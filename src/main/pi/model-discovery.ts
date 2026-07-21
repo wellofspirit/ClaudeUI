@@ -13,6 +13,7 @@
 import { homedir } from 'node:os'
 import type { EngineModelGroup, ModelInfo } from '../../shared/types'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
+import type { EffortLevel } from '../../shared/model-capabilities'
 import { PiRpcClient } from './PiRpcClient'
 import { locatePiBinary, piBinaryAvailable } from './pi-locate'
 import type { PiGetAvailableModelsData, PiModel } from './pi-protocol'
@@ -73,6 +74,27 @@ async function fetchPiModelCatalog(): Promise<PiModel[]> {
 }
 
 /**
+ * Derive the effort tiers a pi model accepts, from the catalog's own facts —
+ * no probing, no guessing. `reasoning:false` models get no effort control at
+ * all. `reasoning:true` models get the always-available low/medium/high base
+ * tier, PLUS `xhigh` when `thinkingLevelMap.xhigh` is present, PLUS `max` when
+ * `thinkingLevelMap.max` is present (verified probe, 2026-07-20: the map's
+ * KEYS are the higher/edge levels the model recognizes — e.g. luna-shaped
+ * models carry `{xhigh:'xhigh', max:'max', minimal:'low'}`, 5.4-shaped models
+ * carry only `{xhigh:'xhigh', minimal:'low'}`). Pure and unit-testable
+ * without the RPC round-trip — the single derivation site both
+ * `discoverPiModels` (picker seeding) and `PiSession.resolveCapsForModel`
+ * (post-connect capability resolve) call, so the two never disagree.
+ */
+export function effortLevelsFromModel(m: Pick<PiModel, 'reasoning' | 'thinkingLevelMap'>): EffortLevel[] {
+  if (!m.reasoning) return []
+  const levels: EffortLevel[] = ['low', 'medium', 'high']
+  if (m.thinkingLevelMap?.xhigh) levels.push('xhigh')
+  if (m.thinkingLevelMap?.max) levels.push('max')
+  return levels
+}
+
+/**
  * Discover pi models grouped by provider for the engine-aware model picker.
  * Value convention: `"<provider>/<id>"` (matches opencode's; decoded by
  * `engineMeta('pi').decodeModelValue`).
@@ -103,14 +125,14 @@ export async function discoverPiModels(): Promise<EngineModelGroup[]> {
       // session-wide off…max level dial, set_thinking_level), so the
       // Adaptive/Enabled/Disabled picker never applies to ANY pi model.
       // supportsEffort DOES flip per-model (M2b): pi's catalog reports
-      // `reasoning: boolean` per model; true models get the conservative
-      // low/medium/high tier set (xhigh/max are model-dependent and the
-      // catalog doesn't say which — a wrong guess would surface as an error
-      // toast on every switch). M3: probe xhigh/max support.
+      // `reasoning: boolean` per model; true models get low/medium/high PLUS
+      // xhigh/max wherever the model's OWN thinkingLevelMap says it accepts
+      // them (verified probe, 2026-07-20 — the catalog DOES say which, via
+      // thinkingLevelMap; effortLevelsFromModel is the single derivation
+      // site, shared with PiSession's post-connect resolve so the picker and
+      // the resolved capability always agree).
       supportsEffort: m.reasoning,
-      ...(m.reasoning
-        ? { supportedEffortLevels: ['low', 'medium', 'high'] as Array<'low' | 'medium' | 'high'> }
-        : {}),
+      ...(m.reasoning ? { supportedEffortLevels: effortLevelsFromModel(m) } : {}),
       supportsAdaptiveThinking: false
     })
     byProvider.set(m.provider, list)

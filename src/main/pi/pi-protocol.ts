@@ -54,6 +54,16 @@ export interface PiModel {
   contextWindow: number
   maxTokens: number
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number }
+  /**
+   * Verified probe (2026-07-20, real binary): `get_available_models` carries
+   * this per model. KEYS are the higher/edge thinking levels the model
+   * recognizes (identity-mapped unless remapped, e.g. `minimal:'low'` =
+   * "minimal is treated as low"). A model supports `xhigh` iff `'xhigh'` is a
+   * key; supports `max` iff `'max'` is a key — see model-discovery.ts's
+   * `effortLevelsFromModel`, the single derivation site. Optional: older/other
+   * providers may omit it, and non-reasoning models carry no meaningful map.
+   */
+  thinkingLevelMap?: Record<string, string>
 }
 
 export interface PiGetStateData {

@@ -777,18 +777,26 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
  * adaptive/enabled/disabled — so `reasoning.thinking` is never populated here
  * (no Adaptive picker for any pi model, ever). `reasoning.effort` DOES flip
  * per-model (M2b): when the catalog's `reasoning` fact is true, the model
- * accepts `set_thinking_level`, so we grant the conservative low/medium/high
- * tier set (xhigh/max are model-dependent and the catalog doesn't say which —
- * a wrong guess would surface as an error toast on every switch; M3: probe
- * xhigh/max support). toolCalling is always true — every pi model that can be
- * selected has tool support (pi has no text-only-model concept exposed via
- * get_available_models).
+ * accepts `set_thinking_level`. The caller may pass `effortLevels` (derived
+ * by `model-discovery.ts`'s `effortLevelsFromModel` from the catalog's
+ * `thinkingLevelMap` — verified probe, 2026-07-20: the map's keys ARE
+ * xhigh/max support) to expose the model's actual tiers, including xhigh/max
+ * where supported; omitting it falls back to the conservative low/medium/high
+ * set (back-compat for callers that haven't traced a PiModel through yet).
+ * toolCalling is always true — every pi model that can be selected has tool
+ * support (pi has no text-only-model concept exposed via get_available_models).
  */
 export function piModelCapabilities(
-  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number; reasoning?: boolean }
+  m?: {
+    vision?: boolean
+    contextWindow?: number
+    maxOutput?: number
+    reasoning?: boolean
+    effortLevels?: EffortLevel[]
+  }
 ): ModelCapabilities {
   return {
-    reasoning: m?.reasoning ? { effort: { levels: ['low', 'medium', 'high'] } } : {},
+    reasoning: m?.reasoning ? { effort: { levels: m.effortLevels ?? ['low', 'medium', 'high'] } } : {},
     vision: !!m?.vision,
     toolCalling: true,
     contextWindow: m?.contextWindow ?? 200_000,
@@ -817,10 +825,13 @@ export function resolvePiCapabilities(
  * defaults until PiSession resolves the full PiModel post-connect. `reasoning`
  * is likewise not a ModelInfo field — PI_META.seedCapabilities derives it from
  * ModelInfo.supportsEffort (the flag model-discovery.ts already sets per the
- * catalog's `reasoning` fact) before calling this.
+ * catalog's `reasoning` fact) before calling this, and passes ModelInfo's own
+ * `supportedEffortLevels` through as `effortLevels` (already carrying
+ * xhigh/max per model via `effortLevelsFromModel` — model-discovery.ts) so
+ * the pre-spawn seed and PiSession's post-connect resolve agree.
  */
 export function resolvePiCapabilitiesFromModel(
-  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number; reasoning?: boolean }
+  m?: Parameters<typeof piModelCapabilities>[0]
 ): ResolvedCapabilities {
   return resolvePiCapabilities(m)
 }

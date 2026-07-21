@@ -119,10 +119,21 @@ const PI_META: EngineMeta = {
   // ModelInfo has no `reasoning` field of its own — derive it from
   // supportsEffort (the flag model-discovery.ts sets from the catalog's
   // `reasoning: boolean` fact per model, M2b) so seeded capabilities agree
-  // with the effort picker the SAME ModelInfo drives in the renderer.
+  // with the effort picker the SAME ModelInfo drives in the renderer. Pass
+  // ModelInfo's own `supportedEffortLevels` through as `effortLevels` too —
+  // it already carries xhigh/max per model (model-discovery.ts's
+  // `effortLevelsFromModel`, derived from the catalog's `thinkingLevelMap`) —
+  // so the pre-spawn seed doesn't stay capped at low/med/high while the
+  // picker it's seeding from shows xhigh/max.
   seedCapabilities: (_modelValue, modelInfo) =>
     resolvePiCapabilitiesFromModel(
-      modelInfo ? { ...modelInfo, reasoning: modelInfo.supportsEffort } : undefined
+      modelInfo
+        ? {
+            ...modelInfo,
+            reasoning: modelInfo.supportsEffort,
+            effortLevels: modelInfo.supportedEffortLevels
+          }
+        : undefined
     )
 }
 

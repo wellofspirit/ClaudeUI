@@ -247,6 +247,82 @@ describe('getPiModelCatalog', () => {
   })
 })
 
+describe('effortLevelsFromModel — thinkingLevelMap-driven xhigh/max derivation (M3)', () => {
+  it('reasoning:false → [] regardless of thinkingLevelMap', async () => {
+    const { effortLevelsFromModel } = await importFresh()
+    expect(
+      effortLevelsFromModel({ reasoning: false, thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } })
+    ).toEqual([])
+  })
+
+  it('reasoning:true + no thinkingLevelMap → base low/medium/high only', async () => {
+    const { effortLevelsFromModel } = await importFresh()
+    expect(effortLevelsFromModel({ reasoning: true })).toEqual(['low', 'medium', 'high'])
+  })
+
+  it('reasoning:true + a 5.4-shaped map ({xhigh, minimal}) → low/medium/high/xhigh, no max', async () => {
+    const { effortLevelsFromModel } = await importFresh()
+    expect(
+      effortLevelsFromModel({ reasoning: true, thinkingLevelMap: { xhigh: 'xhigh', minimal: 'low' } })
+    ).toEqual(['low', 'medium', 'high', 'xhigh'])
+  })
+
+  it('reasoning:true + a luna-shaped map ({xhigh, max, minimal}) → all five, in low→…→max order', async () => {
+    const { effortLevelsFromModel } = await importFresh()
+    expect(
+      effortLevelsFromModel({
+        reasoning: true,
+        thinkingLevelMap: { xhigh: 'xhigh', max: 'max', minimal: 'low' }
+      })
+    ).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+})
+
+describe('discoverPiModels — supportedEffortLevels reflects thinkingLevelMap per model (M3)', () => {
+  it('a luna-shaped model (max) and a 5.4-shaped model (xhigh only) each get the correct tiers', async () => {
+    const mixedCatalog = [
+      {
+        id: 'gpt-5.6-luna',
+        name: 'GPT-5.6 Luna',
+        api: 'openai-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://api.openai.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { xhigh: 'xhigh', max: 'max', minimal: 'low' }
+      },
+      {
+        id: 'gpt-5.4',
+        name: 'GPT-5.4',
+        api: 'openai-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://api.openai.com',
+        reasoning: true,
+        input: ['text'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { xhigh: 'xhigh', minimal: 'low' }
+      }
+    ]
+    mockRequest.mockResolvedValue({ success: true, data: { models: mixedCatalog } })
+    const { discoverPiModels } = await importFresh()
+    const groups = await discoverPiModels()
+    const codex = groups.find((g) => g.vendorId === 'openai-codex')!
+
+    const luna = codex.models.find((m) => m.value === 'openai-codex/gpt-5.6-luna')!
+    expect(luna.supportsEffort).toBe(true)
+    expect(luna.supportedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+
+    const gpt54 = codex.models.find((m) => m.value === 'openai-codex/gpt-5.4')!
+    expect(gpt54.supportsEffort).toBe(true)
+    expect(gpt54.supportedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh'])
+  })
+})
+
 describe('resolvePiSpawnModel — spawn-model resolution ladder', () => {
   // CATALOG's flat values: 'openai-codex/gpt-5.6-luna' (=== PI_DEFAULT_MODEL)
   // and 'anthropic/claude-sonnet-4-6'. importFresh() resets the module

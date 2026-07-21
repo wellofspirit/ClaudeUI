@@ -25,7 +25,7 @@ import { PiRpcClient } from './PiRpcClient'
 import { mapPiEvent, createPiMapperState, buildPiChatMessage } from './event-mapper'
 import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
 import type { PiGetCommandsData, PiGetSessionStatsData, PiGetStateData, PiRpcCommand } from './pi-protocol'
-import { getPiModelCatalog } from './model-discovery'
+import { getPiModelCatalog, effortLevelsFromModel } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from './PiBridgeHost'
@@ -316,7 +316,12 @@ export class PiSession extends BaseSession {
    *  (contextWindow/maxOutput/vision/reasoning) — falls back to
    *  piModelCapabilities' bare defaults if the catalog is unavailable or has
    *  no matching entry. `reasoning` (M2b) drives the effort picker: true only
-   *  when the CATALOG says this specific model accepts `set_thinking_level`. */
+   *  when the CATALOG says this specific model accepts `set_thinking_level`.
+   *  `effortLevels` (M3) is derived from the SAME match via
+   *  `effortLevelsFromModel` — the full PiModel here carries
+   *  `thinkingLevelMap`, so this post-connect resolve exposes xhigh/max
+   *  exactly where the picker (model-discovery.ts, seeded from the identical
+   *  helper) shows them; the two must never disagree. */
   private async resolveCapsForModel(modelValue: string): Promise<ResolvedCapabilities> {
     try {
       const ref = engineMeta('pi').decodeModelValue(modelValue)
@@ -328,7 +333,8 @@ export class PiSession extends BaseSession {
               vision: match.input.includes('image'),
               contextWindow: match.contextWindow,
               maxOutput: match.maxTokens,
-              reasoning: match.reasoning
+              reasoning: match.reasoning,
+              effortLevels: effortLevelsFromModel(match)
             }
           : undefined
       )

@@ -608,6 +608,25 @@ describe('piModelCapabilities', () => {
   it('promptCaching is always true', () => {
     expect(piModelCapabilities().promptCaching).toBe(true)
   })
+
+  it('M3: an explicit effortLevels array (from thinkingLevelMap) reaches reasoning.effort.levels verbatim, xhigh/max included', () => {
+    const caps = piModelCapabilities({
+      reasoning: true,
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    })
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('M3 back-compat: no effortLevels passed → still low/medium/high (existing callers unaffected)', () => {
+    const caps = piModelCapabilities({ reasoning: true })
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high'] })
+  })
+
+  it('M3: reasoning:false ignores any effortLevels passed — no effort picker regardless', () => {
+    const caps = piModelCapabilities({ reasoning: false, effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    expect(caps.reasoning).toEqual({})
+  })
 })
 
 describe('resolvePiCapabilitiesFromModel', () => {
@@ -625,6 +644,14 @@ describe('resolvePiCapabilitiesFromModel', () => {
       'medium',
       'high'
     ])
+  })
+
+  it('M3: passes effortLevels through to the resolved capability, xhigh/max included', () => {
+    const caps = resolvePiCapabilitiesFromModel({
+      reasoning: true,
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    })
+    expect(caps.reasoning.effort?.levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
   })
 
   it('isAgentCapable is true (toolCalling always true for pi)', () => {

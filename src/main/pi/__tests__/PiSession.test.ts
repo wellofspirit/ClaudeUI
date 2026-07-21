@@ -183,9 +183,13 @@ vi.mock('../pi-locate', () => ({
   locatePiBinary: mockLocatePiBinary,
   piBinaryAvailable: () => true
 }))
-vi.mock('../model-discovery', () => ({
-  getPiModelCatalog: mockGetPiModelCatalog
-}))
+// Mocks getPiModelCatalog only — effortLevelsFromModel is kept as the REAL
+// pure function (M3) via importActual, since PiSession's resolveCapsForModel
+// calls it directly and it has no I/O to fake.
+vi.mock('../model-discovery', async () => {
+  const actual = await vi.importActual<typeof import('../model-discovery')>('../model-discovery')
+  return { ...actual, getPiModelCatalog: mockGetPiModelCatalog }
+})
 vi.mock('../../services/pi-session-list', () => ({
   loadPiSessionHistory: mockLoadPiSessionHistory,
   findPiSessionFile: mockFindPiSessionFile
@@ -796,6 +800,95 @@ describe('PiSession.setEffort (M2b)', () => {
     await session.run('hi')
 
     expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'low' })
+  })
+
+  it('M3 guard: setEffort("xhigh") and setEffort("max") for a luna-shaped (thinkingLevelMap max) model send the RPC verbatim — never silently dropped', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'gpt-5.6-luna',
+        provider: 'openai-codex',
+        reasoning: true,
+        name: 'GPT-5.6 Luna',
+        api: 'openai-responses',
+        baseUrl: '',
+        input: ['text', 'image'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { xhigh: 'xhigh', max: 'max', minimal: 'low' }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-effort-xhighmax', win as never, '/cwd', {
+      model: 'openai-codex/gpt-5.6-luna'
+    })
+    await session.run('hi')
+    mockRequest.mockClear()
+
+    session.setEffort('xhigh')
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'xhigh' })
+
+    session.setEffort('max')
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'max' })
+  })
+})
+
+describe('PiSession.resolveCapsForModel — xhigh/max reach the resolved capability (M3)', () => {
+  it('a luna-shaped model (thinkingLevelMap.max present) exposes xhigh+max in the post-connect resolved capabilities', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'gpt-5.6-luna',
+        provider: 'openai-codex',
+        reasoning: true,
+        name: 'GPT-5.6 Luna',
+        api: 'openai-responses',
+        baseUrl: '',
+        input: ['text', 'image'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { xhigh: 'xhigh', max: 'max', minimal: 'low' }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-caps-xhighmax', win as never, '/cwd', {
+      model: 'openai-codex/gpt-5.6-luna'
+    })
+    // Flush the constructor's unawaited resolveCapsForModel().then(...).
+    await new Promise((r) => setImmediate(r))
+
+    expect(session.status.capabilities.reasoning.effort?.levels).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
+  })
+
+  it('a 5.4-shaped model (thinkingLevelMap.xhigh only, no max) exposes xhigh but NOT max', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'gpt-5.4',
+        provider: 'openai-codex',
+        reasoning: true,
+        name: 'GPT-5.4',
+        api: 'openai-responses',
+        baseUrl: '',
+        input: ['text'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap: { xhigh: 'xhigh', minimal: 'low' }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-caps-xhigh-only', win as never, '/cwd', {
+      model: 'openai-codex/gpt-5.4'
+    })
+    await new Promise((r) => setImmediate(r))
+
+    expect(session.status.capabilities.reasoning.effort?.levels).toEqual(['low', 'medium', 'high', 'xhigh'])
   })
 })
 
