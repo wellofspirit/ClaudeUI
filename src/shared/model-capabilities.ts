@@ -735,7 +735,23 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     (pi.registerTool() in pi-bridge-source.ts, calling back over
  *     PiBridgeHost's POST /hosted-tool route to PiSession.handleHostedTool),
  *     auto-allowed via permission-engine.ts's PI_AUTO_ALLOW_HOSTED_TOOLS.
- *   - sideQuestion, fork, forkFromMessage, backgroundTasks, voice →
+ *   - sideQuestion → SHIPPED: pi has no in-session, non-persisting "ask" RPC
+ *     (prompt/steer/followUp all persist to the active branch) and no
+ *     equivalent of Claude's in-session `side_question` control_request, so
+ *     `/btw` is answered by a TRANSCRIPT-FED EPHEMERAL pi process instead of
+ *     a blank one — PiSession.askSideQuestion builds a bounded context string
+ *     from THIS session's own retained `messageHistory`, spawns an isolated
+ *     `pi --mode rpc --no-session` process (the same bare spawn shape
+ *     model-discovery.ts uses — no bridge/subagent/hosted env, so this
+ *     ephemeral gets none of the live session's tool-call gating), sends one
+ *     framing prompt telling the model it is observing and must not act, and
+ *     reads `get_last_assistant_text` once `agent_settled` fires. Bounded
+ *     overall timeout; null on any failure (binary missing, spawn error,
+ *     rejected prompt, timeout) — the UI already handles null gracefully. See
+ *     askSideQuestion's own doc comment for the full mechanism and the
+ *     documented fidelity limitation (visible transcript only, never pi's
+ *     in-flight internal state).
+ *   - fork, forkFromMessage, backgroundTasks, voice →
  *     unwired; each becomes a dedicated follow-up once its RPC surface
  *     (fork/clone, …) is wired the same way OpencodeSession's were.
  *   - subagents → SHIPPED in M5b: a SECOND ClaudeUI-owned extension
@@ -774,7 +790,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   queue: true,
   slashCommands: true,
   skills: true,
-  sideQuestion: false,
+  sideQuestion: true,
   interactiveApprovals: true,
   sandbox: false,
   proxy: false,

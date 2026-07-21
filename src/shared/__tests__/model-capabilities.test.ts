@@ -644,6 +644,11 @@ describe('resolvePiCapabilitiesFromModel', () => {
     expect(PI_ENGINE_CAPABILITIES.auth.multiAccount).toBe(false)
   })
 
+  it('sideQuestion is true (/btw wired via PiSession.askSideQuestion\'s transcript-fed ephemeral pi process)', () => {
+    expect(PI_ENGINE_CAPABILITIES.sideQuestion).toBe(true)
+    expect(resolvePiCapabilitiesFromModel().sideQuestion).toBe(true)
+  })
+
   it('seeds reasoning.effort from the model shape, undefined → engine defaults + no reasoning', () => {
     expect(resolvePiCapabilitiesFromModel(undefined).reasoning).toEqual({})
     expect(resolvePiCapabilitiesFromModel({ reasoning: true }).reasoning.effort?.levels).toEqual([

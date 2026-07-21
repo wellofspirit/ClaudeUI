@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
+import type { ChatMessage } from '../../../shared/types'
 
 class MockWindow extends EventEmitter {
   webContents = { send: vi.fn() }
@@ -24,6 +25,8 @@ const {
   mockSend,
   mockOnEvent,
   mockOnExit,
+  mockEphemeralInstances,
+  ephemeralStartError,
   MockPiRpcClient,
   mockLocatePiBinary,
   mockGetPiModelCatalog,
@@ -58,9 +61,46 @@ const {
   const mockSend = vi.fn()
   const mockOnEvent = vi.fn().mockReturnValue(() => {})
   const mockOnExit = vi.fn().mockReturnValue(() => {})
+  // askSideQuestion (/btw) spawns a SECOND, independent PiRpcClient — an
+  // ephemeral `--no-session` process, distinct from the main session's own
+  // client above. Every such instance gets its OWN fresh vi.fn()s (not the
+  // shared mockStart/mockRequest/... above) so a test can script the
+  // ephemeral's responses without disturbing the main session's client, and
+  // is captured here (newest last) for the test body to inspect/drive.
+  const mockEphemeralInstances: Array<{
+    start: ReturnType<typeof vi.fn>
+    request: ReturnType<typeof vi.fn>
+    dispose: ReturnType<typeof vi.fn>
+    onEvent: ReturnType<typeof vi.fn>
+    onExit: ReturnType<typeof vi.fn>
+    opts: { cwd: string; args: string[]; env?: NodeJS.ProcessEnv }
+  }> = []
+  // Test-controlled one-shot: when set, the NEXT ephemeral's start() rejects
+  // with this error (then auto-clears) — lets a test simulate a genuine
+  // spawn failure, which (unlike a rejected `prompt` response) must be
+  // configured BEFORE `new PiRpcClient(...)` runs, since askSideQuestion
+  // calls `client.start()` synchronously in the same tick it constructs it.
+  const ephemeralStartError: { value: Error | null } = { value: null }
   // Regular `function` (not an arrow fn) — PiSession does `new PiRpcClient(...)`,
   // and arrow functions have no [[Construct]] slot.
-  const MockPiRpcClient = vi.fn().mockImplementation(function () {
+  const MockPiRpcClient = vi.fn().mockImplementation(function (
+    _bin: string,
+    opts: { cwd: string; args: string[]; env?: NodeJS.ProcessEnv }
+  ) {
+    if (opts?.args?.includes('--no-session')) {
+      const startErr = ephemeralStartError.value
+      ephemeralStartError.value = null
+      const inst = {
+        start: startErr ? vi.fn().mockRejectedValue(startErr) : vi.fn().mockResolvedValue(undefined),
+        request: vi.fn().mockResolvedValue({ success: true }),
+        dispose: vi.fn(),
+        onEvent: vi.fn().mockReturnValue(() => {}),
+        onExit: vi.fn().mockReturnValue(() => {}),
+        opts
+      }
+      mockEphemeralInstances.push(inst)
+      return inst
+    }
     return {
       start: mockStart,
       request: mockRequest,
@@ -137,6 +177,8 @@ const {
     mockSend,
     mockOnEvent,
     mockOnExit,
+    mockEphemeralInstances,
+    ephemeralStartError,
     MockPiRpcClient,
     mockLocatePiBinary: vi.fn().mockReturnValue('/fake/pi'),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
@@ -261,6 +303,23 @@ function lastEventHandler(): (ev: PiEvent) => void {
   return calls[calls.length - 1][0]
 }
 
+/** Grab the most-recently-spawned ephemeral (`--no-session`) PiRpcClient — see mockEphemeralInstances' doc comment. */
+function lastEphemeralClient(): (typeof mockEphemeralInstances)[number] {
+  const inst = mockEphemeralInstances[mockEphemeralInstances.length - 1]
+  if (!inst) throw new Error('no ephemeral PiRpcClient was spawned')
+  return inst
+}
+
+/** Directly append a synthetic ChatMessage to a session's retained history — getMessages() returns the SAME array by reference, so this is a legitimate seam for building a transcript without driving a full run()/event round trip per message. */
+function pushMessage(session: PiSession, role: ChatMessage['role'], text: string): void {
+  session.getMessages().push({
+    id: `synthetic-${Math.random().toString(36).slice(2)}`,
+    role,
+    content: [{ type: 'text', text }],
+    timestamp: Date.now()
+  })
+}
+
 function sentChannels(win: MockWindow): string[] {
   return win.webContents.send.mock.calls.map((c) => c[0])
 }
@@ -276,6 +335,8 @@ beforeEach(() => {
   mockSend.mockClear()
   mockOnEvent.mockClear().mockReturnValue(() => {})
   mockOnExit.mockClear().mockReturnValue(() => {})
+  mockEphemeralInstances.length = 0
+  ephemeralStartError.value = null
   MockPiRpcClient.mockClear()
   mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
@@ -2769,5 +2830,266 @@ describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
     )
 
     expect(session.status.totalCostUsd).toBe(costBefore)
+  })
+})
+
+describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', () => {
+  it('returns null without spawning anything when never connected (no client)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-noclient', win as never, '/cwd', {})
+    const answer = await session.askSideQuestion('why?')
+    expect(answer).toBeNull()
+    expect(mockEphemeralInstances).toHaveLength(0)
+  })
+
+  it('returns null without spawning when connected but pi has not reported a sessionId yet', async () => {
+    mockRequest.mockReset().mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'get_state') {
+        return Promise.resolve({
+          success: true,
+          data: {
+            model: {
+              id: 'unknown',
+              name: 'unknown',
+              api: 'unknown',
+              provider: 'unknown',
+              baseUrl: '',
+              reasoning: false,
+              input: [],
+              contextWindow: 0,
+              maxTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+            },
+            thinkingLevel: 'medium',
+            isStreaming: false
+            // sessionId intentionally absent
+          }
+        })
+      }
+      return Promise.resolve({ success: true })
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-nosid', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const answer = await session.askSideQuestion('why?')
+    expect(answer).toBeNull()
+    expect(mockEphemeralInstances).toHaveLength(0)
+  })
+
+  it('binary not found -> null without spawning anything', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-nobin', win as never, '/cwd', {})
+    await session.run('hi')
+
+    mockLocatePiBinary.mockReturnValue(null)
+    const answer = await session.askSideQuestion('why?')
+    expect(answer).toBeNull()
+    expect(mockEphemeralInstances).toHaveLength(0)
+  })
+
+  it('builds a transcript-fed framing prompt (context + do-not-continue instruction + question) and returns the ephemeral\'s get_last_assistant_text', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-happy', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    await session.run('why is the build failing?')
+    pushMessage(session, 'assistant', 'I am rerunning the type checker to see the exact error.')
+
+    const askPromise = session.askSideQuestion('are you stuck?')
+    const eph = lastEphemeralClient()
+
+    eph.request.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'get_last_assistant_text') {
+        return Promise.resolve({ success: true, data: { text: 'No, just double-checking the error output.' } })
+      }
+      return Promise.resolve({ success: true })
+    })
+
+    // Drain the start()->set_model->onEvent-register->prompt chain (all
+    // microtasks, no real timers yet) up to `await settledEvent`, which is
+    // where it blocks until we fire agent_settled below.
+    await new Promise((r) => setImmediate(r))
+    expect(eph.onEvent).toHaveBeenCalled()
+    const settleCb = eph.onEvent.mock.calls[0][0]
+    settleCb({ type: 'agent_settled' })
+
+    const answer = await askPromise
+    expect(answer).toBe('No, just double-checking the error output.')
+    expect(eph.dispose).toHaveBeenCalled()
+
+    // Spawn shape: `--no-session --no-tools` in the LIVE session's own cwd,
+    // no env at all (no bridge/subagent/hosted env — mirrors
+    // model-discovery.ts's ephemeral pattern, PLUS --no-tools). --no-tools is
+    // the enforced safety guarantee: bash/edit/write are never registered, so
+    // the ephemeral can't mutate the live session's cwd regardless of framing.
+    expect(eph.opts).toEqual({ cwd: '/cwd', args: ['--mode', 'rpc', '--no-session', '--no-tools'] })
+    expect(eph.opts.args).toContain('--no-tools')
+    expect(eph.opts.args).not.toContain('-e')
+    expect(eph.opts.env).toBeUndefined()
+
+    // Prompt content: context (both turns) + the question + the framing.
+    const promptCall = eph.request.mock.calls.find((c) => (c[0] as { type: string }).type === 'prompt')
+    expect(promptCall).toBeDefined()
+    const message = (promptCall![0] as { message: string }).message
+    expect(message).toContain('why is the build failing?')
+    expect(message).toContain('I am rerunning the type checker to see the exact error.')
+    expect(message).toContain('are you stuck?')
+    expect(message).toContain('must NOT continue its task')
+    expect(message).toContain('do not take any action or continue the task')
+  })
+
+  it('a rejected prompt ack -> null (never throws)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-promptfail', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const askPromise = session.askSideQuestion('why?')
+    const eph = lastEphemeralClient()
+    eph.request.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'prompt'
+        ? Promise.resolve({ success: false, error: 'pi rejected the prompt' })
+        : Promise.resolve({ success: true })
+    )
+
+    const answer = await askPromise
+    expect(answer).toBeNull()
+    expect(eph.dispose).toHaveBeenCalled()
+  })
+
+  it('get_last_assistant_text throwing after agent_settled -> null (never throws)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-gltfail', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const askPromise = session.askSideQuestion('why?')
+    const eph = lastEphemeralClient()
+    eph.request.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_last_assistant_text' ? Promise.reject(new Error('boom')) : Promise.resolve({ success: true })
+    )
+
+    await new Promise((r) => setImmediate(r))
+    const settleCb = eph.onEvent.mock.calls[0][0]
+    settleCb({ type: 'agent_settled' })
+
+    const answer = await askPromise
+    expect(answer).toBeNull()
+    expect(eph.dispose).toHaveBeenCalled()
+  })
+
+  it('get_last_assistant_text succeeding with no text (verified doc drift: the key is absent, not null) -> null', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-notext', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const askPromise = session.askSideQuestion('why?')
+    const eph = lastEphemeralClient()
+    eph.request.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_last_assistant_text'
+        ? Promise.resolve({ success: true, data: {} })
+        : Promise.resolve({ success: true })
+    )
+
+    await new Promise((r) => setImmediate(r))
+    const settleCb = eph.onEvent.mock.calls[0][0]
+    settleCb({ type: 'agent_settled' })
+
+    expect(await askPromise).toBeNull()
+  })
+
+  it('an ephemeral spawn (start()) failure -> null (never throws)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-startfail', win as never, '/cwd', {})
+    await session.run('hi')
+
+    ephemeralStartError.value = new Error('ENOENT: pi binary vanished')
+    const answer = await session.askSideQuestion('why?')
+    expect(answer).toBeNull()
+    const eph = lastEphemeralClient()
+    expect(eph.dispose).toHaveBeenCalled()
+  })
+
+  it('never settling (agent_settled never fires) -> null after the bounded overall timeout', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-timeout', win as never, '/cwd', {})
+    await session.run('hi')
+
+    vi.useFakeTimers()
+    try {
+      const askPromise = session.askSideQuestion('why?')
+      const eph = lastEphemeralClient()
+      // Advancing the fake clock past the bounded overall timeout (60s) also
+      // flushes the pending microtask chain (start -> set_model -> onEvent
+      // register -> prompt -> await settledEvent, which never resolves here).
+      await vi.advanceTimersByTimeAsync(60_000)
+      const answer = await askPromise
+      expect(answer).toBeNull()
+      expect(eph.dispose).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bounds the transcript context to ~8000 chars, keeping the MOST RECENT content when a huge history is trimmed', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-bounded', win as never, '/cwd', {})
+    await session.run('hi')
+
+    // The FIRST pushed message is the OLDEST, the LAST is the MOST RECENT.
+    pushMessage(session, 'user', 'OLDEST-MARKER ' + 'x'.repeat(5000))
+    for (let i = 0; i < 5; i++) {
+      pushMessage(session, 'assistant', `filler turn ${i} ` + 'y'.repeat(2000))
+    }
+    pushMessage(session, 'user', 'NEWEST-MARKER ' + 'z'.repeat(500))
+
+    const askPromise = session.askSideQuestion('what have you been doing?')
+    const eph = lastEphemeralClient()
+    eph.request.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_last_assistant_text'
+        ? Promise.resolve({ success: true, data: { text: 'answer' } })
+        : Promise.resolve({ success: true })
+    )
+    await new Promise((r) => setImmediate(r))
+    const settleCb = eph.onEvent.mock.calls[0][0]
+    settleCb({ type: 'agent_settled' })
+    await askPromise
+
+    const promptCall = eph.request.mock.calls.find((c) => (c[0] as { type: string }).type === 'prompt')!
+    const message = (promptCall[0] as { message: string }).message
+    const context = message.split('Conversation so far:\n\n')[1].split('\n\n---\n')[0]
+
+    expect(context.length).toBeLessThanOrEqual(8_000)
+    expect(context).toContain('NEWEST-MARKER')
+    expect(context).not.toContain('OLDEST-MARKER')
+  })
+
+  it('bounds the transcript to the most recent 20 user/assistant messages (message-count cap, independent of the char cap)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-btw-msgcount', win as never, '/cwd', {})
+    await session.run('hi') // candidate #1
+
+    for (let i = 0; i < 25; i++) {
+      pushMessage(session, i % 2 === 0 ? 'user' : 'assistant', `turn-${i}`)
+    }
+
+    const askPromise = session.askSideQuestion('summary?')
+    const eph = lastEphemeralClient()
+    eph.request.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_last_assistant_text'
+        ? Promise.resolve({ success: true, data: { text: 'answer' } })
+        : Promise.resolve({ success: true })
+    )
+    await new Promise((r) => setImmediate(r))
+    const settleCb = eph.onEvent.mock.calls[0][0]
+    settleCb({ type: 'agent_settled' })
+    await askPromise
+
+    const promptCall = eph.request.mock.calls.find((c) => (c[0] as { type: string }).type === 'prompt')!
+    const message = (promptCall[0] as { message: string }).message
+    const context = message.split('Conversation so far:\n\n')[1].split('\n\n---\n')[0]
+
+    // 26 total candidates ('hi' + turn-0..turn-24); only the most recent 20 survive.
+    expect(context).not.toContain('turn-0')
+    expect(context).not.toContain('turn-4')
+    expect(context).toContain('turn-5')
+    expect(context).toContain('turn-24')
   })
 })

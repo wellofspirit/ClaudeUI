@@ -24,7 +24,13 @@ import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import { mapPiEvent, createPiMapperState, buildPiChatMessage } from './event-mapper'
 import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
-import type { PiGetCommandsData, PiGetSessionStatsData, PiGetStateData, PiRpcCommand } from './pi-protocol'
+import type {
+  PiGetCommandsData,
+  PiGetLastAssistantTextData,
+  PiGetSessionStatsData,
+  PiGetStateData,
+  PiRpcCommand
+} from './pi-protocol'
 import { getPiModelCatalog, effortLevelsFromModel } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { recordUsageEvent } from '../services/usage-recorder'
@@ -67,6 +73,60 @@ import { BashStreamGate } from '../opencode/bash-stream-gate'
 /** Fail-closed default for an unrecognized /hosted-tool toolName (defense in depth — the bridge extension only ever sends the four names it registers, but handleHostedTool must never crash on an unexpected one). */
 function unknownHostedTool(toolName: string): PiHostedToolResult {
   return { content: [{ type: 'text', text: `Unknown hosted tool "${toolName}"` }], isError: true }
+}
+
+// ---------------------------------------------------------------------------
+// Side question (/btw) — see PiSession.askSideQuestion's doc comment for the
+// full design. Free functions (no `this`) so they're trivially unit-testable
+// and reusable from the constant below without dragging class state in.
+// ---------------------------------------------------------------------------
+
+/** At most this many of the most-recent user/assistant messages feed the ephemeral's context. */
+const SIDE_QUESTION_MAX_MESSAGES = 20
+/** Hard cap on the assembled context string, chars — keeps the ephemeral's prompt (and its cost) bounded regardless of session length. */
+const SIDE_QUESTION_MAX_CONTEXT_CHARS = 8_000
+/** Overall bound on the whole ephemeral spawn+ask+dispose round trip (model call + process spawn overhead). */
+const SIDE_QUESTION_TIMEOUT_MS = 60_000
+
+/**
+ * Render one retained ChatMessage as a single `user:`/`assistant:` context
+ * line. Only `text` blocks and a compact tool-activity marker survive —
+ * `thinking`/`image`/`document`/`cli_command`/`api_error`/`compact_separator`
+ * are dropped: thinking is pi's own internal reasoning (out of scope for a
+ * side question about WHAT is happening, not WHY the model privately
+ * reasoned it), image/document blocks would otherwise dump raw base64 into a
+ * text prompt, and the rest are ClaudeUI meta-transcript entries with no
+ * conversational content. A message that reduces to nothing (e.g. a
+ * tool-only turn whose blocks were all dropped) still gets a placeholder so
+ * the line count/ordering stays intact.
+ */
+function formatSideQuestionContextLine(msg: ChatMessage): string {
+  const parts: string[] = []
+  for (const block of msg.content) {
+    if (block.type === 'text') {
+      parts.push(block.text)
+    } else if (block.type === 'tool_use') {
+      parts.push(`[called tool: ${block.toolName}]`)
+    } else if (block.type === 'tool_result') {
+      parts.push(block.isError ? '[tool result: error]' : '[tool result]')
+    }
+  }
+  const text = parts.join(' ').trim()
+  return `${msg.role}: ${text || '(no text)'}`
+}
+
+/**
+ * The framing message sent as the ephemeral's ONLY prompt — instructs it to
+ * observe rather than act, embeds the bounded transcript context, then the
+ * user's actual question. Exact wording per the kickoff spec.
+ */
+function buildSideQuestionPrompt(context: string, question: string): string {
+  return (
+    'You are observing an ongoing coding session (you are NOT the agent running it and must NOT continue its task). ' +
+    `Conversation so far:\n\n${context}\n\n---\n` +
+    "The user has a side question about what's happening. Answer it directly and concisely; do not take any action or continue the task.\n\n" +
+    `Side question: ${question}`
+  )
 }
 
 /**
@@ -1105,6 +1165,171 @@ export class PiSession extends BaseSession {
     this.bashStreamGate.cancelAll()
     this.startedPromise = null
     this.sendStatus()
+  }
+
+  // ── Side question (/btw) ─────────────────────────────────────────────────────
+
+  /**
+   * Build the bounded transcript context fed to the ephemeral side-question
+   * process. Context source: THIS session's own retained `messageHistory`
+   * (BaseSession field, kept live by run()'s user-message push and
+   * dispatchOutput's 'message' case) — NOT a re-read of the on-disk session
+   * file. That's a deliberate choice over `findPiSessionFile` +
+   * `activeBranchEntries` (pi-session-list.ts): messageHistory IS the exact
+   * live transcript already, with zero extra fs I/O and no risk of a
+   * mid-write race against the file the live session is concurrently
+   * appending to. It also degrades gracefully pre-replay (a resumed session
+   * whose replayStoredHistory hasn't landed yet simply has a shorter history
+   * to draw from, never an error).
+   *
+   * Bounded on two axes (kept independent so either alone is a meaningful
+   * cap): at most SIDE_QUESTION_MAX_MESSAGES of the most recent user/
+   * assistant messages (system entries — compact separators — excluded, they
+   * carry no conversational content), then the assembled string is capped to
+   * SIDE_QUESTION_MAX_CONTEXT_CHARS, trimmed from the FRONT so the kept slice
+   * is always the most RECENT text (matches the kickoff spec: "keep the most
+   * RECENT messages").
+   */
+  private buildTranscriptContext(): string {
+    const candidates = this.messageHistory.filter((m) => m.role === 'user' || m.role === 'assistant')
+    const recent = candidates.slice(-SIDE_QUESTION_MAX_MESSAGES)
+    const joined = recent.map((m) => formatSideQuestionContextLine(m)).join('\n\n')
+    return joined.length > SIDE_QUESTION_MAX_CONTEXT_CHARS
+      ? joined.slice(joined.length - SIDE_QUESTION_MAX_CONTEXT_CHARS)
+      : joined
+  }
+
+  /**
+   * ISession.askSideQuestion (the `/btw` command) — a question ABOUT the
+   * running session ("why are you doing X"), answered from that session's own
+   * recent context. pi has no in-session, non-persisting "ask" RPC (prompt/
+   * steer/followUp all persist to the active branch — using one would
+   * pollute the live session's history) and no equivalent of Claude's
+   * in-session `side_question` control_request, so v1 uses a TRANSCRIPT-FED
+   * EPHEMERAL pi process instead of a blank one:
+   *
+   *   1. Not connected (`this.client` unset) or no `piSessionId` yet → null,
+   *      no spawn — mirrors BaseSession's default "unusable state" behavior.
+   *   2. Build a bounded context string from THIS session's own retained
+   *      history (`buildTranscriptContext` above) — what makes the answer
+   *      grounded in the running session instead of blank.
+   *   3. Spawn a brand-new, fully isolated `pi --mode rpc --no-session
+   *      --no-tools` process — the EXACT spawn shape model-discovery.ts's
+   *      `fetchPiModelCatalog` uses (locatePiBinary, no `-e` bridge/subagent
+   *      extension, no CLAUDEUI_PI_* hosted/dispatch env), PLUS `--no-tools`.
+   *      TOOL EXECUTION DISABLED AT THE PROCESS LEVEL: `--no-tools` (pi
+   *      usage.md:211 — "Disable all tools") means bash/edit/write are never
+   *      registered for this process, so the ephemeral CANNOT mutate the live
+   *      session's cwd even if the model ignores the observe-only framing —
+   *      the enforced safety guarantee, not framing-dependent. This is why
+   *      the ephemeral needs none of the tool-call gating PiBridgeHost
+   *      provides the live session (and is simpler + strictly safer than
+   *      opencode's deny-all-permission-patch approach — no bridge extension
+   *      at all). A side QUESTION answers from the transcript context in
+   *      text and needs no tools regardless. Best-effort `set_model` to this
+   *      session's OWN model so
+   *      the observer answers from a comparable vantage point; failure is
+   *      swallowed (the ephemeral just runs with pi's own default instead).
+   *      Runs fully independent of (and safely alongside) the live session's
+   *      own process — separate child, separate `--no-session` (never
+   *      touches the live session's file on disk).
+   *   4. Sends ONE prompt: the framing message (buildSideQuestionPrompt) —
+   *      explicitly tells the model it is observing, not continuing the task,
+   *      and to answer directly. Waits for `agent_settled` (registered via
+   *      `client.onEvent` BEFORE the prompt is sent, so a fast settle can
+   *      never race ahead of the listener), then reads
+   *      `get_last_assistant_text` and returns it.
+   *   5. Disposes the ephemeral client exactly once (guarded by `settled`),
+   *      whichever of success/failure/the bounded SIDE_QUESTION_TIMEOUT_MS
+   *      overall timeout fires first. Never throws — every failure mode
+   *      (binary missing, spawn error, rejected prompt, a timed-out or
+   *      errored `get_last_assistant_text`) resolves null, which the UI
+   *      already handles gracefully (no BtwCard answer shown).
+   *
+   * FIDELITY LIMITATION (honest, not a bug): the ephemeral only ever sees the
+   * VISIBLE transcript already rendered into `messageHistory` — never pi's
+   * internal live state (a tool call the live turn has started but not yet
+   * flushed as a `message`, or the live model's hidden reasoning for the
+   * CURRENT in-flight turn). A live turn's in-progress activity therefore
+   * will not show up in the answer until it lands as a message. Upgrading
+   * this would require pi to expose an in-session, non-persisting
+   * side-question RPC (it does not, as of this writing) — tracked as a
+   * follow-up, not a v1 blocker.
+   */
+  async askSideQuestion(question: string): Promise<string | null> {
+    if (!this.client || !this.piSessionId) return null
+
+    const bin = locatePiBinary()
+    if (!bin) return null
+
+    const prompt = buildSideQuestionPrompt(this.buildTranscriptContext(), question)
+    // `--no-tools` (pi usage.md:211 — "Disable all tools"; probed: accepted
+    // cleanly in `--mode rpc --no-session`) is the ACTUAL safety guarantee —
+    // see the doc comment's "TOOL EXECUTION DISABLED" note. With no tools
+    // registered, bash/edit/write simply don't exist for this process, so the
+    // ephemeral cannot mutate the live session's cwd regardless of whether
+    // the model heeds the observe-only framing.
+    const client = new PiRpcClient(bin, {
+      cwd: this.cwd,
+      args: ['--mode', 'rpc', '--no-session', '--no-tools']
+    })
+
+    return new Promise<string | null>((resolve) => {
+      let settled = false
+      const finish = (value: string | null): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        client.dispose()
+        resolve(value)
+      }
+      const timer = setTimeout(() => finish(null), SIDE_QUESTION_TIMEOUT_MS)
+
+      void (async () => {
+        try {
+          await client.start()
+
+          // Best-effort — point the ephemeral at the SAME model the live
+          // session runs, but never let a failure here abort the ask.
+          try {
+            const ref = engineMeta('pi').decodeModelValue(this._model)
+            await client.request({ type: 'set_model', provider: ref.vendorId, modelId: ref.modelId })
+          } catch {
+            // best-effort — the ephemeral just runs with pi's own default model.
+          }
+
+          // Registered BEFORE sending the prompt so a fast agent_settled can
+          // never race ahead of the listener (mirrors cross-engine-dispatcher's
+          // drivePiTurn's identical "install the resolver, then send" ordering).
+          const settledEvent = new Promise<void>((res) => {
+            const unsubscribe = client.onEvent((ev) => {
+              if (ev.type === 'agent_settled') {
+                unsubscribe()
+                res()
+              }
+            })
+          })
+
+          const resp = await client.request({ type: 'prompt', message: prompt })
+          if (!resp.success) {
+            finish(null)
+            return
+          }
+
+          await settledEvent
+          const textResp = await client.request<PiGetLastAssistantTextData>({
+            type: 'get_last_assistant_text'
+          })
+          finish(textResp.success && textResp.data?.text ? textResp.data.text : null)
+        } catch (err) {
+          logger.debug(
+            'PiSession',
+            `askSideQuestion ephemeral failed (best-effort, returns null): ${err instanceof Error ? err.message : String(err)}`
+          )
+          finish(null)
+        }
+      })()
+    })
   }
 
   // ── Approval bridge (M2a) ────────────────────────────────────────────────────
