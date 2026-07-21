@@ -17,6 +17,7 @@ import {
   base64UrlEncode,
   generatePkce,
   buildAuthorizeUrl,
+  buildVaultCredential,
   exchangeCodeForTokens,
   refreshAccessToken,
   parseJwtClaims,
@@ -161,6 +162,81 @@ describe('refreshAccessToken', () => {
     await expect(refreshAccessToken('r', { fetch: fn as unknown as typeof fetch, issuer: ISSUER })).rejects.toThrow(
       'Token refresh failed: 401'
     )
+  })
+
+  // Finding B: a revoked/expired refresh token returns HTTP 400 with an
+  // `{error:"invalid_grant"}` body (RFC 6749 §5.2). The thrown error must
+  // surface that body so the caller's revoked-vs-transient classifier can see
+  // it — a status-only message would hide the one signal that matters.
+  it('surfaces the response body in the thrown error (400 invalid_grant)', async () => {
+    const fn = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => '{"error":"invalid_grant","error_description":"Token expired"}'
+    }))
+    await expect(
+      refreshAccessToken('dead-token', { fetch: fn as unknown as typeof fetch, issuer: ISSUER })
+    ).rejects.toThrow('Token refresh failed: 400 - {"error":"invalid_grant","error_description":"Token expired"}')
+  })
+
+  it('degrades to a status-only message when the body cannot be read (text() throws)', async () => {
+    const fn = vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      text: async () => {
+        throw new Error('stream already consumed')
+      }
+    }))
+    await expect(
+      refreshAccessToken('r', { fetch: fn as unknown as typeof fetch, issuer: ISSUER })
+    ).rejects.toThrow('Token refresh failed: 500')
+  })
+})
+
+describe('buildVaultCredential', () => {
+  const fixedNow = () => 1_000_000
+
+  it('computes expires as now() + expires_in*1000 and extracts accountId/email from the tokens', () => {
+    const idToken = makeJwt({ chatgpt_account_id: 'acct-1', email: 'user@example.com' })
+    const cred = buildVaultCredential(
+      { id_token: idToken, access_token: 'acc', refresh_token: 'ref', expires_in: 3600 },
+      fixedNow
+    )
+    expect(cred).toEqual({
+      type: 'oauth',
+      access: 'acc',
+      refresh: 'ref',
+      expires: 1_000_000 + 3600 * 1000,
+      accountId: 'acct-1',
+      email: 'user@example.com'
+    })
+  })
+
+  it('defaults expires_in to 3600 when the response omits it', () => {
+    const cred = buildVaultCredential({ access_token: 'a', refresh_token: 'r' }, fixedNow)
+    expect(cred.expires).toBe(1_000_000 + 3600 * 1000)
+  })
+
+  it('carries forward the prior accountId/email when the refresh response JWTs omit them', () => {
+    // A refresh_token grant whose tokens carry no profile claims.
+    const cred = buildVaultCredential(
+      { access_token: 'a2', refresh_token: 'r2', expires_in: 100 },
+      fixedNow,
+      { accountId: 'acct-prior', email: 'prior@example.com' }
+    )
+    expect(cred.accountId).toBe('acct-prior')
+    expect(cred.email).toBe('prior@example.com')
+  })
+
+  it('prefers the token claims over the prior values when both are present', () => {
+    const idToken = makeJwt({ chatgpt_account_id: 'acct-fresh', email: 'fresh@example.com' })
+    const cred = buildVaultCredential(
+      { id_token: idToken, access_token: 'a', refresh_token: 'r', expires_in: 100 },
+      fixedNow,
+      { accountId: 'acct-prior', email: 'prior@example.com' }
+    )
+    expect(cred.accountId).toBe('acct-fresh')
+    expect(cred.email).toBe('fresh@example.com')
   })
 })
 

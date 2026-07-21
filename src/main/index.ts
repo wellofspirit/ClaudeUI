@@ -40,6 +40,7 @@ import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
+import { credentialSync } from './auth/vault/CredentialSync'
 import { opencodeServerManager } from './opencode/OpencodeServerManager'
 import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
 import { PluginManager } from './services/plugin-manager'
@@ -213,6 +214,12 @@ function createWindow(): void {
   authManager.setWindow(mainWindow)
   accountManager.init(mainWindow)
   claudeAuthProvider.init(mainWindow)
+  // M6b: if a vault Codex (ChatGPT) credential already exists (a prior
+  // ClaudeUI-driven login), arm the sole-refresher + fs-watch resync. Never
+  // blocks boot — best-effort, like every other auth-provider init above.
+  void credentialSync.start().catch((err) => {
+    logger.warn('main', `credentialSync.start() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
+  })
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 
@@ -274,6 +281,7 @@ function createWindow(): void {
     logViewer.destroy()
     pluginManager.stopAll()
     automationManager.stopAll()
+    credentialSync.stop()
     remoteServer.stop()
     stopAllClassifiers()
     // Stop the service session (lightweight CLI subprocess for usage polling)

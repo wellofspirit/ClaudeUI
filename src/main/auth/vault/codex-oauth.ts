@@ -220,9 +220,26 @@ export async function exchangeCodeForTokens(
     }).toString()
   })
   if (!response.ok) {
-    throw new Error(`Token exchange failed: ${response.status}`)
+    throw new Error(`Token exchange failed: ${response.status}${await errorBodySuffix(response)}`)
   }
   return (await response.json()) as TokenResponse
+}
+
+/**
+ * Best-effort `- <body>` suffix for a failed token-endpoint response. Surfaces
+ * the OAuth error body (RFC 6749 §5.2 returns `{"error":"invalid_grant",…}`
+ * on a revoked/expired refresh token, with an HTTP **400** — NOT 401) so
+ * callers can distinguish a genuinely-dead credential (needsReauth) from a
+ * transient server/network blip. Never throws — a body that can't be read
+ * degrades to '' so the status-only message still surfaces.
+ */
+async function errorBodySuffix(response: { text: () => Promise<string> }): Promise<string> {
+  try {
+    const body = (await response.text()).trim()
+    return body ? ` - ${body}` : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -244,20 +261,34 @@ export async function refreshAccessToken(
     }).toString()
   })
   if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`)
+    throw new Error(`Token refresh failed: ${response.status}${await errorBodySuffix(response)}`)
   }
   return (await response.json()) as TokenResponse
 }
 
-function buildVaultCredential(tokens: TokenResponse, now: () => number): VaultCredential {
+/**
+ * Build a VaultCredential from a token-endpoint response.
+ *
+ * `prior` lets a REFRESH carry forward the accountId/email the vault already
+ * holds when the refresh response's JWTs omit them (a refresh_token grant's
+ * id_token frequently lacks the profile claims the original authorization_code
+ * grant carried). Exported so the login path (CodexLoginFlow) and the refresh
+ * path (CredentialSync.doRefresh) compute the credential identically — the two
+ * must not drift on the expires math or the accountId/email fallback rules.
+ */
+export function buildVaultCredential(
+  tokens: TokenResponse,
+  now: () => number,
+  prior?: { accountId?: string; email?: string }
+): VaultCredential {
   const cred: VaultCredential = {
     type: 'oauth',
     access: tokens.access_token,
     refresh: tokens.refresh_token,
     expires: now() + (tokens.expires_in ?? 3600) * 1000
   }
-  const accountId = extractAccountId(tokens)
-  const email = extractEmail(tokens)
+  const accountId = extractAccountId(tokens) ?? prior?.accountId
+  const email = extractEmail(tokens) ?? prior?.email
   if (accountId) cred.accountId = accountId
   if (email) cred.email = email
   return cred

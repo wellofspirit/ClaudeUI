@@ -32,6 +32,16 @@ vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
+const { mockBeginLogin, mockCompleteLogin, mockCancelLogin } = vi.hoisted(() => ({
+  mockBeginLogin: vi.fn(),
+  mockCompleteLogin: vi.fn(),
+  mockCancelLogin: vi.fn()
+}))
+vi.mock('../vault/CredentialSync', () => ({
+  credentialSync: { beginLogin: mockBeginLogin, completeLogin: mockCompleteLogin, cancelLogin: mockCancelLogin },
+  PI_CODEX_VENDOR_ID: 'openai-codex'
+}))
+
 import { PiAuthProvider } from '../PiAuthProvider'
 
 let testHome: string
@@ -54,6 +64,9 @@ beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'pi-auth-provider-test-'))
   homedirHolder.current = testHome
   mockInvalidatePiModelCache.mockClear()
+  mockBeginLogin.mockReset()
+  mockCompleteLogin.mockReset()
+  mockCancelLogin.mockReset()
 })
 
 afterEach(() => {
@@ -290,5 +303,132 @@ describe('PiAuthProvider.buildPiAccountRef', () => {
       authState: 'authenticated',
       label: 'API key'
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M6b: CredentialSync feed target + OAuth delegation
+// ---------------------------------------------------------------------------
+
+describe('PiAuthProvider.authFilePath', () => {
+  it('returns the same path this module writes/reads auth.json at', async () => {
+    const provider = new PiAuthProvider()
+    expect(provider.authFilePath()).toBe(authJsonPath())
+  })
+})
+
+describe('PiAuthProvider.feedOauthCredential', () => {
+  it('writes a {type:"oauth", access, refresh, expires} entry, preserving every other provider entry', async () => {
+    writeAuthJson({ anthropic: { type: 'api_key', key: 'sk-ant-test' } })
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 12345, accountId: 'acct-1' })
+
+    expect(readAuthJsonRaw()).toEqual({
+      anthropic: { type: 'api_key', key: 'sk-ant-test' },
+      'openai-codex': { type: 'oauth', access: 'a1', refresh: 'r1', expires: 12345 }
+    })
+  })
+
+  it('does NOT persist accountId — pi has no such field, unlike opencode', async () => {
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 12345, accountId: 'acct-1' })
+    expect(readAuthJsonRaw()['openai-codex']).not.toHaveProperty('accountId')
+  })
+
+  it('preserves unknown fields already on the SAME entry (merge, not overwrite)', async () => {
+    writeAuthJson({ 'openai-codex': { type: 'api_key', key: 'stale', someUnknownField: 'keep-me' } })
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', { access: 'a2', refresh: 'r2', expires: 999 })
+    expect(readAuthJsonRaw()['openai-codex']).toEqual({
+      type: 'oauth',
+      key: 'stale',
+      someUnknownField: 'keep-me',
+      access: 'a2',
+      refresh: 'r2',
+      expires: 999
+    })
+  })
+
+  it('invalidates the pi model cache and refreshes the probe snapshot', async () => {
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: Date.now() + 60_000 })
+    expect(mockInvalidatePiModelCache).toHaveBeenCalledTimes(1)
+    expect(provider.buildPiAccountRef('openai-codex')).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'subscription',
+      authState: 'authenticated',
+      label: 'OAuth'
+    })
+  })
+
+  it('listVendorCredentialIds reports openai-codex as oauth-credentialed after a feed', async () => {
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: Date.now() + 60_000 })
+    expect(await provider.listVendorCredentialIds()).toEqual({ 'openai-codex': 'oauth' })
+  })
+})
+
+describe('PiAuthProvider.readOauthEntry', () => {
+  it('returns the entry for a present oauth vendor', async () => {
+    writeAuthJson({ 'openai-codex': { type: 'oauth', access: 'a1', refresh: 'r1', expires: 999 } })
+    const provider = new PiAuthProvider()
+    expect(await provider.readOauthEntry('openai-codex')).toEqual({ access: 'a1', refresh: 'r1', expires: 999 })
+  })
+
+  it('returns null when the vendor is absent', async () => {
+    const provider = new PiAuthProvider()
+    expect(await provider.readOauthEntry('openai-codex')).toBeNull()
+  })
+
+  it('returns null for a non-oauth entry', async () => {
+    writeAuthJson({ 'openai-codex': { type: 'api_key', key: 'sk-x' } })
+    const provider = new PiAuthProvider()
+    expect(await provider.readOauthEntry('openai-codex')).toBeNull()
+  })
+
+  it('returns null when the oauth entry is malformed (missing/wrong-typed fields)', async () => {
+    writeAuthJson({ 'openai-codex': { type: 'oauth', access: 'a1' } })
+    const provider = new PiAuthProvider()
+    expect(await provider.readOauthEntry('openai-codex')).toBeNull()
+  })
+})
+
+describe('PiAuthProvider OAuth delegation (openai-codex only)', () => {
+  it('oauthAuthorize("openai-codex") returns the vault authorize URL via credentialSync.beginLogin()', async () => {
+    mockBeginLogin.mockResolvedValue({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1' })
+    const provider = new PiAuthProvider()
+    const result = await provider.oauthAuthorize('openai-codex', 0)
+    expect(mockBeginLogin).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({
+      url: 'https://auth.openai.com/oauth/authorize?x=1',
+      method: 'auto',
+      instructions: expect.any(String)
+    })
+  })
+
+  it('oauthAuthorize rejects any vendor OTHER than openai-codex', async () => {
+    const provider = new PiAuthProvider()
+    await expect(provider.oauthAuthorize('anthropic', 0)).rejects.toThrow(/openai-codex/)
+    expect(mockBeginLogin).not.toHaveBeenCalled()
+  })
+
+  it('oauthCallback("openai-codex") drives credentialSync.completeLogin() and returns true', async () => {
+    mockCompleteLogin.mockResolvedValue({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    const provider = new PiAuthProvider()
+    await expect(provider.oauthCallback('openai-codex', 0)).resolves.toBe(true)
+    expect(mockCompleteLogin).toHaveBeenCalledTimes(1)
+  })
+
+  it('oauthCallback rejects any vendor OTHER than openai-codex', async () => {
+    const provider = new PiAuthProvider()
+    await expect(provider.oauthCallback('anthropic', 0)).rejects.toThrow(/openai-codex/)
+    expect(mockCompleteLogin).not.toHaveBeenCalled()
+  })
+
+  it('cancelVendorOauth() delegates to credentialSync.cancelLogin()', async () => {
+    const provider = new PiAuthProvider()
+    await provider.cancelVendorOauth()
+    expect(mockCancelLogin).toHaveBeenCalledTimes(1)
   })
 })

@@ -25,6 +25,7 @@ import { invalidatePiModelCache } from '../pi/model-discovery'
 import { logger } from '../services/logger'
 import type { AccountRef, AuthState, VendorAuthMap, VendorAuthOption } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
+import { credentialSync, PI_CODEX_VENDOR_ID, type CodexCredentialInput, type CodexEntrySnapshot } from './vault/CredentialSync'
 
 /**
  * `~/.pi/agent/auth.json` — pi's own credential store. Reuses `piAgentDir()`
@@ -237,6 +238,87 @@ export class PiAuthProvider implements EngineAuthProvider {
     writeAuthFile(file)
     invalidatePiModelCache()
     await this.probe()
+  }
+
+  // -------------------------------------------------------------------------
+  // CredentialSync feed target (M6b) — implements vault/CredentialSync.ts's
+  // structural `CodexFeedTarget` interface. NOT part of EngineAuthProvider —
+  // Claude has no analog, and the vendorId this vault feeds ('openai-codex')
+  // is Codex-specific, not a generic per-vendor operation like
+  // setVendorApiKey/removeVendorAuth above.
+  // -------------------------------------------------------------------------
+
+  /** `~/.pi/agent/auth.json`'s absolute path — CredentialSync derives its fs.watch dir + filename filter from this. */
+  authFilePath(): string {
+    return resolvePiAuthJsonPath()
+  }
+
+  /**
+   * RMW-merge a Codex OAuth credential into auth.json. Preserves every other
+   * provider entry AND any unknown field already on this vendor's own entry
+   * (spread-before-overwrite, same idiom as setVendorApiKey above).
+   * Deliberately does NOT write `accountId`/`email` — pi's own auth.json
+   * schema has no such field and doesn't read one; unlike opencode (which
+   * persists accountId), silently dropping it here is correct, not lossy —
+   * the vault (auth-vault.json) remains the source of truth for that data.
+   */
+  async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
+    const file = readAuthFile()
+    file[vendorId] = {
+      ...file[vendorId],
+      type: 'oauth',
+      access: cred.access,
+      refresh: cred.refresh,
+      expires: cred.expires
+    }
+    writeAuthFile(file)
+    invalidatePiModelCache()
+    await this.probe()
+  }
+
+  /** Read this vendor's current OAuth entry — used by CredentialSync's fs-watch resync to detect an engine-initiated rotation. Null if absent, non-oauth, or malformed. */
+  async readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null> {
+    const file = readAuthFile()
+    const entry = file[vendorId]
+    if (!entry || entry.type !== 'oauth') return null
+    const { access, refresh, expires } = entry
+    if (typeof access !== 'string' || typeof refresh !== 'string' || typeof expires !== 'number') return null
+    return { access, refresh, expires }
+  }
+
+  // -------------------------------------------------------------------------
+  // OAuth delegation (M6b) — ONLY for 'openai-codex', dispatched to the
+  // AuthVault-backed CredentialSync. pi's OTHER subscription vendors
+  // (anthropic, github-copilot, xai, radius — PI_SUBSCRIPTION_VENDOR_IDS)
+  // remain undriven (`pi /login` in a terminal); see the module header.
+  // -------------------------------------------------------------------------
+
+  async oauthAuthorize(
+    vendorId: string,
+    _method: number,
+    _inputs?: Record<string, string>
+  ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> {
+    if (vendorId !== PI_CODEX_VENDOR_ID) {
+      throw new Error(`PiAuthProvider.oauthAuthorize: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`)
+    }
+    const { authorizeUrl } = await credentialSync.beginLogin()
+    return {
+      url: authorizeUrl,
+      method: 'auto',
+      instructions: 'Complete sign-in to ChatGPT in the browser window that just opened.'
+    }
+  }
+
+  async oauthCallback(vendorId: string, _method: number, _code?: string): Promise<boolean> {
+    if (vendorId !== PI_CODEX_VENDOR_ID) {
+      throw new Error(`PiAuthProvider.oauthCallback: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`)
+    }
+    await credentialSync.completeLogin()
+    return true
+  }
+
+  async cancelVendorOauth(): Promise<void> {
+    credentialSync.cancelLogin()
   }
 
   // -------------------------------------------------------------------------

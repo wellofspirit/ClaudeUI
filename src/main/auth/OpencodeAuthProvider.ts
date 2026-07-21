@@ -25,6 +25,7 @@ import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
+import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
 
 /**
  * opencode's auth store: `<dataDir>/auth.json`, where the data dir mirrors
@@ -276,6 +277,98 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       invalidateOpencodeModelCache()
     } finally {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // CredentialSync feed target (M6b) — implements vault/CredentialSync.ts's
+  // structural `CodexFeedTarget` interface (type-only import above; no
+  // runtime dependency on CredentialSync.ts, which is what would otherwise
+  // cycle back through PiAuthProvider.ts → CredentialSync.ts).
+  //
+  // Writes DIRECTLY to auth.json (fs RMW), bypassing the `PUT /auth/{id}`
+  // HTTP path every other mutation in this file uses. Why: that path only
+  // exists inside a spawned opencode server process (see oauthAuthorize's own
+  // comment on why the server must be held open across authorize→callback);
+  // spawning one just to relay a file write is unnecessary — opencode reads
+  // auth.json natively off disk on its OWN process start, so a direct file
+  // write is both simpler and correct for what this feed needs.
+  //
+  // LIVE-SERVER STALENESS (v1 limitation, noted per the M6b spec): if an
+  // opencode server is ALREADY RUNNING when this feed lands, that process
+  // will not observe the change until its next start — opencode has no
+  // "reload auth.json" signal we can send it. This is acceptable because the
+  // refresh timer (CredentialSync.scheduleRefresh) keeps the ON-DISK copy
+  // valid well before it would actually expire, so any FRESH opencode server
+  // start always finds a good credential. A live server mid-session using a
+  // credential this feed just rotated out from under it is the one case that
+  // can still 401 until its next restart — flagged for M6c/a future revisit
+  // (e.g. an opencode `/auth/{id}` PUT best-effort mirror IF a server happens
+  // to already be running), not solved here.
+  // -------------------------------------------------------------------------
+
+  /** opencode's auth.json absolute path — CredentialSync derives its fs.watch dir + filename filter from this. */
+  authFilePath(): string {
+    return resolveOpencodeAuthJsonPath()
+  }
+
+  /** RMW-merge a Codex OAuth credential into auth.json. Preserves every other vendor entry AND any unknown field already on this vendor's own entry. Persists `accountId` when known (unlike pi, which doesn't). */
+  async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
+    const filePath = resolveOpencodeAuthJsonPath()
+    const dir = path.dirname(filePath)
+
+    let file: Record<string, unknown> = {}
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8')
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) file = parsed as Record<string, unknown>
+    } catch {
+      // Absent or corrupt — start fresh (matches listVendorCredentialIds's degrade-to-{} posture above).
+    }
+
+    const existing = file[vendorId]
+    const entry: Record<string, unknown> = {
+      ...(existing && typeof existing === 'object' ? existing : {}),
+      type: 'oauth',
+      refresh: cred.refresh,
+      access: cred.access,
+      expires: cred.expires
+    }
+    if (cred.accountId) entry.accountId = cred.accountId
+    file[vendorId] = entry
+
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(filePath, JSON.stringify(file, null, 2), { mode: 0o600 })
+    // Same rationale as PiAuthProvider.writeAuthFile: writeFileSync's `mode`
+    // only applies to a newly-created file, so an existing file (opencode's
+    // own) keeps its prior permissions unless chmod is forced explicitly.
+    if (process.platform !== 'win32') {
+      try {
+        fs.chmodSync(filePath, 0o600)
+      } catch (err) {
+        logger.warn('OpencodeAuth', `chmod 0600 failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    this.invalidateCache()
+    invalidateOpencodeModelCache()
+  }
+
+  /** Read this vendor's current OAuth entry — used by CredentialSync's fs-watch resync to detect an engine-initiated rotation. Null if absent, non-oauth, or malformed. */
+  async readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null> {
+    try {
+      const raw = await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
+      const parsed: unknown = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+      const entry = (parsed as Record<string, unknown>)[vendorId]
+      if (!entry || typeof entry !== 'object') return null
+      const e = entry as Record<string, unknown>
+      if (e.type !== 'oauth') return null
+      if (typeof e.access !== 'string' || typeof e.refresh !== 'string' || typeof e.expires !== 'number') return null
+      const accountId = typeof e.accountId === 'string' ? e.accountId : undefined
+      return { access: e.access, refresh: e.refresh, expires: e.expires, accountId }
+    } catch {
+      return null
     }
   }
 

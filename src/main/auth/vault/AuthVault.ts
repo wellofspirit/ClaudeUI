@@ -21,7 +21,7 @@
  * — a real exchange/refresh ROTATES the shared refresh_token and strands the
  * user's actual pi + opencode Codex session. See codex-oauth.ts's header.
  */
-import { safeStorage as electronSafeStorage } from 'electron'
+import * as electron from 'electron'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -78,7 +78,13 @@ export interface AuthVaultDeps {
 }
 
 export class AuthVault {
-  private readonly safeStorage: SafeStorageLike
+  /**
+   * The test-injected safeStorage, if any. When ABSENT we resolve the real
+   * `electron.safeStorage` LAZILY (resolveSafeStorage()) at each use site
+   * rather than destructuring it in the constructor — see resolveSafeStorage()
+   * for why this matters for import-time safety.
+   */
+  private readonly injectedSafeStorage: SafeStorageLike | undefined
   private readonly now: () => number
   private readonly loginFlowFactory: () => LoginFlow
 
@@ -90,9 +96,32 @@ export class AuthVault {
   private activeFlow: LoginFlow | undefined
 
   constructor(deps: AuthVaultDeps = {}) {
-    this.safeStorage = deps.safeStorage ?? electronSafeStorage
+    this.injectedSafeStorage = deps.safeStorage
     this.now = deps.now ?? (() => Date.now())
     this.loginFlowFactory = deps.loginFlowFactory ?? (() => new CodexLoginFlow({ now: this.now }))
+  }
+
+  /**
+   * Resolve the effective safeStorage AT USE TIME (not construction).
+   *
+   * Uses an injected fake when provided; otherwise reads `electron.safeStorage`
+   * off the namespace import. Two properties this buys us:
+   *
+   *   1. Import-time safety: the singleton `authVault = new AuthVault()` (and
+   *      thus any module that transitively imports this file — e.g.
+   *      register-auth-providers.ts → session.ipc.ts) constructs WITHOUT
+   *      touching `electron.safeStorage`. Combined with the namespace import
+   *      (`import * as electron`), a test that mocks `electron` with a PARTIAL
+   *      shape (no `safeStorage` export) no longer throws vitest's "No
+   *      'safeStorage' export is defined on the 'electron' mock" at import
+   *      time — a namespace-property access yields `undefined` instead of the
+   *      named-export error a destructured `import { safeStorage }` would raise.
+   *   2. Graceful degradation: in a non-Electron/partial-mock context where
+   *      the property is `undefined`, callers fall back to the existing
+   *      0600-plaintext path (encryption "unavailable") rather than crashing.
+   */
+  private resolveSafeStorage(): SafeStorageLike | undefined {
+    return this.injectedSafeStorage ?? (electron as { safeStorage?: SafeStorageLike }).safeStorage
   }
 
   /** Best-effort read. Never throws — an absent, corrupt, or undecryptable file all degrade to null. */
@@ -177,9 +206,17 @@ export class AuthVault {
       const parsed = JSON.parse(raw) as VaultFile
       if (!parsed || typeof parsed !== 'object' || parsed.v !== 1) return {}
 
-      const json = parsed.encrypted
-        ? this.safeStorage.decryptString(Buffer.from(parsed.data, 'base64'))
-        : parsed.data
+      let json: string
+      if (parsed.encrypted) {
+        const safeStorage = this.resolveSafeStorage()
+        // No safeStorage (partial mock / non-Electron): can't decrypt an
+        // encrypted blob — degrade to {} via the catch, same as any other
+        // undecryptable file.
+        if (!safeStorage) throw new Error('safeStorage unavailable — cannot decrypt vault')
+        json = safeStorage.decryptString(Buffer.from(parsed.data, 'base64'))
+      } else {
+        json = parsed.data
+      }
 
       const data = JSON.parse(json)
       if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
@@ -202,9 +239,10 @@ export class AuthVault {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 
     const json = JSON.stringify(all)
+    const safeStorage = this.resolveSafeStorage()
     let file: VaultFile
-    if (this.safeStorage.isEncryptionAvailable()) {
-      const data = this.safeStorage.encryptString(json).toString('base64')
+    if (safeStorage?.isEncryptionAvailable()) {
+      const data = safeStorage.encryptString(json).toString('base64')
       file = { v: 1, encrypted: true, data }
     } else {
       logger.warn(
