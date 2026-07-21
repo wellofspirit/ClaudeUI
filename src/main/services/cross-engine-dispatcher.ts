@@ -52,7 +52,7 @@ import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiB
 import { mapPiEvent, createPiMapperState } from '../pi/event-mapper'
 import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
 import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
-import type { PiGetStateData, PiGetLastAssistantTextData } from '../pi/pi-protocol'
+import type { PiGetStateData, PiGetLastAssistantTextData, PiGetSessionStatsData } from '../pi/pi-protocol'
 import { engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
@@ -301,6 +301,16 @@ const HEARTBEAT_MS = 15 * 1000
 const PENDING_STOP_TTL_MS = 60 * 1000
 /** Default for `DispatcherDeps.piAbortSettleGraceMs` — see that field's doc comment. */
 const PI_ABORT_SETTLE_GRACE_MS = 3_000
+/**
+ * Bounded timeout for the BEST-EFFORT `get_session_stats` reconciliation read
+ * in `accountPiNonSuccessCostReconciled` (audit-residual C fix) — short,
+ * mirroring `piAbortSettleGraceMs` above, because the target may be wedged
+ * (that's often WHY the turn is on the err/timeout path in the first place)
+ * and this must never meaningfully delay an already-failed turn's error
+ * return. A local RPC to an already-spawned child is normally sub-100ms; this
+ * only bites when the process is genuinely stuck.
+ */
+const GET_SESSION_STATS_RECONCILE_TIMEOUT_MS = 3_000
 
 /** A durable stop-intent armed BEFORE the dispatch registered (ADR-033 M3). */
 interface PendingStop {
@@ -2114,6 +2124,57 @@ export class CrossEngineDispatcher {
     return turnCostUsd
   }
 
+  /**
+   * Same cost-delta bookkeeping as `accountPiNonSuccessCost` above, but for
+   * the err/timeout non-success paths ONLY (audit-residual C fix — NEVER the
+   * stop/abort path, which stays unreconciled by design: ADR-033 M4-B already
+   * records no usage row for a turn that never returned, and this file's own
+   * call sites below only ever invoke this method from the err/timeout
+   * branches). `entry.mapperState.totalCostUsd` only grows via cost-bearing
+   * assistant `message_end`s the mapper actually SAW — a turn that dies
+   * before its first one (e.g. erroring inside the very first LLM call, or
+   * timing out before any assistant message streams back) can still have
+   * spent real money that pi's own backend recorded but never surfaced as a
+   * mapped event. `get_session_stats` is pi's authoritative cumulative cost
+   * (the SAME RPC PiSession's resume-seed already trusts — see
+   * PiSession.replayStoredHistory) — read here, BOUNDED
+   * (`GET_SESSION_STATS_RECONCILE_TIMEOUT_MS`) and swallowed on failure (a
+   * wedged target — plausible, since that's often why the turn is on this
+   * path at all — must never block the error return on a follow-up RPC): if
+   * the read succeeds AND reports MORE than `entry.mapperState.totalCostUsd`,
+   * that authoritative number is used IN PLACE OF the mapper's total for the
+   * delta + baseline advance below; otherwise this is behaviorally IDENTICAL
+   * to `accountPiNonSuccessCost`.
+   */
+  private async accountPiNonSuccessCostReconciled(
+    entry: PiTargetEntry,
+    ctx: DispatchContext,
+    model: string
+  ): Promise<number> {
+    let totalCostUsd = entry.mapperState.totalCostUsd
+    try {
+      const statsResp = await entry.client.request<PiGetSessionStatsData>(
+        { type: 'get_session_stats' },
+        GET_SESSION_STATS_RECONCILE_TIMEOUT_MS
+      )
+      if (statsResp.success && statsResp.data && statsResp.data.cost > totalCostUsd) {
+        totalCostUsd = statsResp.data.cost
+      }
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `pi get_session_stats cost reconciliation failed (falling back to streamed cost): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    const turnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
+    entry.lastReportedTotalCostUsd = totalCostUsd
+    entry.cumulativeCostUsd += turnCostUsd
+    if (turnCostUsd > 0) {
+      ctx.addDispatchedCost?.('pi', model, turnCostUsd)
+    }
+    return turnCostUsd
+  }
+
   // ── pi direction (M4c) ────────────────────────────────────────────────────
 
   /**
@@ -2276,7 +2337,15 @@ export class CrossEngineDispatcher {
         // own trailing cost-bearing events can still land during that window
         // (see the RACE GUARD above), so this is the earliest point the
         // mapper's running total can be trusted as final for this turn.
-        const turnCostUsd = this.accountPiNonSuccessCost(entry, ctx, model)
+        // Audit-residual C fix: ONLY the 'timeout' outcome reconciles against
+        // get_session_stats (a genuine failure — it gets a usage row below).
+        // 'stop'/'abort' deliberately do NOT — ADR-033 M4-B already records no
+        // usage row for either, and a follow-up RPC to a target the user just
+        // asked to stop would be pure latency for no observable benefit.
+        const turnCostUsd =
+          winner.kind === 'timeout'
+            ? await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+            : this.accountPiNonSuccessCost(entry, ctx, model)
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         const text =
           winner.kind === 'timeout'
@@ -2318,7 +2387,12 @@ export class CrossEngineDispatcher {
         // "process is not running"), so no extra liveness tracking is needed
         // here — see the M4c report for the full rationale.
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
-        const turnCostUsd = this.accountPiNonSuccessCost(entry, ctx, model)
+        // Audit-residual C fix: reconcile against get_session_stats — an
+        // extension_error/rejected-ack can land before ANY cost-bearing
+        // message_end streamed back, in which case entry.mapperState.
+        // totalCostUsd is still the pre-turn value even though pi's backend
+        // may have genuinely spent something.
+        const turnCostUsd = await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
         emitDispatchNotification(
           ctx,
           entry.sessionId ?? '',

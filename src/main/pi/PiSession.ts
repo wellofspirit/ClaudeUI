@@ -215,6 +215,21 @@ export class PiSession extends BaseSession {
    * session's cumulative subagent calls can't grow this unboundedly.
    */
   private recordedSubagentUsage = new Set<string>()
+  /**
+   * In-flight `dispatch_agent` tool-call ids (M4b; audit-residual B fix) —
+   * added at the START of handleDispatchAgent, BEFORE the
+   * `await crossEngineDispatcher.dispatch(...)` call, removed in a `finally`
+   * once that call settles (success or error). interrupt() walks this set and
+   * calls `crossEngineDispatcher.stopDispatch(id, this.routingId)` for each —
+   * mirrors TaskCard's own Stop-button call — so pi's Esc-to-abort now
+   * propagates into an in-flight dispatched child instead of leaving it
+   * running/spending after the SOURCE turn was aborted (previously a
+   * documented v1 limitation — see handleDispatchAgent's doc comment). A
+   * plain `Set` (not bounded like hostedGrants/recordedSubagentUsage above) —
+   * entries live for, at most, the duration of one in-flight dispatch call,
+   * never accumulate across a long-running session.
+   */
+  private inFlightDispatchIds = new Set<string>()
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
@@ -1039,6 +1054,24 @@ export class PiSession extends BaseSession {
     // Deny FIRST (synchronous, local) — a hanging extension fetch would
     // otherwise wedge pi's turn forever waiting on a human who just hit stop.
     this.rejectAllPendingGates('Interrupted')
+    // Audit-residual B fix: pi's own turn-abort (the `abort` RPC below) does
+    // NOT cancel a `dispatch_agent` child this turn started — the bridge's
+    // /hosted-tool handler is just a JS promise awaiting
+    // crossEngineDispatcher.dispatch(), which pi's abort has no way to reach.
+    // Turn-scoped stop (mirrors TaskCard's own Stop-button call — NOT
+    // disposeFor, which tears down reusable targets; a turn interrupt should
+    // only abort the CURRENT turn, leaving the target alive for a later
+    // continuation, same as a manual Stop click would). Idempotent: a
+    // dispatch that already settled is simply absent from the map
+    // (dispatchInner's `activeByToolUseId` entry is deleted in its own
+    // `finally`), so `stopDispatch` harmlessly misses — see the doc comment
+    // on `inFlightDispatchIds` and cancel()'s later disposeFor call, which
+    // remains safe to run afterward regardless (PiRpcClient.dispose()/
+    // PiBridgeHost.dispose() are both documented idempotent).
+    for (const id of this.inFlightDispatchIds) {
+      crossEngineDispatcher.stopDispatch(id, this.routingId)
+    }
+    this.inFlightDispatchIds.clear()
     if (!this.client) return
     try {
       await this.client.request({ type: 'abort' })
@@ -1419,9 +1452,11 @@ export class PiSession extends BaseSession {
    * is a safe, honest omission — not a fabricated never-aborting stub.
    * Stop-from-CALLER still works regardless: TaskCard's Stop button routes
    * through `crossEngineDispatcher.stopDispatch`, keyed by toolUseId +
-   * routingId, entirely independent of this signal. Only pi's OWN Esc-to-abort
-   * mid-turn does not propagate into an in-flight dispatch — documented v1
-   * limitation, not a bug.
+   * routingId, entirely independent of this signal. pi's OWN Esc-to-abort
+   * mid-turn ALSO now propagates into an in-flight dispatch (audit-residual B
+   * fix) — see `inFlightDispatchIds`'s doc comment and `interrupt()`, which
+   * calls the SAME `stopDispatch` the TaskCard Stop button does for every id
+   * tracked here.
    */
   private async handleDispatchAgent(
     input: Record<string, unknown>,
@@ -1457,7 +1492,16 @@ export class PiSession extends BaseSession {
       toolUseId: toolCallId
     }
 
-    const result = await crossEngineDispatcher.dispatch(req, ctx)
+    // Audit-residual B fix: tracked from BEFORE the dispatch() await starts
+    // (so a Stop/interrupt racing this exact instant still sees it) until it
+    // settles either way — see inFlightDispatchIds' doc comment.
+    this.inFlightDispatchIds.add(toolCallId)
+    let result: Awaited<ReturnType<typeof crossEngineDispatcher.dispatch>>
+    try {
+      result = await crossEngineDispatcher.dispatch(req, ctx)
+    } finally {
+      this.inFlightDispatchIds.delete(toolCallId)
+    }
     const text = result.isError
       ? result.text
       : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`

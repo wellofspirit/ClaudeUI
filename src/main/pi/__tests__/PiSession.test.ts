@@ -49,6 +49,7 @@ const {
   mockShowMockupHandler,
   mockDispatch,
   mockDisposeFor,
+  mockStopDispatch,
   mockCrossEngineDispatchAvailable
 } = vi.hoisted(() => {
   const mockStart = vi.fn().mockResolvedValue(undefined)
@@ -121,8 +122,12 @@ const {
   // PiSession.cancel() tears down owned targets; crossEngineDispatchAvailable
   // drives the capability-flip AND (defaults to true, mirroring the real
   // helper's non-'claude' branch — override per-test to prove the AND).
+  // stopDispatch (audit-residual B): asserts PiSession.interrupt() propagates
+  // Esc into any in-flight dispatch_agent turn — mirrors TaskCard Stop's own
+  // call into the real dispatcher.
   const mockDispatch = vi.fn()
   const mockDisposeFor = vi.fn()
+  const mockStopDispatch = vi.fn()
   const mockCrossEngineDispatchAvailable = vi.fn().mockReturnValue(true)
 
   return {
@@ -174,6 +179,7 @@ const {
     mockShowMockupHandler,
     mockDispatch,
     mockDisposeFor,
+    mockStopDispatch,
     mockCrossEngineDispatchAvailable
   }
 })
@@ -206,7 +212,7 @@ vi.mock('../../services/mermaid-tool', () => ({ createMermaidServer: mockCreateM
 vi.mock('../../services/mockup-tool', () => ({ createMockupServer: mockCreateMockupServer }))
 // Cross-engine dispatch (M4b).
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: mockDispatch, disposeFor: mockDisposeFor },
+  crossEngineDispatcher: { dispatch: mockDispatch, disposeFor: mockDisposeFor, stopDispatch: mockStopDispatch },
   crossEngineDispatchAvailable: mockCrossEngineDispatchAvailable
 }))
 vi.mock('../PiBridgeHost', () => ({
@@ -306,6 +312,7 @@ beforeEach(() => {
     .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }] })
   mockDispatch.mockReset()
   mockDisposeFor.mockClear()
+  mockStopDispatch.mockReset().mockReturnValue(true)
   mockCrossEngineDispatchAvailable.mockReset().mockReturnValue(true)
 })
 
@@ -537,6 +544,84 @@ describe('PiSession.interrupt', () => {
     await session.interrupt()
 
     await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'Interrupted' })
+  })
+})
+
+describe('PiSession.interrupt — propagates into an in-flight dispatch_agent turn (audit-residual B)', () => {
+  it('an in-flight dispatch id is tracked, and interrupt() calls crossEngineDispatcher.stopDispatch(id, routingId) for it', async () => {
+    let resolveDispatch: ((v: { text: string; sessionId: string }) => void) | null = null
+    mockDispatch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDispatch = resolve
+        })
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-interrupt-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantViaApproval(win, session, 'call_di_1', { engine: 'opencode', prompt: 'x' })
+    // Fire the hosted-tool call but do NOT await it yet — dispatch() is still
+    // pending (mockDispatch's promise above never resolves on its own).
+    const hostedToolPromise = hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_di_1')
+    await vi.waitFor(() => expect(mockDispatch).toHaveBeenCalledTimes(1))
+
+    await session.interrupt()
+
+    expect(mockStopDispatch).toHaveBeenCalledWith('call_di_1', 'rid-dispatch-interrupt-1')
+
+    // Let the dispatch settle so the test doesn't leave a dangling promise.
+    resolveDispatch!({ text: 'done', sessionId: 'oc-sess' })
+    await hostedToolPromise
+  })
+
+  it('a COMPLETED dispatch is not stopped — it is removed from the in-flight set once dispatch() resolves', async () => {
+    mockDispatch.mockResolvedValue({ text: 'done', sessionId: 'oc-sess' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-interrupt-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantViaApproval(win, session, 'call_di_2', { engine: 'opencode', prompt: 'x' })
+    await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_di_2')
+
+    await session.interrupt()
+
+    expect(mockStopDispatch).not.toHaveBeenCalled()
+  })
+
+  it('interrupt() with no in-flight dispatch is a no-op on stopDispatch (still sends abort)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-interrupt-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await session.interrupt()
+
+    expect(mockStopDispatch).not.toHaveBeenCalled()
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'abort' })
+  })
+
+  it('cancel() after interrupt() does not throw (no double-stop hazard — disposeFor is idempotent regardless of a prior stopDispatch)', async () => {
+    let resolveDispatch: ((v: { text: string; sessionId: string }) => void) | null = null
+    mockDispatch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDispatch = resolve
+        })
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-interrupt-4', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantViaApproval(win, session, 'call_di_4', { engine: 'opencode', prompt: 'x' })
+    const hostedToolPromise = hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_di_4')
+    await vi.waitFor(() => expect(mockDispatch).toHaveBeenCalledTimes(1))
+
+    await session.interrupt()
+    expect(() => session.cancel()).not.toThrow()
+    expect(mockDisposeFor).toHaveBeenCalledWith('rid-dispatch-interrupt-4')
+
+    resolveDispatch!({ text: 'done', sessionId: 'oc-sess' })
+    await hostedToolPromise
   })
 })
 

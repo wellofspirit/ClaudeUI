@@ -3599,6 +3599,179 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
   })
 })
 
+describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconciliation via get_session_stats (audit-residual C)', () => {
+  it('an errored turn whose fake get_session_stats reports MORE cost than any streamed usage event → the recovered (higher) cost is what is counted toward the cap + usage row', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget({
+      requestHandler: (cmd) => {
+        if (cmd.type === 'get_session_stats') {
+          return {
+            type: 'response',
+            command: 'get_session_stats',
+            success: true,
+            data: { cost: 0.1, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+          }
+        }
+        return defaultPiRequestHandler('pi-target-1')(cmd)
+      }
+    })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_reconcile' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // The event stream only ever saw 0.04 before the extension errored out —
+    // but pi's OWN backend (get_session_stats) recorded 0.10, spend the
+    // mapper never surfaced as a cost-bearing message_end.
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.04, input: 100, output: 40 }))
+    target.pushEvent({
+      type: 'extension_error',
+      extensionPath: 'x.ts',
+      event: 'tool_call',
+      error: 'bridge crashed'
+    })
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_err_reconcile', costUsd: 0.1 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.1)
+  })
+
+  it('a get_session_stats read that FAILS during error-path reconciliation falls back to the mapperState delta (no throw, error result still returned)', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget({
+      requestHandler: (cmd) => {
+        if (cmd.type === 'get_session_stats') throw new Error('target wedged')
+        return defaultPiRequestHandler('pi-target-1')(cmd)
+      }
+    })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_reconcile_fail' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.04, input: 100, output: 40 }))
+    target.pushEvent({
+      type: 'extension_error',
+      extensionPath: 'x.ts',
+      event: 'tool_call',
+      error: 'bridge crashed'
+    })
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_err_reconcile_fail', costUsd: 0.04 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
+  })
+
+  it('a timed-out turn whose fake get_session_stats reports MORE cost than any streamed usage event is reconciled too', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget({
+      requestHandler: (cmd) => {
+        if (cmd.type === 'get_session_stats') {
+          return {
+            type: 'response',
+            command: 'get_session_stats',
+            success: true,
+            data: { cost: 0.08, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+          }
+        }
+        return defaultPiRequestHandler('pi-target-1')(cmd)
+      }
+    })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage,
+      dispatchTimeoutMs: 30
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_reconcile' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 }))
+    // Never push agent_settled — the turn hangs until the timeout fires.
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('timed out')
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_timeout_reconcile', costUsd: 0.08 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.08)
+  })
+
+  it('when get_session_stats reports the SAME cost as the mapper already streamed, the recorded spend is unchanged (no double count)', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget({
+      requestHandler: (cmd) => {
+        if (cmd.type === 'get_session_stats') {
+          return {
+            type: 'response',
+            command: 'get_session_stats',
+            success: true,
+            data: { cost: 0.04, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+          }
+        }
+        return defaultPiRequestHandler('pi-target-1')(cmd)
+      }
+    })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_same_cost' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.04, input: 100, output: 40 }))
+    target.pushEvent({
+      type: 'extension_error',
+      extensionPath: 'x.ts',
+      event: 'tool_call',
+      error: 'bridge crashed'
+    })
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_err_same_cost', costUsd: 0.04 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
+  })
+
+  it('a STOPPED turn never calls get_session_stats (reconciliation is err/timeout-only — stop stays unreconciled by design, ADR-033 M4-B) and still records no usage row', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_no_reconcile' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.02 }))
+    expect(dispatcher.stopDispatch('toolu_stop_no_reconcile')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(
+      target.client.request.mock.calls.some((c: unknown[]) => (c[0] as { type?: string }).type === 'get_session_stats')
+    ).toBe(false)
+  })
+})
+
 describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)', () => {
   it('a continuation turn is rejected once cumulative cost meets the cap; target survives; no second prompt is sent', async () => {
     const target = makeFakePiTarget()

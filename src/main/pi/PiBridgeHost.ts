@@ -38,7 +38,7 @@ import type { Socket } from 'node:net'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { logger } from '../services/logger'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from './pi-bridge-source'
 import { PI_SUBAGENT_EXTENSION_SOURCE, PI_SUBAGENT_VERSION } from './pi-subagent-source'
@@ -278,25 +278,46 @@ export class PiBridgeHost {
 }
 
 /**
+ * Per-user base dir for both extension files (audit residual fix, 2026-07):
+ * `~/.claude/ui/pi-ext` — the SAME `~/.claude/ui/` per-OS-user root db.ts and
+ * the auth vault use, derived locally (no import of either — see the two
+ * writers' doc comments for the full rationale). `mkdirSync(recursive:true)`
+ * creates it with the process's default (umask-restricted) perms under the
+ * user's own home dir, which is NOT world-writable the way `os.tmpdir()`
+ * (`/tmp` on POSIX) normally is — closing the preplant hole described below.
+ */
+function piExtBaseDir(): string {
+  return join(homedir(), '.claude', 'ui', 'pi-ext')
+}
+
+/**
  * Ensure the version-keyed bridge extension file exists on disk AND matches
  * `PI_BRIDGE_EXTENSION_SOURCE` byte-for-byte, then return its absolute path
  * for `-e <path>`.
  *
  * Content is version-keyed by directory (a stale file from a previous
  * ClaudeUI build never shadows an edit to pi-bridge-source.ts) — but that
- * alone is only half the story: on POSIX, `os.tmpdir()` (`/tmp`) is normally
- * world-writable, so another local user could preplant this exact path with
- * attacker-controlled TypeScript BEFORE ClaudeUI ever spawns pi with
- * `-e <path>`, injecting arbitrary code into every pi child. Reading the
- * existing file back and comparing content on every call closes that gap —
- * a mismatch of ANY kind (preplanted, corrupted, hand-edited) is rewritten
- * unconditionally, not just a missing file.
+ * alone used to be only half the story: this file used to live under
+ * `os.tmpdir()`, which is normally world-writable on POSIX (`/tmp`), so
+ * another local user could preplant this exact path with attacker-controlled
+ * TypeScript BEFORE ClaudeUI ever spawned pi with `-e <path>`, injecting
+ * arbitrary code into every pi child — a TOCTOU race between our verify-write
+ * and pi reading the file back could still land inside that window even with
+ * content-verification. Moving the base dir under the PER-USER `~/.claude/ui`
+ * root (see `piExtBaseDir()`) closes that hole: no other local user can
+ * preplant a path under this session's own home directory. The
+ * content-verify-on-every-call behavior is otherwise UNCHANGED — a mismatch
+ * of ANY kind (corrupted, hand-edited) is still rewritten unconditionally,
+ * not just a missing file; the file itself is ClaudeUI's own source, not a
+ * secret, so the point of the per-user dir is a non-world-writable PARENT,
+ * not file permissions on the content.
  *
- * Lives under `os.tmpdir()` — NEVER `~/.pi/**`, which is user space (ADR-026
- * constraint carried over from the M2a kickoff spec).
+ * Lives under `~/.claude/ui/pi-ext` — NEVER `~/.pi/**`, which is user space
+ * (ADR-026 constraint carried over from the M2a kickoff spec; unchanged by
+ * this move — `~/.claude/ui` and `~/.pi` are different roots).
  */
 export function writeBridgeExtension(): string {
-  const dir = join(tmpdir(), 'claudeui-pi-bridge', PI_BRIDGE_VERSION)
+  const dir = join(piExtBaseDir(), 'claudeui-pi-bridge', PI_BRIDGE_VERSION)
   const file = join(dir, 'claudeui-bridge.ts')
   let matches = false
   if (existsSync(file)) {
@@ -318,14 +339,16 @@ export function writeBridgeExtension(): string {
  * pi-subagent-source.ts) exists on disk AND matches
  * `PI_SUBAGENT_EXTENSION_SOURCE` byte-for-byte, then return its absolute path
  * for `-e <path>`. SAME content-verify-on-every-call posture as
- * `writeBridgeExtension` above (rewrite on any mismatch — preplanted,
- * corrupted, or hand-edited) — a SEPARATE tmp dir + version counter
+ * `writeBridgeExtension` above (rewrite on any mismatch — corrupted or
+ * hand-edited) — a SEPARATE dir + version counter
  * (`claudeui-pi-subagent/<PI_SUBAGENT_VERSION>/`, not nested under the
  * bridge's own dir) since the two extensions version independently. Lives
- * under `os.tmpdir()` — NEVER `~/.pi/**`, which is user space.
+ * under `~/.claude/ui/pi-ext` (see `piExtBaseDir()` — same per-user,
+ * non-world-writable rationale as the bridge writer above) — NEVER
+ * `~/.pi/**`, which is user space.
  */
 export function writeSubagentExtension(): string {
-  const dir = join(tmpdir(), 'claudeui-pi-subagent', PI_SUBAGENT_VERSION)
+  const dir = join(piExtBaseDir(), 'claudeui-pi-subagent', PI_SUBAGENT_VERSION)
   const file = join(dir, 'claudeui-subagent.ts')
   let matches = false
   if (existsSync(file)) {

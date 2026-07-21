@@ -10,19 +10,31 @@ import http from 'node:http'
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-// writeBridgeExtension() (A2 tests below) redirects os.tmpdir() to a fresh
-// per-test scratch dir — mirrors pi-session-list.test.ts's identical
-// os.homedir() redirection technique, so no test ever touches the real
-// system tmpdir.
-const { mockTmpdir } = vi.hoisted(() => ({ mockTmpdir: vi.fn() }))
+// writeBridgeExtension()/writeSubagentExtension() (A2 tests below) redirect
+// os.homedir() to a fresh per-test scratch dir — mirrors pi-session-list.
+// test.ts's identical os.homedir() redirection technique, so no test ever
+// touches the real system home dir (both writers now live under
+// `~/.claude/ui/pi-ext` per the audit-residual fix, not os.tmpdir()).
+const { mockHomedir } = vi.hoisted(() => ({ mockHomedir: vi.fn() }))
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os')
-  return { ...actual, tmpdir: mockTmpdir, default: { ...actual, tmpdir: mockTmpdir } }
+  return { ...actual, homedir: mockHomedir, default: { ...actual, homedir: mockHomedir } }
 })
+// '../services/logger' is mocked wholesale (mirrors PiSession.test.ts's
+// identical treatment) — the REAL logger.ts computes `LOG_DIR = join(homedir(),
+// ...)` at MODULE-TOP-LEVEL, which would otherwise run against whatever
+// `mockHomedir` last returned (or hasn't returned yet) and can call
+// `mkdirSync` against a bogus path; PiBridgeHost only ever calls
+// logger.warn/error, never anything test-observable, so a bare no-op double
+// is enough.
+vi.mock('../../services/logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
 
-import { PiBridgeHost, writeBridgeExtension } from '../PiBridgeHost'
+import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from '../PiBridgeHost'
 import type { GateDecision, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from '../PiBridgeHost'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
+import { PI_SUBAGENT_EXTENSION_SOURCE, PI_SUBAGENT_VERSION } from '../pi-subagent-source'
 
 describe('PiBridgeHost', () => {
   let host: PiBridgeHost | null = null
@@ -453,16 +465,16 @@ describe('PiBridgeHost — POST /hosted-tool (M4a+b)', () => {
   })
 })
 
-describe('writeBridgeExtension (A2 — content-verify against tampering/preplanting)', () => {
+describe('writeBridgeExtension (A2 — content-verify against tampering/preplanting; audit-residual A — per-user base dir)', () => {
   let scratchRoot: string
 
   beforeEach(async () => {
     // vi.importActual bypasses the 'node:os' mock above (which redirects
-    // `tmpdir` for the PRODUCT code under test) to get the GENUINE tmpdir,
+    // `homedir` for the PRODUCT code under test) to get the GENUINE tmpdir,
     // purely so this test's own scratch dir doesn't depend on itself.
     const realOs = await vi.importActual<typeof import('node:os')>('node:os')
     scratchRoot = mkdtempSync(join(realOs.tmpdir(), 'pi-bridge-host-test-'))
-    mockTmpdir.mockReturnValue(scratchRoot)
+    mockHomedir.mockReturnValue(scratchRoot)
   })
 
   afterEach(() => {
@@ -470,19 +482,19 @@ describe('writeBridgeExtension (A2 — content-verify against tampering/preplant
   })
 
   function extensionFilePath(): string {
-    return join(scratchRoot, 'claudeui-pi-bridge', PI_BRIDGE_VERSION, 'claudeui-bridge.ts')
+    return join(scratchRoot, '.claude', 'ui', 'pi-ext', 'claudeui-pi-bridge', PI_BRIDGE_VERSION, 'claudeui-bridge.ts')
   }
 
-  it('writes the file when absent', () => {
+  it('writes the file under ~/.claude/ui/pi-ext (per-user, NOT os.tmpdir()) when absent', () => {
     const file = writeBridgeExtension()
 
     expect(file).toBe(extensionFilePath())
     expect(readFileSync(file, 'utf-8')).toBe(PI_BRIDGE_EXTENSION_SOURCE)
   })
 
-  it('rewrites when the on-disk content differs from PI_BRIDGE_EXTENSION_SOURCE (tampered/preplanted)', () => {
+  it('rewrites when the on-disk content differs from PI_BRIDGE_EXTENSION_SOURCE (tampered/hand-edited)', () => {
     const file = writeBridgeExtension()
-    writeFileSync(file, '// TAMPERED — attacker-controlled content, e.g. preplanted before ClaudeUI ever spawned', 'utf-8')
+    writeFileSync(file, '// TAMPERED — hand-edited content', 'utf-8')
 
     const secondPath = writeBridgeExtension()
 
@@ -499,6 +511,51 @@ describe('writeBridgeExtension (A2 — content-verify against tampering/preplant
     utimesSync(file, oldTime, oldTime)
 
     writeBridgeExtension() // second call — content is already identical.
+
+    expect(statSync(file).mtime.getTime()).toBe(oldTime.getTime())
+  })
+})
+
+describe('writeSubagentExtension (M5b; audit-residual A — per-user base dir, SAME posture as writeBridgeExtension)', () => {
+  let scratchRoot: string
+
+  beforeEach(async () => {
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os')
+    scratchRoot = mkdtempSync(join(realOs.tmpdir(), 'pi-subagent-host-test-'))
+    mockHomedir.mockReturnValue(scratchRoot)
+  })
+
+  afterEach(() => {
+    rmSync(scratchRoot, { recursive: true, force: true })
+  })
+
+  function extensionFilePath(): string {
+    return join(scratchRoot, '.claude', 'ui', 'pi-ext', 'claudeui-pi-subagent', PI_SUBAGENT_VERSION, 'claudeui-subagent.ts')
+  }
+
+  it('writes the file under ~/.claude/ui/pi-ext (per-user, NOT os.tmpdir()) when absent — a SEPARATE dir from writeBridgeExtension', () => {
+    const file = writeSubagentExtension()
+
+    expect(file).toBe(extensionFilePath())
+    expect(readFileSync(file, 'utf-8')).toBe(PI_SUBAGENT_EXTENSION_SOURCE)
+  })
+
+  it('rewrites when the on-disk content differs from PI_SUBAGENT_EXTENSION_SOURCE (tampered/hand-edited)', () => {
+    const file = writeSubagentExtension()
+    writeFileSync(file, '// TAMPERED — hand-edited content', 'utf-8')
+
+    const secondPath = writeSubagentExtension()
+
+    expect(secondPath).toBe(file)
+    expect(readFileSync(file, 'utf-8')).toBe(PI_SUBAGENT_EXTENSION_SOURCE)
+  })
+
+  it('leaves the file COMPLETELY untouched (no rewrite) when content already matches', () => {
+    const file = writeSubagentExtension()
+    const oldTime = new Date('2020-01-01T00:00:00.000Z')
+    utimesSync(file, oldTime, oldTime)
+
+    writeSubagentExtension() // second call — content is already identical.
 
     expect(statSync(file).mtime.getTime()).toBe(oldTime.getTime())
   })
