@@ -36,11 +36,14 @@
  * registration entirely (no prompt pollution advertising a tool with no
  * agents to invoke).
  *
- * Written to `<os.tmpdir()>/claudeui-pi-subagent/<PI_SUBAGENT_VERSION>/
+ * Written to `~/.claude/ui/pi-ext/claudeui-pi-subagent/<PI_SUBAGENT_VERSION>/
  * claudeui-subagent.ts` by `writeSubagentExtension()` (PiBridgeHost.ts) — the
  * SAME content-verify-on-every-call posture `writeBridgeExtension()` uses
- * (rewrite on any mismatch; write-if-absent alone would leave a preplant
- * window on a world-writable POSIX /tmp). Never written under `~/.pi/**`.
+ * (rewrite on any mismatch), under the per-user `~/.claude/ui` root rather
+ * than the world-writable `os.tmpdir()` so no other local user can preplant
+ * the `-e` file. Never written under `~/.pi/**`. (The per-child PROMPT temp
+ * file below still uses os.tmpdir() — that's a throwaway prompt, not the
+ * injected extension, so the preplant concern doesn't apply.)
  *
  * SECURITY / TRUST MODEL (required reading before editing):
  *   - Children are spawned with NO `-e` flags of their own — recursion into

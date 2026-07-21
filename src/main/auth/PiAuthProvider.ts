@@ -7,12 +7,14 @@
  * unknown provider entry and unknown field byte-for-byte, and keeps 0600 on
  * POSIX (see docs/protocol-pi/README.md "Auth" + vendor/pi-cli/docs/providers.md).
  *
- * pi's OAuth login (`pi /login`) is a TUI-interactive flow ClaudeUI does NOT
- * drive (capabilities.auth.canDriveLogin stays false — model-capabilities.ts's
- * PI_ENGINE_CAPABILITIES). oauthAuthorize/oauthCallback are therefore NOT
- * implemented here; the oauth entries in listVendorAuthOptions() are
- * informational only (the Settings UI shows a "run pi /login in a terminal"
- * hint instead of driving a flow — see PiVendors.tsx).
+ * pi's native `pi /login` is TUI-interactive, but as of M6 ClaudeUI DOES drive
+ * the `openai-codex` (ChatGPT) login itself via its own auth vault
+ * (capabilities.auth.canDriveLogin is now true — ADR-036): oauthAuthorize/
+ * oauthCallback/cancelVendorOauth below delegate that ONE vendor to
+ * `credentialSync`. pi's OTHER subscription vendors (anthropic/github-copilot/
+ * xai/radius) are still undriven — their oauth entries in
+ * listVendorAuthOptions() stay informational (the Settings UI shows a "run pi
+ * /login in a terminal" hint for those — see PiVendors.tsx).
  *
  * probe()/setVendorApiKey()/removeVendorAuth() degrade to a no-op-safe result
  * on any failure — pi is optional, exactly like ClaudeAuthProvider/

@@ -2,7 +2,7 @@
 
 **Purpose:** a self-contained handoff so a fresh session can continue the pi engine work with no
 prior context. Read this, then the pointers at the bottom. Status as of branch `pi` @ commit
-`0e51393` (2026-07-20).
+`a9c4c52` (2026-07-21).
 
 ---
 
@@ -29,8 +29,9 @@ Code home: `src/main/pi/`. Auth: `src/main/auth/PiAuthProvider.ts`. Sidebar/hist
 
 ## 2. Branch state — what's SHIPPED (all gate-green + real-app verified)
 
-Branch `pi` = `pre-release` + 8 commits, pushed to `origin/pi`. Each was built via the ADR-026
-workflow (Opus specs+reviews, Sonnet implements, gates + real-app drive before commit).
+Branch `pi` = `pre-release` + 23 commits (the last **15 are local, not yet pushed** to origin/pi —
+the audit-fix + M5a/M5b + M6 + fix work). Each was built via the ADR-026 workflow (Opus
+specs+reviews, Sonnet implements, gates + real-app drive before commit).
 
 | Commit | Milestone | Delivers |
 |---|---|---|
@@ -52,10 +53,11 @@ Full parity with opencode: chat/tools/sessions/usage, interactive approvals hono
 `~/.claude` permission rules** as Claude/opencode, auth, shared skills, hosted mermaid/mockup,
 bidirectional cross-engine dispatch.
 
-Tests at branch tip: **324 files / 5539 passing at `test:ci` scope** (the default `bun run test`
+Tests at branch tip: **330 files / 5722 passing at `test:ci` scope** (the default `bun run test`
 skips the slow 2-file/53-test `git` project) + a gated `PI_INTEGRATION_TESTS` real-binary suite
-(4 files, 9 tests — all green against the hardened bridge). Durable record: **ADR-035**
-(`docs/adr/adr-035_pi-engine-backend.md`).
+(5 files incl. pi-subagent — all green against the hardened bridge). Durable records: **ADR-035**
+(`docs/adr/adr-035_pi-engine-backend.md`, pi engine) + **ADR-036**
+(`docs/adr/adr-036_unified-auth-vault.md`, auth vault).
 
 ## 3. What's NOT built — the backlog (this is the point of the handoff)
 
@@ -95,12 +97,14 @@ them = inventing a feature pi doesn't have.
   ("Probed for M5a").
 
 ### Bucket C — limited by pi's design (workaround or pi-upstream)
-- **`auth.canDriveLogin`** — pi's OAuth `/login` (ChatGPT/Claude Pro/Copilot subscriptions) is
-  **TUI-interactive only**; no headless login endpoint to drive (unlike Claude's OAuth over cli.js
-  control requests, ADR-014). M3 ships a "run `/login` in a terminal" hint + copyable binary path;
-  **API keys work fully in-app today.** Workaround: shell pi's `/login` into a **PTY inside the
-  app** (we already have node-pty terminals — see `pty-manager.ts`) so the user never leaves
-  ClaudeUI. Medium value, moderate effort. Only the one real friction point for a subscription user.
+- **`auth.canDriveLogin`** — ✅ SHIPPED for `openai-codex` (M6, ADR-036): rather than driving pi's
+  TUI `/login`, ClaudeUI runs the Codex OAuth flow itself in a ClaudeUI-owned **auth vault** and
+  feeds BOTH pi's and opencode's native stores from one login (sole proactive refresher + fs-watch
+  resync; Claude Code excluded). `canDriveLogin` is now true; Settings › pi › Providers has a real
+  "Connect ChatGPT" button (verified live: connected state renders off the vault). v1 is
+  **openai-codex only** — pi's other subscription vendors still show the terminal `/login` hint, and
+  the live browser-consent click is the one manually-verified step. Anthropic-subscription is the
+  next vault provider. The old PTY-login workaround idea is obsolete.
 - **`subagents`** — ✅ SHIPPED (M5b, `8f5a38a`): in-pi extension route (user decision — faithful to
   pi's example, agent defs in pi-native `~/.pi/agent/agents/*.md`). See ADR-035 + the M5b probe
   notes in `docs/protocol-pi/README.md`. Users author agent defs themselves; zero defs → the tool
@@ -108,19 +112,25 @@ them = inventing a feature pi doesn't have.
   chain/workflow mode, threading the approval bridge into children.
 
 **My recommendation for next work:** `sideQuestion` (near-free), then `fork` (exposes pi's best
-feature), then the PTY-login workaround. Everything in Bucket A: leave alone.
+feature), then Anthropic-subscription in the auth vault. Everything in Bucket A: leave alone.
 
-**Known residuals (accepted 2026-07-20, audit-fix milestone):**
-- Bridge-file TOCTOU: content-verify closes the preplant hole, but on POSIX an attacker who owns a
-  pre-created `claudeui-pi-bridge/<ver>/` dir could still race the write→spawn window. Stronger fix
-  if it ever matters: move the file under `app.getPath('userData')`.
-- pi's rule evaluator still honors only bare-tool + Bash exact/prefix rules (path-glob /
-  `additionalDirectories` / `defaultMode` inert — see §4).
-- pi source Esc-abort does not propagate into an in-flight dispatch (documented v1 limitation;
-  TaskCard Stop works).
-- A dispatch target's errored-turn spend is recovered from the mapper's running total — pi's error
-  events themselves carry no cost snapshot, so a turn that dies before its first cost-bearing
-  `message_end` genuinely spent ~nothing and records none.
+**Backlog now DONE (2026-07-21 autonomous run — all gate-green, one commit each):** path-glob
+permission rules (`5e01935`), M6 unified auth vault (`d079489`/`2925eab`/`0f52f2c`, ADR-036), rich
+edit diffs (`f3e08c8`), effort xhigh/max from thinkingLevelMap (`9a40f12`), and the three audit
+residuals (`a9c4c52`). So these earlier "known residuals" are now CLOSED:
+- ~~Bridge-file TOCTOU~~ → the `-e` files moved from `os.tmpdir()` to per-user `~/.claude/ui/pi-ext/`
+  (a9c4c52); the world-writable preplant window is gone.
+- ~~rule evaluator subset~~ → path-glob rules now evaluated via a faithful port of opencode's
+  Wildcard matcher (5e01935); `additionalDirectories`/`defaultMode` remain deliberately inert
+  (opencode leaves them inert too — see the ADR-022 rationale in `decide()`'s doc comment).
+- ~~Esc-abort not propagating into dispatch~~ → `PiSession.interrupt()` now stopDispatches in-flight
+  children (a9c4c52).
+- ~~errored-turn spend~~ → err/timeout dispatch turns reconcile via a bounded `get_session_stats`
+  read (a9c4c52); a turn dying before ANY cost event still genuinely spent ~nothing.
+
+**Residual still open:** the tmp preplant fix removed the world-writable window, but `~/.claude/ui`
+is trusted per-user space (same trust level as the rest of ClaudeUI's config). No further hardening
+planned.
 
 ## 4. Load-bearing facts a new session MUST know
 

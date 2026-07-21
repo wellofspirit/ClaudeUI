@@ -12,10 +12,11 @@
  *                              <--{behavior:'allow'|'deny', ...}--
  *
  * This string is written verbatim to
- * `<os.tmpdir()>/claudeui-pi-bridge/<PI_BRIDGE_VERSION>/claudeui-bridge.ts`
+ * `~/.claude/ui/pi-ext/claudeui-pi-bridge/<PI_BRIDGE_VERSION>/claudeui-bridge.ts`
  * by `writeBridgeExtension()` (PiBridgeHost.ts) and loaded via
- * `pi --mode rpc -e <path>`. Never written under `~/.pi/**` — that's user
- * space.
+ * `pi --mode rpc -e <path>`. The per-user `~/.claude/ui` root (not the
+ * world-writable `os.tmpdir()`) closes a POSIX `/tmp` preplant vector; never
+ * written under `~/.pi/**` — that's user space.
  *
  * CONSTRAINTS (do not violate when editing this string):
  *  - NO `import` statements. This file is compiled by pi's OWN jiti loader in
