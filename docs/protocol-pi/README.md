@@ -160,6 +160,25 @@ Probed for M5b (2026-07-20, same binary):
   catalog DOES expose per-model higher-tier support (future: lift piModelCapabilities' conservative
   low/medium/high cap by reading this).
 
+Probed for M5c fork/sideQuestion (2026-07-21, same binary):
+
+- **`fork {entryId}` ALONE creates a new session file and switches the client to it, leaving the
+  resumed SOURCE byte-unchanged** (sha256-verified) — the assumed clone-then-fork-on-the-clone
+  two-step is unnecessary. `entryId` must be a USER message on the active branch (`get_fork_messages`
+  lists them); fork drops that entry + everything after it. Entry ids are preserved across a
+  resume, so a source-derived entryId works directly.
+- **`clone` also creates a new session file + switches the client** (source untouched) but does NOT
+  truncate — it's the only primitive for the "fork the LATEST message" case (no later user entry to
+  fork at).
+- Merely RESUMING a session that has never recorded a `thinking_level_change` entry makes pi
+  auto-append one at load (before any command) — harmless for ClaudeUI-created sessions (which
+  already have one, so re-resume is a no-op write; confirmed via hash).
+- **`--no-tools` / `-nt` is accepted in `--mode rpc`** and disables bash/edit/write entirely — the
+  enforced guard for the sideQuestion observer (a soft "don't act" prompt is not enough).
+- pi has NO in-session non-persisting "ask" RPC (prompt/steer/followUp all persist to the active
+  branch) and no equivalent of Claude's `side_question` control request — hence sideQuestion's
+  transcript-fed ephemeral rather than an in-session query.
+
 ## Behavior gotchas
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next

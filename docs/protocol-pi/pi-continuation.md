@@ -2,7 +2,7 @@
 
 **Purpose:** a self-contained handoff so a fresh session can continue the pi engine work with no
 prior context. Read this, then the pointers at the bottom. Status as of branch `pi` @ commit
-`a9c4c52` (2026-07-21).
+`79403f1` (2026-07-21).
 
 ---
 
@@ -29,9 +29,8 @@ Code home: `src/main/pi/`. Auth: `src/main/auth/PiAuthProvider.ts`. Sidebar/hist
 
 ## 2. Branch state — what's SHIPPED (all gate-green + real-app verified)
 
-Branch `pi` = `pre-release` + 23 commits (the last **15 are local, not yet pushed** to origin/pi —
-the audit-fix + M5a/M5b + M6 + fix work). Each was built via the ADR-026 workflow (Opus
-specs+reviews, Sonnet implements, gates + real-app drive before commit).
+Branch `pi` = `pre-release` + 27 commits, pushed to `origin/pi`. Each was built via the ADR-026
+workflow (Opus specs+reviews, Sonnet implements, gates + real-app drive before commit).
 
 | Commit | Milestone | Delivers |
 |---|---|---|
@@ -48,12 +47,14 @@ specs+reviews, Sonnet implements, gates + real-app drive before commit).
 | `8596223` | audit fixes | InputBox fallback ModelInfo carries explicit flags (empty-catalog pi session no longer leaks Claude pickers), pi default-model fallback branch; direct capability/store/settings test suites |
 | `5615437` | M5a | plan mode: bridge-extension `setActiveTools` switching + `exit_plan` (hidden outside plan mode), `'plan'` autonomy with per-segment read-only bash allowlist, ExitPlanModeCard/Shift+Tab wired for pi; `plan:true` |
 | `8f5a38a` | M5b | in-pi subagents: second `-e` extension porting pi's subagent example (user-level agent .md defs, child pi processes, delta streaming via onUpdate details → session:subagent-*/TaskCard, per-agent usage rows); fixed the example's upstream Windows bunfs-path bug; `subagents:true` |
+| `85a2b96` | M5c | sideQuestion (`/btw`): transcript-fed ephemeral `pi --mode rpc --no-session --no-tools` observer (context-aware, tool-disabled); `sideQuestion:true` |
+| `9515d00` | M5c | fork/forkFromMessage: engine-aware `resolveForkAnchor` (position-based for pi) + `fork`/`clone` RPC choreography (source byte-unchanged, gated-verified); `fork`/`forkFromMessage:true` |
 
 Full parity with opencode: chat/tools/sessions/usage, interactive approvals honoring the **same
 `~/.claude` permission rules** as Claude/opencode, auth, shared skills, hosted mermaid/mockup,
 bidirectional cross-engine dispatch.
 
-Tests at branch tip: **330 files / 5722 passing at `test:ci` scope** (the default `bun run test`
+Tests at branch tip: **330 files / 5754 passing at `test:ci` scope** (the default `bun run test`
 skips the slow 2-file/53-test `git` project) + a gated `PI_INTEGRATION_TESTS` real-binary suite
 (5 files incl. pi-subagent — all green against the hardened bridge). Durable records: **ADR-035**
 (`docs/adr/adr-035_pi-engine-backend.md`, pi engine) + **ADR-036**
@@ -61,9 +62,10 @@ skips the slow 2-file/53-test `git` project) + a gated `PI_INTEGRATION_TESTS` re
 
 ## 3. What's NOT built — the backlog (this is the point of the handoff)
 
-Eleven capability flags are `false` in `PI_ENGINE_CAPABILITIES` (`src/shared/model-capabilities.ts`)
-— nine top-level plus `auth.canDriveLogin`/`auth.multiAccount`. Three buckets — the distinction
-matters:
+As of the M5c/M6 work only **five** capability flags remain `false` in `PI_ENGINE_CAPABILITIES`
+(`src/shared/model-capabilities.ts`) — `voice`, `backgroundTasks`, `sandbox`, `proxy`,
+`auth.multiAccount` — and all five are Bucket A (N/A to pi). Everything in Buckets B and C has now
+shipped. The buckets below are kept for the rationale/history:
 
 ### Bucket A — N/A to pi (correctly false forever; don't "fix")
 None of these leak into the pi Settings scope (sandbox/proxy live only in the claude scope's section
@@ -78,20 +80,19 @@ them = inventing a feature pi doesn't have.
 - **`auth.multiAccount`** — pi's `auth.json` holds one credential *per provider* (many providers OK,
   but not two ChatGPT accounts to swap). Same as opencode.
 
-### Bucket B — real pi capabilities, just unwired (the valuable follow-ups)
-- **`fork` / `forkFromMessage`** ⭐ **highest value.** pi has a *native branching session tree*
-  (`fork {entryId}`, `clone`, `get_fork_messages`, `get_tree` in the RPC — see
-  `vendor/pi-cli/docs/rpc.md` + `session-format.md`). This is a place pi is *better* than what we
-  expose. Unwired only because ClaudeUI's fork UX (ADR-010) is built on Claude's JSONL
-  `--resume-session-at`/`--fork-session` flags. **First step:** teach the fork-anchor resolver about
-  pi's entry-id tree; `PiSession` already parses the tree in `pi-session-list.ts`
-  (`activeBranchEntries`). Wire `EngineSpawnOptions.resumeSessionAt`/`forkSession` in `PiSession`
-  to pi's `fork`/`--session` + a get_fork_messages-backed anchor list. Moderate effort. Flip both
-  flags ONLY when the full path works (ADR-030).
-- **`sideQuestion`** (the `/btw` one-off question) — **cheapest.** Spawn an ephemeral
-  `pi --mode rpc --no-session`, ask, dispose — the exact pattern `model-discovery.ts` and the
-  dispatch target already use. Implement `PiSession.askSideQuestion()` (BaseSession returns null by
-  default) + flip `sideQuestion`. Low effort.
+### Bucket B — real pi capabilities (BOTH now SHIPPED)
+- **`fork` / `forkFromMessage`** — ✅ SHIPPED (M5c, `9515d00`): engine-aware, UX-identical to Claude
+  (assistant-bubble Fork button, ADR-010). Mechanism: `resolveForkAnchor` dispatches by engine; pi
+  resolves by POSITION (no persisted renderer id) → the entry id of the next user message to drop,
+  or a clone-latest sentinel; `PiSession` runs `fork {entryId}` alone (or `clone` for the sentinel)
+  before set_model. Probe-verified + gated-integration-verified that fork/clone leave the SOURCE
+  file byte-unchanged. See ADR-035 + the M5c probe notes in README.md. v1 limit: position anchor is
+  exact for the reopen-then-fork flow, imprecise-but-never-corrupt for a heavily-live session.
+- **`sideQuestion`** (`/btw`) — ✅ SHIPPED (M5c, `85a2b96`): the doc's original "sessionless ephemeral"
+  framing was WRONG (user correction) — `/btw` is a context-aware question about the RUNNING session.
+  `PiSession.askSideQuestion` feeds the session's transcript into an isolated
+  `pi --mode rpc --no-session --no-tools` observer (`--no-tools` = enforced no-mutation) and renders
+  the answer in the BtwCard. See ADR-035.
 - **`plan`** — ✅ SHIPPED (M5a, `5615437`): extension-enforced read-only autonomy patterned on
   pi's example extension; see ADR-035 and the M5a probe notes in `docs/protocol-pi/README.md`
   ("Probed for M5a").
@@ -111,8 +112,13 @@ them = inventing a feature pi doesn't have.
   simply doesn't register. v2 candidates: project-local `.pi/agents` (needs a confirm-UI story),
   chain/workflow mode, threading the approval bridge into children.
 
-**My recommendation for next work:** `sideQuestion` (near-free), then `fork` (exposes pi's best
-feature), then Anthropic-subscription in the auth vault. Everything in Bucket A: leave alone.
+**Backlog essentially exhausted.** Every Bucket B capability is now shipped (plan, subagents,
+sideQuestion, fork), M6 auth vault is live, and all audit residuals + the parity fixes (#1 path-glob,
+#2 edit diffs, effort tiers) are done. Remaining candidates are all optional/limited: Anthropic-
+subscription in the vault (constrained — Anthropic tokens can't vend to other engines, so it'd feed
+nothing onward; see [[project-unified-auth-vault]]), the fork position-anchor precision upgrade for
+heavily-live sessions, subagent v2 (project-local agents behind a confirm-UI, chain mode), and the
+live-OAuth-consent manual verification for M6. Everything in Bucket A: leave alone.
 
 **Backlog now DONE (2026-07-21 autonomous run — all gate-green, one commit each):** path-glob
 permission rules (`5e01935`), M6 unified auth vault (`d079489`/`2925eab`/`0f52f2c`, ADR-036), rich

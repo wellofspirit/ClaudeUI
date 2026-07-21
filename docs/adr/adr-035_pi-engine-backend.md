@@ -110,12 +110,35 @@ Two facts drove the design, both **probed against the real binary before any pro
   itself is gated as kind `'task'` (ask/allow/deny by mode) — children then run their agent-def
   toolset ungated, the same two-stage trust posture as the M4c dispatch target, safe because
   agent defs are user-authored files the model cannot write through this tool.
+- **sideQuestion (`/btw`, M5c):** a question ABOUT the running session ("why are you doing X"),
+  answered from its context — NOT a blank session (a user correction to the original "sessionless"
+  framing). pi has no in-session non-persisting ask RPC (prompt/steer/followUp all persist → would
+  pollute the live branch) and no equivalent of Claude's `side_question` control request, so
+  `PiSession.askSideQuestion` drives a **transcript-fed ephemeral**: it builds a bounded context
+  from the session's own retained `messageHistory` (last ~20 msgs, 8k-char cap) and spawns an
+  isolated `pi --mode rpc --no-session --no-tools` observer — `--no-tools` disables bash/edit/write
+  at the process level so it can't mutate the live cwd even if it ignores the observe-only framing
+  (enforcement, not soft instruction). The answer renders in the BtwCard, never in the transcript.
+  Fidelity limit: sees the visible transcript, not pi's in-flight internal state.
+- **fork / forkFromMessage (M5c):** pi has a native branching tree, so the Fork button (assistant
+  bubbles, ADR-010 UX) is wired engine-aware and UX-identical to Claude — but the mechanism differs.
+  pi has no stable id ClaudeUI can match a renderer message against (a live assistant message id is
+  a synthesized uuid, never persisted), so `resolveForkAnchor` is engine-dispatched and pi resolves
+  by POSITION (the store threads the forked message's index → the pi entry id of the next user
+  message to drop, or a clone-latest sentinel). `PiSession` honors `resumeSessionAt`/`forkSession`
+  by running `fork {entryId}` alone, or `clone` alone for the latest-turn sentinel, right after the
+  initial `get_state` and BEFORE any `set_model` — probe-verified that `fork`/`clone` each create a
+  new session file, switch the client to it, and leave the resumed SOURCE **byte-unchanged** (gated
+  integration test asserts source sha256 identity for both branches); a failed fork disposes and
+  rethrows before configuring, so it never mutates the source. Position-based anchoring is exact for
+  the common reopen-then-fork flow; a heavily-live session may fork at a slightly imprecise point,
+  never corrupt.
 - **Capability honesty (ADR-030):** flags flipped only as each end-to-end path shipped and was
   live-verified: M1 `queue`; M2 `steer`/`interactiveApprovals`/`autonomyModes`/`slashCommands`/
   `skills`; M4 `hostedMcp`/`crossEngineDispatch` (the latter ANDed per-session with
   `crossEngineDispatchAvailable('pi')`); M5a `plan` (+ `'plan'` in `autonomyModes`); M5b
-  `subagents`. `fork`, `backgroundTasks`, `voice`, `sandbox`, `proxy`, `sideQuestion`,
-  `multiAccount`, `canDriveLogin` remain false (unwired or N/A).
+  `subagents`; M5c `sideQuestion` + `fork`/`forkFromMessage`; M6 `auth.canDriveLogin` (ADR-036).
+  `backgroundTasks`, `voice`, `sandbox`, `proxy`, `auth.multiAccount` remain false (N/A to pi).
 
 ## Consequences
 
