@@ -16,8 +16,12 @@ only a "run /login in a terminal" hint). Two costs: redundant logins, and a live
 auto-refreshes in place and the OAuth **refresh token rotates**, so one engine refreshing silently
 invalidates the other's stored copy (this nearly stranded opencode during ADR-035 M3 testing).
 
-Claude Code is explicitly **excluded**: cli.js owns its own OAuth end to end (ADR-014) and already
-works in-app; we do not feed it.
+For the **Codex** credential specifically, Claude Code is **not** a consumer (it doesn't use OpenAI),
+and cli.js owns its own Anthropic OAuth end to end (ADR-014) — so v1 feeds only pi + opencode. This
+is NOT a blanket "never touch Claude Code" rule, though: the design generalizes to a **per-provider
+vend allowlist** (see Consequences) where each credential is fed only to the harness(es) permitted to
+use it — a future **Anthropic** provider would vend to **Claude Code only** (Anthropic ToS: their
+subscription tokens run only on their own first-party harness), never to pi/opencode.
 
 ## Decision
 
@@ -70,7 +74,14 @@ port is the pragmatic choice. This is the one place ClaudeUI implements OAuth it
   delegation on `PiAuthProvider`; `OpencodeAuthProvider` gains a direct-file feed/read for its store.
   `credentialSync.start()/stop()` run non-blocking at boot / before-quit.
 - **v1 scope: `openai-codex` only.** The vault key + flow are provider-specific; other providers
-  (Anthropic subscription, etc.) are a follow-up.
+  are a follow-up. The intended generalization is a **per-provider vend allowlist** — the vault is the
+  single central credential manager, and each provider declares which harness stores it feeds:
+  `openai-codex → {pi, opencode}`; a future `anthropic → {claude-code}` ONLY (Anthropic ToS bars
+  vending subscription tokens to non-Anthropic harnesses). **Open question for the Anthropic case
+  (tension with ADR-014):** cli.js currently self-manages its Anthropic OAuth; "vend to Claude Code"
+  means the vault writes/refreshes wherever cli.js reads its credential, replacing or coexisting with
+  that self-management — verify how cli.js consumes an externally-provided OAuth credential before
+  building it.
 - A **live opencode server** observes a fed/rotated credential only on its next start (opencode caches
   auth in-process); the refresh-before-expiry timer keeps the on-disk copy valid so a fresh start
   always works.

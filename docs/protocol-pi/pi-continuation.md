@@ -114,11 +114,14 @@ them = inventing a feature pi doesn't have.
 
 **Backlog essentially exhausted.** Every Bucket B capability is now shipped (plan, subagents,
 sideQuestion, fork), M6 auth vault is live, and all audit residuals + the parity fixes (#1 path-glob,
-#2 edit diffs, effort tiers) are done. Remaining candidates are all optional/limited: Anthropic-
-subscription in the vault (constrained — Anthropic tokens can't vend to other engines, so it'd feed
-nothing onward; see [[project-unified-auth-vault]]), the fork position-anchor precision upgrade for
-heavily-live sessions, subagent v2 (project-local agents behind a confirm-UI, chain mode), and the
-live-OAuth-consent manual verification for M6. Everything in Bucket A: leave alone.
+#2 edit diffs, effort tiers) are done. Remaining candidates: Anthropic-subscription as the vault's
+next provider — the vault is a central credential manager with a PER-PROVIDER vend allowlist, so
+`anthropic` vends to **Claude Code ONLY** (never pi/opencode — Anthropic ToS), which means the vault
+would manage cli.js's Anthropic credential too (tension with ADR-014's self-management — verify how
+cli.js consumes an external OAuth credential first; see docs/adr/adr-036 + [[project-unified-auth-vault]]);
+the fork position-anchor precision upgrade for heavily-live sessions; subagent v2 (project-local
+agents behind a confirm-UI, chain mode); and the live-OAuth-consent manual verification for M6.
+Everything in Bucket A: leave alone.
 
 **Backlog now DONE (2026-07-21 autonomous run — all gate-green, one commit each):** path-glob
 permission rules (`5e01935`), M6 unified auth vault (`d079489`/`2925eab`/`0f52f2c`, ADR-036), rich
