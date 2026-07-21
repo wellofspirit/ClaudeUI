@@ -533,6 +533,11 @@ describe('engine capability honesty (ADR-030)', () => {
     expect(CLAUDE_ENGINE_CAPABILITIES.forkFromMessage).toBe(true)
   })
 
+  it('pi fork/forkFromMessage are true (M5c: clone/fork RPCs wired end-to-end via PiSession.doStart)', () => {
+    expect(PI_ENGINE_CAPABILITIES.fork).toBe(true)
+    expect(PI_ENGINE_CAPABILITIES.forkFromMessage).toBe(true)
+  })
+
   it('degraded path: no-toolCalling model → canUseMcp/canUseSubagents/isAgentCapable false, engine gates unaffected', () => {
     const noToolModel = {
       reasoning: {},

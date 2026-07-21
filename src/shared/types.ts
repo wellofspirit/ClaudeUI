@@ -709,9 +709,19 @@ interface SessionAPI {
     engineId?: EngineId
   ): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
-  /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given
-   *  an assistant message id. Returns { anchorUuid: null, reason } on failure. */
-  resolveForkAnchor(sessionId: string, cwd: string, messageId: string): Promise<ForkAnchorResult>
+  /** Resolve the fork ("branch off") anchor for an engine session. Claude:
+   *  `messageId` (the renderer's ChatMessage.id) resolves to a JSONL line
+   *  uuid; `messageIndex` is unused. pi: no stable id exists, so `messageIndex`
+   *  (the message's position in the store's `messages` array) resolves to a
+   *  pi entryId (or the clone-latest sentinel) instead; `messageId` is unused.
+   *  Returns { anchorUuid: null, reason } on failure. */
+  resolveForkAnchor(
+    sessionId: string,
+    cwd: string,
+    messageId: string,
+    engineId: EngineId,
+    messageIndex: number
+  ): Promise<ForkAnchorResult>
   sendPrompt(
     routingId: string,
     prompt: string,

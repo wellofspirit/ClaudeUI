@@ -1177,6 +1177,213 @@ describe('PiSession resume', () => {
   })
 })
 
+describe('PiSession fork (M5c)', () => {
+  /** A minimal, always-valid get_state payload — callers override `sessionId`/`model` per case. */
+  function stateResponse(sessionId: string): { type: 'response'; command: 'get_state'; success: true; data: unknown } {
+    return {
+      type: 'response',
+      command: 'get_state',
+      success: true,
+      data: {
+        model: { id: 'unknown', name: 'unknown', api: 'unknown', provider: 'unknown', baseUrl: '', reasoning: false, input: [], contextWindow: 0, maxTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        thinkingLevel: 'medium',
+        isStreaming: false,
+        sessionId
+      }
+    }
+  }
+
+  it('forkSession with a real entryId: `fork {entryId}` alone (NO preceding clone) THEN set_model, and adopts the post-fork sessionId — verified against the real binary, clone-then-fork is unnecessary for this branch', async () => {
+    const calls: string[] = []
+    let getStateCount = 0
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      calls.push(cmd.type)
+      if (cmd.type === 'fork') {
+        return Promise.resolve({ type: 'response', command: 'fork', success: true, data: { text: 'second question', cancelled: false } })
+      }
+      if (cmd.type === 'get_state') {
+        getStateCount++
+        // 1st get_state = the resumed SOURCE; 2nd (post-fork) = the NEW file.
+        return Promise.resolve(stateResponse(getStateCount === 1 ? 'source-sess-id' : 'forked-sess-id'))
+      }
+      return defaultRequestImpl(cmd)
+    })
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-1', win as never, '/cwd', {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'entry-u2',
+      forkSession: true,
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+    await session.run('hi')
+
+    expect(calls).not.toContain('clone')
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'fork', entryId: 'entry-u2' })
+    const forkIdx = calls.indexOf('fork')
+    const setModelIdx = calls.indexOf('set_model')
+    expect(forkIdx).toBeGreaterThanOrEqual(0)
+    // set_model happens AFTER fork — source-safety: configuring the session
+    // never mutates the resumed source (fork has already switched to a NEW file by then).
+    expect(setModelIdx).toBeGreaterThan(forkIdx)
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_model', provider: 'anthropic', modelId: 'claude-sonnet-4-6' })
+    // Adopts the POST-fork sessionId, not the source's.
+    expect(session.getSessionId()).toBe('forked-sess-id')
+  })
+
+  it('the clone-latest sentinel: `clone` only, no `fork` call', async () => {
+    const calls: string[] = []
+    let getStateCount = 0
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      calls.push(cmd.type)
+      if (cmd.type === 'clone') {
+        return Promise.resolve({ type: 'response', command: 'clone', success: true, data: { cancelled: false } })
+      }
+      if (cmd.type === 'get_state') {
+        getStateCount++
+        return Promise.resolve(stateResponse(getStateCount === 1 ? 'source-sess-id' : 'cloned-sess-id'))
+      }
+      return defaultRequestImpl(cmd)
+    })
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-2', win as never, '/cwd', {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'pi:clone-latest',
+      forkSession: true
+    })
+    await session.run('hi')
+
+    expect(calls).toContain('clone')
+    expect(calls).not.toContain('fork')
+    expect(session.getSessionId()).toBe('cloned-sess-id')
+  })
+
+  it('a clone failure (success:false) surfaces session:error and does NOT proceed to set_model on the source', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'clone') {
+        return Promise.resolve({ type: 'response', command: 'clone', success: false, error: 'disk full' })
+      }
+      return defaultRequestImpl(cmd)
+    })
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-3', win as never, '/cwd', {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'pi:clone-latest',
+      forkSession: true,
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:error')
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_model' }))
+    // The orphaned client/bridgeHost from the failed spawn are disposed, same
+    // cleanup contract as any other doStart() failure.
+    expect(mockDispose).toHaveBeenCalled()
+    expect(mockBridgeHostDispose).toHaveBeenCalled()
+  })
+
+  it('a clone cancelled by an extension (success:true, data.cancelled:true) is treated as a failure, same as success:false', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'clone') {
+        return Promise.resolve({ type: 'response', command: 'clone', success: true, data: { cancelled: true } })
+      }
+      return defaultRequestImpl(cmd)
+    })
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-4', win as never, '/cwd', {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'pi:clone-latest',
+      forkSession: true,
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:error')
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_model' }))
+  })
+
+  it('a fork failure (success:false) surfaces session:error and does NOT proceed to set_model', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'fork') {
+        return Promise.resolve({ type: 'response', command: 'fork', success: false, error: 'entry not found' })
+      }
+      return defaultRequestImpl(cmd)
+    })
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-5', win as never, '/cwd', {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'entry-u2',
+      forkSession: true,
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:error')
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_model' }))
+  })
+
+  it('a non-fork resume (forkSession false) never sends clone/fork — regression guard', async () => {
+    mockLoadPiSessionHistory.mockResolvedValue([])
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_resume-plain.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-6', win as never, '/cwd', {
+      resumeSessionId: 'resume-plain',
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+    await session.run('hi')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'clone' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'fork' }))
+  })
+
+  it('forkSession is ignored without a resumeSessionAt (mirrors ClaudeSession\'s identical guard) — no clone/fork sent', async () => {
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_resume-plain2.jsonl')
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-7', win as never, '/cwd', {
+      resumeSessionId: 'resume-plain2',
+      forkSession: true // no resumeSessionAt — should be a no-op fork-wise
+    })
+    await session.run('hi')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'clone' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'fork' }))
+  })
+
+  it('a fork (entryId branch) skips replayStoredHistory — the renderer already has the truncated view from the store\'s optimistic seed', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'fork') {
+        return Promise.resolve({ type: 'response', command: 'fork', success: true, data: { text: 'q', cancelled: false } })
+      }
+      return defaultRequestImpl(cmd)
+    })
+    mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
+    mockLoadPiSessionHistory.mockResolvedValue([
+      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+    ])
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-fork-8', win as never, '/cwd', {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'entry-u2',
+      forkSession: true
+    })
+    await session.run('hi')
+
+    expect(mockLoadPiSessionHistory).not.toHaveBeenCalled()
+  })
+})
+
 describe('PiSession — busy path uses streamingBehavior steer (M2b)', () => {
   it('a second run() while the first is still in flight sends streamingBehavior: steer', async () => {
     const win = new MockWindow()

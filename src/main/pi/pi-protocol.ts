@@ -104,6 +104,28 @@ export interface PiGetLastAssistantTextData {
 }
 
 // ---------------------------------------------------------------------------
+// Fork / clone (rpc.md "fork" / "clone" — M5c). `{type:'clone'}` and
+// `{type:'fork', entryId}` commands themselves need no dedicated interface —
+// PiRpcCommand's index signature already covers the extra `entryId` field;
+// these are the RESPONSE `data` shapes, verified against the real binary (see
+// docs/protocol-pi/fork-choreography probe notes / PiSession.doStart's fork
+// block doc comment): both can report `cancelled: true` when a
+// `session_before_fork` extension handler vetoes the operation (ClaudeUI
+// registers no such handler itself, so this is always false in practice, but
+// PiSession still checks it defensively).
+// ---------------------------------------------------------------------------
+
+export interface PiCloneData {
+  cancelled: boolean
+}
+
+export interface PiForkData {
+  /** The text of the user message being forked from. */
+  text: string
+  cancelled: boolean
+}
+
+// ---------------------------------------------------------------------------
 // get_commands (rpc.md "get_commands" — M2b)
 // ---------------------------------------------------------------------------
 

@@ -749,12 +749,20 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     manager.rekey(oldId, newId)
   })
 
-  // Resolve the balanced JSONL line uuid to fork ("branch off") from, given an
-  // assistant ChatMessage id. Used by the renderer before creating the branch.
+  // Resolve the fork ("branch off") anchor, engine-dispatched — Claude by
+  // messageId (JSONL line uuid), pi by messageIndex (position, no stable id).
+  // Used by the renderer before creating the branch.
   ipcMain.handle(
     'session:resolve-fork-anchor',
-    async (_event, sessionId: string, cwd: string, messageId: string) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId)
+    async (
+      _event,
+      sessionId: string,
+      cwd: string,
+      messageId: string,
+      engineId: EngineId,
+      messageIndex: number
+    ) => {
+      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
     }
   )
 

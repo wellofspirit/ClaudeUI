@@ -16,6 +16,7 @@ import type {
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
+import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 
@@ -830,12 +831,24 @@ function extractOutputFile(text: string): string {
  * is the `betaMessage.id` (`msg_xxx`); we also accept a raw line uuid as a
  * fallback. The matching itself is against the JSONL line `uuid`, never the
  * `msg_xxx` id (verified against cli.js's truncation: `j.uuid === resumeSessionAt`).
+ *
+ * Engine-dispatched (ADR-030/033-style split): pi has no stable id to match
+ * `messageId` against at all (a live assistant `ChatMessage.id` is a
+ * synthesized uuid, never persisted — see `findPiForkAnchorEntryId`'s doc
+ * comment in fork-anchor.ts), so its resolution is POSITION-based via
+ * `messageIndex` instead, delegated wholesale to `resolvePiForkAnchor`
+ * (pi-session-list.ts). The Claude branch below is UNCHANGED from before this
+ * dispatch existed — `messageIndex` is simply unused on that path.
  */
 export async function resolveForkAnchor(
   sessionId: string,
   cwd: string,
-  messageId: string
+  messageId: string,
+  engineId: EngineId,
+  messageIndex: number
 ): Promise<ForkAnchorResult> {
+  if (engineId === 'pi') return resolvePiForkAnchor(sessionId, messageIndex)
+
   const projectKey = projectKeyForCwd(cwd)
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
   if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }

@@ -178,9 +178,13 @@ export interface EngineSpawnOptions {
   sandboxConfig?: SandboxSettings
   /** Thinking mode ('adaptive' | 'enabled' | 'disabled'). Claude-only. */
   thinkingMode?: string
-  /** Transcript line uuid to resume at (branch-off anchor, ADR-010). Claude-only. */
+  /** Fork ("branch off") anchor, in the engine's own convention: a JSONL line
+   *  uuid for Claude (ADR-010), or a pi entryId / the clone-latest sentinel
+   *  for pi (M5c) — see PiSession.doStart's fork block. opencode fork is
+   *  unwired (ADR-030). */
   resumeSessionAt?: string
-  /** Fork at resumeSessionAt into a new session (ADR-010). Claude-only — opencode fork is unwired (ADR-030). */
+  /** Fork at resumeSessionAt into a new session (ADR-010 Claude; M5c pi via
+   *  clone/fork RPCs). opencode fork is unwired (ADR-030). */
   forkSession?: boolean
 }
 

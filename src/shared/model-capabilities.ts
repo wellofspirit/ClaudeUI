@@ -751,9 +751,29 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     askSideQuestion's own doc comment for the full mechanism and the
  *     documented fidelity limitation (visible transcript only, never pi's
  *     in-flight internal state).
- *   - fork, forkFromMessage, backgroundTasks, voice →
- *     unwired; each becomes a dedicated follow-up once its RPC surface
- *     (fork/clone, …) is wired the same way OpencodeSession's were.
+ *   - fork/forkFromMessage → SHIPPED in M5c: pi's `clone`/`fork` RPCs stand in
+ *     for cli.js's `--resume-session-at`/`--fork-session` flags. `fork` has no
+ *     stable id ClaudeUI can match a renderer message against (a live
+ *     assistant ChatMessage.id is a uuid event-mapper.ts synthesizes, never
+ *     persisted), so `resolveForkAnchor`'s pi branch (session-history.ts,
+ *     delegating to pi-session-list.ts's `resolvePiForkAnchor`) resolves by
+ *     POSITION instead — the store's `idx` into its own `messages` array,
+ *     which is the SAME sequence pi-session-list.ts's `convertPiSessionEntries`
+ *     produces from disk. PiSession.doStart, when `forkSession`, resumes the
+ *     SOURCE then (BEFORE any set_model/effort application, so configuring
+ *     the fork never mutates the source) either `fork {entryId}` (drop that
+ *     user entry + everything after — verified against the real binary: this
+ *     ALONE already creates a new file and leaves the source untouched, no
+ *     preceding `clone` needed) or, when forking the LATEST message (no
+ *     later user entry to drop), `clone` alone (duplicate the active branch
+ *     at its current position). Either way it adopts the resulting NEW
+ *     sessionId before continuing, and skips the stored-history replay (the
+ *     renderer already has the correct truncated view from the store's own
+ *     optimistic seed) — mirrors ClaudeSession's identical "forks excluded"
+ *     cost-seeding posture.
+ *   - backgroundTasks, voice →
+ *     unwired; each becomes a dedicated follow-up once its RPC surface is
+ *     wired the same way OpencodeSession's were.
  *   - subagents → SHIPPED in M5b: a SECOND ClaudeUI-owned extension
  *     (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS) registers a
  *     `subagent` pi.registerTool() that spawns one child `pi --mode json -p`
@@ -784,8 +804,8 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   backgroundTasks: false,
   subagents: true,
   plan: true,
-  fork: false,
-  forkFromMessage: false,
+  fork: true,
+  forkFromMessage: true,
   steer: true,
   queue: true,
   slashCommands: true,

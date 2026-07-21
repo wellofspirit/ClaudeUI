@@ -19,7 +19,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import type { ChatMessage, ContentBlock, SessionInfo } from '../../shared/types'
+import type { ChatMessage, ContentBlock, ForkAnchorResult, SessionInfo } from '../../shared/types'
 import type {
   PiAgentMessage,
   PiImageContent,
@@ -30,6 +30,7 @@ import type {
   PiUserMessage
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
 
 /** `~/.pi/agent` — pi's own data root. */
@@ -312,7 +313,7 @@ function convertPiTextOrImageContent(content: string | Array<PiTextContent | PiI
  * skipped, matching convertStoredMessage's "silently skip unknown/irrelevant
  * types" precedent).
  */
-function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[] {
+export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[] {
   const toolResultsByCallId = new Map<string, PiToolResultMessage>()
   for (const e of entries) {
     if (e.type === 'message' && e.message.role === 'toolResult') {
@@ -359,6 +360,27 @@ export async function loadPiSessionHistory(sessionId: string): Promise<ChatMessa
     )
     return []
   }
+}
+
+/**
+ * Resolve the pi entryId (or clone-latest sentinel) to fork ("branch off")
+ * from, given the fork message's INDEX in the store's `messages` array (the
+ * store computes this — see session-store.ts's `forkFromMessage`). Pure-fs,
+ * no live process needed (mirrors `loadPiSessionHistory`'s read path) —
+ * reuses the EXACT same `activeBranchEntries` + `convertPiSessionEntries`
+ * pipeline so the positional list here is guaranteed to be the same sequence
+ * or the caller's `messages` array (both derived from the one converter).
+ * Best-effort: any disk-read failure returns a null anchorUuid with a reason,
+ * mirroring Claude's `resolveForkAnchor`'s failure contract.
+ */
+export function resolvePiForkAnchor(sessionId: string, messageIndex: number): ForkAnchorResult {
+  const filePath = findPiSessionFile(sessionId)
+  if (!filePath) return { anchorUuid: null, reason: 'transcript-not-found' }
+  const parsed = readPiSessionFile(filePath)
+  if (!parsed) return { anchorUuid: null, reason: 'read-failed' }
+  const messages = convertPiSessionEntries(activeBranchEntries(parsed.entries))
+  const anchorUuid = findPiForkAnchorEntryId(messages, messageIndex)
+  return anchorUuid ? { anchorUuid } : { anchorUuid: null, reason: 'message-not-found' }
 }
 
 /**

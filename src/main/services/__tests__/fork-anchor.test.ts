@@ -2,7 +2,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import { findForkAnchorUuid } from '../fork-anchor'
+import { findForkAnchorUuid, findPiForkAnchorEntryId, PI_FORK_CLONE_LATEST_SENTINEL } from '../fork-anchor'
 
 // Minimal JSONL line builders mirroring the cli.js transcript shape.
 const userLine = (uuid: string, text: string): Record<string, unknown> => ({
@@ -101,5 +101,37 @@ describe('findForkAnchorUuid', () => {
   it('prefers the last line sharing a message id (defensive against partials)', () => {
     const lines = [assistantText('a1', 'msg_1', 'partial'), assistantText('a1b', 'msg_1', 'final')]
     expect(findForkAnchorUuid(lines, 'msg_1')).toBe('a1b')
+  })
+})
+
+describe('findPiForkAnchorEntryId', () => {
+  const u = (id: string) => ({ id, role: 'user' })
+  const a = (id: string) => ({ id, role: 'assistant' })
+  const sys = (id: string) => ({ id, role: 'system' })
+
+  it('forking an earlier assistant returns the FOLLOWING user entry id', () => {
+    const messages = [u('u1'), a('a1'), u('u2'), a('a2')]
+    // Fork at a1 (index 1) — the next user turn (u2) is what gets dropped.
+    expect(findPiForkAnchorEntryId(messages, 1)).toBe('u2')
+  })
+
+  it('forking the LATEST assistant message returns the clone-latest sentinel (nothing to drop)', () => {
+    const messages = [u('u1'), a('a1'), u('u2'), a('a2')]
+    expect(findPiForkAnchorEntryId(messages, 3)).toBe(PI_FORK_CLONE_LATEST_SENTINEL)
+  })
+
+  it('skips a system (compaction) slot between the target and the next user turn', () => {
+    const messages = [u('u1'), a('a1'), sys('c1'), u('u2'), a('a2')]
+    expect(findPiForkAnchorEntryId(messages, 1)).toBe('u2')
+  })
+
+  it('returns null when the index is out of range (message not yet flushed to disk)', () => {
+    const messages = [u('u1'), a('a1')]
+    expect(findPiForkAnchorEntryId(messages, 5)).toBeNull()
+    expect(findPiForkAnchorEntryId(messages, -1)).toBeNull()
+  })
+
+  it('an empty message list always returns null', () => {
+    expect(findPiForkAnchorEntryId([], 0)).toBeNull()
   })
 })

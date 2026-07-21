@@ -127,8 +127,8 @@ export function registerRemoteHandlers(
 
   dispatcher.register(
     'session:resolve-fork-anchor',
-    async (sessionId: string, cwd: string, messageId: string) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId)
+    async (sessionId: string, cwd: string, messageId: string, engineId: EngineId, messageIndex: number) => {
+      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
     }
   )
 

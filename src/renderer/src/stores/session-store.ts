@@ -1143,8 +1143,21 @@ export const useSessionStore = create<SessionState>((set) => ({
     // carry it as the routingId; a still-streaming session exposes it on status.
     const sourceSessionId = src.status.sessionId ?? sourceRoutingId
 
-    // Claude: resolve the JSONL-flushed uuid for the chosen message.
-    const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
+    // The forked message's index in its own array — Claude's resolver ignores
+    // this (it resolves by messageId, the JSONL-flushed uuid); pi's resolver
+    // is POSITION-based instead (no stable id survives a live→disk round
+    // trip — see resolveForkAnchor's/findPiForkAnchorEntryId's doc comments),
+    // so it's computed BEFORE the anchor call (not after, as it used to be)
+    // so it can be threaded through for that engine.
+    const idx = src.messages.findIndex((m) => m.id === messageId)
+
+    const result = await window.api.resolveForkAnchor(
+      sourceSessionId,
+      src.cwd,
+      messageId,
+      src.status.engineId,
+      idx
+    )
     if (!result?.anchorUuid) {
       // The message isn't flushed to the transcript yet (or vanished). Surface
       // it on the source session rather than silently doing nothing.
@@ -1160,8 +1173,8 @@ export const useSessionStore = create<SessionState>((set) => ({
 
     // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
     // to one session never mutate the other). cli.js performs the same slice by
-    // uuid when it materializes the fork, so the displayed history will match.
-    const idx = src.messages.findIndex((m) => m.id === messageId)
+    // uuid when it materializes the fork, so the displayed history will match
+    // (pi's own clone/fork RPCs perform the equivalent truncation on its side).
     const seeded = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
       ...m,
       content: m.content.map((b) => ({ ...b }))

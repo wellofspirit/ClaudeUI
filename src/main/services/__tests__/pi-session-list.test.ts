@@ -24,8 +24,10 @@ import {
   listPiSessionsGlobal,
   loadPiSessionHistory,
   findPiSessionFile,
-  deletePiSession
+  deletePiSession,
+  resolvePiForkAnchor
 } from '../pi-session-list'
+import { PI_FORK_CLONE_LATEST_SENTINEL } from '../fork-anchor'
 
 let testHome: string
 
@@ -272,6 +274,85 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
 
     const messages = await loadPiSessionHistory('sess-corrupt')
     expect(messages.map((m) => m.id)).toEqual(['e1', 'e2'])
+  })
+})
+
+describe('resolvePiForkAnchor', () => {
+  const userEntry = (id: string, parentId: string | null, text: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    message: { role: 'user', content: text, timestamp: 1 }
+  })
+  const assistantEntry = (id: string, parentId: string, text: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      api: 'a',
+      provider: 'p',
+      model: 'm',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: 'stop',
+      timestamp: 2
+    }
+  })
+  const modelChangeEntry = (id: string, parentId: string) => ({
+    type: 'model_change',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    provider: 'anthropic',
+    modelId: 'claude-x'
+  })
+
+  it('forking an earlier assistant returns the id of the following user entry — a model_change entry in between is skipped', () => {
+    writeSessionFile('--proj-fork-anchor--', 'x_sess-anchor-1.jsonl', [
+      { type: 'session', version: 3, id: 'sess-anchor-1', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/anchor1' },
+      userEntry('u1', null, 'first question'),
+      assistantEntry('a1', 'u1', 'first answer'),
+      modelChangeEntry('mc1', 'a1'),
+      userEntry('u2', 'mc1', 'second question'),
+      assistantEntry('a2', 'u2', 'second answer')
+    ])
+
+    // messages (as convertPiSessionEntries would build them) are [u1, a1, u2, a2] —
+    // model_change never produces a ChatMessage, so it never occupies a slot.
+    // Forking a1 (index 1) should drop u2 onward.
+    expect(resolvePiForkAnchor('sess-anchor-1', 1)).toEqual({ anchorUuid: 'u2' })
+  })
+
+  it('forking the latest assistant message returns the clone-latest sentinel', () => {
+    writeSessionFile('--proj-fork-anchor--', 'x_sess-anchor-2.jsonl', [
+      { type: 'session', version: 3, id: 'sess-anchor-2', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/anchor2' },
+      userEntry('u1', null, 'only question'),
+      assistantEntry('a1', 'u1', 'only answer')
+    ])
+
+    expect(resolvePiForkAnchor('sess-anchor-2', 1)).toEqual({ anchorUuid: PI_FORK_CLONE_LATEST_SENTINEL })
+  })
+
+  it('returns transcript-not-found for an unknown sessionId', () => {
+    expect(resolvePiForkAnchor('does-not-exist', 0)).toEqual({
+      anchorUuid: null,
+      reason: 'transcript-not-found'
+    })
+  })
+
+  it('returns message-not-found when the index is out of range', () => {
+    writeSessionFile('--proj-fork-anchor--', 'x_sess-anchor-3.jsonl', [
+      { type: 'session', version: 3, id: 'sess-anchor-3', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/anchor3' },
+      userEntry('u1', null, 'q')
+    ])
+
+    expect(resolvePiForkAnchor('sess-anchor-3', 5)).toEqual({
+      anchorUuid: null,
+      reason: 'message-not-found'
+    })
   })
 })
 

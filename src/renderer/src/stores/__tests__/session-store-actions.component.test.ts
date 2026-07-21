@@ -10,7 +10,8 @@ import { useSessionStore, OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../se
 import { claudeModel } from '../../../../shared/types'
 import {
   resolveClaudeCapabilities,
-  resolveOpencodeCapabilities
+  resolveOpencodeCapabilities,
+  resolvePiCapabilities
 } from '../../../../shared/model-capabilities'
 import {
   makeChatMessage,
@@ -286,7 +287,9 @@ describe('forkFromMessage', () => {
     const newId = await store().forkFromMessage('src-session', 'msg_1')
 
     expect(newId).toBeTruthy()
-    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('src-session', '/proj', 'msg_1')
+    // idx=1 ('msg_1' is the SECOND message, index 1) + engineId — threaded
+    // through for pi's position-based resolver (Claude's resolver ignores both).
+    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('src-session', '/proj', 'msg_1', 'claude', 1)
     const branch = store().sessions[newId!]
     expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'msg_1'])
     expect(branch.forkOrigin).toEqual({ sourceSessionId: 'src-session', anchorUuid: 'anchor-1' })
@@ -343,7 +346,43 @@ describe('forkFromMessage', () => {
     ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'a1' })
 
     await store().forkFromMessage('routing-temp', 'msg_1')
-    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('real-sid', '/proj', 'msg_1')
+    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('real-sid', '/proj', 'msg_1', 'claude', 0)
+  })
+
+  it('threads engineId + the message index through for pi (position-based resolution)', async () => {
+    store().loadHistoricalSession(
+      'pi-src-session',
+      [
+        makeChatMessage({ id: 'u1' }),
+        makeAssistantMessage('first', { id: 'a1' }),
+        makeChatMessage({ id: 'u2' }),
+        makeAssistantMessage('second', { id: 'a2' })
+      ],
+      '/proj'
+    )
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        'pi-src-session': {
+          ...s.sessions['pi-src-session'],
+          status: makeSessionStatus({ engineId: 'pi', capabilities: resolvePiCapabilities() })
+        }
+      }
+    }))
+    const anchorSpy = vi.fn().mockResolvedValue({ anchorUuid: 'pi:clone-latest' })
+    ;(window.api as any).resolveForkAnchor = anchorSpy
+
+    const newId = await store().forkFromMessage('pi-src-session', 'a2')
+
+    expect(newId).toBeTruthy()
+    // 'a2' is the LAST message (index 3) — the resolver receives that index,
+    // not a re-derivation of it, so the store's own idx computation and the
+    // wire call agree on the same number.
+    expect(anchorSpy).toHaveBeenCalledWith('pi-src-session', '/proj', 'a2', 'pi', 3)
+    expect(store().sessions[newId!].forkOrigin).toEqual({
+      sourceSessionId: 'pi-src-session',
+      anchorUuid: 'pi:clone-latest'
+    })
   })
 
   it('returns null when the source session does not exist', async () => {

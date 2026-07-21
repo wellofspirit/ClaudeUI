@@ -25,6 +25,8 @@ import { PiRpcClient } from './PiRpcClient'
 import { mapPiEvent, createPiMapperState, buildPiChatMessage } from './event-mapper'
 import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
 import type {
+  PiCloneData,
+  PiForkData,
   PiGetCommandsData,
   PiGetLastAssistantTextData,
   PiGetSessionStatsData,
@@ -33,6 +35,7 @@ import type {
 } from './pi-protocol'
 import { getPiModelCatalog, effortLevelsFromModel } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
+import { PI_FORK_CLONE_LATEST_SENTINEL } from '../services/fork-anchor'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from './PiBridgeHost'
 import type { GateDecision, PiHostedToolHandler, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from './PiBridgeHost'
@@ -159,7 +162,10 @@ function buildSideQuestionPrompt(context: string, question: string): string {
  * handleHostedTool) — auto-allowed by permission-engine.ts's
  * PI_AUTO_ALLOW_HOSTED_TOOLS. M4b ADDS pi as a cross-engine dispatch SOURCE
  * (`dispatch_agent`, the same mechanism, NORMAL mode-base gating) — see
- * PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan.
+ * PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan. M5c
+ * ADDS fork ("branch off"): `resumeSessionAt`/`forkSession` (previously
+ * ignored, Claude-only per EngineSpawnOptions' docs) now drive doStart()'s
+ * clone/fork block — see that block's doc comment for the full choreography.
  */
 export class PiSession extends BaseSession {
   readonly engineId = 'pi' as const
@@ -214,6 +220,19 @@ export class PiSession extends BaseSession {
   private requestedEffort: string | undefined
   private permissionMode: string
   private resumeSessionId: string | undefined
+  /**
+   * Fork ("branch off", M5c): when set (only meaningful alongside
+   * `resumeSessionId`, the SOURCE), the FIRST doStart() clones/forks the
+   * resumed source into a brand-new pi session file BEFORE any
+   * set_model/set_thinking_level application — see doStart()'s fork block
+   * doc comment for the full choreography + the source-safety reasoning.
+   * `resumeSessionAt` is either a real pi entryId (drop that user entry and
+   * everything after via `fork`) or `PI_FORK_CLONE_LATEST_SENTINEL` (nothing
+   * to drop — `clone` alone). Mirrors ClaudeSession's identical
+   * resumeSessionAt/forkSession fields (ADR-010).
+   */
+  private resumeSessionAt: string | undefined
+  private forkSession: boolean
 
   // ── Live bash output streaming (M2b) ─────────────────────────────────────────
   /** Reused AS-IS from opencode (src/main/opencode/bash-stream-gate.ts) — pure
@@ -307,14 +326,19 @@ export class PiSession extends BaseSession {
 
   constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
     super(routingId, win, cwd)
-    // sandboxConfig/thinkingMode/resumeSessionAt/forkSession are intentionally
-    // unread — Claude-only options per EngineSpawnOptions' docs / ADR-030.
-    // `effort` IS consumed (M2b) — see doStart()'s spawn-time effort application.
+    // sandboxConfig/thinkingMode are intentionally unread — Claude-only
+    // options per EngineSpawnOptions' docs / ADR-030. `effort` IS consumed
+    // (M2b) — see doStart()'s spawn-time effort application. resumeSessionAt/
+    // forkSession are consumed (M5c) — see doStart()'s fork block.
     this.requestedModel = opts.model
     this.requestedEffort = opts.effort
     this._model = opts.model ?? PI_DEFAULT_MODEL
     this.permissionMode = opts.permissionMode ?? 'default'
     this.resumeSessionId = opts.resumeSessionId || undefined
+    this.resumeSessionAt = opts.resumeSessionAt || undefined
+    // Mirrors ClaudeSession's identical guard — forkSession is meaningless
+    // without a resumeSessionAt anchor (and without a source to fork FROM).
+    this.forkSession = !!opts.forkSession && !!this.resumeSessionAt && !!this.resumeSessionId
     this._capabilities = resolvePiCapabilities()
     this.seedDispatchedCosts()
     this.sendStatus()
@@ -650,6 +674,67 @@ export class PiSession extends BaseSession {
       throw err instanceof Error ? err : new Error(String(err))
     }
 
+    // Fork ("branch off", M5c) — BEFORE any set_model/set_thinking_level
+    // application below, so configuring the session never mutates the
+    // resumed SOURCE (`this.client` is currently attached to whatever
+    // `--session <file>` resumed above, i.e. the source, until this block
+    // switches it). Choreography verified against the real vendored binary
+    // (a throwaway --session-dir probe, never ~/.pi/agent/sessions — see the
+    // M5c kickoff notes):
+    //   - `fork {entryId}` ALONE — no preceding `clone` — already creates a
+    //     brand-new session file and switches the live client to it, leaving
+    //     the resumed source file byte-unchanged. The kickoff spec's assumed
+    //     clone-then-fork-on-the-clone two-step is unnecessary for this
+    //     branch: `fork` already gives "new file, source untouched", the
+    //     same guarantee `clone` gives.
+    //   - `clone` is still needed for the OTHER branch: forking the LATEST
+    //     message (PI_FORK_CLONE_LATEST_SENTINEL) has no target user entry
+    //     for `fork` to drop at, so `clone` (duplicate the active branch at
+    //     its current position) is the only primitive that applies.
+    //   - Both `clone` and `fork` can report `cancelled: true` if a
+    //     `session_before_fork` extension handler vetoes the operation
+    //     (ClaudeUI registers none itself, so this is always false in
+    //     practice) — treated as a failure, same as `success: false`.
+    // Any failure here throws, hits the SAME catch/cleanup contract as the
+    // get_state block above (dispose the orphaned client/bridgeHost) — a
+    // fork that can't be verified must never fall through to configuring
+    // (and thus mutating) the source.
+    if (this.forkSession && this.resumeSessionAt) {
+      try {
+        if (this.resumeSessionAt === PI_FORK_CLONE_LATEST_SENTINEL) {
+          const cloneResp = await client.request<PiCloneData>({ type: 'clone' })
+          if (!cloneResp.success || cloneResp.data?.cancelled) {
+            throw new Error(cloneResp.error ?? 'pi cancelled the session clone (fork failed)')
+          }
+        } else {
+          const forkResp = await client.request<PiForkData>({
+            type: 'fork',
+            entryId: this.resumeSessionAt
+          })
+          if (!forkResp.success || forkResp.data?.cancelled) {
+            throw new Error(forkResp.error ?? 'pi cancelled the fork (fork failed)')
+          }
+        }
+
+        // Adopt the NEW (post-clone/fork) sessionId — this.piSessionId
+        // currently still holds the SOURCE's id from the get_state above.
+        const forkedState = await client.request<PiGetStateData>({ type: 'get_state' })
+        if (!forkedState.success || !forkedState.data?.sessionId) {
+          throw new Error('pi did not report a session id after the fork (fork failed)')
+        }
+        this.piSessionId = forkedState.data.sessionId
+        this.mapperState.sessionId = this.piSessionId
+      } catch (err) {
+        this.client?.dispose()
+        this.client = null
+        if (this.bridgeHost) {
+          this.bridgeHost.dispose()
+          this.bridgeHost = null
+        }
+        throw err instanceof Error ? err : new Error(String(err))
+      }
+    }
+
     // Only set_model when the CALLER explicitly requested one — an omitted
     // model means "use whatever pi already has" (see the adoption above).
     // Forcing PI_DEFAULT_MODEL's hardcoded guess here would fail loudly for a
@@ -752,7 +837,17 @@ export class PiSession extends BaseSession {
       )
     }
 
-    if (this.resumeSessionId) {
+    // Fork excluded (mirrors ClaudeSession's identical "forks excluded" cost-
+    // seeding posture — see its constructor doc comment): the renderer
+    // already has the correct TRUNCATED history from the store's own
+    // optimistic seed (session-store.ts's forkFromMessage slices
+    // messages[0..idx] before this session ever spawns). Replaying
+    // `this.resumeSessionId` here would replay the SOURCE's history — for a
+    // fork that's the pre-truncation, UNTRUNCATED transcript, which would
+    // leak post-fork-point messages into what's supposed to be a fresh
+    // branch. The new (cloned/forked) session's own cost/token base also
+    // starts fresh at 0 rather than double-counting the source's totals.
+    if (this.resumeSessionId && !this.forkSession) {
       await this.replayStoredHistory(this.resumeSessionId)
     }
   }

@@ -62,8 +62,14 @@ const api: ClaudeAPI = {
       engineId
     ),
   rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
-  resolveForkAnchor: (sessionId: string, cwd: string, messageId: string) =>
-    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+  resolveForkAnchor: (
+    sessionId: string,
+    cwd: string,
+    messageId: string,
+    engineId: import('../shared/types').EngineId,
+    messageIndex: number
+  ) =>
+    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
   sendPrompt: (
     routingId: string,
     prompt: string,
