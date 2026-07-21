@@ -36,10 +36,19 @@ export interface PiMapperState {
   /** The pi backend's own session id (from `get_state`), set by the caller
    *  once known. Echoed verbatim into the `result` output at agent_settled. */
   sessionId: string | null
+  /** M2 rich diff — `toolCallId → input.path` for in-flight `edit`/`write` tool
+   *  calls, captured from the ASSISTANT message's `tool_use` blocks (pi's
+   *  toolResult carries no path of its own — see `buildPiEditFileDiffs`).
+   *  Entries are consumed (deleted) by the matching toolResult in the SAME
+   *  turn, so this stays bounded to one turn's edit/write calls; an aborted
+   *  turn whose toolResult never arrives would leak its entry, but pi's
+   *  verified event order always pairs them, so no guard is added for that
+   *  theoretical case (per M2 kickoff spec). */
+  pendingEditPaths: Map<string, string>
 }
 
 export function createPiMapperState(): PiMapperState {
-  return { currentMessageId: null, startTimeMs: 0, totalCostUsd: 0, sessionId: null }
+  return { currentMessageId: null, startTimeMs: 0, totalCostUsd: 0, sessionId: null, pendingEditPaths: new Map() }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +145,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         // accumulator needed, unlike opencode. Upsert-by-id makes this safe
         // to emit repeatedly (once per completed tool call in the turn).
         const content = message.role === 'assistant' ? message.content : []
+        recordPiEditToolPaths(state, content)
         return [{ kind: 'message', message: buildPiChatMessage(messageId, content) }]
       }
 
@@ -153,6 +163,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       if (msg.role === 'assistant') {
         const messageId = ensureMessageId(state)
         state.currentMessageId = null
+        recordPiEditToolPaths(state, msg.content)
 
         const message = buildPiChatMessage(messageId, msg.content)
         const cost = msg.usage.cost.total
@@ -183,17 +194,34 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
           .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
           .map((b) => b.text)
           .join('')
+
         // M2: rich diff — pi's `edit` tool result carries a ready-made unified
         // diff at msg.details.patch, but (unlike opencode's apply_patch/edit)
-        // it carries NO file path of its own (verified against pinned source
-        // packages/coding-agent/src/core/tools/edit.ts — EditToolDetails is
-        // `{diff, patch, firstChangedLine?}`, no path/file field). Resolving it
-        // requires threading the ORIGINAL toolCall's `arguments.path` through
-        // from the assistant message that preceded this toolResult, which this
-        // pure per-event mapper doesn't have in scope. Deferred to M2;
-        // PiEngineToolMap's fileEdit normalize falls back to path + empty
-        // before/after (generic JSON view) until then.
-        const outputs: PiMapperOutput[] = [{ kind: 'tool_result', toolUseId: msg.toolCallId, result, isError: msg.isError }]
+        // it carries NO file path of its own (verified against the compiled
+        // pi binary's dist/core/tools/edit.js execute(): returns
+        // `details: { diff, patch, firstChangedLine }` where `patch` comes
+        // from `generateUnifiedPatch` — a real createTwoFilesPatch unified
+        // diff; `diff` is a custom line-numbered ASCII view, not what
+        // FileDiff.patch wants). The path is threaded through from the
+        // ORIGINAL toolCall's `arguments.path`, captured by
+        // recordPiEditToolPaths above when the preceding assistant message
+        // was built. Never fabricated: fileDiffs is only set when BOTH a path
+        // was recorded for this exact toolCallId AND a non-empty
+        // `details.patch` string is present (write's execute() always returns
+        // `details: undefined`, so this never fires for write today).
+        const path = state.pendingEditPaths.get(msg.toolCallId)
+        state.pendingEditPaths.delete(msg.toolCallId)
+        const fileDiffs = buildPiEditFileDiffs(msg.toolName, path, msg.details)
+
+        const outputs: PiMapperOutput[] = [
+          {
+            kind: 'tool_result',
+            toolUseId: msg.toolCallId,
+            result,
+            isError: msg.isError,
+            ...(fileDiffs ? { fileDiffs } : {})
+          }
+        ]
 
         // M5b — the subagent tool's FINAL return `{content, details}` lands
         // here as this toolResult's `msg.details` (same carrier PiToolResultMessage
@@ -295,6 +323,59 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
 function ensureMessageId(state: PiMapperState): string {
   if (!state.currentMessageId) state.currentMessageId = uuid()
   return state.currentMessageId
+}
+
+/**
+ * M2 rich diff — record `{toolCallId → input.path}` for every `edit`/`write`
+ * tool_use block in an assistant message's content. This is the ONLY place a
+ * path is ever captured: pi's toolResult (message_end role==='toolResult')
+ * carries no path of its own (see `buildPiEditFileDiffs`). Called from BOTH
+ * sites that build an assistant message's content — message_update's
+ * toolcall_end branch AND message_end's assistant branch — since either may
+ * be the one visible to a given caller; upserting by toolCallId makes calling
+ * it repeatedly for the same tool_use harmless.
+ */
+function recordPiEditToolPaths(state: PiMapperState, content: PiAssistantContentBlock[]): void {
+  for (const block of content) {
+    if (block.type !== 'toolCall') continue
+    if (block.name !== 'edit' && block.name !== 'write') continue
+    const path = block.arguments?.path
+    if (typeof path === 'string' && path.length > 0) {
+      state.pendingEditPaths.set(block.id, path)
+    }
+  }
+}
+
+/**
+ * Build the `fileDiffs` array for a completed `edit` (or `write`, if it ever
+ * carries a diff — see the toolResult branch's comment) toolResult. Never
+ * fabricates: returns undefined unless BOTH a recorded `path` is given AND
+ * `details.patch` is a non-empty string.
+ *
+ * additions/deletions are derived by counting `+`/`-` body lines in the
+ * unified diff (skipping the `---`/`+++` file-header lines, which also start
+ * with `-`/`+`) — pi's `patch` carries no ready-made counts the way
+ * opencode's apply_patch/edit metadata does, but counting is cheap enough to
+ * do unconditionally rather than omit.
+ */
+function buildPiEditFileDiffs(
+  toolName: string,
+  path: string | undefined,
+  details: { diff?: string; patch?: string; firstChangedLine?: number; [key: string]: unknown } | undefined
+): FileDiff[] | undefined {
+  if (!path) return undefined
+  const patch = details?.patch
+  if (typeof patch !== 'string' || patch.length === 0) return undefined
+
+  let additions = 0
+  let deletions = 0
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue
+    if (line.startsWith('+')) additions++
+    else if (line.startsWith('-')) deletions++
+  }
+
+  return [{ path, patch, changeType: toolName === 'write' ? 'add' : 'update', additions, deletions }]
 }
 
 /**

@@ -11,14 +11,21 @@
  * `grep {pattern, path?, glob?, ignoreCase?, literal?, context?, limit?}`,
  * `find {pattern, path?, limit?}`, `ls {path?, limit?}`.
  *
- * M2: rich diff — pi's `edit` tool result carries a ready-made unified diff at
- * `details.patch`, but (unlike opencode's apply_patch/edit) it carries no file
- * path of its own — the live event-mapper (src/main/pi/event-mapper.ts) and the
- * stored-history converter (src/main/services/pi-session-list.ts) both defer
- * wiring `ToolResultBlock.fileDiffs` for this reason (see their identical
- * notes). Until then, fileEdit falls back to the single-pair before/after view
- * when the call has exactly one edit (the common case), or the generic JSON
- * view for a true multi-edit call.
+ * M2: rich diff — the live event-mapper (src/main/pi/event-mapper.ts) threads
+ * the ORIGINAL `edit`/`write` toolCall's `arguments.path` through to the
+ * matching toolResult and attaches `fileDiffs: [{path, patch, ...}]` (from
+ * pi's ready-made `details.patch` unified diff) to the `tool_result` content
+ * block. This fileEdit normalize case surfaces that AS `files` on the
+ * ToolView — mirroring OpencodeEngineToolMap's identical `fileDiffs → files`
+ * pass-through verbatim — so FileEditBody renders one real diff card per file
+ * (works for multi-edit calls too, since the whole turn's edits land in ONE
+ * ready-made patch). The single-pair before/after view (below) is only the
+ * INPUT-side fallback: it still renders while the result (and its fileDiffs)
+ * hasn't arrived yet, or for a call whose result never carries a usable
+ * patch. The stored-history converter (src/main/services/pi-session-list.ts)
+ * does NOT yet get the same treatment — replayed/resumed sessions still show
+ * the before/after fallback for edits; out of scope for this fix (see its own
+ * M2 note).
  *
  * M4a+b: hosted tools (render_mermaid/create_mockup/show_mockup) + cross-engine
  * dispatch (dispatch_agent) are registered by the bridge extension via
@@ -126,16 +133,20 @@ function piNormalize(
 
     case 'fileEdit': {
       // pi's edit is always a MULTI-edit call: {path, edits: [{oldText, newText}]}.
-      // A single-edit call still fits the before/after ToolView exactly; 2+
-      // edits fall back to the generic JSON view (before/after left empty) —
-      // see the file header for the M2 rich-diff plan.
+      // A single-edit call still fits the before/after ToolView exactly as an
+      // INPUT-side fallback; 2+ edits leave before/after empty (no sane single
+      // pair) — but `files` below (from the RESULT's fileDiffs, when present)
+      // supersedes both cases with a real per-file diff, same as
+      // OpencodeEngineToolMap's identical pattern (see the file header).
       const edits = Array.isArray(inp.edits) ? (inp.edits as PiEditEntry[]) : []
       const single = edits.length === 1 ? edits[0] : undefined
+      const fileDiffs = result?.fileDiffs
       return {
         kind: 'fileEdit',
         path: inp.path != null ? String(inp.path) : '',
         before: single?.oldText != null ? String(single.oldText) : '',
-        after: single?.newText != null ? String(single.newText) : ''
+        after: single?.newText != null ? String(single.newText) : '',
+        ...(fileDiffs && fileDiffs.length > 0 ? { files: fileDiffs } : {})
       }
     }
 

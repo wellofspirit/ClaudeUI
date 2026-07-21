@@ -603,6 +603,292 @@ describe('mapPiEvent — message_end (toolResult, subagent): final result cuiSub
   })
 })
 
+describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDiffs (M2)', () => {
+  const UNIFIED_DIFF = ['--- a/foo.ts', '+++ b/foo.ts', '@@ -1,2 +1,2 @@', '-old line', '+new line', '+another new line'].join(
+    '\n'
+  )
+
+  function editToolCall(id: string, path: string, edits: Array<{ oldText: string; newText: string }>) {
+    return { type: 'toolCall' as const, id, name: 'edit', arguments: { path, edits } }
+  }
+
+  it('single-edit call: the assistant tool_use path is threaded through to the toolResult as fileDiffs', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [editToolCall('call_1', '/src/foo.ts', [{ oldText: 'old line', newText: 'new line' }])],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_1',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'Successfully replaced 1 block(s) in /src/foo.ts.' }],
+          details: { diff: 'ignored ascii view', patch: UNIFIED_DIFF, firstChangedLine: 1 }
+        })
+      },
+      state
+    )
+
+    expect(out).toEqual([
+      {
+        kind: 'tool_result',
+        toolUseId: 'call_1',
+        result: 'Successfully replaced 1 block(s) in /src/foo.ts.',
+        isError: false,
+        fileDiffs: [{ path: '/src/foo.ts', patch: UNIFIED_DIFF, changeType: 'update', additions: 2, deletions: 1 }]
+      }
+    ])
+  })
+
+  it('multi-edit call: still ONE FileDiff from the ready-made patch — the whole point of M2', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [
+            editToolCall('call_multi', '/src/bar.ts', [
+              { oldText: 'a', newText: 'b' },
+              { oldText: 'c', newText: 'd' }
+            ])
+          ],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_multi',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'Successfully replaced 2 block(s) in /src/bar.ts.' }],
+          details: { diff: 'ignored', patch: UNIFIED_DIFF, firstChangedLine: 1 }
+        })
+      },
+      state
+    )
+
+    expect(out[0].kind).toBe('tool_result')
+    if (out[0].kind === 'tool_result') {
+      expect(out[0].fileDiffs).toEqual([{ path: '/src/bar.ts', patch: UNIFIED_DIFF, changeType: 'update', additions: 2, deletions: 1 }])
+    }
+  })
+
+  it('captured also via the toolcall_end interim upsert (not just the final message_end assistant branch)', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent(
+      {
+        type: 'message_update',
+        message: assistantMsg({
+          content: [editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])]
+        }),
+        assistantMessageEvent: {
+          type: 'toolcall_end',
+          toolCall: editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])
+        }
+      },
+      state
+    )
+
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_interim',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok' }],
+          details: { diff: 'ignored', patch: UNIFIED_DIFF }
+        })
+      },
+      state
+    )
+
+    expect(out[0].kind).toBe('tool_result')
+    if (out[0].kind === 'tool_result') {
+      expect(out[0].fileDiffs).toEqual([{ path: '/src/interim.ts', patch: UNIFIED_DIFF, changeType: 'update', additions: 2, deletions: 1 }])
+    }
+  })
+
+  it('no recorded path (no preceding tool_use capture) → no fileDiffs — never fabricates', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_orphan',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok' }],
+          details: { diff: 'ignored', patch: UNIFIED_DIFF }
+        })
+      },
+      state
+    )
+    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_orphan', result: 'ok', isError: false }])
+  })
+
+  it('recorded path but no details on the toolResult → no fileDiffs', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [editToolCall('call_nodetails', '/src/nodetails.ts', [{ oldText: 'x', newText: 'y' }])],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({ toolCallId: 'call_nodetails', toolName: 'edit', content: [{ type: 'text', text: 'ok' }] })
+      },
+      state
+    )
+    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_nodetails', result: 'ok', isError: false }])
+  })
+
+  it('recorded path but details.patch is empty/absent → no fileDiffs', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [editToolCall('call_emptypatch', '/src/e.ts', [{ oldText: 'x', newText: 'y' }])],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_emptypatch',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok' }],
+          details: { diff: 'ignored', patch: '' }
+        })
+      },
+      state
+    )
+    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_emptypatch', result: 'ok', isError: false }])
+  })
+
+  it('the path entry is consumed: a second toolResult for the same toolCallId gets no fileDiffs', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [editToolCall('call_once', '/src/once.ts', [{ oldText: 'x', newText: 'y' }])],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+    const first = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_once',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok' }],
+          details: { diff: 'ignored', patch: UNIFIED_DIFF }
+        })
+      },
+      state
+    )
+    expect(first[0].kind).toBe('tool_result')
+    if (first[0].kind === 'tool_result') expect(first[0].fileDiffs).toBeDefined()
+
+    const second = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_once',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok again' }],
+          details: { diff: 'ignored', patch: UNIFIED_DIFF }
+        })
+      },
+      state
+    )
+    expect(second).toEqual([{ kind: 'tool_result', toolUseId: 'call_once', result: 'ok again', isError: false }])
+  })
+
+  it('write tool_use path is recorded, but write never produces fileDiffs (pi\'s write.execute() always returns details: undefined)', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [{ type: 'toolCall', id: 'call_write', name: 'write', arguments: { path: '/src/new.ts', content: 'hi' } }],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_write',
+          toolName: 'write',
+          content: [{ type: 'text', text: 'Successfully wrote 2 bytes to /src/new.ts' }]
+          // details omitted — matches write.execute()'s real `details: undefined`.
+        })
+      },
+      state
+    )
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_write', result: 'Successfully wrote 2 bytes to /src/new.ts', isError: false }
+    ])
+  })
+
+  it('a non-edit/non-write tool_use (e.g. bash) never records a path, even if it happens to have one in its args', () => {
+    const state = createPiMapperState()
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [{ type: 'toolCall', id: 'call_bash_path', name: 'bash', arguments: { command: 'ls', path: '/decoy.ts' } }],
+          stopReason: 'toolUse'
+        })
+      },
+      state
+    )
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_bash_path',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'ok' }],
+          details: { diff: 'ignored', patch: UNIFIED_DIFF }
+        })
+      },
+      state
+    )
+    // bash is never recorded as an edit/write path, so even a details.patch present
+    // here (defensive/unrealistic for bash) must not fabricate fileDiffs.
+    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_bash_path', result: 'ok', isError: false }])
+  })
+})
+
 describe('mapPiEvent — tool_execution_end (untouched — final result comes via toolResult message_end)', () => {
   it('still maps to ignore regardless of toolName', () => {
     const state = createPiMapperState()

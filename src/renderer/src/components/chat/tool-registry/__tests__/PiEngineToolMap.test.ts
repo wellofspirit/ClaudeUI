@@ -89,7 +89,7 @@ describe('PiEngineToolMap.normalize', () => {
     expect(view).toMatchObject({ kind: 'fileEdit', path: '/src/a.ts', before: '', after: '' })
   })
 
-  it('fileEdit: M2 — never carries files (rich diff deferred)', () => {
+  it('fileEdit: no fileDiffs on the result -> no files (before/after fallback still used)', () => {
     const result = {
       type: 'tool_result' as const,
       toolUseId: 'x',
@@ -101,6 +101,60 @@ describe('PiEngineToolMap.normalize', () => {
       { path: '/src/a.ts', edits: [{ oldText: 'foo', newText: 'bar' }] },
       result
     )
+    if (view.kind === 'fileEdit') {
+      expect(view.files).toBeUndefined()
+    }
+  })
+
+  it('fileEdit: M2 — result.fileDiffs (from event-mapper.ts) is surfaced AS `files`, mirroring OpencodeEngineToolMap', () => {
+    const fileDiffs = [{ path: '/src/a.ts', patch: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-foo\n+bar', changeType: 'update' as const, additions: 1, deletions: 1 }]
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'x',
+      toolResult: 'Successfully replaced 1 block(s) in /src/a.ts.',
+      isError: false,
+      fileDiffs
+    }
+    const view = PiEngineToolMap.normalize(
+      'fileEdit',
+      { path: '/src/a.ts', edits: [{ oldText: 'foo', newText: 'bar' }] },
+      result
+    )
+    expect(view).toMatchObject({ kind: 'fileEdit', path: '/src/a.ts', files: fileDiffs })
+  })
+
+  it('fileEdit: M2 — a multi-edit call ALSO surfaces `files` when the result carries fileDiffs (no more forced generic view)', () => {
+    const fileDiffs = [{ path: '/src/a.ts', patch: 'unified diff text', changeType: 'update' as const, additions: 2, deletions: 1 }]
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'x',
+      toolResult: 'Successfully replaced 2 block(s) in /src/a.ts.',
+      isError: false,
+      fileDiffs
+    }
+    const view = PiEngineToolMap.normalize(
+      'fileEdit',
+      {
+        path: '/src/a.ts',
+        edits: [
+          { oldText: 'foo', newText: 'bar' },
+          { oldText: 'baz', newText: 'qux' }
+        ]
+      },
+      result
+    )
+    expect(view).toMatchObject({ kind: 'fileEdit', path: '/src/a.ts', before: '', after: '', files: fileDiffs })
+  })
+
+  it('fileEdit: an empty fileDiffs array on the result -> no files (defensive, mirrors OpencodeEngineToolMap)', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'x',
+      toolResult: 'ok',
+      isError: false,
+      fileDiffs: []
+    }
+    const view = PiEngineToolMap.normalize('fileEdit', { path: '/src/a.ts' }, result)
     if (view.kind === 'fileEdit') {
       expect(view.files).toBeUndefined()
     }
