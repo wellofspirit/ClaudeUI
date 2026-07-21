@@ -711,12 +711,25 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     computed in PiSession.doStart) feeding pi's OWN skill loader, which is
  *     what surfaces as `skill:<name>` in `get_commands` above — no second
  *     discovery path needed.
- *   - auth.canDriveLogin → stays false PERMANENTLY, even after M3's
- *     PiAuthProvider. pi's OAuth login (`pi /login`) is TUI-interactive —
- *     ClaudeUI does not and will not drive it (Settings shows a
- *     run-in-a-terminal hint instead, PiVendors.tsx). PiAuthProvider (M3)
- *     covers probe()/api_key read-modify-write only; that is orthogonal to
- *     this flag, which specifically gates in-app *driven* login UI.
+ *   - auth.canDriveLogin → flipped true in M6c. The "TUI-only, permanently
+ *     false" note above is now obsolete for ONE vendor: `openai-codex`
+ *     (ChatGPT). ClaudeUI's own auth vault (M6a AuthVault + M6b
+ *     CredentialSync) now drives that vendor's OAuth login end-to-end —
+ *     PiAuthProvider.oauthAuthorize/oauthCallback/cancelVendorOauth delegate
+ *     to credentialSync.beginLogin/completeLogin/cancelLogin — and PiVendors.tsx
+ *     surfaces a real in-app "Connect ChatGPT" flow (shared with opencode,
+ *     same `authorizeVendorOAuth` store action) instead of a run-in-a-terminal
+ *     hint. pi's OTHER subscription vendors (anthropic, github-copilot, xai,
+ *     radius — PiAuthProvider.ts's PI_SUBSCRIPTION_VENDOR_IDS) remain
+ *     undriven: `pi /login` in a terminal is still the only path for those,
+ *     and PiVendors.tsx keeps the terminal hint for them. This flag itself
+ *     has no renderer consumer (grepped: only this file, EngineAuthProvider.ts's
+ *     doc comments, and PiAuthProvider.ts's doc comment reference it) — it is
+ *     ADR-030 capability-honesty bookkeeping, not a UI gate. The actual
+ *     per-vendor UI decision in PiVendors.tsx is a hardcoded
+ *     `vendorId === 'openai-codex'` check, not a read of this flag, so
+ *     flipping it does NOT wrongly enable driven login for pi's other
+ *     subscription vendors.
  *   - hostedMcp → SHIPPED in M4a: the hosted render_mermaid/create_mockup/
  *     show_mockup tools are bridged through pi's extension API
  *     (pi.registerTool() in pi-bridge-source.ts, calling back over
@@ -766,7 +779,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
-  auth: { canDriveLogin: false, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false },
   crossEngineDispatch: true
 }
 

@@ -209,6 +209,71 @@ describe('CredentialSync.feedAll', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 1b. getStatus() — M6c's read-only UI snapshot (PiVendors.tsx's Connect ChatGPT)
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync.getStatus', () => {
+  it('not connected when the vault is empty', async () => {
+    const sync = new CredentialSync({ vault: makeFakeVault(null).vault })
+    const status = await sync.getStatus()
+    expect(status).toEqual({ connected: false, needsReauth: false })
+  })
+
+  it('connected, with email/accountId/expiresAt from the vault credential', async () => {
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'acc',
+      refresh: 'ref',
+      expires: 999_999,
+      accountId: 'acct-1',
+      email: 'user@example.com'
+    }
+    const sync = new CredentialSync({ vault: makeFakeVault(cred).vault })
+    const status = await sync.getStatus()
+    expect(status).toEqual({
+      connected: true,
+      email: 'user@example.com',
+      accountId: 'acct-1',
+      expiresAt: 999_999,
+      needsReauth: false
+    })
+  })
+
+  it('connected but missing email/accountId omits those keys rather than reporting them as undefined values', async () => {
+    const cred: VaultCredential = { type: 'oauth', access: 'acc', refresh: 'ref', expires: 42 }
+    const sync = new CredentialSync({ vault: makeFakeVault(cred).vault })
+    const status = await sync.getStatus()
+    expect(status).toEqual({ connected: true, expiresAt: 42, needsReauth: false })
+    expect('email' in status).toBe(false)
+    expect('accountId' in status).toBe(false)
+  })
+
+  it('never returns access/refresh token material', async () => {
+    const cred: VaultCredential = { type: 'oauth', access: 'secret-access', refresh: 'secret-refresh', expires: 1 }
+    const sync = new CredentialSync({ vault: makeFakeVault(cred).vault })
+    const status = await sync.getStatus()
+    expect(status).not.toHaveProperty('access')
+    expect(status).not.toHaveProperty('refresh')
+    expect(JSON.stringify(status)).not.toContain('secret-')
+  })
+
+  it('reflects needsReauth after a revoked refresh, even though the credential is still in the vault', async () => {
+    const cred: VaultCredential = { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 1000 }
+    const { vault } = makeFakeVault(cred)
+    const refreshAccessToken = vi.fn(async () => {
+      throw new Error('Token refresh failed: 400 - {"error":"invalid_grant"}')
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    await sync.refreshNow()
+    expect(sync.needsReauth).toBe(true)
+
+    const status = await sync.getStatus()
+    expect(status.connected).toBe(true) // credential is untouched in the vault
+    expect(status.needsReauth).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 2. Sole-refresher scheduler
 // ---------------------------------------------------------------------------
 

@@ -182,6 +182,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
     engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
     getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
+    getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
     generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),

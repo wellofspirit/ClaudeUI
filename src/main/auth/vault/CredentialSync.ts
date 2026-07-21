@@ -315,6 +315,33 @@ export class CredentialSync {
     return this.runRefresh()
   }
 
+  /**
+   * Read-only connection snapshot for M6c's Settings UI (PiVendors.tsx's
+   * "Connect ChatGPT" flow). Reads `vault.load()` fresh every call — same
+   * cheap-local-read posture as PiAuthProvider.probe() — plus the in-memory
+   * `needsReauth` flag. NEVER returns `access`/`refresh` token material.
+   */
+  async getStatus(): Promise<{
+    connected: boolean
+    email?: string
+    accountId?: string
+    expiresAt?: number
+    needsReauth: boolean
+  }> {
+    const cred = await this.vault.load()
+    if (!cred) {
+      return { connected: false, needsReauth: this._needsReauth }
+    }
+    const status: { connected: boolean; email?: string; accountId?: string; expiresAt?: number; needsReauth: boolean } = {
+      connected: true,
+      needsReauth: this._needsReauth,
+      expiresAt: cred.expires
+    }
+    if (cred.email) status.email = cred.email
+    if (cred.accountId) status.accountId = cred.accountId
+    return status
+  }
+
   // -------------------------------------------------------------------------
   // 1. Feed-forward
   // -------------------------------------------------------------------------

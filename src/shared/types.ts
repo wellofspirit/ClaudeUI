@@ -124,6 +124,19 @@ export interface VendorAuthOption {
   prompts?: Array<{ type: string; key: string; message: string; secret?: boolean }>
 }
 
+/**
+ * Read-only snapshot of the M6a/M6b auth vault's Codex (ChatGPT) credential —
+ * CredentialSync.getStatus(). Drives PiVendors.tsx's (M6c) "Connect ChatGPT"
+ * UI. NEVER carries token material (access/refresh).
+ */
+export interface PiAuthStatus {
+  connected: boolean
+  email?: string
+  accountId?: string
+  expiresAt?: number
+  needsReauth: boolean
+}
+
 /** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
 export interface AccountRef {
   engineId: EngineId
@@ -1222,6 +1235,9 @@ export interface ClaudeAPI
   /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not
    *  found. Settings › pi's subscription hint block (`pi /login`). */
   getPiBinaryPath(): Promise<string | null>
+  /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives
+   *  PiVendors.tsx's "Connect ChatGPT" UI — never returns token material. */
+  getPiAuthStatus(): Promise<PiAuthStatus>
 }
 
 // ---------------------------------------------------------------------------

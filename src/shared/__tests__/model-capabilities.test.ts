@@ -637,6 +637,13 @@ describe('resolvePiCapabilitiesFromModel', () => {
     expect(caps.auth).toEqual(PI_ENGINE_CAPABILITIES.auth)
   })
 
+  // M6c: pi now drives ONE vendor's login (openai-codex, via ClaudeUI's own
+  // auth vault — CredentialSync/AuthVault) — was permanently false pre-M6c.
+  it('auth.canDriveLogin is true (M6c: openai-codex is driven via the auth vault; pi\'s other subscription vendors stay undriven)', () => {
+    expect(PI_ENGINE_CAPABILITIES.auth.canDriveLogin).toBe(true)
+    expect(PI_ENGINE_CAPABILITIES.auth.multiAccount).toBe(false)
+  })
+
   it('seeds reasoning.effort from the model shape, undefined → engine defaults + no reasoning', () => {
     expect(resolvePiCapabilitiesFromModel(undefined).reasoning).toEqual({})
     expect(resolvePiCapabilitiesFromModel({ reasoning: true }).reasoning.effort?.levels).toEqual([

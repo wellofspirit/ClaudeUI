@@ -57,6 +57,7 @@ import { dispatchedUsageSummary } from '../services/db'
 import '../auth/register-auth-providers'
 import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
+import { credentialSync } from '../auth/vault/CredentialSync'
 import { authManager } from '../services/auth-manager'
 import { accountManager } from '../services/account-manager'
 import type {
@@ -1099,6 +1100,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Absolute path to the vendored pi binary, for the Settings › pi subscription
   // hint's copyable "run this command in a terminal" block. Null if not found.
   ipcMain.handle('pi:binary-path', (): string | null => locatePiBinary())
+  // Read-only Codex (ChatGPT) auth-vault status for Settings › pi's "Connect
+  // ChatGPT" UI (M6c) — mirrors 'pi:binary-path''s registration shape exactly.
+  // Never returns token material; see CredentialSync.getStatus().
+  ipcMain.handle('pi:auth-status', () => credentialSync.getStatus())
   ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
     loadVendorConfig(vendorId)
   )

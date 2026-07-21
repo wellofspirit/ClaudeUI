@@ -306,6 +306,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     getPiBinaryPath: () =>
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
+    getPiAuthStatus: () =>
+      connection.invoke('pi:auth-status') as ReturnType<ClaudeAPI['getPiAuthStatus']>,
 
     // Generation
     generateTitle: (conversationText) =>

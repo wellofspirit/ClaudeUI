@@ -192,6 +192,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
   engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
   getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
+  getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
   generateCommitMessage: (diff: string) =>

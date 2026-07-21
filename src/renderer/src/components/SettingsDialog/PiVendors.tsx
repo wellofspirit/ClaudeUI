@@ -5,18 +5,29 @@
  * (getOpencodeProviders), its per-provider model-ALLOWLIST dialog
  * (getOpencodeProviderModels/ModelAllowlistDialog), and OpencodeConfigSettings
  * (disabledProviders/modelAllowlist) — none of which exist for pi. pi has no
- * catalog IPC, no model-allowlist concept, and no per-vendor OAuth loopback
- * flow it drives itself (PiAuthProvider's oauthAuthorize/oauthCallback are
- * intentionally unimplemented — pi's OAuth login is TUI-interactive, driven
- * by `pi /login` in a terminal, not by ClaudeUI).
+ * catalog IPC and no model-allowlist concept.
  *
  * Mirrors the opencode section's *structure* only: list configured vendors
  * (from probe()), an add-API-key flow, a remove action, plus a subscription
- * hint block replacing opencode's in-app OAuth UI (pi's oauth options in
- * listVendorAuthOptions() are informational-only).
+ * block for pi's OAuth-only vendors.
+ *
+ * M6c: ONE subscription vendor — `openai-codex` (ChatGPT) — is now driven
+ * in-app (`CodexConnect` below), via the SAME `authorizeVendorOAuth('pi', …)`
+ * store action opencode's OAuth vendors use, backed by ClaudeUI's own auth
+ * vault (M6a AuthVault + M6b CredentialSync; PiAuthProvider.oauthAuthorize/
+ * oauthCallback/cancelVendorOauth delegate to it for this one vendor only).
+ * pi's OTHER subscription vendors (anthropic, github-copilot, xai, radius)
+ * remain undriven — PiAuthProvider's oauthAuthorize/oauthCallback throw for
+ * any vendorId other than 'openai-codex' — so `SubscriptionHint` below still
+ * shows the run-`pi /login`-in-a-terminal hint for those.
  */
 import { useEffect, useRef, useState } from 'react'
-import type { VendorAuthMap, VendorAuthOption } from '../../../../shared/types'
+import { useShallow } from 'zustand/react/shallow'
+import { useSessionStore } from '../../stores/session-store'
+import type { PiAuthStatus, VendorAuthMap, VendorAuthOption } from '../../../../shared/types'
+
+/** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
+const CODEX_VENDOR_ID = 'openai-codex'
 
 // ── usePiInstalled ────────────────────────────────────────────────────
 // Duplicated locally rather than imported from settings-sections.tsx —
@@ -70,11 +81,11 @@ function SubscriptionHint(): React.JSX.Element {
 
   return (
     <div data-testid="PiVendors.subscriptionHint" className="border border-border/30 rounded-md p-2.5 space-y-1.5">
-      <div className="text-[11px] text-text-muted uppercase tracking-wide">Subscription (ChatGPT, Claude Pro/Max, Copilot…)</div>
+      <div className="text-[11px] text-text-muted uppercase tracking-wide">Other subscriptions (Claude Pro/Max, GitHub Copilot, xAI, Radius…)</div>
       <div className="text-[11px] text-text-secondary leading-relaxed">
         pi&rsquo;s OAuth login is interactive and runs in a terminal, not inside ClaudeUI — run{' '}
-        <code className="text-[10px]">/login</code> in a terminal to connect a subscription (ChatGPT, Claude
-        Pro/Max, Copilot…).
+        <code className="text-[10px]">/login</code> in a terminal to connect a subscription (Claude
+        Pro/Max, GitHub Copilot, xAI, Radius…). ChatGPT connects in-app above instead.
       </div>
       {command && (
         <div className="flex items-center gap-1.5">
@@ -92,6 +103,154 @@ function SubscriptionHint(): React.JSX.Element {
             {copied ? 'Copied' : 'Copy'}
           </button>
         </div>
+      )}
+    </div>
+  )
+}
+
+// ── Connect ChatGPT (M6c) ───────────────────────────────────────────────
+// Real in-app OAuth for `openai-codex` ONLY, sharing opencode's driven-OAuth
+// path (`authorizeVendorOAuth` store action → window.api.vendorAuthOauth-
+// Authorize/Callback, PiAuthProvider delegates to the M6a/M6b auth vault for
+// this one vendor). Status comes from the read-only `getPiAuthStatus` IPC
+// (CredentialSync.getStatus()) — NOT from vendorAuthProbe('pi'), which only
+// reflects pi's own auth.json and would otherwise race the vault's feed-forward
+// write.
+
+function CodexConnect(): React.JSX.Element {
+  const [status, setStatus] = useState<PiAuthStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
+  const mountedRef = useRef(true)
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
+    useShallow((s) => ({
+      vendorOAuth: s.vendorOAuth,
+      authorizeVendorOAuth: s.authorizeVendorOAuth,
+      cancelVendorOAuth: s.cancelVendorOAuth
+    }))
+  )
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const reloadStatus = (): void => {
+    window.api
+      .getPiAuthStatus()
+      .then((s) => {
+        if (mountedRef.current) setStatus(s)
+      })
+      .catch(() => {
+        if (mountedRef.current) setStatus({ connected: false, needsReauth: false })
+      })
+  }
+
+  useEffect(() => {
+    reloadStatus()
+  }, [])
+
+  const isPiCodexFlow = vendorOAuth?.engineId === 'pi' && vendorOAuth?.vendorId === CODEX_VENDOR_ID
+  const isConnecting = isPiCodexFlow && vendorOAuth?.stage === 'waiting'
+  const hasFlowError = isPiCodexFlow && vendorOAuth?.stage === 'error'
+
+  const handleConnect = async (): Promise<void> => {
+    setError(null)
+    try {
+      const result = await authorizeVendorOAuth('pi', CODEX_VENDOR_ID)
+      if (result.ok) reloadStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start the ChatGPT connect flow')
+    }
+  }
+
+  const handleDisconnect = async (): Promise<void> => {
+    setDisconnecting(true)
+    setError(null)
+    try {
+      await window.api.vendorAuthRemove('pi', CODEX_VENDOR_ID)
+      reloadStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to disconnect ChatGPT')
+    } finally {
+      if (mountedRef.current) setDisconnecting(false)
+    }
+  }
+
+  return (
+    <div data-testid="PiVendors.codexConnect" className="border border-border/30 rounded-md p-2.5 space-y-1.5">
+      <div className="text-[11px] text-text-muted uppercase tracking-wide">ChatGPT (Codex)</div>
+      {error && <div className="text-[11px] text-red-400 leading-relaxed">{error}</div>}
+
+      {status === null ? (
+        <div className="text-[10px] text-text-muted/60">Loading…</div>
+      ) : (
+        <>
+          {status.connected && (
+            <div data-testid="PiVendors.codexConnected" className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-text-secondary truncate">
+                Connected as{' '}
+                <span className="font-medium text-text-primary">
+                  {status.email ?? status.accountId ?? 'ChatGPT'}
+                </span>
+              </span>
+              <button
+                data-testid="PiVendors.disconnectCodex"
+                onClick={() => void handleDisconnect()}
+                disabled={disconnecting}
+                className="shrink-0 px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted/70 hover:text-red-400 transition-colors disabled:opacity-40"
+              >
+                {disconnecting ? '…' : 'Disconnect'}
+              </button>
+            </div>
+          )}
+
+          {status.needsReauth && (
+            <div
+              data-testid="PiVendors.codexNeedsReauth"
+              className="flex items-center justify-between gap-2 text-[11px] text-amber-400 leading-relaxed"
+            >
+              <span>Session expired — reconnect to keep using ChatGPT.</span>
+              <button
+                data-testid="PiVendors.connectCodex"
+                onClick={() => void handleConnect()}
+                disabled={isConnecting}
+                className="shrink-0 px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 transition-colors"
+              >
+                {isConnecting ? 'Connecting…' : 'Reconnect'}
+              </button>
+            </div>
+          )}
+
+          {!status.connected && !status.needsReauth && (
+            <>
+              <div className="text-[11px] text-text-secondary leading-relaxed">
+                Managed and refreshed by ClaudeUI — the same connection opencode uses.
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  data-testid="PiVendors.connectCodex"
+                  onClick={() => void handleConnect()}
+                  disabled={isConnecting}
+                  className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 transition-colors"
+                >
+                  {isConnecting ? 'Connecting…' : 'Connect ChatGPT (log in once — shared with opencode)'}
+                </button>
+                {isConnecting && (
+                  <button
+                    onClick={cancelVendorOAuth}
+                    className="shrink-0 px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+              {hasFlowError && <div className="text-[11px] text-red-400">Connect failed — try again.</div>}
+            </>
+          )}
+        </>
       )}
     </div>
   )
@@ -147,7 +306,12 @@ export function PiVendors(): React.JSX.Element {
     )
   }
 
-  const configuredIds = Object.keys(probeMap).sort()
+  // openai-codex is excluded here — it gets its own dedicated CodexConnect
+  // block below (driven by getPiAuthStatus, not this generic auth.json probe
+  // row), so it never shows twice with two different disconnect affordances.
+  const configuredIds = Object.keys(probeMap)
+    .filter((id) => id !== CODEX_VENDOR_ID)
+    .sort()
   // Providers offering an api-key option that are NOT yet configured — the
   // add-key select's candidate list.
   const addableIds = Object.keys(options)
@@ -259,6 +423,7 @@ export function PiVendors(): React.JSX.Element {
         </div>
       </div>
 
+      <CodexConnect />
       <SubscriptionHint />
     </div>
   )
