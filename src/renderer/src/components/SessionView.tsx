@@ -23,9 +23,11 @@ import { QuitWorktreeModal } from './QuitWorktreeModal'
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
 
-const SidebarContext = createContext<{ collapsed: boolean; toggle: () => void; isMobile: boolean }>(
-  { collapsed: false, toggle: () => {}, isMobile: false }
-)
+export const SidebarContext = createContext<{
+  collapsed: boolean
+  toggle: () => void
+  isMobile: boolean
+}>({ collapsed: false, toggle: () => {}, isMobile: false })
 export const useSidebarCollapsed = () => useContext(SidebarContext)
 
 function useResizablePanel(key: string, defaultW: number, min: number, max: number) {

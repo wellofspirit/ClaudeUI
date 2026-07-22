@@ -19,6 +19,7 @@ import { render, fireEvent, screen, act } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
+import { SidebarContext } from '../../../SessionView'
 import type { StatusLineData } from '../../../../../../shared/types'
 
 const ROUTE = 'route-topbar'
@@ -340,6 +341,204 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
 
     expect(screen.queryByTestId('TopBar.costTotalInclDispatched')).toBeNull()
 
+    unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mobile-web fullscreen control (TopBar.fullscreen) — remote web client on
+// mobile only, gated behind Fullscreen API support and standalone display
+// mode. Fullscreen state lives on `document`/`window`, not the store, so
+// every mutated global is captured up front and restored in afterEach —
+// nothing here may leak into the other describe blocks in this file.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — mobile web fullscreen control', () => {
+  let app: TestApp
+
+  const originalMatchMedia = window.matchMedia
+  const originalFullscreenEnabled = (document as unknown as { fullscreenEnabled?: boolean })
+    .fullscreenEnabled
+  const originalRequestFullscreen = document.documentElement.requestFullscreen
+  const originalExitFullscreen = (document as unknown as { exitFullscreen?: () => Promise<void> })
+    .exitFullscreen
+  const originalFullscreenElement = (document as unknown as { fullscreenElement?: Element | null })
+    .fullscreenElement
+
+  function setStandalone(standalone: boolean): void {
+    window.matchMedia = ((query: string) => ({
+      matches: query === '(display-mode: standalone)' && standalone,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+  }
+
+  function setFullscreenApiSupported(): void {
+    ;(document as unknown as { fullscreenEnabled: boolean }).fullscreenEnabled = true
+    document.documentElement.requestFullscreen = vi.fn(() => Promise.resolve())
+    ;(document as unknown as { exitFullscreen: () => Promise<void> }).exitFullscreen = vi.fn(() =>
+      Promise.resolve()
+    )
+  }
+
+  function renderTopBar(isMobile: boolean) {
+    return render(
+      <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile }}>
+        <TopBar hasContent />
+      </SidebarContext.Provider>
+    )
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    ;(document as unknown as { fullscreenElement: Element | null }).fullscreenElement = null
+    setStandalone(false)
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+
+    window.matchMedia = originalMatchMedia
+    document.documentElement.requestFullscreen = originalRequestFullscreen
+
+    const doc = document as unknown as {
+      fullscreenEnabled?: boolean
+      exitFullscreen?: () => Promise<void>
+      fullscreenElement?: Element | null
+    }
+    if (originalFullscreenEnabled === undefined) delete doc.fullscreenEnabled
+    else doc.fullscreenEnabled = originalFullscreenEnabled
+    if (originalExitFullscreen === undefined) delete doc.exitFullscreen
+    else doc.exitFullscreen = originalExitFullscreen
+    if (originalFullscreenElement === undefined) delete doc.fullscreenElement
+    else doc.fullscreenElement = originalFullscreenElement
+  })
+
+  it('is hidden on desktop (non-mobile) even when the API is supported and platform is web', () => {
+    setFullscreenApiSupported()
+    app.api.platform = 'web'
+
+    const { unmount } = renderTopBar(false)
+    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
+    unmount()
+  })
+
+  it('is hidden in Electron (non-web) even on mobile', () => {
+    setFullscreenApiSupported()
+    app.api.platform = 'darwin'
+
+    const { unmount } = renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
+    unmount()
+  })
+
+  it('is hidden when the Fullscreen API is unavailable', () => {
+    // jsdom has no Fullscreen API by default — leave request/exitFullscreen
+    // unset so this exercises the real "unsupported" shape, not a stub.
+    ;(document as unknown as { fullscreenEnabled: boolean }).fullscreenEnabled = true
+    app.api.platform = 'web'
+
+    const { unmount } = renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
+    unmount()
+  })
+
+  it('is hidden in standalone display mode', () => {
+    setFullscreenApiSupported()
+    setStandalone(true)
+    app.api.platform = 'web'
+
+    const { unmount } = renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
+    unmount()
+  })
+
+  it('is visible on mobile web with the API supported, and requests fullscreen on click', () => {
+    setFullscreenApiSupported()
+    app.api.platform = 'web'
+
+    const { unmount } = renderTopBar(true)
+    const button = screen.getByTestId('TopBar.fullscreen')
+    expect(button).toHaveAttribute('aria-label', 'Enter fullscreen')
+    expect(button).toHaveAttribute('title', 'Enter fullscreen')
+
+    fireEvent.click(button)
+    expect(document.documentElement.requestFullscreen).toHaveBeenCalledWith({
+      navigationUI: 'hide'
+    })
+
+    unmount()
+  })
+
+  it('updates to the exit state on fullscreenchange, and calls exitFullscreen on click', () => {
+    setFullscreenApiSupported()
+    app.api.platform = 'web'
+
+    const { unmount } = renderTopBar(true)
+    const button = screen.getByTestId('TopBar.fullscreen')
+
+    ;(document as unknown as { fullscreenElement: Element | null }).fullscreenElement =
+      document.documentElement
+    act(() => {
+      document.dispatchEvent(new Event('fullscreenchange'))
+    })
+
+    expect(button).toHaveAttribute('aria-label', 'Exit fullscreen')
+    expect(button).toHaveAttribute('title', 'Exit fullscreen')
+
+    fireEvent.click(button)
+    expect(document.exitFullscreen).toHaveBeenCalled()
+
+    unmount()
+  })
+
+  it('syncs isFullscreen immediately when the control newly appears, without waiting for a fullscreenchange event', () => {
+    // The document is already fullscreen (e.g. entered via some other path)
+    // before the control becomes visible — no fullscreenchange event fires
+    // as part of this test, so the icon must reflect fullscreen state purely
+    // from the initial sync on mount/re-show, not from the event listener.
+    setFullscreenApiSupported()
+    app.api.platform = 'web'
+    ;(document as unknown as { fullscreenElement: Element | null }).fullscreenElement =
+      document.documentElement
+
+    const { rerender, unmount } = renderTopBar(false)
+    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
+
+    rerender(
+      <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: true }}>
+        <TopBar hasContent />
+      </SidebarContext.Provider>
+    )
+
+    const button = screen.getByTestId('TopBar.fullscreen')
+    expect(button).toHaveAttribute('aria-label', 'Exit fullscreen')
+    expect(button).toHaveAttribute('title', 'Exit fullscreen')
+
+    unmount()
+  })
+
+  it('swallows a rejected requestFullscreen without throwing or changing state', async () => {
+    ;(document as unknown as { fullscreenEnabled: boolean }).fullscreenEnabled = true
+    document.documentElement.requestFullscreen = vi.fn(() => Promise.reject(new Error('denied')))
+    ;(document as unknown as { exitFullscreen: () => Promise<void> }).exitFullscreen = vi.fn(() =>
+      Promise.resolve()
+    )
+    app.api.platform = 'web'
+
+    const { unmount } = renderTopBar(true)
+    const button = screen.getByTestId('TopBar.fullscreen')
+
+    await act(async () => {
+      fireEvent.click(button)
+      await Promise.resolve()
+    })
+
+    expect(button).toHaveAttribute('aria-label', 'Enter fullscreen')
     unmount()
   })
 })
