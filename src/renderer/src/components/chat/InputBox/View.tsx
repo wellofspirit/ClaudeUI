@@ -78,6 +78,7 @@ export interface InputBoxViewProps {
   selectedModel: ModelDisplay
   selectedEngineId: EngineId
   engineLocked: boolean
+  showEnginePicker: boolean
   effort: string
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
@@ -510,7 +511,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               {(props.visionEnabled ?? true) && (
                 <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
               )}
-              {(props.showModelPicker ?? true) && (
+              {props.showEnginePicker && (
                 <EnginePicker
                   selectedEngineId={props.selectedEngineId}
                   locked={props.engineLocked}

@@ -169,8 +169,8 @@ export function InputBox(): React.JSX.Element {
   const setSelectedEngine = useSessionStore((s) => s.setSelectedEngine)
   const lastSelectedEngineId = useSessionStore((s) => s.lastSelectedEngineId)
   const setLastSelectedEngineId = useSessionStore((s) => s.setLastSelectedEngineId)
-  // Engine is immutable after backend commitment. The picker remains visible
-  // while locked so the selected harness identity stays explicit.
+  // Engine is immutable after backend commitment, so the picker disappears
+  // once initialization starts. Historical sessions are committed by definition.
   const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
@@ -800,6 +800,7 @@ export function InputBox(): React.JSX.Element {
       selectedModel={selectedModel}
       selectedEngineId={effectiveEngineId}
       engineLocked={engineLocked}
+      showEnginePicker={!engineLocked}
       effort={effectiveEffort}
       effortSupported={effortCap != null}
       allowedEffortLevels={allowedEffortLevels}

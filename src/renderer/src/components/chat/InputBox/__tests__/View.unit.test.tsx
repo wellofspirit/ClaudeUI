@@ -64,6 +64,7 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     selectedModel: baseModel,
     selectedEngineId: 'claude',
     engineLocked: false,
+    showEnginePicker: true,
     effort: 'xhigh',
     effortSupported: true,
     allowedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -112,6 +113,12 @@ describe('engine and model controls', () => {
     const enginePicker = screen.getByTestId('EnginePicker')
     const modelPicker = screen.getByTestId('ModelPicker')
     expect(enginePicker.nextElementSibling).toBe(modelPicker)
+  })
+
+  it('hides the engine picker without hiding the model picker', () => {
+    render(<InputBoxView {...makeProps({ showEnginePicker: false })} />)
+    expect(screen.queryByTestId('EnginePicker')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ModelPicker')).toBeInTheDocument()
   })
 })
 

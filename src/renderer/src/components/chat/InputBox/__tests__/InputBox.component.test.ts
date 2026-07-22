@@ -586,7 +586,7 @@ describe('InputBox FC — rendered', () => {
     )
   })
 
-  it('locks engine selection as soon as backend initialization starts', () => {
+  it('hides engine selection as soon as backend initialization starts', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
@@ -595,6 +595,7 @@ describe('InputBox FC — rendered', () => {
     }))
     renderFC()
     expect(viewProps.engineLocked).toBe(true)
+    expect(viewProps.showEnginePicker).toBe(false)
   })
 
   it('uses an unlocked pending engine on welcome and applies it to the next project session', () => {
@@ -620,6 +621,7 @@ describe('InputBox FC — rendered', () => {
     renderFC()
 
     expect(viewProps.engineLocked).toBe(false)
+    expect(viewProps.showEnginePicker).toBe(true)
     expect(viewProps.selectedEngineId).toBe('claude')
 
     act(() => {
@@ -650,7 +652,7 @@ describe('InputBox FC — rendered', () => {
       })
     ],
     ['historical', () => ({ isHistorical: true })]
-  ])('keeps engine selection locked for a %s session', (_state, change) => {
+  ])('hides engine selection for a %s session', (_state, change) => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
@@ -659,6 +661,7 @@ describe('InputBox FC — rendered', () => {
     }))
     renderFC()
     expect(viewProps.engineLocked).toBe(true)
+    expect(viewProps.showEnginePicker).toBe(false)
   })
 
   it('opencode session with an unavailable model falls back to an opencode model, not Claude', async () => {
