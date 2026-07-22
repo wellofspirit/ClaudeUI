@@ -214,22 +214,79 @@ function runExtension(initialActiveTools: string[] = ['read', 'bash', 'edit', 'w
   return { tools, events, commands, activeTools: () => [...active], setActiveToolsCalls }
 }
 
-/** Set env vars for the duration of `fn`, restoring the prior values (including absence) afterward — `undefined` means "ensure unset". */
-function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+/**
+ * Every env var pi-bridge-source.ts reads (process.env.CLAUDEUI_PI_*) — kept
+ * as an explicit list so `withEnv` can force a CLEAN baseline before each
+ * test's overrides, rather than trusting whatever happens to be ambient in
+ * this process. ClaudeUI itself sets these for its own spawned pi children,
+ * so a test run started FROM a running ClaudeUI dev instance (or any shell
+ * that inherited its env) would otherwise leak PLAN_TOOLS=1/HOSTED_TOOLS=1/
+ * DISPATCH_ENABLED=1/bridge creds into every test here, silently activating
+ * registrations tests never asked for.
+ */
+const BRIDGE_ENV_VARS = [
+  'CLAUDEUI_PI_BRIDGE_URL',
+  'CLAUDEUI_PI_BRIDGE_TOKEN',
+  'CLAUDEUI_PI_SKILL_DIRS',
+  'CLAUDEUI_PI_HOSTED_TOOLS',
+  'CLAUDEUI_PI_DISPATCH_ENABLED',
+  'CLAUDEUI_PI_PLAN_TOOLS'
+] as const
+
+type BridgeEnvVar = (typeof BRIDGE_ENV_VARS)[number]
+
+/**
+ * Run `fn` with the bridge env vars forced to a clean (all-unset) baseline,
+ * `vars`' overrides applied on top, restoring the CALLER's actual ambient
+ * values (including absence) once `fn` is done — for an async `fn`, only
+ * after the returned Promise settles, not the moment it's returned. That
+ * fixes RESTORE TIMING for a single in-flight async `fn` (it no longer
+ * un-sets the env while `fn`'s own async work is still reading it) — it does
+ * NOT make concurrent `process.env` mutation safe. `process.env` is global
+ * mutable state; this file's tests are assumed to run non-concurrently
+ * (vitest's default within a single file/describe), and two `withEnv` calls
+ * actually overlapping in real time would still stomp each other's env
+ * regardless of this settle-then-restore ordering.
+ *
+ * `vars`' keys are constrained to `BridgeEnvVar` (BRIDGE_ENV_VARS) so an
+ * override can never target a var outside the capture/restore set above.
+ */
+function withEnv<T>(vars: Partial<Record<BridgeEnvVar, string | undefined>>, fn: () => T): T {
   const prev: Record<string, string | undefined> = {}
-  for (const k of Object.keys(vars)) prev[k] = process.env[k]
+  for (const k of BRIDGE_ENV_VARS) prev[k] = process.env[k]
+  for (const k of BRIDGE_ENV_VARS) delete process.env[k]
   for (const [k, v] of Object.entries(vars)) {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v
   }
-  try {
-    return fn()
-  } finally {
+  const restore = () => {
     for (const [k, v] of Object.entries(prev)) {
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
     }
   }
+
+  let result: T
+  try {
+    result = fn()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (result instanceof Promise) {
+    return result.then(
+      (value) => {
+        restore()
+        return value
+      },
+      (err) => {
+        restore()
+        throw err
+      }
+    ) as T
+  }
+  restore()
+  return result
 }
 
 const BRIDGE_CREDS = { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9', CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }
@@ -260,6 +317,47 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
         expect(events.has('tool_call')).toBe(true)
       }
     )
+  })
+
+  it('an ambient CLAUDEUI_PI_* env (as set by a currently-running ClaudeUI process) does not leak into a run that opts into NONE of it', () => {
+    // Simulates the exact contamination scenario this harness exists to
+    // prevent: the shell running these tests inherited real flags from a
+    // live ClaudeUI instance. `withEnv({})` -- no overrides at all -- must
+    // still force every bridge env var to unset, not just leave the ambient
+    // values in place.
+    //
+    // Captures every BRIDGE_ENV_VARS value (not just the five this test sets)
+    // BEFORE mutating process.env, and restores each exact original
+    // value/absence in `finally` -- this must leave the process exactly as
+    // found, since these vars may carry REAL ambient values inherited from
+    // whatever launched this test run, not just test fixtures.
+    const priorAmbient: Record<string, string | undefined> = {}
+    for (const k of BRIDGE_ENV_VARS) priorAmbient[k] = process.env[k]
+    try {
+      process.env.CLAUDEUI_PI_BRIDGE_URL = 'http://127.0.0.1:9999'
+      process.env.CLAUDEUI_PI_BRIDGE_TOKEN = 'leaked-token'
+      process.env.CLAUDEUI_PI_PLAN_TOOLS = '1'
+      process.env.CLAUDEUI_PI_HOSTED_TOOLS = '1'
+      process.env.CLAUDEUI_PI_DISPATCH_ENABLED = '1'
+
+      withEnv({}, () => {
+        const { tools, events, commands } = runExtension()
+        expect(tools.size).toBe(0)
+        expect(events.has('tool_call')).toBe(false)
+        expect(events.has('session_start')).toBe(false)
+        expect(commands.has('cui-plan-enter')).toBe(false)
+        expect(commands.has('cui-plan-exit')).toBe(false)
+      })
+      // The ambient values set above must still be visible OUTSIDE withEnv.
+      expect(process.env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:9999')
+      expect(process.env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
+    } finally {
+      for (const k of BRIDGE_ENV_VARS) {
+        const v = priorAmbient[k]
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
   })
 
   it('registers the three hosted tools (not dispatch_agent) when CLAUDEUI_PI_HOSTED_TOOLS=1 but CLAUDEUI_PI_DISPATCH_ENABLED is unset', () => {

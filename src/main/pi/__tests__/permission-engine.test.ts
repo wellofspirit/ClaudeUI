@@ -521,6 +521,36 @@ describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) ar
     expect(decide('edit', { path: 'D:\\repo\\src\\foo.ts' }, ctx)).toBe('allow')
   })
 
+  it('Windows-style RELATIVE input under a Windows cwd is resolved then relativized (round-trips to itself)', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: 'D:\\repo'
+    }
+    expect(decide('edit', { path: 'src\\foo.ts' }, ctx)).toBe('allow')
+  })
+
+  it('cross-drive absolute path stays OUTSIDE a Windows cwd and does NOT match a relative glob', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: 'D:\\repo'
+    }
+    expect(decide('edit', { path: 'E:\\other\\src\\foo.ts' }, ctx)).toBe('ask') // falls through to mode base
+  })
+
+  it('a Windows path OUTSIDE cwd (../-style) does NOT match a relative glob', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: 'D:\\repo\\src'
+    }
+    expect(decide('edit', { path: 'D:\\repo\\other\\foo.ts' }, ctx)).toBe('ask') // falls through to mode base
+  })
+
   it('no-cwd fallback: matches the RAW input path as-is (documented best-effort) when the caller omits cwd', () => {
     const ctx = { mode: 'default', rules: rules({ allow: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
     // No cwd -> raw path used directly; an absolute path is compared literally

@@ -12,7 +12,7 @@
  * server-side permission concept to patch, so ClaudeUI evaluates the same
  * rules itself, per tool_call, entirely in the main process).
  */
-import { isAbsolute, relative, resolve } from 'node:path'
+import path from 'node:path'
 import type { ToolKind } from '../../shared/tool-kinds'
 import { hostedMcpKind } from '../../shared/tool-kinds'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
@@ -300,11 +300,29 @@ function extractToolPath(input: Record<string, unknown>): string | undefined {
  * correct. Every real caller threads `cwd` (`PiSession.gateToolCallInner`);
  * the only omitting caller (`gatePiTargetToolCall`) always passes
  * `EMPTY_RULES`, so it never reaches this function in practice.
+ *
+ * Path FLAVOR (win32 vs posix semantics) follows `cwd`'s own syntax — NOT
+ * the host platform running this process. A session's `cwd` is a string
+ * captured from wherever pi is actually running (could be a Windows path
+ * even when ClaudeUI's main process itself runs on macOS/Linux, e.g. in a
+ * test or a remote/WSL-adjacent setup); using `node:path`'s host-default
+ * `isAbsolute`/`resolve`/`relative` would treat a Windows absolute path
+ * (`D:\repo`, `\\server\share`) as a RELATIVE posix path on a non-Windows
+ * host, silently breaking containment. `looksWindowsAbsolute` recognizes a
+ * drive-letter (`D:\` / `D:/`) or UNC (`\\server\share`) prefix; everything
+ * else uses posix semantics (a plain `/repo`-style cwd, or a bare relative
+ * cwd, which posix treats the same way any reasonable default would).
  */
+function looksWindowsAbsolute(p: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\')
+}
+
 function resolveMatchPath(rawPath: string, cwd: string | undefined): string {
   if (!cwd) return rawPath.replaceAll('\\', '/')
-  const absolute = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath)
-  return relative(cwd, absolute).replaceAll('\\', '/')
+  const flavor = looksWindowsAbsolute(cwd) ? path.win32 : path.posix
+  const normalizedRaw = flavor === path.win32 ? rawPath : rawPath.replaceAll('\\', '/')
+  const absolute = flavor.isAbsolute(normalizedRaw) ? normalizedRaw : flavor.resolve(cwd, normalizedRaw)
+  return flavor.relative(cwd, absolute).replaceAll('\\', '/')
 }
 
 /**
