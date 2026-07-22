@@ -46,14 +46,19 @@ function useClickOutside(
   }, [ref, open, close])
 }
 
-function unsupportedTooltip(level: EffortLevel): string {
+/** Tooltip for a disabled EffortPicker option. Shared with MobileConfigSheet's EffortPage. */
+export function unsupportedTooltip(level: EffortLevel): string {
   if (level === 'xhigh') return 'xhigh effort is only available on Opus 4.7'
   if (level === 'max') return 'max effort is not supported on this model'
   return 'Not supported on this model'
 }
 
-/** Derive groups from a flat model list by (engineId, vendorId) pairing. */
-function deriveModelGroups(
+/** Tooltip for a disabled Adaptive thinking option. Shared with MobileConfigSheet's ThinkingPage. */
+export const ADAPTIVE_UNSUPPORTED_TOOLTIP =
+  'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'
+
+/** Derive groups from a flat model list by (engineId, vendorId) pairing. Shared with MobileConfigSheet's ModelPage. */
+export function deriveModelGroups(
   models: ModelDisplay[]
 ): Array<{ key: string; label: string; items: ModelDisplay[] }> {
   const groupMap = new Map<string, { label: string; items: ModelDisplay[] }>()
@@ -468,11 +473,7 @@ export function ThinkingPicker({
                 data-testid="ThinkingPicker.option"
                 data-value={mode}
                 disabled={!enabled}
-                title={
-                  enabled
-                    ? undefined
-                    : 'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'
-                }
+                title={enabled ? undefined : ADAPTIVE_UNSUPPORTED_TOOLTIP}
                 onClick={() => {
                   if (enabled) {
                     onSelectThinking(mode)
