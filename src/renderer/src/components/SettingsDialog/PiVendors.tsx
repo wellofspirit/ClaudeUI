@@ -4,8 +4,8 @@
  * tightly coupled to opencode's provider CATALOG endpoint
  * (getOpencodeProviders), its per-provider model-ALLOWLIST dialog
  * (getOpencodeProviderModels/ModelAllowlistDialog), and OpencodeConfigSettings
- * (disabledProviders/modelAllowlist) — none of which exist for pi. pi has no
- * catalog IPC and no model-allowlist concept.
+ * (disabledProviders/per-provider modelAllowlist). pi instead uses one
+ * authenticated catalog and a global ClaudeUI-private allowlist under Models.
  *
  * ClaudeUI-managed shared providers are intentionally hidden from these native
  * controls so their route policy cannot be bypassed. Existing external pi

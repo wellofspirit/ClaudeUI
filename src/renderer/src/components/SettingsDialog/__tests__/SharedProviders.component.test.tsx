@@ -85,7 +85,12 @@ describe('SharedProviders', () => {
     const card = await screen.findByTestId('SharedProviderCard')
     expect(card).toHaveTextContent('route collision')
     expect(card).toHaveTextContent('not delivered · 1 models')
+    expect(card).toHaveTextContent('Default model for pi')
+    expect(card).toHaveTextContent(
+      'All delivered models remain available unless restricted in pi model settings.'
+    )
     const selects = screen.getAllByTestId('SharedProviderCard.defaultModel')
+    expect(selects[0]).toHaveTextContent('No default from this provider')
     fireEvent.change(selects[0], { target: { value: 'gpt-5' } })
     fireEvent.change(selects[1], { target: { value: 'gpt-5' } })
     await waitFor(() =>

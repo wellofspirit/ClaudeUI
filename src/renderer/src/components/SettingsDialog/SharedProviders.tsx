@@ -338,26 +338,35 @@ function ProviderCard({
               </span>
             </label>
             {route.enabled && (
-              <select
-                data-testid="SharedProviderCard.defaultModel"
-                data-harness={h}
-                disabled={busy || readOnly}
-                aria-label={`${h} default model`}
-                value={route.defaultModel ?? ''}
-                onChange={(e) => onDefault(h, e.target.value)}
-                className="mt-1 w-full rounded border border-border/40 bg-bg-input px-2 py-1 text-[11px]"
-              >
-                <option value="">None</option>
-                {route.defaultModel &&
-                  !available.some((model) => model.id === route.defaultModel) && (
-                    <option value={route.defaultModel}>{route.defaultModel} (unavailable)</option>
-                  )}
-                {available.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name || m.id}
-                  </option>
-                ))}
-              </select>
+              <div className="mt-1">
+                <label className="text-[10px] text-text-muted" htmlFor={`${definition.id}-${h}-default`}>
+                  Default model for {h}
+                </label>
+                <select
+                  id={`${definition.id}-${h}-default`}
+                  data-testid="SharedProviderCard.defaultModel"
+                  data-harness={h}
+                  disabled={busy || readOnly}
+                  aria-label={`${h} default model`}
+                  value={route.defaultModel ?? ''}
+                  onChange={(e) => onDefault(h, e.target.value)}
+                  className="mt-0.5 w-full rounded border border-border/40 bg-bg-input px-2 py-1 text-[11px]"
+                >
+                  <option value="">No default from this provider</option>
+                  {route.defaultModel &&
+                    !available.some((model) => model.id === route.defaultModel) && (
+                      <option value={route.defaultModel}>{route.defaultModel} (unavailable)</option>
+                    )}
+                  {available.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name || m.id}
+                    </option>
+                  ))}
+                </select>
+                <div className="mt-0.5 text-[10px] text-text-muted/70">
+                  All delivered models remain available unless restricted in {h} model settings.
+                </div>
+              </div>
             )}
           </div>
         )

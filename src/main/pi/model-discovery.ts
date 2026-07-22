@@ -18,6 +18,7 @@ import { PiRpcClient } from './PiRpcClient'
 import { locatePiBinary, piBinaryAvailable } from './pi-locate'
 import type { PiGetAvailableModelsData, PiModel } from './pi-protocol'
 import { logger } from '../services/logger'
+import { loadEngineConfig } from '../services/ui-config'
 
 const DISCOVERY_TIMEOUT_MS = 15_000
 
@@ -86,7 +87,9 @@ async function fetchPiModelCatalog(): Promise<PiModel[]> {
  * `discoverPiModels` (picker seeding) and `PiSession.resolveCapsForModel`
  * (post-connect capability resolve) call, so the two never disagree.
  */
-export function effortLevelsFromModel(m: Pick<PiModel, 'reasoning' | 'thinkingLevelMap'>): EffortLevel[] {
+export function effortLevelsFromModel(
+  m: Pick<PiModel, 'reasoning' | 'thinkingLevelMap'>
+): EffortLevel[] {
   if (!m.reasoning) return []
   const levels: EffortLevel[] = ['low', 'medium', 'high']
   if (m.thinkingLevelMap?.xhigh) levels.push('xhigh')
@@ -105,6 +108,22 @@ export async function discoverPiModels(): Promise<EngineModelGroup[]> {
   const models = await fetchPiModelCatalog()
   if (models.length === 0) return []
 
+  const allowlist = loadEngineConfig('pi').piConfig?.modelAllowlist
+  const allowed = allowlist === undefined ? null : new Set(allowlist)
+  const groups = groupPiModels(
+    allowed === null ? models : models.filter((m) => allowed.has(`${m.provider}/${m.id}`))
+  )
+
+  cachedGroups = groups
+  return groups
+}
+
+/** Unfiltered authenticated catalog for model-management UI. */
+export async function getPiModelCatalogGroups(): Promise<EngineModelGroup[]> {
+  return groupPiModels(await fetchPiModelCatalog())
+}
+
+function groupPiModels(models: PiModel[]): EngineModelGroup[] {
   const byProvider = new Map<string, ModelInfo[]>()
   for (const m of models) {
     const list = byProvider.get(m.provider) ?? []
@@ -138,15 +157,12 @@ export async function discoverPiModels(): Promise<EngineModelGroup[]> {
     byProvider.set(m.provider, list)
   }
 
-  const groups: EngineModelGroup[] = [...byProvider.entries()].map(([vendorId, models]) => ({
+  return [...byProvider.entries()].map(([vendorId, models]) => ({
     engineId: 'pi' as const,
     vendorId,
     vendorName: vendorId,
     models
   }))
-
-  if (groups.length > 0) cachedGroups = groups
-  return groups
 }
 
 /**

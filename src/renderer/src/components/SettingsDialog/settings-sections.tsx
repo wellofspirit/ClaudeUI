@@ -48,6 +48,7 @@ import {
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { PiVendors } from './PiVendors'
 import { SharedProviders } from './SharedProviders'
+import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
@@ -1663,14 +1664,15 @@ function OpencodeModelsSection(): React.JSX.Element {
  * pi's per-engine default model — lives in `EngineConfig.piConfig.defaultModel`
  * (engines/pi.json via loadEngineConfig/saveEngineConfig), NOT a dedicated
  * opencode.json-style settings file like OpencodeModelsSection's `cfg.model`
- * (pi has no native-config-passthrough schema to mirror in M3 — just this one
- * field). Discovered models use a visible select, with an explicit custom-ID
- * escape hatch for models ClaudeUI has not discovered yet.
+ * (pi has no native-config-passthrough schema to mirror in M3). Discovered
+ * models use a visible select, with an explicit custom-ID escape hatch and a
+ * ClaudeUI-private allowlist for picker visibility and default resolution.
  */
 function PiDefaultModelSection(): React.JSX.Element {
   const [cfg, setCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [customMode, setCustomMode] = useState(false)
+  const [managingModels, setManagingModels] = useState(false)
   const installed = usePiInstalled()
 
   useEffect(() => {
@@ -1704,6 +1706,25 @@ function PiDefaultModelSection(): React.JSX.Element {
 
   const current = cfg.piConfig?.defaultModel ?? ''
   const known = current === '' || models.some((m) => m.value === current)
+  const allowlist = cfg.piConfig?.modelAllowlist
+  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
+
+  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
+    const latest = await window.api.loadEngineConfig('pi')
+    const next: EngineConfig = {
+      ...latest,
+      piConfig: { ...latest.piConfig, modelAllowlist }
+    }
+    await window.api.saveEngineConfig('pi', next)
+    setCfg(next)
+    useSessionStore.getState().reloadModels()
+    window.api
+      .getEngineModels()
+      .then((groups) =>
+        setModels(groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models))
+      )
+      .catch(() => {})
+  }
 
   const update = (value: string): void => {
     const next: EngineConfig = { ...cfg, piConfig: { ...cfg.piConfig, defaultModel: value || undefined } }
@@ -1772,7 +1793,23 @@ function PiDefaultModelSection(): React.JSX.Element {
         >
           Refresh models
         </button>
-        {!known && (
+        <button
+          data-testid="PiDefaultModelSection.manageModels"
+          onClick={() => setManagingModels(true)}
+          className="mt-1 ml-3 text-[11px] text-accent"
+        >
+          Manage models ({allowlist === undefined ? 'all' : allowlist.length === 0 ? 'none' : `${allowlist.length} selected`})
+        </button>
+        {defaultExcluded && (
+          <div
+            data-testid="PiDefaultModelSection.excludedDefaultWarning"
+            className="mt-1 text-[10px] text-warning/90"
+          >
+            The configured default is excluded by the model allowlist. ClaudeUI will use an
+            available fallback until it is enabled or replaced.
+          </div>
+        )}
+        {!known && !defaultExcluded && (
           <div
             data-testid="PiDefaultModelSection.unknownWarning"
             className="mt-1 text-[10px] text-warning/90"
@@ -1786,6 +1823,14 @@ function PiDefaultModelSection(): React.JSX.Element {
         Applies to new pi sessions. Falls back to pi&rsquo;s own default (
         {PI_DEFAULT_MODEL}) when unset.
       </div>
+      {managingModels && (
+        <PiModelAllowlistDialog
+          providerName="pi"
+          current={allowlist}
+          onClose={() => setManagingModels(false)}
+          onSave={saveAllowlist}
+        />
+      )}
     </div>
   )
 }

@@ -85,7 +85,11 @@ import {
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import { discoverPiModels, invalidatePiModelCache } from '../pi/model-discovery'
+import {
+  discoverPiModels,
+  getPiModelCatalogGroups,
+  invalidatePiModelCache
+} from '../pi/model-discovery'
 import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
 import {
   readOpencodeNativeConfig,
@@ -348,6 +352,7 @@ const SESSION_IPC_CHANNELS = [
   'session:get-engine-models',
   'session:get-opencode-providers',
   'session:get-opencode-provider-models',
+  'session:get-pi-model-catalog',
   'session:generate-title',
   'session:generate-commit-message',
   'session:write-custom-title',
@@ -970,6 +975,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       return await getOpencodeProviderModels(providerId)
     }
   )
+
+  // Unfiltered authenticated pi catalog for the model-allowlist dialog.
+  ipcMain.handle('session:get-pi-model-catalog', async () => getPiModelCatalogGroups())
 
   ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
     return await generateTitle(conversationText)

@@ -180,6 +180,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
     getOpencodeProviderModels: (providerId) =>
       ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+    getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
     engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
     getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
     getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),

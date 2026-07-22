@@ -6,21 +6,37 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockStart, mockRequest, mockDispose, MockPiRpcClient, mockLocatePiBinary, mockPiBinaryAvailable } =
-  vi.hoisted(() => {
-    const mockStart = vi.fn().mockResolvedValue(undefined)
-    const mockRequest = vi.fn()
-    const mockDispose = vi.fn()
-    // Regular `function` (not an arrow fn) — this mock is invoked via `new
-    // PiRpcClient(...)` in production code, and arrow functions have no
-    // [[Construct]] slot.
-    const MockPiRpcClient = vi.fn().mockImplementation(function () {
-      return { start: mockStart, request: mockRequest, dispose: mockDispose }
-    })
-    const mockLocatePiBinary = vi.fn().mockReturnValue('/fake/pi')
-    const mockPiBinaryAvailable = vi.fn().mockReturnValue(true)
-    return { mockStart, mockRequest, mockDispose, MockPiRpcClient, mockLocatePiBinary, mockPiBinaryAvailable }
+const {
+  mockStart,
+  mockRequest,
+  mockDispose,
+  MockPiRpcClient,
+  mockLocatePiBinary,
+  mockPiBinaryAvailable,
+  mockLoadEngineConfig
+} = vi.hoisted(() => {
+  const mockStart = vi.fn().mockResolvedValue(undefined)
+  const mockRequest = vi.fn()
+  const mockDispose = vi.fn()
+  // Regular `function` (not an arrow fn) — this mock is invoked via `new
+  // PiRpcClient(...)` in production code, and arrow functions have no
+  // [[Construct]] slot.
+  const MockPiRpcClient = vi.fn().mockImplementation(function () {
+    return { start: mockStart, request: mockRequest, dispose: mockDispose }
   })
+  const mockLocatePiBinary = vi.fn().mockReturnValue('/fake/pi')
+  const mockPiBinaryAvailable = vi.fn().mockReturnValue(true)
+  const mockLoadEngineConfig = vi.fn().mockReturnValue({})
+  return {
+    mockStart,
+    mockRequest,
+    mockDispose,
+    MockPiRpcClient,
+    mockLocatePiBinary,
+    mockPiBinaryAvailable,
+    mockLoadEngineConfig
+  }
+})
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 vi.mock('../pi-locate', () => ({
@@ -30,6 +46,7 @@ vi.mock('../pi-locate', () => ({
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
+vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineConfig }))
 
 const CATALOG = [
   {
@@ -70,9 +87,48 @@ beforeEach(() => {
   mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
   mockPiBinaryAvailable.mockClear().mockReturnValue(true)
   MockPiRpcClient.mockClear()
+  mockLoadEngineConfig.mockReset().mockReturnValue({})
 })
 
 describe('discoverPiModels', () => {
+  it('filters full model values while keeping the management catalog unfiltered', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: { modelAllowlist: ['anthropic/claude-sonnet-4-6'] }
+    })
+    const { discoverPiModels, getPiModelCatalogGroups } = await importFresh()
+
+    expect(
+      (await discoverPiModels()).flatMap((group) => group.models.map((model) => model.value))
+    ).toEqual(['anthropic/claude-sonnet-4-6'])
+    expect(
+      (await getPiModelCatalogGroups()).flatMap((group) => group.models.map((model) => model.value))
+    ).toEqual(['openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'])
+  })
+
+  it('treats an explicit empty allowlist as no available models', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
+    mockLoadEngineConfig.mockReturnValue({ piConfig: { modelAllowlist: [] } })
+    const { discoverPiModels } = await importFresh()
+
+    expect(await discoverPiModels()).toEqual([])
+  })
+
+  it('reloads allowlist changes after cache invalidation', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: { modelAllowlist: ['openai-codex/gpt-5.6-luna'] }
+    })
+    const { discoverPiModels, invalidatePiModelCache } = await importFresh()
+    expect((await discoverPiModels())[0].vendorId).toBe('openai-codex')
+
+    mockLoadEngineConfig.mockReturnValue({
+      piConfig: { modelAllowlist: ['anthropic/claude-sonnet-4-6'] }
+    })
+    invalidatePiModelCache()
+    expect((await discoverPiModels())[0].vendorId).toBe('anthropic')
+  })
+
   it('groups models by provider with the correct ModelInfo shape', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     const { discoverPiModels } = await importFresh()
@@ -263,7 +319,10 @@ describe('effortLevelsFromModel — thinkingLevelMap-driven xhigh/max derivation
   it('reasoning:true + a 5.4-shaped map ({xhigh, minimal}) → low/medium/high/xhigh, no max', async () => {
     const { effortLevelsFromModel } = await importFresh()
     expect(
-      effortLevelsFromModel({ reasoning: true, thinkingLevelMap: { xhigh: 'xhigh', minimal: 'low' } })
+      effortLevelsFromModel({
+        reasoning: true,
+        thinkingLevelMap: { xhigh: 'xhigh', minimal: 'low' }
+      })
     ).toEqual(['low', 'medium', 'high', 'xhigh'])
   })
 
@@ -333,7 +392,9 @@ describe('resolvePiSpawnModel — spawn-model resolution ladder', () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     const { resolvePiSpawnModel } = await importFresh()
     const { logger } = await import('../../services/logger')
-    expect(await resolvePiSpawnModel('anthropic/claude-sonnet-4-6')).toBe('anthropic/claude-sonnet-4-6')
+    expect(await resolvePiSpawnModel('anthropic/claude-sonnet-4-6')).toBe(
+      'anthropic/claude-sonnet-4-6'
+    )
     expect(logger.warn).not.toHaveBeenCalled()
   })
 

@@ -306,6 +306,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:get-opencode-provider-models', providerId) as ReturnType<
         ClaudeAPI['getOpencodeProviderModels']
       >,
+    getPiModelCatalogGroups: () =>
+      connection.invoke('session:get-pi-model-catalog') as ReturnType<
+        ClaudeAPI['getPiModelCatalogGroups']
+      >,
     engineIsInstalled: (engineId) =>
       connection.invoke('engine:is-installed', engineId) as ReturnType<
         ClaudeAPI['engineIsInstalled']

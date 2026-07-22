@@ -474,8 +474,7 @@ export interface EngineConfig {
 /**
  * pi engine-configurable settings (M3). Mirrors opencode's `opencodeConfig.model`
  * seam (engine-meta.ts's `defaultModelValue(perEngineDefault)`), but pi has no
- * native-config-passthrough schema to mirror opencode's `OpencodeConfigSettings` —
- * just the one configurable field for now.
+ * native-config-passthrough schema to mirror opencode's `OpencodeConfigSettings`.
  */
 export interface PiConfig {
   /** Default model picker VALUE (`"<provider>/<modelId>"`) for new pi sessions.
@@ -483,6 +482,10 @@ export interface PiConfig {
    *  block — so a model pi has locally that ClaudeUI hasn't discovered yet still
    *  works). Falls back to PI_DEFAULT_MODEL when unset/empty. */
   defaultModel?: string
+  /** ClaudeUI-private visible-model allowlist using full `<provider>/<modelId>`
+   * picker values. Undefined exposes every authenticated pi model; a present
+   * array exposes only its entries, including none when the array is empty. */
+  modelAllowlist?: string[]
 }
 
 /**
@@ -866,6 +869,8 @@ interface SessionAPI {
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
   /** All catalog models for a single opencode provider (for the model-allowlist dialog). */
   getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]>
+  /** Unfiltered authenticated pi catalog for the model-allowlist dialog. */
+  getPiModelCatalogGroups(): Promise<EngineModelGroup[]>
   /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
    *  spawn a server, so transient runtime failures can't read as "not installed". */
   engineIsInstalled(engineId: EngineId): Promise<boolean>

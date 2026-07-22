@@ -7,6 +7,7 @@ import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types
 const loadEngineConfig = vi.fn(async (): Promise<EngineConfig> => ({}))
 const saveEngineConfig = vi.fn(async () => {})
 const getEngineModels = vi.fn(async (): Promise<EngineModelGroup[]> => [])
+const getPiModelCatalogGroups = vi.fn(async (): Promise<EngineModelGroup[]> => [])
 const engineIsInstalled = vi.fn(async () => true)
 const group: EngineModelGroup = {
   engineId: 'pi',
@@ -49,12 +50,14 @@ describe('PiDefaultModelSection', () => {
     vi.clearAllMocks()
     loadEngineConfig.mockResolvedValue({})
     getEngineModels.mockResolvedValue([group])
+    getPiModelCatalogGroups.mockResolvedValue([group])
     engineIsInstalled.mockResolvedValue(true)
     useSessionStore.setState({ piDefaultModel: PI_DEFAULT_MODEL, modelReloadNonce: 0 })
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       loadEngineConfig,
       saveEngineConfig,
       getEngineModels,
+      getPiModelCatalogGroups,
       engineIsInstalled
     }
   })
@@ -118,5 +121,78 @@ describe('PiDefaultModelSection', () => {
     await screen.findByTestId('PiDefaultModelSection.defaultModel')
     expect(screen.getByTestId('PiDefaultModelSection.customModel')).toHaveValue('local/missing')
     expect(screen.getByTestId('PiDefaultModelSection.unknownWarning')).toBeInTheDocument()
+  })
+
+  it('manages an explicit allowlist while preserving the latest engine config', async () => {
+    const latest: EngineConfig = {
+      dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'] },
+      piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+    }
+    loadEngineConfig.mockResolvedValue(latest)
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+
+    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
+    const rows = await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
+    fireEvent.click(rows[0])
+    fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
+
+    await waitFor(() =>
+      expect(saveEngineConfig).toHaveBeenCalledWith('pi', {
+        ...latest,
+        piConfig: {
+          defaultModel: 'openai-codex/gpt-5.6-luna',
+          modelAllowlist: ['anthropic/claude-sonnet-5']
+        }
+      })
+    )
+    expect(useSessionStore.getState().modelReloadNonce).toBeGreaterThan(0)
+  })
+
+  it('warns when the configured default is excluded', async () => {
+    loadEngineConfig.mockResolvedValue({
+      piConfig: {
+        defaultModel: 'openai-codex/gpt-5.6-luna',
+        modelAllowlist: ['anthropic/claude-sonnet-5']
+      }
+    })
+    getEngineModels.mockResolvedValue([
+      {
+        ...group,
+        models: group.models.filter((model) => model.value !== 'openai-codex/gpt-5.6-luna')
+      }
+    ])
+    renderSection()
+
+    expect(
+      await screen.findByTestId('PiDefaultModelSection.excludedDefaultWarning')
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('PiDefaultModelSection.unknownWarning')).not.toBeInTheDocument()
+  })
+
+  it('keeps saving disabled when the unfiltered catalog fails to load', async () => {
+    getPiModelCatalogGroups.mockRejectedValueOnce(new Error('catalog unavailable'))
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
+
+    expect(await screen.findByTestId('ModelAllowlistDialog.error')).toHaveTextContent(
+      'catalog unavailable'
+    )
+    expect(screen.getByTestId('ModelAllowlistDialog.save')).toBeDisabled()
+  })
+
+  it('keeps the dialog open and reports a failed allowlist save', async () => {
+    saveEngineConfig.mockRejectedValueOnce(new Error('config write failed'))
+    renderSection()
+    await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    fireEvent.click(screen.getByTestId('PiDefaultModelSection.manageModels'))
+    await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
+    fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
+
+    expect(await screen.findByTestId('ModelAllowlistDialog.error')).toHaveTextContent(
+      'config write failed'
+    )
+    expect(screen.getByTestId('ModelAllowlistDialog')).toBeInTheDocument()
   })
 })
