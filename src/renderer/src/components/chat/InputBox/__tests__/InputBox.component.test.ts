@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
@@ -417,7 +417,9 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState({
       activeSessionId: null,
       sessions: {},
-      recentSessionIds: []
+      recentSessionIds: [],
+      lastSelectedEngineId: 'claude',
+      availableModels: []
     })
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: FC_ROUTE })
@@ -595,8 +597,66 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.engineLocked).toBe(true)
   })
 
-  it('locks engine selection until a project session exists', () => {
-    useSessionStore.setState({ activeSessionId: null })
+  it('uses an unlocked pending engine on welcome and applies it to the next project session', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      availableModels: [
+        {
+          value: 'openai/foo',
+          displayName: 'OpenCode Foo',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'openai'
+        },
+        {
+          value: 'openai/foo',
+          displayName: 'Pi Foo',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'openai'
+        }
+      ]
+    })
+    renderFC()
+
+    expect(viewProps.engineLocked).toBe(false)
+    expect(viewProps.selectedEngineId).toBe('claude')
+
+    act(() => {
+      viewProps.onSelectEngine('pi')
+    })
+
+    expect(useSessionStore.getState().lastSelectedEngineId).toBe('pi')
+    expect(localStorage.getItem('lastSelectedEngineId')).toBe('pi')
+    expect(viewProps.selectedEngineId).toBe('pi')
+    expect(viewProps.models).toEqual([
+      expect.objectContaining({ engineId: 'pi', value: 'openai/foo', displayName: 'Pi Foo' })
+    ])
+    expect(viewProps.selectedModel).toEqual(
+      expect.objectContaining({ engineId: 'pi', value: 'openai/foo', displayName: 'Pi Foo' })
+    )
+
+    act(() => {
+      useSessionStore.getState().createNewSession('welcome-pi', '/project')
+    })
+    expect(useSessionStore.getState().sessions['welcome-pi'].selectedEngineId).toBe('pi')
+  })
+
+  it.each([
+    [
+      'started',
+      (state: ReturnType<typeof useSessionStore.getState>) => ({
+        status: { ...state.sessions[FC_ROUTE].status, sessionId: 'started' }
+      })
+    ],
+    ['historical', () => ({ isHistorical: true })]
+  ])('keeps engine selection locked for a %s session', (_state, change) => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], ...change(state) }
+      }
+    }))
     renderFC()
     expect(viewProps.engineLocked).toBe(true)
   })

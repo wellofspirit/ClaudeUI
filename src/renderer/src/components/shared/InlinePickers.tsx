@@ -91,7 +91,11 @@ export function EnginePicker({
       <button
         type="button"
         disabled={locked}
-        title={locked ? 'Engine selection is unavailable' : 'Engine'}
+        title={
+          locked
+            ? 'Engine cannot change after session initialization or for historical sessions'
+            : 'Engine'
+        }
         data-testid="EnginePicker.trigger"
         onClick={(e) => {
           e.stopPropagation()

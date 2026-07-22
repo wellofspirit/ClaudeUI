@@ -167,15 +167,20 @@ export function InputBox(): React.JSX.Element {
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const setSelectedEngine = useSessionStore((s) => s.setSelectedEngine)
+  const lastSelectedEngineId = useSessionStore((s) => s.lastSelectedEngineId)
+  const setLastSelectedEngineId = useSessionStore((s) => s.setLastSelectedEngineId)
   // Engine is immutable after backend commitment. The picker remains visible
   // while locked so the selected harness identity stays explicit.
   const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
-  const engineLocked = !activeSessionId || sdkActive || !!startedSessionId || !!isHistorical
+  // On welcome, the picker controls the engine that createNewSession will seed.
+  // Once a session exists, it always reflects that session's own engine instead.
+  const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
+  const engineLocked = sdkActive || !!startedSessionId || !!isHistorical
   const pickerModels = useMemo(
-    () => filterModelsForEngine(models, sessionEngineId),
-    [models, sessionEngineId]
+    () => filterModelsForEngine(models, effectiveEngineId),
+    [models, effectiveEngineId]
   )
   // Memoized so its identity is stable across renders (it feeds several
   // downstream useMemo dependency lists). The fallback MUST stay within the
@@ -185,7 +190,7 @@ export function InputBox(): React.JSX.Element {
   const opencodeDefaultModel = useSessionStore((s) => s.opencodeDefaultModel)
   const piDefaultModel = useSessionStore((s) => s.piDefaultModel)
   const selectedModel = useMemo(() => {
-    const engine = sessionEngineId ?? 'claude'
+    const engine = effectiveEngineId ?? 'claude'
     const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
@@ -224,7 +229,7 @@ export function InputBox(): React.JSX.Element {
           : { engineId: engine, supportsAdaptiveThinking: false, supportsEffort: false })
       }
     )
-  }, [models, sessionEngineId, selectedModelValue, opencodeDefaultModel, piDefaultModel])
+  }, [models, effectiveEngineId, selectedModelValue, opencodeDefaultModel, piDefaultModel])
 
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)
@@ -793,7 +798,7 @@ export function InputBox(): React.JSX.Element {
       attachedFiles={attachedFiles}
       models={pickerModels}
       selectedModel={selectedModel}
-      selectedEngineId={sessionEngineId}
+      selectedEngineId={effectiveEngineId}
       engineLocked={engineLocked}
       effort={effectiveEffort}
       effortSupported={effortCap != null}
@@ -820,7 +825,7 @@ export function InputBox(): React.JSX.Element {
       onSlashSelect={handleSlashSelect}
       onFileMentionConfirm={handleFileMentionConfirm}
       onSelectModel={handleSelectModel}
-      onSelectEngine={setSelectedEngine}
+      onSelectEngine={activeSessionId ? setSelectedEngine : setLastSelectedEngineId}
       onSelectEffort={handleSelectEffort}
       onSelectThinking={handleSelectThinking}
       reasoningVariants={reasoningVariants}

@@ -178,7 +178,10 @@ describe('EnginePicker', () => {
 
     const trigger = screen.getByTestId('EnginePicker.trigger')
     expect(trigger).toBeDisabled()
-    expect(trigger).toHaveAttribute('title', 'Engine selection is unavailable')
+    expect(trigger).toHaveAttribute(
+      'title',
+      'Engine cannot change after session initialization or for historical sessions'
+    )
     fireEvent.click(trigger)
     expect(screen.queryByTestId('EnginePicker.option')).toBeNull()
     expect(onSelectEngine).not.toHaveBeenCalled()
