@@ -143,7 +143,7 @@ describe('discoverPiModels', () => {
       {
         value: 'openai-codex/gpt-5.6-luna',
         displayName: 'GPT-5.6 Luna',
-        description: '128k ctx',
+        description: 'GPT-5.6 Luna · 128k ctx',
         engineId: 'pi',
         vendorId: 'openai-codex',
         vision: true,
@@ -161,7 +161,7 @@ describe('discoverPiModels', () => {
       value: 'anthropic/claude-sonnet-4-6',
       vision: false,
       toolCalling: true,
-      description: '200k ctx'
+      description: 'Claude Sonnet 4.6 · 200k ctx'
     })
   })
 

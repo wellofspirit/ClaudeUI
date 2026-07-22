@@ -130,7 +130,7 @@ function groupPiModels(models: PiModel[]): EngineModelGroup[] {
     list.push({
       value: `${m.provider}/${m.id}`,
       displayName: m.name,
-      description: `${Math.round(m.contextWindow / 1000)}k ctx`,
+      description: `${m.name || m.id} · ${Math.round(m.contextWindow / 1000)}k ctx`,
       engineId: 'pi',
       vendorId: m.provider,
       vision: m.input.includes('image'),
