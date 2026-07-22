@@ -57,6 +57,8 @@ import { dispatchedUsageSummary } from '../services/db'
 import '../auth/register-auth-providers'
 import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
+import { credentialSync } from '../auth/vault/CredentialSync'
+import { sharedProviderService } from '../shared-providers'
 import { authManager } from '../services/auth-manager'
 import { accountManager } from '../services/account-manager'
 import type {
@@ -72,6 +74,10 @@ import type {
   VendorAuthMap,
   VendorAuthOption
 } from '../../shared/types'
+import type {
+  ConfigurableHarnessId,
+  SharedProviderDefinition
+} from '../../shared/shared-provider'
 import {
   discoverOpencodeModels,
   invalidateOpencodeModelCache,
@@ -79,6 +85,12 @@ import {
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import {
+  discoverPiModels,
+  getPiModelCatalogGroups,
+  invalidatePiModelCache
+} from '../pi/model-discovery'
+import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
 import {
   readOpencodeNativeConfig,
   writeOpencodeNativeConfig,
@@ -105,6 +117,7 @@ import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
+import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import { deleteSessionByEngine } from '../services/session-delete'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
@@ -339,6 +352,7 @@ const SESSION_IPC_CHANNELS = [
   'session:get-engine-models',
   'session:get-opencode-providers',
   'session:get-opencode-provider-models',
+  'session:get-pi-model-catalog',
   'session:generate-title',
   'session:generate-commit-message',
   'session:write-custom-title',
@@ -349,6 +363,8 @@ const SESSION_IPC_CHANNELS = [
   'session:list-directories',
   'session:list-opencode',
   'session:load-opencode-history',
+  'session:list-pi',
+  'session:load-pi-history',
   'session:load-history',
   'session:load-subagent-history',
   'session:build-subagent-file-map',
@@ -743,12 +759,20 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     manager.rekey(oldId, newId)
   })
 
-  // Resolve the balanced JSONL line uuid to fork ("branch off") from, given an
-  // assistant ChatMessage id. Used by the renderer before creating the branch.
+  // Resolve the fork ("branch off") anchor, engine-dispatched — Claude by
+  // messageId (JSONL line uuid), pi by messageIndex (position, no stable id).
+  // Used by the renderer before creating the branch.
   ipcMain.handle(
     'session:resolve-fork-anchor',
-    async (_event, sessionId: string, cwd: string, messageId: string) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId)
+    async (
+      _event,
+      sessionId: string,
+      cwd: string,
+      messageId: string,
+      engineId: EngineId,
+      messageIndex: number
+    ) => {
+      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
     }
   )
 
@@ -931,7 +955,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
     // opencode models — returns [] if binary not present or discovery fails
     const opencodeGroups = await discoverOpencodeModels()
-    return [claudeGroup, ...opencodeGroups]
+    // pi models — returns [] if binary not present, no auth configured, or discovery fails
+    const piGroups = await discoverPiModels()
+    return [claudeGroup, ...opencodeGroups, ...piGroups]
   })
 
   // Full opencode provider catalog for the settings provider manager. Returns []
@@ -949,6 +975,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       return await getOpencodeProviderModels(providerId)
     }
   )
+
+  // Unfiltered authenticated pi catalog for the model-allowlist dialog.
+  ipcMain.handle('session:get-pi-model-catalog', async () => getPiModelCatalogGroups())
 
   ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
     return await generateTitle(conversationText)
@@ -1005,6 +1034,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:load-opencode-history', async (_e, sessionId: string) => {
     return await loadOpencodeSessionHistory(sessionId)
+  })
+
+  ipcMain.handle('session:list-pi', async () => {
+    return await listPiSessionsGlobal()
+  })
+
+  ipcMain.handle('session:load-pi-history', async (_e, sessionId: string) => {
+    return await loadPiSessionHistory(sessionId)
   })
 
   ipcMain.handle('file:list-dir', async (_e, dirPath: string) => listDirEntries(dirPath))
@@ -1070,19 +1107,77 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     // re-discovers (otherwise a disabled/re-enabled provider only reflects after
     // an app restart).
     if (engineId === 'opencode') invalidateOpencodeModelCache()
+    if (engineId === 'pi') invalidatePiModelCache()
   })
   // Cheap, deterministic engine availability check. Backs the renderer's
-  // "is opencode installed?" gate WITHOUT spawning a server — a transient
-  // spawn/HTTP failure can no longer masquerade as "not installed". Claude is
-  // always installed (it's the bundled default engine).
-  ipcMain.handle('engine:is-installed', (_e, engineId: EngineId): boolean =>
-    engineId === 'opencode' ? opencodeServerManager.isBinaryAvailable() : true
-  )
+  // "is opencode/pi installed?" gate WITHOUT spawning a server/process — a
+  // transient spawn/HTTP failure can no longer masquerade as "not installed".
+  // Claude is always installed (it's the bundled default engine).
+  ipcMain.handle('engine:is-installed', (_e, engineId: EngineId): boolean => {
+    if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
+    if (engineId === 'pi') return piBinaryAvailable()
+    return true
+  })
+  // Absolute path to the vendored pi binary, for the Settings › pi subscription
+  // hint's copyable "run this command in a terminal" block. Null if not found.
+  ipcMain.handle('pi:binary-path', (): string | null => locatePiBinary())
+  // Read-only Codex (ChatGPT) auth-vault status for Settings › pi's "Connect
+  // ChatGPT" UI (M6c) — mirrors 'pi:binary-path''s registration shape exactly.
+  // Never returns token material; see CredentialSync.getStatus().
+  ipcMain.handle('pi:auth-status', () => credentialSync.getStatus())
   ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
     loadVendorConfig(vendorId)
   )
   ipcMain.handle('config:save-vendor-config', (_e, vendorId: string, cfg: VendorConfig) =>
     saveVendorConfig(vendorId, cfg)
+  )
+  ipcMain.handle(
+    'shared-provider:list',
+    safeHandler(async () => sharedProviderService.listDefinitions())
+  )
+  ipcMain.handle(
+    'shared-provider:statuses',
+    safeHandler(async () => sharedProviderService.listStatuses())
+  )
+  ipcMain.handle(
+    'shared-provider:models',
+    safeHandler(async (_e, id: string) => sharedProviderService.listProviderModels(id))
+  )
+  ipcMain.handle(
+    'shared-provider:save',
+    safeHandler(async (_e, definition: SharedProviderDefinition) =>
+      sharedProviderService.saveDefinition(definition)
+    )
+  )
+  ipcMain.handle(
+    'shared-provider:remove',
+    safeHandler(async (_e, id: string) => sharedProviderService.removeDefinition(id))
+  )
+  ipcMain.handle(
+    'shared-provider:set-route',
+    safeHandler(
+      async (_e, id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
+        sharedProviderService.setRouteEnabled(id, harness, enabled)
+    )
+  )
+  ipcMain.handle(
+    'shared-provider:set-key',
+    safeHandler(async (_e, id: string, key: string) => sharedProviderService.setApiKey(id, key))
+  )
+  ipcMain.handle(
+    'shared-provider:sync',
+    safeHandler(async (_e, id: string) => sharedProviderService.syncProvider(id))
+  )
+  ipcMain.handle(
+    'shared-provider:disconnect',
+    safeHandler(async (_e, id: string) => sharedProviderService.disconnectProvider(id))
+  )
+  ipcMain.handle(
+    'shared-provider:set-default',
+    safeHandler(
+      async (_e, id: string, harness: ConfigurableHarnessId, modelId?: string) =>
+        sharedProviderService.setRouteDefaultModel(id, harness, modelId)
+    )
   )
 
   // opencode engine-native settings — read/write opencode's OWN config file.

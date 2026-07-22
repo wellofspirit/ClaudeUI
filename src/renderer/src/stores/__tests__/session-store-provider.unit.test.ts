@@ -12,7 +12,12 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore, resolveOpencodeModel } from '../session-store'
+import {
+  useSessionStore,
+  resolveOpencodeModel,
+  hydrateConfigFromDisk,
+  PI_DEFAULT_MODEL
+} from '../session-store'
 import type { EngineId, ModelInfo } from '../../../../shared/types'
 import { claudeModel } from '../../../../shared/types'
 
@@ -307,5 +312,142 @@ describe('model persistence loop', () => {
     store().loadHistoricalSession('oc-y', [], '/tmp/proj')
     expect(store().sessions['oc-y']?.selectedEngineId).toBe('opencode')
     expect(store().sessions['oc-y']?.selectedModel).toBe('anthropic/claude-sonnet-4-6')
+  })
+
+  it('reopen with NO persisted model on a pi session uses piDefaultModel, NOT opencodeDefaultModel (perEngineDefaultModel regression)', () => {
+    // Mirrors the opencode case above, but for pi: before perEngineDefaultModel
+    // existed, this call site passed state.opencodeDefaultModel unconditionally
+    // regardless of engineId, so a reopened pi session with no stored model
+    // would seed from opencode's default model string instead of pi's own.
+    useSessionStore.setState({
+      sessionEngines: { 'pi-y': { engineId: 'pi' as EngineId } },
+      piDefaultModel: 'anthropic/claude-sonnet-5',
+      opencodeDefaultModel: 'opencode/mimo-v2.5-free'
+    })
+    store().loadHistoricalSession('pi-y', [], '/tmp/proj')
+    expect(store().sessions['pi-y']?.selectedEngineId).toBe('pi')
+    expect(store().sessions['pi-y']?.selectedModel).toBe('anthropic/claude-sonnet-5')
+  })
+})
+
+describe('setSelectedEngine', () => {
+  it('switches a fresh opencode session to pi using pi default and persists the engine identity', () => {
+    useSessionStore.setState({
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: 'openai/foo',
+      piDefaultModel: 'openai/foo',
+      availableModels: [
+        {
+          value: 'openai/foo',
+          displayName: 'OpenCode Foo',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'openai'
+        },
+        {
+          value: 'openai/foo',
+          displayName: 'Pi Foo',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'openai',
+          supportsEffort: true
+        }
+      ]
+    })
+    store().createNewSession('switch-engine', '/tmp/proj')
+    store().setSelectedEngine('pi')
+
+    const session = store().sessions['switch-engine']
+    expect(session.selectedEngineId).toBe('pi')
+    expect(session.selectedModel).toBe('openai/foo')
+    expect(session.status.engineId).toBe('pi')
+    expect(session.status.capabilities.reasoning.effort?.levels).toEqual(['low', 'medium', 'high'])
+    expect(store().sessionEngines['switch-engine']).toEqual({
+      engineId: 'pi',
+      model: { engineId: 'pi', vendorId: 'openai', modelId: 'foo' }
+    })
+    expect(store().lastSelectedEngineId).toBe('pi')
+    expect(localStorage.getItem('lastSelectedEngineId')).toBe('pi')
+    expect(saveSessionConfigSpy).toHaveBeenCalled()
+  })
+
+  it('does not change a committed session engine', () => {
+    store().createNewSession('committed-engine', '/tmp/proj')
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        'committed-engine': {
+          ...state.sessions['committed-engine'],
+          status: { ...state.sessions['committed-engine'].status, sessionId: 'started' }
+        }
+      }
+    }))
+    store().setSelectedEngine('pi')
+    expect(store().sessions['committed-engine'].selectedEngineId).toBe('claude')
+  })
+
+  it('does not change the engine while backend initialization is pending', () => {
+    store().createNewSession('initializing-engine', '/tmp/proj')
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        'initializing-engine': {
+          ...state.sessions['initializing-engine'],
+          sdkActive: true
+        }
+      }
+    }))
+    store().setSelectedEngine('pi')
+    expect(store().sessions['initializing-engine'].selectedEngineId).toBe('claude')
+  })
+
+  it('keeps the selected model when re-selecting the current engine', () => {
+    store().createNewSession('same-engine', '/tmp/proj')
+    store().setSelectedModel('claude-opus-4-8')
+    store().setSelectedEngine('claude')
+    expect(store().sessions['same-engine'].selectedModel).toBe('claude-opus-4-8')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// hydrateConfigFromDisk — piDefaultModel load (M3: EngineConfig.piConfig.defaultModel)
+// ---------------------------------------------------------------------------
+
+describe('hydrateConfigFromDisk loads piDefaultModel', () => {
+  /** Minimal window.api stub covering exactly what hydrateConfigFromDisk reads. */
+  function stubWindowApi(piConfig?: { defaultModel?: string }): void {
+    ;(globalThis as any).window = globalThis.window || {}
+    ;(globalThis as any).window.api = {
+      loadSettings: vi.fn().mockResolvedValue({}),
+      loadSessionConfig: vi.fn().mockResolvedValue({}),
+      loadSlashCommands: vi.fn().mockResolvedValue([]),
+      loadEngineConfig: vi.fn((engineId: string) =>
+        Promise.resolve(engineId === 'pi' ? { piConfig } : {})
+      ),
+      loadOpencodeSettings: vi.fn().mockResolvedValue({}),
+      saveSettings: vi.fn(),
+      saveSessionConfig: vi.fn()
+    } as any
+  }
+
+  it('sets piDefaultModel from EngineConfig.piConfig.defaultModel when present', async () => {
+    stubWindowApi({ defaultModel: 'anthropic/claude-sonnet-5' })
+    await hydrateConfigFromDisk()
+    expect(useSessionStore.getState().piDefaultModel).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('falls back to PI_DEFAULT_MODEL when piConfig.defaultModel is unset', async () => {
+    stubWindowApi(undefined)
+    await hydrateConfigFromDisk()
+    expect(useSessionStore.getState().piDefaultModel).toBe(PI_DEFAULT_MODEL)
+  })
+
+  it('falls back to PI_DEFAULT_MODEL when loadEngineConfig("pi") rejects', async () => {
+    stubWindowApi()
+    ;(globalThis as any).window.api.loadEngineConfig = vi.fn((engineId: string) =>
+      engineId === 'pi' ? Promise.reject(new Error('no config file')) : Promise.resolve({})
+    )
+    await hydrateConfigFromDisk()
+    expect(useSessionStore.getState().piDefaultModel).toBe(PI_DEFAULT_MODEL)
   })
 })

@@ -1,4 +1,10 @@
 import type { ResolvedCapabilities } from './model-capabilities'
+import type {
+  ConfigurableHarnessId,
+  SharedProviderDefinition,
+  SharedProviderModel,
+  SharedProviderStatus
+} from './shared-provider'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -57,7 +63,7 @@ export interface ChatMessage {
   planContent?: string
 }
 
-export type EngineId = 'claude' | 'opencode'
+export type EngineId = 'claude' | 'opencode' | 'pi'
 
 /** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
 export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
@@ -78,6 +84,11 @@ export function claudeModel(modelId: string): ModelRef {
 /** Construct an opencode ModelRef (engine 'opencode', vendor = providerId). */
 export function opencodeModel(vendorId: VendorId, modelId: string): ModelRef {
   return { engineId: 'opencode', vendorId, modelId }
+}
+
+/** Construct a pi ModelRef (engine 'pi', vendor = provider id, e.g. 'openai-codex'). */
+export function piModel(vendorId: VendorId, modelId: string): ModelRef {
+  return { engineId: 'pi', vendorId, modelId }
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +128,19 @@ export interface VendorAuthOption {
   type: 'api' | 'oauth'
   label: string
   prompts?: Array<{ type: string; key: string; message: string; secret?: boolean }>
+}
+
+/**
+ * Read-only snapshot of the M6a/M6b auth vault's Codex (ChatGPT) credential —
+ * CredentialSync.getStatus(). Drives PiVendors.tsx's (M6c) "Connect ChatGPT"
+ * UI. NEVER carries token material (access/refresh).
+ */
+export interface PiAuthStatus {
+  connected: boolean
+  email?: string
+  accountId?: string
+  expiresAt?: number
+  needsReauth: boolean
 }
 
 /** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
@@ -287,6 +311,8 @@ export interface SandboxSettings {
 export interface OpencodeProviderSettings {
   name?: string
   baseURL?: string
+  /** Native provider adapter package (provider.npm). */
+  npm?: string
   models?: { id: string; name?: string }[]
 }
 
@@ -441,6 +467,25 @@ export interface EngineConfig {
   opencodeConfig?: OpencodeConfigSettings
   /** Cross-engine dispatch INTO this engine (ADR-033). */
   dispatch?: DispatchConfig
+  /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
+  piConfig?: PiConfig
+}
+
+/**
+ * pi engine-configurable settings (M3). Mirrors opencode's `opencodeConfig.model`
+ * seam (engine-meta.ts's `defaultModelValue(perEngineDefault)`), but pi has no
+ * native-config-passthrough schema to mirror opencode's `OpencodeConfigSettings`.
+ */
+export interface PiConfig {
+  /** Default model picker VALUE (`"<provider>/<modelId>"`) for new pi sessions.
+   *  Free-text (validated against discoverPiModels() with a warning, not a hard
+   *  block — so a model pi has locally that ClaudeUI hasn't discovered yet still
+   *  works). Falls back to PI_DEFAULT_MODEL when unset/empty. */
+  defaultModel?: string
+  /** ClaudeUI-private visible-model allowlist using full `<provider>/<modelId>`
+   * picker values. Undefined exposes every authenticated pi model; a present
+   * array exposes only its entries, including none when the array is empty. */
+  modelAllowlist?: string[]
 }
 
 /**
@@ -675,9 +720,19 @@ interface SessionAPI {
     engineId?: EngineId
   ): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
-  /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given
-   *  an assistant message id. Returns { anchorUuid: null, reason } on failure. */
-  resolveForkAnchor(sessionId: string, cwd: string, messageId: string): Promise<ForkAnchorResult>
+  /** Resolve the fork ("branch off") anchor for an engine session. Claude:
+   *  `messageId` (the renderer's ChatMessage.id) resolves to a JSONL line
+   *  uuid; `messageIndex` is unused. pi: no stable id exists, so `messageIndex`
+   *  (the message's position in the store's `messages` array) resolves to a
+   *  pi entryId (or the clone-latest sentinel) instead; `messageId` is unused.
+   *  Returns { anchorUuid: null, reason } on failure. */
+  resolveForkAnchor(
+    sessionId: string,
+    cwd: string,
+    messageId: string,
+    engineId: EngineId,
+    messageIndex: number
+  ): Promise<ForkAnchorResult>
   sendPrompt(
     routingId: string,
     prompt: string,
@@ -701,6 +756,12 @@ interface SessionAPI {
   /** Load a persisted opencode session's transcript as ChatMessage[] (read-only,
    *  for painting history on sidebar click). Best-effort: returns [] on error. */
   loadOpencodeHistory(sessionId: string): Promise<ChatMessage[]>
+  /** Fetch the global pi session list (all cwds, read from ~/.pi/agent/sessions).
+   *  Best-effort: returns [] on error. */
+  listPiSessionsGlobal(): Promise<SessionInfo[]>
+  /** Load a persisted pi session's transcript as ChatMessage[] (read-only,
+   *  for painting history on sidebar click). Best-effort: returns [] on error. */
+  loadPiHistory(sessionId: string): Promise<ChatMessage[]>
   loadSessionHistory(
     sessionId: string,
     projectKey: string
@@ -808,6 +869,8 @@ interface SessionAPI {
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
   /** All catalog models for a single opencode provider (for the model-allowlist dialog). */
   getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]>
+  /** Unfiltered authenticated pi catalog for the model-allowlist dialog. */
+  getPiModelCatalogGroups(): Promise<EngineModelGroup[]>
   /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
    *  spawn a server, so transient runtime failures can't read as "not installed". */
   engineIsInstalled(engineId: EngineId): Promise<boolean>
@@ -869,6 +932,27 @@ interface SessionAPI {
   setOpencodeAgentDisabled(name: string, scope: OpencodeAgentScope, cwd: string | undefined, disabled: boolean): Promise<void>
   generateOpencodeAgent(description: string, cwd?: string): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
   logError(source: string, message: string): void
+}
+
+interface SharedProviderAPI {
+  listSharedProviders(): Promise<SharedProviderDefinition[]>
+  getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
+  listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
+  saveSharedProvider(definition: SharedProviderDefinition): Promise<void>
+  removeSharedProvider(id: string): Promise<void>
+  setSharedProviderRoute(
+    id: string,
+    harness: ConfigurableHarnessId,
+    enabled: boolean
+  ): Promise<void>
+  setSharedProviderApiKey(id: string, key: string): Promise<void>
+  syncSharedProvider(id: string): Promise<void>
+  disconnectSharedProvider(id: string): Promise<void>
+  setSharedProviderDefaultModel(
+    id: string,
+    harness: ConfigurableHarnessId,
+    modelId?: string
+  ): Promise<void>
 }
 
 interface GitAPI {
@@ -1185,6 +1269,7 @@ export interface ClaudeAPI
     VendorAuthAPI,
     RemoteAPI,
     VoiceAPI,
+    SharedProviderAPI,
     PluginAPI {
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
@@ -1192,6 +1277,12 @@ export interface ClaudeAPI
   getVersionInfo(): Promise<{ appVersion: string; sdkVersion: string; cliVersion: string }>
   /** Open the standalone log viewer window */
   openLogViewer(): Promise<void>
+  /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not
+   *  found. Settings › pi's subscription hint block (`pi /login`). */
+  getPiBinaryPath(): Promise<string | null>
+  /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives
+   *  PiVendors.tsx's "Connect ChatGPT" UI — never returns token material. */
+  getPiAuthStatus(): Promise<PiAuthStatus>
 }
 
 // ---------------------------------------------------------------------------

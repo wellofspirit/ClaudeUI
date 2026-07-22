@@ -6,6 +6,28 @@
 import { engineAuthRegistry } from './EngineAuthRegistry'
 import { claudeAuthProvider } from './ClaudeAuthProvider'
 import { opencodeAuthProvider } from './OpencodeAuthProvider'
+import { piAuthProvider } from './PiAuthProvider'
+import { credentialSync } from './vault/CredentialSync'
+import { SharedProviderRepository } from '../shared-providers/SharedProviderRepository'
 
 engineAuthRegistry.register('claude', claudeAuthProvider)
 engineAuthRegistry.register('opencode', opencodeAuthProvider)
+engineAuthRegistry.register('pi', piAuthProvider)
+
+// M6b: wire CredentialSync's two engine feed targets here — the composition
+// root. This is the ONLY place that imports both piAuthProvider/
+// opencodeAuthProvider AND credentialSync together, which is what breaks the
+// PiAuthProvider.ts <-> CredentialSync.ts cycle that would otherwise exist
+// (PiAuthProvider drives credentialSync.beginLogin/completeLogin;
+// credentialSync feeds INTO piAuthProvider/opencodeAuthProvider). Mirrors
+// OpencodeServerManager.setCallerSessionLookup's dependency-injection wiring
+// in main/index.ts for an analogous cycle.
+const sharedProviderRepository = new SharedProviderRepository()
+credentialSync.configure({
+  pi: piAuthProvider,
+  opencode: opencodeAuthProvider,
+  getEnabledRoutes: () => {
+    const routes = sharedProviderRepository.get('chatgpt')?.routes
+    return { pi: routes?.pi.enabled ?? true, opencode: routes?.opencode.enabled ?? true }
+  }
+})

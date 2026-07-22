@@ -384,7 +384,8 @@ interface SessionMetaRow {
 }
 
 function rowToMeta(row: SessionMetaRow): SessionMeta {
-  const engineId: EngineId = row.engine_id === 'opencode' ? 'opencode' : 'claude'
+  const engineId: EngineId =
+    row.engine_id === 'opencode' || row.engine_id === 'pi' ? row.engine_id : 'claude'
   if (row.model_id != null) {
     return {
       engineId,
@@ -519,7 +520,7 @@ export function importSessionEnginesOnce(
   for (const [sessionId, entry] of entries) {
     // Clamp unknown/codex engineIds to 'claude'
     const engineId: EngineId =
-      entry.engineId === 'claude' || entry.engineId === 'opencode'
+      entry.engineId === 'claude' || entry.engineId === 'opencode' || entry.engineId === 'pi'
         ? (entry.engineId as EngineId)
         : 'claude'
 

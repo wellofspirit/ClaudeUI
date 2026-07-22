@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
@@ -388,16 +388,21 @@ describe('InputBox FC — rendered', () => {
       record('session:set-thinking-mode', ...args)
       return null
     })
-    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
-      record('session:set-reasoning-variant', ...args)
-      return null
-    })
+    app.bridge.ipcMain.handle(
+      'session:set-reasoning-variant',
+      (_e: unknown, ...args: unknown[]) => {
+        record('session:set-reasoning-variant', ...args)
+        return null
+      }
+    )
     app.bridge.ipcMain.handle('session:cancel', (_e: unknown, ...args: unknown[]) => {
       record('session:cancel', ...args)
       return null
     })
     app.bridge.ipcMain.handle('session:get-models', () => [])
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [{ engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
+    ])
     app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
       record('voice:start-recording', ...args)
       return null
@@ -412,7 +417,9 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState({
       activeSessionId: null,
       sessions: {},
-      recentSessionIds: []
+      recentSessionIds: [],
+      lastSelectedEngineId: 'claude',
+      availableModels: []
     })
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: FC_ROUTE })
@@ -543,29 +550,118 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
   })
 
-  it('onSelectModel: picking a Claude model on an opencode session switches the engine to claude', async () => {
-    // Regression: Claude ModelInfo entries may lack an explicit engineId. The
-    // pick resolution must treat a missing engineId as 'claude' — NOT fall back
-    // to the session's current engine — otherwise a Claude pick on an opencode
-    // session is recorded as "opencode/<claudeModelId>" (e.g. "opencode/default")
-    // and the engine never switches, breaking the chat.
-    renderFC()
+  it('fresh model list is scoped to the selected engine', async () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedEngineId: 'opencode' }
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai/foo'
+        }
       },
-      // Claude entry with engineId undefined (as supportedModels() returns it).
-      availableModels: [{ value: 'default', displayName: 'Default', description: '' }]
+      availableModels: [
+        {
+          value: 'openai/foo',
+          displayName: 'OpenCode Foo',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'openai'
+        },
+        {
+          value: 'openai/foo',
+          displayName: 'Pi Foo',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'openai'
+        }
+      ]
     }))
+    renderFC()
+    expect(viewProps.models).toEqual([
+      expect.objectContaining({ engineId: 'pi', value: 'openai/foo' })
+    ])
+    expect(viewProps.selectedModel).toEqual(
+      expect.objectContaining({ displayName: 'Pi Foo', engineId: 'pi' })
+    )
+  })
 
-    viewProps.onSelectModel('default')
+  it('hides engine selection as soon as backend initialization starts', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
+      }
+    }))
+    renderFC()
+    expect(viewProps.engineLocked).toBe(true)
+    expect(viewProps.showEnginePicker).toBe(false)
+  })
 
-    const s = useSessionStore.getState()
-    expect(s.sessions[FC_ROUTE].selectedEngineId).toBe('claude')
-    expect(s.sessions[FC_ROUTE].selectedModel).toBe('default')
-    // No opencode-engine attribution leaked into setModel.
-    expect(ipcCalls['session:set-model']).toBeUndefined()
+  it('uses an unlocked pending engine on welcome and applies it to the next project session', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      availableModels: [
+        {
+          value: 'openai/foo',
+          displayName: 'OpenCode Foo',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'openai'
+        },
+        {
+          value: 'openai/foo',
+          displayName: 'Pi Foo',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'openai'
+        }
+      ]
+    })
+    renderFC()
+
+    expect(viewProps.engineLocked).toBe(false)
+    expect(viewProps.showEnginePicker).toBe(true)
+    expect(viewProps.selectedEngineId).toBe('claude')
+
+    act(() => {
+      viewProps.onSelectEngine('pi')
+    })
+
+    expect(useSessionStore.getState().lastSelectedEngineId).toBe('pi')
+    expect(localStorage.getItem('lastSelectedEngineId')).toBe('pi')
+    expect(viewProps.selectedEngineId).toBe('pi')
+    expect(viewProps.models).toEqual([
+      expect.objectContaining({ engineId: 'pi', value: 'openai/foo', displayName: 'Pi Foo' })
+    ])
+    expect(viewProps.selectedModel).toEqual(
+      expect.objectContaining({ engineId: 'pi', value: 'openai/foo', displayName: 'Pi Foo' })
+    )
+
+    act(() => {
+      useSessionStore.getState().createNewSession('welcome-pi', '/project')
+    })
+    expect(useSessionStore.getState().sessions['welcome-pi'].selectedEngineId).toBe('pi')
+  })
+
+  it.each([
+    [
+      'started',
+      (state: ReturnType<typeof useSessionStore.getState>) => ({
+        status: { ...state.sessions[FC_ROUTE].status, sessionId: 'started' }
+      })
+    ],
+    ['historical', () => ({ isHistorical: true })]
+  ])('hides engine selection for a %s session', (_state, change) => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], ...change(state) }
+      }
+    }))
+    renderFC()
+    expect(viewProps.engineLocked).toBe(true)
+    expect(viewProps.showEnginePicker).toBe(false)
   })
 
   it('opencode session with an unavailable model falls back to an opencode model, not Claude', async () => {
@@ -964,12 +1060,14 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     app = await bootTestApp()
 
     app.bridge.ipcMain.handle('session:get-models', () => [])
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
-      engineId: 'claude',
-      vendorId: 'anthropic',
-      vendorName: 'Anthropic',
-      models: []
-    }])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        vendorName: 'Anthropic',
+        models: []
+      }
+    ])
     app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
     app.bridge.ipcMain.handle('file:list-dir', () => [])
 
@@ -998,14 +1096,16 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
           ...session,
           status: {
             ...session.status,
-            account: billingType !== undefined
-              ? {
-                  engineId: 'opencode' as const,
-                  vendorId: 'opencode',
-                  billingType: billingType as import('../../../../../../shared/types').BillingType,
-                  authState: 'authenticated' as const
-                }
-              : null
+            account:
+              billingType !== undefined
+                ? {
+                    engineId: 'opencode' as const,
+                    vendorId: 'opencode',
+                    billingType:
+                      billingType as import('../../../../../../shared/types').BillingType,
+                    authState: 'authenticated' as const
+                  }
+                : null
           }
         }
       }
@@ -1068,27 +1168,32 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
     }
 
     app.bridge.ipcMain.handle('session:get-models', () => [])
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
-      engineId: 'opencode',
-      vendorId: 'minimax',
-      vendorName: 'MiniMax',
-      models: [
-        {
-          value: 'minimax/minimax-01',
-          displayName: 'MiniMax-01',
-          description: 'MiniMax · MiniMax-01',
-          engineId: 'opencode',
-          vendorId: 'minimax',
-          supportsEffort: false,
-          supportsAdaptiveThinking: false,
-          reasoningVariants: ['none', 'thinking']
-        }
-      ]
-    }])
-    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
-      record('session:set-reasoning-variant', ...args)
-      return null
-    })
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      {
+        engineId: 'opencode',
+        vendorId: 'minimax',
+        vendorName: 'MiniMax',
+        models: [
+          {
+            value: 'minimax/minimax-01',
+            displayName: 'MiniMax-01',
+            description: 'MiniMax · MiniMax-01',
+            engineId: 'opencode',
+            vendorId: 'minimax',
+            supportsEffort: false,
+            supportsAdaptiveThinking: false,
+            reasoningVariants: ['none', 'thinking']
+          }
+        ]
+      }
+    ])
+    app.bridge.ipcMain.handle(
+      'session:set-reasoning-variant',
+      (_e: unknown, ...args: unknown[]) => {
+        record('session:set-reasoning-variant', ...args)
+        return null
+      }
+    )
     app.bridge.ipcMain.handle('session:set-model', (_e: unknown, ...args: unknown[]) => {
       record('session:set-model', ...args)
       return null
@@ -1234,5 +1339,153 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
 
     // No reasoningVariants on Claude model → empty or absent
     expect(viewProps.reasoningVariants ?? []).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pi model fallback (C1 fix) — InputBox's selectedModel memo must never leak
+// Claude's Adaptive-thinking / 5-tier effort pickers onto a pi session via the
+// synthetic last-resort ModelInfo. An empty catalog (no auth / discovery
+// failure) is pi's normal cold-start state — before the fix, the synthetic
+// fallback carried no capability flags, so claudeModelCapabilities()'s
+// unknown-family heuristic assumed a modern Claude model and turned both
+// pickers on.
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — pi model fallback (C1 fix)', () => {
+  const PI_ROUTE = 'pi-route-1'
+
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [])
+    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: []
+    })
+    useSessionStore.getState().createNewSession(PI_ROUTE, '/test/cwd')
+    useSessionStore.setState({ activeSessionId: PI_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  it('empty catalog: fallback ModelInfo has no adaptive/effort picker (regression guard)', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [PI_ROUTE]: {
+          ...state.sessions[PI_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai-codex/gpt-5.6-luna'
+        }
+      },
+      availableModels: []
+    }))
+
+    renderFC()
+
+    expect(viewProps.adaptiveSupported).toBe(false)
+    expect(viewProps.effortSupported).toBe(false)
+    expect(viewProps.allowedEffortLevels).toEqual([])
+    expect(viewProps.selectedModel.displayName).toBe('Select a model')
+  })
+
+  it('discovered pi model with supportsEffort: effort picker shows exactly low/medium/high, no adaptive', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [PI_ROUTE]: {
+          ...state.sessions[PI_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai-codex/gpt-5.6-luna'
+        }
+      },
+      availableModels: [
+        {
+          value: 'openai-codex/gpt-5.6-luna',
+          displayName: 'GPT-5.6 Luna',
+          description: '200k ctx',
+          engineId: 'pi',
+          vendorId: 'openai-codex',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high'],
+          supportsAdaptiveThinking: false
+        }
+      ]
+    }))
+
+    renderFC()
+
+    expect(viewProps.adaptiveSupported).toBe(false)
+    expect(viewProps.effortSupported).toBe(true)
+    expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high'])
+  })
+
+  it('unavailable selectedModel falls back to the configured piDefaultModel, not the first pi model', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [PI_ROUTE]: {
+          ...state.sessions[PI_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai-codex/stale-model' // not in availableModels below
+        }
+      },
+      piDefaultModel: 'anthropic/claude-sonnet-5',
+      availableModels: [
+        {
+          value: 'openai-codex/gpt-5.6-luna',
+          displayName: 'GPT-5.6 Luna (first in list)',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'openai-codex'
+        },
+        {
+          value: 'anthropic/claude-sonnet-5',
+          displayName: 'Claude Sonnet 5 (configured default)',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'anthropic'
+        }
+      ]
+    }))
+
+    renderFC()
+
+    expect(viewProps.selectedModel.value).toBe('anthropic/claude-sonnet-5')
+    expect(viewProps.selectedModel.displayName).toBe('Claude Sonnet 5 (configured default)')
+  })
+
+  it('claude session with empty catalog keeps the "Default" wording (unchanged behavior)', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [PI_ROUTE]: {
+          ...state.sessions[PI_ROUTE],
+          selectedEngineId: 'claude',
+          selectedModel: 'default'
+        }
+      },
+      availableModels: []
+    }))
+
+    renderFC()
+
+    expect(viewProps.selectedModel.displayName).toBe('Default')
   })
 })

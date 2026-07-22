@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest'
 import { engineToolMap } from '../engine-tool-maps'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
 import { OpencodeEngineToolMap } from '../OpencodeEngineToolMap'
+import { PiEngineToolMap } from '../PiEngineToolMap'
 import type { EngineId } from '../../../../../../shared/types'
 
 describe('engineToolMap', () => {
@@ -21,8 +22,12 @@ describe('engineToolMap', () => {
     expect(engineToolMap('opencode')).toBe(OpencodeEngineToolMap)
   })
 
+  it('resolves pi to PiEngineToolMap', () => {
+    expect(engineToolMap('pi')).toBe(PiEngineToolMap)
+  })
+
   it('has a defined tool map for every EngineId', () => {
-    const ids: EngineId[] = ['claude', 'opencode']
+    const ids: EngineId[] = ['claude', 'opencode', 'pi']
     for (const id of ids) {
       expect(engineToolMap(id)).toBeTruthy()
     }

@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
 import type { OpencodeConfigSettings, EngineModelGroup } from '../../../../../shared/types'
+import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
 
 // ── window.api stub ──────────────────────────────────────────────────
 let savedConfigs: OpencodeConfigSettings[] = []
@@ -51,7 +52,11 @@ const OPENCODE_GROUP: EngineModelGroup = {
 
 function installApiStub(
   initial: OpencodeConfigSettings,
-  opts?: { models?: EngineModelGroup[]; credIds?: Record<string, 'api' | 'oauth'> }
+  opts?: {
+    models?: EngineModelGroup[]
+    credIds?: Record<string, 'api' | 'oauth'>
+    sharedProviders?: SharedProviderDefinition[]
+  }
 ): void {
   credIdState = opts?.credIds ? structuredClone(opts.credIds) : {}
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
@@ -65,7 +70,8 @@ function installApiStub(
     saveOpencodeSettings,
     vendorAuthListKeys,
     vendorAuthSetKey,
-    vendorAuthRemove
+    vendorAuthRemove,
+    listSharedProviders: vi.fn(async () => opts?.sharedProviders ?? [])
   }
 }
 
@@ -193,6 +199,73 @@ describe('opencode Providers section', () => {
       expect(last.providers?.['new-id']?.models).toEqual([{ id: 'llama3.2' }])
       expect(last.providers?.['old-id']).toBeUndefined()
     })
+  })
+
+  it('preserves a provider npm adapter when editing another projected field', async () => {
+    installApiStub({
+      providers: {
+        managed: {
+          npm: '@ai-sdk/openai-compatible',
+          baseURL: 'https://old.example/v1',
+          models: [{ id: 'model' }]
+        }
+      }
+    })
+    await act(async () => {
+      renderProvidersSection()
+    })
+
+    const urlInput = await screen.findByDisplayValue('https://old.example/v1')
+    await act(async () => {
+      fireEvent.change(urlInput, { target: { value: 'https://new.example/v1' } })
+    })
+
+    await waitFor(() => {
+      const saved = savedConfigs[savedConfigs.length - 1]
+      expect(saved.providers?.managed).toMatchObject({
+        npm: '@ai-sdk/openai-compatible',
+        baseURL: 'https://new.example/v1'
+      })
+    })
+  })
+
+  it('renders a shared provider as read-only and keeps native auth controls unavailable', async () => {
+    installApiStub(
+      {
+        providers: {
+          shared: {
+            npm: '@ai-sdk/openai-compatible',
+            baseURL: 'https://example.test/v1',
+            models: [{ id: 'model' }]
+          }
+        }
+      },
+      {
+        credIds: { shared: 'api' },
+        sharedProviders: [
+          {
+            id: 'shared',
+            name: 'Shared',
+            kind: 'custom',
+            protocol: 'openai-completions',
+            baseUrl: 'https://example.test/v1',
+            models: [{ id: 'model' }],
+            routes: { pi: { enabled: false }, opencode: { enabled: true } },
+            managed: true
+          }
+        ]
+      }
+    )
+    await act(async () => {
+      renderProvidersSection()
+    })
+
+    expect(await screen.findByTestId('OpencodeProvidersSection.managedProvider')).toHaveAttribute(
+      'data-id',
+      'shared'
+    )
+    expect(screen.queryByTestId('OpencodeProvidersSection.removeKey')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Provider id (e.g. my-ollama)')).not.toBeInTheDocument()
   })
 
   describe('per-row API key', () => {

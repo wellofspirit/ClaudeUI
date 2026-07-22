@@ -28,6 +28,7 @@ import { BaseSession } from '../providers/BaseSession'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
+import { sharedProviderService } from '../shared-providers'
 import { prepareAndCreateSession } from './create-session'
 import {
   sendPrompt,
@@ -127,8 +128,8 @@ export function registerRemoteHandlers(
 
   dispatcher.register(
     'session:resolve-fork-anchor',
-    async (sessionId: string, cwd: string, messageId: string) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId)
+    async (sessionId: string, cwd: string, messageId: string, engineId: EngineId, messageIndex: number) => {
+      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
     }
   )
 
@@ -312,6 +313,11 @@ export function registerRemoteHandlers(
     saveSessions(win, config, { notifyMainWindow: true })
   )
   dispatcher.register('config:load-slash-commands', async () => loadSlashCommands())
+  dispatcher.register('shared-provider:list', async () => sharedProviderService.listDefinitions())
+  dispatcher.register('shared-provider:statuses', async () => sharedProviderService.listStatuses())
+  dispatcher.register('shared-provider:models', async (id: string) =>
+    sharedProviderService.listProviderModels(id)
+  )
   dispatcher.register('config:scan-custom-commands', async (cwd: string) => scanCustomCommands(cwd))
   dispatcher.register('config:load-skill-details', async (cwd: string) =>
     loadSkillDetails(manager, cwd)

@@ -19,10 +19,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { parse as jsoncParse, modify, applyEdits } from 'jsonc-parser'
 import type { FormattingOptions } from 'jsonc-parser'
-import {
-  loadEngineConfig,
-  saveEngineConfig
-} from '../services/ui-config'
+import { loadEngineConfig, saveEngineConfig } from '../services/ui-config'
 import { detectEol, safeRead, jsoncParseSafe } from './opencode-jsonc-io'
 import type { OpencodeConfigSettings, OpencodeProviderSettings } from '../../shared/types'
 
@@ -63,8 +60,8 @@ export function resolveOpencodeConfigFile(): { path: string; existed: boolean } 
 
 /**
  * Map opencode's native provider record shape → ClaudeUI's OpencodeProviderSettings:
- *   { name?, options?: { baseURL? }, models?: Record<id, {name?}> }
- *   → { name?, baseURL?, models?: { id, name? }[] }
+ *   { name?, npm?, options?: { baseURL? }, models?: Record<id, {name?}> }
+ *   → { name?, npm?, baseURL?, models?: { id, name? }[] }
  */
 function nativeProviderToSettings(
   id: string,
@@ -72,6 +69,7 @@ function nativeProviderToSettings(
 ): OpencodeProviderSettings {
   const result: OpencodeProviderSettings = {}
   if (typeof entry.name === 'string' && entry.name) result.name = entry.name
+  if (typeof entry.npm === 'string' && entry.npm) result.npm = entry.npm
   const options = entry.options as Record<string, unknown> | undefined
   if (options && typeof options.baseURL === 'string' && options.baseURL) {
     result.baseURL = options.baseURL
@@ -95,11 +93,10 @@ function nativeProviderToSettings(
 function settingsProviderToNative(p: OpencodeProviderSettings): Record<string, unknown> {
   const entry: Record<string, unknown> = {}
   if (p.name) entry.name = p.name
+  if (p.npm) entry.npm = p.npm
   if (p.baseURL) entry.options = { baseURL: p.baseURL }
   if (p.models && p.models.length > 0) {
-    entry.models = Object.fromEntries(
-      p.models.map((m) => [m.id, m.name ? { name: m.name } : {}])
-    )
+    entry.models = Object.fromEntries(p.models.map((m) => [m.id, m.name ? { name: m.name } : {}]))
   }
   return entry
 }
@@ -117,10 +114,10 @@ export type NativeOpencodeFields = Pick<
  * public reader and the diff-driven writer project through it so the write diff
  * base is computed identically to what the UI reads.
  *
- * The projection is deliberately LOSSY: it models only `{name?, baseURL?,
+ * The projection is deliberately LOSSY: it models only `{name?, npm?, baseURL?,
  * models:{id,name?}[]}` per provider and `{model?, temperature?}` per agent.
  * Everything else opencode understands (model-level attachment/modalities/
- * tool_call/cost/limit, provider-level npm/options.apiKey, unknown agent fields)
+ * tool_call/cost/limit, provider-level options.apiKey, unknown agent fields)
  * is invisible here — which is exactly why the writer must never round-trip a
  * whole subtree from this projection.
  */
@@ -278,7 +275,7 @@ function arraysEqual(a: string[] | undefined, b: string[] | undefined): boolean 
  *     different, delete when emptied.
  *   - provider: per id — add (whole native shape), remove (delete subtree, which
  *     IS user intent), or keep with per-field leaf edits (name, options.baseURL,
- *     models per id). Never touches unmodelled fields (npm, options.apiKey,
+ *     npm, models per id). Never touches unmodelled fields (options.apiKey,
  *     model attachment/modalities/tool_call/cost/limit/…).
  *   - agent: per name — add/remove/keep; keep touches only model/temperature and
  *     preserves unknown entry fields (prompt, mode, permission, …).
@@ -343,7 +340,11 @@ export function writeOpencodeNativeConfig(fields: NativeOpencodeFields): void {
   reconcileScalar('small_model', normScalar(fields.smallModel), current.smallModel)
 
   // ── disabled_providers / enabled_providers (atomic arrays) ──────────────────
-  reconcileArray('disabled_providers', normArray(fields.disabledProviders), current.disabledProviders)
+  reconcileArray(
+    'disabled_providers',
+    normArray(fields.disabledProviders),
+    current.disabledProviders
+  )
   reconcileArray('enabled_providers', normArray(fields.enabledProviders), current.enabledProviders)
 
   // ── provider (per id, per field) ────────────────────────────────────────────
@@ -365,6 +366,12 @@ export function writeOpencodeNativeConfig(fields: NativeOpencodeFields): void {
       if (inName !== curName) {
         if (inName === undefined) del(['provider', id, 'name'])
         else set(['provider', id, 'name'], inName)
+      }
+      const inNpm = normScalar(incoming.npm)
+      const curNpm = normScalar(cur.npm)
+      if (inNpm !== curNpm) {
+        if (inNpm === undefined) del(['provider', id, 'npm'])
+        else set(['provider', id, 'npm'], inNpm)
       }
       const inBase = normScalar(incoming.baseURL)
       const curBase = normScalar(cur.baseURL)

@@ -664,3 +664,223 @@ export function resolveOpencodeCapabilitiesFromModel(
     m ? { capabilities: { attachment: m.vision, toolcall: m.toolCalling } } : undefined
   )
 }
+
+/**
+ * pi engine capabilities (ADR-030 capability honesty: every flag is false
+ * except what a shipped milestone fully wires end-to-end). Flip plan for
+ * later milestones (see the M1 kickoff spec's milestone list):
+ *   - interactiveApprovals:true, autonomyModes: ['ask','autoEdit','full'] →
+ *     SHIPPED in M2a via the approval-bridge extension (`pi.on('tool_call',
+ *     …)`, verified in M0; PiBridgeHost + permission-engine.ts).
+ *   - plan:true, autonomyModes includes 'plan' → SHIPPED in M5a: extension-
+ *     enforced read-only autonomy. Unlike opencode's built-in `plan` agent,
+ *     pi has no native plan mode — ClaudeUI's bridge extension
+ *     (pi-bridge-source.ts) toggles pi's own active-tool set on
+ *     `/cui-plan-enter`/`/cui-plan-exit` (dropping edit/write, adding a
+ *     locally-executed `exit_plan` tool) while permission-engine.ts's
+ *     `planModeBaseDecision` independently gates bash to a read-only
+ *     allowlist and denies everything else — defense in depth, not either
+ *     layer alone. The autonomy↔permission-mode mapping (settings-sections.tsx)
+ *     already mapped 'plan'↔'plan' for every engine before this flip (verified
+ *     against src/shared/__tests__/autonomy-mode.test.ts) — only the
+ *     capability flags and the pi-side implementation were missing.
+ *   - steer:true → SHIPPED in M2b: PiSession.run()'s busy path now sends
+ *     `streamingBehavior:'steer'` (delivered after the current tool calls
+ *     finish, before the next LLM call — verified, docs/protocol-pi/README.md).
+ *     `queue` stays true alongside it: the two flags gate the SAME
+ *     send-while-busy affordance (InputBox's queueEnabled derives from
+ *     `capabilities.queue` only — `capabilities.steer` is read nowhere in the
+ *     renderer, it is a pure ADR-030 honesty/documentation flag), and the
+ *     renderer's queued-message UI resolves identically either way via the
+ *     engine-neutral `session:steer-consumed` ack.
+ *   - slashCommands:true, skills:true → SHIPPED in M2b via `get_commands`
+ *     (doStart(), once per spawn): emits `session:slash-commands` (all
+ *     non-temporary-scope entries, '/'-prefixed) and `session:skills` (source
+ *     === 'skill' entries, `skill:` prefix stripped) — same wire contract as
+ *     OpencodeSession's listCommands/listSkills emission. `skills:true` is
+ *     safe despite `discoverSkills` staying UNIMPLEMENTED here: SkillsDialog's
+ *     only data path (`loadSkillDetails` IPC handler) already does
+ *     `delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)` — the optional-call
+ *     falls back to Claude's filesystem scanner instead of throwing.
+ *     `session:skills` therefore only drives the TopBar Skills-button
+ *     availability hint. M3 (shared skills) deliberately did NOT add
+ *     `PiSession.discoverSkills` — the generic `scanSkills(cwd)` fallback
+ *     already covers the SkillsDialog's directory listing adequately, and the
+ *     actually-loaded skill set (M3's real deliverable) is driven by the
+ *     bridge extension's `resources_discover` handler (`CLAUDEUI_PI_SKILL_DIRS`,
+ *     computed in PiSession.doStart) feeding pi's OWN skill loader, which is
+ *     what surfaces as `skill:<name>` in `get_commands` above — no second
+ *     discovery path needed.
+ *   - auth.canDriveLogin → flipped true in M6c. The "TUI-only, permanently
+ *     false" note above is now obsolete for ONE vendor: `openai-codex`
+ *     (ChatGPT). ClaudeUI's own auth vault (M6a AuthVault + M6b
+ *     CredentialSync) now drives that vendor's OAuth login end-to-end —
+ *     PiAuthProvider.oauthAuthorize/oauthCallback/cancelVendorOauth delegate
+ *     to credentialSync.beginLogin/completeLogin/cancelLogin — and PiVendors.tsx
+ *     surfaces a real in-app "Connect ChatGPT" flow (shared with opencode,
+ *     same `authorizeVendorOAuth` store action) instead of a run-in-a-terminal
+ *     hint. pi's OTHER subscription vendors (anthropic, github-copilot, xai,
+ *     radius — PiAuthProvider.ts's PI_SUBSCRIPTION_VENDOR_IDS) remain
+ *     undriven: `pi /login` in a terminal is still the only path for those,
+ *     and PiVendors.tsx keeps the terminal hint for them. This flag itself
+ *     has no renderer consumer (grepped: only this file, EngineAuthProvider.ts's
+ *     doc comments, and PiAuthProvider.ts's doc comment reference it) — it is
+ *     ADR-030 capability-honesty bookkeeping, not a UI gate. The actual
+ *     per-vendor UI decision in PiVendors.tsx is a hardcoded
+ *     `vendorId === 'openai-codex'` check, not a read of this flag, so
+ *     flipping it does NOT wrongly enable driven login for pi's other
+ *     subscription vendors.
+ *   - hostedMcp → SHIPPED in M4a: the hosted render_mermaid/create_mockup/
+ *     show_mockup tools are bridged through pi's extension API
+ *     (pi.registerTool() in pi-bridge-source.ts, calling back over
+ *     PiBridgeHost's POST /hosted-tool route to PiSession.handleHostedTool),
+ *     auto-allowed via permission-engine.ts's PI_AUTO_ALLOW_HOSTED_TOOLS.
+ *   - sideQuestion → SHIPPED: pi has no in-session, non-persisting "ask" RPC
+ *     (prompt/steer/followUp all persist to the active branch) and no
+ *     equivalent of Claude's in-session `side_question` control_request, so
+ *     `/btw` is answered by a TRANSCRIPT-FED EPHEMERAL pi process instead of
+ *     a blank one — PiSession.askSideQuestion builds a bounded context string
+ *     from THIS session's own retained `messageHistory`, spawns an isolated
+ *     `pi --mode rpc --no-session` process (the same bare spawn shape
+ *     model-discovery.ts uses — no bridge/subagent/hosted env, so this
+ *     ephemeral gets none of the live session's tool-call gating), sends one
+ *     framing prompt telling the model it is observing and must not act, and
+ *     reads `get_last_assistant_text` once `agent_settled` fires. Bounded
+ *     overall timeout; null on any failure (binary missing, spawn error,
+ *     rejected prompt, timeout) — the UI already handles null gracefully. See
+ *     askSideQuestion's own doc comment for the full mechanism and the
+ *     documented fidelity limitation (visible transcript only, never pi's
+ *     in-flight internal state).
+ *   - fork/forkFromMessage → SHIPPED in M5c: pi's `clone`/`fork` RPCs stand in
+ *     for cli.js's `--resume-session-at`/`--fork-session` flags. `fork` has no
+ *     stable id ClaudeUI can match a renderer message against (a live
+ *     assistant ChatMessage.id is a uuid event-mapper.ts synthesizes, never
+ *     persisted), so `resolveForkAnchor`'s pi branch (session-history.ts,
+ *     delegating to pi-session-list.ts's `resolvePiForkAnchor`) resolves by
+ *     POSITION instead — the store's `idx` into its own `messages` array,
+ *     which is the SAME sequence pi-session-list.ts's `convertPiSessionEntries`
+ *     produces from disk. PiSession.doStart, when `forkSession`, resumes the
+ *     SOURCE then (BEFORE any set_model/effort application, so configuring
+ *     the fork never mutates the source) either `fork {entryId}` (drop that
+ *     user entry + everything after — verified against the real binary: this
+ *     ALONE already creates a new file and leaves the source untouched, no
+ *     preceding `clone` needed) or, when forking the LATEST message (no
+ *     later user entry to drop), `clone` alone (duplicate the active branch
+ *     at its current position). Either way it adopts the resulting NEW
+ *     sessionId before continuing, and skips the stored-history replay (the
+ *     renderer already has the correct truncated view from the store's own
+ *     optimistic seed) — mirrors ClaudeSession's identical "forks excluded"
+ *     cost-seeding posture.
+ *   - backgroundTasks, voice →
+ *     unwired; each becomes a dedicated follow-up once its RPC surface is
+ *     wired the same way OpencodeSession's were.
+ *   - subagents → SHIPPED in M5b: a SECOND ClaudeUI-owned extension
+ *     (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS) registers a
+ *     `subagent` pi.registerTool() that spawns one child `pi --mode json -p`
+ *     process per user-level agent definition (`~/.pi/agent/agents/*.md`,
+ *     port of pi's own shipped example) and streams its progress through the
+ *     SAME `session:subagent-*`/TaskCard pipeline the cross-engine dispatch
+ *     target uses (event-mapper.ts's `subagent_update` MapperOutput →
+ *     PiSession.dispatchOutput). Flipped true only because that full path —
+ *     tool visible → gated ('task' kind) → child spawned → streamed →
+ *     result rendered — is genuinely wired, not because pi has any NATIVE
+ *     subagent concept (it has none; this is entirely a ClaudeUI construct,
+ *     same posture as hostedMcp/crossEngineDispatch above).
+ *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
+ *     (see EngineCapabilities' own doc comment) — likely permanently false.
+ *   - crossEngineDispatch → SHIPPED both directions: pi as a dispatch SOURCE
+ *     (M4b — `dispatch_agent`, same registerTool mechanism as hostedMcp above,
+ *     PiSession.handleDispatchAgent calling crossEngineDispatcher.dispatch()
+ *     directly — NOT via MCP) AND pi as a dispatch TARGET (M4c —
+ *     cross-engine-dispatcher.ts's engine guard accepts 'pi' as `req.engine`
+ *     and routes it through `resolveAndRunPi`). The static `true` here is
+ *     ANDed with the runtime `crossEngineDispatchAvailable('pi')` check at
+ *     PiSession's `capabilities` getter (mirrors ClaudeSession/
+ *     OpencodeSession's identical AND at session build — ADR-030/033 M4-A).
+ */
+export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  hostedMcp: true,
+  backgroundTasks: false,
+  subagents: true,
+  plan: true,
+  fork: true,
+  forkFromMessage: true,
+  steer: true,
+  queue: true,
+  slashCommands: true,
+  skills: true,
+  sideQuestion: true,
+  interactiveApprovals: true,
+  sandbox: false,
+  proxy: false,
+  autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
+  auth: { canDriveLogin: true, multiAccount: false },
+  crossEngineDispatch: true
+}
+
+/**
+ * Derive ModelCapabilities for a pi model. pi's reasoning is TWO things that
+ * must not be conflated: `thinkingLevel` is a SESSION-WIDE off/low/…/max dial
+ * (`set_thinking_level`), not a per-model thinking-MODE axis like Claude's
+ * adaptive/enabled/disabled — so `reasoning.thinking` is never populated here
+ * (no Adaptive picker for any pi model, ever). `reasoning.effort` DOES flip
+ * per-model (M2b): when the catalog's `reasoning` fact is true, the model
+ * accepts `set_thinking_level`. The caller may pass `effortLevels` (derived
+ * by `model-discovery.ts`'s `effortLevelsFromModel` from the catalog's
+ * `thinkingLevelMap` — verified probe, 2026-07-20: the map's keys ARE
+ * xhigh/max support) to expose the model's actual tiers, including xhigh/max
+ * where supported; omitting it falls back to the conservative low/medium/high
+ * set (back-compat for callers that haven't traced a PiModel through yet).
+ * toolCalling is always true — every pi model that can be selected has tool
+ * support (pi has no text-only-model concept exposed via get_available_models).
+ */
+export function piModelCapabilities(
+  m?: {
+    vision?: boolean
+    contextWindow?: number
+    maxOutput?: number
+    reasoning?: boolean
+    effortLevels?: EffortLevel[]
+  }
+): ModelCapabilities {
+  return {
+    reasoning: m?.reasoning ? { effort: { levels: m.effortLevels ?? ['low', 'medium', 'high'] } } : {},
+    vision: !!m?.vision,
+    toolCalling: true,
+    contextWindow: m?.contextWindow ?? 200_000,
+    maxOutput: m?.maxOutput ?? 8192,
+    promptCaching: true
+  }
+}
+
+/**
+ * Convenience: compute ResolvedCapabilities for a pi session from the fuller
+ * PiModel-derived shape (vision/contextWindow/maxOutput) — PiSession's own
+ * call site, once connected and the model catalog is warm.
+ */
+export function resolvePiCapabilities(
+  m?: Parameters<typeof piModelCapabilities>[0]
+): ResolvedCapabilities {
+  return resolveCapabilities(PI_ENGINE_CAPABILITIES, piModelCapabilities(m))
+}
+
+/**
+ * Seed ResolvedCapabilities for a pi session from a discovered ModelInfo's flat
+ * capability flags (renderer pre-spawn gating, before status.capabilities
+ * becomes authoritative on connect). ModelInfo carries no structured
+ * contextWindow/maxOutput (model-discovery.ts encodes context size into the
+ * description string instead), so those fall back to piModelCapabilities'
+ * defaults until PiSession resolves the full PiModel post-connect. `reasoning`
+ * is likewise not a ModelInfo field — PI_META.seedCapabilities derives it from
+ * ModelInfo.supportsEffort (the flag model-discovery.ts already sets per the
+ * catalog's `reasoning` fact) before calling this, and passes ModelInfo's own
+ * `supportedEffortLevels` through as `effortLevels` (already carrying
+ * xhigh/max per model via `effortLevelsFromModel` — model-discovery.ts) so
+ * the pre-spawn seed and PiSession's post-connect resolve agree.
+ */
+export function resolvePiCapabilitiesFromModel(
+  m?: Parameters<typeof piModelCapabilities>[0]
+): ResolvedCapabilities {
+  return resolvePiCapabilities(m)
+}

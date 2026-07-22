@@ -11,7 +11,8 @@ import {
   type ThinkingMode
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
-import { engineMeta } from '../../../../shared/engine-meta'
+import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
+import { EngineLogo } from './EngineLogo'
 
 export interface ModelDisplay {
   value: string
@@ -69,6 +70,78 @@ function deriveModelGroups(
     groupMap.get(key)!.items.push(m)
   }
   return Array.from(groupMap.entries()).map(([key, g]) => ({ key, ...g }))
+}
+
+export function EnginePicker({
+  selectedEngineId,
+  locked,
+  onSelectEngine
+}: {
+  selectedEngineId: EngineId
+  locked: boolean
+  onSelectEngine: (engineId: EngineId) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+  const selected = engineMeta(selectedEngineId)
+
+  return (
+    <div className="relative" ref={ref} data-testid="EnginePicker">
+      <button
+        type="button"
+        disabled={locked}
+        title={
+          locked
+            ? 'Engine cannot change after session initialization or for historical sessions'
+            : 'Engine'
+        }
+        data-testid="EnginePicker.trigger"
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(!open)
+        }}
+        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <EngineLogo engineId={selectedEngineId} size={11} className="shrink-0" />
+        <span>{selected.label}</span>
+        <svg
+          width="8"
+          height="8"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 w-36 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          {Object.values(ENGINE_META).map((meta) => (
+            <button
+              key={meta.id}
+              type="button"
+              data-testid="EnginePicker.option"
+              data-engine={meta.id}
+              onClick={() => {
+                onSelectEngine(meta.id)
+                setOpen(false)
+              }}
+              className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
+                meta.id === selectedEngineId
+                  ? 'text-text-primary bg-bg-hover'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
+              {meta.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function ModelPicker({

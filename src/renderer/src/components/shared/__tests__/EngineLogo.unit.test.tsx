@@ -4,6 +4,7 @@
  * Asserts that the correct SVG mark is rendered for each engineId:
  * - 'claude' → svg with aria-label="Claude"
  * - 'opencode' → svg with aria-label="opencode"
+ * - 'pi' → svg with aria-label="pi"
  *
  * The mark is selected via the ENGINE_MARK table keyed by engineId.
  */
@@ -27,15 +28,24 @@ describe('EngineLogo', () => {
     expect(svg!.getAttribute('aria-label')).toBe('opencode')
   })
 
-  it('uses the provided size for both marks', () => {
+  it('renders the pi mark for engineId="pi"', () => {
+    const { container } = render(<EngineLogo engineId="pi" size={12} className="" />)
+    const svg = container.querySelector('svg')
+    expect(svg).not.toBeNull()
+    expect(svg!.getAttribute('aria-label')).toBe('pi')
+  })
+
+  it('uses the provided size for all marks', () => {
     const { container: claudeContainer } = render(
       <EngineLogo engineId="claude" size={20} className="" />
     )
     const { container: opencodeContainer } = render(
       <EngineLogo engineId="opencode" size={20} className="" />
     )
+    const { container: piContainer } = render(<EngineLogo engineId="pi" size={20} className="" />)
     expect(claudeContainer.querySelector('svg')!.getAttribute('width')).toBe('20')
     expect(opencodeContainer.querySelector('svg')!.getAttribute('width')).toBe('20')
+    expect(piContainer.querySelector('svg')!.getAttribute('width')).toBe('20')
   })
 
   it('passes className through to the svg element', () => {
@@ -58,5 +68,19 @@ describe('EngineLogo', () => {
   it('opencode svg has viewBox 0 0 512 512', () => {
     const { container } = render(<EngineLogo engineId="opencode" size={12} className="" />)
     expect(container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 512 512')
+  })
+
+  it('pi mark uses currentColor (no hardcoded fill color)', () => {
+    const { container } = render(<EngineLogo engineId="pi" size={12} className="" />)
+    const paths = container.querySelectorAll('path')
+    expect(paths).toHaveLength(2)
+    for (const path of paths) {
+      expect(path.getAttribute('fill')).toBe('currentColor')
+    }
+  })
+
+  it('pi svg preserves the supplied logo viewBox', () => {
+    const { container } = render(<EngineLogo engineId="pi" size={12} className="" />)
+    expect(container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 800 800')
   })
 })

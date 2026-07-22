@@ -224,6 +224,51 @@ describe('createCollabServer', () => {
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('dispatch.defaultModel')
   })
+
+  // -------------------------------------------------------------------------
+  // ADR-033 M4c — pi as a second dispatch target (engine enum widening)
+  // -------------------------------------------------------------------------
+
+  it("the engine param's schema accepts 'pi' and rejects an unlisted engine value", () => {
+    const server = createCollabServer(makeCtx())
+    const engineSchema = server.tools[0].inputSchema.engine as unknown as {
+      safeParse: (v: unknown) => { success: boolean }
+    }
+    expect(engineSchema.safeParse('pi').success).toBe(true)
+    expect(engineSchema.safeParse('opencode').success).toBe(true)
+    expect(engineSchema.safeParse('codex').success).toBe(false)
+  })
+
+  it("accepts engine: 'pi' and delegates to the dispatcher with the full context (ADR-033 M4c)", async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'pi says hi', sessionId: 'pi-sess-1' })
+    const ctx = makeCtx()
+    const server = createCollabServer(ctx)
+    const extra = makeExtra()
+
+    const result = await server.tools[0].handler(
+      { engine: 'pi', prompt: 'do a thing', model: 'openai-codex/gpt-5.6-luna' },
+      extra
+    )
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      { engine: 'pi', prompt: 'do a thing', model: 'openai-codex/gpt-5.6-luna', sessionId: undefined },
+      {
+        fromEngine: 'claude',
+        fromRoutingId: 'routing-1',
+        cwd: '/tmp/project',
+        autonomyMode: 'acceptEdits',
+        emit: ctx.emit,
+        addDispatchedCost: ctx.addDispatchedCost,
+        extra
+      }
+    )
+    expect(result.isError).toBeUndefined()
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('pi says hi')
+    expect(text).toContain('session_id: pi-sess-1')
+  })
 })
 
 describe('createCollabServer — dispatch_agent model hint (ADR-033 follow-up)', () => {
@@ -278,5 +323,31 @@ describe('createCollabServer — dispatch_agent model hint (ADR-033 follow-up)',
     peekSpy.mockReturnValueOnce(null)
     createCollabServer(makeCtx())
     expect(peekSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('bakes an INDEPENDENT pi model hint alongside the opencode one (ADR-033 M4c)', () => {
+    // First call is the opencode hint (loadEngineConfig('opencode')), second
+    // is pi's (loadEngineConfig('pi')) — see createCollabServer's call order.
+    vi.mocked(loadEngineConfig)
+      .mockReturnValueOnce({ dispatch: { defaultModel: 'openai/gpt-5' } })
+      .mockReturnValueOnce({
+        dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'], defaultModel: 'openai-codex/gpt-5.6-luna' }
+      })
+    const server = createCollabServer(makeCtx())
+    const description = server.tools[0].description
+    expect(description).toContain('openai/gpt-5') // opencode hint survives
+    expect(description).toContain('openai-codex/gpt-5.6-luna') // pi hint present too
+
+    const modelParamDescribe = (
+      server.tools[0].inputSchema.model as unknown as { description?: string }
+    ).description
+    expect(modelParamDescribe).toContain('openai-codex/gpt-5.6-luna')
+  })
+
+  it('falls back to the generic pi "provider/modelId" hint when pi has nothing configured or cached', () => {
+    vi.mocked(loadEngineConfig).mockReturnValueOnce({}).mockReturnValueOnce({})
+    vi.mocked(peekOpencodeModels).mockReturnValueOnce(null)
+    const server = createCollabServer(makeCtx())
+    expect(server.tools[0].description).toContain('provider/modelId')
   })
 })

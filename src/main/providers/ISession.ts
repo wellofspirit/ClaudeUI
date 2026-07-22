@@ -164,7 +164,9 @@ export interface ISession {
  * ignore options they do not consume (noted per member).
  */
 export interface EngineSpawnOptions {
-  /** Reasoning-effort tier. Claude-only — opencode uses per-model reasoning variants instead. */
+  /** Reasoning-effort tier. Claude + pi (M2b: applied via `set_thinking_level`
+   *  at spawn when the resolved model supports it) — opencode uses per-model
+   *  reasoning variants instead. */
   effort?: string
   /** Engine session id to resume. Consumed by both engines. */
   resumeSessionId?: string
@@ -176,9 +178,13 @@ export interface EngineSpawnOptions {
   sandboxConfig?: SandboxSettings
   /** Thinking mode ('adaptive' | 'enabled' | 'disabled'). Claude-only. */
   thinkingMode?: string
-  /** Transcript line uuid to resume at (branch-off anchor, ADR-010). Claude-only. */
+  /** Fork ("branch off") anchor, in the engine's own convention: a JSONL line
+   *  uuid for Claude (ADR-010), or a pi entryId / the clone-latest sentinel
+   *  for pi (M5c) — see PiSession.doStart's fork block. opencode fork is
+   *  unwired (ADR-030). */
   resumeSessionAt?: string
-  /** Fork at resumeSessionAt into a new session (ADR-010). Claude-only — opencode fork is unwired (ADR-030). */
+  /** Fork at resumeSessionAt into a new session (ADR-010 Claude; M5c pi via
+   *  clone/fork RPCs). opencode fork is unwired (ADR-030). */
   forkSession?: boolean
 }
 

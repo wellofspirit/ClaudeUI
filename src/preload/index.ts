@@ -62,8 +62,14 @@ const api: ClaudeAPI = {
       engineId
     ),
   rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
-  resolveForkAnchor: (sessionId: string, cwd: string, messageId: string) =>
-    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+  resolveForkAnchor: (
+    sessionId: string,
+    cwd: string,
+    messageId: string,
+    engineId: import('../shared/types').EngineId,
+    messageIndex: number
+  ) =>
+    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
   sendPrompt: (
     routingId: string,
     prompt: string,
@@ -93,6 +99,8 @@ const api: ClaudeAPI = {
   listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
   loadOpencodeHistory: (sessionId: string) =>
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
+  listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
+  loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
@@ -188,7 +196,10 @@ const api: ClaudeAPI = {
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
   getOpencodeProviderModels: (providerId: string) =>
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+  getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
   engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+  getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
+  getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
   generateCommitMessage: (diff: string) =>
@@ -379,6 +390,19 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
     ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+  listSharedProviders: () => unwrap('shared-provider:list'),
+  getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
+  listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),
+  saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+  removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
+  setSharedProviderRoute: (id, harness, enabled) =>
+    unwrap('shared-provider:set-route', id, harness, enabled),
+  setSharedProviderApiKey: (id: string, key: string) =>
+    unwrap('shared-provider:set-key', id, key),
+  syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
+  disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
+  setSharedProviderDefaultModel: (id, harness, modelId?) =>
+    unwrap('shared-provider:set-default', id, harness, modelId),
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)

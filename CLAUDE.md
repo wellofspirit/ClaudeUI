@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # ClaudeUI
 
-A desktop client for coding agents, built with Electron + React 19 + TypeScript. Runs Claude Code (rebundled `bun-claude` binary, in-house stream-json harness — no agent SDK) and opencode side by side behind an engine-neutral session layer. Package manager: **bun**.
+A desktop client for coding agents, built with Electron + React 19 + TypeScript. Runs Claude Code (rebundled `bun-claude` binary, in-house stream-json harness — no agent SDK), opencode (`opencode serve` over HTTP+SSE), and pi (`pi --mode rpc` over stdio JSONL) side by side behind an engine-neutral session layer. Package manager: **bun**.
 
 ## Documentation
 
 Full documentation index: [docs/README.md](docs/README.md)
 
-Architecture, services, persistence, multi-engine design → `docs/architecture.md`. cli.js wire protocol + build pipeline + patches → `docs/protocol/` (authoritative — consult before theorizing about cli.js behavior). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
+Architecture, services, persistence, multi-engine design → `docs/architecture.md`. cli.js wire protocol + build pipeline + patches → `docs/protocol/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
 
 ## Development Workflow (read this first)
 
@@ -30,6 +30,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 - `bun run typecheck` / `bun run lint` / `bun run format`
 - `bun run rebuild:native` — **run after every `bun install`/`add`/`remove`**; bun leaves a Node-ABI `better-sqlite3` that crashes the app on boot (`ERR_DLOPEN_FAILED`)
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary; version pinned via `package.json#claudeCliVersion`
+- `bun run ensure-pi` / `update-pi` — vendor the pinned pi binary (`package.json#piCliVersion`); `ensure-opencode` / `update-opencode` likewise for opencode
 
 ## Testing
 

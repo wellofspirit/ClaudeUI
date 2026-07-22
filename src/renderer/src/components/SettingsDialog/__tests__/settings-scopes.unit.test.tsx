@@ -20,20 +20,21 @@ import {
 import {
   CLAUDE_ENGINE_CAPABILITIES,
   OPENCODE_ENGINE_CAPABILITIES,
+  PI_ENGINE_CAPABILITIES,
   type EngineCapabilities
 } from '../../../../../shared/model-capabilities'
 
 describe('SCOPES structure', () => {
-  it('has exactly 3 scopes', () => {
-    expect(SCOPES).toHaveLength(3)
+  it('has exactly 4 scopes', () => {
+    expect(SCOPES).toHaveLength(4)
   })
 
-  it('scope ids are common / claude / opencode', () => {
-    expect(SCOPES.map((s) => s.id)).toEqual(['common', 'claude', 'opencode'])
+  it('scope ids are common / claude / opencode / pi', () => {
+    expect(SCOPES.map((s) => s.id)).toEqual(['common', 'claude', 'opencode', 'pi'])
   })
 
-  it('scope labels are Common / Claude / opencode', () => {
-    expect(SCOPES.map((s) => s.label)).toEqual(['Common', 'Claude', 'opencode'])
+  it('scope labels are Common / Claude / opencode / pi', () => {
+    expect(SCOPES.map((s) => s.label)).toEqual(['Common', 'Claude', 'opencode', 'pi'])
   })
 
   describe('common scope', () => {
@@ -46,10 +47,10 @@ describe('SCOPES structure', () => {
       expect(common.subgroups[0].label).toBeUndefined()
     })
 
-    it('contains the 12 app sections in order', () => {
+    it('contains the 13 app sections in order', () => {
       const ids = common.subgroups.flatMap((sg) => sg.sections.map((s) => s.id))
       expect(ids).toEqual([
-        'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+        'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
         'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
       ])
     })
@@ -117,6 +118,26 @@ describe('SCOPES structure', () => {
     it('Agents subgroup contains opencode-agents', () => {
       const agents = opencode.subgroups.find((sg) => sg.label === 'Agents')!
       expect(agents.sections.map((s) => s.id)).toEqual(['opencode-agents'])
+    })
+  })
+
+  describe('pi scope', () => {
+    const pi = SCOPES.find((s) => s.id === 'pi')!
+
+    it('exists', () => expect(pi).toBeDefined())
+
+    it('has 2 subgroups: Engine, Vendor', () => {
+      expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor'])
+    })
+
+    it('Engine subgroup contains only pi-models (no auto-mode/dispatch in M3)', () => {
+      const engine = pi.subgroups.find((sg) => sg.label === 'Engine')!
+      expect(engine.sections.map((s) => s.id)).toEqual(['pi-models'])
+    })
+
+    it('Vendor subgroup contains vendor-pi', () => {
+      const vendor = pi.subgroups.find((sg) => sg.label === 'Vendor')!
+      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-pi'])
     })
   })
 
@@ -190,6 +211,14 @@ describe('SECTION_SCOPE_MAP', () => {
   it('vendor-anthropic → claude', () => {
     expect(SECTION_SCOPE_MAP.get('vendor-anthropic')).toBe('claude')
   })
+
+  it('pi-models → pi', () => {
+    expect(SECTION_SCOPE_MAP.get('pi-models')).toBe('pi')
+  })
+
+  it('vendor-pi → pi', () => {
+    expect(SECTION_SCOPE_MAP.get('vendor-pi')).toBe('pi')
+  })
 })
 
 describe('Anthropic vendor section', () => {
@@ -222,7 +251,13 @@ describe('Per-section capability gating (#12)', () => {
   it('scopeCapabilities maps scope → static engine caps (common = null)', () => {
     expect(scopeCapabilities('claude')).toBe(CLAUDE_ENGINE_CAPABILITIES)
     expect(scopeCapabilities('opencode')).toBe(OPENCODE_ENGINE_CAPABILITIES)
+    expect(scopeCapabilities('pi')).toBe(PI_ENGINE_CAPABILITIES)
     expect(scopeCapabilities('common')).toBeNull()
+  })
+
+  it('pi declares no sandbox / proxy (M3 has no launch-param sections for it)', () => {
+    expect(PI_ENGINE_CAPABILITIES.sandbox).toBe(false)
+    expect(PI_ENGINE_CAPABILITIES.proxy).toBe(false)
   })
 
   it('Claude declares the sandbox + proxy launch-param capabilities', () => {

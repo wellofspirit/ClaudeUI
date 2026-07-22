@@ -77,6 +77,62 @@ export function mergeOpencodeIntoDirectories(
   return result
 }
 
+/**
+ * Merge pi SessionInfo[] into an existing DirectoryGroup[]. Structurally
+ * identical to mergeOpencodeIntoDirectories (own function rather than a
+ * parameterized shared helper, so opencode's behavior stays byte-for-byte
+ * unchanged — see the M1 kickoff spec's "additive edits only" constraint) —
+ * filters out stale 'pi' entries first (replace-not-accumulate on every poll),
+ * then groups the fresh ones by projectKey, creating a new group when no
+ * Claude/opencode group already covers that cwd.
+ */
+export function mergePiIntoDirectories(current: DirectoryGroup[], piInfos: SessionInfo[]): DirectoryGroup[] {
+  const byProjectKey = new Map<string, DirectoryGroup>()
+  const order: string[] = []
+  for (const g of current) {
+    byProjectKey.set(g.projectKey, { ...g, sessions: [...g.sessions] })
+    order.push(g.projectKey)
+  }
+
+  for (const [key, group] of byProjectKey) {
+    const filtered = group.sessions.filter((s) => s.engineId !== 'pi')
+    byProjectKey.set(key, { ...group, sessions: filtered })
+  }
+
+  for (const info of piInfos) {
+    const projectKey = info.projectKey
+    let group = byProjectKey.get(projectKey)
+    if (!group) {
+      const folderName = info.cwd.split(/[\\/]/).pop() || info.cwd
+      group = { cwd: info.cwd, projectKey, folderName, sessions: [] }
+      byProjectKey.set(projectKey, group)
+      order.push(projectKey)
+    }
+    group.sessions.push(info)
+  }
+
+  for (const group of byProjectKey.values()) {
+    group.sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+  }
+
+  const result: DirectoryGroup[] = []
+  const seen = new Set<string>()
+  for (const key of order) {
+    if (seen.has(key)) continue
+    seen.add(key)
+    const group = byProjectKey.get(key)
+    if (group && group.sessions.length > 0) result.push(group)
+  }
+
+  result.sort((a, b) => {
+    const aMax = a.sessions[0]?.lastActivityAt ?? 0
+    const bMax = b.sessions[0]?.lastActivityAt ?? 0
+    return bMax - aMax
+  })
+
+  return result
+}
+
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
   cwd: string
@@ -320,6 +376,14 @@ export function Sidebar({
     } catch {
       // Best-effort — opencode not installed or server down → Claude-only list.
     }
+    try {
+      const piInfos = await window.api.listPiSessionsGlobal()
+      if (piInfos.length > 0) {
+        merged = mergePiIntoDirectories(merged, piInfos)
+      }
+    } catch {
+      // Best-effort — pi not installed or no sessions yet → unchanged list.
+    }
     setDirectories(merged)
   }, [setDirectories])
 
@@ -383,6 +447,29 @@ export function Sidebar({
       // Best-effort history load (returns [] if opencode is down) — paints the
       // transcript immediately rather than waiting for the first new prompt.
       const messages = await window.api.loadOpencodeHistory(info.sessionId).catch(() => [])
+      loadHistoricalSession(routingId, messages, info.cwd)
+      if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
+      addRecentSession(routingId)
+      switchSession(routingId)
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
+
+    // pi sessions: same treatment as opencode above, but the "always resume by
+    // id" nuance does NOT apply — pi is a claude-shaped (spawn-per-session,
+    // no server) engine, so PiSession only resumes when session-store's own
+    // isHistorical gate is true (i.e. this history load actually returned
+    // messages), exactly like Claude. No extra sessionEngines/resumeSessionId
+    // wiring is needed here beyond seeding engineId, same as the opencode branch.
+    if (info.engineId === 'pi') {
+      const storeState = useSessionStore.getState()
+      const sessionEngines = {
+        ...storeState.sessionEngines,
+        [routingId]: { ...storeState.sessionEngines[routingId], engineId: 'pi' as const }
+      }
+      useSessionStore.setState({ sessionEngines })
+      window.api.saveSessionConfig({ sessionEngines })
+      const messages = await window.api.loadPiHistory(info.sessionId).catch(() => [])
       loadHistoricalSession(routingId, messages, info.cwd)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)

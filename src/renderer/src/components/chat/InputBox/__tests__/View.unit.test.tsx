@@ -62,6 +62,9 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     attachedFiles: [],
     models: [baseModel],
     selectedModel: baseModel,
+    selectedEngineId: 'claude',
+    engineLocked: false,
+    showEnginePicker: true,
     effort: 'xhigh',
     effortSupported: true,
     allowedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -82,6 +85,7 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     onSlashSelect: vi.fn(),
     onFileMentionConfirm: vi.fn(),
     onSelectModel: vi.fn(),
+    onSelectEngine: vi.fn(),
     onSelectEffort: vi.fn(),
     onSelectThinking: vi.fn(),
     onOpenSandboxSettings: vi.fn(),
@@ -101,6 +105,21 @@ beforeEach(() => {
   ;(globalThis as { window: { api?: unknown } }).window.api = {
     saveSessionConfig: () => {}
   }
+})
+
+describe('engine and model controls', () => {
+  it('renders the engine picker immediately before the model picker', () => {
+    render(<InputBoxView {...makeProps()} />)
+    const enginePicker = screen.getByTestId('EnginePicker')
+    const modelPicker = screen.getByTestId('ModelPicker')
+    expect(enginePicker.nextElementSibling).toBe(modelPicker)
+  })
+
+  it('hides the engine picker without hiding the model picker', () => {
+    render(<InputBoxView {...makeProps({ showEnginePicker: false })} />)
+    expect(screen.queryByTestId('EnginePicker')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ModelPicker')).toBeInTheDocument()
+  })
 })
 
 describe('ThinkingPicker', () => {

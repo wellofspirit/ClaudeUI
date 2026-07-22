@@ -9,13 +9,15 @@
  * renderer near their consumers (they must not pull React into shared/).
  */
 import type { EngineId, VendorId, ModelRef, ModelInfo } from './types'
-import { claudeModel, opencodeModel } from './types'
+import { claudeModel, opencodeModel, piModel } from './types'
 import type { EngineCapabilities, ResolvedCapabilities } from './model-capabilities'
 import {
   CLAUDE_ENGINE_CAPABILITIES,
   OPENCODE_ENGINE_CAPABILITIES,
+  PI_ENGINE_CAPABILITIES,
   resolveClaudeCapabilities,
-  resolveOpencodeCapabilitiesFromModel
+  resolveOpencodeCapabilitiesFromModel,
+  resolvePiCapabilitiesFromModel
 } from './model-capabilities'
 
 /**
@@ -25,6 +27,17 @@ import {
  * re-exports it for existing importers.
  */
 export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
+
+/**
+ * The hard-coded pi fallback model VALUE. `openai-codex` is pi's provider id
+ * for the ChatGPT-subscription flow (shares opencode's Codex OAuth client —
+ * see docs/protocol-pi/README.md "Auth"). A per-engine configurable default
+ * (mirroring opencode's opencodeConfig.model) shipped in M3 — Settings'
+ * PiDefaultModelSection + session-store's `piDefaultModel` — and takes
+ * precedence via `defaultModelValue`'s `perEngineDefault` param below; this
+ * constant remains the fallback when that's unset/empty.
+ */
+export const PI_DEFAULT_MODEL = 'openai-codex/gpt-5.6-luna'
 
 /** Free/bundled opencode vendors (OpenCode Zen) that never require auth credentials. */
 export const FREE_OPENCODE_VENDOR_IDS: ReadonlySet<string> = new Set(['opencode', 'zen'])
@@ -86,12 +99,52 @@ const OPENCODE_META: EngineMeta = {
 }
 
 /**
+ * pi's picker-value convention mirrors opencode's exactly (`"<provider>/<modelId>"`,
+ * split on the FIRST '/', fallback vendor when no slash) — see
+ * docs/protocol-pi/README.md / the M1 kickoff spec's "Architecture decisions".
+ */
+const PI_META: EngineMeta = {
+  id: 'pi',
+  label: 'pi',
+  capabilities: PI_ENGINE_CAPABILITIES,
+  defaultVendorId: 'openai-codex',
+  defaultModelValue: (perEngineDefault) => perEngineDefault || PI_DEFAULT_MODEL,
+  encodeModelValue: (ref) => `${ref.vendorId}/${ref.modelId}`,
+  decodeModelValue: (value) => {
+    const slash = value.indexOf('/')
+    return slash >= 0
+      ? piModel(value.slice(0, slash), value.slice(slash + 1))
+      : piModel('openai-codex', value)
+  },
+  // ModelInfo has no `reasoning` field of its own — derive it from
+  // supportsEffort (the flag model-discovery.ts sets from the catalog's
+  // `reasoning: boolean` fact per model, M2b) so seeded capabilities agree
+  // with the effort picker the SAME ModelInfo drives in the renderer. Pass
+  // ModelInfo's own `supportedEffortLevels` through as `effortLevels` too —
+  // it already carries xhigh/max per model (model-discovery.ts's
+  // `effortLevelsFromModel`, derived from the catalog's `thinkingLevelMap`) —
+  // so the pre-spawn seed doesn't stay capped at low/med/high while the
+  // picker it's seeding from shows xhigh/max.
+  seedCapabilities: (_modelValue, modelInfo) =>
+    resolvePiCapabilitiesFromModel(
+      modelInfo
+        ? {
+            ...modelInfo,
+            reasoning: modelInfo.supportsEffort,
+            effortLevels: modelInfo.supportedEffortLevels
+          }
+        : undefined
+    )
+}
+
+/**
  * The engine descriptor table. `satisfies Record<EngineId, EngineMeta>` makes a
  * new EngineId a compile error until its meta is added.
  */
 export const ENGINE_META = {
   claude: CLAUDE_META,
-  opencode: OPENCODE_META
+  opencode: OPENCODE_META,
+  pi: PI_META
 } satisfies Record<EngineId, EngineMeta>
 
 /** Look up an engine's meta. Throws on an unregistered id (mirrors EngineRegistry). */

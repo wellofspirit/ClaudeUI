@@ -4,7 +4,8 @@ import type {
   StatusLineData,
   SlashCommandInfo,
   DirEntry,
-  VoiceState
+  VoiceState,
+  EngineId
 } from '../../../../../shared/types'
 import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
@@ -13,6 +14,7 @@ import { FileAttachmentBar } from '../FileAttachmentBar'
 import { type EffortLevel, type ThinkingMode } from '../../../../../shared/model-capabilities'
 import {
   ModelPicker,
+  EnginePicker,
   EffortPicker,
   ThinkingPicker,
   ReasoningPicker,
@@ -74,6 +76,9 @@ export interface InputBoxViewProps {
   // Controls
   models: ModelDisplay[]
   selectedModel: ModelDisplay
+  selectedEngineId: EngineId
+  engineLocked: boolean
+  showEnginePicker: boolean
   effort: string
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
@@ -106,6 +111,7 @@ export interface InputBoxViewProps {
   onSlashSelect: (name: string) => void
   onFileMentionConfirm: (entry: DirEntry) => void
   onSelectModel: (value: string) => void
+  onSelectEngine: (engineId: EngineId) => void
   onSelectEffort: (level: EffortLevel) => void
   onSelectThinking: (mode: ThinkingMode) => void
   /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
@@ -504,6 +510,13 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             <div className="flex items-center gap-1">
               {(props.visionEnabled ?? true) && (
                 <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
+              )}
+              {props.showEnginePicker && (
+                <EnginePicker
+                  selectedEngineId={props.selectedEngineId}
+                  locked={props.engineLocked}
+                  onSelectEngine={props.onSelectEngine}
+                />
               )}
               {(props.showModelPicker ?? true) && (
                 <ModelPicker

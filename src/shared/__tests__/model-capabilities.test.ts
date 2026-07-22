@@ -23,7 +23,10 @@ import {
   CONTEXT_WINDOW_1M,
   resolveCapabilities,
   OPENCODE_ENGINE_CAPABILITIES,
-  CLAUDE_ENGINE_CAPABILITIES
+  CLAUDE_ENGINE_CAPABILITIES,
+  PI_ENGINE_CAPABILITIES,
+  piModelCapabilities,
+  resolvePiCapabilitiesFromModel
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -530,6 +533,11 @@ describe('engine capability honesty (ADR-030)', () => {
     expect(CLAUDE_ENGINE_CAPABILITIES.forkFromMessage).toBe(true)
   })
 
+  it('pi fork/forkFromMessage are true (M5c: clone/fork RPCs wired end-to-end via PiSession.doStart)', () => {
+    expect(PI_ENGINE_CAPABILITIES.fork).toBe(true)
+    expect(PI_ENGINE_CAPABILITIES.forkFromMessage).toBe(true)
+  })
+
   it('degraded path: no-toolCalling model → canUseMcp/canUseSubagents/isAgentCapable false, engine gates unaffected', () => {
     const noToolModel = {
       reasoning: {},
@@ -546,5 +554,124 @@ describe('engine capability honesty (ADR-030)', () => {
     // Engine gates still true
     expect(caps.voice).toBe(true)
     expect(caps.hostedMcp).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// piModelCapabilities — pi's reasoning is two independent things that must
+// not be conflated: thinkingLevel is a session-wide dial (never a `thinking`
+// picker), reasoning.effort flips per-model off the catalog's `reasoning` fact.
+// ---------------------------------------------------------------------------
+
+describe('piModelCapabilities', () => {
+  it('reasoning:true → effort levels exactly [low, medium, high], and reasoning.thinking is never set', () => {
+    const caps = piModelCapabilities({ reasoning: true })
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high'] })
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('reasoning:false → reasoning is {} (no effort picker)', () => {
+    const caps = piModelCapabilities({ reasoning: false })
+    expect(caps.reasoning).toEqual({})
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('reasoning:undefined (no arg) → reasoning is {}', () => {
+    expect(piModelCapabilities().reasoning).toEqual({})
+    expect(piModelCapabilities(undefined).reasoning).toEqual({})
+  })
+
+  it('never populates reasoning.thinking regardless of input — no Adaptive picker for any pi model', () => {
+    expect(piModelCapabilities({ reasoning: true }).reasoning.thinking).toBeUndefined()
+    expect(piModelCapabilities({ reasoning: false }).reasoning.thinking).toBeUndefined()
+  })
+
+  it('defaults contextWindow to 200_000 and maxOutput to 8192 when absent', () => {
+    const caps = piModelCapabilities()
+    expect(caps.contextWindow).toBe(200_000)
+    expect(caps.maxOutput).toBe(8192)
+  })
+
+  it('passes through explicit contextWindow / maxOutput', () => {
+    const caps = piModelCapabilities({ contextWindow: 1_000_000, maxOutput: 64_000 })
+    expect(caps.contextWindow).toBe(1_000_000)
+    expect(caps.maxOutput).toBe(64_000)
+  })
+
+  it('toolCalling is always true, regardless of input', () => {
+    expect(piModelCapabilities().toolCalling).toBe(true)
+    expect(piModelCapabilities({ reasoning: false }).toolCalling).toBe(true)
+    expect(piModelCapabilities({ vision: false, reasoning: true }).toolCalling).toBe(true)
+  })
+
+  it('vision passes through the input flag (defaults to false when absent)', () => {
+    expect(piModelCapabilities({ vision: true }).vision).toBe(true)
+    expect(piModelCapabilities({ vision: false }).vision).toBe(false)
+    expect(piModelCapabilities().vision).toBe(false)
+  })
+
+  it('promptCaching is always true', () => {
+    expect(piModelCapabilities().promptCaching).toBe(true)
+  })
+
+  it('M3: an explicit effortLevels array (from thinkingLevelMap) reaches reasoning.effort.levels verbatim, xhigh/max included', () => {
+    const caps = piModelCapabilities({
+      reasoning: true,
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    })
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('M3 back-compat: no effortLevels passed → still low/medium/high (existing callers unaffected)', () => {
+    const caps = piModelCapabilities({ reasoning: true })
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high'] })
+  })
+
+  it('M3: reasoning:false ignores any effortLevels passed — no effort picker regardless', () => {
+    const caps = piModelCapabilities({ reasoning: false, effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    expect(caps.reasoning).toEqual({})
+  })
+})
+
+describe('resolvePiCapabilitiesFromModel', () => {
+  it('resolves against PI_ENGINE_CAPABILITIES (engine gates come from the pi table)', () => {
+    const caps = resolvePiCapabilitiesFromModel({ reasoning: true })
+    expect(caps.steer).toBe(PI_ENGINE_CAPABILITIES.steer)
+    expect(caps.queue).toBe(PI_ENGINE_CAPABILITIES.queue)
+    expect(caps.auth).toEqual(PI_ENGINE_CAPABILITIES.auth)
+  })
+
+  // M6c: pi now drives ONE vendor's login (openai-codex, via ClaudeUI's own
+  // auth vault — CredentialSync/AuthVault) — was permanently false pre-M6c.
+  it('auth.canDriveLogin is true (M6c: openai-codex is driven via the auth vault; pi\'s other subscription vendors stay undriven)', () => {
+    expect(PI_ENGINE_CAPABILITIES.auth.canDriveLogin).toBe(true)
+    expect(PI_ENGINE_CAPABILITIES.auth.multiAccount).toBe(false)
+  })
+
+  it('sideQuestion is true (/btw wired via PiSession.askSideQuestion\'s transcript-fed ephemeral pi process)', () => {
+    expect(PI_ENGINE_CAPABILITIES.sideQuestion).toBe(true)
+    expect(resolvePiCapabilitiesFromModel().sideQuestion).toBe(true)
+  })
+
+  it('seeds reasoning.effort from the model shape, undefined → engine defaults + no reasoning', () => {
+    expect(resolvePiCapabilitiesFromModel(undefined).reasoning).toEqual({})
+    expect(resolvePiCapabilitiesFromModel({ reasoning: true }).reasoning.effort?.levels).toEqual([
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+
+  it('M3: passes effortLevels through to the resolved capability, xhigh/max included', () => {
+    const caps = resolvePiCapabilitiesFromModel({
+      reasoning: true,
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    })
+    expect(caps.reasoning.effort?.levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it('isAgentCapable is true (toolCalling always true for pi)', () => {
+    expect(resolvePiCapabilitiesFromModel(undefined).isAgentCapable).toBe(true)
   })
 })

@@ -41,6 +41,19 @@ import { transformAssistantMessage } from './assistant-message'
 import { mapEvent } from '../opencode/event-mapper'
 import type { MessageAccumulator } from '../opencode/event-mapper'
 import type { OpencodeEvent } from '../opencode/protocol/types'
+// pi target primitives (ADR-033 M4c — pi as a dispatch TARGET). None of these
+// leaf modules import THIS file (or PiSession.ts, which does), so — same
+// reasoning as the opencode imports above — this is a one-way edge, not a
+// cycle. Reused verbatim, never reimplemented (per the M4c kickoff spec).
+import { locatePiBinary, piBinaryAvailable } from '../pi/pi-locate'
+import { PiRpcClient } from '../pi/PiRpcClient'
+import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
+import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
+import { mapPiEvent, createPiMapperState } from '../pi/event-mapper'
+import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
+import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
+import type { PiGetStateData, PiGetLastAssistantTextData, PiGetSessionStatsData } from '../pi/pi-protocol'
+import { engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
   CanUseTool,
@@ -79,9 +92,13 @@ import type {
  *  - 'opencode' hosts the tool for Claude-originated dispatches into opencode;
  *    the only other engine is Claude, which is ClaudeUI's bundled default
  *    engine — always present, so always true.
+ *  - 'pi' (ADR-033 M4c) hosts the tool for Claude/opencode-originated
+ *    dispatches into pi — gates on the vendored pi binary actually being
+ *    present, mirroring the 'claude' branch's opencode-binary check.
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
   if (engineId === 'claude') return opencodeServerManager.isBinaryAvailable()
+  if (engineId === 'pi') return piBinaryAvailable()
   return true
 }
 
@@ -194,6 +211,33 @@ export interface ClaudeQuerySpawnOpts {
  */
 export type SpawnClaudeQueryFn = (opts: ClaudeQuerySpawnOpts) => Promise<QueryHandle>
 
+/** Spawn opts for a headless pi dispatch target (ADR-033 M4c). */
+export interface PiTargetSpawnOpts {
+  cwd: string
+  /**
+   * Gate handler for the per-target PiBridgeHost's `/tool-call` route — the
+   * two-stage approval gate (see `CrossEngineDispatcher.gatePiTargetToolCall`).
+   * Threaded in rather than constructed inside the default spawn function so
+   * the SAME closure (bound to the target's `entry`) is used regardless of
+   * which spawn implementation (real or test-injected) is active.
+   */
+  gateHandler: PiBridgeHandler
+}
+
+/** The two live primitives a pi dispatch target owns — one PiRpcClient (the
+ *  headless child) and its OWN PiBridgeHost (approval gate transport). */
+export interface PiTargetPrimitives {
+  client: PiRpcClient
+  bridgeHost: PiBridgeHost
+}
+
+/**
+ * Spawns a headless pi dispatch target's PiRpcClient + its own PiBridgeHost.
+ * Injectable so tests drive a fake target without a real binary (mirrors
+ * `SpawnClaudeQueryFn`/`defaultSpawnClaudeQuery`).
+ */
+export type SpawnPiTargetFn = (opts: PiTargetSpawnOpts) => Promise<PiTargetPrimitives>
+
 export interface DispatcherDeps {
   serverManager: {
     acquire(cwd: string): Promise<{ baseUrl: string; authHeader: string }>
@@ -203,9 +247,23 @@ export interface DispatcherDeps {
   loadEngineConfig: (engineId: string) => EngineConfig
   /** Defaults to the real sdkQuery + claudeSpawnPrep. */
   spawnClaudeQuery?: SpawnClaudeQueryFn
+  /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
+  spawnPiTarget?: SpawnPiTargetFn
   maxConcurrent?: number
   dispatchTimeoutMs?: number
   heartbeatMs?: number
+  /**
+   * ADR-033 M4c: how long `resolveAndRunPi`'s give-up path (timeout/abort/
+   * stop) waits for the ABANDONED turn's own terminal pi events to drain
+   * before releasing the target's `busy` flag — see `PiTargetEntry.settled`'s
+   * "RACE NOTE" doc comment for why this exists (pi's `abort` is turn-scoped,
+   * not process-killing, and its wire has no per-event turn correlation).
+   * Bounded so a hung/never-arriving settle can't wedge the stop path
+   * forever. Defaults to a value comfortably above pi's observed real-world
+   * abort→agent_settled latency (single-digit ms, verified) so the common
+   * case never actually waits the full duration.
+   */
+  piAbortSettleGraceMs?: number
   /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
   now?: () => number
   /**
@@ -223,12 +281,36 @@ export interface DispatcherDeps {
 /** Reserved requestId prefix routing approvals to the dispatcher (ADR-033). */
 export const XENG_REQUEST_PREFIX = 'xeng:'
 
+/**
+ * A pi dispatch target's gate never has a per-session "always allow"
+ * escalation set — UNLIKE PiSession's own interactive sessionAllows, a
+ * dispatched target's `gatePiTargetToolCall` treats 'allowForSession'
+ * IDENTICALLY to a one-off 'allow' (see its resolve callback): each tool_call
+ * runs `decide()` fresh, matching `awaitClaudeTargetApproval`, which ALSO
+ * never persists any escalation state across a Claude target's tool calls.
+ * One shared, frozen, empty Set — never mutated — so no per-target
+ * allocation is needed.
+ */
+const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
+
 const MAX_CONCURRENT = 3
 const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000
 const HEARTBEAT_MS = 15 * 1000
 /** How long an armed stop-intent (see `pendingStops`) stays valid. Generous —
  *  it only needs to outlive the MCP tools/call round-trip + handler prelude. */
 const PENDING_STOP_TTL_MS = 60 * 1000
+/** Default for `DispatcherDeps.piAbortSettleGraceMs` — see that field's doc comment. */
+const PI_ABORT_SETTLE_GRACE_MS = 3_000
+/**
+ * Bounded timeout for the BEST-EFFORT `get_session_stats` reconciliation read
+ * in `accountPiNonSuccessCostReconciled` (audit-residual C fix) — short,
+ * mirroring `piAbortSettleGraceMs` above, because the target may be wedged
+ * (that's often WHY the turn is on the err/timeout path in the first place)
+ * and this must never meaningfully delay an already-failed turn's error
+ * return. A local RPC to an already-spawned child is normally sub-100ms; this
+ * only bites when the process is genuinely stuck.
+ */
+const GET_SESSION_STATS_RECONCILE_TIMEOUT_MS = 3_000
 
 /** A durable stop-intent armed BEFORE the dispatch registered (ADR-033 M3). */
 interface PendingStop {
@@ -335,7 +417,143 @@ interface ClaudeTargetEntry {
   turnToolUseIds: Set<string>
 }
 
-type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry
+/**
+ * A live pi dispatch target (ADR-033 M4c). pi is Claude-shaped at the process
+ * level — ONE persistent headless `pi --mode rpc --no-session` child per
+ * target, alive across turns — but its EVENT model is not an async iterable:
+ * `PiRpcClient.onEvent()` is a single ambient callback registered ONCE for the
+ * target's whole lifetime (installed in `createPiTarget`), not something a
+ * turn-loop can manually `.next()` through. There is therefore no
+ * `driveClaudeTurn`-style pull loop and no `.return()`-kills-the-process
+ * hazard to guard against — see `drivePiTurn`'s doc comment for the full
+ * divergence. `settled` is how a turn currently in flight gets resolved by
+ * that ambient callback.
+ *
+ * ABORT SEMANTICS DIVERGE FROM CLAUDE TOO (verified empirically — see the
+ * M4c kickoff investigation): pi's `abort` command is TURN-scoped like
+ * opencode's `abortSession` — the process and session survive an abort, then
+ * happily serve a fresh `prompt`. This is UNLIKE Claude, whose
+ * `abortController.abort()` kills the whole process (forcing
+ * resolveAndRunClaude to delete the entry on timeout/abort/stop). pi's
+ * timeout/abort/stop handling therefore keeps the entry alive for
+ * continuation, matching the opencode target's survive-the-process pattern.
+ */
+interface PiTargetEntry {
+  kind: 'pi'
+  /**
+   * pi's own session id, from `get_state` — UNLIKE Claude (whose session_id
+   * only arrives with the first turn's `system/init`), pi's `get_state`
+   * returns a real in-memory session id immediately after spawn (VERIFIED —
+   * even under `--no-session`), so this is set EAGERLY in `createPiTarget`
+   * and the entry is registered in `this.targets` before the first turn ever
+   * runs. Typed nullable only for structural parity with ClaudeTargetEntry —
+   * a successfully-created PiTargetEntry always has this populated
+   * (createPiTarget throws instead of returning one without it).
+   */
+  sessionId: string | null
+  fromRoutingId: string
+  cwd: string
+  client: PiRpcClient
+  /** This target's OWN loopback approval-gate host (ADR-033 §4 — a dispatch
+   *  target gets its own bridge, never shares the dispatching session's). */
+  bridgeHost: PiBridgeHost
+  /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
+  ctx: DispatchContext
+  /**
+   * Fixed at target creation from `ctx.autonomyMode` — a continuation call's
+   * (possibly different) `ctx.autonomyMode` is IGNORED for gating purposes,
+   * mirroring the Claude target's `permissionMode`, which is baked into the
+   * spawned process at creation and can never change later either. Passed
+   * DIRECTLY (no translation) as `permission-engine.ts`'s `decide()` `mode`
+   * param — `modeBaseDecision` already natively accepts this exact vocabulary
+   * ('auto'/'bypassPermissions' → allow-all, 'acceptEdits' → partial,
+   * 'plan'/'default'/anything else → conservative), so unlike
+   * `mapAutonomyToClaudeTargetMode` (which translates into a DIFFERENT
+   * vocabulary — `PermissionMode` + a boolean — for `sdkQuery`), pi needs no
+   * translation function at all: this is the identity mapping.
+   */
+  autonomyMode: string
+  /** True while a turn is being driven — same busy-reject rationale as
+   *  ClaudeTargetEntry (a single ambient event stream per process; two
+   *  concurrent turns would have no way to tell which `result` belongs to
+   *  which caller). */
+  busy: boolean
+  /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
+  cumulativeCostUsd: number
+  /**
+   * Mirrors `ClaudeTargetEntry.lastReportedTotalCostUsd` — VERIFIED WIRE FACT
+   * (event-mapper.ts's `agent_settled` case echoes `state.totalCostUsd`, which
+   * only grows via `+=` in the assistant `message_end` branch): the mapper's
+   * `result` output's `totalCostUsd` is CUMULATIVE across this target's WHOLE
+   * process lifetime, not per-turn. Converts each turn's reported running
+   * total into a per-turn delta against this baseline — the exact same
+   * pattern as the Claude target (same wire-cumulative-total hazard).
+   */
+  lastReportedTotalCostUsd: number
+  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
+   *  M4-B) — same Set-not-counter rationale as the other two target kinds. */
+  turnToolUseIds: Set<string>
+  /** Sum of input+output+reasoning tokens across the turn CURRENTLY in flight
+   *  (ADR-033 M4-B) — pi's `usage` MapperOutput fires once per ASSISTANT
+   *  MESSAGE (a multi-tool-call turn can have several), so this accumulates
+   *  across them; reset to 0 at the start of every turn. */
+  turnTotalTokens: number
+  /** Pure per-process mapper state (event-mapper.ts) — NOT reset between
+   *  turns (its `totalCostUsd` is the cumulative baseline `lastReportedTotalCostUsd`
+   *  is diffed against; `currentMessageId` is message-scoped bookkeeping that
+   *  naturally clears itself on every assistant `message_end`). */
+  mapperState: PiMapperState
+  /** The model this target was created with (picker-value string, e.g.
+   *  "openai-codex/gpt-5.6-luna") — fixed for the target's lifetime, same as
+   *  Claude/opencode targets (a continuation call cannot switch models). */
+  model: string
+  /**
+   * Resolver for the turn CURRENTLY in flight; null when idle. Set by
+   * `drivePiTurn` just before sending `prompt`, invoked EXACTLY ONCE per turn
+   * by `forwardPiTargetMessage`'s `result`/`error` handling, or by the
+   * `onExit` handler if the process dies mid-turn. See `drivePiTurn`'s doc
+   * comment for why pi needs this event-driven settle instead of Claude's
+   * manual iterator pull.
+   *
+   * RACE NOTE (pi-specific — Claude/opencode don't have this): on timeout/
+   * abort/stop, pi's target process SURVIVES (see the class doc comment) and
+   * its OWN terminal event sequence for the ABANDONED turn is still in
+   * flight (message_end→turn_end→agent_end→agent_settled, triggered by the
+   * `abort` command). pi's wire has NO per-event turn correlation — whatever
+   * wrapper is CURRENTLY installed here receives the NEXT settle-shaped
+   * event, whichever turn actually produced it — so `resolveAndRunPi`'s
+   * give-up path WAITS (briefly, bounded) for this field to go quiet before
+   * releasing `busy`, instead of returning immediately, so a fast-enough
+   * continuation can never install a new wrapper while a stale one is still
+   * pending delivery. See `resolveAndRunPi`'s stop/timeout/abort branch.
+   */
+  settled: ((outcome: PiTurnOutcome) => void) | null
+  /**
+   * RACE NOTE (pi-specific, same root cause as `settled`'s RACE NOTE above):
+   * the ABANDONED turn's own in-flight terminal event sequence can carry a
+   * `/tool-call` 'ask' that lands AFTER `resolveAndRunPi`'s timeout/abort/stop
+   * branch has already run `dismissPendingForTarget` — pi's wire has no
+   * per-event turn correlation, so the gate has no other way to recognize
+   * that ask as belonging to a turn the caller was already told is
+   * stopped/failed. Without this flag, that late ask would register a FRESH
+   * `pendingApprovals` entry and emit a `session:approval-request` for a
+   * dispatch that already settled — orphaned until a manual deny or
+   * `disposeFor`. Set true as the FIRST action in the timeout/abort/stop
+   * winner branch (before the `abort` RPC even sends, so no event can race
+   * ahead of it); `gatePiTargetToolCall` checks this FIRST and short-circuits
+   * to `deny` — never registers a pending approval while draining. Cleared at
+   * the start of `drivePiTurn` — a fresh continuation turn is no longer
+   * draining.
+   */
+  draining: boolean
+}
+
+/** What a pi dispatch turn settles with — see `PiTargetEntry.settled`. */
+type PiTurnOutcome =
+  | { kind: 'ok'; totalCostUsd: number; durationMs: number; sessionId: string | null }
+  | { kind: 'error'; message: string }
+
+type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry
 
 /** One shared opencode server connection (+ SSE loop) per cwd with live targets. */
 interface ConnRecord {
@@ -364,7 +582,19 @@ interface ClaudePendingApproval {
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 
-type PendingForwardedApproval = OpencodePendingApproval | ClaudePendingApproval
+/** Same shape/handling as ClaudePendingApproval — a resolve-callback, no
+ *  remote client/permissionId (mirrors a pi dispatch target's gate, which
+ *  resolves a local Promise exactly like a Claude target's canUseTool does).
+ *  Kept as its own sibling variant (not a rename of ClaudePendingApproval) so
+ *  the claude/opencode branches stay byte-identical — this is a pure addition. */
+interface PiPendingApproval {
+  kind: 'pi'
+  targetSessionId: string | null
+  emit: (channel: string, data: unknown) => void
+  resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
+}
+
+type PendingForwardedApproval = OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
@@ -536,12 +766,106 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
   })
 }
 
+/**
+ * Real default for `DispatcherDeps.spawnPiTarget` (ADR-033 M4c). Mirrors
+ * `PiSession.doStart()`'s spawn shape (bridge host first, then the version-
+ * keyed extension file, then the child) with two deliberate differences for
+ * a headless DISPATCH target:
+ *  - `--no-session`: ephemeral — no `~/.pi/agent/sessions` write (verified:
+ *    `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/`abort` all
+ *    work normally under `--no-session`, same as `model-discovery.ts`'s own
+ *    ephemeral-probe precedent).
+ *  - NO `CLAUDEUI_PI_HOSTED_TOOLS` / `CLAUDEUI_PI_DISPATCH_ENABLED` /
+ *    `CLAUDEUI_PI_SKILL_DIRS` in the target's env — `buildPiTargetChildEnv`
+ *    both OMITS them from what it builds AND explicitly overrides them to
+ *    `''` in the returned env object (PiRpcClient spawns with `{...process.
+ *    env, ...opts.env}`, so omission ALONE would leak through whatever the
+ *    ClaudeUI process's OWN env happens to carry — see buildPiTargetChildEnv's
+ *    doc comment for the full recursion-guard rationale). The bridge
+ *    extension's hosted-tool registrations (render_mermaid/create_mockup/
+ *    show_mockup/dispatch_agent) are gated on the first two
+ *    (pi-bridge-source.ts); disabling them means the target's OWN pi process
+ *    never has a `dispatch_agent` tool to call in the first place — recursion
+ *    is impossible at the wire level, not just by policy (mirrors ADR-033
+ *    §4's "dispatcher-created targets never get the collab server"). Belt-
+ *    and-suspenders even if a hosted tool were somehow still registered: this
+ *    `PiBridgeHost` below is constructed with ONLY `opts.gateHandler` (no
+ *    `hostedToolHandler`), so any `/hosted-tool` execute against this target
+ *    fails closed with an isError result — never actually runs anything (see
+ *    `PiBridgeHost.processHostedToolBody`'s own documented no-handler
+ *    fail-closed default). The approval gate (the extension's `tool_call`
+ *    hook) still activates normally — it depends ONLY on
+ *    `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`, independent of the hosted-tools gate
+ *    (verified against pi-bridge-source.ts's own independence design).
+ */
+/**
+ * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
+ * function (rather than inlined into `defaultSpawnPiTarget`) so the
+ * recursion-guard property is DIRECTLY unit-testable without mocking
+ * PiRpcClient/PiBridgeHost/locatePiBinary: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
+ * `CLAUDEUI_PI_DISPATCH_ENABLED` / `CLAUDEUI_PI_SKILL_DIRS` — see
+ * `defaultSpawnPiTarget`'s doc comment for the full rationale.
+ *
+ * The three gate vars are set to `''` EXPLICITLY, not merely left out of this
+ * object: `PiRpcClient` spawns with `{...process.env, ...opts.env}` (this
+ * object is `opts.env`), so plain omission would let the flag leak straight
+ * through from the ClaudeUI process's OWN env if IT happens to carry one
+ * (e.g. a dev shell that exports `CLAUDEUI_PI_HOSTED_TOOLS=1` for its own pi
+ * session) — the target would then see hosted tools registered (still unable
+ * to execute them, see `defaultSpawnPiTarget`'s doc comment, but visible and
+ * always-erroring to the model). The bridge extension's gates are plain
+ * truthiness/`=== '1'` checks (pi-bridge-source.ts) — `''` is falsy against
+ * both, so this reliably disables all three regardless of what the parent
+ * process happens to have set.
+ */
+export function buildPiTargetChildEnv(bridge: { url: string; token: string }): NodeJS.ProcessEnv {
+  return {
+    CLAUDEUI_PI_BRIDGE_URL: bridge.url,
+    CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
+    CLAUDEUI_PI_HOSTED_TOOLS: '',
+    CLAUDEUI_PI_DISPATCH_ENABLED: '',
+    CLAUDEUI_PI_SKILL_DIRS: ''
+  }
+}
+
+async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPrimitives> {
+  const bin = locatePiBinary()
+  if (!bin) {
+    throw new Error(
+      'pi binary not found — run `bun run ensure-pi` to vendor it ' +
+        `(vendor/pi-cli/pi${process.platform === 'win32' ? '.exe' : ''} is missing).`
+    )
+  }
+  const bridgeHost = new PiBridgeHost(opts.gateHandler)
+  let bridge: { url: string; token: string }
+  try {
+    bridge = await bridgeHost.start()
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err))
+  }
+  const bridgePath = writeBridgeExtension()
+  const client = new PiRpcClient(bin, {
+    cwd: opts.cwd,
+    args: ['--mode', 'rpc', '--no-session', '-e', bridgePath],
+    env: buildPiTargetChildEnv(bridge)
+  })
+  try {
+    await client.start()
+  } catch (err) {
+    bridgeHost.dispose()
+    throw err instanceof Error ? err : new Error(String(err))
+  }
+  return { client, bridgeHost }
+}
+
 export class CrossEngineDispatcher {
   private readonly deps: DispatcherDeps
   private readonly maxConcurrent: number
   private readonly dispatchTimeoutMs: number
   private readonly heartbeatMs: number
+  private readonly piAbortSettleGraceMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
+  private readonly spawnPiTarget: SpawnPiTargetFn
   private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
@@ -581,7 +905,9 @@ export class CrossEngineDispatcher {
     this.maxConcurrent = deps.maxConcurrent ?? MAX_CONCURRENT
     this.dispatchTimeoutMs = deps.dispatchTimeoutMs ?? DISPATCH_TIMEOUT_MS
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
+    this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
+    this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
     this.now = deps.now ?? Date.now
     this.recordDispatchedUsage = deps.recordDispatchedUsage ?? insertDispatchedUsage
   }
@@ -690,7 +1016,7 @@ export class CrossEngineDispatcher {
           'Use your own tools (or a native subagent) for same-engine work.'
       )
     }
-    if (req.engine !== 'opencode' && req.engine !== 'claude') {
+    if (req.engine !== 'opencode' && req.engine !== 'claude' && req.engine !== 'pi') {
       return errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
     }
     if (this.activeDispatches >= this.maxConcurrent) {
@@ -744,9 +1070,9 @@ export class CrossEngineDispatcher {
     }
 
     try {
-      return req.engine === 'claude'
-        ? await this.resolveAndRunClaude(req, ctx, stopController)
-        : await this.resolveAndRunOpencode(req, ctx, stopController)
+      if (req.engine === 'claude') return await this.resolveAndRunClaude(req, ctx, stopController)
+      if (req.engine === 'pi') return await this.resolveAndRunPi(req, ctx, stopController)
+      return await this.resolveAndRunOpencode(req, ctx, stopController)
     } finally {
       this.activeDispatches--
       if (ctx.toolUseId) this.activeByToolUseId.delete(ctx.toolUseId)
@@ -771,7 +1097,7 @@ export class CrossEngineDispatcher {
     if (!pending) return true
     this.pendingApprovals.delete(requestId)
 
-    if (pending.kind === 'claude') {
+    if (pending.kind === 'claude' || pending.kind === 'pi') {
       pending.resolve(decision, answers)
       return true
     }
@@ -802,10 +1128,18 @@ export class CrossEngineDispatcher {
       if (entry.kind === 'opencode') {
         entry.client.deleteSession(sessionId).catch(() => {})
         this.releaseConnection(entry)
-      } else {
+      } else if (entry.kind === 'claude') {
         // Killing the process is the only teardown a Claude target needs —
         // no server ref, no remote session to delete.
         entry.abortController.abort()
+      } else {
+        // pi (ADR-033 M4c): kill the child + its OWN per-target bridge host
+        // (mirrors PiSession.cancel()'s identical teardown order). Both calls
+        // are idempotent (PiRpcClient.dispose()/PiBridgeHost.dispose() no-op
+        // if already torn down), so this is safe even if the process already
+        // exited on its own (onExit already disposed the bridge host).
+        entry.client.dispose()
+        entry.bridgeHost.dispose()
       }
     }
   }
@@ -1751,17 +2085,689 @@ export class CrossEngineDispatcher {
   }
 
   /** Dismiss all forwarded approvals for one target (timeout/abort/dispose).
-   *  Claude-kind resolvers are ALSO resolved with deny — never leave a
-   *  hanging canUseTool promise (ADR-033 M2 item 7). */
+   *  Claude/pi-kind resolvers are ALSO resolved with deny — never leave a
+   *  hanging canUseTool/gate promise (ADR-033 M2 item 7, extended to pi in M4c). */
   private dismissPendingForTarget(targetSessionId: string): void {
     for (const [key, pending] of [...this.pendingApprovals]) {
       if (pending.targetSessionId !== targetSessionId) continue
       this.pendingApprovals.delete(key)
       pending.emit('session:approval-dismiss', { requestId: key })
-      if (pending.kind === 'claude') {
+      if (pending.kind === 'claude' || pending.kind === 'pi') {
         pending.resolve('deny')
       }
     }
+  }
+
+  /**
+   * Shared cost-delta bookkeeping for a NON-success pi turn outcome (timeout/
+   * stop/err) — mirrors the Claude target's failed-subtype handling (§ "the
+   * cap is a SPEND limit, not a success limit", :1797-1802): a turn that
+   * streamed real spend before erroring/timing-out/being stopped must still
+   * count that spend toward the cap and the dispatching session's cost
+   * breakdown, exactly like a successful turn does. `entry.mapperState.
+   * totalCostUsd` is the right source here (NOT anything derived from the
+   * turn's own outcome, since a non-success outcome carries no such number):
+   * it is the mapper's per-PROCESS running total, incremented by `mapPiEvent`
+   * on every cost-bearing assistant message REGARDLESS of which turn produced
+   * it or how that turn ended (see event-mapper.ts's `PiMapperState.
+   * totalCostUsd` doc) — so it already reflects whatever the abandoned turn
+   * actually spent by the time the caller reads it. Returns the turn's own
+   * delta (>= 0) for the caller to fold into a usage row.
+   */
+  private accountPiNonSuccessCost(entry: PiTargetEntry, ctx: DispatchContext, model: string): number {
+    const turnCostUsd = Math.max(0, entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd)
+    entry.lastReportedTotalCostUsd = entry.mapperState.totalCostUsd
+    entry.cumulativeCostUsd += turnCostUsd
+    if (turnCostUsd > 0) {
+      ctx.addDispatchedCost?.('pi', model, turnCostUsd)
+    }
+    return turnCostUsd
+  }
+
+  /**
+   * Same cost-delta bookkeeping as `accountPiNonSuccessCost` above, but for
+   * the err/timeout non-success paths ONLY (audit-residual C fix — NEVER the
+   * stop/abort path, which stays unreconciled by design: ADR-033 M4-B already
+   * records no usage row for a turn that never returned, and this file's own
+   * call sites below only ever invoke this method from the err/timeout
+   * branches). `entry.mapperState.totalCostUsd` only grows via cost-bearing
+   * assistant `message_end`s the mapper actually SAW — a turn that dies
+   * before its first one (e.g. erroring inside the very first LLM call, or
+   * timing out before any assistant message streams back) can still have
+   * spent real money that pi's own backend recorded but never surfaced as a
+   * mapped event. `get_session_stats` is pi's authoritative cumulative cost
+   * (the SAME RPC PiSession's resume-seed already trusts — see
+   * PiSession.replayStoredHistory) — read here, BOUNDED
+   * (`GET_SESSION_STATS_RECONCILE_TIMEOUT_MS`) and swallowed on failure (a
+   * wedged target — plausible, since that's often why the turn is on this
+   * path at all — must never block the error return on a follow-up RPC): if
+   * the read succeeds AND reports MORE than `entry.mapperState.totalCostUsd`,
+   * that authoritative number is used IN PLACE OF the mapper's total for the
+   * delta + baseline advance below; otherwise this is behaviorally IDENTICAL
+   * to `accountPiNonSuccessCost`.
+   */
+  private async accountPiNonSuccessCostReconciled(
+    entry: PiTargetEntry,
+    ctx: DispatchContext,
+    model: string
+  ): Promise<number> {
+    let totalCostUsd = entry.mapperState.totalCostUsd
+    try {
+      const statsResp = await entry.client.request<PiGetSessionStatsData>(
+        { type: 'get_session_stats' },
+        GET_SESSION_STATS_RECONCILE_TIMEOUT_MS
+      )
+      if (statsResp.success && statsResp.data && statsResp.data.cost > totalCostUsd) {
+        totalCostUsd = statsResp.data.cost
+      }
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `pi get_session_stats cost reconciliation failed (falling back to streamed cost): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    const turnCostUsd = Math.max(0, totalCostUsd - entry.lastReportedTotalCostUsd)
+    entry.lastReportedTotalCostUsd = totalCostUsd
+    entry.cumulativeCostUsd += turnCostUsd
+    if (turnCostUsd > 0) {
+      ctx.addDispatchedCost?.('pi', model, turnCostUsd)
+    }
+    return turnCostUsd
+  }
+
+  // ── pi direction (M4c) ────────────────────────────────────────────────────
+
+  /**
+   * Everything past the guards for engine:'pi' — runs with an activeDispatches
+   * slot held and the Stop handle already registered (mirrors
+   * resolveAndRunClaude/resolveAndRunOpencode's identical preamble).
+   */
+  private async resolveAndRunPi(
+    req: DispatchRequest,
+    ctx: DispatchContext,
+    stopController: AbortController
+  ): Promise<DispatchResult> {
+    // ── Model resolution ──────────────────────────────────────────────────
+    // A model is REQUIRED (req.model or dispatch.defaultModel) — same as the
+    // Claude branch, DELIBERATELY UNLIKE PiSession's own "no requested model →
+    // keep pi's own settings default" behavior (doStart() skips set_model
+    // entirely when unset). That soft-degrade exists for an INTERACTIVE
+    // session's UX; a headless dispatch target has no such benefit, and
+    // letting a model-less dispatch silently fall through to "whatever pi
+    // happens to be configured with" would make a configured allowedModels
+    // allowlist UNENFORCEABLE (we'd never know the actual model until AFTER
+    // spawn). Requiring a model keeps the allowlist honest, matching Claude.
+    const dispatchCfg = this.deps.loadEngineConfig('pi').dispatch
+    const model = req.model ?? dispatchCfg?.defaultModel
+    if (!model) {
+      return errorResult(
+        'No model is configured for cross-engine dispatch into pi. Ask the user to set ' +
+          'Engines › pi › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          '~/.claude/ui/engines/pi.json), or pass `model` explicitly.'
+      )
+    }
+    const allowed = dispatchCfg?.allowedModels
+    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+      return errorResult(
+        `Model "${model}" is not in the user-configured allowlist for pi dispatch. ` +
+          `Allowed models: ${allowed.join(', ')}`
+      )
+    }
+
+    // ── Target resolution ─────────────────────────────────────────────────
+    let entry: PiTargetEntry
+    if (req.sessionId) {
+      const existing = this.targets.get(req.sessionId)
+      if (!existing || existing.kind !== 'pi' || existing.fromRoutingId !== ctx.fromRoutingId) {
+        return errorResult(
+          `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
+            'Start a fresh dispatch without session_id.'
+        )
+      }
+      // Busy-reject BEFORE touching entry state — same rationale as the
+      // Claude target (one ambient event stream per process; interleaving two
+      // turns would have no way to tell which `result` belongs to which caller).
+      if (existing.busy) {
+        return errorResult(
+          `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
+          req.sessionId
+        )
+      }
+      if (dispatchCfg?.maxCostUsd !== undefined && existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd) {
+        return errorResult(
+          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
+            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
+            'Raise dispatch.maxCostUsd in engines/pi.json, or start a fresh dispatch.',
+          req.sessionId
+        )
+      }
+      existing.ctx = ctx
+      entry = existing
+    } else {
+      try {
+        entry = await this.createPiTarget(ctx, model)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return errorResult(`Failed to start dispatched pi agent: ${msg}`)
+      }
+    }
+
+    // Mark busy BEFORE the prompt is sent — fresh per-turn accumulators.
+    entry.busy = true
+    entry.turnToolUseIds = new Set()
+    entry.turnTotalTokens = 0
+
+    // ── Run the turn ──────────────────────────────────────────────────────
+    let beats = 0
+    const heartbeat = setInterval(() => {
+      beats++
+      void sendProgress(ctx.extra, {
+        progress: beats,
+        message: 'Dispatched agent is still working…'
+      }).catch(() => {})
+      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
+    }, this.heartbeatMs)
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    const signal = ctx.extra?.signal
+    let abortListener: (() => void) | undefined
+
+    type Raced =
+      | { kind: 'ok'; outcome: Extract<PiTurnOutcome, { kind: 'ok' }> }
+      | { kind: 'err'; message: string }
+      | { kind: 'timeout' }
+      | { kind: 'abort' }
+      | { kind: 'stop' }
+
+    const turnPromise: Promise<Raced> = this.drivePiTurn(entry, req.prompt).then(
+      (outcome): Raced =>
+        outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
+    )
+    const timeoutPromise = new Promise<Raced>((resolve) => {
+      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
+    })
+    const abortPromise: Promise<Raced> = signal
+      ? signal.aborted
+        ? Promise.resolve({ kind: 'abort' })
+        : new Promise((resolve) => {
+            abortListener = (): void => resolve({ kind: 'abort' })
+            signal.addEventListener('abort', abortListener, { once: true })
+          })
+      : new Promise(() => {})
+    const stopPromise: Promise<Raced> = stopController.signal.aborted
+      ? Promise.resolve({ kind: 'stop' })
+      : new Promise((resolve) => {
+          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+            once: true
+          })
+        })
+
+    try {
+      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
+
+      if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
+        // See PiTargetEntry.draining's doc comment — set FIRST, synchronously,
+        // before the `abort` RPC even sends, so no late 'ask' from this turn
+        // can possibly race ahead of it.
+        entry.draining = true
+        // DIVERGES FROM CLAUDE: pi's `abort` interrupts the CURRENT TURN only
+        // (session survives — verified; see PiTargetEntry's doc comment) —
+        // mirrors the OPENCODE target's survive-the-process pattern, so the
+        // entry is kept alive for continuation rather than torn down.
+        void entry.client.request({ type: 'abort' }).catch(() => {})
+        // RACE GUARD (see PiTargetEntry.settled's "RACE NOTE"): wait, BOUNDED,
+        // for the ABANDONED turn's own terminal event sequence (still in
+        // flight — triggered by the abort just sent) to drain and settle
+        // `entry.settled` back to null BEFORE releasing `busy` in the
+        // `finally` below. Without this, a fast-enough continuation could
+        // install a NEW settle wrapper here while the stale one is still
+        // pending delivery — pi's wire has no per-event turn correlation, so
+        // whichever wrapper is CURRENTLY installed receives the next
+        // settle-shaped event regardless of which turn actually produced it.
+        let graceTimer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          turnPromise,
+          new Promise<void>((r) => {
+            graceTimer = setTimeout(r, this.piAbortSettleGraceMs)
+          })
+        ])
+        if (graceTimer) clearTimeout(graceTimer)
+        entry.settled = null // belt-and-suspenders if the grace period elapsed first
+        // Read AFTER the grace-period wait, not before — the abandoned turn's
+        // own trailing cost-bearing events can still land during that window
+        // (see the RACE GUARD above), so this is the earliest point the
+        // mapper's running total can be trusted as final for this turn.
+        // Audit-residual C fix: ONLY the 'timeout' outcome reconciles against
+        // get_session_stats (a genuine failure — it gets a usage row below).
+        // 'stop'/'abort' deliberately do NOT — ADR-033 M4-B already records no
+        // usage row for either, and a follow-up RPC to a target the user just
+        // asked to stop would be pure latency for no observable benefit.
+        const turnCostUsd =
+          winner.kind === 'timeout'
+            ? await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+            : this.accountPiNonSuccessCost(entry, ctx, model)
+        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+        const text =
+          winner.kind === 'timeout'
+            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).`
+            : winner.kind === 'stop'
+              ? 'Dispatch stopped by user.'
+              : 'Dispatch cancelled.'
+        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+        emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
+        // Row vs spend accounting are DELIBERATELY split here: a 'stopped' turn
+        // gets no usage ROW (ADR-033 M4-B: no usage numbers for a turn that
+        // never returned) — but its cost/cap accounting above (`entry.
+        // cumulativeCostUsd` / `addDispatchedCost`) still applies regardless of
+        // status, via `accountPiNonSuccessCost` — a stopped turn can have
+        // burned real spend before the stop landed, and that spend counts
+        // toward the cap exactly like a timeout's or a success's does.
+        if (status === 'failed') {
+          this.safeRecordUsage({
+            ts: this.now(),
+            fromRoutingId: ctx.fromRoutingId,
+            fromEngine: ctx.fromEngine,
+            targetEngine: 'pi',
+            targetModel: model,
+            targetSessionId: entry.sessionId,
+            toolUseId: ctx.toolUseId ?? null,
+            totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
+            costUsd: turnCostUsd > 0 ? turnCostUsd : null,
+            durationMs: null
+          })
+        }
+        return errorResult(text, entry.sessionId ?? '')
+      }
+
+      if (winner.kind === 'err') {
+        // Also NOT torn down — pi's own error surface (a rejected prompt ack,
+        // an extension_error) mostly leaves the process alive; a genuinely
+        // dead process (the onExit case) self-diagnoses cleanly on the NEXT
+        // continuation attempt instead (PiRpcClient.request() already guards
+        // "process is not running"), so no extra liveness tracking is needed
+        // here — see the M4c report for the full rationale.
+        if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+        // Audit-residual C fix: reconcile against get_session_stats — an
+        // extension_error/rejected-ack can land before ANY cost-bearing
+        // message_end streamed back, in which case entry.mapperState.
+        // totalCostUsd is still the pre-turn value even though pi's backend
+        // may have genuinely spent something.
+        const turnCostUsd = await this.accountPiNonSuccessCostReconciled(entry, ctx, model)
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId ?? '',
+          'failed',
+          `Dispatched turn failed: ${winner.message}`
+        )
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: 'pi',
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
+          costUsd: turnCostUsd > 0 ? turnCostUsd : null,
+          durationMs: null
+        })
+        return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
+      }
+
+      // ── Success ────────────────────────────────────────────────────────
+      const { outcome } = winner
+      const turnCostUsd = Math.max(0, outcome.totalCostUsd - entry.lastReportedTotalCostUsd)
+      entry.lastReportedTotalCostUsd = outcome.totalCostUsd
+
+      // get_last_assistant_text — simpler + more reliable than accumulating
+      // `message` MapperOutputs across the turn ourselves (see drivePiTurn's
+      // doc comment). Best-effort: a failure here still returns a result
+      // (with a placeholder text) rather than failing an otherwise-successful
+      // turn over a follow-up RPC call.
+      let finalText = '(the dispatched agent returned no text)'
+      try {
+        const textResp = await entry.client.request<PiGetLastAssistantTextData>({
+          type: 'get_last_assistant_text'
+        })
+        if (textResp.success && textResp.data?.text) finalText = textResp.data.text
+      } catch (err) {
+        logger.warn(
+          'CrossEngineDispatcher',
+          `pi get_last_assistant_text failed (using placeholder text): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+
+      // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+      const maxCostUsd = dispatchCfg?.maxCostUsd
+      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
+      entry.cumulativeCostUsd += turnCostUsd
+      let outText = finalText
+      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+        outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+      }
+
+      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
+      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+        ctx.addDispatchedCost?.('pi', model, turnCostUsd)
+      }
+
+      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
+        totalTokens: entry.turnTotalTokens,
+        toolUses: entry.turnToolUseIds.size,
+        durationMs: outcome.durationMs
+      })
+      this.safeRecordUsage({
+        ts: this.now(),
+        fromRoutingId: ctx.fromRoutingId,
+        fromEngine: ctx.fromEngine,
+        targetEngine: 'pi',
+        targetModel: model,
+        targetSessionId: entry.sessionId,
+        toolUseId: ctx.toolUseId ?? null,
+        totalTokens: entry.turnTotalTokens,
+        costUsd: turnCostUsd,
+        durationMs: outcome.durationMs
+      })
+      return { text: outText, sessionId: entry.sessionId ?? '' }
+    } finally {
+      entry.busy = false
+      clearInterval(heartbeat)
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener)
+    }
+  }
+
+  /**
+   * Build the target shell + spawn its PiRpcClient + PiBridgeHost, resolve
+   * `get_state` (capturing session_id EAGERLY — see PiTargetEntry's doc
+   * comment), then apply the requested model via `set_model`. Any failure
+   * along the way tears down whatever was already created and re-throws —
+   * `resolveAndRunPi` turns that into a friendly isError.
+   */
+  private async createPiTarget(ctx: DispatchContext, model: string): Promise<PiTargetEntry> {
+    const entry: PiTargetEntry = {
+      kind: 'pi',
+      sessionId: null,
+      fromRoutingId: ctx.fromRoutingId,
+      cwd: ctx.cwd,
+      // Populated below, once spawnPiTarget resolves — the gate handler
+      // closure captures `entry` BY REFERENCE (mirrors createClaudeTargetShell),
+      // so it's safe to construct before these fields are filled in: a real
+      // tool_call can only fire after the child has actually spawned.
+      client: undefined as unknown as PiRpcClient,
+      bridgeHost: undefined as unknown as PiBridgeHost,
+      ctx,
+      autonomyMode: ctx.autonomyMode,
+      busy: false,
+      cumulativeCostUsd: 0,
+      lastReportedTotalCostUsd: 0,
+      turnToolUseIds: new Set(),
+      turnTotalTokens: 0,
+      mapperState: createPiMapperState(),
+      model,
+      settled: null,
+      draining: false
+    }
+
+    const gateHandler: PiBridgeHandler = (payload) => this.gatePiTargetToolCall(entry, payload)
+
+    let primitives: PiTargetPrimitives
+    try {
+      primitives = await this.spawnPiTarget({ cwd: ctx.cwd, gateHandler })
+    } catch (err) {
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+    entry.client = primitives.client
+    entry.bridgeHost = primitives.bridgeHost
+
+    entry.client.onEvent((ev) => {
+      const outputs = mapPiEvent(ev, entry.mapperState)
+      for (const output of outputs) this.forwardPiTargetMessage(entry, output)
+    })
+    entry.client.onExit(() => {
+      // If a turn is in flight, nothing else will ever settle it — mirrors
+      // the Claude target's process-exit-kills-the-turn outcome. ALSO dispose
+      // the bridge host here (not just on disposeFor) — an unexpected process
+      // death must not leak the loopback HTTP server's port (mirrors
+      // PiSession's own onExit teardown of its bridgeHost).
+      const settle = entry.settled
+      entry.settled = null
+      settle?.({ kind: 'error', message: 'pi target process exited unexpectedly' })
+      entry.bridgeHost.dispose()
+    })
+
+    try {
+      const stateResp = await entry.client.request<PiGetStateData>({ type: 'get_state' })
+      if (!stateResp.success || !stateResp.data?.sessionId) {
+        throw new Error(stateResp.error ?? 'pi target did not report a session id')
+      }
+      entry.sessionId = stateResp.data.sessionId
+      entry.mapperState.sessionId = entry.sessionId
+      this.targets.set(entry.sessionId, entry)
+
+      const ref = engineMeta('pi').decodeModelValue(model)
+      const setModelResp = await entry.client.request({
+        type: 'set_model',
+        provider: ref.vendorId,
+        modelId: ref.modelId
+      })
+      if (!setModelResp.success) {
+        throw new Error(setModelResp.error ?? `Failed to set pi model "${model}"`)
+      }
+    } catch (err) {
+      if (entry.sessionId) this.targets.delete(entry.sessionId)
+      entry.client.dispose()
+      entry.bridgeHost.dispose()
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+
+    return entry
+  }
+
+  /**
+   * Send the `prompt` command and await turn completion.
+   *
+   * DIVERGES FROM `driveClaudeTurn`: Claude's `sdkQuery()` hands back an
+   * AsyncIterable the dispatcher manually pulls (`iterator.next()`) until it
+   * sees `result` — necessary there because `for await` would `.return()` the
+   * iterator on early exit and kill the process (see ClaudeTargetEntry's
+   * hazard doc). pi's `PiRpcClient` has NO such iterable: agent events arrive
+   * via a single ambient `onEvent` callback registered ONCE for the target's
+   * whole lifetime (wired in `createPiTarget`), so there is nothing to pull
+   * from and no `.return()` hazard to guard against. "Driving a turn" here
+   * instead means: install `entry.settled` as this promise's resolver BEFORE
+   * sending `prompt` (synchronously, so no event or ack can possibly arrive
+   * first), then let the ALREADY-RUNNING onEvent → forwardPiTargetMessage
+   * pipeline settle it once the mapper produces a `result` (agent_settled) or
+   * `error` (extension_error) output. A turn is guaranteed unique in flight by
+   * the busy-reject in `resolveAndRunPi`, mirroring the single-iterator
+   * exclusivity Claude's `busy` flag protects.
+   *
+   * `streamingBehavior` (pi's steer/follow-up mode for a prompt sent while
+   * already streaming) is deliberately NEVER set: a dispatch target only ever
+   * has ONE caller (the dispatcher itself) and the busy-reject above
+   * guarantees at most one turn in flight, so pi is never "already streaming"
+   * when this fires — unlike PiSession.run(), which drives an INTERACTIVE
+   * session where the human can send a follow-up mid-turn.
+   */
+  private drivePiTurn(entry: PiTargetEntry, prompt: string): Promise<PiTurnOutcome> {
+    entry.mapperState.startTimeMs = Date.now()
+    // A fresh turn (first turn, or a continuation after a prior stop/timeout/
+    // abort) is never draining — see PiTargetEntry.draining's doc comment.
+    entry.draining = false
+    return new Promise<PiTurnOutcome>((resolve) => {
+      entry.settled = resolve
+      entry.client.request({ type: 'prompt', message: prompt }).then(
+        (resp) => {
+          // Only the ACK that the prompt was accepted — the real outcome
+          // arrives later via the ambient onEvent pipeline UNLESS pi rejected
+          // it outright (e.g. malformed command), in which case nothing else
+          // will ever settle this promise.
+          if (!resp.success && entry.settled === resolve) {
+            entry.settled = null
+            resolve({ kind: 'error', message: resp.error ?? 'pi rejected the prompt' })
+          }
+        },
+        (err) => {
+          if (entry.settled === resolve) {
+            entry.settled = null
+            resolve({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
+          }
+        }
+      )
+    })
+  }
+
+  /**
+   * Forward a pi dispatch target's live turn output as engine-neutral
+   * subagent events — byte-matches `forwardClaudeTargetMessage`'s /
+   * `handleOpencodeTargetStream`'s payload shapes exactly (subagent-stream /
+   * subagent-message / subagent-tool-result). ALSO owns turn-completion:
+   * `result`/`error` MapperOutputs settle `entry.settled` (see `drivePiTurn`'s
+   * doc comment) and `usage` outputs accumulate this turn's token total.
+   * `bash_output`/`ignore` are skipped — the caller's TaskCard doesn't stream
+   * a dispatch target's raw bash output (same as the other two directions).
+   */
+  private forwardPiTargetMessage(entry: PiTargetEntry, out: PiMapperOutput): void {
+    if (out.kind === 'result') {
+      entry.settled?.({
+        kind: 'ok',
+        totalCostUsd: out.totalCostUsd,
+        durationMs: out.durationMs,
+        sessionId: out.sessionId
+      })
+      entry.settled = null
+      return
+    }
+    if (out.kind === 'error') {
+      entry.settled?.({ kind: 'error', message: out.message })
+      entry.settled = null
+      // Falls through — also forwarded as a visible stream chunk below (if a
+      // toolUseId is set) so a live-watching human sees WHY the turn ended,
+      // not just the eventual "Dispatched turn failed" summary.
+    }
+
+    const toolUseId = entry.ctx.toolUseId
+    if (!toolUseId) return
+
+    switch (out.kind) {
+      case 'stream':
+        entry.ctx.emit('session:subagent-stream', {
+          toolUseId,
+          type: out.streamType,
+          text: out.delta
+        })
+        break
+      case 'message':
+        collectToolUseIds(out.message, entry.turnToolUseIds)
+        entry.ctx.emit('session:subagent-message', { toolUseId, message: out.message })
+        break
+      case 'tool_result':
+        entry.ctx.emit('session:subagent-tool-result', {
+          toolUseId,
+          toolResultToolUseId: out.toolUseId,
+          result: out.result,
+          isError: out.isError
+        })
+        break
+      case 'usage':
+        entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
+        break
+      case 'error':
+        entry.ctx.emit('session:subagent-stream', {
+          toolUseId,
+          type: 'text',
+          text: `\n[error: ${out.message}]`
+        })
+        break
+      case 'bash_output':
+      case 'ignore':
+        break
+    }
+  }
+
+  /**
+   * Gate handler for a pi dispatch target's PiBridgeHost (the two-stage
+   * approval gate, ADR-033 M4c) — mirrors `awaitClaudeTargetApproval`'s
+   * ROLE (forward an 'ask' to the dispatching session, resolve a local
+   * Promise) with an extra stage IN FRONT of it: `permission-engine.decide()`
+   * runs FIRST against the target's fixed `autonomyMode` with EMPTY Claude
+   * rules + an empty sessionAllows set — a dispatched target does not
+   * inherit the user's interactive-session rules (see PiTargetEntry.autonomyMode's
+   * doc comment) — so ONLY an 'ask' decision ever reaches a human; 'allow'
+   * resolves immediately (no round-trip), and a full-autonomy dispatch target
+   * (mode 'auto'/'bypassPermissions') NEVER prompts, matching the Claude
+   * target's allow-all under bypassPermissions.
+   *
+   * NOTE: with EMPTY rules, `decide()` can structurally never return 'deny'
+   * (`modeBaseDecision`'s own return type is `'allow' | 'ask'` — rules-based
+   * deny is the ONLY source of a 'deny' verdict, and the rules are empty
+   * here). The 'deny' branch below is kept anyway for defensive completeness
+   * against `decide()`'s full return type (and in case a future change starts
+   * passing real rules) — see the M4c report for the full discussion of this
+   * tension against the kickoff spec's phrasing.
+   *
+   * `toolUseId` on the forwarded approval is the pi tool call's OWN id
+   * (`payload.toolCallId`), NOT the outer dispatching `ctx.toolUseId` —
+   * verified against the renderer's `FloatingApproval.useUnmatchedApprovals`,
+   * which only ever matches a `PendingApproval.toolUseId` against TOP-LEVEL
+   * message tool_use ids; a dispatch target's inner tool_use ids never appear
+   * there (they live in the subagent-scoped message bucket), so an inner id is
+   * required for the approval to render at all (as a floating card) — this is
+   * exactly what `awaitClaudeTargetApproval` does with `opts.toolUseId`
+   * (the target's own tool_use id), not `entry.ctx.toolUseId`.
+   *
+   * `suggestions` ("always allow" scope checkboxes) are deliberately OMITTED:
+   * Claude's mirror gets them for free via cli.js's canUseTool context;
+   * building the pi equivalent would mean either reimplementing PiSession's
+   * private `buildApprovalSuggestions` here or exporting/refactoring it out
+   * of PiSession.ts, which the kickoff spec says not to revisit for M4c. The
+   * approval still fully functions via Allow/Deny — only the persistent
+   * "always allow" convenience is missing, and it would write to the SAME
+   * shared Claude permission files a dispatch target's gate deliberately does
+   * NOT consult (rules are empty here), so its practical value would be
+   * limited to a future INTERACTIVE pi session, not this or a future dispatch.
+   */
+  private gatePiTargetToolCall(entry: PiTargetEntry, payload: PiToolCallPayload): Promise<GateDecision> {
+    // See PiTargetEntry.draining's doc comment — a late 'ask' from an already
+    // stopped/timed-out/aborted turn must never register a pending approval.
+    if (entry.draining) {
+      return Promise.resolve({ behavior: 'deny', reason: 'Dispatch stopped' })
+    }
+    const decision = decide(payload.toolName, payload.input, {
+      mode: entry.autonomyMode,
+      rules: EMPTY_PI_RULES,
+      sessionAllows: EMPTY_PI_SESSION_ALLOWS
+    })
+
+    if (decision === 'allow') return Promise.resolve({ behavior: 'allow' })
+    if (decision === 'deny') {
+      return Promise.resolve({ behavior: 'deny', reason: 'Denied by dispatch autonomy mode' })
+    }
+
+    // 'ask' — forward to the DISPATCHING session, mirrors awaitClaudeTargetApproval.
+    return new Promise((resolve) => {
+      const requestId = XENG_REQUEST_PREFIX + uuidv4()
+      const approval: PendingApproval = {
+        requestId,
+        toolUseId: payload.toolCallId,
+        toolName: payload.toolName,
+        input: payload.input
+      }
+      this.pendingApprovals.set(requestId, {
+        kind: 'pi',
+        targetSessionId: entry.sessionId,
+        emit: entry.ctx.emit,
+        resolve: (decision, answers) => {
+          if (decision === 'allow' || decision === 'allowForSession') {
+            resolve({ behavior: 'allow' })
+          } else {
+            resolve({ behavior: 'deny', reason: answers?.feedback || 'User denied' })
+          }
+        }
+      })
+      entry.ctx.emit('session:approval-request', approval)
+    })
   }
 }
 

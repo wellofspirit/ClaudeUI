@@ -71,6 +71,14 @@ describe('describeDispatchModels', () => {
     expect(hint.long).toContain('sonnet')
   })
 
+  it('nothing known: falls back to a DISTINCT "provider/modelId" hint for targetEngine "pi" (ADR-033 M4c — not the Claude-alias phrasing)', () => {
+    const hint = describeDispatchModels({ targetEngine: 'pi' })
+    expect(hint.long).toContain('provider/modelId')
+    expect(hint.long).toContain('openai-codex/gpt-5.6-luna')
+    expect(hint.long).not.toContain('Claude model alias')
+    expect(hint.short).toContain('provider/modelId')
+  })
+
   it('empty allowedModels array is treated as "not configured" (falls through)', () => {
     const hint = describeDispatchModels({ targetEngine: 'claude', allowedModels: [] })
     expect(hint.long).not.toContain('Allowed models')

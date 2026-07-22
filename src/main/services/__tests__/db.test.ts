@@ -178,6 +178,16 @@ describe('migrations via repository', () => {
     expect(getSessionMeta('s2')?.engineId).toBe('opencode')
     expect(Object.keys(allSessionMeta())).toHaveLength(2)
   })
+
+  it('round-trips a pi session (rowToMeta accepts engineId "pi")', () => {
+    setSessionMeta('s-pi', {
+      engineId: 'pi',
+      model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' }
+    })
+    const meta = getSessionMeta('s-pi')
+    expect(meta?.engineId).toBe('pi')
+    expect(meta?.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -323,6 +333,14 @@ describe('importSessionEnginesOnce', () => {
       'legacy-codex': { engineId: 'codex' }
     })
     expect(getSessionMeta('legacy-codex')?.engineId).toBe('claude')
+  })
+
+  it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {
+    importSessionEnginesOnce({
+      's-pi': { engineId: 'pi', model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' } }
+    })
+    expect(getSessionMeta('s-pi')?.engineId).toBe('pi')
+    expect(getSessionMeta('s-pi')?.model?.modelId).toBe('gpt-5.6-luna')
   })
 
   it('is idempotent — second call does nothing when table already has rows', () => {

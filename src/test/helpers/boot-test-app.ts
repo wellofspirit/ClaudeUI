@@ -70,6 +70,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
     loadOpencodeHistory: (sessionId) =>
       ipcRenderer.invoke('session:load-opencode-history', sessionId),
+    listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
+    loadPiHistory: (sessionId) => ipcRenderer.invoke('session:load-pi-history', sessionId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
@@ -178,7 +180,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
     getOpencodeProviderModels: (providerId) =>
       ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+    getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
     engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+    getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
+    getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
     generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),
@@ -348,6 +353,18 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+    listSharedProviders: () => unwrap('shared-provider:list'),
+    getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
+    listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
+    saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
+    setSharedProviderRoute: (id, harness, enabled) =>
+      unwrap('shared-provider:set-route', id, harness, enabled),
+    setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
+    disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
+    setSharedProviderDefaultModel: (id, harness, modelId) =>
+      unwrap('shared-provider:set-default', id, harness, modelId),
     openLogViewer: () => ipcRenderer.invoke('log-viewer:open'),
 
     listPlugins: () => ipcRenderer.invoke('plugin:list'),

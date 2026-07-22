@@ -414,6 +414,7 @@ describe('writeOpencodeNativeConfig', () => {
           'my-ollama': {
             name: 'My Ollama',
             baseURL: 'http://localhost:11434/v1',
+            npm: '@ai-sdk/openai-compatible',
             models: [{ id: 'llama3.2', name: 'Llama 3.2' }, { id: 'mistral-7b' }]
           }
         }
@@ -501,6 +502,24 @@ describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
     })
   })
 
+  it('round-trips npm and updates only that leaf while preserving options.apiKey', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify({
+          provider: { myprov: { npm: '@old/adapter', options: { apiKey: 'secret-key' } } }
+        })
+      )
+      const cur = readOpencodeNativeConfig()
+      expect(cur.providers?.myprov.npm).toBe('@old/adapter')
+      writeOpencodeNativeConfig({
+        providers: { myprov: { ...cur.providers!.myprov, npm: '@ai-sdk/openai-compatible' } }
+      })
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.provider.myprov.npm).toBe('@ai-sdk/openai-compatible')
+      expect(parsed.provider.myprov.options.apiKey).toBe('secret-key')
+    })
+  })
+
   it('preserves provider-level npm + options.apiKey across a baseURL change', () => {
     withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
       const p = seed(
@@ -564,7 +583,7 @@ describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
               keepme: {
                 npm: '@custom/pkg',
                 options: { baseURL: 'http://keep/v1', apiKey: 'k' },
-                models: { 'm1': { attachment: true } }
+                models: { m1: { attachment: true } }
               },
               dropme: { name: 'Drop', options: { baseURL: 'http://drop/v1' } }
             }

@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { useActiveSession, useSessionStore, OPENCODE_DEFAULT_MODEL } from '../../stores/session-store'
+import {
+  useActiveSession,
+  useSessionStore,
+  OPENCODE_DEFAULT_MODEL,
+  PI_DEFAULT_MODEL
+} from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import type {
@@ -41,6 +46,9 @@ import {
   InfoTooltip
 } from './settings-controls'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { PiVendors } from './PiVendors'
+import { SharedProviders } from './SharedProviders'
+import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
@@ -427,23 +435,24 @@ function AutonomyModePicker(): React.JSX.Element {
 // ── opencode availability probe ──────────────────────────────────────
 
 /**
- * Whether the opencode engine is installed.
+ * Whether a given engine is installed.
  *
- * Uses `engineIsInstalled('opencode')` — a cheap, deterministic binary-on-disk
- * check that NEVER spawns a server. The earlier `vendorAuthProbe`/`getEngineModels`
- * approaches both required a successful server spawn + HTTP round-trip, so any
- * transient spawn failure (e.g. an opencode startup crash) made the engine read as
- * "not installed" and hid the very sections that configure it. Auth/model state is
- * a separate, allowed-to-fail concern — not "installed".
+ * Uses `engineIsInstalled(engineId)` — a cheap, deterministic binary-on-disk
+ * check that NEVER spawns a server/process. The earlier `vendorAuthProbe`/
+ * `getEngineModels` approaches both required a successful server spawn + HTTP
+ * round-trip, so any transient spawn failure (e.g. an opencode startup crash)
+ * made the engine read as "not installed" and hid the very sections that
+ * configure it. Auth/model state is a separate, allowed-to-fail concern — not
+ * "installed".
  *
  * Returns null while probing, then true/false.
  */
-function useOpencodeInstalled(): boolean | null {
+function useEngineInstalled(engineId: EngineId): boolean | null {
   const [installed, setInstalled] = useState<boolean | null>(null)
   useEffect(() => {
     let cancelled = false
     window.api
-      .engineIsInstalled('opencode')
+      .engineIsInstalled(engineId)
       .then((v) => {
         if (!cancelled) setInstalled(v)
       })
@@ -453,8 +462,16 @@ function useOpencodeInstalled(): boolean | null {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [engineId])
   return installed
+}
+
+function useOpencodeInstalled(): boolean | null {
+  return useEngineInstalled('opencode')
+}
+
+function usePiInstalled(): boolean | null {
+  return useEngineInstalled('pi')
 }
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
@@ -1641,6 +1658,183 @@ function OpencodeModelsSection(): React.JSX.Element {
   )
 }
 
+// ── pi Default model section (M3) ────────────────────────────────────
+
+/**
+ * pi's per-engine default model — lives in `EngineConfig.piConfig.defaultModel`
+ * (engines/pi.json via loadEngineConfig/saveEngineConfig), NOT a dedicated
+ * opencode.json-style settings file like OpencodeModelsSection's `cfg.model`
+ * (pi has no native-config-passthrough schema to mirror in M3). Discovered
+ * models use a visible select, with an explicit custom-ID escape hatch and a
+ * ClaudeUI-private allowlist for picker visibility and default resolution.
+ */
+function PiDefaultModelSection(): React.JSX.Element {
+  const [cfg, setCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [customMode, setCustomMode] = useState(false)
+  const [managingModels, setManagingModels] = useState(false)
+  const installed = usePiInstalled()
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('pi')
+      .then(setCfg)
+      .catch(() => setCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const pi = groups.filter((g) => g.engineId === 'pi')
+        setModels(pi.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (cfg === null || installed === null) {
+    return (
+      <div data-testid="PiDefaultModelSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
+  }
+  if (!installed) {
+    return (
+      <div data-testid="PiDefaultModelSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        pi is not installed. Model settings apply to pi sessions.
+      </div>
+    )
+  }
+
+  const current = cfg.piConfig?.defaultModel ?? ''
+  const known = current === '' || models.some((m) => m.value === current)
+  const allowlist = cfg.piConfig?.modelAllowlist
+  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
+
+  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
+    const latest = await window.api.loadEngineConfig('pi')
+    const next: EngineConfig = {
+      ...latest,
+      piConfig: { ...latest.piConfig, modelAllowlist }
+    }
+    await window.api.saveEngineConfig('pi', next)
+    setCfg(next)
+    useSessionStore.getState().reloadModels()
+    window.api
+      .getEngineModels()
+      .then((groups) =>
+        setModels(groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models))
+      )
+      .catch(() => {})
+  }
+
+  const update = (value: string): void => {
+    const next: EngineConfig = { ...cfg, piConfig: { ...cfg.piConfig, defaultModel: value || undefined } }
+    setCfg(next)
+    window.api.saveEngineConfig('pi', next).catch(() => {})
+    // Mirror the default-model choice into the store so new/reopened pi
+    // sessions pick it up immediately, and refresh the picker model list.
+    useSessionStore.getState().setPiDefaultModel(value || PI_DEFAULT_MODEL)
+    useSessionStore.getState().reloadModels()
+  }
+
+  return (
+    <div data-testid="PiDefaultModelSection" className="space-y-1">
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Default model
+          <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
+        </div>
+        {models.length > 0 ? (
+          <select
+            data-testid="PiDefaultModelSection.defaultModel"
+            value={customMode || !known ? '__custom__' : current}
+            onChange={(e) => {
+              if (e.target.value === '__custom__') setCustomMode(true)
+              else {
+                setCustomMode(false)
+                update(e.target.value)
+              }
+            }}
+            className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+          >
+            <option value="">Default ({PI_DEFAULT_MODEL})</option>
+            {models.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.displayName || m.value}
+              </option>
+            ))}
+            <option value="__custom__">Custom model ID...</option>
+          </select>
+        ) : (
+          <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
+            No pi models discovered. Authenticate a provider, then refresh models.
+          </div>
+        )}
+        {(models.length === 0 || customMode || !known) && (
+          <input
+            data-testid="PiDefaultModelSection.customModel"
+            type="text"
+            value={current}
+            onChange={(e) => update(e.target.value)}
+            placeholder="Custom provider/model-id"
+            className="mt-1 w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+          />
+        )}
+        <button
+          data-testid="PiDefaultModelSection.refresh"
+          onClick={() => {
+            window.api
+              .getEngineModels()
+              .then((groups) =>
+                setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
+              )
+              .catch(() => {})
+          }}
+          className="mt-1 text-[11px] text-accent"
+        >
+          Refresh models
+        </button>
+        <button
+          data-testid="PiDefaultModelSection.manageModels"
+          onClick={() => setManagingModels(true)}
+          className="mt-1 ml-3 text-[11px] text-accent"
+        >
+          Manage models ({allowlist === undefined ? 'all' : allowlist.length === 0 ? 'none' : `${allowlist.length} selected`})
+        </button>
+        {defaultExcluded && (
+          <div
+            data-testid="PiDefaultModelSection.excludedDefaultWarning"
+            className="mt-1 text-[10px] text-warning/90"
+          >
+            The configured default is excluded by the model allowlist. ClaudeUI will use an
+            available fallback until it is enabled or replaced.
+          </div>
+        )}
+        {!known && !defaultExcluded && (
+          <div
+            data-testid="PiDefaultModelSection.unknownWarning"
+            className="mt-1 text-[10px] text-warning/90"
+          >
+            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the provider is
+            authenticated and the model id is spelled correctly.
+          </div>
+        )}
+      </div>
+      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+        Applies to new pi sessions. Falls back to pi&rsquo;s own default (
+        {PI_DEFAULT_MODEL}) when unset.
+      </div>
+      {managingModels && (
+        <PiModelAllowlistDialog
+          providerName="pi"
+          current={allowlist}
+          onClose={() => setManagingModels(false)}
+          onSave={saveAllowlist}
+        />
+      )}
+    </div>
+  )
+}
+
 // ── opencode Providers section ───────────────────────────────────────
 
 const inputClass =
@@ -1653,7 +1847,7 @@ const inputClass =
  *          remount the row.
  *   _id  — the EDITABLE opencode provider id (the map key used at save time).
  */
-type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string }
+type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string; _managed?: boolean }
 
 /** Empty provider row factory — stable _key, blank editable id. */
 function newProvider(): ProviderRow {
@@ -1693,17 +1887,26 @@ function OpencodeProvidersSection(): React.JSX.Element {
   }
 
   useEffect(() => {
-    window.api
-      .loadOpencodeSettings()
-      .then((settings) => {
+    Promise.all([
+      window.api.loadOpencodeSettings(),
+      window.api.listSharedProviders().catch(() => [])
+    ])
+      .then(([settings, sharedProviders]) => {
         setCfg(settings)
+        const managedIds = new Set(
+          sharedProviders.map(
+            (provider) => provider.routes.opencode.providerId ?? provider.id
+          )
+        )
         // Hydrate provider rows from saved config. The saved provider id becomes
         // both the stable _key and the editable _id.
         const saved = settings.providers ?? {}
         const rows: ProviderRow[] = Object.entries(saved).map(([id, p]) => ({
           _key: id,
           _id: id,
+          _managed: managedIds.has(id),
           name: p.name ?? '',
+          npm: p.npm,
           baseURL: p.baseURL ?? '',
           models: p.models ?? []
         }))
@@ -1737,6 +1940,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
         .map((m) => (m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }))
       const entry: OpencodeProviderSettings = {}
       if (row.name) entry.name = row.name
+      if (row.npm) entry.npm = row.npm
       if (row.baseURL) entry.baseURL = row.baseURL
       if (models.length > 0) entry.models = models
       providers[row._id] = entry
@@ -1875,6 +2079,31 @@ function OpencodeProvidersSection(): React.JSX.Element {
         </div>
         {providerRows.map((row) => {
           const id = row._id.trim()
+          if (row._managed) {
+            return (
+              <div
+                key={row._key}
+                data-testid="OpencodeProvidersSection.managedProvider"
+                data-id={id}
+                className="border border-border/30 rounded-md p-2 text-[11px] text-text-secondary"
+              >
+                <div className="font-medium text-text-primary">{row.name || id}</div>
+                <div className="text-text-muted">Managed in Common · Providers & models</div>
+                <button
+                  onClick={() =>
+                    window.dispatchEvent(
+                      new CustomEvent('open-settings', {
+                        detail: { scope: 'common', section: 'shared-providers' }
+                      })
+                    )
+                  }
+                  className="mt-1 text-accent"
+                >
+                  Open shared provider
+                </button>
+              </div>
+            )
+          }
           const hasKey = id.length > 0 && credIds[id] !== undefined
           const busy = keyBusy[row._key] ?? false
           const error = keyError[row._key]
@@ -3787,6 +4016,24 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'shared-providers',
+    label: 'Providers & models',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'sharedProviders',
+        label: 'Providers & models',
+        keywords: 'shared provider chatgpt codex api key model pi opencode',
+        render: () => <SharedProviders />
+      }
+    ]
+  },
+  {
     id: 'effortDefaults',
     label: 'Default effort',
     icon: (
@@ -3949,6 +4196,52 @@ export const SECTIONS: Section[] = [
         render: () => <OpencodeAgentsSection />
       }
     ]
+  },
+  {
+    id: 'pi-models',
+    label: 'Models',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piDefaultModel',
+        label: 'Default model',
+        keywords: 'pi model default provider openai-codex anthropic',
+        render: () => <PiDefaultModelSection />
+      }
+    ]
+  },
+  {
+    id: 'vendor-pi',
+    label: 'Providers',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'vendorPiAuth',
+        label: 'Providers & subscriptions',
+        keywords: 'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
+        render: () => <PiVendors />
+      }
+    ]
   }
 ]
 
@@ -3956,7 +4249,7 @@ export const SECTIONS: Section[] = [
 
 /** Section ids that belong to the App group (flat, directly visible) */
 const APP_SECTION_IDS = new Set([
-  'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+  'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
   'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
 ])
 
@@ -3979,6 +4272,18 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode', 'opencode-provid
 /** Section ids that belong to opencode Agents subgroup */
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
+/** Section ids that belong to Engines > pi (content self-gates on install).
+ *  Default model only — no auto-mode (deferred; opencode's ADR-023 gatekeeper
+ *  has no pi equivalent yet). No dispatch section: the Claude/opencode dispatch
+ *  sections configure dispatches INTO that engine (allowlist/default/cap for
+ *  incoming targets), and pi is a dispatch SOURCE only so far — nothing to
+ *  configure until pi-as-target ships (crossEngineDispatch is true for the
+ *  source direction as of M4b). */
+const ENGINE_PI_SECTION_IDS = new Set(['pi-models'])
+
+/** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
+const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
+
 /** Section ids that belong to Accounts (flat) */
 const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
 
@@ -3992,7 +4297,7 @@ function getSectionsForIds(ids: Set<string>, order?: string[]): Section[] {
 
 // ── Scoped navigation (Option A, ADR settings-ia-refactor) ──────────
 
-export type SettingsScope = 'common' | 'claude' | 'opencode'
+export type SettingsScope = 'common' | 'claude' | 'opencode' | 'pi'
 
 export interface ScopeSubgroup {
   id: string
@@ -4019,7 +4324,7 @@ export const SCOPES: ScopeDef[] = [
         id: 'common-app',
         label: undefined,
         sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+          'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
           'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
         ])
       }
@@ -4066,6 +4371,22 @@ export const SCOPES: ScopeDef[] = [
         id: 'opencode-agents',
         label: 'Agents',
         sections: getSectionsForIds(AGENTS_OPENCODE_SECTION_IDS, ['opencode-agents'])
+      }
+    ]
+  },
+  {
+    id: 'pi',
+    label: 'pi',
+    subgroups: [
+      {
+        id: 'pi-engine',
+        label: 'Engine',
+        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-models'])
+      },
+      {
+        id: 'pi-vendor',
+        label: 'Vendor',
+        sections: getSectionsForIds(VENDOR_PI_SECTION_IDS, ['vendor-pi'])
       }
     ]
   }
