@@ -4,6 +4,7 @@
  * Asserts that the correct SVG mark is rendered for each engineId:
  * - 'claude' → svg with aria-label="Claude"
  * - 'opencode' → svg with aria-label="opencode"
+ * - 'pi' → svg with aria-label="pi"
  *
  * The mark is selected via the ENGINE_MARK table keyed by engineId.
  */
@@ -69,17 +70,17 @@ describe('EngineLogo', () => {
     expect(container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 512 512')
   })
 
-  it('pi mark uses currentColor (no hardcoded stroke color)', () => {
+  it('pi mark uses currentColor (no hardcoded fill color)', () => {
     const { container } = render(<EngineLogo engineId="pi" size={12} className="" />)
     const paths = container.querySelectorAll('path')
-    expect(paths.length).toBeGreaterThan(0)
+    expect(paths).toHaveLength(2)
     for (const path of paths) {
-      expect(path.getAttribute('stroke')).toBe('currentColor')
+      expect(path.getAttribute('fill')).toBe('currentColor')
     }
   })
 
-  it('pi svg has viewBox 0 0 24 24 (consistent with Claude\'s compact mark)', () => {
+  it('pi svg preserves the supplied logo viewBox', () => {
     const { container } = render(<EngineLogo engineId="pi" size={12} className="" />)
-    expect(container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 24 24')
+    expect(container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 800 800')
   })
 })

@@ -23,7 +23,6 @@ const mockSaveSessionConfig = vi.fn()
 
 beforeEach(() => {
   resetFactoryCounter()
-
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: mockSaveSessionConfig,
@@ -98,7 +97,7 @@ describe('reasoningVariant resets on model change', () => {
     expect(store().sessions[ROUTE].reasoningVariant).toBe('thinking')
 
     // setSelectedModel should reset reasoningVariant to null
-    store().setSelectedModel('openai/o3-mini', 'opencode')
+    store().setSelectedModel('openai/o3-mini')
     expect(store().sessions[ROUTE].reasoningVariant).toBeNull()
   })
 
@@ -117,7 +116,7 @@ describe('reasoningVariant resets on model change', () => {
     expect(store().sessions[ROUTE].reasoningVariant).toBe('high')
 
     // Switching to another opencode model should still reset
-    store().setSelectedModel('minimax/minimax-01', 'opencode')
+    store().setSelectedModel('minimax/minimax-01')
     expect(store().sessions[ROUTE].reasoningVariant).toBeNull()
   })
 })

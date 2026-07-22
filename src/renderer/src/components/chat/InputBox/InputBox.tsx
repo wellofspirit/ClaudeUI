@@ -117,8 +117,7 @@ export function InputBox(): React.JSX.Element {
   // doesn't support slash commands, the menu offers nothing (engine + filesystem
   // commands alike) and `/` types as literal text. Claude: true → unchanged.
   const mergedSlashCommands = useMemo(
-    () =>
-      capabilities.slashCommands ? mergeSlashCommands(slashCommands, customCommands) : [],
+    () => (capabilities.slashCommands ? mergeSlashCommands(slashCommands, customCommands) : []),
     [capabilities.slashCommands, slashCommands, customCommands]
   )
 
@@ -167,36 +166,32 @@ export function InputBox(): React.JSX.Element {
   )
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
-  const setLastSelectedEngineId = useSessionStore((s) => s.setLastSelectedEngineId)
-  // Once the session is committed to an engine the engine is immutable — only
-  // show that engine's models in the picker. A session is engine-locked when it
-  // is running (has a backend sessionId) OR is loaded/forked from history
-  // (isHistorical). A brand-new empty session is unlocked, so the user can
-  // cross-engine pick (which switches the session engine).
+  const setSelectedEngine = useSessionStore((s) => s.setSelectedEngine)
+  // Engine is immutable after backend commitment. The picker remains visible
+  // while locked so the selected harness identity stays explicit.
   const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
-  const engineLocked = !!startedSessionId || !!isHistorical
+  const engineLocked = !activeSessionId || sdkActive || !!startedSessionId || !!isHistorical
   const pickerModels = useMemo(
-    () => filterModelsForEngine(models, engineLocked, sessionEngineId),
-    [models, engineLocked, sessionEngineId]
+    () => filterModelsForEngine(models, sessionEngineId),
+    [models, sessionEngineId]
   )
   // Memoized so its identity is stable across renders (it feeds several
   // downstream useMemo dependency lists). The fallback MUST stay within the
-  // session's OWN engine — never surface a Claude model on an opencode session
-  // (or vice-versa). `pickerModels` is UNFILTERED for brand-new (unlocked)
-  // sessions, so we can't use pickerModels[0] here: it would be the first Claude
-  // model. Instead filter explicitly by the session engine, and for opencode use
-  // the same resolver the spawn path uses so display == what will actually run.
+  // session's OWN engine — never surface a same-valued model from another
+  // harness. For opencode use the same resolver the spawn path uses so display
+  // == what will actually run.
   const opencodeDefaultModel = useSessionStore((s) => s.opencodeDefaultModel)
   const piDefaultModel = useSessionStore((s) => s.piDefaultModel)
   const selectedModel = useMemo(() => {
-    const exact = models.find((m) => m.value === selectedModelValue)
-    if (exact) return exact
     const engine = sessionEngineId ?? 'claude'
+    const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
+    const exact = sameEngine.find((m) => m.value === selectedModelValue)
+    if (exact) return exact
     if (engine === 'opencode') {
       const resolved = resolveOpencodeModel(models, opencodeDefaultModel)
-      const m = resolved ? models.find((mm) => mm.value === resolved) : undefined
+      const m = resolved ? sameEngine.find((mm) => mm.value === resolved) : undefined
       if (m) return m
     }
     if (engine === 'pi') {
@@ -205,10 +200,11 @@ export function InputBox(): React.JSX.Element {
       // "default", and `sameEngine[0]` below covers "first catalog". Looking the
       // configured default up in `models` keeps display consistent with what
       // would actually spawn — never surfaces it if pi's catalog doesn't have it.
-      const m = models.find((mm) => mm.value === piDefaultModel && (mm.engineId ?? 'claude') === 'pi')
+      const m = models.find(
+        (mm) => mm.value === piDefaultModel && (mm.engineId ?? 'claude') === 'pi'
+      )
       if (m) return m
     }
-    const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
     return (
       sameEngine[0] || {
         value: selectedModelValue || 'default',
@@ -262,17 +258,25 @@ export function InputBox(): React.JSX.Element {
     loadedModelsKey.current = key
 
     let ignore = false
-    window.api.getEngineModels().then((groups) => {
-      if (!ignore) {
-        const flat = groups.flatMap((g) => g.models)
-        setAvailableModels(flat)
-      }
-    }).catch(() => {
-      // Fallback to Claude-only models if getEngineModels fails
-      window.api.getModels().then((models) => {
-        if (!ignore) setAvailableModels(models)
-      }).catch(() => {/* non-fatal */})
-    })
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        if (!ignore) {
+          const flat = groups.flatMap((g) => g.models)
+          setAvailableModels(flat)
+        }
+      })
+      .catch(() => {
+        // Fallback to Claude-only models if getEngineModels fails
+        window.api
+          .getModels()
+          .then((models) => {
+            if (!ignore) setAvailableModels(models)
+          })
+          .catch(() => {
+            /* non-fatal */
+          })
+      })
     return () => {
       ignore = true
     }
@@ -296,7 +300,10 @@ export function InputBox(): React.JSX.Element {
   } {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
-    const modelInfo = state.availableModels.find((m) => m.value === session?.selectedModel)
+    const engineId = session?.selectedEngineId ?? 'claude'
+    const modelInfo = state.availableModels.find(
+      (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
+    )
     const desiredThinking: ThinkingMode =
       session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
     // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
@@ -344,7 +351,7 @@ export function InputBox(): React.JSX.Element {
           // OpencodeSession.run() verifies the id via getSession and falls back to
           // createSession if it doesn't exist (e.g. first-ever prompt on that slot).
           const isOpencode = session?.selectedEngineId === 'opencode'
-          const resumeId = (isHistorical || isOpencode) ? activeSessionId : undefined
+          const resumeId = isHistorical || isOpencode ? activeSessionId : undefined
           await window.api.createSession(
             activeSessionId,
             session?.cwd || '',
@@ -618,27 +625,16 @@ export function InputBox(): React.JSX.Element {
     (value: string) => {
       const state = useSessionStore.getState()
       const session = state.sessions[activeSessionId ?? '']
-      const newModel = state.availableModels.find((m) => m.value === value)
-      // The picked entry carries engineId/vendorId (from getEngineModels). The
-      // store action switches the session's engine when it differs (valid only
-      // for a not-yet-started session — guarded below before any IPC).
-      // A model with no engineId is a Claude model (ModelInfo.engineId defaults
-      // to 'claude' when absent) — NEVER fall back to the session's current
-      // engine, or a Claude pick on an opencode session is recorded as
-      // "opencode/<claudeModelId>" and the engine never switches.
-      const pickedEngine = newModel?.engineId ?? 'claude'
-      setSelectedModel(value, pickedEngine)
-      // Persist the chosen engine so the next new session inherits it (was
-      // previously only written by EngineToggle, which is now removed).
-      setLastSelectedEngineId(pickedEngine)
+      const selectedEngine = session?.selectedEngineId ?? 'claude'
+      const newModel = state.availableModels.find(
+        (m) => m.value === value && (m.engineId ?? 'claude') === selectedEngine
+      )
+      setSelectedModel(value)
 
       // A "started" session has a backend sessionId. Only push a live model
-      // switch to the backend when the picked engine MATCHES the running
-      // engine — never send an opencode model string to a live Claude process
-      // (or vice versa). Cross-engine picks take effect on the next/new session.
+      // switch to the backend for an already committed same-engine session.
       const started = !!session?.status.sessionId
-      const sameEngine = (session?.selectedEngineId ?? 'claude') === pickedEngine
-      if (activeSessionId && started && sameEngine) {
+      if (activeSessionId && started) {
         window.api.setModel(activeSessionId, value)
       }
 
@@ -656,11 +652,11 @@ export function InputBox(): React.JSX.Element {
       }
       // Reset reasoning variant — the new model has different variants.
       // setSelectedModel already resets it in the store; also notify the backend.
-      if (activeSessionId && started && sameEngine) {
+      if (activeSessionId && started) {
         window.api.setReasoningVariant(activeSessionId, null)
       }
     },
-    [activeSessionId, setSelectedModel, setLastSelectedEngineId, setThinkingMode, setEffort]
+    [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
   )
 
   // Effort and thinking mode are read at sdkQuery start time, so restart the
@@ -750,20 +746,14 @@ export function InputBox(): React.JSX.Element {
   // carrying authoritative SDK capability fields) so the pickers track the
   // user's model selection live, before any spawn/setModel round-trip. No
   // parallel modelSupports* derivation here.
-  const reasoning = useMemo(
-    () => claudeModelCapabilities(selectedModel).reasoning,
-    [selectedModel]
-  )
+  const reasoning = useMemo(() => claudeModelCapabilities(selectedModel).reasoning, [selectedModel])
   const thinkingCap = reasoning.thinking
   const effortCap = reasoning.effort
 
   // opencode per-model reasoning variant picker: derived from the selected
   // model's reasoningVariants (populated by model-discovery). Claude models have
   // none → empty array → picker hidden.
-  const reasoningVariants = useMemo(
-    () => selectedModel.reasoningVariants ?? [],
-    [selectedModel]
-  )
+  const reasoningVariants = useMemo(() => selectedModel.reasoningVariants ?? [], [selectedModel])
   const adaptiveSupported = !!thinkingCap?.modes.includes('adaptive')
   const allowedEffortLevels = useMemo(() => effortCap?.levels ?? [], [effortCap])
 
@@ -803,6 +793,8 @@ export function InputBox(): React.JSX.Element {
       attachedFiles={attachedFiles}
       models={pickerModels}
       selectedModel={selectedModel}
+      selectedEngineId={sessionEngineId}
+      engineLocked={engineLocked}
       effort={effectiveEffort}
       effortSupported={effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
@@ -828,6 +820,7 @@ export function InputBox(): React.JSX.Element {
       onSlashSelect={handleSlashSelect}
       onFileMentionConfirm={handleFileMentionConfirm}
       onSelectModel={handleSelectModel}
+      onSelectEngine={setSelectedEngine}
       onSelectEffort={handleSelectEffort}
       onSelectThinking={handleSelectThinking}
       reasoningVariants={reasoningVariants}

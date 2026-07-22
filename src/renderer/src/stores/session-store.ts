@@ -98,6 +98,33 @@ function perEngineDefaultModel(
   return undefined
 }
 
+function isModelForEngine(model: ModelInfo, engineId: EngineId): boolean {
+  return (model.engineId ?? 'claude') === engineId
+}
+
+function resolveEngineDefaultModel(
+  engineId: EngineId,
+  models: ModelInfo[],
+  opencodeDefaultModel: string,
+  piDefaultModel: string
+): string {
+  if (engineId === 'opencode') {
+    return (
+      resolveOpencodeModel(models, opencodeDefaultModel) ??
+      engineMeta(engineId).defaultModelValue(opencodeDefaultModel)
+    )
+  }
+  if (engineId === 'pi') {
+    const piModels = models.filter((model) => isModelForEngine(model, 'pi'))
+    return (
+      piModels.find((model) => model.value === piDefaultModel)?.value ??
+      piModels[0]?.value ??
+      engineMeta(engineId).defaultModelValue(piDefaultModel)
+    )
+  }
+  return engineMeta(engineId).defaultModelValue()
+}
+
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
 
 /**
@@ -308,15 +335,25 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeSettings, piEngineConfig] =
-    await Promise.all([
-      window.api.loadSettings(),
-      window.api.loadSessionConfig(),
-      window.api.loadSlashCommands(),
-      window.api.loadEngineConfig('claude'),
-      window.api.loadOpencodeSettings().catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
-      window.api.loadEngineConfig('pi').catch((): import('../../../shared/types').EngineConfig => ({}))
-    ])
+  let [
+    savedSettings,
+    sessionConfig,
+    slashCommands,
+    loadedEngineConfig,
+    opencodeSettings,
+    piEngineConfig
+  ] = await Promise.all([
+    window.api.loadSettings(),
+    window.api.loadSessionConfig(),
+    window.api.loadSlashCommands(),
+    window.api.loadEngineConfig('claude'),
+    window.api
+      .loadOpencodeSettings()
+      .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
+    window.api
+      .loadEngineConfig('pi')
+      .catch((): import('../../../shared/types').EngineConfig => ({}))
+  ])
 
   // One-time migration from localStorage → disk
   const MIGRATION_FLAG = 'claudeui-migrated-to-disk'
@@ -669,7 +706,12 @@ interface SessionState {
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
-  vendorOAuth: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null
+  vendorOAuth: {
+    engineId: string
+    vendorId: string
+    stage: 'waiting' | 'error'
+    instructions: string
+  } | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -688,6 +730,8 @@ interface SessionState {
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
   /** Set the remembered engine choice. Persisted in localStorage (lightweight). */
   setLastSelectedEngineId: (engineId: EngineId) => void
+  /** Switch the active fresh session's engine and seed its effective default model. */
+  setSelectedEngine: (engineId: EngineId) => void
   /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
@@ -848,11 +892,8 @@ interface SessionState {
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
-  /** Set the active session's model picker value. When `engineId` is provided
-   *  and differs from the session's current engine, switches the session's
-   *  engine too (only valid for a not-yet-started session — the caller guards
-   *  this). Persists the engine-correct ModelRef. */
-  setSelectedModel: (model: string, engineId?: EngineId) => void
+  /** Set the active session's model picker value within its selected engine. */
+  setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setSdkSkillNames: (names: string[]) => void
@@ -891,11 +932,21 @@ interface SessionState {
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
-  setVendorOAuth(state: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null): void
+  setVendorOAuth(
+    state: {
+      engineId: string
+      vendorId: string
+      stage: 'waiting' | 'error'
+      instructions: string
+    } | null
+  ): void
   cancelVendorOAuth(): void
   setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
   clearVendorAuthRequired(routingId: string): void
-  authorizeVendorOAuth(engineId: EngineId, vendorId: string): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
+  authorizeVendorOAuth(
+    engineId: EngineId,
+    vendorId: string
+  ): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -1021,19 +1072,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       // would show a Claude model in the picker while routing send to a phantom
       // opencode model (the desync regression). Fall back to claude in that case.
       let engineId = state.lastSelectedEngineId
-      let defaultModel: string
-      if (engineId === 'opencode') {
-        const resolved = resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
-        if (resolved) {
-          defaultModel = resolved
-        } else {
-          engineId = 'claude'
-          defaultModel = 'default'
-        }
-      } else {
-        defaultModel = engineMeta(engineId).defaultModelValue(
-          perEngineDefaultModel(engineId, state.opencodeDefaultModel, state.piDefaultModel)
-        )
+      let defaultModel = resolveEngineDefaultModel(
+        engineId,
+        state.availableModels,
+        state.opencodeDefaultModel,
+        state.piDefaultModel
+      )
+      if (
+        engineId === 'opencode' &&
+        !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
+      ) {
+        engineId = 'claude'
+        defaultModel = 'default'
       }
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
@@ -1051,7 +1101,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         engineId,
         capabilities: engineMeta(engineId).seedCapabilities(
           defaultModel,
-          state.availableModels.find((m) => m.value === defaultModel)
+          state.availableModels.find(
+            (m) => m.value === defaultModel && isModelForEngine(m, engineId)
+          )
         )
       }
       return {
@@ -1068,6 +1120,44 @@ export const useSessionStore = create<SessionState>((set) => ({
     localStorage.setItem('lastSelectedEngineId', engineId)
     set({ lastSelectedEngineId: engineId })
   },
+
+  setSelectedEngine: (engineId) =>
+    set((state) => {
+      const id = state.activeSessionId
+      const session = id ? state.sessions[id] : undefined
+      if (!id || !session || session.sdkActive || session.status.sessionId || session.isHistorical)
+        return {}
+      if (session.selectedEngineId === engineId) return {}
+      const model = resolveEngineDefaultModel(
+        engineId,
+        state.availableModels,
+        state.opencodeDefaultModel,
+        state.piDefaultModel
+      )
+      const modelInfo = state.availableModels.find(
+        (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
+      )
+      const sessionEngines = {
+        ...state.sessionEngines,
+        [id]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+      }
+      saveSessionConfig(state, { sessionEngines })
+      localStorage.setItem('lastSelectedEngineId', engineId)
+      return {
+        sessions: updateSession(state.sessions, id, () => ({
+          selectedEngineId: engineId,
+          selectedModel: model,
+          reasoningVariant: null,
+          status: {
+            ...session.status,
+            engineId,
+            capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
+          }
+        })),
+        sessionEngines,
+        lastSelectedEngineId: engineId
+      }
+    }),
 
   setOpencodeDefaultModel: (model) =>
     set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
@@ -1363,10 +1453,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   deleteProject: async (projectKey) => {
     await window.api.deleteProject(projectKey)
     // Also delete any opencode sessions in this group so they don't reappear on the next poll.
-    const opencodeSessions = useSessionStore
-      .getState()
-      .directories.find((g) => g.projectKey === projectKey)
-      ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
+    const opencodeSessions =
+      useSessionStore
+        .getState()
+        .directories.find((g) => g.projectKey === projectKey)
+        ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
     if (opencodeSessions.length > 0) {
       await Promise.allSettled(
         opencodeSessions.map((s) => window.api.deleteSession(s.sessionId, projectKey, 'opencode'))
@@ -1878,7 +1969,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  appendSubagentToolResult: (routingId, toolUseId, toolResultToolUseId, result, isError, fileDiffs) =>
+  appendSubagentToolResult: (
+    routingId,
+    toolUseId,
+    toolResultToolUseId,
+    result,
+    isError,
+    fileDiffs
+  ) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -2241,52 +2339,31 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),
 
-  setSelectedModel: (model, engineId) =>
+  setSelectedModel: (model) =>
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
       const session = state.sessions[id]
-      // Resolve the engine this model belongs to: explicit arg wins, else keep
-      // the session's current engine.
-      const targetEngine: EngineId = engineId ?? session?.selectedEngineId ?? 'claude'
-      const engineChanged = !!session && session.selectedEngineId !== targetEngine
+      const targetEngine = session?.selectedEngineId ?? 'claude'
 
       // Persist the engine-correct ModelRef into sessionEngines so it seeds
-      // selectedModel + engine on reopen. Update the engineId too when it changed.
+      // selectedModel + engine on reopen.
       const existing = state.sessionEngines[id]
       const modelRef = engineMeta(targetEngine).decodeModelValue(model)
       const sessionEngines = existing
         ? {
             ...state.sessionEngines,
-            [id]: { ...existing, engineId: targetEngine, model: modelRef }
+            [id]: { ...existing, model: modelRef }
           }
         : state.sessionEngines
       if (existing) saveSessionConfig(state, { sessionEngines })
 
-      // Mirror the engine choice into localStorage (matches setLastSelectedEngineId).
-      if (engineChanged) localStorage.setItem('lastSelectedEngineId', targetEngine)
-
-      // When the engine changed, also update the session's selectedEngineId,
-      // status.engineId, and capabilities so pre-spawn gating is correct.
       // Always reset reasoningVariant on model change — different models have different variants.
       const patch: Partial<PerSessionState> = { selectedModel: model, reasoningVariant: null }
-      if (engineChanged && session) {
-        patch.selectedEngineId = targetEngine
-        patch.status = {
-          ...session.status,
-          engineId: targetEngine,
-          capabilities: engineMeta(targetEngine).seedCapabilities(
-            model,
-            state.availableModels.find((m) => m.value === model)
-          )
-        }
-      }
 
       return {
         sessions: updateSession(state.sessions, id, () => patch),
-        sessionEngines,
-        // Remember the engine for the next new session.
-        ...(engineChanged ? { lastSelectedEngineId: targetEngine } : {})
+        sessionEngines
       }
     }),
 
@@ -2338,9 +2415,13 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ vendorOAuth: null })
   },
   setVendorAuthRequired: (routingId, data) =>
-    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data })) })),
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data }))
+    })),
   clearVendorAuthRequired: (routingId) =>
-    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null })) })),
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null }))
+    })),
   authorizeVendorOAuth: async (engineId, vendorId) => {
     try {
       const allOptions = await window.api.vendorAuthListOptions(engineId)
@@ -2375,16 +2456,29 @@ export const useSessionStore = create<SessionState>((set) => ({
             // invalidates the model cache main-side. (REQUIRED 1.)
             return { ok: true }
           }
-          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          useSessionStore.getState().setVendorOAuth({
+            engineId,
+            vendorId,
+            stage: 'error',
+            instructions: result.instructions
+          })
           return { ok: false }
         } catch {
           if (superseded()) return { ok: false }
-          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          useSessionStore.getState().setVendorOAuth({
+            engineId,
+            vendorId,
+            stage: 'error',
+            instructions: result.instructions
+          })
           return { ok: false }
         }
       } else {
         // method === 'code': return needsPaste so the caller can show paste box
-        return { ok: false, needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions } }
+        return {
+          ok: false,
+          needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions }
+        }
       }
     } catch {
       return { ok: false }
@@ -2408,7 +2502,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // opencode sessions always pass routingId as resumeSessionId (the server resumes
     // the prior opencode session regardless of whether messages are preloaded locally).
     const isOpencode = session.selectedEngineId === 'opencode'
-    const resumeId = (session.messages.length > 0 || isOpencode) ? routingId : undefined
+    const resumeId = session.messages.length > 0 || isOpencode ? routingId : undefined
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -2458,7 +2552,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         delete sessionEngines[oldId]
       } else {
         // Always record the engine + current model, defaulting to the session's choices
-        const modelRef = engineMeta(session.selectedEngineId).decodeModelValue(session.selectedModel)
+        const modelRef = engineMeta(session.selectedEngineId).decodeModelValue(
+          session.selectedModel
+        )
         sessionEngines[newId] = {
           engineId: session.selectedEngineId,
           model: modelRef

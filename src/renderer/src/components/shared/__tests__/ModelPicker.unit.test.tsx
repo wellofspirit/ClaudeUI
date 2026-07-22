@@ -10,7 +10,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
-import { ModelPicker, type ModelDisplay } from '../InlinePickers'
+import { EnginePicker, ModelPicker, type ModelDisplay } from '../InlinePickers'
 
 const claudeModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -150,5 +150,37 @@ describe('ModelPicker — free badge + filter', () => {
       'claude-opus-4-7',
       'opencode/paid1'
     ])
+  })
+})
+
+describe('EnginePicker', () => {
+  it('offers every registered engine and invokes the selected engine', () => {
+    const onSelectEngine = vi.fn()
+    render(
+      <EnginePicker selectedEngineId="claude" locked={false} onSelectEngine={onSelectEngine} />
+    )
+
+    fireEvent.click(screen.getByTestId('EnginePicker.trigger'))
+    expect(
+      screen.getAllByTestId('EnginePicker.option').map((option) => option.dataset.engine)
+    ).toEqual(['claude', 'opencode', 'pi'])
+    const piOption = screen
+      .getAllByTestId('EnginePicker.option')
+      .find((option) => option.dataset.engine === 'pi')
+    if (!piOption) throw new Error('Pi engine option not found')
+    fireEvent.click(piOption)
+    expect(onSelectEngine).toHaveBeenCalledWith('pi')
+  })
+
+  it('stays visible but disabled when the session engine is locked', () => {
+    const onSelectEngine = vi.fn()
+    render(<EnginePicker selectedEngineId="pi" locked onSelectEngine={onSelectEngine} />)
+
+    const trigger = screen.getByTestId('EnginePicker.trigger')
+    expect(trigger).toBeDisabled()
+    expect(trigger).toHaveAttribute('title', 'Engine selection is unavailable')
+    fireEvent.click(trigger)
+    expect(screen.queryByTestId('EnginePicker.option')).toBeNull()
+    expect(onSelectEngine).not.toHaveBeenCalled()
   })
 })

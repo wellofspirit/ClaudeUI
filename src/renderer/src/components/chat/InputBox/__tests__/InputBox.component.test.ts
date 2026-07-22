@@ -388,16 +388,21 @@ describe('InputBox FC — rendered', () => {
       record('session:set-thinking-mode', ...args)
       return null
     })
-    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
-      record('session:set-reasoning-variant', ...args)
-      return null
-    })
+    app.bridge.ipcMain.handle(
+      'session:set-reasoning-variant',
+      (_e: unknown, ...args: unknown[]) => {
+        record('session:set-reasoning-variant', ...args)
+        return null
+      }
+    )
     app.bridge.ipcMain.handle('session:cancel', (_e: unknown, ...args: unknown[]) => {
       record('session:cancel', ...args)
       return null
     })
     app.bridge.ipcMain.handle('session:get-models', () => [])
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [{ engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
+    ])
     app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
       record('voice:start-recording', ...args)
       return null
@@ -543,29 +548,57 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
   })
 
-  it('onSelectModel: picking a Claude model on an opencode session switches the engine to claude', async () => {
-    // Regression: Claude ModelInfo entries may lack an explicit engineId. The
-    // pick resolution must treat a missing engineId as 'claude' — NOT fall back
-    // to the session's current engine — otherwise a Claude pick on an opencode
-    // session is recorded as "opencode/<claudeModelId>" (e.g. "opencode/default")
-    // and the engine never switches, breaking the chat.
-    renderFC()
+  it('fresh model list is scoped to the selected engine', async () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedEngineId: 'opencode' }
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'pi',
+          selectedModel: 'openai/foo'
+        }
       },
-      // Claude entry with engineId undefined (as supportedModels() returns it).
-      availableModels: [{ value: 'default', displayName: 'Default', description: '' }]
+      availableModels: [
+        {
+          value: 'openai/foo',
+          displayName: 'OpenCode Foo',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'openai'
+        },
+        {
+          value: 'openai/foo',
+          displayName: 'Pi Foo',
+          description: '',
+          engineId: 'pi',
+          vendorId: 'openai'
+        }
+      ]
     }))
+    renderFC()
+    expect(viewProps.models).toEqual([
+      expect.objectContaining({ engineId: 'pi', value: 'openai/foo' })
+    ])
+    expect(viewProps.selectedModel).toEqual(
+      expect.objectContaining({ displayName: 'Pi Foo', engineId: 'pi' })
+    )
+  })
 
-    viewProps.onSelectModel('default')
+  it('locks engine selection as soon as backend initialization starts', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
+      }
+    }))
+    renderFC()
+    expect(viewProps.engineLocked).toBe(true)
+  })
 
-    const s = useSessionStore.getState()
-    expect(s.sessions[FC_ROUTE].selectedEngineId).toBe('claude')
-    expect(s.sessions[FC_ROUTE].selectedModel).toBe('default')
-    // No opencode-engine attribution leaked into setModel.
-    expect(ipcCalls['session:set-model']).toBeUndefined()
+  it('locks engine selection until a project session exists', () => {
+    useSessionStore.setState({ activeSessionId: null })
+    renderFC()
+    expect(viewProps.engineLocked).toBe(true)
   })
 
   it('opencode session with an unavailable model falls back to an opencode model, not Claude', async () => {
@@ -964,12 +997,14 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     app = await bootTestApp()
 
     app.bridge.ipcMain.handle('session:get-models', () => [])
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
-      engineId: 'claude',
-      vendorId: 'anthropic',
-      vendorName: 'Anthropic',
-      models: []
-    }])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        vendorName: 'Anthropic',
+        models: []
+      }
+    ])
     app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
     app.bridge.ipcMain.handle('file:list-dir', () => [])
 
@@ -998,14 +1033,16 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
           ...session,
           status: {
             ...session.status,
-            account: billingType !== undefined
-              ? {
-                  engineId: 'opencode' as const,
-                  vendorId: 'opencode',
-                  billingType: billingType as import('../../../../../../shared/types').BillingType,
-                  authState: 'authenticated' as const
-                }
-              : null
+            account:
+              billingType !== undefined
+                ? {
+                    engineId: 'opencode' as const,
+                    vendorId: 'opencode',
+                    billingType:
+                      billingType as import('../../../../../../shared/types').BillingType,
+                    authState: 'authenticated' as const
+                  }
+                : null
           }
         }
       }
@@ -1068,27 +1105,32 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
     }
 
     app.bridge.ipcMain.handle('session:get-models', () => [])
-    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
-      engineId: 'opencode',
-      vendorId: 'minimax',
-      vendorName: 'MiniMax',
-      models: [
-        {
-          value: 'minimax/minimax-01',
-          displayName: 'MiniMax-01',
-          description: 'MiniMax · MiniMax-01',
-          engineId: 'opencode',
-          vendorId: 'minimax',
-          supportsEffort: false,
-          supportsAdaptiveThinking: false,
-          reasoningVariants: ['none', 'thinking']
-        }
-      ]
-    }])
-    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
-      record('session:set-reasoning-variant', ...args)
-      return null
-    })
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      {
+        engineId: 'opencode',
+        vendorId: 'minimax',
+        vendorName: 'MiniMax',
+        models: [
+          {
+            value: 'minimax/minimax-01',
+            displayName: 'MiniMax-01',
+            description: 'MiniMax · MiniMax-01',
+            engineId: 'opencode',
+            vendorId: 'minimax',
+            supportsEffort: false,
+            supportsAdaptiveThinking: false,
+            reasoningVariants: ['none', 'thinking']
+          }
+        ]
+      }
+    ])
+    app.bridge.ipcMain.handle(
+      'session:set-reasoning-variant',
+      (_e: unknown, ...args: unknown[]) => {
+        record('session:set-reasoning-variant', ...args)
+        return null
+      }
+    )
     app.bridge.ipcMain.handle('session:set-model', (_e: unknown, ...args: unknown[]) => {
       record('session:set-model', ...args)
       return null

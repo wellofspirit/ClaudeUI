@@ -2,7 +2,7 @@
  * EngineLogo — a small inline SVG mark identifying a session's engine.
  *
  * Claude: simplified Anthropic logomark, tinted #D97757 (Claude orange)
- * opencode: monochrome geometric logomark, inherits currentColor (theme-adaptive)
+ * opencode / pi: monochrome marks that inherit currentColor (theme-adaptive)
  *
  * Sizes: 'sm' (12px, sidebar rows), 'md' (14px, TopBar), 'lg' (16px, other uses)
  */
@@ -107,9 +107,8 @@ function OpencodeMark({
 }
 
 // ── pi mark ───────────────────────────────────────────────────────────────────
-// Simple monochrome π glyph: a top bar + two legs (the right one flicking
-// outward at the foot, like the printed character). Uses currentColor
-// (theme-adaptive), viewBox consistent with Claude's compact 24x24 mark.
+// Official block-form mark, adapted from pi-logo-on-dark.svg. The source uses
+// white; currentColor keeps it legible across all application themes.
 
 function PiMark({
   size,
@@ -126,7 +125,7 @@ function PiMark({
     <svg
       width={size}
       height={size}
-      viewBox="0 0 24 24"
+      viewBox="0 0 800 800"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
@@ -135,24 +134,12 @@ function PiMark({
       data-engine={engineId}
       style={{ flexShrink: 0 }}
     >
-      {/* Top bar */}
-      <path d="M4 7H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      {/* Left leg, small foot flick outward */}
       <path
-        d="M8 7V17.5C8 18.5 7.2 18.9 6.2 19.2"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        fill="none"
+        fill="currentColor"
+        fillRule="evenodd"
+        d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
       />
-      {/* Right leg, foot flicks outward (classic printed π shape) */}
-      <path
-        d="M16.5 7L15.3 17C15.1 18.3 15.7 19 17 19"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        fill="none"
-      />
+      <path fill="currentColor" d="M517.36 400H634.72V634.72H517.36Z" />
     </svg>
   )
 }
