@@ -21,6 +21,12 @@ declare global {
 
 type Listener = (...args: unknown[]) => void
 
+function sharedProviderRemoteMutation(..._args: unknown[]): Promise<never> {
+  return Promise.reject(
+    new Error('Shared provider settings can only be changed from the desktop app')
+  )
+}
+
 /**
  * Create event listener registration that mirrors preload's onEvent().
  * Events arrive via the connection's event handler.
@@ -308,6 +314,23 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
     getPiAuthStatus: () =>
       connection.invoke('pi:auth-status') as ReturnType<ClaudeAPI['getPiAuthStatus']>,
+    listSharedProviders: () =>
+      connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
+    getSharedProviderStatuses: () =>
+      connection.invoke('shared-provider:statuses') as ReturnType<
+        ClaudeAPI['getSharedProviderStatuses']
+      >,
+    listSharedProviderModels: (id) =>
+      connection.invoke('shared-provider:models', id) as ReturnType<
+        ClaudeAPI['listSharedProviderModels']
+      >,
+    saveSharedProvider: sharedProviderRemoteMutation,
+    removeSharedProvider: sharedProviderRemoteMutation,
+    setSharedProviderRoute: sharedProviderRemoteMutation,
+    setSharedProviderApiKey: sharedProviderRemoteMutation,
+    syncSharedProvider: sharedProviderRemoteMutation,
+    disconnectSharedProvider: sharedProviderRemoteMutation,
+    setSharedProviderDefaultModel: sharedProviderRemoteMutation,
 
     // Generation
     generateTitle: (conversationText) =>

@@ -58,6 +58,7 @@ import '../auth/register-auth-providers'
 import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { sharedProviderService } from '../shared-providers'
 import { authManager } from '../services/auth-manager'
 import { accountManager } from '../services/account-manager'
 import type {
@@ -73,6 +74,10 @@ import type {
   VendorAuthMap,
   VendorAuthOption
 } from '../../shared/types'
+import type {
+  ConfigurableHarnessId,
+  SharedProviderDefinition
+} from '../../shared/shared-provider'
 import {
   discoverOpencodeModels,
   invalidateOpencodeModelCache,
@@ -1117,6 +1122,54 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   )
   ipcMain.handle('config:save-vendor-config', (_e, vendorId: string, cfg: VendorConfig) =>
     saveVendorConfig(vendorId, cfg)
+  )
+  ipcMain.handle(
+    'shared-provider:list',
+    safeHandler(async () => sharedProviderService.listDefinitions())
+  )
+  ipcMain.handle(
+    'shared-provider:statuses',
+    safeHandler(async () => sharedProviderService.listStatuses())
+  )
+  ipcMain.handle(
+    'shared-provider:models',
+    safeHandler(async (_e, id: string) => sharedProviderService.listProviderModels(id))
+  )
+  ipcMain.handle(
+    'shared-provider:save',
+    safeHandler(async (_e, definition: SharedProviderDefinition) =>
+      sharedProviderService.saveDefinition(definition)
+    )
+  )
+  ipcMain.handle(
+    'shared-provider:remove',
+    safeHandler(async (_e, id: string) => sharedProviderService.removeDefinition(id))
+  )
+  ipcMain.handle(
+    'shared-provider:set-route',
+    safeHandler(
+      async (_e, id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
+        sharedProviderService.setRouteEnabled(id, harness, enabled)
+    )
+  )
+  ipcMain.handle(
+    'shared-provider:set-key',
+    safeHandler(async (_e, id: string, key: string) => sharedProviderService.setApiKey(id, key))
+  )
+  ipcMain.handle(
+    'shared-provider:sync',
+    safeHandler(async (_e, id: string) => sharedProviderService.syncProvider(id))
+  )
+  ipcMain.handle(
+    'shared-provider:disconnect',
+    safeHandler(async (_e, id: string) => sharedProviderService.disconnectProvider(id))
+  )
+  ipcMain.handle(
+    'shared-provider:set-default',
+    safeHandler(
+      async (_e, id: string, harness: ConfigurableHarnessId, modelId?: string) =>
+        sharedProviderService.setRouteDefaultModel(id, harness, modelId)
+    )
   )
 
   // opencode engine-native settings — read/write opencode's OWN config file.

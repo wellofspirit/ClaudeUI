@@ -47,6 +47,7 @@ import {
 } from './settings-controls'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { PiVendors } from './PiVendors'
+import { SharedProviders } from './SharedProviders'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
@@ -1663,15 +1664,13 @@ function OpencodeModelsSection(): React.JSX.Element {
  * (engines/pi.json via loadEngineConfig/saveEngineConfig), NOT a dedicated
  * opencode.json-style settings file like OpencodeModelsSection's `cfg.model`
  * (pi has no native-config-passthrough schema to mirror in M3 — just this one
- * field). Free-text input (not a closed <select>) with a <datalist> of
- * discovered models for convenience + a non-blocking warning when the typed
- * value isn't in that list — a model pi supports locally that ClaudeUI
- * hasn't discovered yet (e.g. a not-yet-authenticated provider) should still
- * be settable.
+ * field). Discovered models use a visible select, with an explicit custom-ID
+ * escape hatch for models ClaudeUI has not discovered yet.
  */
 function PiDefaultModelSection(): React.JSX.Element {
   const [cfg, setCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [customMode, setCustomMode] = useState(false)
   const installed = usePiInstalled()
 
   useEffect(() => {
@@ -1723,20 +1722,56 @@ function PiDefaultModelSection(): React.JSX.Element {
           Default model
           <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
         </div>
-        <input
-          data-testid="PiDefaultModelSection.defaultModel"
-          type="text"
-          list="pi-default-model-options"
-          value={current}
-          onChange={(e) => update(e.target.value)}
-          placeholder={PI_DEFAULT_MODEL}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        />
-        <datalist id="pi-default-model-options">
-          {models.map((m) => (
-            <option key={m.value} value={m.value} label={m.displayName || m.value} />
-          ))}
-        </datalist>
+        {models.length > 0 ? (
+          <select
+            data-testid="PiDefaultModelSection.defaultModel"
+            value={customMode || !known ? '__custom__' : current}
+            onChange={(e) => {
+              if (e.target.value === '__custom__') setCustomMode(true)
+              else {
+                setCustomMode(false)
+                update(e.target.value)
+              }
+            }}
+            className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+          >
+            <option value="">Default ({PI_DEFAULT_MODEL})</option>
+            {models.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.displayName || m.value}
+              </option>
+            ))}
+            <option value="__custom__">Custom model ID...</option>
+          </select>
+        ) : (
+          <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
+            No pi models discovered. Authenticate a provider, then refresh models.
+          </div>
+        )}
+        {(models.length === 0 || customMode || !known) && (
+          <input
+            data-testid="PiDefaultModelSection.customModel"
+            type="text"
+            value={current}
+            onChange={(e) => update(e.target.value)}
+            placeholder="Custom provider/model-id"
+            className="mt-1 w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+          />
+        )}
+        <button
+          data-testid="PiDefaultModelSection.refresh"
+          onClick={() => {
+            window.api
+              .getEngineModels()
+              .then((groups) =>
+                setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
+              )
+              .catch(() => {})
+          }}
+          className="mt-1 text-[11px] text-accent"
+        >
+          Refresh models
+        </button>
         {!known && (
           <div
             data-testid="PiDefaultModelSection.unknownWarning"
@@ -1767,7 +1802,7 @@ const inputClass =
  *          remount the row.
  *   _id  — the EDITABLE opencode provider id (the map key used at save time).
  */
-type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string }
+type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string; _managed?: boolean }
 
 /** Empty provider row factory — stable _key, blank editable id. */
 function newProvider(): ProviderRow {
@@ -1807,17 +1842,26 @@ function OpencodeProvidersSection(): React.JSX.Element {
   }
 
   useEffect(() => {
-    window.api
-      .loadOpencodeSettings()
-      .then((settings) => {
+    Promise.all([
+      window.api.loadOpencodeSettings(),
+      window.api.listSharedProviders().catch(() => [])
+    ])
+      .then(([settings, sharedProviders]) => {
         setCfg(settings)
+        const managedIds = new Set(
+          sharedProviders.map(
+            (provider) => provider.routes.opencode.providerId ?? provider.id
+          )
+        )
         // Hydrate provider rows from saved config. The saved provider id becomes
         // both the stable _key and the editable _id.
         const saved = settings.providers ?? {}
         const rows: ProviderRow[] = Object.entries(saved).map(([id, p]) => ({
           _key: id,
           _id: id,
+          _managed: managedIds.has(id),
           name: p.name ?? '',
+          npm: p.npm,
           baseURL: p.baseURL ?? '',
           models: p.models ?? []
         }))
@@ -1851,6 +1895,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
         .map((m) => (m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }))
       const entry: OpencodeProviderSettings = {}
       if (row.name) entry.name = row.name
+      if (row.npm) entry.npm = row.npm
       if (row.baseURL) entry.baseURL = row.baseURL
       if (models.length > 0) entry.models = models
       providers[row._id] = entry
@@ -1989,6 +2034,31 @@ function OpencodeProvidersSection(): React.JSX.Element {
         </div>
         {providerRows.map((row) => {
           const id = row._id.trim()
+          if (row._managed) {
+            return (
+              <div
+                key={row._key}
+                data-testid="OpencodeProvidersSection.managedProvider"
+                data-id={id}
+                className="border border-border/30 rounded-md p-2 text-[11px] text-text-secondary"
+              >
+                <div className="font-medium text-text-primary">{row.name || id}</div>
+                <div className="text-text-muted">Managed in Common · Providers & models</div>
+                <button
+                  onClick={() =>
+                    window.dispatchEvent(
+                      new CustomEvent('open-settings', {
+                        detail: { scope: 'common', section: 'shared-providers' }
+                      })
+                    )
+                  }
+                  className="mt-1 text-accent"
+                >
+                  Open shared provider
+                </button>
+              </div>
+            )
+          }
           const hasKey = id.length > 0 && credIds[id] !== undefined
           const busy = keyBusy[row._key] ?? false
           const error = keyError[row._key]
@@ -3901,6 +3971,24 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'shared-providers',
+    label: 'Providers & models',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'sharedProviders',
+        label: 'Providers & models',
+        keywords: 'shared provider chatgpt codex api key model pi opencode',
+        render: () => <SharedProviders />
+      }
+    ]
+  },
+  {
     id: 'effortDefaults',
     label: 'Default effort',
     icon: (
@@ -4116,7 +4204,7 @@ export const SECTIONS: Section[] = [
 
 /** Section ids that belong to the App group (flat, directly visible) */
 const APP_SECTION_IDS = new Set([
-  'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+  'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
   'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
 ])
 
@@ -4191,7 +4279,7 @@ export const SCOPES: ScopeDef[] = [
         id: 'common-app',
         label: undefined,
         sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+          'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
           'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
         ])
       }

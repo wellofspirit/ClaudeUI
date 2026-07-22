@@ -1,214 +1,205 @@
-/**
- * @vitest-environment node
- *
- * Unit tests for AuthVault — tmp-dir fixtures, `os.homedir()` redirected via a
- * hoisted mock (same trick as PiAuthProvider.test.ts / account-manager.test.ts)
- * so `vaultPath()` resolves inside the fixture tree. `electron` is mocked so
- * importing AuthVault.ts (which references `safeStorage` for the singleton
- * default) never touches real Electron; every test that exercises encryption
- * passes its OWN fake `SafeStorageLike` through the ctor instead.
- *
- * SAFETY: beginLogin()/completeLogin() are driven entirely by a fake
- * `loginFlowFactory` in every test below — nothing here constructs a real
- * CodexLoginFlow or reaches auth.openai.com.
- */
+/** @vitest-environment node */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-
-const homedirHolder = vi.hoisted(() => ({ current: '' }))
+const home = vi.hoisted(() => ({ value: '' }))
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os')
-  return {
-    ...actual,
-    homedir: () => homedirHolder.current,
-    default: { ...actual, homedir: () => homedirHolder.current }
-  }
+  return { ...actual, homedir: () => home.value, default: { ...actual, homedir: () => home.value } }
 })
-vi.mock('electron', () => ({
-  safeStorage: {
-    isEncryptionAvailable: () => false,
-    encryptString: (s: string) => Buffer.from(s),
-    decryptString: (b: Buffer) => b.toString('utf-8')
-  }
-}))
-
-import { AuthVault, vaultPath, type SafeStorageLike } from '../AuthVault'
-import type { LoginFlow, VaultCredential } from '../codex-oauth'
-
+import { AuthVault, vaultPath } from '../AuthVault'
+import { CredentialSync, type CodexFeedTarget } from '../CredentialSync'
+import type { VaultCredential } from '../codex-oauth'
 let testHome: string
-
 beforeEach(() => {
-  testHome = mkdtempSync(join(tmpdir(), 'claudeui-authvault-test-'))
-  homedirHolder.current = testHome
+  testHome = mkdtempSync(join(tmpdir(), 'auth-vault-'))
+  home.value = testHome
 })
-
-afterEach(() => {
-  rmSync(testHome, { recursive: true, force: true })
-})
-
-/** A fake safeStorage whose "encryption" is a visible, assertable transform (not real crypto). */
-function makeFakeSafeStorage(available: boolean): SafeStorageLike {
-  return {
-    isEncryptionAvailable: () => available,
-    encryptString: (s: string) => Buffer.from(`ENC[${s}]`, 'utf-8'),
-    decryptString: (buf: Buffer) => {
-      const str = buf.toString('utf-8')
-      const match = /^ENC\[([\s\S]*)\]$/.exec(str)
-      if (!match) throw new Error('fake decryptString: not a recognized envelope')
-      return match[1]
+afterEach(() => rmSync(testHome, { recursive: true, force: true }))
+describe('AuthVault', () => {
+  it('writes a plaintext v2 0600 generic credential map', async () => {
+    const vault = new AuthVault()
+    await vault.saveCredential('custom', { type: 'api_key', key: 'test-key' })
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toEqual({
+      v: 2,
+      credentials: { custom: { type: 'api_key', key: 'test-key' } }
+    })
+    if (process.platform !== 'win32') expect(statSync(vaultPath()).mode & 0o777).toBe(0o600)
+  })
+  it('keeps legacy load/save compatibility under chatgpt', async () => {
+    const vault = new AuthVault()
+    const credential: VaultCredential = {
+      type: 'oauth',
+      access: 'access',
+      refresh: 'refresh',
+      expires: 1
     }
-  }
-}
-
-function readVaultFileRaw(): { v: number; encrypted: boolean; data: string } {
-  return JSON.parse(readFileSync(vaultPath(), 'utf-8'))
-}
-
-describe('AuthVault — storage', () => {
-  it('save() then load() round-trips through a fake "encrypted" safeStorage, tagging encrypted:true', async () => {
-    const safeStorage = makeFakeSafeStorage(true)
-    const vault = new AuthVault({ safeStorage })
-    const cred: VaultCredential = { type: 'oauth', access: 'acc', refresh: 'ref', expires: 6000 }
-
-    await vault.save(cred)
-
-    const onDisk = readVaultFileRaw()
-    expect(onDisk.v).toBe(1)
-    expect(onDisk.encrypted).toBe(true)
-    const decoded = Buffer.from(onDisk.data, 'base64').toString('utf-8')
-    expect(decoded).toBe('ENC[{"openai-codex":{"type":"oauth","access":"acc","refresh":"ref","expires":6000}}]')
-
-    expect(await vault.load()).toEqual(cred)
+    await vault.save(credential)
+    await expect(vault.load()).resolves.toEqual(credential)
   })
-
-  it('falls back to plaintext with encrypted:false when isEncryptionAvailable() is false', async () => {
-    const safeStorage = makeFakeSafeStorage(false)
-    const vault = new AuthVault({ safeStorage })
-    const cred: VaultCredential = { type: 'oauth', access: 'acc2', refresh: 'ref2', expires: 999 }
-
-    await vault.save(cred)
-
-    const onDisk = readVaultFileRaw()
-    expect(onDisk.encrypted).toBe(false)
-    expect(JSON.parse(onDisk.data)).toEqual({ 'openai-codex': cred })
-    expect(await vault.load()).toEqual(cred)
-  })
-
-  it('writes the file 0600 (POSIX only)', async () => {
-    if (process.platform === 'win32') return
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
-    await vault.save({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
-    const mode = statSync(vaultPath()).mode & 0o777
-    expect(mode).toBe(0o600)
-  })
-
-  it('load() returns null when the file is absent', async () => {
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
-    expect(await vault.load()).toBeNull()
-  })
-
-  it('load() returns null for a corrupt file — never throws', async () => {
+  it('migrates plaintext v1 Codex data on the next write', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
-    writeFileSync(vaultPath(), 'this is not json', 'utf-8')
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
-    await expect(vault.load()).resolves.toBeNull()
+    writeFileSync(
+      vaultPath(),
+      JSON.stringify({
+        v: 1,
+        encrypted: false,
+        data: JSON.stringify({
+          'openai-codex': { type: 'oauth', access: 'a', refresh: 'r', expires: 1 }
+        })
+      })
+    )
+    const vault = new AuthVault()
+    await expect(vault.load()).resolves.toEqual({
+      type: 'oauth',
+      access: 'a',
+      refresh: 'r',
+      expires: 1
+    })
+    await vault.saveCredential('custom', { type: 'api_key', key: 'k' })
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8')).credentials.chatgpt.access).toBe('a')
   })
-
-  it('load() returns null when the stored blob is undecryptable — never throws', async () => {
+  it('never decrypts encrypted v1 and reports it for native recovery', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
-    writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'not-a-valid-envelope' }), 'utf-8')
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
+    writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
+    const vault = new AuthVault()
     await expect(vault.load()).resolves.toBeNull()
+    expect(vault.hasUnreadableLegacyVault()).toBe(true)
   })
-
-  it('clear() removes the file and is a no-op when already absent', async () => {
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
+  it('recovers an unreadable encrypted v1 from native snapshots into plaintext v2 without decrypting it', async () => {
+    mkdirSync(dirname(vaultPath()), { recursive: true })
+    writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
+    const native = (
+      snapshot: { access: string; refresh: string; expires: number } | null
+    ): CodexFeedTarget => ({
+      authFilePath: () => join(testHome, 'native-auth.json'),
+      feedOauthCredential: vi.fn(async () => {}),
+      readOauthEntry: vi.fn(async () => snapshot),
+      removeVendorAuth: vi.fn(async () => {})
+    })
+    const pi = native({ access: 'pi', refresh: 'pi', expires: 10 })
+    const opencode = native({ access: 'oc', refresh: 'oc', expires: 20 })
+    const sync = new CredentialSync({ vault: new AuthVault() })
+    sync.configure({ pi, opencode })
+    await sync.start()
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toEqual({
+      v: 2,
+      credentials: { chatgpt: { type: 'oauth', access: 'oc', refresh: 'oc', expires: 20 } }
+    })
+    sync.stop()
+  })
+  it('disconnectChatgpt preserves custom vault credentials while removing both native copies', async () => {
+    const vault = new AuthVault()
+    await vault.saveCredential('custom', { type: 'api_key', key: 'keep' })
     await vault.save({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
-    expect(existsSync(vaultPath())).toBe(true)
-
-    await vault.clear()
-    expect(existsSync(vaultPath())).toBe(false)
-
-    await expect(vault.clear()).resolves.toBeUndefined()
+    const native = (): CodexFeedTarget => ({
+      authFilePath: () => join(testHome, 'native-auth.json'),
+      feedOauthCredential: vi.fn(async () => {}),
+      readOauthEntry: vi.fn(async () => null),
+      removeVendorAuth: vi.fn(async () => {})
+    })
+    const pi = native()
+    const opencode = native()
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi, opencode })
+    await sync.disconnectChatgpt()
+    await expect(vault.load()).resolves.toBeNull()
+    await expect(vault.loadCredential('custom')).resolves.toEqual({ type: 'api_key', key: 'keep' })
+    expect(pi.removeVendorAuth).toHaveBeenCalledWith('openai-codex')
+    expect(opencode.removeVendorAuth).toHaveBeenCalledWith('openai')
+  })
+  it('clears an unreadable encrypted v1 with no native recovery source so future boots do not retry it', async () => {
+    mkdirSync(dirname(vaultPath()), { recursive: true })
+    writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
+    const target = (): CodexFeedTarget => ({
+      authFilePath: () => join(testHome, 'native-auth.json'),
+      feedOauthCredential: vi.fn(async () => {}),
+      readOauthEntry: vi.fn(async () => null),
+      removeVendorAuth: vi.fn(async () => {})
+    })
+    const vault = new AuthVault()
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: target(), opencode: target() })
+    await sync.start()
+    expect(vault.hasUnreadableLegacyVault()).toBe(false)
+    await expect(vault.load()).resolves.toBeNull()
   })
 })
 
-describe('AuthVault — login flow entry points', () => {
-  function fakeLoginFlow(overrides: Partial<LoginFlow> = {}): LoginFlow {
+describe('AuthVault validation', () => {
+  it('rejects malformed v1/v2 entries and unsafe provider ids', async () => {
+    mkdirSync(dirname(vaultPath()), { recursive: true })
+    writeFileSync(
+      vaultPath(),
+      JSON.stringify({ v: 1, encrypted: false, data: JSON.stringify({ 'openai-codex': null }) })
+    )
+    const vault = new AuthVault()
+    await expect(vault.load()).resolves.toBeNull()
+
+    writeFileSync(
+      vaultPath(),
+      JSON.stringify({ v: 2, credentials: { chatgpt: null, valid: { type: 'api_key', key: 'k' } } })
+    )
+    await expect(vault.loadCredential('chatgpt')).resolves.toBeNull()
+    await expect(vault.loadCredential('valid')).resolves.toEqual({ type: 'api_key', key: 'k' })
+    await expect(vault.saveCredential('__proto__', { type: 'api_key', key: 'k' })).rejects.toThrow(
+      /Invalid/
+    )
+    await expect(vault.saveCredential('empty', { type: 'api_key', key: '' })).rejects.toThrow(
+      /Invalid vault credential/
+    )
+    await expect(vault.loadCredential('../x')).rejects.toThrow(/Invalid/)
+  })
+})
+
+describe('AuthVault lifecycle compatibility', () => {
+  function flow(overrides: Partial<import('../codex-oauth').LoginFlow> = {}) {
     return {
-      start: vi.fn(async () => ({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1', state: 's' })),
-      waitForCallback: vi.fn(async () => {
-        throw new Error('fakeLoginFlow: waitForCallback not configured for this test')
-      }),
+      start: vi.fn(async () => ({ authorizeUrl: 'https://example.test/auth', state: 's' })),
+      waitForCallback: vi.fn(async () => ({
+        type: 'oauth' as const,
+        access: 'a',
+        refresh: 'r',
+        expires: 1
+      })),
       cancel: vi.fn(),
       ...overrides
     }
   }
-
-  it('beginLogin() returns the authorize URL; completeLogin() persists the canned credential', async () => {
-    const canned: VaultCredential = { type: 'oauth', access: 'aa', refresh: 'rr', expires: 12345, accountId: 'acct-x' }
-    const flow = fakeLoginFlow({ waitForCallback: vi.fn(async () => canned) })
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true), loginFlowFactory: () => flow })
-
-    const { authorizeUrl } = await vault.beginLogin()
-    expect(authorizeUrl).toBe('https://auth.openai.com/oauth/authorize?x=1')
-
-    const cred = await vault.completeLogin()
-    expect(cred).toEqual(canned)
-    expect(await vault.load()).toEqual(canned)
+  it('preserves other records, clears idempotently, and enforces 0600 on replacement', async () => {
+    const vault = new AuthVault()
+    await vault.saveCredential('custom', { type: 'api_key', key: 'k' })
+    await vault.save({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    await expect(vault.loadCredential('custom')).resolves.toEqual({ type: 'api_key', key: 'k' })
+    if (process.platform !== 'win32') expect(statSync(vaultPath()).mode & 0o777).toBe(0o600)
+    await vault.clear()
+    await vault.clear()
+    await expect(vault.load()).resolves.toBeNull()
   })
-
-  it('completeLogin() without a prior beginLogin() rejects', async () => {
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
-    await expect(vault.completeLogin()).rejects.toThrow(/no login in progress/)
-  })
-
-  it('SINGLE-FLIGHT: a second beginLogin() while one is pending rejects, leaving the first flow untouched', async () => {
-    let resolveStart: ((v: { authorizeUrl: string; state: string }) => void) | undefined
-    const flow = fakeLoginFlow({
-      start: vi.fn(
-        () =>
-          new Promise<{ authorizeUrl: string; state: string }>((resolve) => {
-            resolveStart = resolve
-          })
-      )
-    })
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true), loginFlowFactory: () => flow })
-
-    const firstPromise = vault.beginLogin() // start() is pending — first call has NOT resolved yet
-    await expect(vault.beginLogin()).rejects.toThrow(/already in progress/)
-
-    resolveStart!({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1', state: 's' })
-    await expect(firstPromise).resolves.toEqual({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1' })
-    expect(flow.cancel).not.toHaveBeenCalled()
-  })
-
-  it('a failed start() clears the single-flight guard so a retry is allowed', async () => {
-    const failingFlow = fakeLoginFlow({ start: vi.fn(async () => Promise.reject(new Error('port in use'))) })
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true), loginFlowFactory: () => failingFlow })
-
-    await expect(vault.beginLogin()).rejects.toThrow('port in use')
-    // guard cleared — a second attempt is allowed, not rejected as "already in progress"
-    const okFlow = fakeLoginFlow()
-    const vault2 = new AuthVault({ safeStorage: makeFakeSafeStorage(true), loginFlowFactory: () => okFlow })
-    await expect(vault2.beginLogin()).resolves.toEqual({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1' })
-  })
-
-  it('cancelLogin() cancels the active flow and clears the guard for a subsequent beginLogin()', async () => {
-    const flow = fakeLoginFlow({ waitForCallback: vi.fn(() => new Promise<VaultCredential>(() => {})) })
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true), loginFlowFactory: () => flow })
-
+  it('handles corrupt data and login single-flight, failure cleanup, and cancellation', async () => {
+    mkdirSync(dirname(vaultPath()), { recursive: true })
+    writeFileSync(vaultPath(), 'bad')
+    const good = flow()
+    const vault = new AuthVault({ loginFlowFactory: () => good })
+    await expect(vault.load()).resolves.toBeNull()
     await vault.beginLogin()
-    vault.cancelLogin()
-
-    expect(flow.cancel).toHaveBeenCalledTimes(1)
-    await expect(vault.beginLogin()).resolves.toEqual({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1' })
-  })
-
-  it('cancelLogin() with no active flow is a no-op', () => {
-    const vault = new AuthVault({ safeStorage: makeFakeSafeStorage(true) })
-    expect(() => vault.cancelLogin()).not.toThrow()
+    await expect(vault.beginLogin()).rejects.toThrow(/already in progress/)
+    await vault.completeLogin()
+    await expect(vault.load()).resolves.toMatchObject({ access: 'a' })
+    const failing = flow({
+      waitForCallback: vi.fn(async () => {
+        throw new Error('callback failed')
+      })
+    })
+    const failedVault = new AuthVault({ loginFlowFactory: () => failing })
+    await failedVault.beginLogin()
+    await expect(failedVault.completeLogin()).rejects.toThrow('callback failed')
+    await expect(failedVault.completeLogin()).rejects.toThrow(/no login/)
+    const cancelled = flow()
+    const cancelledVault = new AuthVault({ loginFlowFactory: () => cancelled })
+    await cancelledVault.beginLogin()
+    cancelledVault.cancelLogin()
+    expect(cancelled.cancel).toHaveBeenCalled()
   })
 })

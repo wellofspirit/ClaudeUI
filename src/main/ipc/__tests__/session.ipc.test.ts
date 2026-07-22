@@ -209,6 +209,21 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
 
+const sharedProviderSpies = vi.hoisted(() => ({
+  listDefinitions: vi.fn(() => []),
+  listStatuses: vi.fn(async () => []),
+  listProviderModels: vi.fn(async () => []),
+  saveDefinition: vi.fn(async () => {}),
+  removeDefinition: vi.fn(async () => {}),
+  setRouteEnabled: vi.fn(async () => {}),
+  setApiKey: vi.fn(async () => {}),
+  syncProvider: vi.fn(async () => {}),
+  disconnectProvider: vi.fn(async () => {}),
+  setRouteDefaultModel: vi.fn(async () => {})
+}))
+
+vi.mock('../../shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
+
 vi.mock('../../services/session-manager', () => ({
   SessionManager: class {
     constructor() {
@@ -629,6 +644,34 @@ describe('session.ipc', () => {
     it('session:set-effort routes to session.setEffort', async () => {
       await harness.call('session:set-effort', 'rid-1', 'high')
       expect(sessionStub.setEffort).toHaveBeenCalledWith('high')
+    })
+
+    it('registers and routes the shared-provider channel family', async () => {
+      const definition = {
+        id: 'local',
+        name: 'Local',
+        kind: 'custom',
+        protocol: 'openai-completions',
+        baseUrl: 'https://example.test/v1',
+        models: [{ id: 'model' }],
+        routes: { pi: { enabled: true }, opencode: { enabled: true } },
+        managed: true
+      }
+
+      await harness.callSafe('shared-provider:list')
+      await harness.callSafe('shared-provider:statuses')
+      await harness.callSafe('shared-provider:models', 'local')
+      await harness.callSafe('shared-provider:save', definition)
+      await harness.callSafe('shared-provider:remove', 'local')
+      await harness.callSafe('shared-provider:set-route', 'local', 'pi', false)
+      await harness.callSafe('shared-provider:set-key', 'local', 'secret')
+      await harness.callSafe('shared-provider:sync', 'local')
+      await harness.callSafe('shared-provider:disconnect', 'local')
+      await harness.callSafe('shared-provider:set-default', 'local', 'opencode', 'model')
+
+      expect(sharedProviderSpies.saveDefinition).toHaveBeenCalledWith(definition)
+      expect(sharedProviderSpies.setRouteEnabled).toHaveBeenCalledWith('local', 'pi', false)
+      expect(sharedProviderSpies.disconnectProvider).toHaveBeenCalledWith('local')
     })
   })
 

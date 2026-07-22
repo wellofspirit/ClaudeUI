@@ -1,270 +1,178 @@
-/**
- * AuthVault — encrypted credential store for Codex (ChatGPT) OAuth (M6a).
- *
- * `~/.claude/ui/auth-vault.json`, encrypted at rest via Electron's
- * `safeStorage` when available, falling back to 0600 plaintext (parity with
- * the engines' OWN auth stores — pi's `~/.pi/agent/auth.json`
- * (PiAuthProvider.ts) and opencode's `auth.json` are both unencrypted 0600
- * today; this is a flagged pre-existing posture, not a regression introduced
- * here).
- *
- * M6a scope is deliberately narrow: storage + the login-flow entry points
- * only (beginLogin/completeLogin/cancelLogin). Feeding credentials to
- * pi/opencode, background refresh-before-expiry, and a filesystem watch all
- * land in M6b — this milestone is the standalone, fully unit-tested security
- * core, not wired into any engine or UI yet.
- *
- * HARD SAFETY NOTE: nothing here may be exercised against the real
- * auth.openai.com in any test. beginLogin()/completeLogin() drive a
- * `LoginFlow` (real implementation: CodexLoginFlow, codex-oauth.ts) whose
- * token exchange must be reached ONLY through a mocked `deps.fetch` in tests
- * — a real exchange/refresh ROTATES the shared refresh_token and strands the
- * user's actual pi + opencode Codex session. See codex-oauth.ts's header.
- */
-import * as electron from 'electron'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { validateSharedProviderId } from '../../../shared/shared-provider'
 import { logger } from '../../services/logger'
 import { CodexLoginFlow, type LoginFlow, type VaultCredential } from './codex-oauth'
 
-/**
- * `~/.claude/ui/` — the SAME per-OS-user config/data root db.ts's CONFIG_DIR
- * resolves to. Deliberately re-derived here (not imported from db.ts) so this
- * security-core module never pulls in db.ts's better-sqlite3 dependency chain
- * — same "each file derives its own `~/.claude/ui/...` path" convention
- * already used throughout src/main/services (automation-manager.ts, logger.ts,
- * account-manager.ts, persisted-sessions-dir.ts, etc). Computed at CALL time
- * (not a module-load-time const) so it honors the same `os.homedir()` test
- * mock the rest of the codebase uses (piAgentDir(), persisted-sessions-dir.ts).
- */
 export function claudeUiDir(): string {
   return path.join(os.homedir(), '.claude', 'ui')
 }
-
-/** `~/.claude/ui/auth-vault.json` — exported so tests can locate the on-disk file. */
 export function vaultPath(): string {
   return path.join(claudeUiDir(), 'auth-vault.json')
 }
-
-/** Canonical vault key for this milestone's only credential. */
-const CODEX_KEY = 'openai-codex'
-
-interface VaultFileEncrypted {
-  v: 1
-  encrypted: true
-  /** base64 of safeStorage.encryptString(JSON.stringify(Record<string, VaultCredential>)). */
-  data: string
-}
-interface VaultFilePlain {
-  v: 1
-  encrypted: false
-  /** JSON.stringify(Record<string, VaultCredential>). */
-  data: string
-}
-type VaultFile = VaultFileEncrypted | VaultFilePlain
-
-/** The slice of Electron's `safeStorage` this module needs — lets tests inject a fake without touching Electron at all. */
-export interface SafeStorageLike {
-  isEncryptionAvailable(): boolean
-  encryptString(plainText: string): Buffer
-  decryptString(encrypted: Buffer): string
+export const CHATGPT_PROVIDER_ID = 'chatgpt'
+export type VaultCredentialRecord = VaultCredential | { type: 'api_key'; key: string }
+interface VaultFileV2 {
+  v: 2
+  credentials: Record<string, VaultCredentialRecord>
 }
 
 export interface AuthVaultDeps {
-  safeStorage?: SafeStorageLike
   now?: () => number
   loginFlowFactory?: () => LoginFlow
 }
 
 export class AuthVault {
-  /**
-   * The test-injected safeStorage, if any. When ABSENT we resolve the real
-   * `electron.safeStorage` LAZILY (resolveSafeStorage()) at each use site
-   * rather than destructuring it in the constructor — see resolveSafeStorage()
-   * for why this matters for import-time safety.
-   */
-  private readonly injectedSafeStorage: SafeStorageLike | undefined
   private readonly now: () => number
   private readonly loginFlowFactory: () => LoginFlow
-
-  /**
-   * The in-flight login flow started by beginLogin(), if any — the single-flight
-   * guard. See beginLogin()'s doc comment for the chosen behavior (reject the
-   * second call, don't cancel the first).
-   */
   private activeFlow: LoginFlow | undefined
 
   constructor(deps: AuthVaultDeps = {}) {
-    this.injectedSafeStorage = deps.safeStorage
     this.now = deps.now ?? (() => Date.now())
     this.loginFlowFactory = deps.loginFlowFactory ?? (() => new CodexLoginFlow({ now: this.now }))
   }
 
-  /**
-   * Resolve the effective safeStorage AT USE TIME (not construction).
-   *
-   * Uses an injected fake when provided; otherwise reads `electron.safeStorage`
-   * off the namespace import. Two properties this buys us:
-   *
-   *   1. Import-time safety: the singleton `authVault = new AuthVault()` (and
-   *      thus any module that transitively imports this file — e.g.
-   *      register-auth-providers.ts → session.ipc.ts) constructs WITHOUT
-   *      touching `electron.safeStorage`. Combined with the namespace import
-   *      (`import * as electron`), a test that mocks `electron` with a PARTIAL
-   *      shape (no `safeStorage` export) no longer throws vitest's "No
-   *      'safeStorage' export is defined on the 'electron' mock" at import
-   *      time — a namespace-property access yields `undefined` instead of the
-   *      named-export error a destructured `import { safeStorage }` would raise.
-   *   2. Graceful degradation: in a non-Electron/partial-mock context where
-   *      the property is `undefined`, callers fall back to the existing
-   *      0600-plaintext path (encryption "unavailable") rather than crashing.
-   */
-  private resolveSafeStorage(): SafeStorageLike | undefined {
-    return this.injectedSafeStorage ?? (electron as { safeStorage?: SafeStorageLike }).safeStorage
-  }
-
-  /** Best-effort read. Never throws — an absent, corrupt, or undecryptable file all degrade to null. */
   async load(): Promise<VaultCredential | null> {
-    const all = this.readAll()
-    return all[CODEX_KEY] ?? null
+    const credential = await this.loadCredential(CHATGPT_PROVIDER_ID)
+    return credential?.type === 'oauth' ? credential : null
   }
-
-  /** Persist a credential under the canonical Codex key, preserving any other (future) key already in the file. */
-  async save(cred: VaultCredential): Promise<void> {
-    const all = this.readAll()
-    all[CODEX_KEY] = cred
-    this.writeAll(all)
+  async save(credential: VaultCredential): Promise<void> {
+    await this.saveCredential(CHATGPT_PROVIDER_ID, credential)
   }
-
-  /** Remove the file entirely. No-op (not an error) if it's already absent. */
+  async loadCredential(providerId: string): Promise<VaultCredentialRecord | null> {
+    validateSharedProviderId(providerId)
+    return this.readAll().credentials[providerId] ?? null
+  }
+  async saveCredential(providerId: string, credential: VaultCredentialRecord): Promise<void> {
+    validateSharedProviderId(providerId)
+    if (!isCredential(credential)) throw new Error('Invalid vault credential')
+    const state = this.readAll()
+    state.credentials[providerId] = credential
+    this.write(state)
+  }
+  async removeCredential(providerId: string): Promise<void> {
+    validateSharedProviderId(providerId)
+    const state = this.readAll()
+    delete state.credentials[providerId]
+    if (Object.keys(state.credentials).length === 0) await this.clear()
+    else this.write(state)
+  }
   async clear(): Promise<void> {
     try {
       fs.unlinkSync(vaultPath())
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger.warn('AuthVault', `clear() failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
+        logger.warn('AuthVault', `clear failed: ${String(err)}`)
     }
   }
-
-  /**
-   * Start a login flow, returning the URL the caller should open in a browser.
-   *
-   * Single-flight rule (DECISION): a second beginLogin() while one is already
-   * pending REJECTS immediately and leaves the first flow untouched — it does
-   * NOT cancel the in-progress flow. Rationale: the first flow's browser tab
-   * may already be open with the user mid-authorization; silently killing it
-   * on a stray double-click (or a UI re-render re-invoking beginLogin) would
-   * be a more surprising failure mode than a clear "already in progress"
-   * rejection. Callers that genuinely want to restart must cancelLogin() first.
-   */
-  async beginLogin(): Promise<{ authorizeUrl: string }> {
-    if (this.activeFlow) {
-      throw new Error('AuthVault: a login is already in progress')
-    }
-    const flow = this.loginFlowFactory()
-    this.activeFlow = flow
+  hasUnreadableLegacyVault(): boolean {
     try {
-      const { authorizeUrl } = await flow.start()
-      return { authorizeUrl }
+      const value = JSON.parse(fs.readFileSync(vaultPath(), 'utf8')) as {
+        v?: unknown
+        encrypted?: unknown
+      }
+      return value.v === 1 && value.encrypted === true
+    } catch {
+      return false
+    }
+  }
+  async beginLogin(): Promise<{ authorizeUrl: string }> {
+    if (this.activeFlow) throw new Error('AuthVault: a login is already in progress')
+    this.activeFlow = this.loginFlowFactory()
+    try {
+      return { authorizeUrl: (await this.activeFlow.start()).authorizeUrl }
     } catch (err) {
       this.activeFlow = undefined
       throw err
     }
   }
-
-  /** Await the callback for the flow started by beginLogin(), persisting the credential on success. */
   async completeLogin(): Promise<VaultCredential> {
     const flow = this.activeFlow
-    if (!flow) {
-      throw new Error('AuthVault: no login in progress — call beginLogin() first')
-    }
+    if (!flow) throw new Error('AuthVault: no login in progress — call beginLogin() first')
     try {
-      const cred = await flow.waitForCallback()
-      await this.save(cred)
-      return cred
+      const credential = await flow.waitForCallback()
+      await this.save(credential)
+      return credential
     } finally {
       this.activeFlow = undefined
     }
   }
-
-  /** Abandon the in-flight login started via beginLogin(), if any. Safe to call with no active flow. */
   cancelLogin(): void {
     this.activeFlow?.cancel()
     this.activeFlow = undefined
   }
 
-  // ---------------------------------------------------------------------
-  // File I/O
-  // ---------------------------------------------------------------------
-
-  /** Best-effort read + decrypt of the whole vault file. Any failure (absent/corrupt/undecryptable) → {}. */
-  private readAll(): Record<string, VaultCredential> {
+  private readAll(): VaultFileV2 {
     try {
-      const raw = fs.readFileSync(vaultPath(), 'utf-8')
-      const parsed = JSON.parse(raw) as VaultFile
-      if (!parsed || typeof parsed !== 'object' || parsed.v !== 1) return {}
-
-      let json: string
-      if (parsed.encrypted) {
-        const safeStorage = this.resolveSafeStorage()
-        // No safeStorage (partial mock / non-Electron): can't decrypt an
-        // encrypted blob — degrade to {} via the catch, same as any other
-        // undecryptable file.
-        if (!safeStorage) throw new Error('safeStorage unavailable — cannot decrypt vault')
-        json = safeStorage.decryptString(Buffer.from(parsed.data, 'base64'))
-      } else {
-        json = parsed.data
+      const parsed: unknown = JSON.parse(fs.readFileSync(vaultPath(), 'utf8'))
+      if (!parsed || typeof parsed !== 'object') return emptyVault()
+      if ((parsed as { v?: unknown }).v === 2) return parseV2(parsed)
+      const legacy = parsed as { v?: unknown; encrypted?: unknown; data?: unknown }
+      if (legacy.v === 1 && legacy.encrypted === false && typeof legacy.data === 'string') {
+        const entries: unknown = JSON.parse(legacy.data)
+        const credential =
+          entries && typeof entries === 'object'
+            ? (entries as Record<string, unknown>)['openai-codex']
+            : undefined
+        return isCredential(credential)
+          ? { v: 2, credentials: { [CHATGPT_PROVIDER_ID]: credential } }
+          : emptyVault()
       }
-
-      const data = JSON.parse(json)
-      if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
-      return data as Record<string, VaultCredential>
     } catch {
-      return {}
+      /* malformed vault is disconnected */
     }
+    return emptyVault()
   }
-
-  /**
-   * Write the whole vault file. Encrypts via safeStorage when available;
-   * otherwise falls back to plaintext with a logged warning (see the module
-   * header — parity with the engines' own auth stores, not a new regression).
-   * 0600 on POSIX (chmod, mirroring PiAuthProvider's writeAuthFile — a fresh
-   * file gets its mode from `fs.writeFileSync`'s `mode` option, but an
-   * existing file keeps its prior permissions, so chmod is forced explicitly).
-   */
-  private writeAll(all: Record<string, VaultCredential>): void {
-    const dir = claudeUiDir()
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-
-    const json = JSON.stringify(all)
-    const safeStorage = this.resolveSafeStorage()
-    let file: VaultFile
-    if (safeStorage?.isEncryptionAvailable()) {
-      const data = safeStorage.encryptString(json).toString('base64')
-      file = { v: 1, encrypted: true, data }
-    } else {
-      logger.warn(
-        'AuthVault',
-        'safeStorage encryption unavailable — writing auth-vault.json in plaintext (0600). ' +
-          'This mirrors the existing engine auth stores (pi auth.json, opencode auth.json), which are ' +
-          'also unencrypted 0600 today; flagged here, not a new regression.'
-      )
-      file = { v: 1, encrypted: false, data: json }
-    }
-
-    const filePath = vaultPath()
-    fs.writeFileSync(filePath, JSON.stringify(file), { mode: 0o600 })
-    if (process.platform !== 'win32') {
+  private write(file: VaultFileV2): void {
+    fs.mkdirSync(claudeUiDir(), { recursive: true, mode: 0o700 })
+    if (process.platform !== 'win32') fs.chmodSync(claudeUiDir(), 0o700)
+    const target = vaultPath()
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(file), { mode: 0o600 })
+      if (process.platform !== 'win32') fs.chmodSync(temporary, 0o600)
+      fs.renameSync(temporary, target)
+      if (process.platform !== 'win32') fs.chmodSync(target, 0o600)
+    } catch (err) {
       try {
-        fs.chmodSync(filePath, 0o600)
-      } catch (err) {
-        logger.warn('AuthVault', `chmod 0600 failed: ${err instanceof Error ? err.message : String(err)}`)
+        fs.unlinkSync(temporary)
+      } catch {
+        /* cleanup */
       }
+      throw err
     }
   }
 }
-
-/** Singleton — real Electron safeStorage + real fetch/clock. M6b/M6c wire engines/UI to this. */
+function emptyVault(): VaultFileV2 {
+  return { v: 2, credentials: {} }
+}
+function parseV2(value: object): VaultFileV2 {
+  const entries = (value as { credentials?: unknown }).credentials
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return emptyVault()
+  const credentials: Record<string, VaultCredentialRecord> = {}
+  for (const [id, credential] of Object.entries(entries)) {
+    try {
+      validateSharedProviderId(id)
+      if (isCredential(credential)) credentials[id] = credential
+    } catch {
+      // Ignore malformed or unsafe credential entries.
+    }
+  }
+  return { v: 2, credentials }
+}
+function isCredential(value: unknown): value is VaultCredentialRecord {
+  if (!value || typeof value !== 'object') return false
+  const credential = value as Record<string, unknown>
+  return credential.type === 'api_key'
+    ? typeof credential.key === 'string' && credential.key.length > 0
+    : credential.type === 'oauth' &&
+        typeof credential.access === 'string' &&
+        credential.access.length > 0 &&
+        typeof credential.refresh === 'string' &&
+        credential.refresh.length > 0 &&
+        typeof credential.expires === 'number' &&
+        Number.isFinite(credential.expires) &&
+        credential.expires > 0
+}
 export const authVault = new AuthVault()

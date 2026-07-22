@@ -13,37 +13,39 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import { PiVendors } from '../PiVendors'
-import { useSessionStore } from '../../../stores/session-store'
-import type { PiAuthStatus, VendorAuthMap, VendorAuthOption } from '../../../../../shared/types'
+import type { VendorAuthMap, VendorAuthOption } from '../../../../../shared/types'
+import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
 
 let probeMap: VendorAuthMap = {}
 let optionsMap: Record<string, VendorAuthOption[]> = {}
-let codexStatus: PiAuthStatus = { connected: false, needsReauth: false }
-
 const vendorAuthProbe = vi.fn(async () => structuredClone(probeMap))
 const vendorAuthListOptions = vi.fn(async () => structuredClone(optionsMap))
 const vendorAuthSetKey = vi.fn(async (_engineId: string, vendorId: string, _key: string) => {
-  probeMap = { ...probeMap, [vendorId]: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' } }
+  probeMap = {
+    ...probeMap,
+    [vendorId]: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' }
+  }
 })
 const vendorAuthRemove = vi.fn(async (_engineId: string, vendorId: string) => {
   const next = { ...probeMap }
   delete next[vendorId]
   probeMap = next
-  if (vendorId === 'openai-codex') codexStatus = { connected: false, needsReauth: false }
 })
 const engineIsInstalled = vi.fn(async () => true)
 const getPiBinaryPath = vi.fn(async () => '/fake/vendor/pi-cli/pi')
-const getPiAuthStatus = vi.fn(async () => structuredClone(codexStatus))
-const vendorAuthOauthAuthorize = vi.fn(async () => ({
-  url: 'https://auth.openai.com/oauth/authorize?x=1',
-  method: 'auto' as const,
-  instructions: 'Complete sign-in to ChatGPT in the browser window that just opened.'
-}))
-const vendorAuthOauthCallback = vi.fn(async () => {
-  codexStatus = { connected: true, email: 'user@example.com', needsReauth: false }
-  return true
-})
-const vendorAuthOauthCancel = vi.fn(async () => undefined)
+const listSharedProviders = vi.fn(async (): Promise<SharedProviderDefinition[]> => [
+  {
+    id: 'chatgpt',
+    name: 'ChatGPT',
+    kind: 'subscription' as const,
+    models: [],
+    routes: {
+      pi: { enabled: true, providerId: 'openai-codex' },
+      opencode: { enabled: true, providerId: 'openai' }
+    },
+    managed: true as const
+  }
+])
 
 function installApiStub(): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
@@ -53,10 +55,7 @@ function installApiStub(): void {
     vendorAuthRemove,
     engineIsInstalled,
     getPiBinaryPath,
-    getPiAuthStatus,
-    vendorAuthOauthAuthorize,
-    vendorAuthOauthCallback,
-    vendorAuthOauthCancel
+    listSharedProviders
   }
 }
 
@@ -64,24 +63,21 @@ describe('PiVendors', () => {
   beforeEach(() => {
     probeMap = {}
     optionsMap = {
-      anthropic: [{ type: 'api', label: 'API key' }, { type: 'oauth', label: 'Subscription (run pi /login in a terminal)' }],
+      anthropic: [
+        { type: 'api', label: 'API key' },
+        { type: 'oauth', label: 'Subscription (run pi /login in a terminal)' }
+      ],
       openai: [{ type: 'api', label: 'API key' }],
       'openai-codex': [{ type: 'oauth', label: 'Subscription (run pi /login in a terminal)' }]
     }
-    codexStatus = { connected: false, needsReauth: false }
     vendorAuthProbe.mockClear()
     vendorAuthListOptions.mockClear()
     vendorAuthSetKey.mockClear()
     vendorAuthRemove.mockClear()
     engineIsInstalled.mockClear()
     getPiBinaryPath.mockClear()
-    getPiAuthStatus.mockClear()
-    vendorAuthOauthAuthorize.mockClear()
-    vendorAuthOauthCallback.mockClear()
-    vendorAuthOauthCancel.mockClear()
+    listSharedProviders.mockClear()
     installApiStub()
-    useSessionStore.setState({ vendorOAuth: null })
-    ;(globalThis as any).window.open = vi.fn()
   })
 
   afterEach(() => {
@@ -97,7 +93,9 @@ describe('PiVendors', () => {
   })
 
   it('lists configured vendors from probe() with their auth label', async () => {
-    probeMap = { anthropic: { authState: 'authenticated', billingType: 'subscription', label: 'OAuth' } }
+    probeMap = {
+      anthropic: { authState: 'authenticated', billingType: 'subscription', label: 'OAuth' }
+    }
     render(<PiVendors />)
     await waitFor(() => {
       const row = screen.getByTestId('PiVendors.row')
@@ -132,7 +130,9 @@ describe('PiVendors', () => {
   })
 
   it('offers only providers with an api option, not yet configured, in the add-key select', async () => {
-    probeMap = { anthropic: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' } }
+    probeMap = {
+      anthropic: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' }
+    }
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
     const select = screen.getByTestId('PiVendors.addVendorSelect') as HTMLSelectElement
@@ -149,8 +149,12 @@ describe('PiVendors', () => {
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
 
-    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), { target: { value: 'openai' } })
-    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), { target: { value: 'sk-test-123' } })
+    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), {
+      target: { value: 'openai' }
+    })
+    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), {
+      target: { value: 'sk-test-123' }
+    })
     fireEvent.click(screen.getByTestId('PiVendors.addKey'))
 
     await waitFor(() => {
@@ -163,7 +167,9 @@ describe('PiVendors', () => {
   })
 
   it('remove action calls vendorAuthRemove for that vendor', async () => {
-    probeMap = { anthropic: { authState: 'authenticated', billingType: 'subscription', label: 'OAuth' } }
+    probeMap = {
+      anthropic: { authState: 'authenticated', billingType: 'subscription', label: 'OAuth' }
+    }
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.remove'))
     fireEvent.click(screen.getByTestId('PiVendors.remove'))
@@ -175,9 +181,13 @@ describe('PiVendors', () => {
   it('renders the subscription hint with the resolved pi binary path', async () => {
     render(<PiVendors />)
     await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.subscriptionCommand')).toHaveTextContent('/fake/vendor/pi-cli/pi')
+      expect(screen.getByTestId('PiVendors.subscriptionCommand')).toHaveTextContent(
+        '/fake/vendor/pi-cli/pi'
+      )
     })
-    expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent('run /login in a terminal')
+    expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent(
+      'run /login in a terminal'
+    )
   })
 
   it('setKey rejection surfaces the error message and does not clear the form', async () => {
@@ -185,8 +195,12 @@ describe('PiVendors', () => {
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
 
-    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), { target: { value: 'openai' } })
-    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), { target: { value: 'sk-test-123' } })
+    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), {
+      target: { value: 'openai' }
+    })
+    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), {
+      target: { value: 'sk-test-123' }
+    })
     fireEvent.click(screen.getByTestId('PiVendors.addKey'))
 
     await waitFor(() => {
@@ -201,8 +215,12 @@ describe('PiVendors', () => {
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
 
-    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), { target: { value: 'openai' } })
-    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), { target: { value: 'sk-test-123' } })
+    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), {
+      target: { value: 'openai' }
+    })
+    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), {
+      target: { value: 'sk-test-123' }
+    })
     fireEvent.click(screen.getByTestId('PiVendors.addKey'))
 
     await waitFor(() => {
@@ -214,7 +232,9 @@ describe('PiVendors', () => {
     getPiBinaryPath.mockResolvedValueOnce(null as unknown as string)
     render(<PiVendors />)
     await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent('run /login in a terminal')
+      expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent(
+        'run /login in a terminal'
+      )
     })
     expect(screen.queryByTestId('PiVendors.subscriptionCommand')).not.toBeInTheDocument()
     expect(screen.queryByTestId('PiVendors.copyCommand')).not.toBeInTheDocument()
@@ -224,98 +244,58 @@ describe('PiVendors', () => {
     getPiBinaryPath.mockRejectedValueOnce(new Error('not found'))
     render(<PiVendors />)
     await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent('run /login in a terminal')
+      expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent(
+        'run /login in a terminal'
+      )
     })
     expect(screen.queryByTestId('PiVendors.subscriptionCommand')).not.toBeInTheDocument()
   })
 
-  // ── M6c: Connect ChatGPT (openai-codex) ──────────────────────────────
-
-  it('fetches Codex auth status via getPiAuthStatus on mount', async () => {
+  it('renders only the shared ChatGPT settings link and never removes its pi credential directly', async () => {
+    const opened: Array<{ scope?: string; section?: string }> = []
+    const listener = (event: Event): void => { opened.push((event as CustomEvent).detail) }
+    window.addEventListener('open-settings', listener)
     render(<PiVendors />)
-    await waitFor(() => {
-      expect(getPiAuthStatus).toHaveBeenCalled()
-    })
+    await waitFor(() => screen.getByTestId('PiVendors.openSharedProviders'))
+    expect(screen.getByTestId('PiVendors.sharedChatgpt')).toBeInTheDocument()
+    expect(screen.queryByTestId('PiVendors.disconnectCodex')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('PiVendors.openSharedProviders'))
+    expect(opened).toEqual([{ scope: 'common', section: 'shared-providers' }])
+    expect(vendorAuthRemove).not.toHaveBeenCalledWith('pi', 'openai-codex')
+    window.removeEventListener('open-settings', listener)
   })
 
-  it('not connected: renders the Connect button; clicking it drives authorizeVendorOAuth(pi, openai-codex)', async () => {
+  it('does not list openai-codex as a generic configured-provider row', async () => {
+    probeMap = {
+      'openai-codex': { authState: 'authenticated', billingType: 'subscription', label: 'OAuth' }
+    }
     render(<PiVendors />)
-    await waitFor(() => screen.getByTestId('PiVendors.connectCodex'))
-    expect(screen.queryByTestId('PiVendors.codexConnected')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByTestId('PiVendors.connectCodex'))
-
-    await waitFor(() => {
-      expect(vendorAuthListOptions).toHaveBeenCalledWith('pi')
-    })
-    await waitFor(() => {
-      expect(vendorAuthOauthAuthorize).toHaveBeenCalledWith('pi', 'openai-codex', 0)
-    })
-    expect((globalThis as any).window.open).toHaveBeenCalledWith(
-      'https://auth.openai.com/oauth/authorize?x=1',
-      '_blank'
-    )
-    await waitFor(() => {
-      expect(vendorAuthOauthCallback).toHaveBeenCalledWith('pi', 'openai-codex', 0)
-    })
-    // On success the flow re-fetches status — the connected block should appear.
-    await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.codexConnected')).toHaveTextContent('user@example.com')
-    })
-  })
-
-  it('connected: shows "Connected as <email>" and a disconnect action instead of the Connect button', async () => {
-    codexStatus = { connected: true, email: 'user@example.com', needsReauth: false }
-    render(<PiVendors />)
-    await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.codexConnected')).toHaveTextContent('user@example.com')
-    })
-    expect(screen.queryByTestId('PiVendors.connectCodex')).not.toBeInTheDocument()
-    expect(screen.getByTestId('PiVendors.disconnectCodex')).toBeInTheDocument()
-  })
-
-  it('connected without email: falls back to accountId in the connected label', async () => {
-    codexStatus = { connected: true, accountId: 'acct-123', needsReauth: false }
-    render(<PiVendors />)
-    await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.codexConnected')).toHaveTextContent('acct-123')
-    })
-  })
-
-  it('needsReauth: renders a warning banner with a reconnect action', async () => {
-    codexStatus = { connected: true, accountId: 'acct-123', needsReauth: true }
-    render(<PiVendors />)
-    await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.codexNeedsReauth')).toHaveTextContent('reconnect')
-    })
-    // The connected block still shows (credential exists, just stale) alongside the banner.
-    expect(screen.getByTestId('PiVendors.codexConnected')).toBeInTheDocument()
-    // The reconnect action reuses the connect testid/action (only one renders at a time).
-    expect(screen.getByTestId('PiVendors.connectCodex')).toBeInTheDocument()
-  })
-
-  it('disconnect calls vendorAuthRemove(pi, openai-codex) and returns to the not-connected state', async () => {
-    codexStatus = { connected: true, email: 'user@example.com', needsReauth: false }
-    render(<PiVendors />)
-    await waitFor(() => screen.getByTestId('PiVendors.disconnectCodex'))
-
-    fireEvent.click(screen.getByTestId('PiVendors.disconnectCodex'))
-
-    await waitFor(() => {
-      expect(vendorAuthRemove).toHaveBeenCalledWith('pi', 'openai-codex')
-    })
-    await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.connectCodex')).toBeInTheDocument()
-    })
-  })
-
-  it('does not double-list openai-codex as a generic configured-provider row', async () => {
-    probeMap = { 'openai-codex': { authState: 'authenticated', billingType: 'subscription', label: 'OAuth' } }
-    codexStatus = { connected: true, email: 'user@example.com', needsReauth: false }
-    render(<PiVendors />)
-    await waitFor(() => {
-      expect(screen.getByTestId('PiVendors.codexConnected')).toBeInTheDocument()
-    })
+    await waitFor(() => screen.getByTestId('PiVendors.sharedChatgpt'))
     expect(screen.queryByTestId('PiVendors.row')).not.toBeInTheDocument()
+  })
+
+  it('hides credentials owned by any shared provider from native remove controls', async () => {
+    probeMap = {
+      shared: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' },
+      external: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' }
+    }
+    listSharedProviders.mockResolvedValueOnce([
+      {
+        id: 'shared',
+        name: 'Shared',
+        kind: 'custom',
+        protocol: 'openai-completions',
+        baseUrl: 'https://example.test/v1',
+        models: [{ id: 'model' }],
+        routes: { pi: { enabled: true }, opencode: { enabled: false } },
+        managed: true
+      }
+    ])
+    render(<PiVendors />)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('PiVendors.row')).toHaveAttribute('data-id', 'external')
+    )
+    expect(screen.queryByText('shared')).not.toBeInTheDocument()
   })
 })

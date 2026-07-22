@@ -7,24 +7,13 @@
  * (disabledProviders/modelAllowlist) — none of which exist for pi. pi has no
  * catalog IPC and no model-allowlist concept.
  *
- * Mirrors the opencode section's *structure* only: list configured vendors
- * (from probe()), an add-API-key flow, a remove action, plus a subscription
- * block for pi's OAuth-only vendors.
- *
- * M6c: ONE subscription vendor — `openai-codex` (ChatGPT) — is now driven
- * in-app (`CodexConnect` below), via the SAME `authorizeVendorOAuth('pi', …)`
- * store action opencode's OAuth vendors use, backed by ClaudeUI's own auth
- * vault (M6a AuthVault + M6b CredentialSync; PiAuthProvider.oauthAuthorize/
- * oauthCallback/cancelVendorOauth delegate to it for this one vendor only).
- * pi's OTHER subscription vendors (anthropic, github-copilot, xai, radius)
- * remain undriven — PiAuthProvider's oauthAuthorize/oauthCallback throw for
- * any vendorId other than 'openai-codex' — so `SubscriptionHint` below still
- * shows the run-`pi /login`-in-a-terminal hint for those.
+ * ClaudeUI-managed shared providers are intentionally hidden from these native
+ * controls so their route policy cannot be bypassed. Existing external pi
+ * credentials remain editable here. ChatGPT links to its Common-settings owner;
+ * other interactive subscriptions still use pi's terminal `/login` flow.
  */
 import { useEffect, useRef, useState } from 'react'
-import { useShallow } from 'zustand/react/shallow'
-import { useSessionStore } from '../../stores/session-store'
-import type { PiAuthStatus, VendorAuthMap, VendorAuthOption } from '../../../../shared/types'
+import type { VendorAuthMap, VendorAuthOption } from '../../../../shared/types'
 
 /** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
 const CODEX_VENDOR_ID = 'openai-codex'
@@ -80,12 +69,17 @@ function SubscriptionHint(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="PiVendors.subscriptionHint" className="border border-border/30 rounded-md p-2.5 space-y-1.5">
-      <div className="text-[11px] text-text-muted uppercase tracking-wide">Other subscriptions (Claude Pro/Max, GitHub Copilot, xAI, Radius…)</div>
+    <div
+      data-testid="PiVendors.subscriptionHint"
+      className="border border-border/30 rounded-md p-2.5 space-y-1.5"
+    >
+      <div className="text-[11px] text-text-muted uppercase tracking-wide">
+        Other subscriptions (Claude Pro/Max, GitHub Copilot, xAI, Radius…)
+      </div>
       <div className="text-[11px] text-text-secondary leading-relaxed">
         pi&rsquo;s OAuth login is interactive and runs in a terminal, not inside ClaudeUI — run{' '}
         <code className="text-[10px]">/login</code> in a terminal to connect a subscription (Claude
-        Pro/Max, GitHub Copilot, xAI, Radius…). ChatGPT connects in-app above instead.
+        Pro/Max, GitHub Copilot, xAI, Radius…). ChatGPT connects from Common settings instead.
       </div>
       {command && (
         <div className="flex items-center gap-1.5">
@@ -108,150 +102,29 @@ function SubscriptionHint(): React.JSX.Element {
   )
 }
 
-// ── Connect ChatGPT (M6c) ───────────────────────────────────────────────
-// Real in-app OAuth for `openai-codex` ONLY, sharing opencode's driven-OAuth
-// path (`authorizeVendorOAuth` store action → window.api.vendorAuthOauth-
-// Authorize/Callback, PiAuthProvider delegates to the M6a/M6b auth vault for
-// this one vendor). Status comes from the read-only `getPiAuthStatus` IPC
-// (CredentialSync.getStatus()) — NOT from vendorAuthProbe('pi'), which only
-// reflects pi's own auth.json and would otherwise race the vault's feed-forward
-// write.
+// ── Shared ChatGPT entry point ──────────────────────────────────────────
 
-function CodexConnect(): React.JSX.Element {
-  const [status, setStatus] = useState<PiAuthStatus | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [disconnecting, setDisconnecting] = useState(false)
-  const mountedRef = useRef(true)
-  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
-    useShallow((s) => ({
-      vendorOAuth: s.vendorOAuth,
-      authorizeVendorOAuth: s.authorizeVendorOAuth,
-      cancelVendorOAuth: s.cancelVendorOAuth
-    }))
-  )
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-    }
-  }, [])
-
-  const reloadStatus = (): void => {
-    window.api
-      .getPiAuthStatus()
-      .then((s) => {
-        if (mountedRef.current) setStatus(s)
-      })
-      .catch(() => {
-        if (mountedRef.current) setStatus({ connected: false, needsReauth: false })
-      })
-  }
-
-  useEffect(() => {
-    reloadStatus()
-  }, [])
-
-  const isPiCodexFlow = vendorOAuth?.engineId === 'pi' && vendorOAuth?.vendorId === CODEX_VENDOR_ID
-  const isConnecting = isPiCodexFlow && vendorOAuth?.stage === 'waiting'
-  const hasFlowError = isPiCodexFlow && vendorOAuth?.stage === 'error'
-
-  const handleConnect = async (): Promise<void> => {
-    setError(null)
-    try {
-      const result = await authorizeVendorOAuth('pi', CODEX_VENDOR_ID)
-      if (result.ok) reloadStatus()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start the ChatGPT connect flow')
-    }
-  }
-
-  const handleDisconnect = async (): Promise<void> => {
-    setDisconnecting(true)
-    setError(null)
-    try {
-      await window.api.vendorAuthRemove('pi', CODEX_VENDOR_ID)
-      reloadStatus()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to disconnect ChatGPT')
-    } finally {
-      if (mountedRef.current) setDisconnecting(false)
-    }
-  }
-
+function SharedChatgptLink(): React.JSX.Element {
   return (
-    <div data-testid="PiVendors.codexConnect" className="border border-border/30 rounded-md p-2.5 space-y-1.5">
-      <div className="text-[11px] text-text-muted uppercase tracking-wide">ChatGPT (Codex)</div>
-      {error && <div className="text-[11px] text-red-400 leading-relaxed">{error}</div>}
-
-      {status === null ? (
-        <div className="text-[10px] text-text-muted/60">Loading…</div>
-      ) : (
-        <>
-          {status.connected && (
-            <div data-testid="PiVendors.codexConnected" className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-text-secondary truncate">
-                Connected as{' '}
-                <span className="font-medium text-text-primary">
-                  {status.email ?? status.accountId ?? 'ChatGPT'}
-                </span>
-              </span>
-              <button
-                data-testid="PiVendors.disconnectCodex"
-                onClick={() => void handleDisconnect()}
-                disabled={disconnecting}
-                className="shrink-0 px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted/70 hover:text-red-400 transition-colors disabled:opacity-40"
-              >
-                {disconnecting ? '…' : 'Disconnect'}
-              </button>
-            </div>
-          )}
-
-          {status.needsReauth && (
-            <div
-              data-testid="PiVendors.codexNeedsReauth"
-              className="flex items-center justify-between gap-2 text-[11px] text-amber-400 leading-relaxed"
-            >
-              <span>Session expired — reconnect to keep using ChatGPT.</span>
-              <button
-                data-testid="PiVendors.connectCodex"
-                onClick={() => void handleConnect()}
-                disabled={isConnecting}
-                className="shrink-0 px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 transition-colors"
-              >
-                {isConnecting ? 'Connecting…' : 'Reconnect'}
-              </button>
-            </div>
-          )}
-
-          {!status.connected && !status.needsReauth && (
-            <>
-              <div className="text-[11px] text-text-secondary leading-relaxed">
-                Managed and refreshed by ClaudeUI — the same connection opencode uses.
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button
-                  data-testid="PiVendors.connectCodex"
-                  onClick={() => void handleConnect()}
-                  disabled={isConnecting}
-                  className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 transition-colors"
-                >
-                  {isConnecting ? 'Connecting…' : 'Connect ChatGPT (log in once — shared with opencode)'}
-                </button>
-                {isConnecting && (
-                  <button
-                    onClick={cancelVendorOAuth}
-                    className="shrink-0 px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                )}
-              </div>
-              {hasFlowError && <div className="text-[11px] text-red-400">Connect failed — try again.</div>}
-            </>
-          )}
-        </>
-      )}
+    <div
+      data-testid="PiVendors.sharedChatgpt"
+      className="border border-border/30 rounded-md p-2.5 text-[11px] space-y-1"
+    >
+      <div className="text-text-muted uppercase tracking-wide">ChatGPT (Codex)</div>
+      <div>ChatGPT is configured once and can be shared with pi and opencode.</div>
+      <button
+        data-testid="PiVendors.openSharedProviders"
+        onClick={() =>
+          window.dispatchEvent(
+            new CustomEvent('open-settings', {
+              detail: { scope: 'common', section: 'shared-providers' }
+            })
+          )
+        }
+        className="text-accent"
+      >
+        Open Providers & models
+      </button>
     </div>
   )
 }
@@ -262,6 +135,7 @@ export function PiVendors(): React.JSX.Element {
   const installed = usePiInstalled()
   const [probeMap, setProbeMap] = useState<VendorAuthMap | null>(null)
   const [options, setOptions] = useState<Record<string, VendorAuthOption[]> | null>(null)
+  const [managedPiIds, setManagedPiIds] = useState<Set<string>>(new Set([CODEX_VENDOR_ID]))
   const [addVendorId, setAddVendorId] = useState('')
   const [addKey, setAddKey] = useState('')
   const [saving, setSaving] = useState(false)
@@ -279,11 +153,20 @@ export function PiVendors(): React.JSX.Element {
   const reload = (): void => {
     Promise.all([
       window.api.vendorAuthProbe('pi').catch((): VendorAuthMap => ({})),
-      window.api.vendorAuthListOptions('pi').catch((): Record<string, VendorAuthOption[]> => ({}))
-    ]).then(([probe, opts]) => {
+      window.api.vendorAuthListOptions('pi').catch((): Record<string, VendorAuthOption[]> => ({})),
+      window.api.listSharedProviders().catch(() => [])
+    ]).then(([probe, opts, sharedProviders]) => {
       if (!mountedRef.current) return
       setProbeMap(probe)
       setOptions(opts)
+      setManagedPiIds(
+        new Set(
+          [
+            CODEX_VENDOR_ID,
+            ...sharedProviders.map((provider) => provider.routes.pi.providerId ?? provider.id)
+          ]
+        )
+      )
     })
   }
 
@@ -300,22 +183,27 @@ export function PiVendors(): React.JSX.Element {
   }
   if (!installed) {
     return (
-      <div data-testid="PiVendors" className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+      <div
+        data-testid="PiVendors"
+        className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed"
+      >
         pi is not installed. Install it to add providers and authenticate them.
       </div>
     )
   }
 
-  // openai-codex is excluded here — it gets its own dedicated CodexConnect
-  // block below (driven by getPiAuthStatus, not this generic auth.json probe
-  // row), so it never shows twice with two different disconnect affordances.
   const configuredIds = Object.keys(probeMap)
-    .filter((id) => id !== CODEX_VENDOR_ID)
+    .filter((id) => !managedPiIds.has(id))
     .sort()
   // Providers offering an api-key option that are NOT yet configured — the
   // add-key select's candidate list.
   const addableIds = Object.keys(options)
-    .filter((id) => !probeMap[id] && (options[id] ?? []).some((o) => o.type === 'api'))
+    .filter(
+      (id) =>
+        !managedPiIds.has(id) &&
+        !probeMap[id] &&
+        (options[id] ?? []).some((o) => o.type === 'api')
+    )
     .sort()
 
   const handleAddKey = async (): Promise<void> => {
@@ -353,10 +241,13 @@ export function PiVendors(): React.JSX.Element {
       {error && <div className="text-[11px] text-red-400 leading-relaxed">{error}</div>}
 
       <div className="space-y-1.5">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Configured providers</div>
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">
+          Configured providers
+        </div>
         {configuredIds.length === 0 && (
           <div className="text-[10px] text-text-muted/60 leading-relaxed">
-            No providers configured yet. Add an API key below, or connect a subscription via the hint below.
+            No providers configured yet. Add an API key below, or connect a subscription via the
+            hint below.
           </div>
         )}
         {configuredIds.map((vendorId) => {
@@ -423,7 +314,7 @@ export function PiVendors(): React.JSX.Element {
         </div>
       </div>
 
-      <CodexConnect />
+      <SharedChatgptLink />
       <SubscriptionHint />
     </div>
   )

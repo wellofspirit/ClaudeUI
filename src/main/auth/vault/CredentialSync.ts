@@ -8,12 +8,11 @@
  * ("M6a scope is deliberately narrow: storage + the login-flow entry points
  * only ... Feeding credentials to pi/opencode, background refresh-before-
  * expiry, and a filesystem watch all land in M6b"). AuthVault's job is
- * encrypted-at-rest storage + login-flow orchestration (SRP); this class's
+ * plaintext vault storage + login-flow orchestration (SRP); this class's
  * job is lifecycle orchestration ACROSS three stores (the vault + two engine
- * auth files) — timers, fs.watch, retry/backoff, and reconciliation logic
- * that has nothing to do with how/whether the vault file is encrypted.
- * Keeping them separate also keeps AuthVault.test.ts's encryption-focused
- * fixtures untouched by any of this file's timer/fs-watch machinery.
+ * auth files) — timers, fs.watch, retry/backoff, and reconciliation logic.
+ * Keeping them separate also keeps AuthVault.test.ts's storage fixtures
+ * untouched by any of this file's timer/fs-watch machinery.
  *
  * DEPENDENCY DIRECTION (avoiding an import cycle): PiAuthProvider.ts drives
  * this service (oauthAuthorize/oauthCallback → beginLogin/completeLogin), and
@@ -82,6 +81,8 @@ export const MAX_TRANSIENT_RETRIES = 3
 export interface VaultLike {
   load(): Promise<VaultCredential | null>
   save(cred: VaultCredential): Promise<void>
+  removeCredential?(providerId: string): Promise<void>
+  hasUnreadableLegacyVault?(): boolean
   beginLogin(): Promise<{ authorizeUrl: string }>
   completeLogin(): Promise<VaultCredential>
   cancelLogin(): void
@@ -114,6 +115,13 @@ export interface CodexFeedTarget {
   feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void>
   /** Read this engine's current Codex entry, or null if absent/non-oauth/malformed. */
   readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null>
+  /** Remove this vendor's native credential and invalidate the target's auth cache. */
+  removeVendorAuth(vendorId: string): Promise<void>
+}
+
+export interface CodexEnabledRoutes {
+  pi: boolean
+  opencode: boolean
 }
 
 export interface CredentialSyncDeps {
@@ -121,6 +129,7 @@ export interface CredentialSyncDeps {
   now?: () => number
   refreshAccessToken?: (refreshToken: string) => Promise<TokenResponse>
   watchDebounceMs?: number
+  getEnabledRoutes?: () => CodexEnabledRoutes
 }
 
 type EngineKey = 'pi' | 'opencode'
@@ -162,6 +171,9 @@ export class CredentialSync {
   private readonly now: () => number
   private readonly refreshAccessTokenFn: (refreshToken: string) => Promise<TokenResponse>
   private readonly watchDebounceMs: number
+  private getEnabledRoutes: () => CodexEnabledRoutes
+  private hasConfiguredRoutePolicy: boolean
+  private lifecycleGeneration = 0
 
   private piTarget: CodexFeedTarget | undefined
   private opencodeTarget: CodexFeedTarget | undefined
@@ -180,14 +192,25 @@ export class CredentialSync {
   constructor(deps: CredentialSyncDeps = {}) {
     this.vault = deps.vault ?? authVault
     this.now = deps.now ?? (() => Date.now())
-    this.refreshAccessTokenFn = deps.refreshAccessToken ?? ((refresh) => defaultRefreshAccessToken(refresh))
+    this.refreshAccessTokenFn =
+      deps.refreshAccessToken ?? ((refresh) => defaultRefreshAccessToken(refresh))
     this.watchDebounceMs = deps.watchDebounceMs ?? DEFAULT_WATCH_DEBOUNCE_MS
+    this.getEnabledRoutes = deps.getEnabledRoutes ?? (() => ({ pi: true, opencode: true }))
+    this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
   }
 
   /** Wire the two engine feed targets in from the composition root (register-auth-providers.ts). Safe to call more than once (e.g. hot-reload). */
-  configure(targets: { pi: CodexFeedTarget; opencode: CodexFeedTarget }): void {
+  configure(targets: {
+    pi: CodexFeedTarget
+    opencode: CodexFeedTarget
+    getEnabledRoutes?: () => CodexEnabledRoutes
+  }): void {
     this.piTarget = targets.pi
     this.opencodeTarget = targets.opencode
+    if (targets.getEnabledRoutes) {
+      this.getEnabledRoutes = targets.getEnabledRoutes
+      this.hasConfiguredRoutePolicy = true
+    }
   }
 
   /** True after a refresh attempt hits a revoked/invalid refresh token — surfaced to M6c's UI. Cleared by any subsequent successful refresh, adopt, or completeLogin(). */
@@ -216,8 +239,17 @@ export class CredentialSync {
    * whole point of a centralized refresher.
    */
   async start(): Promise<void> {
-    const cred = await this.reconcileOnStart()
-    if (!cred) return // empty vault + no engine credential — clean no-op
+    const generation = this.lifecycleGeneration
+    const cred = await this.reconcileOnStart(generation)
+    try {
+      await this.removeDisabledCopies()
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `start: failed to remove one or more disabled credential copies: ${errMessage(err)}`
+      )
+    }
+    if (!cred || !this.isCurrent(generation)) return // empty vault + no engine credential — clean no-op
     this.scheduleRefresh(cred)
     this.startWatchers()
   }
@@ -229,9 +261,12 @@ export class CredentialSync {
    * vault from an engine store when the vault is empty. Returns the credential
    * to schedule off, or null when there is nothing anywhere (no-op).
    */
-  private async reconcileOnStart(): Promise<VaultCredential | null> {
+  private async reconcileOnStart(generation: number): Promise<VaultCredential | null> {
     const vaultCred = await this.vault.load()
-    const newestEngine = await this.readNewestEngineEntry()
+    if (!this.isCurrent(generation)) return null
+    const recoveringLegacyVault = !vaultCred && this.vault.hasUnreadableLegacyVault?.() === true
+    const newestEngine = await this.readNewestEngineEntry(recoveringLegacyVault)
+    if (!this.isCurrent(generation)) return null
 
     if (vaultCred) {
       const engineBeatsVault =
@@ -239,25 +274,37 @@ export class CredentialSync {
         newestEngine.refresh !== vaultCred.refresh &&
         newestEngine.expires > vaultCred.expires
       if (engineBeatsVault) {
-        logger.info('CredentialSync', 'reconcileOnStart: engine store holds a newer credential than the vault — adopting')
-        return this.persistAdopted(newestEngine, vaultCred)
+        logger.info(
+          'CredentialSync',
+          'reconcileOnStart: engine store holds a newer credential than the vault — adopting'
+        )
+        return this.persistAdopted(newestEngine, vaultCred, generation)
       }
       return vaultCred // vault is the newest (or tied) — keep it
     }
 
     // Vault empty: bootstrap from an engine store if one has a credential.
     if (newestEngine) {
-      logger.info('CredentialSync', 'reconcileOnStart: vault empty, adopting existing engine credential')
-      return this.persistAdopted(newestEngine, null)
+      logger.info(
+        'CredentialSync',
+        `reconcileOnStart: ${recoveringLegacyVault ? 'recovering unreadable legacy vault from' : 'vault empty, adopting'} existing engine credential`
+      )
+      return this.persistAdopted(newestEngine, null, generation)
     }
+    if (recoveringLegacyVault) await this.removeChatgptCredential()
     return null
   }
 
   /** Read both engines' Codex entries (best-effort) and return the one with the strictly-largest expiry, or null if neither has one. */
-  private async readNewestEngineEntry(): Promise<CodexEntrySnapshot | null> {
+  private async readNewestEngineEntry(includeDisabled = false): Promise<CodexEntrySnapshot | null> {
+    const routes = this.routes()
     const snapshots = await Promise.all([
-      this.safeReadEntry('pi', this.piTarget, PI_CODEX_VENDOR_ID),
-      this.safeReadEntry('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
+      includeDisabled || routes.pi
+        ? this.safeReadEntry('pi', this.piTarget, PI_CODEX_VENDOR_ID)
+        : null,
+      includeDisabled || routes.opencode
+        ? this.safeReadEntry('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
+        : null
     ])
     let newest: CodexEntrySnapshot | null = null
     for (const snap of snapshots) {
@@ -297,7 +344,12 @@ export class CredentialSync {
 
   /** On success: feed both engine stores, arm the refresh scheduler, and start the fs-watch resync. */
   async completeLogin(): Promise<VaultCredential> {
+    const generation = this.lifecycleGeneration
     const cred = await this.vault.completeLogin()
+    if (!this.isCurrent(generation)) {
+      await this.removeChatgptCredential()
+      throw new Error('ChatGPT login was cancelled')
+    }
     this._needsReauth = false
     this.retryCount = 0
     await this.feedAll(cred)
@@ -308,6 +360,25 @@ export class CredentialSync {
 
   cancelLogin(): void {
     this.vault.cancelLogin()
+  }
+
+  /** Remove only ChatGPT credentials, preserving all other central-vault records. */
+  async disconnectChatgpt(): Promise<void> {
+    this.lifecycleGeneration += 1
+    this.cancelLogin()
+    this.stop()
+    this._needsReauth = false
+    this.retryCount = 0
+    const failures: unknown[] = []
+    await Promise.all([
+      this.removeChatgptCredential().catch((err) => failures.push(err)),
+      this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID).catch((err) => failures.push(err)),
+      this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID).catch((err) =>
+        failures.push(err)
+      )
+    ])
+    if (failures.length)
+      throw new AggregateError(failures, 'Failed to disconnect ChatGPT credentials')
   }
 
   /** Force an out-of-band refresh check right now (e.g. a future "sync now" UI action). Goes through the same single-flight dedupe as the scheduled path. */
@@ -332,7 +403,13 @@ export class CredentialSync {
     if (!cred) {
       return { connected: false, needsReauth: this._needsReauth }
     }
-    const status: { connected: boolean; email?: string; accountId?: string; expiresAt?: number; needsReauth: boolean } = {
+    const status: {
+      connected: boolean
+      email?: string
+      accountId?: string
+      expiresAt?: number
+      needsReauth: boolean
+    } = {
       connected: true,
       needsReauth: this._needsReauth,
       expiresAt: cred.expires
@@ -368,12 +445,17 @@ export class CredentialSync {
     vendorId: string,
     cred: CodexCredentialInput
   ): Promise<boolean> {
+    if (!this.routes()[label]) {
+      logger.info('CredentialSync', `feedAll: ${label} route disabled — skipping`)
+      return false
+    }
     if (!target) {
       logger.warn('CredentialSync', `feedAll: no ${label} target configured — skipping`)
       return false
     }
     try {
       await target.feedOauthCredential(vendorId, cred)
+      this.startWatcher(label, target)
       return true
     } catch (err) {
       logger.warn('CredentialSync', `feedAll: ${label} write failed: ${errMessage(err)}`)
@@ -424,7 +506,9 @@ export class CredentialSync {
   }
 
   private async doRefresh(): Promise<void> {
+    const generation = this.lifecycleGeneration
     const cred = await this.vault.load()
+    if (!this.isCurrent(generation)) return
     if (!cred) {
       logger.debug('CredentialSync', 'doRefresh: no vault credential — nothing to refresh')
       return
@@ -434,19 +518,25 @@ export class CredentialSync {
     try {
       tokens = await this.refreshAccessTokenFn(cred.refresh)
     } catch (err) {
-      this.handleRefreshError(err, cred)
+      if (this.isCurrent(generation)) this.handleRefreshError(err, cred)
       return
     }
+    if (!this.isCurrent(generation)) return
 
     this.retryCount = 0
     this._needsReauth = false
     // Shared with the login path via buildVaultCredential — identical expires
     // math + carry-forward of the prior accountId/email when a refresh
     // response's JWTs omit the profile claims.
-    const next = buildVaultCredential(tokens, this.now, { accountId: cred.accountId, email: cred.email })
+    const next = buildVaultCredential(tokens, this.now, {
+      accountId: cred.accountId,
+      email: cred.email
+    })
+    if (!this.isCurrent(generation)) return
     await this.vault.save(next)
+    if (!this.isCurrent(generation)) return
     await this.feedAll(next)
-    this.scheduleRefresh(next)
+    if (this.isCurrent(generation)) this.scheduleRefresh(next)
   }
 
   private handleRefreshError(err: unknown, cred: VaultCredential): void {
@@ -455,7 +545,10 @@ export class CredentialSync {
       this.clearRefreshTimer()
       this.clearRetryTimer()
       this.retryCount = 0
-      logger.error('CredentialSync', `refresh rejected (refresh token revoked) — needsReauth: ${errMessage(err)}`)
+      logger.error(
+        'CredentialSync',
+        `refresh rejected (refresh token revoked) — needsReauth: ${errMessage(err)}`
+      )
       return
     }
 
@@ -486,8 +579,9 @@ export class CredentialSync {
   // -------------------------------------------------------------------------
 
   private startWatchers(): void {
-    this.startWatcher('pi', this.piTarget)
-    this.startWatcher('opencode', this.opencodeTarget)
+    const routes = this.routes()
+    if (routes.pi) this.startWatcher('pi', this.piTarget)
+    if (routes.opencode) this.startWatcher('opencode', this.opencodeTarget)
   }
 
   /**
@@ -508,14 +602,20 @@ export class CredentialSync {
     try {
       filePath = target.authFilePath()
     } catch (err) {
-      logger.warn('CredentialSync', `startWatcher(${engine}): authFilePath() failed: ${errMessage(err)}`)
+      logger.warn(
+        'CredentialSync',
+        `startWatcher(${engine}): authFilePath() failed: ${errMessage(err)}`
+      )
       return
     }
     const dir = path.dirname(filePath)
     const filename = path.basename(filePath)
 
     if (!fs.existsSync(dir)) {
-      logger.debug('CredentialSync', `startWatcher(${engine}): ${dir} does not exist yet — skipping watch`)
+      logger.debug(
+        'CredentialSync',
+        `startWatcher(${engine}): ${dir} does not exist yet — skipping watch`
+      )
       return
     }
 
@@ -558,6 +658,8 @@ export class CredentialSync {
    * write racing behind the current one).
    */
   private async handleExternalChange(engine: EngineKey): Promise<void> {
+    const generation = this.lifecycleGeneration
+    if (!this.routes()[engine]) return
     const target = engine === 'pi' ? this.piTarget : this.opencodeTarget
     if (!target) return
     const vendorId = engine === 'pi' ? PI_CODEX_VENDOR_ID : OPENCODE_CODEX_VENDOR_ID
@@ -566,23 +668,32 @@ export class CredentialSync {
     try {
       entry = await target.readOauthEntry(vendorId)
     } catch (err) {
-      logger.warn('CredentialSync', `handleExternalChange(${engine}): read failed: ${errMessage(err)}`)
+      logger.warn(
+        'CredentialSync',
+        `handleExternalChange(${engine}): read failed: ${errMessage(err)}`
+      )
       return
     }
-    if (!entry) return
+    if (!entry || !this.isCurrent(generation)) return
 
     const vaultCred = await this.vault.load()
-    if (!vaultCred) return // nothing to reconcile against yet — first credential must arrive via completeLogin()
+    if (!this.isCurrent(generation) || !vaultCred) return // nothing to reconcile against yet — first credential must arrive via completeLogin()
 
     if (entry.refresh === vaultCred.refresh) return // our own write (loop guard) or genuinely unchanged
     if (entry.expires <= vaultCred.expires) {
-      logger.debug('CredentialSync', `handleExternalChange(${engine}): ignoring older/stale credential`)
+      logger.debug(
+        'CredentialSync',
+        `handleExternalChange(${engine}): ignoring older/stale credential`
+      )
       return
     }
 
-    logger.info('CredentialSync', `handleExternalChange(${engine}): adopting externally-rotated credential`)
-    const adopted = await this.persistAdopted(entry, vaultCred)
-    this.scheduleRefresh(adopted)
+    logger.info(
+      'CredentialSync',
+      `handleExternalChange(${engine}): adopting externally-rotated credential`
+    )
+    const adopted = await this.persistAdopted(entry, vaultCred, generation)
+    if (adopted && this.isCurrent(generation)) this.scheduleRefresh(adopted)
   }
 
   /**
@@ -598,8 +709,9 @@ export class CredentialSync {
    */
   private async persistAdopted(
     snapshot: CodexEntrySnapshot,
-    prior: VaultCredential | null
-  ): Promise<VaultCredential> {
+    prior: VaultCredential | null,
+    generation: number
+  ): Promise<VaultCredential | null> {
     const adopted: VaultCredential = {
       type: 'oauth',
       access: snapshot.access,
@@ -610,11 +722,58 @@ export class CredentialSync {
     if (accountId) adopted.accountId = accountId
     if (prior?.email) adopted.email = prior.email
 
+    if (!this.isCurrent(generation)) return null
     await this.vault.save(adopted)
+    if (!this.isCurrent(generation)) return null
     this._needsReauth = false
     this.retryCount = 0
     await this.feedAll(adopted)
-    return adopted
+    return this.isCurrent(generation) ? adopted : null
+  }
+
+  private routes(): CodexEnabledRoutes {
+    try {
+      return this.getEnabledRoutes()
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `getEnabledRoutes failed, failing closed: ${errMessage(err)}`
+      )
+      return this.hasConfiguredRoutePolicy ? { pi: false, opencode: false } : { pi: true, opencode: true }
+    }
+  }
+
+  private async removeChatgptCredential(): Promise<void> {
+    if (!this.vault.removeCredential) throw new Error('Vault does not support credential removal')
+    await this.vault.removeCredential('chatgpt')
+  }
+
+  private async removeDisabledCopies(): Promise<void> {
+    const routes = this.routes()
+    await Promise.allSettled([
+      routes.pi ? undefined : this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID),
+      routes.opencode
+        ? undefined
+        : this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
+    ])
+  }
+
+  private isCurrent(generation: number): boolean {
+    return generation === this.lifecycleGeneration
+  }
+
+  private async removeOne(
+    label: EngineKey,
+    target: CodexFeedTarget | undefined,
+    vendorId: string
+  ): Promise<void> {
+    if (!target) return
+    try {
+      await target.removeVendorAuth(vendorId)
+    } catch (err) {
+      logger.warn('CredentialSync', `removeVendorAuth(${label}) failed: ${errMessage(err)}`)
+      throw err
+    }
   }
 }
 

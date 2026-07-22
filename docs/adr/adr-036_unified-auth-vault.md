@@ -1,6 +1,6 @@
 # ADR-036: Unified auth vault — ClaudeUI drives Codex OAuth once, feeds pi + opencode
 
-**Status:** Accepted (implemented on branch `pi`, M6a–M6c)
+**Status:** Amended by ADR-037
 **Date:** 2026-07-21
 **Relates to:** ADR-021 (neutral auth), ADR-014 (Claude OAuth over cli.js — the deliberately-different
 precedent), ADR-019 (opencode backend), ADR-035 (pi backend), ADR-030 (capability honesty)

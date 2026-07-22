@@ -1,4 +1,10 @@
 import type { ResolvedCapabilities } from './model-capabilities'
+import type {
+  ConfigurableHarnessId,
+  SharedProviderDefinition,
+  SharedProviderModel,
+  SharedProviderStatus
+} from './shared-provider'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -305,6 +311,8 @@ export interface SandboxSettings {
 export interface OpencodeProviderSettings {
   name?: string
   baseURL?: string
+  /** Native provider adapter package (provider.npm). */
+  npm?: string
   models?: { id: string; name?: string }[]
 }
 
@@ -921,6 +929,27 @@ interface SessionAPI {
   logError(source: string, message: string): void
 }
 
+interface SharedProviderAPI {
+  listSharedProviders(): Promise<SharedProviderDefinition[]>
+  getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
+  listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
+  saveSharedProvider(definition: SharedProviderDefinition): Promise<void>
+  removeSharedProvider(id: string): Promise<void>
+  setSharedProviderRoute(
+    id: string,
+    harness: ConfigurableHarnessId,
+    enabled: boolean
+  ): Promise<void>
+  setSharedProviderApiKey(id: string, key: string): Promise<void>
+  syncSharedProvider(id: string): Promise<void>
+  disconnectSharedProvider(id: string): Promise<void>
+  setSharedProviderDefaultModel(
+    id: string,
+    harness: ConfigurableHarnessId,
+    modelId?: string
+  ): Promise<void>
+}
+
 interface GitAPI {
   gitCheckRepo(cwd: string): Promise<boolean>
   gitGetStatus(cwd: string): Promise<GitStatusData>
@@ -1235,6 +1264,7 @@ export interface ClaudeAPI
     VendorAuthAPI,
     RemoteAPI,
     VoiceAPI,
+    SharedProviderAPI,
     PluginAPI {
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void

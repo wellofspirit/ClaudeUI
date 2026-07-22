@@ -389,6 +389,19 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
     ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+  listSharedProviders: () => unwrap('shared-provider:list'),
+  getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
+  listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),
+  saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+  removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
+  setSharedProviderRoute: (id, harness, enabled) =>
+    unwrap('shared-provider:set-route', id, harness, enabled),
+  setSharedProviderApiKey: (id: string, key: string) =>
+    unwrap('shared-provider:set-key', id, key),
+  syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
+  disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
+  setSharedProviderDefaultModel: (id, harness, modelId?) =>
+    unwrap('shared-provider:set-default', id, harness, modelId),
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)

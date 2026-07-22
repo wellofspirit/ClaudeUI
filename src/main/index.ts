@@ -41,6 +41,7 @@ import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { credentialSync } from './auth/vault/CredentialSync'
+import { sharedProviderService } from './shared-providers'
 import { opencodeServerManager } from './opencode/OpencodeServerManager'
 import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
 import { PluginManager } from './services/plugin-manager'
@@ -214,12 +215,26 @@ function createWindow(): void {
   authManager.setWindow(mainWindow)
   accountManager.init(mainWindow)
   claudeAuthProvider.init(mainWindow)
-  // M6b: if a vault Codex (ChatGPT) credential already exists (a prior
-  // ClaudeUI-driven login), arm the sole-refresher + fs-watch resync. Never
-  // blocks boot — best-effort, like every other auth-provider init above.
-  void credentialSync.start().catch((err) => {
-    logger.warn('main', `credentialSync.start() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
-  })
+  // Reconcile central credentials first, then materialize all shared-provider
+  // routes. Both are best-effort and must never block app startup.
+  void (async () => {
+    try {
+      await credentialSync.start()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `credentialSync.start() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    try {
+      await sharedProviderService.syncAll()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `sharedProviderService.syncAll() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  })()
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 

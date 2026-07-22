@@ -352,6 +352,18 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+    listSharedProviders: () => unwrap('shared-provider:list'),
+    getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
+    listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
+    saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
+    setSharedProviderRoute: (id, harness, enabled) =>
+      unwrap('shared-provider:set-route', id, harness, enabled),
+    setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
+    disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
+    setSharedProviderDefaultModel: (id, harness, modelId) =>
+      unwrap('shared-provider:set-default', id, harness, modelId),
     openLogViewer: () => ipcRenderer.invoke('log-viewer:open'),
 
     listPlugins: () => ipcRenderer.invoke('plugin:list'),

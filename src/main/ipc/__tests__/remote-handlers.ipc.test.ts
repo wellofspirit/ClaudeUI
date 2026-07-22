@@ -46,7 +46,8 @@ const uiConfigMocks = vi.hoisted(() => ({
 vi.mock('../../services/ui-config', () => uiConfigMocks)
 
 vi.mock('../../opencode/model-discovery', () => ({
-  resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free')
+  resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free'),
+  invalidateOpencodeModelCache: vi.fn()
 }))
 
 vi.mock('../../sdk/proxy', () => ({
@@ -351,6 +352,22 @@ describe('registerRemoteHandlers', () => {
     expect(channels).toContain('mcp:load-servers')
     expect(channels).toContain('usage:fetch')
     expect(channels).toContain('file:list-dir')
+    for (const channel of [
+      'shared-provider:list',
+      'shared-provider:statuses',
+      'shared-provider:models'
+    ])
+      expect(channels).toContain(channel)
+    for (const channel of [
+      'shared-provider:save',
+      'shared-provider:remove',
+      'shared-provider:set-route',
+      'shared-provider:set-key',
+      'shared-provider:sync',
+      'shared-provider:disconnect',
+      'shared-provider:set-default'
+    ])
+      expect(channels).not.toContain(channel)
   })
 
   it('does NOT register blocklisted channels', () => {

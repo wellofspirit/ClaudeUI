@@ -5,6 +5,7 @@ import {
   SCOPES,
   scopeCapabilities,
   isSectionVisible,
+  SECTION_SCOPE_MAP,
   type SettingsScope
 } from './settings-sections'
 import type { EngineConfig, VendorConfig } from '../../../../shared/types'
@@ -22,7 +23,15 @@ function firstSectionOfScope(scope: SettingsScope): string {
   return ''
 }
 
-export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
+export function SettingsDialog({
+  onClose,
+  initialScope,
+  initialSection
+}: {
+  onClose: () => void
+  initialScope?: SettingsScope
+  initialSection?: string
+}): React.JSX.Element {
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const setStoreEngineConfig = useSessionStore((s) => s.setEngineConfig)
@@ -32,6 +41,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
   const [search, setSearch] = useState('')
   const [engineConfig, setEngineConfig] = useState<EngineConfig>({})
   const [vendorConfig, setVendorConfig] = useState<VendorConfig>({})
+
+  useEffect(() => {
+    const scope = initialScope ?? (initialSection ? SECTION_SCOPE_MAP.get(initialSection) : undefined)
+    if (!scope) return
+    setActiveScope(scope)
+    setActiveSectionId(initialSection || firstSectionOfScope(scope))
+    setSearch('')
+  }, [initialScope, initialSection])
 
   // Fetch version info on mount
   useEffect(() => {
