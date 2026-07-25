@@ -6,6 +6,8 @@
  * they're hermetic (no dependence on the dev machine's real ~/.claude).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import path from 'node:path'
+import { homedir } from 'node:os'
 import type { MergedClaudeRules } from '../permission-engine'
 
 const { mockLoadClaudePermissions } = vi.hoisted(() => ({
@@ -270,7 +272,46 @@ describe('isPlanSafeBashCommand (M5a — per-segment validation, deny-when-unsur
     // Unknown / unrecognized commands are denied by default ("when unsure, deny").
     ['', false],
     ['some-random-binary --flag', false],
-    ['./run.sh', false]
+    ['./run.sh', false],
+
+    // ── Flag-level mutation on a read-only command NAME ───────────────────
+    // The safe list is anchored on the command name, so a mutating FLAG used
+    // to sail straight through it. A plan-mode bash allow is an AUTO-allow —
+    // these all executed with no human in the loop.
+    ["find . -name '*.tmp' -delete", false], // deletes files
+    ['find . -name x -exec sh -c bad {} +', false], // runs an arbitrary nested command
+    ['find . -name x -execdir sh -c bad {} +', false],
+    ['find . -type f -fprintf /tmp/out %p', false], // writes a file
+    ['find . -name "*.ts"', true], // plain search stays allowed
+    ['sort -o out.txt in.txt', false], // -o writes a file
+    ['sort --output=out.txt in.txt', false],
+    ['sort -ofile.txt in.txt', false], // GNU bundles the argument
+    ['sort -uo out.txt in.txt', false], // …and bundles the flag
+    ['sort file.txt', true],
+    ['sort -u file.txt', true],
+    ['sort -k2,2 -r file.txt', true], // no `o` in any of these flags
+    ['cat a.txt | sort | uniq -c', true], // the common pipe use survives
+    // `sed` was dropped from the safe list entirely: `-n` suppresses
+    // auto-printing, it does not make sed read-only, and detecting a `w`
+    // command inside a sed script needs a real parser.
+    ["sed -n 'w /tmp/pwned' input.txt", false], // writes a file
+    ["sed -n -i 's/a/b/' input.txt", false], // edits in place
+    ["sed -n '1,5p' input.txt", false], // read-only, but denied — accepted cost
+    // `git branch` / `git remote` are read-only only in their LISTING forms.
+    ['git branch', true],
+    ['git branch -v', true],
+    ['git branch -a', true],
+    ['git branch --show-current', true],
+    ['git branch my-new-branch', false], // creates a ref
+    ['git branch -m old new', false], // renames a ref
+    ['git branch -c old new', false], // copies a ref
+    ['git remote', true],
+    ['git remote -v', true],
+    ['git remote show origin', true],
+    ['git remote get-url origin', true],
+    ['git remote add origin https://evil.example/x.git', false], // adds a push target
+    ['git remote set-url origin https://evil.example/x.git', false],
+    ['git remote rename origin upstream', false]
   ]
 
   it.each(cases)('isPlanSafeBashCommand(%j) === %s', (command, expected) => {
@@ -563,6 +604,77 @@ describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) ar
   it('legacy file_path alias is honored for edit/write/read when path is absent', () => {
     const ctx = { mode: 'default', rules: rules({ deny: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
     expect(decide('edit', { file_path: 'src/foo.ts' }, ctx)).toBe('deny')
+  })
+})
+
+describe('decide — ABSOLUTE / home-dir / Windows-absolute rule specifiers', () => {
+  // resolveMatchPath always relativises the TOOL path against cwd, but rule
+  // specifiers were matched verbatim — so every absolute-looking specifier
+  // compared an absolute glob against a relative string and could NEVER match.
+  // `Edit(~/.ssh/**)`, `Read(//etc/shadow)` and `Edit(D:\secrets\**)` were
+  // inert: the tool ran with no prompt at all, in every mode.
+  const HOME = homedir()
+
+  const ctx = (partial: Partial<MergedClaudeRules>, cwd?: string) => ({
+    mode: 'default',
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    ...(cwd === undefined ? {} : { cwd })
+  })
+
+  it('`//abs/path` (Claude double-slash = absolute) matches the absolute tool path', () => {
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))).toBe('deny')
+    expect(decide('edit', { path: '/srv/secrets/k.pem' }, ctx({ deny: ['Edit(//srv/secrets/**)'] }, '/repo'))).toBe(
+      'deny'
+    )
+  })
+
+  it('`~/…` expands to the home directory', () => {
+    const cwd = path.join(HOME, 'proj')
+    expect(decide('read', { path: path.join(HOME, '.ssh', 'id_rsa') }, ctx({ deny: ['Read(~/.ssh/**)'] }, cwd))).toBe(
+      'deny'
+    )
+    // …and a bare `~` covers the whole home tree.
+    expect(decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~)'] }, cwd))).toBe('allow')
+    expect(decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~/**)'] }, cwd))).toBe('deny')
+  })
+
+  it('a Windows-absolute specifier matches regardless of separator or drive-letter case', () => {
+    for (const rule of ['Edit(D:\\secrets\\**)', 'Edit(D:/secrets/**)', 'Edit(d:/secrets/**)']) {
+      expect(decide('edit', { path: 'D:\\secrets\\keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')), rule).toBe('deny')
+      expect(decide('edit', { path: 'd:/secrets/keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')), rule).toBe('deny')
+    }
+  })
+
+  it('a relative tool path is resolved against cwd before the absolute comparison', () => {
+    // `src/a.ts` under cwd D:\secrets IS inside the denied tree.
+    expect(decide('edit', { path: 'src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\secrets'))).toBe('deny')
+  })
+
+  it('an absolute specifier does NOT match a path outside it (no over-broadening)', () => {
+    expect(decide('read', { path: '/etc/hosts' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))).toBe('allow')
+    expect(decide('edit', { path: 'D:\\repo\\src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\repo'))).toBe(
+      'ask'
+    )
+  })
+
+  it('a `..`-containing tool path is normalised before comparing (no traversal escape)', () => {
+    expect(
+      decide('read', { path: '/repo/../etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))
+    ).toBe('deny')
+  })
+
+  it('an absolute specifier still works on the no-cwd best-effort path when the input is already absolute', () => {
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }))).toBe('deny')
+  })
+
+  it('a SINGLE leading slash is NOT treated as absolute (unchanged — Claude reads it as settings-relative)', () => {
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(/etc/passwd)'] }, '/repo'))).toBe('allow')
+  })
+
+  it('ordinary relative specifiers keep their cwd-relative semantics', () => {
+    expect(decide('edit', { path: '/repo/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))).toBe('deny')
+    expect(decide('edit', { path: '/elsewhere/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))).toBe('ask')
   })
 })
 
