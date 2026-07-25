@@ -9,6 +9,25 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  # electron-builder does NOT read .gitignore — without these negations the
+  # asar packs the whole working tree: developer-local .claude/ (settings,
+  # logs, saved mockups), .cache/ (session screenshots, restored CLI
+  # binaries), the ~2 GB vendor/ tree (already shipped via extraResources),
+  # docs, patches, scripts, and stray logs. That both doubles the shipped
+  # size and leaks local session data into any built distributable.
+  - '!.cache/**'
+  - '!.claude/**'
+  - '!vendor/**'
+  - '!docs/**'
+  - '!patch/**'
+  - '!scripts/**'
+  - '!dist/**'
+  - '!.github/**'
+  - '!**/*.log'
+  - '!*.md'
+  # out/web is shipped as extraResources (resources/web) and prod resolves it
+  # there (remote-server getWebClientDir) — the asar copy is never read.
+  - '!out/web/**'
 extraResources:
   # Ship the rebundled Bun binary + version metadata + native addons that
   # the Electron main process loads directly (audio-capture.node etc. — see
