@@ -117,8 +117,12 @@ if (src.includes(patchFMarker)) {
   const msgVar = callMatch[1]
   const idx = src.indexOf(oldStr)
 
-  // Verify it's inside the sub-agent query generator (cR in v2.1.39, WR in v2.1.47)
-  const before = src.slice(Math.max(0, idx - 10000), idx)
+  // Verify it's inside the sub-agent query generator (cR in v2.1.39, WR in v2.1.47).
+  // `yield` can only belong to the nearest enclosing generator, so a preceding
+  // `async function*` decl in the window confirms the injected `yield` is legal.
+  // v2.1.219 grew the generator body: the decl now sits ~10.9k chars before the
+  // RVY gate (was <10k), so widen the window to 20000 to keep the sanity check.
+  const before = src.slice(Math.max(0, idx - 20000), idx)
   if (!/async function\*[\w$]+\(/.test(before)) {
     console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
     process.exit(1)
@@ -136,6 +140,104 @@ if (src.includes(patchFMarker)) {
   src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
   patchCount++
   console.log(`Applied at char ${idx}. msg=${msgVar}`)
+}
+
+// ===========================================================================
+// Patch F2: Yield stream_event past the IVe/fHo streaming pre-filter (v2.1.197+)
+//
+// In v2.1.197 the sub-agent query generator gained a pre-filter ABOVE the
+// RVY gate that Patch F targets:
+//
+//   for await(let MSG of b4({...})){
+//     if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}
+//     ...
+//     /*PATCHED:subagent-F*/if(MSG.type==="stream_event"){yield MSG}else  ← now DEAD for stream_event
+//     if(RVY(MSG))...
+//   }
+//
+// IVe(MSG) === Bam.has(MSG.type), and Bam/Fam INCLUDES "stream_event". So
+// stream_events hit this branch first: FHO() consumes them for display
+// side-effects (onStreamingText etc.) and the branch `continue`s — they
+// never reach Patch F's yield, and thus never reach the `nt` onMessage
+// callback (Patch B) or BVe. That is why no sub-agent stream_event ever
+// surfaces. Patch F's RVY-gate injection is now unreachable for stream_event
+// but is kept (harmless, marker-verified, still correct on older CLIs).
+//
+// Fix: inside that IVe branch, after FHO's side-effects, also `yield MSG`
+// when it is a stream_event, BEFORE flushing BUF and continuing. The yielded
+// stream_event then flows to `nt` (Patch B, sync) / BVe's h.push (Patch E,
+// background) exactly as designed.
+//
+// Anchor is unique: `IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}`.
+// We only patch when it exists (older CLIs without the pre-filter skip it —
+// Patch F alone was sufficient there).
+// ===========================================================================
+
+console.log('\n--- Patch F2: yield stream_event past IVe/fHo pre-filter ---')
+
+const patchF2Marker = '/*PATCHED:subagent-F2*/'
+// Older CLIs (< v2.1.197) have no IVe/fHo pre-filter; F2 is then inapplicable
+// and Patch F's RVY-gate injection alone forwards stream_events.
+let patchF2Applicable = true
+
+if (src.includes(patchF2Marker)) {
+  console.log('Already applied. Skipping.')
+} else {
+  // Match: if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}
+  // - CB (optional-call callback), IVe (the Bam.has type-gate),
+  //   FHO (the stream-handler), CFG/N (fHo config args), BUF (buffer array).
+  const preFilterRe = new RegExp(
+    `if\\((${V})\\?\\.\\(\\),(${V})\\((${V})\\)\\)\\{` +
+      `(${V})\\(\\3,(${V}),(${V})\\),` +
+      `yield\\*(${V}),\\7\\.length=0;continue\\}`
+  )
+  const pfMatch = src.match(preFilterRe)
+
+  if (!pfMatch) {
+    console.log(
+      'IVe/fHo streaming pre-filter not found — pre-v2.1.197 CLI. Patch F alone forwards stream_events. Skipping.'
+    )
+    patchF2Applicable = false
+  } else {
+    const pfStr = pfMatch[0]
+    const msgVar = pfMatch[3] // MSG (the loop variable)
+    const idx = src.indexOf(pfStr)
+
+    if (src.indexOf(pfStr, idx + 1) !== -1) {
+      console.error('ERROR: Multiple matches for Patch F2. Aborting.')
+      process.exit(1)
+    }
+
+    // Sanity: this branch must live inside the same sub-agent async generator
+    // Patch F targeted (verify a Patch-F marker is nearby downstream).
+    const after = src.slice(idx, idx + 6000)
+    if (!after.includes(patchFMarker)) {
+      console.error('ERROR: IVe pre-filter is not co-located with Patch F. Context mismatch.')
+      process.exit(1)
+    }
+
+    // Rebuild the branch: keep the fHo side-effects and BUF flush, but insert
+    // a stream_event yield between them. The comma-sequenced `(yield MSG)`
+    // expression is valid inside a generator body.
+    const fhoFn = pfMatch[4]
+    const cfg1 = pfMatch[5]
+    const cfg2 = pfMatch[6]
+    const buf = pfMatch[7]
+    const cbVar = pfMatch[1]
+    const iveFn = pfMatch[2]
+    const gateArg = pfMatch[3]
+    const newStr =
+      `if(${cbVar}?.(),${iveFn}(${gateArg})){` +
+      `${patchF2Marker}${fhoFn}(${msgVar},${cfg1},${cfg2}),` +
+      `${msgVar}.type==="stream_event"&&(yield ${msgVar}),` +
+      `yield*${buf},${buf}.length=0;continue}`
+
+    src = src.slice(0, idx) + newStr + src.slice(idx + pfStr.length)
+    patchCount++
+    console.log(
+      `Applied at char ${idx}. msg=${msgVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}`
+    )
+  }
 }
 
 // ===========================================================================
@@ -253,24 +355,31 @@ const patchBMarker = '/*PATCHED:subagent-B*/'
 if (src.includes(patchBMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the unique sync loop pattern.
+  // In v2.1.197 the Task tool's sync path was refactored: the old for-await loop
+  // with O1.push(MSG) is gone. Instead Task.call() creates an `nt` onMessage callback
+  // and passes it to BVe() which runs the for-await internally.
   //
-  // v2.1.47–v2.1.63: push and bash_progress in the same if:
-  //   if(ARR.push(MSG),MSG.type==="progress"&&(MSG.data.type==="bash_progress"||...)
+  // The nt callback receives every message from the sub-agent. stream_events are
+  // dangerous because Ye[] (the collection array) is later passed to Tko/FVe which
+  // call NAe() on the last non-system/progress message — NAe accesses .message.content
+  // and would crash on a stream_event lacking .message.
   //
-  // v2.1.71–v2.1.81: push+stats in one if, bash_progress check is a separate if:
-  //   =VAL.value;if(ARR.push(MSG),STATS(VARS,MSG,TOOLS,j.options.tools),...)
+  // The `nt` callback structure (v2.1.197+):
+  //   nt=(MSG)=>{
+  //     if(DONE_FLAG)return;
+  //     if(MSG.type==="spinner_mode")return;
+  //     if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")ARR.push(MSG);  ← target
+  //     if(!CALLBACK)return;
+  //     ...bash_progress forward...
+  //     if(MSG.type!=="assistant"&&MSG.type!=="user")return;  ← stream_event dropped here
+  //     ...agent_progress forward...
+  //   }
   //
-  // v2.1.87+: push+stats+bool in one if, bash_progress is a separate if:
-  //   =VAL.value;if(ARR.push(MSG),STATS(STATS,MSG,TOOLS,H.options.tools),BOOL){...}
-  //   if(MSG.type==="progress"&&(bash_progress||...))
+  // We intercept stream_event BEFORE ARR.push and forward via CALLBACK, then `return`
+  // (not `continue` — this is an arrow function, not a for-loop body).
   //
-  // v2.1.144+: an api_metrics early-exit was inserted between =VAL.value and
-  // the push-and-stats `if(...)`:
-  //   =VAL.value;if(MSG.type==="api_metrics"){CB?.(MSG);continue}
-  //   if(ARR.push(MSG),STATS(STATS,MSG,TOOLS,H.options.tools),BOOL){...}
-  //
-  // Try patterns newest first.
+  // v2.1.47–v2.1.196 patterns (for-await with push) are tried first for backward compat.
+  // The new nt-callback pattern is the final fallback.
   const v144PushRe = new RegExp(
     `=(${V})\\.value;if\\((${V})\\.type==="api_metrics"\\)\\{(${V})\\?\\.\\(\\2\\);continue\\}` +
       `if\\((${V})\\.push\\(\\2\\),` +
@@ -291,8 +400,14 @@ if (src.includes(patchBMarker)) {
       `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
       `\\2\\.data\\.type==="bash_progress")`
   )
+  // v2.1.197+: nt-callback pattern — unique to this architecture
+  const ntCallbackRe = new RegExp(
+    `if\\((${V})\\.type!=="api_metrics"&&\\1\\.type!=="set_in_progress_tool_use_ids"\\)(${V})\\.push\\(\\1\\)`
+  )
+
   let m = src.match(v144PushRe)
   let matchStr, msgVar, idx
+  let isNtCallback = false
   if (m) {
     // v2.1.144: matchStr starts at the SECOND "if(" (the push gate) — skip
     // the `=VAL.value;` prefix and the api_metrics guard.
@@ -324,6 +439,13 @@ if (src.includes(patchBMarker)) {
     msgVar = m[2]
     idx = src.indexOf(matchStr)
     console.log(`Found sync loop body (old pattern) at char ${idx} (arr=${m[1]}, msg=${msgVar})`)
+  } else if ((m = src.match(ntCallbackRe))) {
+    // v2.1.197+: nt onMessage callback — no for-await push loop anymore
+    matchStr = m[0]
+    msgVar = m[1]
+    idx = src.indexOf(matchStr)
+    isNtCallback = true
+    console.log(`Found sync loop body (v197+ nt-callback pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
   } else {
     console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
     process.exit(1)
@@ -362,16 +484,18 @@ if (src.includes(patchBMarker)) {
     process.exit(1)
   }
 
-  // Inject stream_event check BEFORE the if(ARR.push(...)) statement.
-  // The full "if(" is part of the match, so we prepend our check.
+  // Inject stream_event check BEFORE the collection-array push.
+  // In the old for-await loop shape: use `continue` (valid in loop body).
+  // In the v2.1.197+ nt-callback shape: use `return` (arrow function, not a loop body).
   // v2.1.143+ requires outer `type:"progress",` so ZhA's switch dispatches it.
   const wrapPrefix = hasProgressWrap ? `type:"progress",` : ``
+  const loopExit = isNtCallback ? `return` : `continue`
   const injection =
     `${patchBMarker}if(${msgVar}.type==="stream_event"){` +
     `if(${cbVar})${cbVar}({${wrapPrefix}toolUseID:\`agent_\${${parentVar}.message.id}\`,` +
-    `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});continue}`
+    `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});${loopExit}}`
 
-  // Insert before the matched "if(ARR.push(..." — don't remove anything
+  // Insert before the matched pattern — don't remove anything
   src = src.slice(0, idx) + injection + src.slice(idx)
   patchCount++
   console.log('Applied. Stream events intercepted before push — never enter collection array.')
@@ -570,33 +694,42 @@ if (src.includes(patchDMarker)) {
 }
 
 // ===========================================================================
-// Patch E: Direct stdout streaming for background agents
+// Patch E: Background agent streaming — BVe for-await injection (v2.1.197+)
+//          OR direct stdout streaming for old re-background loops (v2.1.196-)
 //
-// Background (async) Task paths run detached — by the time their for-await
-// loop executes, the tool executor has closed its output queue and the
-// progress callback j() is dead. Instead, we write directly to stdout as
-// newline-delimited JSON, formatting messages the same way mI8/ihA/ZhA would.
+// v2.1.196 and earlier: Two distinct for-await loops handled re-backgrounding.
+// v2.1.197+: iu8() and both re-background loops were unified into BVe(). BVe
+//   takes an `onMessage` callback (nt in Task.call()). When Task.call() backgrounds
+//   (sets Fe=!0 and returns), nt returns early for all subsequent messages.
+//   BVe's own for-await then has `h.push(ce)` for every message including
+//   stream_events, which corrupts h[] (NAe crashes on stream_event.message).
 //
-// Before (v2.1.41):
-//   for await(let W1 of jy({...}))f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(AGENTID,...);
+//   Fix: inject before the h.push() statement in BVe's for-await:
+//   - stream_event: if notify-owner mode (gate()===true), write stdout; always continue
+//   - assistant/user: if notify-owner mode, write stdout; fall through to h.push()
 //
-// After:
-//   for await(let W1 of jy({...})){
-//     if(W1.type==="stream_event"){...forward directly...}
-//     else{f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(AGENTID,...);
-//       ...forward assistant/user via stdout...
-//     }
-//   }
+//   The gate is the defaulted shouldNotifyOwner alias (`let X=shouldNotifyOwnerParam??(()=>!0)`),
+//   extracted structurally — it was `p` in v2.1.197–207 but `m` in v2.1.219 (new
+//   onRunSettled/onTerminalSuccess params claimed `p`/`f`). Semantics:
+//   - sync Task path passes shouldNotifyOwner:()=>Fe → gate()=false while running
+//     (nt/progress-callback forwards), true after re-backgrounding → stdout.
+//   - spawned/background path passes no shouldNotifyOwner → gate()=true → stdout.
+//
+//   Anchor: if(WATCHDOG(),MSG.type==="system"&&MSG.subtype==="api_error")continue;ARR.push(MSG)
+//   (unique to BVe's for-await loop body)
+//
+// v2.1.41 and later old shapes:
+//   ))ARR.push(MSG),STATS_FN(STATS,MSG,TOOLS,J.options.tools),STATE_FN(AGENTID,...);
 // ===========================================================================
 
-console.log('\n--- Patch E: Background agent direct stdout streaming ---')
+console.log('\n--- Patch E: Background agent streaming (BVe or legacy re-background loops) ---')
 
 const patchEMarker = '/*PATCHED:subagent-E*/'
 
 if (src.includes(patchEMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the session ID function from mI8/ihA/ZhA yields
+  // Find the session ID function from mI8/ihA/ZhA/ATt yields
   const sessFnRe = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
   const sessFnMatch = src.match(sessFnRe)
   if (!sessFnMatch) {
@@ -606,159 +739,247 @@ if (src.includes(patchEMarker)) {
   const sessFn = sessFnMatch[1]
   console.log(`Session ID function: ${sessFn}()`)
 
-  // We used to extract whatever UUID generator cli.js used in the progress
-  // wrapper (XW8.randomUUID(), V6H.randomUUID(), etc.). Those identifiers are
-  // module-local bindings populated by Bun's lazy CJS init (`var X = V(()=>{ X
-  // = require("crypto") })`). When the for-await injection runs inside iu8
-  // BEFORE its initializer fires, the binding is still `undefined` and the
-  // JSON.stringify call throws inside our `try`, silently swallowing the line.
-  // The Web Crypto global is set up before any user code runs in Bun and
-  // Node ≥19, so use it directly — no dynamic extraction needed.
   const uuidFn = 'globalThis.crypto.randomUUID'
   console.log(`UUID function: ${uuidFn}() (web crypto global)`)
 
-  // Find async for-await+jy loops by matching the body pattern after )).
-  // Pattern: ))ARR.push(MSG),STATS_FN(STATS,MSG,TOOLS,J.options.tools),STATE_FN(AGENTID,...);
-  // v2.1.41: ))f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(t.agentId,Nm1(k1),J.setAppState);
-  // v2.1.42: ))J1.push(q6),tM1(M1,q6,y1,J.options.tools),kWA(S1,pm1(M1),J.setAppState);
-  // v2.1.59: ))if(T6.push(r),_f6(s,r,o,j.options.tools),GI8(...),r.type==="assistant"&&...)Pa7(...);
-  //          The `if(` wrapper is optional — matches both old and new patterns.
-  // v2.1.76: )){ARR.push(MSG),STATS(STATS,MSG,TOOLS,J.options.tools),STATE(...);let V=wm8(MSG);if(V)Om8(...)}
-  //          Loop body now uses braces with additional output-file statements.
+  // ---- Try v2.1.197+ BVe for-await injection first ----
   //
-  // v2.1.144: an early `if(MSG.type==="api_metrics")continue;` was inserted at
-  //           the top of the loop body before the push. The check is optional
-  //           in our regex so older versions still match.
+  // Unique anchor in BVe's for-await loop:
+  //   if(WATCHDOG(),MSG.type==="system"&&MSG.subtype==="api_error")continue;ARR.push(MSG)
   //
-  // Try braced pattern first (v2.1.76+), fall back to old single-statement pattern.
-  const bracedAsyncBodyRe = new RegExp(
-    `\\)\\)\\{(?:if\\([\\w$]+\\.type==="api_metrics"\\)continue;)?` + // )){ [if(MSG.type==="api_metrics")continue;]
-      `(${V})\\.push\\((${V})\\),` + // ARR.push(MSG),
-      `(${V})\\((${V}),\\2,` + // STATS(STATS,MSG,
-      `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`, // TOOLS,j.options.tools),...}
-    'g'
+  // Variables available in BVe scope:
+  //   - msg var (ce) = loop variable
+  //   - arr var (h) = collection array
+  //   - p() = shouldNotifyOwner callback — returns Fe (true when backgrounded)
+  //   - toolUseContext param (.toolUseId = parent_tool_use_id)
+  const bveAnchorRe = new RegExp(
+    `if\\((${V})\\(\\),(${V})\\.type==="system"&&\\2\\.subtype==="api_error"\\)continue;(${V})\\.push\\(\\2\\)`
   )
-  const unbracedAsyncBodyRe = new RegExp(
-    `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` + // ))ARR.push(MSG), or ))if(ARR.push(MSG),
-      `(${V})\\((${V}),\\2,` + // STATS(STATS,MSG,
-      `(${V}),(${V})\\.options\\.tools\\),` + // TOOLS,j.options.tools),
-      `[^;]+;`, // ...rest until ;
-    'g'
-  )
+  const bveAnchorMatch = src.match(bveAnchorRe)
 
-  let asyncMatch
-  let asyncPatchCount = 0
+  if (bveAnchorMatch) {
+    // v2.1.197+ BVe path
+    const anchorStr = bveAnchorMatch[0]
+    const watchdogFn = bveAnchorMatch[1]
+    const msgVar = bveAnchorMatch[2]
+    const arrVar = bveAnchorMatch[3]
+    const anchorIdx = src.indexOf(anchorStr)
 
-  const matches = []
-  // Try braced pattern first, fall back to unbraced
-  for (const re of [bracedAsyncBodyRe, unbracedAsyncBodyRe]) {
-    re.lastIndex = 0
-    while ((asyncMatch = re.exec(src)) !== null) {
-      const before = src.slice(Math.max(0, asyncMatch.index - 1000), asyncMatch.index)
-      if (!before.includes('for await')) continue
-      matches.push({
-        fullMatch: asyncMatch[0],
-        msgVar: asyncMatch[2],
-        index: asyncMatch.index
-      })
+    if (src.indexOf(anchorStr, anchorIdx + 1) !== -1) {
+      console.error('ERROR: BVe anchor matches more than once. Aborting.')
+      process.exit(1)
     }
-    if (matches.length > 0) break
-  }
 
-  if (matches.length === 0) {
-    console.error('ERROR: Cannot locate async for-await loops.')
-    console.error('The background agent loop structure may have changed.')
-    console.error('Search for "for await" loops with .push() + stats + state-update patterns.')
-    process.exit(1)
-  }
-
-  console.log(`Found ${matches.length} async for-await loop(s) to patch.`)
-
-  // Extract parent message var and description var from the Task tool's call() signature.
-  // Pattern: async call({...description:DESC,...},CONTEXT,CANUSE,PARENT_MSG,CALLBACK){
-  // DESC is the minified name for the "description" input field.
-  // PARENT_MSG is the 4th positional param (the parent assistant message).
-  const callSigRe = new RegExp(
-    `async call\\(\\{[^}]*description:(${V})[^}]*\\},` + // {prompt:A,...,description:K,...},
-      `(${V}),(${V}),(${V}),(${V})\\)\\{` // J,X,j,D){
-  )
-  const callSigMatch = src.match(callSigRe)
-  if (!callSigMatch) {
-    console.error('ERROR: Cannot locate Task tool call() signature.')
-    console.error('Need to extract description and parent message variable names.')
-    process.exit(1)
-  }
-  const descVar = callSigMatch[1] // K in current version — "description" input
-  const parentMsgVar = callSigMatch[4] // j in current version — parent assistant message
-  console.log(`Task call() signature: description=${descVar}, parentMsg=${parentMsgVar}`)
-
-  // Apply in reverse order so indices stay valid
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const { fullMatch, msgVar, index } = matches[i]
-
-    const body = fullMatch.slice(2) // strip leading "))"
-
-    // Write line-delimited JSON to stdout (the SDK reads newline-delimited
-    // JSON, NOT binary-framed). parentMsgVar is the full assistant message
-    // from the parent (may contain text/thinking blocks before the tool_use).
-    // Find the matching tool_use block by description (descVar) for parent_tool_use_id.
+    // Detect the toolUseContext variable by binding structurally to the
+    // BVe function's destructured parameter. The minified name changes
+    // between versions (s in v197-v198, i in v207+).
     //
-    // stream_events are forwarded directly without pushing to the collection
-    // array (they lack .message/.uuid and break downstream processing).
-    // For assistant/user messages, the original push+stats+state runs first.
-    const ptuLookup =
-      `let _ptu=null;for(let _b of ${parentMsgVar}.message.content)` +
-      `{if(_b.type==="tool_use"&&_b.input&&_b.input.description===${descVar}){_ptu=_b.id;break}}`
+    // Collect ALL matching `async function NAME({...,toolUseContext:VAR,...})`
+    // signatures in the bounded prefix. Exactly one must exist — the BVe
+    // (sje/async background runner) function. If zero or multiple match,
+    // fail closed: we cannot safely distinguish the correct scope.
+    const sigBefore = src.slice(Math.max(0, anchorIdx - 15000), anchorIdx)
+    const globalSigRe = new RegExp(`async function (${V})\\([^)]*toolUseContext:(${V})[,)]`, 'g')
+    const sigCandidates = [...sigBefore.matchAll(globalSigRe)].map((m) => ({
+      fn: m[1],
+      ctxVar: m[2]
+    }))
+    if (sigCandidates.length === 0) {
+      console.error(
+        'ERROR: No `async function(...toolUseContext:VAR,...)` signature found ' +
+        'in the 15KB prefix before the BVe anchor. Cannot determine toolUseContext binding.'
+      )
+      process.exit(1)
+    }
+    if (sigCandidates.length > 1) {
+      const summary = sigCandidates.map((c) => `${c.fn}(toolUseContext:${c.ctxVar})`).join(', ')
+      console.error(
+        `ERROR: ${sigCandidates.length} async functions with toolUseContext found in the 15KB prefix. ` +
+        `Ambiguous — cannot determine which encloses the anchor. Candidates: ${summary}`
+      )
+      process.exit(1)
+    }
+    const toolUseCtxVar = sigCandidates[0].ctxVar
+    console.log(`  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`)
 
-    const replacement =
-      `){${patchEMarker}` +
-      // stream_event: forward directly, skip push to collection array
+    // Extract the shouldNotifyOwner gate. It must NOT be hardcoded: in
+    // v2.1.197–v2.1.207 the defaulted alias was `p` (`shouldNotifyOwner:d}){let p=d??(()=>!0)`),
+    // but v2.1.219 appended params (`onRunSettled:p,onTerminalSuccess:f`) and renamed the
+    // alias to `m` (`let m=d??(()=>!0)`). Hardcoding `p` silently called onRunSettled()
+    // instead — gate always falsy, so background/spawned agents never got stdout
+    // stream_events, and the run-settled callback fired spuriously per message.
+    // Match the destructured param + its defaulted alias structurally.
+    const notifyRe = new RegExp(
+      `shouldNotifyOwner:(${V})[^)]*\\)\\{let (${V})=\\1\\?\\?\\(\\(\\)=>!0\\)`
+    )
+    const notifyMatches = [...sigBefore.matchAll(new RegExp(notifyRe, 'g'))]
+    if (notifyMatches.length !== 1) {
+      console.error(
+        `ERROR: shouldNotifyOwner alias pattern matched ${notifyMatches.length} times in the 15KB prefix (expected 1). Aborting.`
+      )
+      process.exit(1)
+    }
+    const notifyFn = notifyMatches[0][2]
+    console.log(`  shouldNotifyOwner gate: ${notifyFn}() (param ${notifyMatches[0][1]})`)
+
+    // v2.1.219's runner refactor (the one that added onRunSettled/onTerminalSuccess
+    // to this signature) also added a native relay that forwards spawned/background
+    // sub-agent assistant/user messages to the SDK stream with parent_tool_use_id
+    // (verified live: with Patch E inert, background runs still delivered tagged
+    // assistants; with Patch E writing them too, the same message.id arrived twice).
+    // stream_events are still NOT natively forwarded. So on relay-capable builds,
+    // Patch E must forward ONLY stream_events; on older builds (v2.1.197–2.1.207,
+    // no onRunSettled param) it must keep forwarding assistant/user as well.
+    const hasNativeRelay = notifyMatches[0][0].includes('onRunSettled:')
+    console.log(`  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`)
+
+    console.log(`Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, arr=${arrVar})`)
+
+    // Inject before the full `if(WATCHDOG(),...api_error...)continue;ARR.push(MSG)` sequence.
+    // We insert our check BEFORE the watchdog call so the anchor remains intact after insertion.
+    //
+    // Injection (GATE = extracted shouldNotifyOwner alias):
+    //   if(MSG.type==="stream_event"){
+    //     if(GATE())try{process.stdout.write(...)...}catch(_e){}
+    //     continue  ← skip h.push regardless — stream_events must NOT enter h[]
+    //   }
+    //   // only when the native relay is absent (pre-v2.1.219):
+    //   if(MSG.type==="assistant"||MSG.type==="user"){
+    //     if(GATE())try{process.stdout.write(...)...}catch(_e){}
+    //     // fall through to original h.push below
+    //   }
+    const assistantUserWrite = hasNativeRelay
+      ? ''
+      : `if(${msgVar}.type==="assistant"||${msgVar}.type==="user")` +
+        `if(${notifyFn}())try{process.stdout.write(JSON.stringify({type:${msgVar}.type,message:${msgVar}.message,` +
+        `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}`
+    const injection =
+      `${patchEMarker}` +
       `if(${msgVar}.type==="stream_event"){` +
-      `${ptuLookup}` +
-      `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
-      `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")` +
-      `}else{` +
-      // non-stream_event: original body (push, stats, state update)
-      `${body}` +
-      `{${ptuLookup}` +
-      `if(${msgVar}.type==="assistant")` +
-      `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
-      `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
-      `else if(${msgVar}.type==="user")` +
-      `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
-      `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
-      `}}}`
+      `if(${notifyFn}())try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
+      `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}` +
+      `continue}` +
+      assistantUserWrite
 
-    src = src.slice(0, index + 1) + replacement + src.slice(index + fullMatch.length)
-    asyncPatchCount++
-    console.log(`  Patched loop ${i + 1} at char ${index} (msg=${msgVar})`)
+    src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
+    patchCount++
+    console.log('Applied (v197+ BVe path). stream_events skipped from h[], background agents get stdout.')
+  } else {
+    // ---- Fallback: v2.1.41–v2.1.196 legacy re-background for-await loops ----
+    //
+    // Pattern: ))ARR.push(MSG),STATS_FN(STATS,MSG,TOOLS,J.options.tools),STATE_FN(AGENTID,...);
+    // v2.1.41: ))f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(t.agentId,Nm1(k1),J.setAppState);
+    // v2.1.76+: )){ARR.push(MSG),STATS(...),STATE(...);let V=wm8(MSG);if(V)Om8(...)}
+    // v2.1.144+: optional api_metrics early-exit before push.
+    const bracedAsyncBodyRe = new RegExp(
+      `\\)\\)\\{(?:if\\([\\w$]+\\.type==="api_metrics"\\)continue;)?` +
+        `(${V})\\.push\\((${V})\\),` +
+        `(${V})\\((${V}),\\2,` +
+        `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`,
+      'g'
+    )
+    const unbracedAsyncBodyRe = new RegExp(
+      `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` +
+        `(${V})\\((${V}),\\2,` +
+        `(${V}),(${V})\\.options\\.tools\\),` +
+        `[^;]+;`,
+      'g'
+    )
+
+    let asyncMatch
+    let asyncPatchCount = 0
+    const legacyMatches = []
+    for (const re of [bracedAsyncBodyRe, unbracedAsyncBodyRe]) {
+      re.lastIndex = 0
+      while ((asyncMatch = re.exec(src)) !== null) {
+        const before = src.slice(Math.max(0, asyncMatch.index - 1000), asyncMatch.index)
+        if (!before.includes('for await')) continue
+        legacyMatches.push({
+          fullMatch: asyncMatch[0],
+          msgVar: asyncMatch[2],
+          index: asyncMatch.index
+        })
+      }
+      if (legacyMatches.length > 0) break
+    }
+
+    if (legacyMatches.length === 0) {
+      console.error('ERROR: Cannot locate async for-await loops (tried BVe anchor and legacy patterns).')
+      console.error('The background agent loop structure may have changed.')
+      process.exit(1)
+    }
+
+    console.log(`Found ${legacyMatches.length} legacy async for-await loop(s) to patch.`)
+
+    // Extract parent message var and description var from the Task tool's call() signature.
+    const callSigRe = new RegExp(
+      `async call\\(\\{[^}]*description:(${V})[^}]*\\},` +
+        `(${V}),(${V}),(${V}),(${V})\\)\\{`
+    )
+    const callSigMatch = src.match(callSigRe)
+    if (!callSigMatch) {
+      console.error('ERROR: Cannot locate Task tool call() signature.')
+      process.exit(1)
+    }
+    const descVar = callSigMatch[1]
+    const parentMsgVar = callSigMatch[4]
+    console.log(`Task call() signature: description=${descVar}, parentMsg=${parentMsgVar}`)
+
+    // Apply in reverse order so indices stay valid
+    for (let i = legacyMatches.length - 1; i >= 0; i--) {
+      const { fullMatch, msgVar, index } = legacyMatches[i]
+      const body = fullMatch.slice(2) // strip leading "))"
+      const ptuLookup =
+        `let _ptu=null;for(let _b of ${parentMsgVar}.message.content)` +
+        `{if(_b.type==="tool_use"&&_b.input&&_b.input.description===${descVar}){_ptu=_b.id;break}}`
+      const replacement =
+        `){${patchEMarker}` +
+        `if(${msgVar}.type==="stream_event"){` +
+        `${ptuLookup}` +
+        `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")` +
+        `}else{` +
+        `${body}` +
+        `{${ptuLookup}` +
+        `if(${msgVar}.type==="assistant")` +
+        `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
+        `else if(${msgVar}.type==="user")` +
+        `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
+        `}}}`
+      src = src.slice(0, index + 1) + replacement + src.slice(index + fullMatch.length)
+      asyncPatchCount++
+      console.log(`  Patched loop ${i + 1} at char ${index} (msg=${msgVar})`)
+    }
+
+    patchCount++
+    console.log(`Applied (legacy path) to ${asyncPatchCount} loop(s).`)
   }
-
-  patchCount++
-  console.log(`Applied to ${asyncPatchCount} loop(s).`)
 }
 
 // ===========================================================================
 // Patch G: iu8() — async background agent direct stdout streaming
 //
-// iu8() is the function that runs agents launched with run_in_background=true.
-// Unlike the re-background loop (Patch E), iu8 never had stdout forwarding.
-// Its `for await` loop just collects messages — we inject forwarding logic
-// identical to Patch E.
-//
-// Anchor: the unique function signature of iu8 plus its for-await body:
-//   for await(let MSG of _(CACHE_PARAM)){ARR.push(MSG),REGISTRY.update(...)
+// In v2.1.196 and earlier, iu8() was a standalone function for agents launched
+// directly with run_in_background=true. In v2.1.197+, iu8() was unified into
+// BVe() which already handles background streaming via Patch E's BVe injection.
+// When iu8() is absent, this patch auto-skips with a notice.
 // ===========================================================================
 
 console.log('\n--- Patch G: iu8() background agent stdout streaming ---')
 
 const patchGMarker = '/*PATCHED:subagent-G*/'
+// Set false when iu8() does not exist (v2.1.197+: merged into BVe, covered by Patch E),
+// so the final marker verification doesn't require a Patch G that was correctly skipped.
+let patchGApplicable = true
 
 if (src.includes(patchGMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find iu8 by its unique signature pattern:
-  // async function FUNC({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,...})
+  // Find iu8 by its unique signature pattern.
+  // In v2.1.197+, iu8() was merged into BVe() and this pattern no longer exists.
+  // When absent, skip gracefully — BVe (Patch E) covers this case.
   const iu8SigRe = new RegExp(
     `async function (${V})\\(\\{taskId:(${V}),abortController:(${V}),makeStream:(${V}),` +
       `metadata:(${V}),description:(${V}),toolUseContext:(${V}),taskRegistry:(${V}),` +
@@ -766,94 +987,77 @@ if (src.includes(patchGMarker)) {
   )
   const iu8Match = iu8SigRe.exec(src)
   if (!iu8Match) {
-    console.error('ERROR: Cannot locate iu8() function signature.')
-    process.exit(1)
+    console.log('iu8() not found — merged into BVe() in v2.1.197+. Patch E covers this path. Skipping.')
+    patchGApplicable = false
+  } else {
+    // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)
+    const sessFnReG = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
+    const sessFnMatchG = src.match(sessFnReG)
+    if (!sessFnMatchG) {
+      console.error('ERROR: Cannot locate session ID function for Patch G.')
+      process.exit(1)
+    }
+    const sessFnG = sessFnMatchG[1]
+
+    // Same rationale as Patch E — use the web crypto global, not a module-local.
+    const uuidFnG = 'globalThis.crypto.randomUUID'
+
+    const iu8Name = iu8Match[1]
+    const taskIdVar = iu8Match[2] // q
+    const makeStreamVar = iu8Match[4] // _
+    const descVar_g = iu8Match[6] // Y — description
+    const toolUseCtxVar = iu8Match[7] // A — toolUseContext (has .toolUseId)
+    console.log(`  Found ${iu8Name}() at char ${iu8Match.index}`)
+    console.log(
+      `    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`
+    )
+
+    // Find the for-await loop body inside iu8.
+    const iu8Body = src.slice(iu8Match.index, iu8Match.index + 3000)
+    const reEscG = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const forAwaitRe = new RegExp(
+      `for await\\(let (${V}) of ${reEscG(makeStreamVar)}\\([^)]*\\)\\)\\{`
+    )
+    const forAwaitMatch = forAwaitRe.exec(iu8Body)
+    if (!forAwaitMatch) {
+      console.error('ERROR: Cannot find for-await loop in iu8().')
+      process.exit(1)
+    }
+    const msgVar_g = forAwaitMatch[1]
+    const pushRe = new RegExp(`(${V})\\.push\\(${reEscG(msgVar_g)}\\)`)
+    const pushMatch = pushRe.exec(iu8Body.slice(forAwaitMatch.index + forAwaitMatch[0].length))
+    if (!pushMatch) {
+      console.error(`ERROR: Cannot find .push(${msgVar_g}) after iu8() for-await loop.`)
+      process.exit(1)
+    }
+    const arrVar_g = pushMatch[1]
+    console.log(`    Loop: msg=${msgVar_g}, arr=${arrVar_g}`)
+
+    const forAwaitAbsIdx = iu8Match.index + iu8Body.indexOf(forAwaitMatch[0])
+    const braceIdx = forAwaitAbsIdx + forAwaitMatch[0].indexOf('{') + 1
+    const ptuExpr = `${toolUseCtxVar}.toolUseId`
+
+    const gInjection =
+      patchGMarker +
+      `if(${msgVar_g}.type==="stream_event"){` +
+      `try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar_g}.event,` +
+      `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}` +
+      `continue` +
+      `}` +
+      `if(${msgVar_g}.type==="assistant"||${msgVar_g}.type==="user")` +
+      `try{process.stdout.write(JSON.stringify({type:${msgVar_g}.type,message:${msgVar_g}.message,` +
+      `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}`
+
+    src = src.slice(0, braceIdx) + gInjection + src.slice(braceIdx)
+
+    if (!src.includes(patchGMarker)) {
+      console.error('ERROR: Patch G injection failed.')
+      process.exit(1)
+    }
+
+    patchCount++
+    console.log('  Applied.')
   }
-  // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)
-  const sessFnReG = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
-  const sessFnMatchG = src.match(sessFnReG)
-  if (!sessFnMatchG) {
-    console.error('ERROR: Cannot locate session ID function for Patch G.')
-    process.exit(1)
-  }
-  const sessFnG = sessFnMatchG[1]
-
-  // Same rationale as Patch E — use the web crypto global, not a module-local.
-  const uuidFnG = 'globalThis.crypto.randomUUID'
-
-  const iu8Name = iu8Match[1]
-  const taskIdVar = iu8Match[2] // q
-  const makeStreamVar = iu8Match[4] // _
-  const descVar_g = iu8Match[6] // Y — description
-  const toolUseCtxVar = iu8Match[7] // A — toolUseContext (has .toolUseId)
-  console.log(`  Found ${iu8Name}() at char ${iu8Match.index}`)
-  console.log(
-    `    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`
-  )
-
-  // Find the for-await loop body inside iu8:
-  // v2.1.76:  for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
-  // v2.1.114: for await(let MSG of MAKESTREAM(CACHE)){PROGRESS=MSG.type,WATCHDOG(),ARR.push(MSG),...
-  // v2.1.118: for await(let MSG of MAKESTREAM(SUMFN,POKEFN)){PROGRESS=...,if(MSG.type==="assistant"){...}else if(MSG.type==="user"){...},...ARR.push(MSG),...
-  //           MAKESTREAM now takes 2 args (summarization fn + watchdog poke) and
-  //           the loop body contains nested { } for last-seen tracking, so a
-  //           non-nested prefix won't reach .push(). We only need the loop
-  //           variable — arr is never referenced in the injection. Match just
-  //           the for-await opening, then find .push(msgVar) separately.
-  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 3000)
-  // Minified identifiers can be `$`, which is a regex metachar (end-of-input)
-  // when used outside a character class. Escape before interpolating.
-  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const forAwaitRe = new RegExp(
-    `for await\\(let (${V}) of ${reEsc(makeStreamVar)}\\([^)]*\\)\\)\\{`
-  )
-  const forAwaitMatch = forAwaitRe.exec(iu8Body)
-  if (!forAwaitMatch) {
-    console.error('ERROR: Cannot find for-await loop in iu8().')
-    process.exit(1)
-  }
-  const msgVar_g = forAwaitMatch[1]
-  // Sanity check: confirm `.push(msgVar)` exists in the body (proves we're in
-  // the collection-building loop, not some other for-await).
-  const pushRe = new RegExp(`(${V})\\.push\\(${reEsc(msgVar_g)}\\)`)
-  const pushMatch = pushRe.exec(iu8Body.slice(forAwaitMatch.index + forAwaitMatch[0].length))
-  if (!pushMatch) {
-    console.error(`ERROR: Cannot find .push(${msgVar_g}) after iu8() for-await loop.`)
-    process.exit(1)
-  }
-  const arrVar_g = pushMatch[1]
-  console.log(`    Loop: msg=${msgVar_g}, arr=${arrVar_g}`)
-
-  // The injection point is right after the opening `{` of the for-await body
-  const forAwaitAbsIdx = iu8Match.index + iu8Body.indexOf(forAwaitMatch[0])
-  const braceIdx = forAwaitAbsIdx + forAwaitMatch[0].indexOf('{') + 1
-
-  // toolUseId for parent_tool_use_id comes from toolUseContext
-  const ptuExpr = `${toolUseCtxVar}.toolUseId`
-
-  // Single injection at the start of the loop body — handles all three types.
-  // stream_event: forward + continue (skip collection).
-  // assistant/user: forward + fall through to existing body (push, stats, etc).
-  const gInjection =
-    patchGMarker +
-    `if(${msgVar_g}.type==="stream_event"){` +
-    `try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar_g}.event,` +
-    `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}` +
-    `continue` +
-    `}` +
-    `if(${msgVar_g}.type==="assistant"||${msgVar_g}.type==="user")` +
-    `try{process.stdout.write(JSON.stringify({type:${msgVar_g}.type,message:${msgVar_g}.message,` +
-    `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}`
-
-  src = src.slice(0, braceIdx) + gInjection + src.slice(braceIdx)
-
-  if (!src.includes(patchGMarker)) {
-    console.error('ERROR: Patch G injection failed.')
-    process.exit(1)
-  }
-
-  patchCount++
-  console.log('  Applied.')
 }
 
 // ===========================================================================
@@ -871,12 +1075,19 @@ console.log(`\nWrote patched file to ${cliPath}`)
 const verify = readFileSync(cliPath, 'utf-8')
 const markers = [
   ['F', patchFMarker, 'cR yield filter (RVY) — allow stream_event'],
+  ...(patchF2Applicable
+    ? [['F2', patchF2Marker, 'yield stream_event past IVe/fHo pre-filter (v2.1.197+)']]
+    : []),
   ['A', patchAMarker, 'Content-block filter removal'],
   ['B', patchBMarker, 'Stream_event forwarding (before O1.push)'],
   ['C', patchCMarker, 'ZhA agent_stream_event handler'],
   ['D', patchDMarker, '.output file thinking inclusion'],
   ['E', patchEMarker, 'Background agent stdout streaming (re-background)'],
-  ['G', patchGMarker, 'Background agent stdout streaming (iu8 — run_in_background)']
+  // Patch G only applies when iu8() exists as a standalone function (≤ v2.1.196).
+  // In v2.1.197+ iu8() was merged into BVe(), so Patch E (BVe path) covers it.
+  ...(patchGApplicable
+    ? [['G', patchGMarker, 'Background agent stdout streaming (iu8 — run_in_background)']]
+    : [])
 ]
 
 let allGood = true
@@ -884,6 +1095,12 @@ for (const [label, marker, desc] of markers) {
   const ok = verify.includes(marker)
   console.log(`  ${ok ? 'OK' : 'MISSING'} Patch ${label}: ${desc}`)
   if (!ok) allGood = false
+}
+if (!patchGApplicable) {
+  console.log('  SKIP Patch G: iu8() merged into BVe() (v2.1.197+) — covered by Patch E')
+}
+if (!patchF2Applicable) {
+  console.log('  SKIP Patch F2: no IVe/fHo pre-filter (< v2.1.197) — Patch F alone suffices')
 }
 
 if (!allGood) {

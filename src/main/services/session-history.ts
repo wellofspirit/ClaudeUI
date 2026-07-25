@@ -9,13 +9,31 @@ import type {
   SessionInfo,
   TaskNotification,
   StatusLineData,
-  ForkAnchorResult
+  ForkAnchorResult,
+  ModelCostEntry,
+  EngineId
 } from '../../shared/types'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
+import { resolvePiForkAnchor } from './pi-session-list'
+import { calculateCostFromTokens, normalizeModelName } from './block-usage'
+import { dispatchedCostsByRouting } from './db'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
+
+/**
+ * Derive cli.js's transcript project key from a working directory. The SDK
+ * replaces path separators, drive colons, AND dots with '-' — on disk,
+ * `D:\WorkPlace\ClaudeUI` → `D--WorkPlace-ClaudeUI` and `/home/u/proj.x` →
+ * `-home-u-proj-x`. The old inline derivations only replaced `/` and `.`,
+ * which produced a nonexistent path for every Windows cwd — so every
+ * consumer (JSONL reconciliation, resume seeding, fork-anchor resolution,
+ * the disk-fallback message loader) silently no-opped on Windows.
+ */
+export function projectKeyForCwd(cwd: string): string {
+  return cwd.replace(/[\\/:.]/g, '-')
+}
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
 const CACHE_FILE = path.join(CACHE_DIR, 'directory-cache.json')
 
@@ -71,9 +89,221 @@ function saveDiskCache(cache: DiskCache): void {
 }
 
 /**
+ * Incremental accumulator reconstructing accumulated ACTIVE (turn-processing)
+ * duration from a Claude transcript's parsed JSONL lines
+ * (StatusLineData.totalDurationMs — see shared/types.ts). Real transcripts
+ * carry no `type: "result"` lines (the historical duration source), so
+ * duration is rebuilt from line timestamps instead:
+ *
+ * A **turn boundary** is a real user prompt line — `type === 'user'` with no
+ * `toolUseResult` and not `isMeta`. Everything from a boundary up to (but not
+ * including) the next boundary belongs to that turn — including tool-result
+ * user lines and meta lines, which are part of the in-flight turn, not new
+ * turns themselves. A turn's span is its first parseable-timestamp line to
+ * its last, summed across every turn (the trailing turn runs to EOF).
+ *
+ * Lines with a missing/unparseable ISO `timestamp` are skipped for span math
+ * but do not break the current turn — the next line with a valid timestamp
+ * still extends it. Negative or NaN spans are clamped to 0.
+ *
+ * `push()` lines one at a time (streaming — no line retention; O(1) state) and
+ * read `total()` at end-of-stream. `total()` finalizes the trailing turn but
+ * does not consume the accumulator: further push/total cycles keep working.
+ */
+export function createTurnSpanAccumulator(): {
+  push(line: Record<string, unknown>): void
+  total(): number
+} {
+  let totalMs = 0
+  let turnOpen = false
+  let turnStartMs: number | null = null
+  let turnEndMs: number | null = null
+
+  const finalizeTurn = (): void => {
+    if (turnStartMs !== null && turnEndMs !== null) {
+      const span = turnEndMs - turnStartMs
+      if (Number.isFinite(span) && span > 0) totalMs += span
+    }
+    turnStartMs = null
+    turnEndMs = null
+  }
+
+  return {
+    push(line: Record<string, unknown>): void {
+      const isBoundary = line.type === 'user' && !line.toolUseResult && !line.isMeta
+      if (isBoundary) {
+        finalizeTurn()
+        turnOpen = true
+      }
+      if (!turnOpen) return
+
+      const ts = typeof line.timestamp === 'string' ? Date.parse(line.timestamp) : NaN
+      if (!Number.isFinite(ts)) return
+      if (turnStartMs === null) turnStartMs = ts
+      turnEndMs = ts
+    },
+    total(): number {
+      // Fold the trailing (unfinalized) turn in WITHOUT consuming state: keep
+      // the open turn's span live so a subsequent push can still extend it.
+      let result = totalMs
+      if (turnStartMs !== null && turnEndMs !== null) {
+        const span = turnEndMs - turnStartMs
+        if (Number.isFinite(span) && span > 0) result += span
+      }
+      return result
+    }
+  }
+}
+
+/**
+ * Batch convenience over `createTurnSpanAccumulator` — same semantics for a
+ * fully materialized line array (tests, small transcripts). Streaming callers
+ * (computeTokenMetrics) use the accumulator directly to avoid retaining every
+ * parsed line in memory.
+ */
+export function computeTurnSpanDurationMs(lines: Array<Record<string, unknown>>): number {
+  const acc = createTurnSpanAccumulator()
+  for (const line of lines) acc.push(line)
+  return acc.total()
+}
+
+/**
  * Compute token metrics from a JSONL transcript file.
  * Mirrors ccstatusline's approach: sums message.usage from every assistant entry.
  */
+/** Per-model token aggregate used only for the modelCosts cost reconstruction
+ *  (kept separate from the legacy totalInputTokens/etc sums below, which are
+ *  NOT deduplicated by message id and are left behaviorally unchanged). */
+interface ModelTokenAgg {
+  input: number
+  output: number
+  cacheCreation: number
+  cacheCreation1h: number
+  cacheRead: number
+}
+
+/**
+ * Fold one parsed transcript line's assistant usage into the shared per-model
+ * cost map (Slice B state) — factored out so the SAME accumulation (and the
+ * same `seenMessageIds` dedup set) can be applied to both the main transcript
+ * and its subagent transcripts (see `foldSubagentCosts` below). No-ops for
+ * anything that isn't a priced assistant usage line.
+ */
+function foldAssistantCostLine(
+  data: Record<string, unknown>,
+  modelTokens: Map<string, ModelTokenAgg>,
+  seenMessageIds: Set<string>
+): void {
+  if (data.type !== 'assistant') return
+  const message = data.message as Record<string, unknown> | undefined
+  const usage = message?.usage as Record<string, unknown> | undefined
+  if (!usage) return
+
+  const rawModel = typeof message?.model === 'string' ? (message.model as string) : undefined
+  const normalizedModel = rawModel ? normalizeModelName(rawModel) : null
+  if (!normalizedModel) return
+
+  const messageId = typeof message?.id === 'string' ? (message.id as string) : ''
+  if (messageId !== '' && seenMessageIds.has(messageId)) return
+  if (messageId) seenMessageIds.add(messageId)
+
+  const agg = modelTokens.get(normalizedModel) ?? {
+    input: 0,
+    output: 0,
+    cacheCreation: 0,
+    cacheCreation1h: 0,
+    cacheRead: 0
+  }
+  agg.input += (usage.input_tokens as number) || 0
+  agg.output += (usage.output_tokens as number) || 0
+  agg.cacheCreation += (usage.cache_creation_input_tokens as number) ?? 0
+  const cacheCreation = usage.cache_creation as Record<string, unknown> | undefined
+  agg.cacheCreation1h += (cacheCreation?.ephemeral_1h_input_tokens as number) ?? 0
+  agg.cacheRead += (usage.cache_read_input_tokens as number) ?? 0
+  modelTokens.set(normalizedModel, agg)
+}
+
+/**
+ * Stream one subagent transcript's assistant lines into the shared per-model
+ * cost map. Cost-only — deliberately does NOT touch the legacy token sums,
+ * context length, or turn-span duration accumulator (those are main-chain
+ * semantics: context-window display and active session time).
+ */
+function foldSubagentFile(
+  filePath: string,
+  modelTokens: Map<string, ModelTokenAgg>,
+  seenMessageIds: Set<string>
+): Promise<void> {
+  return new Promise((resolve) => {
+    let stream: fs.ReadStream
+    try {
+      stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to open subagent transcript for cost scan', err)
+      resolve()
+      return
+    }
+    const rl = readline.createInterface({ input: stream })
+    rl.on('line', (line) => {
+      try {
+        const data = JSON.parse(line)
+        foldAssistantCostLine(data, modelTokens, seenMessageIds)
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to parse line in subagent cost scan', err)
+      }
+    })
+    rl.on('close', () => resolve())
+    rl.on('error', () => resolve())
+  })
+}
+
+/**
+ * Task-tool subagent transcripts are stored as SEPARATE files —
+ * `<projectDir>/<sessionId>/subagents/agent-<id>.jsonl` (alongside
+ * `agent-<id>.meta.json` and a `tool-results/` dir) — not lines in the main
+ * transcript, so the main streaming pass above never sees them. A session
+ * that leans on subagents can have most of its actual spend live only in
+ * these files, invisible to the per-model cost recompute. This folds them
+ * into the SAME modelTokens map / seenMessageIds set used for the main file,
+ * sequentially (a session can have dozens of agent files — no unbounded
+ * fan-out).
+ *
+ * Not a double-count risk: the cost base this function feeds is seeded ONCE
+ * at ClaudeSession construction (transcript state at that moment), and live
+ * tracking during the running session comes from cli.js's own authoritative
+ * `result.modelUsage`, which already covers everything the current process
+ * — including its own subagent API calls — spends (see the modelCosts doc
+ * comment below for the seam with live costBaseUsd/liveTotalCostUsd).
+ */
+async function foldSubagentCosts(
+  filePath: string,
+  modelTokens: Map<string, ModelTokenAgg>,
+  seenMessageIds: Set<string>
+): Promise<void> {
+  const subagentsDir = path.join(
+    path.dirname(filePath),
+    path.basename(filePath, '.jsonl'),
+    'subagents'
+  )
+  if (!fs.existsSync(subagentsDir)) return // common case — no subagents used
+
+  let files: string[]
+  try {
+    files = fs.readdirSync(subagentsDir)
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to read subagents directory', err)
+    return
+  }
+
+  const agentFiles = files
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .sort()
+
+  for (const f of agentFiles) {
+    await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
+  }
+}
+
 export async function computeTokenMetrics(
   filePath: string,
   model?: string
@@ -88,7 +318,8 @@ export async function computeTokenMetrics(
     totalTokens: 0,
     contextWindowSize: 0,
     usedPercentage: null,
-    remainingPercentage: null
+    remainingPercentage: null,
+    modelCosts: []
   }
 
   if (!fs.existsSync(filePath)) return empty
@@ -98,7 +329,6 @@ export async function computeTokenMetrics(
     let outputTokens = 0
     let cachedTokens = 0
     let totalCostUsd = 0
-    let totalDurationMs = 0
     let totalApiDurationMs = 0
     let contextLength = 0
 
@@ -108,6 +338,18 @@ export async function computeTokenMetrics(
     // *resolved* id (e.g. "claude-opus-4-8"), so it disambiguates aliases like
     // "default" that the caller can't resolve. Latest main-chain wins.
     let transcriptModel: string | undefined
+    // Incremental turn-span duration reconstruction — O(1) state, no line
+    // retention (transcripts run tens of MB and this function re-reads the
+    // whole file after every turn during reconciliation).
+    const turnSpanAcc = createTurnSpanAccumulator()
+
+    // Per-model cost reconstruction (Slice B): deduplicated by message id —
+    // same semantic as block-usage.ts's scanAllJsonl (first occurrence of a
+    // given message id wins). Unlike the legacy token sums above (unchanged,
+    // not deduplicated), this map is used ONLY to derive modelCosts/totalCostUsd
+    // via pricing-table math, so getting the dedup right here matters more.
+    const modelTokens = new Map<string, ModelTokenAgg>()
+    const seenMessageIds = new Set<string>()
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
@@ -115,6 +357,7 @@ export async function computeTokenMetrics(
     rl.on('line', (line) => {
       try {
         const data = JSON.parse(line)
+        turnSpanAcc.push(data)
 
         if (data.type === 'assistant' && data.message?.usage) {
           const usage = data.message.usage
@@ -127,9 +370,17 @@ export async function computeTokenMetrics(
             mostRecentMainChainUsage = usage
             if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
+
+          foldAssistantCostLine(data, modelTokens, seenMessageIds)
         } else if (data.type === 'result') {
+          // Real transcripts carry no `type: "result"` lines (verified across
+          // 46 real transcripts), so this branch is dead in practice today.
+          // Kept so a future CLI version that reintroduces result lines picks
+          // the cost figure back up automatically (additive with the modelCosts
+          // sum below — no realistic transcript has both). duration_ms is
+          // deliberately NOT accumulated here — the turn-span accumulator
+          // (above) is the sole source for the emitted totalDurationMs.
           totalCostUsd += (data.total_cost_usd as number) || 0
-          totalDurationMs += (data.duration_ms as number) || 0
           totalApiDurationMs += (data.duration_api_ms as number) || 0
         }
       } catch (err) {
@@ -137,7 +388,7 @@ export async function computeTokenMetrics(
       }
     })
 
-    rl.on('close', () => {
+    rl.on('close', async () => {
       if (mostRecentMainChainUsage) {
         contextLength =
           (mostRecentMainChainUsage.input_tokens || 0) +
@@ -152,6 +403,35 @@ export async function computeTokenMetrics(
       const usedPercentage =
         contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
       const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
+      // Turn-span reconstruction is the sole source for totalDurationMs — see
+      // the createTurnSpanAccumulator doc comment for why.
+      const totalDurationMs = turnSpanAcc.total()
+
+      // Per-model cost reconstruction: real Claude transcripts carry no cost
+      // figure at all (see the dead `result` branch above), so this pricing-table
+      // recompute is the effective source for both modelCosts and totalCostUsd.
+      // Acceptable imprecision: this is pricing-table math against historical
+      // tokens, while a live session's cost comes from cli.js's authoritative
+      // costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd seam).
+      //
+      // Task-tool subagent spend lives in separate transcript files (see
+      // foldSubagentCosts's doc comment) — fold it into the same modelTokens
+      // map before deriving modelCosts/totalCostUsd below.
+      await foldSubagentCosts(filePath, modelTokens, seenMessageIds)
+
+      const modelCosts: ModelCostEntry[] = []
+      for (const [modelId, agg] of modelTokens) {
+        const costUsd = calculateCostFromTokens(
+          modelId,
+          agg.input,
+          agg.output,
+          agg.cacheCreation,
+          agg.cacheCreation1h,
+          agg.cacheRead
+        )
+        modelCosts.push({ engineId: 'claude', modelId, costUsd })
+        totalCostUsd += costUsd
+      }
 
       resolve({
         totalCostUsd,
@@ -163,7 +443,8 @@ export async function computeTokenMetrics(
         totalTokens,
         contextWindowSize: contextLength,
         usedPercentage,
-        remainingPercentage
+        remainingPercentage,
+        modelCosts
       })
     })
 
@@ -550,13 +831,25 @@ function extractOutputFile(text: string): string {
  * is the `betaMessage.id` (`msg_xxx`); we also accept a raw line uuid as a
  * fallback. The matching itself is against the JSONL line `uuid`, never the
  * `msg_xxx` id (verified against cli.js's truncation: `j.uuid === resumeSessionAt`).
+ *
+ * Engine-dispatched (ADR-030/033-style split): pi has no stable id to match
+ * `messageId` against at all (a live assistant `ChatMessage.id` is a
+ * synthesized uuid, never persisted — see `findPiForkAnchorEntryId`'s doc
+ * comment in fork-anchor.ts), so its resolution is POSITION-based via
+ * `messageIndex` instead, delegated wholesale to `resolvePiForkAnchor`
+ * (pi-session-list.ts). The Claude branch below is UNCHANGED from before this
+ * dispatch existed — `messageIndex` is simply unused on that path.
  */
 export async function resolveForkAnchor(
   sessionId: string,
   cwd: string,
-  messageId: string
+  messageId: string,
+  engineId: EngineId,
+  messageIndex: number
 ): Promise<ForkAnchorResult> {
-  const projectKey = cwd.replace(/[/.]/g, '-')
+  if (engineId === 'pi') return resolvePiForkAnchor(sessionId, messageIndex)
+
+  const projectKey = projectKeyForCwd(cwd)
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
   if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
 
@@ -927,6 +1220,28 @@ export async function loadSessionHistory(
 
     rl.on('close', async () => {
       const statusLine = await computeTokenMetrics(filePath)
+      // Slice C — merge durable dispatched-cost rows into the history-loaded
+      // status line. A reopened session that hasn't spawned a ClaudeSession
+      // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics
+      // only knows the transcript — without this merge the tooltip would show
+      // dispatched spend only after the first prompt. Best-effort: a DB
+      // failure must never break history loading.
+      try {
+        const dispatched = dispatchedCostsByRouting(sessionId)
+        if (dispatched.length > 0) {
+          statusLine.modelCosts = [
+            ...(statusLine.modelCosts ?? []),
+            ...dispatched.map((d) => ({
+              engineId: d.targetEngine as EngineId,
+              modelId: d.targetModel,
+              costUsd: d.costUsd,
+              dispatched: true as const
+            }))
+          ]
+        }
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to merge dispatched costs into status line', err)
+      }
       resolve({
         messages,
         taskNotifications,

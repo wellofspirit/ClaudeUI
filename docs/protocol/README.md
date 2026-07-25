@@ -99,7 +99,7 @@ It is NOT:
 
 - A tutorial for MCP protocol (see the MCP spec)
 - A tutorial for the Anthropic API (see docs.anthropic.com)
-- A design document (see `docs/sdk-layer.md` and ADRs)
+- A design document (see the ADRs — notably ADR-006 for the rebundled-Bun-binary pipeline)
 
 ---
 

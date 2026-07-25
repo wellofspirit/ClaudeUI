@@ -16,8 +16,8 @@ consumes natively — it reads/writes the engine's own files (`settings.json`/`.
 The opencode implementation had **drifted** from this: *all* opencode config — `model`,
 `small_model`, providers, disabled/enabled providers, and the agent model/temperature overrides —
 was stored in ClaudeUI's **private** `~/.claude/ui/engines/opencode.json` and injected
-**ephemerally** via the `OPENCODE_CONFIG_CONTENT` spawn env var (the shortcut taken in
-`docs/v2/followup-opencode-settings.md`). A user launching `opencode` standalone saw **none** of it.
+**ephemerally** via the `OPENCODE_CONFIG_CONTENT` spawn env var (a shortcut taken in the V2
+opencode-settings follow-up). A user launching `opencode` standalone saw **none** of it.
 
 The drift had a real cause worth naming: the **same `OPENCODE_CONFIG_CONTENT` channel legitimately
 exists** for config that is genuinely neutral and/or dynamic — the hosted-MCP block (dynamic per-spawn

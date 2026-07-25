@@ -1,0 +1,119 @@
+import { createSdkMcpServer, tool } from '../sdk'
+import type { SdkMcpServer } from '../sdk'
+import { z } from 'zod'
+import { crossEngineDispatcher } from './cross-engine-dispatcher'
+import { loadEngineConfig } from './ui-config'
+import { peekOpencodeModels } from '../opencode/model-discovery'
+import { describeDispatchModels } from './dispatch-model-hint'
+import type { EngineId } from '../../shared/types'
+
+export interface CollabServerContext {
+  engineId: EngineId
+  /** Live routingId lookup — the session is rekeyed to its UUID after init. */
+  getRoutingId: () => string
+  cwd: string
+  getAutonomyMode: () => string
+  /** BaseSession.send — re-emits under the dispatching session's routing. */
+  emit: (channel: string, data: unknown) => void
+  /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
+   *  session's own cost breakdown (ADR-033 Slice C). */
+  addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void
+}
+
+/**
+ * In-process MCP server hosting the `dispatch_agent` tool (ADR-033).
+ *
+ * Registered as a SEPARATE server (`claude-ui-collab`) so it does NOT ride
+ * the auto-allowed `mcp__claude-ui__` prefix — dispatch_agent goes through
+ * canUseTool like an ordinary tool.
+ */
+export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
+  // Model-hint snapshot (ADR-033 follow-up, see dispatch-model-hint.ts):
+  // resolved ONCE per Claude session spawn from engines/opencode.json plus
+  // whatever the opencode model-discovery cache happens to hold right now.
+  // Config edits or newly-discovered models mid-session are NOT reflected
+  // until the NEXT spawn — cross-engine-dispatcher.ts's isError allowlist
+  // echo remains the live source of truth if the model turns out to be
+  // stale/mismatched.
+  const dispatchCfg = loadEngineConfig('opencode').dispatch
+  const knownModelIds = peekOpencodeModels()?.flatMap((group) => group.models.map((m) => m.value))
+  const modelHint = describeDispatchModels({
+    targetEngine: 'opencode',
+    allowedModels: dispatchCfg?.allowedModels,
+    defaultModel: dispatchCfg?.defaultModel,
+    knownModelIds
+  })
+  // pi (ADR-033 M4c) — a SECOND, independent model-hint snapshot, since one
+  // tool registration now spans two possible target engines with unrelated
+  // model-id formats/allowlists. Same snapshot-at-spawn caveat as above.
+  const piDispatchCfg = loadEngineConfig('pi').dispatch
+  const piModelHint = describeDispatchModels({
+    targetEngine: 'pi',
+    allowedModels: piDispatchCfg?.allowedModels,
+    defaultModel: piDispatchCfg?.defaultModel
+  })
+
+  return createSdkMcpServer({
+    name: 'claude-ui-collab',
+    version: '1.0.0',
+    tools: [
+      tool(
+        'dispatch_agent',
+        'Delegate a task to an agent running on a DIFFERENT engine — opencode (fronts ' +
+          'non-Anthropic model vendors, e.g. GPT or Gemini models) or pi (an alternative coding-agent ' +
+          'harness). The agent runs headless in the same working directory and its final answer is ' +
+          'returned as this tool result. The result includes a session_id — pass it back as ' +
+          '`session_id` to continue the same agent with its context intact (multi-turn collaboration). ' +
+          'The available model list is user-configured per target engine; omit `model` to use that ' +
+          `engine's configured default. For opencode: ${modelHint.long} For pi: ${piModelHint.long}`,
+        {
+          // 'opencode' and 'pi' (ADR-033 M4c) are listed: dispatching to
+          // 'claude' from a Claude session is same-engine and already
+          // guard-rejected by the dispatcher — listing it here would be
+          // misleading (ADR-033 M2).
+          engine: z.enum(['opencode', 'pi']).describe('Target engine to dispatch to'),
+          prompt: z.string().describe('Task for the dispatched agent'),
+          model: z
+            .string()
+            .optional()
+            .describe(
+              'Target model id (format depends on the target engine — must be user-allowed). Omit for ' +
+                `that engine's configured default. For opencode: ${modelHint.short} For pi: ${piModelHint.short}`
+            ),
+          session_id: z
+            .string()
+            .optional()
+            .describe('session_id from a previous dispatch_agent result — continues that agent')
+        },
+        async ({ engine, prompt, model, session_id }, extra) => {
+          // cli.js stamps `_meta["claudecode/toolUseId"]` on EVERY MCP tools/call
+          // (the calling assistant tool_use block's id) — the Claude-side source
+          // of the dispatching tool_use id (ADR-033 M3). Missing/non-string →
+          // undefined; the dispatcher gates every subagent/task emit on its
+          // presence and never fails a dispatch over it.
+          const toolUseId = extra?.meta?.['claudecode/toolUseId']
+          const result = await crossEngineDispatcher.dispatch(
+            { engine, prompt, model, sessionId: session_id },
+            {
+              fromEngine: ctx.engineId,
+              fromRoutingId: ctx.getRoutingId(),
+              cwd: ctx.cwd,
+              autonomyMode: ctx.getAutonomyMode(),
+              emit: ctx.emit,
+              addDispatchedCost: ctx.addDispatchedCost,
+              toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,
+              extra
+            }
+          )
+          const text = result.isError
+            ? result.text
+            : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+          return {
+            content: [{ type: 'text' as const, text }],
+            ...(result.isError ? { isError: true } : {})
+          }
+        }
+      )
+    ]
+  })
+}

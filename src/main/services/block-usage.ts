@@ -21,7 +21,6 @@ import type {
   DailyUsageFile,
   BlockUsageData
 } from '../../shared/types'
-import { ClaudeSession } from './claude-session'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
 import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
@@ -29,6 +28,7 @@ import {
   groupEntriesIntoBlocks,
   computeProjectionWLS as computeWLS,
   perEngineBreakdown,
+  selectRowCostUsd,
   type AggEntry,
   type ApiWindow as AggApiWindow,
   type ProjectionSample as AggProjectionSample
@@ -46,6 +46,7 @@ import {
 } from './db'
 import { v4 as uuid } from 'uuid'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { BaseSession } from '../providers/BaseSession'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -225,7 +226,7 @@ const DEFAULT_PRICING: ModelPricing = {
   cacheReadPerMTok: 0.3
 }
 
-function getPricing(model: string): ModelPricing {
+export function getPricing(model: string): ModelPricing {
   const lower = model.toLowerCase()
   for (const { match, pricing } of MODEL_PRICING) {
     if (lower.includes(match)) return pricing
@@ -241,7 +242,7 @@ function getPricing(model: string): ModelPricing {
  * JSONL usage lacks the `cache_creation` breakdown, pass 0 — everything is
  * billed at the 5m rate, matching the pre-split behavior.
  */
-function calculateCostFromTokens(
+export function calculateCostFromTokens(
   model: string,
   inputTokens: number,
   outputTokens: number,
@@ -267,7 +268,7 @@ function calculateCostFromTokens(
  * full forms ("claude-sonnet-4-6", "claude-haiku-4-5-20251001") map to
  * the same canonical key. Filters out synthetic models.
  */
-function normalizeModelName(model: string): string | null {
+export function normalizeModelName(model: string): string | null {
   const lower = model.toLowerCase()
   // Filter out synthetic / invalid models
   if (lower === '<synthetic>' || lower === 'unknown' || !model) return null
@@ -298,6 +299,28 @@ export interface ParsedEntry {
   cacheReadTokens: number
   costUsd: number
   messageId: string // for deduplication
+  /** Session UUID this entry belongs to, derived from the JSONL file path
+   *  (Slice B backfill-attribution fix). Null only if derivation somehow fails. */
+  sessionId: string | null
+}
+
+/**
+ * Derive the owning session UUID from a JSONL file path. Main session files are
+ * named `<sessionId>.jsonl` directly under the project directory; subagent files
+ * are `<projectDir>/<sessionId>/subagents/agent-<hex>.jsonl` — the session UUID
+ * is the subagents directory's PARENT directory name, not the agent file's own
+ * name. Pure — used by parseJsonlFile so every ParsedEntry can be attributed to
+ * a real session (previously always written as `sessionId: null` in the DB).
+ */
+export function deriveSessionIdFromPath(filePath: string): string | null {
+  const dir = path.dirname(filePath)
+  const dirName = path.basename(dir)
+  if (dirName === 'subagents') {
+    const parent = path.basename(path.dirname(dir))
+    return parent || null
+  }
+  const base = path.basename(filePath, '.jsonl')
+  return base || null
 }
 
 interface FileCache {
@@ -816,8 +839,8 @@ export class BlockUsageService {
   /**
    * Per-engine usage breakdown over the scan window, from usage_event (Phase 7
    * Pass 2). Both engines appear. Failures degrade to undefined (Claude-only
-   * dashboard unaffected). Uses each row's equiv_cost_usd (falling back to
-   * engine_cost_usd) so the cost matches the dashboard's equivalent-cost metric.
+   * dashboard unaffected). Uses selectRowCostUsd per row — real engine spend when
+   * nonzero, otherwise the best available list-price estimate.
    */
   private computePerEngine(now: number): BlockUsageData['perEngine'] {
     try {
@@ -831,11 +854,11 @@ export class BlockUsageService {
         outputTokens: r.outputTokens,
         cacheCreationTokens: r.cacheWriteTokens,
         cacheReadTokens: r.cacheReadTokens,
-        // Phase 9b cost fix: engineCostUsd is authoritative for all engines.
-        // For opencode, 0 is a valid real cost (free model) — only null falls back
-        // to equivCostUsd. Previously equivCostUsd was preferred, which wrongly
-        // shadowed opencode's real cost with the pricing-table estimate.
-        costUsd: r.engineCostUsd ?? r.equivCostUsd ?? 0,
+        // Cost fix: engineCostUsd is authoritative when it's a real nonzero spend.
+        // Null OR 0 (e.g. opencode on a pooled/enterprise plan that bills $0 per
+        // call) falls back to selectRowCostUsd's list-price estimate — see its
+        // doc comment. Genuinely-free models still show $0.
+        costUsd: selectRowCostUsd(r),
         messageId: r.messageId,
         engineId: r.engineId
       }))
@@ -889,7 +912,7 @@ export class BlockUsageService {
           cacheReadTokens: e.cacheReadTokens,
           equivCostUsd: equiv ?? e.costUsd,
           engineCostUsd: e.costUsd,
-          sessionId: null,
+          sessionId: e.sessionId,
           messageId: e.messageId,
           source: 'backfill'
         })
@@ -902,10 +925,11 @@ export class BlockUsageService {
 
   /**
    * Read Claude entries back from usage_event as the ParsedEntry shape the block
-   * grouping consumes. costUsd is sourced from engine_cost_usd (= the original
-   * calculateCostFromTokens value) so blocks are byte-identical to the old
-   * JSONL-sourced blocks. cacheCreationTokens = cache_write_tokens (combined
-   * 5m+1h, matching the JSONL ParsedEntry).
+   * grouping consumes. costUsd is sourced via selectRowCostUsd — for Claude rows
+   * engine_cost_usd (= the original calculateCostFromTokens value) is always the
+   * real nonzero spend, so blocks stay byte-identical to the old JSONL-sourced
+   * blocks. cacheCreationTokens = cache_write_tokens (combined 5m+1h, matching the
+   * JSONL ParsedEntry).
    */
   private claudeEntriesFromDb(now: number): ParsedEntry[] {
     const cutoff = now - SCAN_WINDOW_MS
@@ -917,8 +941,9 @@ export class BlockUsageService {
       outputTokens: r.outputTokens,
       cacheCreationTokens: r.cacheWriteTokens,
       cacheReadTokens: r.cacheReadTokens,
-      costUsd: r.engineCostUsd ?? r.equivCostUsd ?? 0,
-      messageId: r.messageId
+      costUsd: selectRowCostUsd(r),
+      messageId: r.messageId,
+      sessionId: r.sessionId
     }))
   }
 
@@ -962,11 +987,11 @@ export class BlockUsageService {
         b.outputTokens += r.outputTokens
         b.cacheWriteTokens += r.cacheWriteTokens
         b.cacheReadTokens += r.cacheReadTokens
-        // Phase 9b cost fix: engineCostUsd is authoritative for all engines.
-        // For opencode, 0 is a valid real cost (free model) — only null falls back
-        // to equivCostUsd. Claude's engineCostUsd = calculateCostFromTokens so this
-        // continues to match the historical entry-derived total.
-        b.costUsd += r.engineCostUsd ?? r.equivCostUsd ?? 0
+        // Cost fix: selectRowCostUsd keeps real nonzero engine spend authoritative
+        // (Claude's engineCostUsd = calculateCostFromTokens, so this continues to
+        // match the historical entry-derived total) and falls back to a list-price
+        // estimate when the engine reports null/0 — see its doc comment.
+        b.costUsd += selectRowCostUsd(r)
         b.requestCount += 1
       }
 
@@ -1330,8 +1355,8 @@ export class BlockUsageService {
    * Phase 9a: the sample SOURCE is now the DB (`usage_window_sample`) when
    * available, with the in-memory ring as fallback when the DB has no samples
    * for the current window (e.g. first boot before any poll has written to DB).
-   * Minor numerical drift vs the ring-only approach is accepted — see docs/v2/
-   * phase-9-usage-analytics.md §WLS projection.
+   * Minor numerical drift vs the ring-only approach is accepted (DB samples are
+   * poll-aligned, the ring was frame-aligned).
    */
   private computeProjectionWLS(
     block: UsageBlock,
@@ -1542,7 +1567,8 @@ export class BlockUsageService {
             cacheCreationTokens: cacheCreate,
             cacheReadTokens: cacheRead,
             costUsd,
-            messageId
+            messageId,
+            sessionId: deriveSessionIdFromPath(filePath)
           })
         } catch {
           // Skip malformed lines
@@ -2009,7 +2035,7 @@ export class BlockUsageService {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:block-data', data)
       }
-      for (const w of ClaudeSession.getExtraWindows()) {
+      for (const w of BaseSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('usage:block-data', data)
       }
     } catch {

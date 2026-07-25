@@ -9,7 +9,7 @@ import { app } from 'electron'
 import { EventLog } from './event-log'
 import { RemoteDispatcher } from './remote-dispatcher'
 import { RemoteBridge } from './remote-bridge'
-import { ClaudeSession } from './claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
@@ -89,7 +89,7 @@ export class RemoteServer {
     this.statusCallback = cb
   }
 
-  /** Get the RemoteBridge instance for registering with ClaudeSession. */
+  /** Get the RemoteBridge instance for registering with BaseSession. */
   getBridge(): RemoteBridge {
     return this.bridge
   }
@@ -145,8 +145,8 @@ export class RemoteServer {
 
     this.port = actualPort
 
-    // Register bridge as extra window for all ClaudeSession events
-    ClaudeSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
+    // Register bridge as extra window for all session events
+    BaseSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
 
     // Start idle timeout checker
     this.idleTimer = setInterval(() => this.checkIdleClients(), 60_000)
@@ -190,8 +190,8 @@ export class RemoteServer {
     }
     this.clients.clear()
 
-    // Remove bridge from ClaudeSession
-    ClaudeSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
+    // Remove bridge from BaseSession
+    BaseSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
 
     // Close servers
     if (this.wss) {

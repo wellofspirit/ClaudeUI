@@ -24,7 +24,8 @@ import type {
   SessionStatus,
   PendingApproval,
   StreamDelta,
-  TodoItem
+  TodoItem,
+  FileDiff
 } from '../../../../shared/types'
 
 /**
@@ -73,6 +74,12 @@ function wireEventHandlers(): void {
     }
   )
 
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
+    }
+  )
+
   onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
     (routingId, status) => {
       // Rekey logic from useClaudeEvents
@@ -113,9 +120,12 @@ function wireEventHandlers(): void {
   })
 
   onEvent<
-    (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
-  >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
-    store().appendToolResult(routingId, toolUseId, result, isError)
+    (
+      routingId: string,
+      data: { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] }
+    ) => void
+  >('session:tool-result')((routingId, { toolUseId, result, isError, fileDiffs }) => {
+    store().appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
   })
 
   onEvent<(routingId: string, data: { toolUseId: string; text: string; type?: string }) => void>(
@@ -326,6 +336,27 @@ describe('useClaudeEvents component tests', () => {
       expect(session.pendingApprovals[0].toolName).toBe('Bash')
     })
 
+    it('removes ONLY the dismissed approval on session:approval-dismiss (ADR-033)', () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+
+      const dispatched = makePendingApproval({
+        requestId: 'xeng:perm-1',
+        toolName: 'dispatch:bash'
+      })
+      const ordinary = makePendingApproval({ requestId: 'req-2', toolName: 'Bash' })
+      bridge.webContents.send('session:approval-request', routingId, dispatched)
+      bridge.webContents.send('session:approval-request', routingId, ordinary)
+      expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(2)
+
+      // opencode cascade-rejected the forwarded approval — main dismisses it.
+      bridge.webContents.send('session:approval-dismiss', routingId, { requestId: 'xeng:perm-1' })
+
+      const remaining = useSessionStore.getState().sessions[routingId].pendingApprovals
+      expect(remaining).toHaveLength(1)
+      expect(remaining[0].requestId).toBe('req-2')
+    })
+
     it('clears pending approvals when status becomes idle', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
@@ -429,6 +460,32 @@ describe('useClaudeEvents component tests', () => {
       expect(resultBlock?.type === 'tool_result' && resultBlock.toolResult).toBe(
         'file contents here'
       )
+    })
+
+    it('attaches fileDiffs (opencode apply_patch/edit) to the tool_result block', () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+
+      const msg = makeChatMessage({
+        id: 'msg-1',
+        content: [makeToolUseBlock('apply_patch', { patchText: '*** Begin Patch ***' }, 'tool-1')]
+      })
+      bridge.webContents.send('session:message', routingId, msg)
+
+      const fileDiffs: FileDiff[] = [
+        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+      ]
+      bridge.webContents.send('session:tool-result', routingId, {
+        toolUseId: 'tool-1',
+        result: 'Success. Updated the following files:\nM a.ts',
+        isError: false,
+        fileDiffs
+      })
+
+      const session = useSessionStore.getState().sessions[routingId]
+      const lastMsg = session.messages[session.messages.length - 1]
+      const resultBlock = lastMsg.content.find((b) => b.type === 'tool_result')
+      expect(resultBlock?.type === 'tool_result' && resultBlock.fileDiffs).toEqual(fileDiffs)
     })
   })
 

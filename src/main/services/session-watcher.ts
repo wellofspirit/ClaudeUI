@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession } from './claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
 
@@ -54,7 +54,7 @@ export function watchSession(
             statusLine
           })
         }
-        for (const w of ClaudeSession.getExtraWindows()) {
+        for (const w of BaseSession.getExtraWindows()) {
           if (!w.isDestroyed())
             w.webContents.send('session:watch-update', {
               routingId,

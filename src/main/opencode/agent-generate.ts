@@ -9,15 +9,8 @@
 
 import { opencodeServerManager } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
-import { resolveOpencodeSpawnModel } from './model-discovery'
+import { resolveOpencodeSpawnModel, parseModelString } from './model-discovery'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
-
-/** Parse "providerID/modelID" → { providerID, modelID } (mirrors OpencodeSession). */
-function parseModelString(model: string): { providerID: string; modelID: string } {
-  const slash = model.indexOf('/')
-  if (slash < 0) return { providerID: 'opencode', modelID: model }
-  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
-}
 
 // ─── Meta-prompt ──────────────────────────────────────────────────────────────
 

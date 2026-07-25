@@ -143,6 +143,25 @@ export interface SystemMessage extends BaseSDKMessage {
   retracted_message_uuids?: string[]
 }
 
+/**
+ * Per-model entry inside a `result` message's `modelUsage` map (Slice B — verified
+ * against the real bun-claude binary). `modelUsage` and `total_cost_usd` are
+ * CUMULATIVE within one cli.js process (turn 2's values include turn 1's), and
+ * reset to zero on `--resume` (a resumed process reports only post-resume
+ * usage) — see claude-session.ts's costBaseUsd/liveTotalCostUsd split.
+ * `costUSD` is the authoritative per-model cost.
+ */
+export interface ModelUsageEntry {
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
+  webSearchRequests?: number
+  costUSD?: number
+  contextWindow?: number
+  maxOutputTokens?: number
+}
+
 export interface ResultMessage extends BaseSDKMessage {
   type: 'result'
   subtype?: string
@@ -151,6 +170,11 @@ export interface ResultMessage extends BaseSDKMessage {
   duration_api_ms?: number
   result?: string
   errors?: string[]
+  /** Per-turn token usage — `{input_tokens, output_tokens, cache_creation_input_tokens,
+   *  cache_read_input_tokens, ...}` (docs/protocol/03-inbound-messages.md §3.7). */
+  usage?: Record<string, unknown>
+  /** Per-model usage breakdown when the turn spanned multiple models (fallback, etc.). */
+  modelUsage?: Record<string, ModelUsageEntry>
 }
 
 export interface ToolProgressMessage extends BaseSDKMessage {
@@ -405,15 +429,39 @@ export interface SdkMcpServer {
 export type McpServerConfig = McpServerStdio | McpServerHttp | McpServerSse | SdkMcpServer
 
 /**
+ * Extra context passed alongside a tool call's parsed input — mirrors the
+ * MCP SDK's `RequestHandlerExtra` but trimmed to what our tool handlers
+ * need. `signal` fires when the caller (cli.js control channel or an MCP
+ * client) cancels the in-flight call; `sendNotification` lets a long-running
+ * handler emit progress (see `sendProgress()` in create-sdk-mcp.ts).
+ */
+export interface SdkToolExtra {
+  signal: AbortSignal
+  progressToken?: string | number
+  sendNotification: (notification: {
+    method: string
+    params?: Record<string, unknown>
+  }) => Promise<void>
+  /**
+   * Raw `_meta` bag from the MCP request (`RequestHandlerExtra._meta`), when
+   * present. cli.js stamps `_meta["claudecode/toolUseId"]` on EVERY MCP
+   * `tools/call` it issues — this is the Claude-side source of the dispatching
+   * tool_use id (ADR-033 M3), read via `extra.meta?.['claudecode/toolUseId']`.
+   */
+  meta?: Record<string, unknown>
+}
+
+/**
  * A tool registered on an in-process SDK MCP server. The schema is a record
  * of Zod validators (or any runtime with `.parse()`), matching the upstream
- * `tool()` helper's signature.
+ * `tool()` helper's signature. `extra` is optional so existing one-arg
+ * handlers (mermaid, mockup, auto-classifier) keep compiling unchanged.
  */
 export interface SdkMcpTool {
   name: string
   description: string
   inputSchema: Record<string, ZodLike>
-  handler: (input: Record<string, unknown>) => Promise<ToolResultContent>
+  handler: (input: Record<string, unknown>, extra?: SdkToolExtra) => Promise<ToolResultContent>
 }
 
 /** Minimal Zod-shaped interface — we only need parsing and JSON schema conversion. */

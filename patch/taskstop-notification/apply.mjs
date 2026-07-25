@@ -45,20 +45,34 @@ if (versionMatch) {
 let patchCount = 0
 
 // ===========================================================================
-// Part A: Map "killed" → "stopped" in task_notification XML parser
+// Part A: Map "killed" → "stopped" in task_notification status
 //
-// The CLI uses "killed" internally but the SDK schema expects "stopped".
-// The validator rejects "killed" and defaults to "completed" (wrong).
+// Historically the CLI used "killed" internally, and a shared status
+// *validator* rejected anything outside completed|failed|stopped, silently
+// defaulting unknown statuses (including "killed") to "completed" (wrong).
 //
-// Before:
-//   y1=(R1)=>R1==="completed"||R1==="failed"||R1==="stopped",
-//   x1=X1?.[1],
-//   G1=y1(x1)?x1:"completed";
+// As of SDK 0.2.49 that shared validator is gone entirely. There is no
+// longer a single allowlist to extend — the killed→stopped translation now
+// happens at each kill-site call, right before the value is handed to the
+// notification emitter (`qu(taskId, status, opts)` in 2.1.198's naming,
+// previously `cN`/`rx8` etc. — names churn every version). The emitter
+// itself does no validation; it forwards whatever status string it's given
+// straight into the `task_notification` system event
+// (`CT({type:"system",subtype:"task_notification",...,status:t,...})`).
 //
-// After:
-//   y1=(R1)=>R1==="completed"||R1==="failed"||R1==="stopped"||R1==="killed",
-//   x1=X1?.[1],
-//   G1=y1(x1)?(x1==="killed"?"stopped":x1):"completed";
+// So "is this upstreamed" is no longer a single-token regex question. We
+// verify the *behavior* directly:
+//   1. Every task-type kill path (local_bash/local_agent/remote_agent/
+//      dream/workflow/system-sweep) must call the emitter with the literal
+//      "stopped" — i.e. `<emitter>(<id-expr>,"stopped"` must exist.
+//   2. No call site must ever hand the emitter the raw "killed" internal
+//      status — i.e. `<emitter>(<id-expr>,"killed"` must NOT exist.
+//   3. The emitter itself must not gate/allowlist the status param before
+//      forwarding it (a defensive check — if some future version reintroduces
+//      a validator, we want to fail loud rather than assume it's fine).
+// If all three hold, "killed" never reaches an SDK consumer unmapped, and
+// Part A is a no-op by construction — there is no validator token left to
+// patch.
 // ===========================================================================
 
 console.log('\n--- Part A: killed → stopped mapping in status validator ---')
@@ -68,28 +82,28 @@ const patchAMarker = '/*PATCHED:taskstop-notification-A*/'
 if (src.includes(patchAMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Check if the fix has been upstreamed (SDK 0.2.49+ includes "killed" natively)
+  // Legacy path for older SDK versions: the original shared validator shape.
+  // (`y1=(R1)=>R1==="completed"||R1==="failed"||R1==="stopped"`, followed by
+  // `x1=X1?.[1]` extraction and a `y1(x1)?x1:"completed"` ternary default.)
+  const legacyValidatorRe = new RegExp(
+    `(${V})=\\((${V})\\)=>\\2==="completed"\\|\\|\\2==="failed"\\|\\|\\2==="stopped",` +
+      `(${V})=(${V})\\?\\.\\[1\\],` +
+      `(${V})=\\1\\(\\3\\)\\?\\3:"completed";`
+  )
+  // Already-patched-shape or an even older upstream form that inlined
+  // "killed" directly into the allowlist.
   const upstreamKilledRe = new RegExp(
     `=\\((${V})\\)=>\\1==="completed"\\|\\|\\1==="failed"\\|\\|\\1==="stopped"\\|\\|\\1==="killed"`
   )
-  if (src.match(upstreamKilledRe)) {
-    console.log('Upstreamed in this SDK version. Skipping.')
-  } else {
-    // Legacy path for older SDK versions
-    const validatorRe = new RegExp(
-      `(${V})=\\((${V})\\)=>\\2==="completed"\\|\\|\\2==="failed"\\|\\|\\2==="stopped",` +
-        `(${V})=(${V})\\?\\.\\[1\\],` +
-        `(${V})=\\1\\(\\3\\)\\?\\3:"completed";`
-    )
 
-    const validatorMatch = src.match(validatorRe)
+  const legacyValidatorMatch = src.match(legacyValidatorRe)
+  const upstreamKilledMatch = src.match(upstreamKilledRe)
 
-    if (!validatorMatch) {
-      console.error('ERROR: Cannot locate task_notification status validator.')
-      process.exit(1)
-    }
-
-    const [fullMatch, validatorName, statusParam, extractedStatusName] = validatorMatch
+  if (upstreamKilledMatch) {
+    console.log('Upstreamed in this SDK version (validator already accepts "killed"). Skipping.')
+  } else if (legacyValidatorMatch) {
+    // A shared validator still exists in this SDK version — patch it as before.
+    const [fullMatch, validatorName, statusParam, , extractedStatusName] = legacyValidatorMatch
     console.log(`Found status validator: ${validatorName}(${statusParam})`)
 
     const matchIdx = src.indexOf(fullMatch)
@@ -112,6 +126,68 @@ if (src.includes(patchAMarker)) {
     src = src.slice(0, matchIdx) + patchAMarker + patched + src.slice(matchIdx + fullMatch.length)
     patchCount++
     console.log('Applied.')
+  } else {
+    // No shared validator at all anymore (SDK 0.2.49+ removed it). Verify the
+    // translation is happening at kill-site call sites instead, by content,
+    // before concluding this is safe to skip.
+    //
+    // Signature: function NAME(id,status,opts){if(!GUARD(id))return;
+    // EMIT({type:"system",subtype:"task_notification",task_id:id,
+    // tool_use_id:opts?.toolUseId,status:status,...})}
+    const emitterRe = new RegExp(
+      `function (${V})\\((${V}),(${V}),(${V})\\)\\{` +
+        `if\\(!(${V})\\(\\2\\)\\)return;` +
+        `(${V})\\(\\{type:"system",subtype:"task_notification",task_id:\\2,` +
+        `tool_use_id:\\4\\?\\.toolUseId,status:\\3,`
+    )
+    const emitterMatch = src.match(emitterRe)
+
+    if (!emitterMatch) {
+      console.error(
+        'ERROR: Cannot locate task_notification status validator, nor the ' +
+          'expected no-validator emitter shape ' +
+          '(function NAME(id,status,opts){if(!GUARD(id))return;EMIT({type:"system",' +
+          'subtype:"task_notification",...,status:status,...})}). The status-plumbing ' +
+          'code has changed shape again — this needs re-analysis, not a blind skip.'
+      )
+      process.exit(1)
+    }
+
+    const [, emitterName] = emitterMatch
+    console.log(`Found no-validator emitter: ${emitterName}(taskId, status, opts)`)
+
+    // Behavioral check 1: at least one kill-site call must translate the
+    // internal "killed" registry status into a literal "stopped" argument
+    // to the emitter, right after setting status:"killed" in the registry.
+    const translationAtCallSiteRe = new RegExp(
+      `status:"killed",[\\s\\S]{1,400}?${emitterName}\\([^,]+,"stopped"`
+    )
+    if (!src.match(translationAtCallSiteRe)) {
+      console.error(
+        `ERROR: ${emitterName}() has no validator, but no kill-site call could be found ` +
+          'translating internal "killed" status to "stopped" before emission. ' +
+          '"killed" may be leaking to SDK consumers unmapped — needs re-analysis.'
+      )
+      process.exit(1)
+    }
+
+    // Behavioral check 2: no call site should ever hand the emitter the raw
+    // "killed" status directly (that would mean an unmapped leak).
+    const rawKilledToEmitterRe = new RegExp(`${emitterName}\\([^,]+,"killed"`)
+    if (src.match(rawKilledToEmitterRe)) {
+      console.error(
+        `ERROR: Found a call site passing "killed" directly to ${emitterName}() — ` +
+          'this would surface an invalid status to SDK consumers. Needs re-analysis ' +
+          '(the old Part A patch shape may need to be revived against this call site).'
+      )
+      process.exit(1)
+    }
+
+    console.log(
+      'Upstreamed in this SDK version: no shared validator exists; every kill-site ' +
+        `call translates "killed" → "stopped" before calling ${emitterName}(), and no ` +
+        'call site leaks "killed" unmapped. Skipping.'
+    )
   }
 }
 
@@ -267,23 +343,41 @@ if (src.includes(patchBMarker)) {
 // Write and verify
 // ===========================================================================
 
-if (patchCount === 0) {
-  console.log('\nAll parts already applied. Nothing to do.')
-  process.exit(0)
+if (patchCount > 0) {
+  writeFileSync(cliPath, src)
+  console.log(`\nPatch applied to ${cliPath}`)
+} else {
+  console.log('\nAll parts already applied or upstreamed. Nothing to write.')
 }
-
-writeFileSync(cliPath, src)
-console.log(`\nPatch applied to ${cliPath}`)
 
 const verify = readFileSync(cliPath, 'utf-8')
 
-// Part A is optional (upstreamed in SDK 0.2.49+)
+// Part A is optional — upstreamed either via:
+//  - the legacy validator extended to accept "killed" (old SDKs, or our own
+//    patch having run), or
+//  - SDK 0.2.49+'s shared-validator-free design, where every kill-site call
+//    translates "killed" -> "stopped" before handing it to the emitter (see
+//    the detection logic above for the exact behavioral checks).
+const legacyPatchedShapeRe =
+  /=\([\w$]+\)=>[\w$]+===\s*"completed"\|\|[\w$]+===\s*"failed"\|\|[\w$]+===\s*"stopped"\|\|[\w$]+===\s*"killed"/
+const noValidatorEmitterRe = new RegExp(
+  `function (${V})\\((${V}),(${V}),(${V})\\)\\{` +
+    `if\\(!(${V})\\(\\2\\)\\)return;` +
+    `(${V})\\(\\{type:"system",subtype:"task_notification",task_id:\\2,` +
+    `tool_use_id:\\4\\?\\.toolUseId,status:\\3,`
+)
+const noValidatorEmitterMatch = verify.match(noValidatorEmitterRe)
+const noValidatorUpstreamed =
+  !!noValidatorEmitterMatch &&
+  new RegExp(
+    `status:"killed",[\\s\\S]{1,400}?${noValidatorEmitterMatch[1]}\\([^,]+,"stopped"`
+  ).test(verify) &&
+  !new RegExp(`${noValidatorEmitterMatch[1]}\\([^,]+,"killed"`).test(verify)
 const partAOk =
-  verify.includes(patchAMarker) ||
-  /=\([\w$]+\)=>[\w$]+===\s*"completed"\|\|[\w$]+===\s*"failed"\|\|[\w$]+===\s*"stopped"\|\|[\w$]+===\s*"killed"/.test(
-    verify
-  )
-// Part B is optional (upstreamed in SDK 0.2.87+ — rx8() calls cN() with "stopped")
+  verify.includes(patchAMarker) || legacyPatchedShapeRe.test(verify) || noValidatorUpstreamed
+
+// Part B is optional (upstreamed in SDK 0.2.87+ — TaskStop's kill path calls
+// the emitter with "stopped" right after setting notified:true)
 const partBUpstreamed = new RegExp(
   `notified:!0[\\s\\S]{1,300}?` + `[\\w$]+\\([\\w$]+,"stopped",\\{toolUseId:`
 ).test(verify)
@@ -296,7 +390,7 @@ console.log(
   `  ${partBOk ? 'OK' : 'MISSING'} Part B: TaskStop notification injection ${verify.includes(patchBMarker) ? '(patched)' : '(upstreamed)'}`
 )
 
-if (!partBOk) {
+if (!partAOk || !partBOk) {
   console.error('\nVerification FAILED.')
   process.exit(1)
 }
@@ -304,5 +398,5 @@ if (!partBOk) {
 console.log('\nAll parts verified.')
 console.log('')
 console.log('What this does:')
-console.log('  A — Accepts "killed" in status validator, maps it to "stopped" for SDK consumers')
-console.log('  B — Injects notification sender call into TaskStop before notified flag is set')
+console.log('  A — Ensures "killed" is mapped to "stopped" before reaching SDK consumers')
+console.log('  B — Ensures TaskStop sends a notification sender call before the notified flag is set')

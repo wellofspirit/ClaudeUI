@@ -76,7 +76,8 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     removePendingApproval,
     clearConversation,
     setPermissionMode,
-    markSdkActive
+    markSdkActive,
+    selectedEngineId
   ])
 
   // Option 2: Continue, auto-accept edits

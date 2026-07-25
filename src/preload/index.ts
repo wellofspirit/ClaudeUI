@@ -62,8 +62,14 @@ const api: ClaudeAPI = {
       engineId
     ),
   rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
-  resolveForkAnchor: (sessionId: string, cwd: string, messageId: string) =>
-    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+  resolveForkAnchor: (
+    sessionId: string,
+    cwd: string,
+    messageId: string,
+    engineId: import('../shared/types').EngineId,
+    messageIndex: number
+  ) =>
+    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
   sendPrompt: (
     routingId: string,
     prompt: string,
@@ -93,6 +99,8 @@ const api: ClaudeAPI = {
   listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
   loadOpencodeHistory: (sessionId: string) =>
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
+  listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
+  loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
@@ -111,6 +119,7 @@ const api: ClaudeAPI = {
   onMessage: onEvent('session:message'),
   onStreamEvent: onEvent('session:stream'),
   onApprovalRequest: onEvent('session:approval-request'),
+  onApprovalDismiss: onEvent('session:approval-dismiss'),
   onStatus: onEvent('session:status'),
   onResult: onEvent('session:result'),
   onError: onEvent('session:error'),
@@ -164,8 +173,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:unwatch-background', routingId, toolUseId),
   readBackgroundRange: (routingId: string, toolUseId: string, offset: number, length: number) =>
     ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
-  stopTask: (routingId: string, toolUseId: string) =>
-    ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
+  stopTask: (routingId: string, toolUseId: string, isDispatch?: boolean) =>
+    ipcRenderer.invoke('session:stop-task', routingId, toolUseId, isDispatch),
   backgroundTask: (routingId: string, toolUseId: string) =>
     ipcRenderer.invoke('session:background-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
@@ -187,7 +196,10 @@ const api: ClaudeAPI = {
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
   getOpencodeProviderModels: (providerId: string) =>
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+  getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
   engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+  getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
+  getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
   generateCommitMessage: (diff: string) =>
@@ -265,6 +277,9 @@ const api: ClaudeAPI = {
   setUsageAccountFilter: (account: string | null) =>
     ipcRenderer.invoke('usage:set-account-filter', account),
 
+  // Cross-engine dispatched usage (ADR-033 M4-B)
+  fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
+
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
   submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
@@ -326,6 +341,8 @@ const api: ClaudeAPI = {
     unwrap('vendor-auth:probe', engineId),
   vendorAuthListOptions: (engineId: import('../shared/types').EngineId) =>
     unwrap('vendor-auth:list-options', engineId),
+  vendorAuthListKeys: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:list-keys', engineId),
   vendorAuthSetKey: (
     engineId: import('../shared/types').EngineId,
     vendorId: string,
@@ -355,6 +372,9 @@ const api: ClaudeAPI = {
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
   saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
     unwrap('config:save-opencode-settings', settings),
+  readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
+  patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
+    unwrap('config:patch-opencode-native', patches),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
     unwrap('opencode-agents:read', name, scope, cwd),
@@ -370,6 +390,19 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
     ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+  listSharedProviders: () => unwrap('shared-provider:list'),
+  getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
+  listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),
+  saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+  removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
+  setSharedProviderRoute: (id, harness, enabled) =>
+    unwrap('shared-provider:set-route', id, harness, enabled),
+  setSharedProviderApiKey: (id: string, key: string) =>
+    unwrap('shared-provider:set-key', id, key),
+  syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
+  disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
+  setSharedProviderDefaultModel: (id, harness, modelId?) =>
+    unwrap('shared-provider:set-default', id, harness, modelId),
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)

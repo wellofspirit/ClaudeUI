@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type {
+  BlockUsageData,
   UsageBlock,
   UsageSnapshot,
-  AccountUsage,
   EngineUsageSummary,
-  ModelTokenBreakdown
+  ModelTokenBreakdown,
+  DispatchedUsageSummary
 } from '../../../../shared/types'
 import { TokenDonut } from './TokenDonut'
 import { BlockTimeline } from './BlockTimeline'
@@ -24,7 +25,13 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type ClaudeTab = 'block' | 'timeline' | 'window' | 'recent'
+type ClaudeTab = 'block' | 'timeline' | 'recent'
+
+function calendarDaySpan(history: BlockUsageData['dailyHistory']): number {
+  if (history.length === 0) return 0
+  const dates = history.map((day) => day.date).sort()
+  return Math.round((Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / 86_400_000) + 1
+}
 
 interface UsageViewProps {
   onClose: () => void
@@ -36,8 +43,26 @@ interface UsageViewProps {
 
 export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const blockUsage = useSessionStore((s) => s.blockUsage)
-  const accountUsage = useSessionStore((s) => s.accountUsage)
   const [activeTab, setActiveTab] = useState<ClaudeTab>('block')
+  // ADR-033 M4-B: delegated (cross-engine dispatched) usage — request/response
+  // only, no live-push channel (an all-time aggregate, not a hot path). Local
+  // component state, same pattern as OpencodeSection's refresh-prices call.
+  const [dispatchedUsage, setDispatchedUsage] = useState<DispatchedUsageSummary[] | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .fetchDispatchedUsage()
+      .then((rows) => {
+        if (!cancelled) setDispatchedUsage(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setDispatchedUsage([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   if (!blockUsage) {
     return (
@@ -61,6 +86,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   } = blockUsage
 
   const opencodeEntry = perEngine?.find((e) => e.engineId === 'opencode') ?? null
+  const historyDays = calendarDaySpan(dailyHistory)
 
   return (
     <div data-testid="UsageView" className="flex flex-col h-full bg-bg-primary overflow-y-auto">
@@ -78,7 +104,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           currentBlock={currentBlock}
           recentBlocks={recentBlocks}
           todaySnapshots={todaySnapshots}
-          accountUsage={accountUsage}
           activeTab={activeTab}
           onTabChange={setActiveTab}
         />
@@ -86,8 +111,13 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
         {/* opencode section — only when data exists */}
         {opencodeEntry && <OpencodeSection entry={opencodeEntry} />}
 
+        {/* Delegated (cross-engine dispatched) usage — only when data exists */}
+        {dispatchedUsage && dispatchedUsage.length > 0 && (
+          <DelegatedUsageSection rows={dispatchedUsage} />
+        )}
+
         {/* Daily Usage (all engines) */}
-        <Section title="Daily Usage" subtitle={`Last ${dailyHistory.length} days · all engines`}>
+        <Section title="Daily Usage" subtitle={`Last ${historyDays} calendar days · all engines`}>
           <DailyUsageChart dailyHistory={dailyHistory} />
         </Section>
       </div>
@@ -102,7 +132,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 const CLAUDE_TABS: { id: ClaudeTab; label: string }[] = [
   { id: 'block', label: 'Current Block' },
   { id: 'timeline', label: 'Block Timeline' },
-  { id: 'window', label: '5hr Window' },
   { id: 'recent', label: 'Recent Blocks' }
 ]
 
@@ -110,14 +139,12 @@ function ClaudeCard({
   currentBlock,
   recentBlocks,
   todaySnapshots,
-  accountUsage,
   activeTab,
   onTabChange
 }: {
   currentBlock: UsageBlock | null
   recentBlocks: UsageBlock[]
   todaySnapshots: UsageSnapshot[]
-  accountUsage: AccountUsage | null
   activeTab: ClaudeTab
   onTabChange: (tab: ClaudeTab) => void
 }): React.JSX.Element {
@@ -160,7 +187,6 @@ function ClaudeCard({
             todaySnapshots={todaySnapshots}
           />
         )}
-        {activeTab === 'window' && <WindowPanel accountUsage={accountUsage} />}
         {activeTab === 'recent' && <RecentBlocksPanel recentBlocks={recentBlocks} />}
       </div>
     </div>
@@ -291,51 +317,6 @@ function TimelinePanel({
   )
 }
 
-function WindowPanel({ accountUsage }: { accountUsage: AccountUsage | null }): React.JSX.Element {
-  if (!accountUsage || accountUsage.error) {
-    return (
-      <div className="text-text-muted text-[11px]">No window data</div>
-    )
-  }
-
-  const pct = accountUsage.fiveHour.usedPercent
-  const color = pct > 80 ? '#ef4444' : pct > 50 ? '#eab308' : '#22c55e'
-
-  let resetStr = ''
-  if (accountUsage.fiveHour.resetsAt) {
-    const ms = new Date(accountUsage.fiveHour.resetsAt).getTime() - Date.now()
-    if (ms > 0) {
-      const min = Math.round(ms / 60_000)
-      if (min >= 60) {
-        resetStr = `resets in ${Math.floor(min / 60)}h ${min % 60}m`
-      } else {
-        resetStr = `resets in ${min}m`
-      }
-    }
-  }
-
-  return (
-    <>
-      {resetStr && (
-        <div className="flex items-baseline gap-2 mb-2">
-          <span className="text-[10px] text-text-muted">{resetStr}</span>
-        </div>
-      )}
-      <div className="flex items-center gap-3">
-        <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
-          />
-        </div>
-        <span className="text-[11px] font-mono font-medium" style={{ color }}>
-          {Math.round(pct)}%
-        </span>
-      </div>
-    </>
-  )
-}
-
 function RecentBlocksPanel({ recentBlocks }: { recentBlocks: UsageBlock[] }): React.JSX.Element {
   if (recentBlocks.length === 0) {
     return (
@@ -439,7 +420,9 @@ function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.El
 
       {/* Footnote */}
       <p className="text-[9px] text-text-muted mt-2">
-        Cost reported by opencode (models.dev pricing). No 5-hour window — pay-per-token.
+        Cost reported by opencode; when the engine reports $0 (subscription/pooled
+        billing), estimated list-price cost is shown. No 5-hour window —
+        pay-per-token.
       </p>
     </div>
   )
@@ -468,6 +451,62 @@ function OpencodeModelRow({
       <td className="text-right font-mono">{model.requestCount}</td>
       <td className="text-right font-mono">{pct}%</td>
     </tr>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Delegated (cross-engine dispatched) usage — ADR-033 M4-B
+// ---------------------------------------------------------------------------
+
+function DelegatedUsageSection({ rows }: { rows: DispatchedUsageSummary[] }): React.JSX.Element {
+  return (
+    <div data-testid="DelegatedUsage" className="bg-bg-secondary rounded-xl border border-border/50 p-3">
+      <div className="flex items-center gap-2 mb-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+          Delegated
+        </h3>
+        <span className="text-[9px] text-text-muted">
+          cross-engine dispatch_agent calls · all-time
+        </span>
+      </div>
+
+      <table className="w-full text-[10px]">
+        <thead>
+          <tr className="text-text-muted">
+            <th className="text-left font-medium pb-1">Target</th>
+            <th className="text-right font-medium pb-1">Dispatches</th>
+            <th className="text-right font-medium pb-1">Tokens</th>
+            <th className="text-right font-medium pb-1">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr
+              key={`${row.targetEngine}/${row.targetModel}`}
+              data-testid="DelegatedUsage.row"
+              data-id={`${row.targetEngine}/${row.targetModel}`}
+              className="text-text-secondary"
+            >
+              <td className="py-0.5 flex items-center gap-1.5">
+                <span
+                  className="inline-block w-2 h-2 rounded-full"
+                  style={{ backgroundColor: getModelColor(row.targetModel) }}
+                />
+                {row.targetEngine} · {shortModelName(row.targetModel)}
+              </td>
+              <td className="text-right font-mono">{row.dispatches}</td>
+              <td className="text-right font-mono">{formatTokenCount(row.totalTokens)}</td>
+              <td className="text-right font-mono">{formatCost(row.costUsd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <p className="text-[9px] text-text-muted mt-2">
+        Tasks this conversation delegated to the OTHER engine via dispatch_agent — attributed to
+        the dispatching session, cost/tokens from the target&apos;s own turn result.
+      </p>
+    </div>
   )
 }
 

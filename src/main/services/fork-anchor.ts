@@ -1,7 +1,14 @@
 /**
- * Pure core of the fork ("branch off") anchor resolver. Kept free of electron
- * / filesystem imports so it can be unit-tested directly; the disk-reading
- * wrapper lives in session-history.ts (`resolveForkAnchor`).
+ * Pure core of the fork ("branch off") anchor resolver — ENGINE-dispatched
+ * (session-history.ts's `resolveForkAnchor`) between two unrelated
+ * resolution strategies, both kept free of electron/filesystem imports here
+ * so they're unit-testable directly:
+ *   - `findForkAnchorUuid` (Claude): matches the renderer's `ChatMessage.id`
+ *     against the JSONL transcript. Disk-reading wrapper lives in
+ *     session-history.ts (`resolveForkAnchor`'s Claude branch).
+ *   - `findPiForkAnchorEntryId` (pi, M5c): POSITION-based — see its own doc
+ *     comment below for why. Disk-reading wrapper lives in
+ *     pi-session-list.ts (`resolvePiForkAnchor`).
  *
  * Given the parsed JSONL transcript lines of a session and the renderer's
  * `ChatMessage.id` for an assistant message, returns the JSONL line `uuid` to
@@ -75,4 +82,55 @@ export function findForkAnchorUuid(
   }
 
   return anchorUuid
+}
+
+// ---------------------------------------------------------------------------
+// pi fork anchor (position-based — no line/message id to match against)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sentinel `anchorUuid` value meaning "clone the active branch as-is, do not
+ * truncate" — returned when forking the LATEST message (no later user turn
+ * exists to drop). Opaque to the renderer/store (flows through
+ * `forkOrigin.anchorUuid` → `EngineSpawnOptions.resumeSessionAt` unchanged,
+ * same as a real pi entryId would); only `PiSession.doStart` interprets it.
+ */
+export const PI_FORK_CLONE_LATEST_SENTINEL = 'pi:clone-latest'
+
+/**
+ * Pure core of the pi fork-anchor resolver. pi has no stable id ClaudeUI can
+ * match a renderer message against (unlike Claude's JSONL line `uuid` —
+ * see `findForkAnchorUuid` above): a LIVE assistant `ChatMessage.id` is a
+ * uuid synthesized by event-mapper.ts, never pi's own entry id. But the fork
+ * POSITION is stable — the store computes `idx`, the target message's index
+ * in its own `messages` array, and that array is built by the SAME converter
+ * (pi-session-list.ts's `convertPiSessionEntries`) whether live or replayed.
+ * So `messages` here must be exactly that converter's output (id = the real
+ * pi entryId, role = 'user'|'assistant'|'system') for position `messageIndex`
+ * to line up with the caller's `idx`.
+ *
+ * `fork {entryId}` requires entryId to be a USER message on the active
+ * branch (rpc.md) — it drops that entry and everything after. So: walk
+ * forward from the slot right after the target for the first `role==='user'`
+ * entry (skipping any `system` compaction slot in between — pi's tree
+ * truncates by entry id, not by array position, so a compaction entry
+ * between the target and the next user turn doesn't change WHAT to drop,
+ * only its position) and return its id. If none follows — forking the
+ * latest turn — return `PI_FORK_CLONE_LATEST_SENTINEL`: nothing to drop, so
+ * `clone` (duplicate the branch at its current position) is the right
+ * primitive, not `fork`.
+ *
+ * `messageIndex` out of range (the target itself isn't on disk yet — a
+ * still-in-flight or otherwise unflushed message) returns null, mirroring
+ * `findForkAnchorUuid`'s "message-not-found" contract.
+ */
+export function findPiForkAnchorEntryId(
+  messages: Array<{ id: string; role: string }>,
+  messageIndex: number
+): string | null {
+  if (messageIndex < 0 || messageIndex >= messages.length) return null
+  for (let i = messageIndex + 1; i < messages.length; i++) {
+    if (messages[i].role === 'user') return messages[i].id
+  }
+  return PI_FORK_CLONE_LATEST_SENTINEL
 }

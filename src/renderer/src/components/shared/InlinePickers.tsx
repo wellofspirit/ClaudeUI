@@ -11,6 +11,8 @@ import {
   type ThinkingMode
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
+import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
+import { EngineLogo } from './EngineLogo'
 
 export interface ModelDisplay {
   value: string
@@ -24,6 +26,8 @@ export interface ModelDisplay {
   engineId?: EngineId
   /** Vendor id within the engine (used for group header rendering). */
   vendorId?: VendorId
+  /** true when the provider catalog reports zero input+output cost (e.g. opencode zen free tier). */
+  free?: boolean
 }
 
 function useClickOutside(
@@ -42,14 +46,19 @@ function useClickOutside(
   }, [ref, open, close])
 }
 
-function unsupportedTooltip(level: EffortLevel): string {
+/** Tooltip for a disabled EffortPicker option. Shared with MobileConfigSheet's EffortPage. */
+export function unsupportedTooltip(level: EffortLevel): string {
   if (level === 'xhigh') return 'xhigh effort is only available on Opus 4.7'
   if (level === 'max') return 'max effort is not supported on this model'
   return 'Not supported on this model'
 }
 
-/** Derive groups from a flat model list by (engineId, vendorId) pairing. */
-function deriveModelGroups(
+/** Tooltip for a disabled Adaptive thinking option. Shared with MobileConfigSheet's ThinkingPage. */
+export const ADAPTIVE_UNSUPPORTED_TOOLTIP =
+  'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'
+
+/** Derive groups from a flat model list by (engineId, vendorId) pairing. Shared with MobileConfigSheet's ModelPage. */
+export function deriveModelGroups(
   models: ModelDisplay[]
 ): Array<{ key: string; label: string; items: ModelDisplay[] }> {
   const groupMap = new Map<string, { label: string; items: ModelDisplay[] }>()
@@ -60,12 +69,84 @@ function deriveModelGroups(
     if (!groupMap.has(key)) {
       // Build a human label: "Claude · Anthropic" or "opencode · <vendorName>"
       const vendorLabel = vendorId.charAt(0).toUpperCase() + vendorId.slice(1)
-      const engineLabel = engineId === 'claude' ? 'Claude' : engineId
+      const engineLabel = engineMeta(engineId).label
       groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, items: [] })
     }
     groupMap.get(key)!.items.push(m)
   }
   return Array.from(groupMap.entries()).map(([key, g]) => ({ key, ...g }))
+}
+
+export function EnginePicker({
+  selectedEngineId,
+  locked,
+  onSelectEngine
+}: {
+  selectedEngineId: EngineId
+  locked: boolean
+  onSelectEngine: (engineId: EngineId) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+  const selected = engineMeta(selectedEngineId)
+
+  return (
+    <div className="relative" ref={ref} data-testid="EnginePicker">
+      <button
+        type="button"
+        disabled={locked}
+        title={
+          locked
+            ? 'Engine cannot change after session initialization or for historical sessions'
+            : 'Engine'
+        }
+        data-testid="EnginePicker.trigger"
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(!open)
+        }}
+        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <EngineLogo engineId={selectedEngineId} size={11} className="shrink-0" />
+        <span>{selected.label}</span>
+        <svg
+          width="8"
+          height="8"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 w-36 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          {Object.values(ENGINE_META).map((meta) => (
+            <button
+              key={meta.id}
+              type="button"
+              data-testid="EnginePicker.option"
+              data-engine={meta.id}
+              onClick={() => {
+                onSelectEngine(meta.id)
+                setOpen(false)
+              }}
+              className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
+                meta.id === selectedEngineId
+                  ? 'text-text-primary bg-bg-hover'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
+              {meta.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function ModelPicker({
@@ -81,9 +162,24 @@ export function ModelPicker({
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
 
+  // Local-only filter toggle — intentionally not persisted across dropdown
+  // open/close (or model list changes); it simply resets on remount.
+  const [freeOnly, setFreeOnly] = useState(false)
+
   // Derive groups only when models change (avoids re-grouping every render)
   const groups = useMemo(() => deriveModelGroups(models), [models])
   const isGrouped = groups.length > 1
+  const hasFreeModels = useMemo(() => models.some((m) => m.free), [models])
+  const displayedGroups = useMemo(() => {
+    // Ignore a stale toggle when the list no longer contains free models
+    // (e.g. the session became engine-locked to Claude and upstream filtering
+    // stripped all opencode models) — the chip is unmounted then, so an active
+    // filter would otherwise leave a permanently empty dropdown.
+    if (!freeOnly || !hasFreeModels) return groups
+    return groups
+      .map((g) => ({ ...g, items: g.items.filter((m) => m.free) }))
+      .filter((g) => g.items.length > 0)
+  }, [groups, freeOnly, hasFreeModels])
 
   return (
     <div className="relative" ref={ref} data-testid="ModelPicker">
@@ -110,7 +206,27 @@ export function ModelPicker({
       </button>
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-56 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {groups.map((group) => (
+          {hasFreeModels && (
+            <div className="px-2 pt-2 pb-1 flex items-center border-b border-border/50">
+              <button
+                type="button"
+                data-testid="ModelPicker.freeFilter"
+                aria-pressed={freeOnly}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setFreeOnly((v) => !v)
+                }}
+                className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide transition-colors cursor-pointer border ${
+                  freeOnly
+                    ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                    : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
+                }`}
+              >
+                Free
+              </button>
+            </div>
+          )}
+          {displayedGroups.map((group) => (
             <div key={group.key}>
               {isGrouped && (
                 <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
@@ -132,7 +248,17 @@ export function ModelPicker({
                       : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
                   }`}
                 >
-                  <span className="text-[12px]">{m.shortName}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[12px]">{m.shortName}</span>
+                    {m.free && (
+                      <span
+                        data-testid="ModelPicker.freeBadge"
+                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
                   {m.description && (
                     <span className="text-text-muted text-[10px]">
                       {m.description.split('·')[1]?.trim()}
@@ -347,11 +473,7 @@ export function ThinkingPicker({
                 data-testid="ThinkingPicker.option"
                 data-value={mode}
                 disabled={!enabled}
-                title={
-                  enabled
-                    ? undefined
-                    : 'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'
-                }
+                title={enabled ? undefined : ADAPTIVE_UNSUPPORTED_TOOLTIP}
                 onClick={() => {
                   if (enabled) {
                     onSelectThinking(mode)

@@ -142,9 +142,23 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
 
   const isCompleted = !isRunning && !isError
   const isStopping = stoppingTaskIds.includes(toolUseId)
+  // Cross-engine dispatch cards (ADR-033 M3, M4b) reuse this component via the
+  // 'task' kind but have no backgrounding concept — cli.js's backgroundTask
+  // control targets native Task/Agent tool calls, not an in-flight MCP/bridge
+  // dispatch. Detected by tool name (all three engines' dispatch tool names),
+  // not a ToolView discriminator. Stop stays available (routed to
+  // crossEngineDispatcher.stopDispatch via session:stop-task). The bare
+  // 'dispatch_agent' name is pi's (pi.registerTool() has no mcp__/claudeui_
+  // prefix to sanitize) — safe to match unconditionally since only pi ever
+  // emits that exact bare name (Claude/opencode use their own prefixed names).
+  const isDispatch =
+    block.toolName === 'mcp__claude-ui-collab__dispatch_agent' ||
+    block.toolName === 'claudeui_dispatch_agent' ||
+    block.toolName === 'dispatch_agent'
   // Gated on capabilities.backgroundTasks — engines without background execution
   // never offer "Send to background". Claude: true → unchanged.
-  const canBackground = isRunning && !isBackground && !isStopping && backgroundTasksEnabled
+  const canBackground =
+    isRunning && !isBackground && !isStopping && backgroundTasksEnabled && !isDispatch
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
   const handleBackgroundTask = async (): Promise<void> => {
@@ -175,7 +189,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const handleStopTask = async (): Promise<void> => {
     if (!activeSessionId) return
     setTaskStopping(activeSessionId, toolUseId)
-    const result = await window.api.stopTask(activeSessionId, toolUseId)
+    // isDispatch: routes to the dispatcher with a durable stop-intent — a
+    // dispatch card can show "running" before the dispatch has even reached
+    // the main process (ADR-033 M3), so the plain toolUseId lookup can miss.
+    const result = await window.api.stopTask(activeSessionId, toolUseId, isDispatch)
 
     if (!result.success) {
       window.api.logError('TaskCard', `Failed to stop task: ${result.error}`)

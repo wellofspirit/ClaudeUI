@@ -45,7 +45,15 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
 
     await window.api.sendPrompt(activeSessionId, prompt)
     clearDiffComments(activeSessionId)
-  }, [activeSessionId, comments, sdkActive, sessions, markSdkActive, clearDiffComments])
+  }, [
+    activeSessionId,
+    comments,
+    sdkActive,
+    sessions,
+    markSdkActive,
+    clearDiffComments,
+    selectedEngineId
+  ])
 
   // Stable ref so the keydown handler always sees the latest handleSend
   const sendRef = useRef(handleSend)

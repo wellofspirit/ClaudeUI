@@ -10,9 +10,14 @@
  *     reads it back and registers prices without a server.
  *  3. registerSupplementalPricing integration via the refreshPrices path.
  *  4. Best-effort: server failures return { count: 0 } without throwing.
+ *
+ * Isolation: the SUT's PRICES_FILE is a module-level const derived from
+ * os.homedir() at import time. We mock 'os' so homedir() resolves to a per-run
+ * temp dir — these tests must NEVER touch the developer's real
+ * ~/.claude/ui/opencode-prices.json (refreshPrices persists on every call).
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -21,11 +26,30 @@ import * as path from 'path'
 // Hoisted mocks — must be at top level so vi.hoisted runs before any imports
 // ---------------------------------------------------------------------------
 
-const { mockAcquire, mockRelease, mockGetConfigProviders } = vi.hoisted(() => ({
-  mockAcquire: vi.fn(),
-  mockRelease: vi.fn(),
-  mockGetConfigProviders: vi.fn()
-}))
+const { mockAcquire, mockRelease, mockGetConfigProviders, TEMP_HOME } = vi.hoisted(() => {
+  // Hoisted code runs before ESM imports resolve, so use process.getBuiltinModule
+  // (Node 22.3+) to reach the REAL fs/os/path for the temp-dir setup.
+  const realFs = process.getBuiltinModule('fs')
+  const realOs = process.getBuiltinModule('os')
+  const realPath = process.getBuiltinModule('path')
+  return {
+    mockAcquire: vi.fn(),
+    mockRelease: vi.fn(),
+    mockGetConfigProviders: vi.fn(),
+    TEMP_HOME: realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'opencode-prices-test-'))
+  }
+})
+
+// Redirect os.homedir() → TEMP_HOME. vitest hoists vi.mock above imports, so the
+// mock is in place before the SUT module (and its PRICES_FILE const) loads.
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>()
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME }
+  }
+})
 
 vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
@@ -101,6 +125,9 @@ const fakeNoCostProvider = {
 import { refreshPrices, loadPersistedPrices } from '../opencode-pricing'
 import { equivalentCostUsd, registerSupplementalPricing } from '../../../shared/pricing'
 
+/** The SUT's PRICES_FILE, resolved under the mocked (temp) homedir. */
+const PRICES_PATH = path.join(TEMP_HOME, '.claude', 'ui', 'opencode-prices.json')
+
 beforeEach(() => {
   mockAcquire.mockResolvedValue({ baseUrl: 'http://localhost:9999', authHeader: 'Bearer test' })
   mockRelease.mockReturnValue(undefined)
@@ -115,15 +142,25 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+afterAll(() => {
+  // Best-effort cleanup of the per-run temp home.
+  try {
+    fs.rmSync(TEMP_HOME, { recursive: true, force: true })
+  } catch {
+    /* ignore */
+  }
+})
+
 // ---------------------------------------------------------------------------
 // refreshPrices — mapping and count
 // ---------------------------------------------------------------------------
 
 describe('opencode-pricing: refreshPrices', () => {
-  it('returns count=2 (models with cost fields) and a refreshedAt timestamp', async () => {
+  it('returns count=1 (models with a non-zero cost) and a refreshedAt timestamp', async () => {
     const result = await refreshPrices()
-    // gpt-4o-test and gpt-3.5-free have cost; llama-3 has none → 2 entries
-    expect(result.count).toBe(2)
+    // gpt-4o-test has non-zero cost; free-tier-llm-v1 is $0/$0 (filtered — see
+    // isZeroCost); llama-3 has no cost field at all → 1 entry
+    expect(result.count).toBe(1)
     expect(typeof result.refreshedAt).toBe('number')
     expect(result.refreshedAt).toBeGreaterThan(0)
   })
@@ -137,15 +174,16 @@ describe('opencode-pricing: refreshPrices', () => {
     expect(cost).toBeCloseTo(2.5)
   })
 
-  it('maps free model (cost.input=0) → cost resolved as 0, not null', async () => {
+  it('skips a $0/$0 model (cost.input=0, cost.output=0) — produces NO entry', async () => {
     await refreshPrices()
-    // free-tier-llm-v1 has cost.input=0; it doesn't match any built-in entry
+    // free-tier-llm-v1 has cost {input:0, output:0} — a $0 list price carries no
+    // estimation signal (see isZeroCost) so it must not be registered at all;
+    // equivalentCostUsd falls through to null, not a poisoned 0.
     const cost = equivalentCostUsd('openai', 'free-tier-llm-v1', {
       inputTokens: 1_000_000, outputTokens: 0,
       cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
     })
-    // Registered with 0 rate → equivalentCostUsd returns 0 (not null)
-    expect(cost).toBe(0)
+    expect(cost).toBeNull()
   })
 
   it('skips models without a cost field (llama-3 → not registered)', async () => {
@@ -189,19 +227,20 @@ describe('opencode-pricing: refreshPrices', () => {
 })
 
 // ---------------------------------------------------------------------------
-// loadPersistedPrices — round-trip via a real temp file
+// loadPersistedPrices — round-trip via the (temp-homedir) prices file
 // ---------------------------------------------------------------------------
 
 describe('opencode-pricing: persisted-file round-trip', () => {
-  const tmpDir = os.tmpdir()
-  const tmpFile = path.join(tmpDir, `test-prices-${process.pid}.json`)
+  beforeEach(() => {
+    // Isolate from the refreshPrices tests above (they persist to the same file).
+    fs.rmSync(PRICES_PATH, { force: true })
+  })
 
-  afterEach(() => {
-    try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
+  it('sanity: the prices file under test lives under os.tmpdir(), not the real home', () => {
+    expect(PRICES_PATH.startsWith(os.tmpdir())).toBe(true)
   })
 
   it('loadPersistedPrices registers entries from a hand-written JSON file', () => {
-    // Write a minimal PricingEntry[] manually
     const entries = [
       {
         vendorId: 'test-vendor',
@@ -212,19 +251,10 @@ describe('opencode-pricing: persisted-file round-trip', () => {
         }
       }
     ]
-    fs.writeFileSync(tmpFile, JSON.stringify(entries), 'utf-8')
+    fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
+    fs.writeFileSync(PRICES_PATH, JSON.stringify(entries), 'utf-8')
 
-    // Monkey-patch the module to use our tmp file by testing via the real FS path.
-    // We write to the real PRICES_FILE location used by loadPersistedPrices.
-    // Since we can't override the private constant, we test the integration via
-    // a known-good file that's directly re-read. We do this by overriding the
-    // module's import path using vi.doMock — but the simpler approach here
-    // is to exercise the public surface via refreshPrices+registerSupplementalPricing
-    // which IS the path that loadPersistedPrices covers.
-    //
-    // We verify the round-trip via registerSupplementalPricing directly, which
-    // is what loadPersistedPrices calls internally.
-    registerSupplementalPricing(entries as Parameters<typeof registerSupplementalPricing>[0])
+    loadPersistedPrices()
 
     const cost = equivalentCostUsd('test-vendor', 'my-model-x1', {
       inputTokens: 1_000_000, outputTokens: 0,
@@ -233,8 +263,58 @@ describe('opencode-pricing: persisted-file round-trip', () => {
     expect(cost).toBeCloseTo(7.0)
   })
 
+  it('refreshPrices → loadPersistedPrices full round-trip (write then re-read from disk)', async () => {
+    await refreshPrices()
+    // Simulate an app restart: wipe the in-memory table, reload from disk only.
+    registerSupplementalPricing([])
+    loadPersistedPrices()
+
+    const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
+      inputTokens: 1_000_000, outputTokens: 0,
+      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+    })
+    expect(cost).toBeCloseTo(2.5)
+  })
+
   it('loadPersistedPrices is a no-op when the file does not exist', () => {
     // Should not throw even when the prices file is absent
     expect(() => loadPersistedPrices()).not.toThrow()
+  })
+
+  it('self-heals a poisoned persisted file — drops a $0/$0 entry on load, keeps a paid entry', () => {
+    const poisoned = [
+      {
+        vendorId: 'openai',
+        match: 'poisoned-zero-cost-model',
+        pricing: {
+          inputPerMTok: 0, outputPerMTok: 0,
+          cacheWritePerMTok: 0, cacheWrite1hPerMTok: 0, cacheReadPerMTok: 0
+        }
+      },
+      {
+        vendorId: 'openai',
+        match: 'legit-paid-model',
+        pricing: {
+          inputPerMTok: 2.5, outputPerMTok: 10,
+          cacheWritePerMTok: 2.5, cacheWrite1hPerMTok: 2.5, cacheReadPerMTok: 1.25
+        }
+      }
+    ]
+    fs.mkdirSync(path.dirname(PRICES_PATH), { recursive: true })
+    fs.writeFileSync(PRICES_PATH, JSON.stringify(poisoned), 'utf-8')
+
+    loadPersistedPrices()
+
+    const zeroCost = equivalentCostUsd('openai', 'poisoned-zero-cost-model', {
+      inputTokens: 1_000_000, outputTokens: 0,
+      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+    })
+    expect(zeroCost).toBeNull()
+
+    const paidCost = equivalentCostUsd('openai', 'legit-paid-model', {
+      inputTokens: 1_000_000, outputTokens: 0,
+      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+    })
+    expect(paidCost).toBeCloseTo(2.5)
   })
 })

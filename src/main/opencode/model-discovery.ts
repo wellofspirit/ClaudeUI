@@ -2,6 +2,7 @@ import { opencodeServerManager } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { loadEngineConfig } from '../services/ui-config'
+import { readOpencodeNativeConfig, readDeclaredProviderIds } from './opencode-config'
 import type {
   EngineModelGroup,
   ModelInfo,
@@ -10,14 +11,27 @@ import type {
 } from '../../shared/types'
 import type { Provider, AuthOption } from './protocol/types'
 import { logger } from '../services/logger'
+import { engineMeta, FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 
 let cachedGroups: EngineModelGroup[] | null = null
 
-/** Per-model context-window cache: key = "providerID/modelID", value = tokens. */
-const contextWindowCache = new Map<string, number>()
+/** Cached per-model capability input (the subset opencodeModelCapabilities consumes). */
+type OpencodeModelCapInput = {
+  capabilities?: { attachment?: boolean; toolcall?: boolean; reasoning?: boolean; input?: { image?: boolean } }
+  limit?: { context?: number; output?: number }
+  cost?: { cache?: { read: number; write: number } }
+}
+const modelCapsCache = new Map<string, OpencodeModelCapInput>()
 
-/** Free/bundled opencode providers that never require auth credentials. */
-const FREE_VENDOR_IDS = new Set(['opencode', 'zen'])
+/**
+ * Parse an opencode model VALUE ("providerID/modelID", bare id → provider
+ * 'opencode') into its parts. Canonical single copy — delegates to the
+ * EngineMeta decode so the string convention lives in ONE place (Item 5).
+ */
+export function parseModelString(model: string): { providerID: string; modelID: string } {
+  const ref = engineMeta('opencode').decodeModelValue(model)
+  return { providerID: ref.vendorId, modelID: ref.modelId }
+}
 
 /**
  * Raw catalog snapshot (the full models.dev provider set + which providers are
@@ -35,6 +49,27 @@ interface CatalogSnapshot {
 }
 
 let cachedCatalog: CatalogSnapshot | null = null
+
+/**
+ * Derive the addable auth methods for a provider id from the /provider/auth
+ * catalog: 'oauth' when a custom OAuth loader is present, 'api' when a custom
+ * API-key loader is present, and a plain-key fallback (['api']) when the
+ * provider has no custom loader at all — the generic /auth endpoint still
+ * accepts a key for those. Shared by regular catalog entries and the synthetic
+ * re-addable entries for disabled providers (see discoverOpencodeProviderCatalog).
+ */
+function deriveAuthMethods(
+  providerId: string,
+  authCatalog: Record<string, AuthOption[]>
+): ('api' | 'oauth')[] {
+  const opts = authCatalog[providerId] ?? []
+  const methods = new Set<'api' | 'oauth'>()
+  for (const o of opts) {
+    if (o.type === 'oauth') methods.add('oauth')
+    else if (o.type === 'api') methods.add('api')
+  }
+  return methods.size > 0 ? [...methods] : ['api']
+}
 
 /**
  * Read the per-provider model allowlist from engine config. Returns a map keyed
@@ -91,39 +126,79 @@ async function fetchCatalogSnapshot(): Promise<CatalogSnapshot> {
 export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProviderCatalogEntry[]> {
   try {
     const { all, configuredIds, authCatalog } = await fetchCatalogSnapshot()
-    return all
-      .map((provider): OpencodeProviderCatalogEntry => {
-        const isFree = FREE_VENDOR_IDS.has(provider.id)
-        const isConfigured = configuredIds.has(provider.id)
-        const authState: OpencodeProviderCatalogEntry['authState'] = isFree
-          ? 'free'
-          : isConfigured
-            ? 'authenticated'
-            : 'unauthenticated'
+    const entries = all.map((provider): OpencodeProviderCatalogEntry => {
+      const isFree = FREE_OPENCODE_VENDOR_IDS.has(provider.id)
+      const isConfigured = configuredIds.has(provider.id)
+      const authState: OpencodeProviderCatalogEntry['authState'] = isFree
+        ? 'free'
+        : isConfigured
+          ? 'authenticated'
+          : 'unauthenticated'
 
-        // Auth methods: derive from the custom-loader catalog when present.
-        // Providers absent from it still accept a generic API key, so fall back
-        // to ['api'] for non-free providers (e.g. openrouter via OPENROUTER_API_KEY).
-        const opts = authCatalog[provider.id] ?? []
-        const methods = new Set<'api' | 'oauth'>()
-        for (const o of opts) {
-          if (o.type === 'oauth') methods.add('oauth')
-          else if (o.type === 'api') methods.add('api')
-        }
-        let authMethods: ('api' | 'oauth')[]
-        if (isFree) authMethods = []
-        else if (methods.size > 0) authMethods = [...methods]
-        else authMethods = ['api']
+      // Auth methods: derive from the custom-loader catalog when present.
+      // Providers absent from it still accept a generic API key, so fall back
+      // to ['api'] for non-free providers (e.g. openrouter via OPENROUTER_API_KEY).
+      const authMethods: ('api' | 'oauth')[] = isFree
+        ? []
+        : deriveAuthMethods(provider.id, authCatalog)
 
-        return {
-          id: provider.id,
-          name: provider.name || provider.id,
-          authState,
-          authMethods,
-          modelCount: Object.keys(provider.models ?? {}).length
-        }
+      return {
+        id: provider.id,
+        name: provider.name || provider.id,
+        authState,
+        authMethods,
+        modelCount: Object.keys(provider.models ?? {}).length
+      }
+    })
+
+    // opencode's GET /provider EXCLUDES disabled providers from `all` entirely
+    // (verified against the live server), so a provider removed via handleRemove
+    // (which adds it to disabledProviders) vanishes from both "Added providers"
+    // AND the "Add provider" catalog — the un-disable path in finishAdd() becomes
+    // unreachable because the entry never shows up to click "Add" on again.
+    // Re-synthesize a minimal addable entry for each disabled id that isn't
+    // already present in `all` and isn't a user-declared custom provider (those
+    // belong to the Custom providers editor, not this catalog).
+    //
+    // The disabled list is read FRESH here on every call — deliberately NOT
+    // folded into the cached fetchCatalogSnapshot() — so that immediately after
+    // finishAdd() clears an id from disabledProviders, the synthetic entry for
+    // it disappears on the very next catalog read even while the underlying
+    // server catalog snapshot is still warm.
+    //
+    // disabledIds comes from readOpencodeNativeConfig() (the single resolved
+    // write target — that's the file ClaudeUI's own remove/re-add writes to),
+    // but declared custom-provider ids must union BOTH global config files:
+    // opencode merges opencode.jsonc AND opencode.json at load, so a split
+    // layout can declare `provider` entries in the file we don't resolve.
+    // See readDeclaredProviderIds().
+    let disabledIds: string[] = []
+    let declaredProviderIds = new Set<string>()
+    try {
+      disabledIds = readOpencodeNativeConfig().disabledProviders ?? []
+      declaredProviderIds = new Set(readDeclaredProviderIds())
+    } catch {
+      // opencode's own config files are optional — treat as "nothing disabled".
+    }
+
+    const presentIds = new Set(entries.map((e) => e.id))
+    for (const id of disabledIds) {
+      if (presentIds.has(id)) continue
+      if (declaredProviderIds.has(id)) continue
+      // Mirror the regular-entry derivation: a disabled zen gateway is still a
+      // credential-free provider ('free', no auth methods), so the Add row can
+      // offer the keyless re-add path instead of a meaningless API-key input.
+      const isFree = FREE_OPENCODE_VENDOR_IDS.has(id)
+      entries.push({
+        id,
+        name: id,
+        authState: isFree ? 'free' : 'unauthenticated',
+        authMethods: isFree ? [] : deriveAuthMethods(id, authCatalog),
+        modelCount: 0
       })
-      .sort((a, b) => a.name.localeCompare(b.name))
+    }
+
+    return entries.sort((a, b) => a.name.localeCompare(b.name))
   } catch (err) {
     logger.warn(
       'opencode',
@@ -145,15 +220,20 @@ export async function getOpencodeProviderModels(
     const { all } = await fetchCatalogSnapshot()
     const provider = all.find((p) => p.id === providerId)
     if (!provider) return []
+    // Same zen-gated free derivation as discoverOpencodeModels — see its comment.
+    const providerIsFreeGateway = FREE_OPENCODE_VENDOR_IDS.has(providerId)
     return Object.entries(provider.models ?? {})
       .map(([modelId, m]): OpencodeCatalogModel => {
         const rec = m as Provider['models'][string] & { release_date?: string }
+        const isFree =
+          providerIsFreeGateway && !!rec.cost && rec.cost.input === 0 && rec.cost.output === 0
         return {
           id: modelId,
           name: rec.name || modelId,
           releaseDate: rec.release_date,
           toolCalling: !!rec.capabilities?.toolcall,
-          reasoning: !!rec.capabilities?.reasoning
+          reasoning: !!rec.capabilities?.reasoning,
+          ...(isFree ? { free: true } : {})
         }
       })
       .sort((a, b) => {
@@ -216,15 +296,34 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
             // OpenCode Zen model reads "MiMo V2.5 Free" (primary) / "OpenCode Zen" (sub),
             // not the inverted provider-first form.
             const description = `${m.name || modelId} · ${provider.name}`
-            // Cache the context window size for status-line usage (% used).
-            if (m.limit?.context) {
-              contextWindowCache.set(`${provider.id}/${modelId}`, m.limit.context)
-            }
+            // Cache the full capability input for status-line context-window lookups AND
+            // for resolveOpencodeCapabilities (session vision/toolCalling/promptCaching).
+            modelCapsCache.set(`${provider.id}/${modelId}`, {
+              capabilities: {
+                attachment: caps?.attachment,
+                toolcall: caps?.toolcall,
+                reasoning: caps?.reasoning,
+                input: caps?.input ? { image: caps.input.image } : undefined
+              },
+              limit: m.limit ? { context: m.limit.context, output: m.limit.output } : undefined,
+              cost: m.cost?.cache ? { cache: m.cost.cache } : undefined
+            })
             // Compute reasoning variant keys: only when reasoning is true and variants exist.
             const reasoningVariants =
               caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
                 ? Object.keys(m.variants)
                 : []
+            // A model is free iff the catalog reports cost AND both input/output are zero
+            // AND the provider is a credential-free zen gateway (FREE_OPENCODE_VENDOR_IDS).
+            // Subscription/OAuth-authenticated providers (e.g. openai) report zeroed catalog
+            // costs for models the USER pays for elsewhere — that's not "free", it's a
+            // pricing-catalog blind spot, so gate on provider identity, not just cost.
+            // Missing cost is treated as unknown, not free.
+            const isFree =
+              !!m.cost &&
+              m.cost.input === 0 &&
+              m.cost.output === 0 &&
+              FREE_OPENCODE_VENDOR_IDS.has(provider.id)
             return {
               value: `${provider.id}/${modelId}`,
               displayName: m.name || modelId,
@@ -235,7 +334,8 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
               toolCalling,
               supportsEffort: false,
               supportsAdaptiveThinking: false,
-              ...(reasoningVariants.length > 0 ? { reasoningVariants } : {})
+              ...(reasoningVariants.length > 0 ? { reasoningVariants } : {}),
+              ...(isFree ? { free: true } : {})
             }
           })
 
@@ -307,12 +407,34 @@ export async function resolveOpencodeSpawnModel(requested?: string): Promise<str
  * the discovery cache (discovery hasn't run yet, or the model has no limit).
  */
 export function getOpencodeModelContextWindow(providerID: string, modelID: string): number {
-  return contextWindowCache.get(`${providerID}/${modelID}`) ?? 0
+  return modelCapsCache.get(`${providerID}/${modelID}`)?.limit?.context ?? 0
+}
+
+/**
+ * Return the cached capability input for a model (attachment/vision, toolcall,
+ * limit, cost) as reported by /config/providers, or undefined if the model is
+ * not in the discovery cache (discovery hasn't run yet). Feeds
+ * resolveOpencodeCapabilities so a session's vision/toolCalling/contextWindow
+ * reflect the actual model.
+ */
+export function getOpencodeModelCapabilities(providerID: string, modelID: string): OpencodeModelCapInput | undefined {
+  return modelCapsCache.get(`${providerID}/${modelID}`)
+}
+
+/**
+ * Synchronous, cache-only peek at the discovered opencode model groups —
+ * returns null on a cold cache. Unlike `discoverOpencodeModels`, this NEVER
+ * populates the cache or spawns a server, so it's safe to call from any
+ * registration path that must stay synchronous and side-effect-free (e.g.
+ * building the `dispatch_agent` tool description — ADR-033 follow-up).
+ */
+export function peekOpencodeModels(): EngineModelGroup[] | null {
+  return cachedGroups
 }
 
 /** Invalidate the model + catalog discovery caches (call on auth/config change). */
 export function invalidateOpencodeModelCache(): void {
   cachedGroups = null
   cachedCatalog = null
-  contextWindowCache.clear()
+  modelCapsCache.clear()
 }

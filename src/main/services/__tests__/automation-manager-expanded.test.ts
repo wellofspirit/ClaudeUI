@@ -1,8 +1,8 @@
 /**
  * @vitest-environment node
  *
- * Expanded coverage for AutomationManager — addresses test-coverage-proposal
- * section 2.5: DST transitions, interval drift, concurrency, cancel/dismiss,
+ * Expanded coverage for AutomationManager:
+ * DST transitions, interval drift, concurrency, cancel/dismiss,
  * retention, enable/disable cycle, upsert preserves run history, startup load.
  *
  * AutomationManager resolves AUTOMATION_DIR at module load time from

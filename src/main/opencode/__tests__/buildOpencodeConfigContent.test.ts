@@ -2,10 +2,13 @@
  * Unit tests for buildOpencodeConfigContent (OpencodeServerManager).
  *
  * Guards:
- * - Only {mcp: {claudeui: ...}} is emitted (no model/provider/agent fields).
+ * - Only {mcp: {claudeui: ...}} + the experimental block are emitted (no
+ *   model/provider/agent fields).
  * - MCP host port and token are wired in correctly.
  * - API keys are never injected.
  * - bridgedMcp arg merges Claude MCP servers alongside claudeui; claudeui is always first.
+ * - experimental.continue_loop_on_deny keeps permission rejections non-fatal
+ *   (Claude parity — Slice C).
  *
  * Model/provider/agent fields are now written to opencode's own config file by
  * opencode-config.ts; they are no longer part of OPENCODE_CONFIG_CONTENT.
@@ -18,14 +21,19 @@ import type { OpencodeMcpEntry } from '../claude-mcp-bridge'
 const PORT = 19000
 const TOKEN = 'test-token'
 
-function parse(bridgedMcp?: Record<string, OpencodeMcpEntry>): Record<string, unknown> {
-  return JSON.parse(buildOpencodeConfigContent(PORT, TOKEN, bridgedMcp)) as Record<string, unknown>
+function parse(
+  bridgedMcp?: Record<string, OpencodeMcpEntry>,
+  pluginPath?: string | null
+): Record<string, unknown> {
+  return JSON.parse(
+    buildOpencodeConfigContent(PORT, TOKEN, bridgedMcp, pluginPath)
+  ) as Record<string, unknown>
 }
 
 describe('buildOpencodeConfigContent', () => {
-  it('emits ONLY the mcp.claudeui block — no model/provider/agent fields', () => {
+  it('emits ONLY the mcp + experimental blocks — no model/provider/agent fields', () => {
     const out = parse()
-    expect(Object.keys(out)).toEqual(['mcp'])
+    expect(Object.keys(out)).toEqual(['mcp', 'experimental'])
     expect(out).not.toHaveProperty('model')
     expect(out).not.toHaveProperty('small_model')
     expect(out).not.toHaveProperty('provider')
@@ -61,6 +69,35 @@ describe('buildOpencodeConfigContent', () => {
     const mcp = out.mcp as Record<string, unknown>
     const claudeui = mcp.claudeui as Record<string, unknown>
     expect(claudeui.type).toBe('remote')
+  })
+
+  it('sets experimental.continue_loop_on_deny: true (rejections stay non-fatal)', () => {
+    const out = parse()
+    expect(out.experimental).toEqual({ continue_loop_on_deny: true })
+  })
+
+  // ── ADR-033 M2: dispatch timeout + caller-identity plugin ──────────────────
+
+  it('sets mcp.claudeui.timeout to a generous value (exceeds the dispatcher 10-min DISPATCH_TIMEOUT_MS)', () => {
+    const out = parse()
+    const mcp = out.mcp as Record<string, unknown>
+    const claudeui = mcp.claudeui as Record<string, unknown>
+    expect(claudeui.timeout).toBeGreaterThan(10 * 60 * 1000)
+  })
+
+  it('omits `plugin` when no pluginPath is provided', () => {
+    const out = parse()
+    expect(out).not.toHaveProperty('plugin')
+  })
+
+  it('emits plugin: [path] when a pluginPath is provided', () => {
+    const out = parse(undefined, '/abs/path/to/claudeui-xeng-plugin.ts')
+    expect(out.plugin).toEqual(['/abs/path/to/claudeui-xeng-plugin.ts'])
+  })
+
+  it('omits `plugin` when pluginPath is explicitly null (not found)', () => {
+    const out = parse(undefined, null)
+    expect(out).not.toHaveProperty('plugin')
   })
 
   // ── bridgedMcp integration ────────────────────────────────────────────────

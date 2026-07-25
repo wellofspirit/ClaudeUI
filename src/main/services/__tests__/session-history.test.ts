@@ -5,7 +5,24 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { computeTokenMetrics } from '../session-history'
+import {
+  computeTokenMetrics,
+  computeTurnSpanDurationMs,
+  createTurnSpanAccumulator,
+  projectKeyForCwd
+} from '../session-history'
+
+describe('projectKeyForCwd', () => {
+  it('matches the on-disk key for a Windows cwd (drive colon + backslashes → -)', () => {
+    expect(projectKeyForCwd('D:\\WorkPlace\\ClaudeUI')).toBe('D--WorkPlace-ClaudeUI')
+    expect(projectKeyForCwd('C:\\Users\\why20')).toBe('C--Users-why20')
+  })
+
+  it('matches the on-disk key for a POSIX cwd (slashes and dots → -)', () => {
+    expect(projectKeyForCwd('/home/u/proj.x')).toBe('-home-u-proj-x')
+    expect(projectKeyForCwd('/tmp/proj')).toBe('-tmp-proj')
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Replicate private parser functions from session-history.ts for testing
@@ -303,5 +320,332 @@ describe('computeTokenMetrics — context window from transcript model', () => {
     const m = await computeTokenMetrics(file, 'default')
     fs.unlinkSync(file)
     expect(m.usedPercentage).toBe(50) // 100k / 200k
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeTurnSpanDurationMs — active-turn duration reconstruction.
+//
+// Guard: real Claude transcripts carry NO `type: "result"` lines (verified
+// across 46 real transcripts), so the pre-fix implementation — which only
+// summed duration_ms off result lines — always returned 0 for every real
+// session. These tests exercise the turn-span reconstruction that replaces it.
+// ---------------------------------------------------------------------------
+
+describe('computeTurnSpanDurationMs', () => {
+  function userLine(
+    ts: string,
+    opts: { isMeta?: boolean; toolUseResult?: boolean } = {}
+  ): Record<string, unknown> {
+    return {
+      type: 'user',
+      timestamp: ts,
+      ...(opts.isMeta ? { isMeta: true } : {}),
+      ...(opts.toolUseResult ? { toolUseResult: { some: 'result' } } : {})
+    }
+  }
+  function assistantLine(ts?: string): Record<string, unknown> {
+    return { type: 'assistant', ...(ts ? { timestamp: ts } : {}), message: { content: [] } }
+  }
+
+  it('returns 0 for an empty transcript', () => {
+    expect(computeTurnSpanDurationMs([])).toBe(0)
+  })
+
+  it('sums multiple turns, each bounded by a real user prompt', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:05.000Z'), // turn 1 span: 5s
+      userLine('2026-01-01T00:01:00.000Z'),
+      assistantLine('2026-01-01T00:01:03.000Z') // turn 2 span: 3s
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(8000)
+  })
+
+  it('treats tool-result user lines as part of the in-flight turn, not new boundaries', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:02.000Z'),
+      userLine('2026-01-01T00:00:03.000Z', { toolUseResult: true }), // NOT a boundary
+      assistantLine('2026-01-01T00:00:10.000Z')
+    ]
+    // If the tool-result line were (wrongly) treated as a new turn boundary,
+    // this would split into two short spans instead of one 10s span.
+    expect(computeTurnSpanDurationMs(lines)).toBe(10000)
+  })
+
+  it('treats isMeta user lines as part of the in-flight turn, not new boundaries', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      userLine('2026-01-01T00:00:01.000Z', { isMeta: true }), // NOT a boundary
+      assistantLine('2026-01-01T00:00:06.000Z')
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(6000)
+  })
+
+  it('includes the trailing turn (no following user prompt) through EOF', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:04.000Z')
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(4000)
+  })
+
+  it('skips lines with a missing/unparseable timestamp without breaking the turn', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine(undefined), // no timestamp at all
+      { type: 'assistant', timestamp: 'not-a-date', message: { content: [] } }, // unparseable
+      assistantLine('2026-01-01T00:00:07.000Z')
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(7000)
+  })
+
+  it('clamps a negative span (out-of-order timestamps) to 0 rather than going negative', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:10.000Z'),
+      assistantLine('2026-01-01T00:00:05.000Z') // earlier than the prompt itself
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(0)
+  })
+
+  it('incremental accumulator push-per-line equals the batch result', () => {
+    // Mixed sequence exercising every state transition: multi-turn, tool-result
+    // and isMeta lines mid-turn, missing timestamps, trailing turn.
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:02.000Z'),
+      userLine('2026-01-01T00:00:03.000Z', { toolUseResult: true }),
+      assistantLine(undefined),
+      assistantLine('2026-01-01T00:00:10.000Z'),
+      userLine('2026-01-01T00:01:00.000Z'),
+      userLine('2026-01-01T00:01:01.000Z', { isMeta: true }),
+      assistantLine('2026-01-01T00:01:04.000Z') // trailing turn
+    ]
+    const acc = createTurnSpanAccumulator()
+    for (const line of lines) acc.push(line)
+    expect(acc.total()).toBe(computeTurnSpanDurationMs(lines))
+    expect(acc.total()).toBe(14000) // 10s (turn 1) + 4s (trailing turn 2)
+  })
+
+  it('accumulator total() is a non-destructive read — a later push still extends the open turn', () => {
+    const acc = createTurnSpanAccumulator()
+    acc.push(userLine('2026-01-01T00:00:00.000Z'))
+    acc.push(assistantLine('2026-01-01T00:00:03.000Z'))
+    expect(acc.total()).toBe(3000)
+    acc.push(assistantLine('2026-01-01T00:00:08.000Z'))
+    expect(acc.total()).toBe(8000)
+  })
+})
+
+describe('computeTokenMetrics — duration reconstruction from turn spans', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-dur-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+
+  it('reconstructs totalDurationMs from turn spans, not from (absent) result lines', async () => {
+    const file = writeTranscript([
+      { type: 'user', timestamp: '2026-01-01T00:00:00.000Z' },
+      { type: 'assistant', timestamp: '2026-01-01T00:00:05.000Z', message: { content: [] } }
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+    expect(m.totalDurationMs).toBe(5000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeTokenMetrics — modelCosts (Slice B: per-model session cost breakdown,
+// recomputed from pricing-table math since real transcripts carry no cost).
+// ---------------------------------------------------------------------------
+
+describe('computeTokenMetrics — modelCosts (Slice B)', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-cost-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+  function assistantMsg(
+    id: string,
+    model: string,
+    usage: { input_tokens: number; output_tokens: number }
+  ): object {
+    return { type: 'assistant', message: { id, model, usage } }
+  }
+
+  it('computes per-model cost using pricing-table math and sums to totalCostUsd', async () => {
+    const file = writeTranscript([
+      // sonnet: $3/MTok input → 1M input tokens = $3
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 }),
+      // opus-4-8: $5/MTok input → 1M input tokens = $5
+      assistantMsg('msg_2', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+
+    expect(m.modelCosts).toBeDefined()
+    const sonnet = m.modelCosts!.find((e) => e.modelId === 'claude-sonnet-4-6')
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    expect(sonnet).toEqual({ engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 3 })
+    expect(opus).toEqual({ engineId: 'claude', modelId: 'claude-opus-4-8', costUsd: 5 })
+    expect(m.totalCostUsd).toBeCloseTo(8, 6)
+  })
+
+  it('dedupes repeated lines sharing the same message id (partial-update writes)', async () => {
+    const file = writeTranscript([
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 }),
+      // Same message id re-emitted (e.g. a partial update also persisted) —
+      // must be counted once, not twice, for the cost breakdown.
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+
+    const sonnet = m.modelCosts!.find((e) => e.modelId === 'claude-sonnet-4-6')
+    expect(sonnet?.costUsd).toBeCloseTo(3, 6) // NOT 6
+    expect(m.totalCostUsd).toBeCloseTo(3, 6)
+  })
+
+  it('omits synthetic/unknown models from the breakdown', async () => {
+    const file = writeTranscript([
+      { type: 'assistant', message: { id: 'msg_1', model: '<synthetic>', usage: { input_tokens: 100, output_tokens: 0 } } }
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+    expect(m.modelCosts).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeTokenMetrics — subagent transcripts fold into modelCosts.
+//
+// Task-tool subagent transcripts live in SEPARATE files
+// (<projectDir>/<sessionId>/subagents/agent-<id>.jsonl), not lines in the
+// main transcript. Guard: against the pre-fix implementation (main-file-only
+// scan), the multi-model fixture below fails because the subagent-only
+// model (opus, never mentioned in the main file) is entirely absent from
+// modelCosts.
+// ---------------------------------------------------------------------------
+
+describe('computeTokenMetrics — subagent transcripts fold into modelCosts', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-subagent-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+  function assistantMsg(
+    id: string,
+    model: string,
+    usage: { input_tokens: number; output_tokens: number }
+  ): object {
+    return { type: 'assistant', message: { id, model, usage } }
+  }
+  // Mirrors production layout: <projectDir>/<sessionId>.jsonl (main file) +
+  // <projectDir>/<sessionId>/subagents/agent-<id>.jsonl (subagent files).
+  function subagentsDirFor(mainFile: string): string {
+    return path.join(path.dirname(mainFile), path.basename(mainFile, '.jsonl'), 'subagents')
+  }
+  function writeSubagentFile(mainFile: string, name: string, lines: object[]): void {
+    const dir = subagentsDirFor(mainFile)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, name), lines.map((l) => JSON.stringify(l)).join('\n'))
+  }
+  function cleanup(mainFile: string): void {
+    fs.unlinkSync(mainFile)
+    const sessionDir = path.join(path.dirname(mainFile), path.basename(mainFile, '.jsonl'))
+    fs.rmSync(sessionDir, { recursive: true, force: true })
+  }
+
+  it('folds subagent-file spend into modelCosts/totalCostUsd, leaving legacy sums + duration main-file-only', async () => {
+    const file = writeTranscript([
+      { type: 'user', timestamp: '2026-01-01T00:00:00.000Z' },
+      {
+        ...assistantMsg('msg_main_1', 'claude-sonnet-4-6', {
+          input_tokens: 500_000,
+          output_tokens: 0
+        }),
+        timestamp: '2026-01-01T00:00:05.000Z'
+      }
+    ])
+    writeSubagentFile(file, 'agent-aaa.jsonl', [
+      assistantMsg('msg_sub_1', 'claude-opus-4-8', { input_tokens: 200_000, output_tokens: 0 })
+    ])
+    writeSubagentFile(file, 'agent-bbb.jsonl', [
+      assistantMsg('msg_sub_2', 'claude-opus-4-8', { input_tokens: 800_000, output_tokens: 0 }),
+      // Same model as the main file — must ADD to the main-file sonnet cost,
+      // not replace it.
+      assistantMsg('msg_sub_3', 'claude-sonnet-4-6', { input_tokens: 500_000, output_tokens: 0 })
+    ])
+
+    const m = await computeTokenMetrics(file)
+    cleanup(file)
+
+    const sonnet = m.modelCosts!.find((e) => e.modelId === 'claude-sonnet-4-6')
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    // sonnet: main (500k → $1.5) + subagent (500k → $1.5) = $3
+    expect(sonnet?.costUsd).toBeCloseTo(3, 6)
+    // opus: entirely from subagent files (200k + 800k = 1M → $5) — this
+    // model is ABSENT from modelCosts pre-fix.
+    expect(opus?.costUsd).toBeCloseTo(5, 6)
+    expect(m.totalCostUsd).toBeCloseTo(8, 6)
+
+    // Legacy main-chain sums/duration must be untouched by subagent files —
+    // these reflect the main transcript only (500k input tokens, one turn).
+    expect(m.totalInputTokens).toBe(500_000)
+    expect(m.totalOutputTokens).toBe(0)
+    expect(m.cachedTokens).toBe(0)
+    expect(m.contextWindowSize).toBe(500_000)
+    expect(m.totalDurationMs).toBe(5000)
+  })
+
+  it('dedupes a message id repeated across two different subagent files', async () => {
+    const file = writeTranscript([{ type: 'user', timestamp: '2026-01-01T00:00:00.000Z' }])
+    writeSubagentFile(file, 'agent-aaa.jsonl', [
+      assistantMsg('msg_dup', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    writeSubagentFile(file, 'agent-bbb.jsonl', [
+      // Same message id re-emitted in a different subagent file — must be
+      // counted once, not twice.
+      assistantMsg('msg_dup', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+
+    const m = await computeTokenMetrics(file)
+    cleanup(file)
+
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    expect(opus?.costUsd).toBeCloseTo(5, 6) // NOT 10
+    expect(m.totalCostUsd).toBeCloseTo(5, 6)
+  })
+
+  it('ignores non-matching files in the subagents dir (.meta.json, notes.txt)', async () => {
+    const file = writeTranscript([{ type: 'user', timestamp: '2026-01-01T00:00:00.000Z' }])
+    const dir = subagentsDirFor(file)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'agent-aaa.meta.json'), JSON.stringify({ some: 'meta' }))
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'not json at all')
+    writeSubagentFile(file, 'agent-aaa.jsonl', [
+      assistantMsg('msg_1', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+
+    const m = await computeTokenMetrics(file)
+    cleanup(file)
+
+    expect(m.modelCosts!.length).toBe(1)
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    expect(opus?.costUsd).toBeCloseTo(5, 6)
+  })
+
+  it('is unaffected when the subagents dir is absent (existing single-file behavior)', async () => {
+    const file = writeTranscript([
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+    expect(m.modelCosts).toEqual([{ engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 3 }])
   })
 })

@@ -70,6 +70,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
     loadOpencodeHistory: (sessionId) =>
       ipcRenderer.invoke('session:load-opencode-history', sessionId),
+    listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
+    loadPiHistory: (sessionId) => ipcRenderer.invoke('session:load-pi-history', sessionId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
@@ -103,6 +105,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onMessage: onEvent('session:message'),
     onStreamEvent: onEvent('session:stream'),
     onApprovalRequest: onEvent('session:approval-request'),
+    onApprovalDismiss: onEvent('session:approval-dismiss'),
     onStatus: onEvent('session:status'),
     onResult: onEvent('session:result'),
     onError: onEvent('session:error'),
@@ -156,8 +159,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:unwatch-background', routingId, toolUseId),
     readBackgroundRange: (routingId, toolUseId, offset, length) =>
       ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
-    stopTask: (routingId, toolUseId) =>
-      ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
+    stopTask: (routingId, toolUseId, isDispatch) =>
+      ipcRenderer.invoke('session:stop-task', routingId, toolUseId, isDispatch),
     backgroundTask: (routingId, toolUseId) =>
       ipcRenderer.invoke('session:background-task', routingId, toolUseId),
     dequeueMessage: (routingId, value) =>
@@ -177,7 +180,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
     getOpencodeProviderModels: (providerId) =>
       ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+    getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
     engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
+    getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
+    getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
     generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),
@@ -249,6 +255,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
     setUsageAccountFilter: async () => {},
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
+    fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
     signIn: () => ipcRenderer.invoke('auth:sign-in'),
     submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
     cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
@@ -297,6 +304,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
     vendorAuthProbe: async () => ({}),
     vendorAuthListOptions: async () => ({}),
+    vendorAuthListKeys: async () => ({}),
     vendorAuthSetKey: async () => {},
     vendorAuthOauthAuthorize: async () => {
       throw new Error('Vendor auth not available in tests')
@@ -314,6 +322,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
+    patchOpencodeNative: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
@@ -343,6 +353,18 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+    listSharedProviders: () => unwrap('shared-provider:list'),
+    getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
+    listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
+    saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
+    setSharedProviderRoute: (id, harness, enabled) =>
+      unwrap('shared-provider:set-route', id, harness, enabled),
+    setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
+    disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
+    setSharedProviderDefaultModel: (id, harness, modelId) =>
+      unwrap('shared-provider:set-default', id, harness, modelId),
     openLogViewer: () => ipcRenderer.invoke('log-viewer:open'),
 
     listPlugins: () => ipcRenderer.invoke('plugin:list'),

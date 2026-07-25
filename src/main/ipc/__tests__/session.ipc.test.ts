@@ -73,7 +73,8 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     notifySettingsChanged: vi.fn(async () => {}),
     getPlanContent: vi.fn(() => null),
     getSessionLogPath: vi.fn(() => null),
-    getUsage: vi.fn(async () => null)
+    getUsage: vi.fn(async () => null),
+    discoverSkills: vi.fn(async () => [])
   }
   const sessionManagerSpies = {
     create: vi.fn(),
@@ -82,7 +83,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     cancel: vi.fn(),
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
-    forEachClaude: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
     setSessionTimeout: vi.fn()
   }
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
@@ -194,6 +194,35 @@ vi.mock('../../services/block-usage', () => ({
 vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
+
+// Cross-engine dispatcher (ADR-033) — the real singleton pulls the opencode
+// client graph; stub it and let tests control resolveApproval's return.
+const crossEngineSpies = vi.hoisted(() => ({
+  resolveApproval: vi.fn((requestId: string) => requestId.startsWith('xeng:')),
+  dispatch: vi.fn(),
+  disposeFor: vi.fn(),
+  stopDispatch: vi.fn(() => false)
+}))
+
+vi.mock('../../services/cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: crossEngineSpies,
+  XENG_REQUEST_PREFIX: 'xeng:'
+}))
+
+const sharedProviderSpies = vi.hoisted(() => ({
+  listDefinitions: vi.fn(() => []),
+  listStatuses: vi.fn(async () => []),
+  listProviderModels: vi.fn(async () => []),
+  saveDefinition: vi.fn(async () => {}),
+  removeDefinition: vi.fn(async () => {}),
+  setRouteEnabled: vi.fn(async () => {}),
+  setApiKey: vi.fn(async () => {}),
+  syncProvider: vi.fn(async () => {}),
+  disconnectProvider: vi.fn(async () => {}),
+  setRouteDefaultModel: vi.fn(async () => {})
+}))
+
+vi.mock('../../shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
 
 vi.mock('../../services/session-manager', () => ({
   SessionManager: class {
@@ -408,6 +437,87 @@ describe('session.ipc', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Approval routing — xeng: prefix → cross-engine dispatcher (ADR-033)
+  // -------------------------------------------------------------------------
+
+  describe('session:approval-response prefix routing', () => {
+    it("routes 'xeng:'-prefixed requestIds to the dispatcher, NOT the session", async () => {
+      await harness.call('session:approval-response', 'rid-1', 'xeng:perm-1', 'allow', {
+        feedback: 'ok'
+      })
+      expect(crossEngineSpies.resolveApproval).toHaveBeenCalledWith(
+        'xeng:perm-1',
+        'allow',
+        { feedback: 'ok' },
+        undefined
+      )
+      expect(sessionStub.resolveApproval).not.toHaveBeenCalled()
+    })
+
+    it('still routes ordinary requestIds to the session (dispatcher untouched)', async () => {
+      await harness.call('session:approval-response', 'rid-1', 'req-9', 'deny')
+      expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-9', 'deny', undefined, undefined)
+      expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
+    })
+
+    it('falls through to the session when the dispatcher declines to consume', async () => {
+      crossEngineSpies.resolveApproval.mockReturnValueOnce(false)
+      await harness.call('session:approval-response', 'rid-1', 'xeng:stale', 'allow')
+      expect(sessionStub.resolveApproval).toHaveBeenCalledWith(
+        'xeng:stale',
+        'allow',
+        undefined,
+        undefined
+      )
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Stop routing — dispatch toolUseIds → cross-engine dispatcher (ADR-033 M3)
+  // -------------------------------------------------------------------------
+
+  describe('session:stop-task dispatch routing', () => {
+    it('routes a known dispatch toolUseId to the dispatcher (scoped by routingId), NOT the session', async () => {
+      crossEngineSpies.stopDispatch.mockReturnValueOnce(true)
+      const result = await harness.call<{ success: boolean }>(
+        'session:stop-task',
+        'rid-1',
+        'toolu_dispatch_1'
+      )
+      expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_dispatch_1', 'rid-1')
+      expect(result).toEqual({ success: true })
+      expect(sessionStub.stopTask).not.toHaveBeenCalled()
+    })
+
+    it('falls through to the session stopTask when the id is not a known dispatch', async () => {
+      const result = await harness.call<{ success: boolean }>(
+        'session:stop-task',
+        'rid-1',
+        'toolu_ordinary_1'
+      )
+      expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_ordinary_1', 'rid-1')
+      expect(sessionStub.stopTask).toHaveBeenCalledWith('toolu_ordinary_1')
+      expect(result).toEqual({ success: true })
+    })
+
+    it('isDispatch=true: arms a durable stop-intent, returns success even with no live turn, never touches the session path', async () => {
+      // Default stopDispatch mock returns false — simulating the upstream race
+      // where the Stop click beats the MCP tools/call round-trip entirely.
+      const result = await harness.call<{ success: boolean }>(
+        'session:stop-task',
+        'rid-1',
+        'toolu_disp_racy',
+        true
+      )
+      expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_disp_racy', 'rid-1', {
+        armIfUnknown: true
+      })
+      expect(result).toEqual({ success: true })
+      expect(sessionStub.stopTask).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Git channels (spot-check registration)
   // -------------------------------------------------------------------------
 
@@ -534,6 +644,100 @@ describe('session.ipc', () => {
     it('session:set-effort routes to session.setEffort', async () => {
       await harness.call('session:set-effort', 'rid-1', 'high')
       expect(sessionStub.setEffort).toHaveBeenCalledWith('high')
+    })
+
+    it('registers and routes the shared-provider channel family', async () => {
+      const definition = {
+        id: 'local',
+        name: 'Local',
+        kind: 'custom',
+        protocol: 'openai-completions',
+        baseUrl: 'https://example.test/v1',
+        models: [{ id: 'model' }],
+        routes: { pi: { enabled: true }, opencode: { enabled: true } },
+        managed: true
+      }
+
+      await harness.callSafe('shared-provider:list')
+      await harness.callSafe('shared-provider:statuses')
+      await harness.callSafe('shared-provider:models', 'local')
+      await harness.callSafe('shared-provider:save', definition)
+      await harness.callSafe('shared-provider:remove', 'local')
+      await harness.callSafe('shared-provider:set-route', 'local', 'pi', false)
+      await harness.callSafe('shared-provider:set-key', 'local', 'secret')
+      await harness.callSafe('shared-provider:sync', 'local')
+      await harness.callSafe('shared-provider:disconnect', 'local')
+      await harness.callSafe('shared-provider:set-default', 'local', 'opencode', 'model')
+
+      expect(sharedProviderSpies.saveDefinition).toHaveBeenCalledWith(definition)
+      expect(sharedProviderSpies.setRouteEnabled).toHaveBeenCalledWith('local', 'pi', false)
+      expect(sharedProviderSpies.disconnectProvider).toHaveBeenCalledWith('local')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ISession optional-member safety (Item 3)
+  //
+  // These handlers cast ISession to ClaudeSession before Item 3; the refactor
+  // replaced the cast with capability checks + optional-call (`?.`). Verify a
+  // session that advertises the capability but doesn't implement the optional
+  // method (e.g. a future/partial engine) degrades to the documented fallback
+  // instead of throwing "not a function".
+  // -------------------------------------------------------------------------
+
+  describe('ISession optional-member safety (Item 3)', () => {
+    it('handlers fall back safely when a capability-true session lacks the optional method', async () => {
+      const minimalStub: any = {
+        engineId: 'claude',
+        capabilities: resolveClaudeCapabilities('default'),
+        willQueue: false,
+        cwd: '/tmp/cwd',
+        run: vi.fn(),
+        resolveApproval: vi.fn(),
+        setPermissionMode: vi.fn(async () => {}),
+        setModel: vi.fn(async () => {})
+        // Deliberately no optional members: no watchBackground, stopTask,
+        // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
+        // mcpToggleServer, setEffort, etc.
+      }
+      sessionManagerSpies.get.mockReturnValue(minimalStub)
+
+      await expect(harness.call<unknown[]>('mcp:status', 'rid-min')).resolves.toEqual([])
+
+      await expect(
+        harness.call<{ removed: number }>('session:dequeue-message', 'rid-min', 'val')
+      ).resolves.toEqual({ removed: 0 })
+
+      await expect(
+        harness.call<string | null>('session:get-plan-content', 'rid-min')
+      ).resolves.toBeNull()
+
+      await expect(
+        harness.call<string | null>('session:get-session-log-path', 'rid-min')
+      ).resolves.toBeNull()
+
+      await expect(
+        harness.call<{ success: boolean; error?: string }>('session:stop-task', 'rid-min', 'tool-1')
+      ).resolves.toEqual({
+        success: false,
+        error: 'Provider does not support background tasks'
+      })
+
+      // mcp:toggle: capability is true but the method is absent — this is the
+      // guard that proves the method-presence check (not just the capability
+      // flag) gates the call.
+      const mcpToggle = await harness.call<any>('mcp:toggle', 'rid-min', 'srv', true)
+      expect(mcpToggle).toEqual({ ok: false, error: 'Provider does not support hosted MCP' })
+
+      await expect(harness.call('session:set-effort', 'rid-min', 'high')).resolves.toBeUndefined()
+
+      // Restore the default stub for any subsequent tests in this file.
+      sessionManagerSpies.get.mockReturnValue(sessionStub)
+    })
+
+    it('claude:save-permissions invokes notifySettingsChanged via the neutral forEach iteration', async () => {
+      await harness.call('claude:save-permissions', 'user', { allow: [], deny: [], ask: [] })
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
   })
 })

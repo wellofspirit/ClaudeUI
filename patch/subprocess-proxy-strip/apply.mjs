@@ -139,6 +139,170 @@ if (src.includes(MARKER)) {
 //     for(let M of xY1)delete O[M],delete O[`INPUT_${M}`];
 //     return O
 //   }
+// v2.1.197 shape — major refactor of the BG-session detection and delete chain:
+//   * flagBg assignment changed from a hardcoded ||chain of process.env.X!==void 0
+//     checks to DYr.some((u)=>process.env[u]!==void 0), where DYr is a module-level
+//     array of BG session var names (captures as bgArray).
+//   * Per-var unconditional deletes for session-kind vars replaced by a loop:
+//     for(let u of DYr)delete c[u]
+//   * OTEL .some() check now also includes: ||u==="CLAUDE_CODE_OTEL_DIAG_STDERR"
+//   * Before block-list loop: if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c
+//     (v170 had: if(!T)return Y as a simple guard)
+//   * OAuth/socket-token deletes in the merged object still individual (unchanged).
+//
+//   function oM(){
+//     let e=Zit(),
+//         t=Object.keys(e).length>0,
+//         n=Object.keys(LYr).length>0,
+//         r=ct(process.env.CLAUDE_CODE_REMOTE)?R2i(t?{...process.env,...e}:process.env):{},
+//         o=Object.keys(r).length>0,
+//         s=v$d(),
+//         i=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||
+//           process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||
+//           process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||
+//           process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||
+//           Ne.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||
+//           Ne.CLAUDE_BG_RV_AUTH!==void 0||
+//           Ne.CLAUDE_BG_PTY_AUTH!==void 0,
+//         a=!1;
+//     a=DYr.some((u)=>process.env[u]!==void 0);
+//     let l=Object.keys(process.env).some((u)=>u.startsWith("OTEL_")||u==="CLAUDE_CODE_OTEL_DIAG_STDERR");
+//     if(!t&&!o&&!s&&!a&&!i&&!l&&!n)return process.env;
+//     let c={...process.env,...LYr,...e,...r};
+//     delete c.CLAUDE_CODE_OAUTH_TOKEN,
+//     delete c.CLAUDE_CODE_SUBSCRIPTION_TYPE,
+//     delete c.CLAUDE_CODE_RATE_LIMIT_TIER,
+//     delete c.CLAUDE_BG_AUTH_SNAPSHOT_PATH,
+//     delete c.CLAUDE_BG_SOCKET_TOKENS_PATH,
+//     delete c.CLAUDE_BG_RV_AUTH,
+//     delete c.CLAUDE_BG_PTY_AUTH;
+//     for(let u of DYr)delete c[u];
+//     for(let u of Object.keys(c))if(u.startsWith("OTEL_"))delete c[u];
+//     if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c;
+//     for(let u of k$d)delete c[u],delete c[`INPUT_${u}`];
+//     return c
+//   }
+// v2.1.198 shape — adds a NEW dynamic scrub source on top of v197:
+//   * A "host-managed provider" env-name array, computed by a helper (`iyn`
+//     in 2.1.198) that returns `[]` unless
+//     CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST is set, in which case it returns
+//     ["ANTHROPIC_CUSTOM_HEADERS", ...blockList, HOST_AUTH_ENV_VAR,
+//     "CLAUDE_CODE_HOST_CREDS_FILE"] (filtered for truthiness). Captured as
+//     `hostArray` (`a` in 2.1.198) / `hostArrayFn` (`iyn`).
+//   * `hostArray` gates the early-return guard via `!hostArray.length`
+//     (alongside the other flags) and is drained via its own
+//     `for(let x of hostArray)delete merged[x]` loop, placed *before* the
+//     bgArray delete loop.
+//   * Everything else (BG-session `.some()` detection/delete-loop, OTEL
+//     `.some()` check, OTEL-DIAG-STDERR guard-comma trick, block-list loop)
+//     is unchanged from v197 — only renamed per the minifier.
+//
+//   function pD(){
+//     let e=nlt(),
+//         t=Object.keys(e).length>0,
+//         n=Object.keys(LQr).length>0,
+//         r=st(process.env.CLAUDE_CODE_REMOTE)?y3i(t?{...process.env,...e}:process.env):{},
+//         o=Object.keys(r).length>0,
+//         s=jGd(),
+//         i=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||
+//           process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||
+//           process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||
+//           process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||
+//           Le.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||
+//           Le.CLAUDE_BG_RV_AUTH!==void 0||
+//           Le.CLAUDE_BG_PTY_AUTH!==void 0,
+//         a=iyn(process.env),
+//         l=!1;
+//     l=RQr.some((d)=>process.env[d]!==void 0);
+//     let c=Object.keys(process.env).some((d)=>d.startsWith("OTEL_")||d==="CLAUDE_CODE_OTEL_DIAG_STDERR");
+//     if(!t&&!o&&!s&&!l&&!i&&!a.length&&!c&&!n)return process.env;
+//     let u={...process.env,...LQr,...e,...r};
+//     delete u.CLAUDE_CODE_OAUTH_TOKEN,
+//     delete u.CLAUDE_CODE_SUBSCRIPTION_TYPE,
+//     delete u.CLAUDE_CODE_RATE_LIMIT_TIER,
+//     delete u.CLAUDE_BG_AUTH_SNAPSHOT_PATH,
+//     delete u.CLAUDE_BG_SOCKET_TOKENS_PATH,
+//     delete u.CLAUDE_BG_RV_AUTH,
+//     delete u.CLAUDE_BG_PTY_AUTH;
+//     for(let d of a)delete u[d];
+//     for(let d of RQr)delete u[d];
+//     for(let d of Object.keys(u))if(d.startsWith("OTEL_"))delete u[d];
+//     if(delete u.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return u;
+//     for(let d of GGd)delete u[d],delete u[`INPUT_${d}`];
+//     return u
+//   }
+const fnReV198 = new RegExp(
+  `function (${V})\\(\\)\\{` +
+    `let (${V})=(${V})\\(\\),` +
+    `(${V})=Object\\.keys\\(\\2\\)\\.length>0,` +
+    `(${V})=Object\\.keys\\((${V})\\)\\.length>0,` +
+    `(${V})=(${V})\\(process\\.env\\.CLAUDE_CODE_REMOTE\\)\\?(${V})\\(\\4\\?\\{\\.\\.\\.process\\.env,\\.\\.\\.\\2\\}:process\\.env\\):\\{\\},` +
+    `(${V})=Object\\.keys\\(\\7\\)\\.length>0,` +
+    `(${V})=(${V})\\(\\),` +
+    `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0\\|\\|` +
+    `(${V})\\.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0\\|\\|` +
+    `\\14\\.CLAUDE_BG_RV_AUTH!==void 0\\|\\|` +
+    `\\14\\.CLAUDE_BG_PTY_AUTH!==void 0,` +
+    `(${V})=(${V})\\(process\\.env\\),` +
+    `(${V})=!1;` +
+    `\\17=(${V})\\.some\\(\\((${V})\\)=>process\\.env\\[\\19\\]!==void 0\\);` +
+    `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\21\\.startsWith\\("OTEL_"\\)\\|\\|\\21==="CLAUDE_CODE_OTEL_DIAG_STDERR"\\);` +
+    `if\\(!\\4&&!\\10&&!\\11&&!\\17&&!\\13&&!\\15\\.length&&!\\20&&!\\5\\)return process\\.env;` +
+    `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\6,\\.\\.\\.\\2,\\.\\.\\.\\7\\};` +
+    `delete \\22\\.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete \\22\\.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete \\22\\.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete \\22\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete \\22\\.CLAUDE_BG_SOCKET_TOKENS_PATH,` +
+    `delete \\22\\.CLAUDE_BG_RV_AUTH,` +
+    `delete \\22\\.CLAUDE_BG_PTY_AUTH;` +
+    `for\\(let (${V}) of \\15\\)delete \\22\\[\\23\\];` +
+    `for\\(let (${V}) of \\18\\)delete \\22\\[\\24\\];` +
+    `for\\(let (${V}) of Object\\.keys\\(\\22\\)\\)if\\(\\25\\.startsWith\\("OTEL_"\\)\\)delete \\22\\[\\25\\];` +
+    `if\\(delete \\22\\.CLAUDE_CODE_OTEL_DIAG_STDERR,!\\11\\)return \\22;` +
+    `for\\(let (${V}) of (${V})\\)delete \\22\\[\\26\\],delete \\22\\[\`INPUT_\\$\\{\\26\\}\`\\];` +
+    `return \\22` +
+    `\\}`
+)
+
+const fnReV197 = new RegExp(
+  `function (${V})\\(\\)\\{` +
+    `let (${V})=(${V})\\(\\),` +
+    `(${V})=Object\\.keys\\(\\2\\)\\.length>0,` +
+    `(${V})=Object\\.keys\\((${V})\\)\\.length>0,` +
+    `(${V})=(${V})\\(process\\.env\\.CLAUDE_CODE_REMOTE\\)\\?(${V})\\(\\4\\?\\{\\.\\.\\.process\\.env,\\.\\.\\.\\2\\}:process\\.env\\):\\{\\},` +
+    `(${V})=Object\\.keys\\(\\7\\)\\.length>0,` +
+    `(${V})=(${V})\\(\\),` +
+    `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0\\|\\|` +
+    `(${V})\\.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0\\|\\|` +
+    `\\14\\.CLAUDE_BG_RV_AUTH!==void 0\\|\\|` +
+    `\\14\\.CLAUDE_BG_PTY_AUTH!==void 0,` +
+    `(${V})=!1;` +
+    `\\15=(${V})\\.some\\(\\((${V})\\)=>process\\.env\\[\\17\\]!==void 0\\);` +
+    `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\19\\.startsWith\\("OTEL_"\\)\\|\\|\\19==="CLAUDE_CODE_OTEL_DIAG_STDERR"\\);` +
+    `if\\(!\\4&&!\\10&&!\\11&&!\\15&&!\\13&&!\\18&&!\\5\\)return process\\.env;` +
+    `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\6,\\.\\.\\.\\2,\\.\\.\\.\\7\\};` +
+    `delete \\20\\.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete \\20\\.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete \\20\\.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete \\20\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete \\20\\.CLAUDE_BG_SOCKET_TOKENS_PATH,` +
+    `delete \\20\\.CLAUDE_BG_RV_AUTH,` +
+    `delete \\20\\.CLAUDE_BG_PTY_AUTH;` +
+    `for\\(let (${V}) of \\16\\)delete \\20\\[\\21\\];` +
+    `for\\(let (${V}) of Object\\.keys\\(\\20\\)\\)if\\(\\22\\.startsWith\\("OTEL_"\\)\\)delete \\20\\[\\22\\];` +
+    `if\\(delete \\20\\.CLAUDE_CODE_OTEL_DIAG_STDERR,!\\11\\)return \\20;` +
+    `for\\(let (${V}) of (${V})\\)delete \\20\\[\\23\\],delete \\20\\[\`INPUT_\\$\\{\\23\\}\`\\];` +
+    `return \\20` +
+    `\\}`
+)
+
 // v2.1.170 shape — identical to v163 but adds three background-session auth
 // vars (CLAUDE_BG_SOCKET_TOKENS_PATH, CLAUDE_BG_RV_AUTH, CLAUDE_BG_PTY_AUTH):
 //   * appended to the OAuth-style detection flag — but read off a module-level
@@ -490,8 +654,171 @@ const stripHelperDecl =
 
 let match, full, newFn, shape
 
-match = fnReV170.exec(src)
+match = fnReV198.exec(src)
 if (match) {
+  shape = 'v198'
+  const duplicates = [...src.matchAll(new RegExp(fnReV198.source, 'g'))]
+  if (duplicates.length > 1) {
+    console.error(`ERROR: v198 pattern matched ${duplicates.length} times. Aborting.`)
+    process.exit(1)
+  }
+  const [
+    ,
+    fnName,
+    H, // 2  — user env binding (e)
+    userFn, // 3  — getter function for user env (nlt)
+    flagUserNotEmpty, // 4  — t
+    flagExtraNotEmpty, // 5  — n
+    extraGlobal, // 6  — LQr
+    qRemote, // 7  — r
+    remoteGate, // 8  — st
+    remoteFn, // 9  — y3i
+    flagRemoteNotEmpty, // 10 — o
+    flagScrub, // 11 — s
+    scrubFn, // 12 — jGd
+    flagOAuth, // 13 — i
+    envSnap, // 14 — Le (module-level env snapshot global)
+    hostArray, // 15 — a (NEW in v198 — host-managed-provider scrub array)
+    hostArrayFn, // 16 — iyn (NEW in v198)
+    flagBg, // 17 — l
+    bgArray, // 18 — RQr (module-level array of BG session var names)
+    bgLambda, // 19 — d (lambda param in .some())
+    flagOtel, // 20 — c
+    otelLambda, // 21 — d (lambda param in OTEL .some())
+    merged, // 22 — u
+    hostArrayLoopVar, // 23 — d (loop var for hostArray delete loop, NEW in v198)
+    bgArrayLoopVar, // 24 — d (loop var for bgArray delete loop)
+    otelLoopVar, // 25 — d (loop var for OTEL delete loop)
+    blockLoopVar, // 26 — d (loop var for block-list loop)
+    blockList // 27 — GGd
+  ] = match
+  full = match[0]
+  console.log(`Found ${fnName}() [v198 shape] at char ${match.index}`)
+  console.log(
+    `  locals: H=${H} userFn=${userFn} t=${flagUserNotEmpty} n=${flagExtraNotEmpty} LQr=${extraGlobal} ` +
+      `r=${qRemote} st=${remoteGate} y3i=${remoteFn} o=${flagRemoteNotEmpty} s=${flagScrub} jGd=${scrubFn} ` +
+      `i=${flagOAuth} Le=${envSnap} a=${hostArray} iyn=${hostArrayFn} l=${flagBg} RQr=${bgArray} ` +
+      `d(bgλ)=${bgLambda} c=${flagOtel} d(otelλ)=${otelLambda} u=${merged} d(hostLoop)=${hostArrayLoopVar} ` +
+      `d(bgLoop)=${bgArrayLoopVar} d(otelLoop)=${otelLoopVar} d(blockLoop)=${blockLoopVar} GGd=${blockList}`
+  )
+
+  newFn =
+    MARKER +
+    `function ${fnName}(){` +
+    stripHelperDecl +
+    `let ${H}=${userFn}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
+    `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${scrubFn}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
+    `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_RV_AUTH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_PTY_AUTH!==void 0,` +
+    `${hostArray}=${hostArrayFn}(process.env),` +
+    `${flagBg}=!1;` +
+    `${flagBg}=${bgArray}.some((${bgLambda})=>process.env[${bgLambda}]!==void 0);` +
+    `let ${flagOtel}=Object.keys(process.env).some((${otelLambda})=>${otelLambda}.startsWith("OTEL_")||${otelLambda}==="CLAUDE_CODE_OTEL_DIAG_STDERR");` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${hostArray}.length&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete ${merged}.CLAUDE_BG_SOCKET_TOKENS_PATH,` +
+    `delete ${merged}.CLAUDE_BG_RV_AUTH,` +
+    `delete ${merged}.CLAUDE_BG_PTY_AUTH;` +
+    `for(let ${hostArrayLoopVar} of ${hostArray})delete ${merged}[${hostArrayLoopVar}];` +
+    `for(let ${bgArrayLoopVar} of ${bgArray})delete ${merged}[${bgArrayLoopVar}];` +
+    `for(let ${otelLoopVar} of Object.keys(${merged}))if(${otelLoopVar}.startsWith("OTEL_"))delete ${merged}[${otelLoopVar}];` +
+    `if(delete ${merged}.CLAUDE_CODE_OTEL_DIAG_STDERR,!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${blockLoopVar} of ${blockList})delete ${merged}[${blockLoopVar}],delete ${merged}[\`INPUT_\${${blockLoopVar}}\`];` +
+    `return ${stripHelperName}(${merged})` +
+    `}`
+} else if ((match = fnReV197.exec(src))) {
+  shape = 'v197'
+  const duplicates = [...src.matchAll(new RegExp(fnReV197.source, 'g'))]
+  if (duplicates.length > 1) {
+    console.error(`ERROR: v197 pattern matched ${duplicates.length} times. Aborting.`)
+    process.exit(1)
+  }
+  const [
+    ,
+    fnName,
+    H, // 2  — user env binding (e)
+    userFn, // 3  — getter function for user env (Zit)
+    flagUserNotEmpty, // 4  — t
+    flagExtraNotEmpty, // 5  — n
+    extraGlobal, // 6  — LYr
+    qRemote, // 7  — r
+    remoteGate, // 8  — ct
+    remoteFn, // 9  — R2i
+    flagRemoteNotEmpty, // 10 — o
+    flagScrub, // 11 — s
+    scrubFn, // 12 — v$d
+    flagOAuth, // 13 — i
+    envSnap, // 14 — Ne (module-level env snapshot global)
+    flagBg, // 15 — a
+    bgArray, // 16 — DYr (module-level array of BG session var names)
+    bgLambda, // 17 — u (lambda param in .some())
+    flagOtel, // 18 — l
+    otelLambda, // 19 — u (lambda param in OTEL .some())
+    merged, // 20 — c
+    DYrLoopVar, // 21 — u (loop var for DYr delete loop)
+    otelLoopVar, // 22 — u (loop var for OTEL delete loop)
+    blockLoopVar, // 23 — u (loop var for block-list loop)
+    blockList // 24 — k$d
+  ] = match
+  full = match[0]
+  console.log(`Found ${fnName}() [v197 shape] at char ${match.index}`)
+  console.log(
+    `  locals: H=${H} userFn=${userFn} t=${flagUserNotEmpty} n=${flagExtraNotEmpty} LYr=${extraGlobal} ` +
+      `r=${qRemote} ct=${remoteGate} R2i=${remoteFn} o=${flagRemoteNotEmpty} s=${flagScrub} v$d=${scrubFn} ` +
+      `i=${flagOAuth} Ne=${envSnap} a=${flagBg} DYr=${bgArray} u(bgλ)=${bgLambda} l=${flagOtel} ` +
+      `u(otelλ)=${otelLambda} c=${merged} u(DYrLoop)=${DYrLoopVar} u(otelLoop)=${otelLoopVar} ` +
+      `u(blockLoop)=${blockLoopVar} k$d=${blockList}`
+  )
+
+  newFn =
+    MARKER +
+    `function ${fnName}(){` +
+    stripHelperDecl +
+    `let ${H}=${userFn}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
+    `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${scrubFn}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
+    `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_RV_AUTH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_PTY_AUTH!==void 0,` +
+    `${flagBg}=!1;` +
+    `${flagBg}=${bgArray}.some((${bgLambda})=>process.env[${bgLambda}]!==void 0);` +
+    `let ${flagOtel}=Object.keys(process.env).some((${otelLambda})=>${otelLambda}.startsWith("OTEL_")||${otelLambda}==="CLAUDE_CODE_OTEL_DIAG_STDERR");` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete ${merged}.CLAUDE_BG_SOCKET_TOKENS_PATH,` +
+    `delete ${merged}.CLAUDE_BG_RV_AUTH,` +
+    `delete ${merged}.CLAUDE_BG_PTY_AUTH;` +
+    `for(let ${DYrLoopVar} of ${bgArray})delete ${merged}[${DYrLoopVar}];` +
+    `for(let ${otelLoopVar} of Object.keys(${merged}))if(${otelLoopVar}.startsWith("OTEL_"))delete ${merged}[${otelLoopVar}];` +
+    `if(delete ${merged}.CLAUDE_CODE_OTEL_DIAG_STDERR,!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${blockLoopVar} of ${blockList})delete ${merged}[${blockLoopVar}],delete ${merged}[\`INPUT_\${${blockLoopVar}}\`];` +
+    `return ${stripHelperName}(${merged})` +
+    `}`
+} else if ((match = fnReV170.exec(src))) {
   shape = 'v170'
   const duplicates = [...src.matchAll(new RegExp(fnReV170.source, 'g'))]
   if (duplicates.length > 1) {
@@ -1021,7 +1348,7 @@ if (match) {
     `}`
 } else {
   console.error(
-    'ERROR: Cannot locate env-builder function by v114, v118, v119, v129, v143, v150, v163, or v170 structural shape.'
+    'ERROR: Cannot locate env-builder function by v114, v118, v119, v129, v143, v150, v163, v170, v197, or v198 structural shape.'
   )
   console.error('The function may have been refactored by upstream. Re-run bundle-analyzer.')
   process.exit(1)

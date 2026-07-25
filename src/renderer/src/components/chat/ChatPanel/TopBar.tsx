@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
@@ -9,6 +9,60 @@ import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { shortModelName } from '../../usage/usage-utils'
+
+/** Format a millisecond duration as "Ns", "Nm Ns", or "Nh Nm" — seconds drop
+ *  out at the hour scale where they're noise. Shared by the Session time /
+ *  API time tooltip rows. */
+function formatDuration(ms: number): string {
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`
+  if (ms < 3_600_000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
+  return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60000)}m`
+}
+
+/** Format a cost figure consistently with the existing Cost/breakdown rows. */
+function formatCost(costUsd: number): string {
+  return `$${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`
+}
+
+/** iOS Safari's pre-standard standalone-mode flag — not in lib.dom's Navigator type. */
+type NavigatorWithIosStandalone = Navigator & { standalone?: boolean }
+
+/**
+ * The fullscreen control is for the remote web client on mobile only: it
+ * needs the standard Fullscreen API, and is pointless (and its own toggle
+ * would conflict with the OS chrome) once the page is already running as an
+ * installed standalone PWA.
+ */
+function canShowFullscreenControl(isMobileCtx: boolean): boolean {
+  if (!isMobileCtx || window.api.platform !== 'web') return false
+  if (
+    document.fullscreenEnabled !== true ||
+    typeof document.documentElement.requestFullscreen !== 'function' ||
+    typeof document.exitFullscreen !== 'function'
+  ) {
+    return false
+  }
+  if (window.matchMedia('(display-mode: standalone)').matches) return false
+  if ((navigator as NavigatorWithIosStandalone).standalone) return false
+  return true
+}
+
+/**
+ * Display label for a dispatched (cross-engine, Slice C) cost row. Reuses
+ * shortModelName — it already recognizes Claude family names anywhere in the
+ * id, so a dispatched Claude target (e.g. "anthropic/claude-opus-4-6") comes
+ * back clean. For a non-Claude id shortModelName can't shorten (e.g. an
+ * opencode "providerID/modelID" target like "openai/gpt-5-codex"), it returns
+ * the raw string unchanged (by design — see its own doc comment) — strip the
+ * redundant provider prefix here instead of teaching shortModelName about
+ * dispatch-only id shapes.
+ */
+function dispatchedModelLabel(modelId: string): string {
+  const short = shortModelName(modelId)
+  const slash = short.indexOf('/')
+  return slash === -1 ? short : short.slice(slash + 1)
+}
 
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
@@ -37,6 +91,8 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
+  const showFullscreenControl = canShowFullscreenControl(isMobileCtx)
+  const [isFullscreen, setIsFullscreen] = useState(() => !!document.fullscreenElement)
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -46,9 +102,63 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
     infoLeaveTimer.current = setTimeout(() => setInfoHover(false), 150)
   }, [])
 
+  useEffect(() => {
+    if (!showFullscreenControl) return
+    const handleFullscreenChange = (): void => setIsFullscreen(!!document.fullscreenElement)
+    // Sync immediately — the control can newly appear (e.g. a viewport/context
+    // transition into mobile) after the document already entered fullscreen
+    // through some other path, and the listener alone only catches *future*
+    // fullscreenchange events.
+    handleFullscreenChange()
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [showFullscreenControl])
+
+  const handleToggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {})
+    } else {
+      document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {})
+    }
+  }, [])
+
   const displaySessionId = sdkSessionId || activeSessionId
   const cost = statusLine ? statusLine.totalCostUsd : fallbackCost
-  const durationMs = statusLine?.totalDurationMs ?? 0
+  const totalDurationMs = statusLine?.totalDurationMs ?? 0
+  const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
+  const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
+  const rawModelCosts = statusLine?.modelCosts ?? []
+  // A single-model session's breakdown is redundant with the headline Cost
+  // figure — only show it when there's actually more than one line, or a
+  // dispatched (cross-engine, Slice C) row is present.
+  const showCostBreakdown =
+    rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
+  const sortedModelCosts = showCostBreakdown
+    ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
+    : []
+  // "Total incl. dispatched" (Slice C): headline own-engine cost + dispatched
+  // spend, NEVER sum(breakdown rows) — the headline is the authoritative
+  // own-engine figure, so summing rows instead could disagree with it if a
+  // per-model recompute ever drifts from the engine's own cumulative total.
+  const hasDispatchedCost = rawModelCosts.some((m) => m.dispatched)
+  const dispatchedCostUsd = rawModelCosts
+    .filter((m) => m.dispatched)
+    .reduce((acc, m) => acc + m.costUsd, 0)
+  const totalInclDispatchedUsd = cost + dispatchedCostUsd
+
+  // Tick every second while the tooltip is open and a turn is in flight, so
+  // "Session time" keeps counting up live instead of freezing until the next
+  // status-line event.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!infoHover || !turnStartedAtMs) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [infoHover, turnStartedAtMs])
+
+  const sessionDurationMs =
+    totalDurationMs + (turnStartedAtMs ? Math.max(0, now - turnStartedAtMs) : 0)
 
   const handleCopy = useCallback((text: string, field: string) => {
     navigator.clipboard.writeText(text)
@@ -169,6 +279,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           </div>
         )}
         <div
+          data-testid="TopBar.info"
           className="flex items-center min-w-0 [-webkit-app-region:no-drag] relative"
           onMouseEnter={infoMouseEnter}
           onMouseLeave={infoMouseLeave}
@@ -225,23 +336,67 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                         </div>
                       </button>
                     )}
-                    {(cost > 0 || durationMs > 0) && (
+                    {(cost > 0 ||
+                      hasDispatchedCost ||
+                      sessionDurationMs > 0 ||
+                      totalApiDurationMs > 0) && (
                       <div className="flex gap-4">
-                        {cost > 0 && (
+                        {(cost > 0 || hasDispatchedCost) && (
                           <div>
                             <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
                             <div className="text-[11px] text-text-secondary font-mono">
                               ${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}
                             </div>
+                            {showCostBreakdown && (
+                              <div data-testid="TopBar.costBreakdown" className="mt-1 space-y-0.5">
+                                {sortedModelCosts.map((m) => (
+                                  <div
+                                    key={`${m.engineId}:${m.modelId}`}
+                                    data-testid="TopBar.costBreakdownRow"
+                                    data-model={m.modelId}
+                                    {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
+                                    className="flex items-center justify-between gap-3"
+                                  >
+                                    <span className="text-[10px] text-text-muted truncate">
+                                      {m.dispatched
+                                        ? `${dispatchedModelLabel(m.modelId)} · dispatched`
+                                        : shortModelName(m.modelId)}
+                                    </span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      {formatCost(m.costUsd)}
+                                    </span>
+                                  </div>
+                                ))}
+                                {hasDispatchedCost && (
+                                  <div
+                                    data-testid="TopBar.costTotalInclDispatched"
+                                    className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
+                                  >
+                                    <span className="text-[10px] text-text-muted truncate">
+                                      Total incl. dispatched
+                                    </span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      {formatCost(totalInclDispatchedUsd)}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         )}
-                        {durationMs > 0 && (
-                          <div>
-                            <div className="text-[10px] text-text-muted mb-0.5">Duration</div>
+                        {sessionDurationMs > 0 && (
+                          <div data-testid="TopBar.sessionTime">
+                            <div className="text-[10px] text-text-muted mb-0.5">Session time</div>
                             <div className="text-[11px] text-text-secondary font-mono">
-                              {durationMs < 60000
-                                ? `${Math.floor(durationMs / 1000)}s`
-                                : `${Math.floor(durationMs / 60000)}m ${Math.floor((durationMs % 60000) / 1000)}s`}
+                              {formatDuration(sessionDurationMs)}
+                            </div>
+                          </div>
+                        )}
+                        {totalApiDurationMs > 0 && (
+                          <div data-testid="TopBar.apiTime">
+                            <div className="text-[10px] text-text-muted mb-0.5">API time</div>
+                            <div className="text-[11px] text-text-secondary font-mono">
+                              {formatDuration(totalApiDurationMs)}
                             </div>
                           </div>
                         )}
@@ -255,6 +410,50 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         </div>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
+        {showFullscreenControl && (
+          <button
+            type="button"
+            data-testid="TopBar.fullscreen"
+            onClick={handleToggleFullscreen}
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            className="w-[40px] h-[40px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          >
+            {isFullscreen ? (
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M8 3v3a2 2 0 01-2 2H3" />
+                <path d="M21 8h-3a2 2 0 01-2-2V3" />
+                <path d="M3 16h3a2 2 0 012 2v3" />
+                <path d="M16 21v-3a2 2 0 012-2h3" />
+              </svg>
+            ) : (
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M8 3H5a2 2 0 00-2 2v3" />
+                <path d="M16 3h3a2 2 0 012 2v3" />
+                <path d="M8 21H5a2 2 0 01-2-2v-3" />
+                <path d="M16 21h3a2 2 0 002-2v-3" />
+              </svg>
+            )}
+          </button>
+        )}
         {!isMobileCtx && cwd && (
           <button
             data-testid="TopBar.openVSCode"

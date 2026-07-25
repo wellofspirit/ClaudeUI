@@ -143,10 +143,15 @@ UI calls query.getUsage()
 The "Unsupported control request subtype" fallback in the main message loop:
 
 ```
-else <errorFn>(<msgVar>,`Unsupported control request subtype: ${<msgVar>.request.subtype}`);continue}else if(<msgVar>.type==="control_response")
+else <errorFn>(<msgVar>,`Unsupported control request subtype: ${<msgVar>.request.subtype}`)
 ```
 
-This is the same anchor used by `queue-control` and `background-task` patches. All three inject `else if` branches before the fallback `else`.
+This is the same anchor used by `queue-control`, `background-task`, and `voice-server` patches. All inject `else if` branches before the fallback `else`.
+
+Version notes:
+- ≤ v2.1.207 the fallback tail was `` ...subtype}`);continue}else if(<msgVar>.type==="control_response") `` and the anchor regex included it.
+- v2.1.219 wrapped the dispatch chain in `try{...}finally{...}` (the tail became `` ...subtype}`)}finally{...}continue}... ``), so the anchor is now matched tail-less — still globally unique.
+- v2.1.219 also introduced a **second**, class-based dispatcher (`async processControlRequest(e,t)` ending in `throw Error("Unsupported control request subtype: "+e.request.subtype)`). That one serves the SDK `Query` transport, NOT the stream-json stdin loop ClaudeUI drives — do not anchor there. The correct loop is recognizable by its tail `else if(<msgVar>.type==="control_response"){if(<opts>.replayUserMessages)...`.
 
 #### Before
 

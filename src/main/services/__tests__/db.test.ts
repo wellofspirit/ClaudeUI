@@ -126,14 +126,14 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v5)', () => {
+  it('applies the real production migration set (v1–v6)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
       runMigrations(db)
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
-      // v5: daily_usage
-      expect(userVersion(db)).toBe(5)
+      // v5: daily_usage, v6: dispatched_usage
+      expect(userVersion(db)).toBe(6)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -149,6 +149,9 @@ describe('migration framework — user_version guard', () => {
       // daily_usage must exist (Phase 7 v5 migration — Full SQL).
       const duRows = db.prepare('SELECT * FROM daily_usage').all()
       expect(duRows).toEqual([])
+      // dispatched_usage must exist (ADR-033 M4-B v6 migration).
+      const dispatchedRows = db.prepare('SELECT * FROM dispatched_usage').all()
+      expect(dispatchedRows).toEqual([])
     } finally {
       db.close()
     }
@@ -174,6 +177,16 @@ describe('migrations via repository', () => {
     expect(getSessionMeta('s1')?.engineId).toBe('claude')
     expect(getSessionMeta('s2')?.engineId).toBe('opencode')
     expect(Object.keys(allSessionMeta())).toHaveLength(2)
+  })
+
+  it('round-trips a pi session (rowToMeta accepts engineId "pi")', () => {
+    setSessionMeta('s-pi', {
+      engineId: 'pi',
+      model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' }
+    })
+    const meta = getSessionMeta('s-pi')
+    expect(meta?.engineId).toBe('pi')
+    expect(meta?.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
   })
 })
 
@@ -320,6 +333,14 @@ describe('importSessionEnginesOnce', () => {
       'legacy-codex': { engineId: 'codex' }
     })
     expect(getSessionMeta('legacy-codex')?.engineId).toBe('claude')
+  })
+
+  it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {
+    importSessionEnginesOnce({
+      's-pi': { engineId: 'pi', model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' } }
+    })
+    expect(getSessionMeta('s-pi')?.engineId).toBe('pi')
+    expect(getSessionMeta('s-pi')?.model?.modelId).toBe('gpt-5.6-luna')
   })
 
   it('is idempotent — second call does nothing when table already has rows', () => {

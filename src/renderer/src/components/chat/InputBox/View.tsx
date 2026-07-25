@@ -4,7 +4,8 @@ import type {
   StatusLineData,
   SlashCommandInfo,
   DirEntry,
-  VoiceState
+  VoiceState,
+  EngineId
 } from '../../../../../shared/types'
 import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
@@ -13,11 +14,13 @@ import { FileAttachmentBar } from '../FileAttachmentBar'
 import { type EffortLevel, type ThinkingMode } from '../../../../../shared/model-capabilities'
 import {
   ModelPicker,
+  EnginePicker,
   EffortPicker,
   ThinkingPicker,
   ReasoningPicker,
   type ModelDisplay
 } from '../../shared/InlinePickers'
+import { MobileConfigSheet } from './MobileConfigSheet'
 
 export type { ModelDisplay }
 
@@ -74,6 +77,9 @@ export interface InputBoxViewProps {
   // Controls
   models: ModelDisplay[]
   selectedModel: ModelDisplay
+  selectedEngineId: EngineId
+  engineLocked: boolean
+  showEnginePicker: boolean
   effort: string
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
@@ -106,6 +112,7 @@ export interface InputBoxViewProps {
   onSlashSelect: (name: string) => void
   onFileMentionConfirm: (entry: DirEntry) => void
   onSelectModel: (value: string) => void
+  onSelectEngine: (engineId: EngineId) => void
   onSelectEffort: (level: EffortLevel) => void
   onSelectThinking: (mode: ThinkingMode) => void
   /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
@@ -176,7 +183,7 @@ function AttachMenu({
   const [open, setOpen] = useState(false)
 
   return (
-    <div className="relative">
+    <div className="relative shrink-0">
       <button
         onClick={(e) => {
           e.stopPropagation()
@@ -302,7 +309,7 @@ function SandboxPill({
   return (
     <button
       onClick={onOpenSandboxSettings}
-      className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-success/70 hover:text-success hover:bg-success/5 transition-colors cursor-pointer"
+      className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-success/70 hover:text-success hover:bg-success/5 transition-colors cursor-pointer shrink-0"
       title="Sandbox enabled — click to configure"
     >
       <svg
@@ -501,37 +508,70 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           {/* Controls bar */}
           <div className="flex items-center justify-between px-1.5 pb-1.5">
             {/* Left controls */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 min-w-0 flex-1">
               {(props.visionEnabled ?? true) && (
                 <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
               )}
-              {(props.showModelPicker ?? true) && (
-                <ModelPicker
+              {isMobile ? (
+                <MobileConfigSheet
                   models={props.models}
                   selectedModel={props.selectedModel}
-                  onSelectModel={props.onSelectModel}
-                />
-              )}
-              {(props.showThinkingPicker ?? true) && (
-                <ThinkingPicker
+                  selectedEngineId={props.selectedEngineId}
+                  engineLocked={props.engineLocked}
+                  showEnginePicker={props.showEnginePicker}
+                  showModelPicker={props.showModelPicker ?? true}
+                  showThinkingPicker={props.showThinkingPicker ?? true}
                   thinkingMode={props.thinkingMode}
                   adaptiveSupported={props.adaptiveSupported}
+                  reasoningVariants={props.reasoningVariants ?? []}
+                  reasoningVariant={props.reasoningVariant ?? null}
+                  effort={props.effort}
+                  effortSupported={props.effortSupported}
+                  allowedEffortLevels={props.allowedEffortLevels}
+                  onSelectEngine={props.onSelectEngine}
+                  onSelectModel={props.onSelectModel}
                   onSelectThinking={props.onSelectThinking}
+                  onSelectReasoningVariant={props.onSelectReasoningVariant ?? (() => {})}
+                  onSelectEffort={props.onSelectEffort}
                 />
+              ) : (
+                <>
+                  {props.showEnginePicker && (
+                    <EnginePicker
+                      selectedEngineId={props.selectedEngineId}
+                      locked={props.engineLocked}
+                      onSelectEngine={props.onSelectEngine}
+                    />
+                  )}
+                  {(props.showModelPicker ?? true) && (
+                    <ModelPicker
+                      models={props.models}
+                      selectedModel={props.selectedModel}
+                      onSelectModel={props.onSelectModel}
+                    />
+                  )}
+                  {(props.showThinkingPicker ?? true) && (
+                    <ThinkingPicker
+                      thinkingMode={props.thinkingMode}
+                      adaptiveSupported={props.adaptiveSupported}
+                      onSelectThinking={props.onSelectThinking}
+                    />
+                  )}
+                  {(props.reasoningVariants?.length ?? 0) > 0 && (
+                    <ReasoningPicker
+                      variants={props.reasoningVariants!}
+                      selected={props.reasoningVariant ?? null}
+                      onSelect={props.onSelectReasoningVariant ?? (() => {})}
+                    />
+                  )}
+                  <EffortPicker
+                    effort={props.effort}
+                    allowedEffortLevels={props.allowedEffortLevels}
+                    supported={props.effortSupported}
+                    onSelectEffort={props.onSelectEffort}
+                  />
+                </>
               )}
-              {(props.reasoningVariants?.length ?? 0) > 0 && (
-                <ReasoningPicker
-                  variants={props.reasoningVariants!}
-                  selected={props.reasoningVariant ?? null}
-                  onSelect={props.onSelectReasoningVariant ?? (() => {})}
-                />
-              )}
-              <EffortPicker
-                effort={props.effort}
-                allowedEffortLevels={props.allowedEffortLevels}
-                supported={props.effortSupported}
-                onSelectEffort={props.onSelectEffort}
-              />
               <SandboxPill
                 sandboxEnabled={props.sandboxEnabled}
                 onOpenSandboxSettings={props.onOpenSandboxSettings}
@@ -539,7 +579,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             </div>
 
             {/* Right controls */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 shrink-0">
               {isRunning && (
                 <button
                   data-testid="InputBox.cancel"

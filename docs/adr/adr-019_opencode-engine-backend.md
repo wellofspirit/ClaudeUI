@@ -1,6 +1,6 @@
 # ADR-019: opencode engine backend — shared HTTP/SSE server, legacy API, tool maps
 
-**Status:** Accepted (V2 design; sequenced in `docs/v2/implementation-plan.md`)
+**Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md)
 
@@ -11,7 +11,7 @@ opencode**: opencode is a meta-harness that runs OpenAI/Anthropic/Google/local m
 *subsumes* access to OpenAI's coding models while being a better harness, and exposes a documented
 HTTP+SSE server with an official SDK. The direct `codex app-server` backend (ADR-017) becomes a
 **dormant fallback** — insurance if OpenAI ever de-supports opencode. Integration surface verified
-against opencode v1.17.x; design detail across `docs/v2/`.
+against opencode v1.17.x.
 
 ## Decision
 
@@ -49,4 +49,5 @@ against opencode v1.17.x; design detail across `docs/v2/`.
 
 - **Supersedes ADR-017** (Codex backend) — Codex demoted to dormant fallback.
 - Implements the engine model of **ADR-018**; auth in **ADR-021**; persistence/config in **ADR-020**;
-  tool rendering in foundation 6 (`docs/v2/06-tool-rendering.md`).
+  tool rendering via the neutral ToolKind registry (`src/shared/tool-kinds.ts` + the per-engine tool
+  maps under `src/renderer/src/components/chat/tool-registry/`).

@@ -101,9 +101,15 @@ console.log('\n--- Locating pF1 call in stream loop ---')
 
 // Find pF1 function name dynamically: it's the function that calls hR4 and
 // contains "anthropic-ratelimit-unified-status" via SR4.
-// Pattern: function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>))
+//
+// v2.1.97 signature:  function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>)){if(<kh8>={} ...
+// v2.1.197 signature: function <pF1>(<e>,<t>,<n>=!1,<r>=Date.now()){let <o>=<Eo>();if(!<ndt>(<o>)){if(<kh8>={} ...
+// The function grew from 1 param to 4 (with two defaulted), and the guard var
+// is now called inline instead of assigned first. We match by the 4-param+defaults
+// signature, then anchor on the kh8 reset inside the falsy-scope guard.
+const escapedKh8 = kh8Var.replace(/\$/g, '\\$')
 const pf1DefRe = new RegExp(
-  `function (${V})\\(${V}\\)\\{let ${V}=(${V})\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${kh8Var.replace(/\$/g, '\\$')}=\\{\\}`
+  `function (${V})\\(${V},${V},${V}=!1,${V}=Date\\.now\\(\\)\\)\\{let ${V}=${V}\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${escapedKh8}=\\{\\}`
 )
 const pf1DefMatch = pf1DefRe.exec(src)
 if (!pf1DefMatch) {
@@ -113,9 +119,22 @@ if (!pf1DefMatch) {
 const pf1Fn = pf1DefMatch[1]
 console.log(`  pF1 function name: ${pf1Fn}`)
 
-// Now find the call site: if(<var>)<pF1>(<var>.headers),<var>=<var>.headers
+// Now find the call site: if(<var>)<pF1>(<var>.headers,<args...>),<var>=<var>.headers
+//
+// v2.1.97:  if(<U1>)<pF1>(<U1>.headers),<k8>=<U1>.headers
+// v2.1.197: if(<Hn>)<pF1>(<Hn>.headers,<model>,<bool_expr>,<we>),<Je>=<Hn>.headers
+// The arg list now includes nested parens (e.g. (fg(model)||Sx(model))&&...).
+// We handle up to 2 levels of paren nesting with:
+//   (?:[^)(]|\((?:[^)(]|\([^)(]*\))*\))*
+const argPat = `(?:[^)(]|\\((?:[^)(]|\\([^)(]*\\))*\\))*`
+// v2.1.219 prepended another call (e.g. `EDu(<resp>.headers,...)`) before the
+// pF1 call inside the `if(<resp>)` guard, so `if(<resp>)` is no longer
+// immediately followed by pF1. Anchor directly on the pF1 call plus its
+// `,<hdrVar>=<resp>.headers` capture assignment — that shape is unique to the
+// stream loop (the interceptor/refresh call sites pass headers directly as
+// `pF1(<hdrs>,...)` and lack the trailing assignment).
 const callSiteRe = new RegExp(
-  `if\\((${V})\\)${pf1Fn.replace(/\$/g, '\\$')}\\(\\1\\.headers\\),(${V})=\\1\\.headers`
+  `${pf1Fn.replace(/\$/g, '\\$')}\\((${V})\\.headers,${argPat}\\),(${V})=\\1\\.headers`
 )
 const callSiteMatch = callSiteRe.exec(src)
 if (!callSiteMatch) {

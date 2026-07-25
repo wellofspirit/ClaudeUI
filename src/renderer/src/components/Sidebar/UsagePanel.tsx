@@ -290,12 +290,24 @@ export function UsageRing(): React.JSX.Element {
             className="transition-all duration-500"
           />
         </svg>
-        <span
-          className="absolute inset-0 flex items-center justify-center font-mono font-semibold select-none"
-          style={{ fontSize: displayText.length > 2 ? '7px' : '8px', color }}
+        {/* Text lives in its own overlay SVG so it stays put while the ring spins */}
+        <svg
+          width={size}
+          height={size}
+          className="absolute inset-0 pointer-events-none select-none"
+          aria-hidden="true"
         >
-          {displayText}
-        </span>
+          <text
+            x={size / 2}
+            y={size / 2}
+            textAnchor="middle"
+            dominantBaseline="central"
+            className="font-mono font-semibold"
+            style={{ fontSize: displayText.length > 2 ? '7px' : '8px', fill: color }}
+          >
+            {displayText}
+          </text>
+        </svg>
       </button>
       <span className="text-[10px] text-text-muted select-none">
         {usage && !usage.error ? formatResetTime(usage.fiveHour.resetsAt) : 'Usage'}

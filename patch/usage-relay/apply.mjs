@@ -67,8 +67,12 @@ if (src.includes(PATCH_MARKER)) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Locating control-request fallback ---')
 
+  // v2.1.219 wrapped the control-request dispatch chain in a try/finally, so the
+  // fallback tail changed from `...subtype}`);continue}else if(msg.type==="control_response")`
+  // to `...subtype}`)}finally{...}continue}else if(...)`. Match the fallback call
+  // itself (tail-less) — still globally unique.
   const anchorRe = new RegExp(
-    `else (${V})\\((${V}),\`Unsupported control request subtype: \\$\\{\\2\\.request\\.subtype\\}\`\\);continue\\}else if\\(\\2\\.type==="control_response"\\)`
+    `else (${V})\\((${V}),\`Unsupported control request subtype: \\$\\{\\2\\.request\\.subtype\\}\`\\)`
   )
 
   const anchorMatch = anchorRe.exec(src)

@@ -1,12 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
+import { SECTION_SCOPE_MAP, type SettingsScope } from '../SettingsDialog/settings-sections'
 import { RemoteAccessModal } from '../RemoteAccessModal'
 import { UsageRing } from './UsagePanel'
 
 export function SettingsPanel(): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [settingsTarget, setSettingsTarget] = useState<{
+    scope?: SettingsScope
+    section?: string
+  }>({})
   const [remoteModalOpen, setRemoteModalOpen] = useState(false)
   const [remoteRunning, setRemoteRunning] = useState(false)
   const [remoteClients, setRemoteClients] = useState(0)
@@ -34,7 +39,14 @@ export function SettingsPanel(): React.JSX.Element {
 
   // Listen for 'open-settings' custom events (e.g. from sandbox pill in InputBox)
   useEffect(() => {
-    const handler = (): void => setDialogOpen(true)
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
+      setSettingsTarget({
+        scope: detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
+        section: detail?.section
+      })
+      setDialogOpen(true)
+    }
     window.addEventListener('open-settings', handler)
     return () => window.removeEventListener('open-settings', handler)
   }, [])
@@ -100,6 +112,7 @@ export function SettingsPanel(): React.JSX.Element {
             data-testid="SettingsPanel.allSettings"
             onClick={() => {
               setOpen(false)
+              setSettingsTarget({})
               setDialogOpen(true)
             }}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 mt-1 mb-0.5 text-[12px] text-text-muted hover:text-accent transition-colors cursor-default border-t border-border/30 pt-2"
@@ -178,7 +191,13 @@ export function SettingsPanel(): React.JSX.Element {
           </svg>
         </button>
       </div>
-      {dialogOpen && <SettingsDialog onClose={() => setDialogOpen(false)} />}
+      {dialogOpen && (
+        <SettingsDialog
+          onClose={() => setDialogOpen(false)}
+          initialScope={settingsTarget.scope}
+          initialSection={settingsTarget.section}
+        />
+      )}
       {remoteModalOpen && <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />}
     </div>
   )

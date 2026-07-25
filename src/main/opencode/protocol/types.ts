@@ -1,4 +1,4 @@
-// Trimmed types derived from opencode 1.17.9 /doc snapshot
+// Trimmed types derived from opencode 1.17.14 /doc snapshot
 
 export interface ModelCapabilities {
   temperature: boolean
@@ -116,7 +116,7 @@ export interface StoredMessage {
     id: string
     role: 'user' | 'assistant' | 'system'
     sessionID?: string
-    time?: { created?: number; updated?: number }
+    time?: { created?: number; completed?: number; updated?: number }
     cost?: number
     tokens?: {
       input?: number

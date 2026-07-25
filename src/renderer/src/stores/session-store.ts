@@ -1,9 +1,16 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES, claudeModel, opencodeModel } from '../../../shared/types'
-import { resolveClaudeCapabilities, resolveOpencodeCapabilities } from '../../../shared/model-capabilities'
+import { VOICE_LANGUAGES } from '../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
+import {
+  engineMeta,
+  OPENCODE_DEFAULT_MODEL,
+  PI_DEFAULT_MODEL,
+  FREE_OPENCODE_VENDOR_IDS
+} from '../../../shared/engine-meta'
+export { OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../../../shared/engine-meta'
 import type {
   ChatMessage,
   SessionStatus,
@@ -36,7 +43,8 @@ import type {
   PluginViewWithOwner,
   EngineId,
   ModelRef,
-  EngineConfig
+  EngineConfig,
+  FileDiff
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -44,28 +52,6 @@ export function normalizeCwd(cwd: string): string {
   if (cwd.length > 1 && cwd.endsWith('/')) return cwd.slice(0, -1)
   return cwd || '.'
 }
-
-/**
- * The default model picker VALUE for a given engine. opencode must never get
- * `'default'` (a Claude alias) — the free no-auth model is the hard fallback.
- * The opencode value convention is `"<providerID>/<modelID>"`.
- *
- * The opencode default is user-configurable (Settings › opencode › Models →
- * "Default model", stored in engines/opencode.json `opencodeConfig.model`),
- * threaded in via `opencodeDefault`. Used as the fallback when a session has no
- * remembered model (fresh load) — loadHistoricalSession restores the persisted
- * per-session model when one exists.
- */
-export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
-export function defaultModelForEngine(
-  engineId: EngineId,
-  opencodeDefault: string = OPENCODE_DEFAULT_MODEL
-): string {
-  return engineId === 'opencode' ? opencodeDefault || OPENCODE_DEFAULT_MODEL : 'default'
-}
-
-/** Free/bundled opencode vendors that never require auth (OpenCode Zen). */
-const FREE_OPENCODE_VENDORS = new Set(['opencode', 'zen'])
 
 /**
  * Resolve a usable opencode picker VALUE against the currently-available
@@ -84,19 +70,59 @@ export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): s
   const oc = models.filter((m) => m.engineId === 'opencode')
   if (oc.length === 0) return null
   if (preferred && oc.some((m) => m.value === preferred)) return preferred
-  const free = oc.find((m) => FREE_OPENCODE_VENDORS.has(m.vendorId ?? ''))
+  const free = oc.find((m) => FREE_OPENCODE_VENDOR_IDS.has(m.vendorId ?? ''))
   return (free ?? oc[0]).value
 }
 
-/** Build the engine-correct ModelRef from a picker value string. */
-export function modelRefForEngine(engineId: EngineId, value: string): ModelRef {
+/**
+ * The engine-configurable `perEngineDefault` to feed `engineMeta(engineId).
+ * defaultModelValue(...)` — opencode's `opencodeDefaultModel` for 'opencode',
+ * pi's `piDefaultModel` for 'pi', undefined for every other engine (claude's
+ * defaultModelValue ignores the param entirely, so passing undefined is a
+ * pure no-op for it — see engine-meta.ts's doc comments).
+ *
+ * Before this helper existed, BOTH call sites below passed
+ * `state.opencodeDefaultModel` unconditionally regardless of `engineId` — a
+ * latent bug for 'pi' (a fresh/reopened pi session would seed from opencode's
+ * default model string instead of pi's own, since PI_DEFAULT_MODEL's fallback
+ * in `defaultModelValue` never triggers while `opencodeDefaultModel` is
+ * truthy, which it always is).
+ */
+function perEngineDefaultModel(
+  engineId: EngineId,
+  opencodeDefaultModel: string,
+  piDefaultModel: string
+): string | undefined {
+  if (engineId === 'opencode') return opencodeDefaultModel
+  if (engineId === 'pi') return piDefaultModel
+  return undefined
+}
+
+function isModelForEngine(model: ModelInfo, engineId: EngineId): boolean {
+  return (model.engineId ?? 'claude') === engineId
+}
+
+function resolveEngineDefaultModel(
+  engineId: EngineId,
+  models: ModelInfo[],
+  opencodeDefaultModel: string,
+  piDefaultModel: string
+): string {
   if (engineId === 'opencode') {
-    const slash = value.indexOf('/')
-    return slash >= 0
-      ? opencodeModel(value.slice(0, slash), value.slice(slash + 1))
-      : opencodeModel('opencode', value)
+    return (
+      resolveOpencodeModel(models, opencodeDefaultModel) ??
+      engineMeta(engineId).defaultModelValue(opencodeDefaultModel)
+    )
   }
-  return claudeModel(value)
+  if (engineId === 'pi') {
+    const piModels = models.filter((model) => isModelForEngine(model, 'pi'))
+    return (
+      piModels.find((model) => model.value === piDefaultModel)?.value ??
+      piModels[0]?.value ??
+      engineMeta(engineId).defaultModelValue(piDefaultModel)
+    )
+  }
+  return engineMeta(engineId).defaultModelValue()
 }
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
@@ -198,10 +224,10 @@ export interface AppSettings {
   voiceLanguage: VoiceLanguageCode
   /**
    * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`,
-   * `claude-fable-5`). When set,
-   * overrides the cli.js-derived default for that model; a per-session
-   * explicit pick still wins.
+   * (`claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-4-7`,
+   * `claude-opus-4-8`, `claude-fable-5`). When set, overrides the
+   * cli.js-derived default for that model; a per-session explicit pick
+   * still wins.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
@@ -309,14 +335,25 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeSettings] =
-    await Promise.all([
-      window.api.loadSettings(),
-      window.api.loadSessionConfig(),
-      window.api.loadSlashCommands(),
-      window.api.loadEngineConfig('claude'),
-      window.api.loadOpencodeSettings().catch((): import('../../../shared/types').OpencodeConfigSettings => ({}))
-    ])
+  let [
+    savedSettings,
+    sessionConfig,
+    slashCommands,
+    loadedEngineConfig,
+    opencodeSettings,
+    piEngineConfig
+  ] = await Promise.all([
+    window.api.loadSettings(),
+    window.api.loadSessionConfig(),
+    window.api.loadSlashCommands(),
+    window.api.loadEngineConfig('claude'),
+    window.api
+      .loadOpencodeSettings()
+      .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
+    window.api
+      .loadEngineConfig('pi')
+      .catch((): import('../../../shared/types').EngineConfig => ({}))
+  ])
 
   // One-time migration from localStorage → disk
   const MIGRATION_FLAG = 'claudeui-migrated-to-disk'
@@ -360,6 +397,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   useSessionStore.setState({
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
+    piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -639,8 +677,11 @@ interface SessionState {
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
   /** Configurable opencode default model (engines/opencode.json `opencodeConfig.model`).
-   *  The opencode-engine value `defaultModelForEngine('opencode')` resolves to. */
+   *  The opencode-engine value `engineMeta('opencode').defaultModelValue()` resolves to. */
   opencodeDefaultModel: string
+  /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
+   *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
+  piDefaultModel: string
   /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
    *  an opencode provider/default-model change in Settings. */
   modelReloadNonce: number
@@ -665,7 +706,12 @@ interface SessionState {
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
-  vendorOAuth: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null
+  vendorOAuth: {
+    engineId: string
+    vendorId: string
+    stage: 'waiting' | 'error'
+    instructions: string
+  } | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -684,8 +730,12 @@ interface SessionState {
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
   /** Set the remembered engine choice. Persisted in localStorage (lightweight). */
   setLastSelectedEngineId: (engineId: EngineId) => void
+  /** Switch the active fresh session's engine and seed its effective default model. */
+  setSelectedEngine: (engineId: EngineId) => void
   /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
   setOpencodeDefaultModel: (model: string) => void
+  /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
+  setPiDefaultModel: (model: string) => void
   /** Force the model picker to re-fetch the engine model list. */
   reloadModels: () => void
   loadHistoricalSession: (
@@ -755,7 +805,13 @@ interface SessionState {
   clearErrors: (routingId: string) => void
   addSandboxViolation: (routingId: string, message: string) => void
   removeSandboxViolation: (routingId: string, index: number) => void
-  appendToolResult: (routingId: string, toolUseId: string, result: string, isError: boolean) => void
+  appendToolResult: (
+    routingId: string,
+    toolUseId: string,
+    result: string,
+    isError: boolean,
+    fileDiffs?: FileDiff[]
+  ) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
@@ -776,7 +832,8 @@ interface SessionState {
     toolUseId: string,
     toolResultToolUseId: string,
     result: string,
-    isError: boolean
+    isError: boolean,
+    fileDiffs?: FileDiff[]
   ) => void
   setBashOutput: (
     routingId: string,
@@ -835,11 +892,8 @@ interface SessionState {
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
-  /** Set the active session's model picker value. When `engineId` is provided
-   *  and differs from the session's current engine, switches the session's
-   *  engine too (only valid for a not-yet-started session — the caller guards
-   *  this). Persists the engine-correct ModelRef. */
-  setSelectedModel: (model: string, engineId?: EngineId) => void
+  /** Set the active session's model picker value within its selected engine. */
+  setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setSdkSkillNames: (names: string[]) => void
@@ -878,11 +932,21 @@ interface SessionState {
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
-  setVendorOAuth(state: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null): void
+  setVendorOAuth(
+    state: {
+      engineId: string
+      vendorId: string
+      stage: 'waiting' | 'error'
+      instructions: string
+    } | null
+  ): void
   cancelVendorOAuth(): void
   setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
   clearVendorAuthRequired(routingId: string): void
-  authorizeVendorOAuth(engineId: EngineId, vendorId: string): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
+  authorizeVendorOAuth(
+    engineId: EngineId,
+    vendorId: string
+  ): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -941,6 +1005,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
+  piDefaultModel: PI_DEFAULT_MODEL,
   modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
@@ -1007,23 +1072,24 @@ export const useSessionStore = create<SessionState>((set) => ({
       // would show a Claude model in the picker while routing send to a phantom
       // opencode model (the desync regression). Fall back to claude in that case.
       let engineId = state.lastSelectedEngineId
-      let defaultModel: string
-      if (engineId === 'opencode') {
-        const resolved = resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
-        if (resolved) {
-          defaultModel = resolved
-        } else {
-          engineId = 'claude'
-          defaultModel = 'default'
-        }
-      } else {
-        defaultModel = defaultModelForEngine(engineId, state.opencodeDefaultModel)
+      let defaultModel = resolveEngineDefaultModel(
+        engineId,
+        state.availableModels,
+        state.opencodeDefaultModel,
+        state.piDefaultModel
+      )
+      if (
+        engineId === 'opencode' &&
+        !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
+      ) {
+        engineId = 'claude'
+        defaultModel = 'default'
       }
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
       const sessionEngines = {
         ...state.sessionEngines,
-        [routingId]: { engineId, model: modelRefForEngine(engineId, defaultModel) }
+        [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(defaultModel) }
       }
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       const newSession = createEmptySession(cwd)
@@ -1033,9 +1099,12 @@ export const useSessionStore = create<SessionState>((set) => ({
       newSession.status = {
         ...newSession.status,
         engineId,
-        capabilities: engineId === 'opencode'
-          ? resolveOpencodeCapabilities()
-          : resolveClaudeCapabilities('default')
+        capabilities: engineMeta(engineId).seedCapabilities(
+          defaultModel,
+          state.availableModels.find(
+            (m) => m.value === defaultModel && isModelForEngine(m, engineId)
+          )
+        )
       }
       return {
         ...(switchTo
@@ -1052,8 +1121,48 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ lastSelectedEngineId: engineId })
   },
 
+  setSelectedEngine: (engineId) =>
+    set((state) => {
+      const id = state.activeSessionId
+      const session = id ? state.sessions[id] : undefined
+      if (!id || !session || session.sdkActive || session.status.sessionId || session.isHistorical)
+        return {}
+      if (session.selectedEngineId === engineId) return {}
+      const model = resolveEngineDefaultModel(
+        engineId,
+        state.availableModels,
+        state.opencodeDefaultModel,
+        state.piDefaultModel
+      )
+      const modelInfo = state.availableModels.find(
+        (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
+      )
+      const sessionEngines = {
+        ...state.sessionEngines,
+        [id]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+      }
+      saveSessionConfig(state, { sessionEngines })
+      localStorage.setItem('lastSelectedEngineId', engineId)
+      return {
+        sessions: updateSession(state.sessions, id, () => ({
+          selectedEngineId: engineId,
+          selectedModel: model,
+          reasoningVariant: null,
+          status: {
+            ...session.status,
+            engineId,
+            capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
+          }
+        })),
+        sessionEngines,
+        lastSelectedEngineId: engineId
+      }
+    }),
+
   setOpencodeDefaultModel: (model) =>
     set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
+
+  setPiDefaultModel: (model) => set({ piDefaultModel: model || PI_DEFAULT_MODEL }),
 
   reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
 
@@ -1077,15 +1186,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       const persistedEngineId = persistedEntry?.engineId ?? 'claude'
       const persistedModelRef = persistedEntry?.model
       // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
-      let persistedModel: string | undefined
-      if (persistedModelRef) {
-        persistedModel =
-          persistedEngineId === 'opencode'
-            ? `${persistedModelRef.vendorId}/${persistedModelRef.modelId}`
-            : persistedModelRef.modelId
-      }
+      const persistedModel: string | undefined = persistedModelRef
+        ? engineMeta(persistedEngineId).encodeModelValue(persistedModelRef)
+        : undefined
       const selectedModel =
-        persistedModel ?? defaultModelForEngine(persistedEngineId, state.opencodeDefaultModel)
+        persistedModel ??
+        engineMeta(persistedEngineId).defaultModelValue(
+          perEngineDefaultModel(persistedEngineId, state.opencodeDefaultModel, state.piDefaultModel)
+        )
       return {
         sessions: {
           ...state.sessions,
@@ -1108,12 +1216,38 @@ export const useSessionStore = create<SessionState>((set) => ({
   forkFromMessage: async (sourceRoutingId, messageId) => {
     const src = useSessionStore.getState().sessions[sourceRoutingId]
     if (!src) return null
+    // Last-resort guard: MessageBubble already gates the Fork button on this
+    // same flag, but resolveForkAnchor below is Claude-JSONL-only, so if a
+    // stale/true capability flag ever reached here for a non-Claude engine it
+    // would call into a path that can't work for it.
+    if (!src.status.capabilities.forkFromMessage) {
+      useSessionStore
+        .getState()
+        .addError(
+          sourceRoutingId,
+          'This engine does not support branching a session from a specific message.'
+        )
+      return null
+    }
     // The on-disk session id: a rekeyed live session or a historical load both
     // carry it as the routingId; a still-streaming session exposes it on status.
     const sourceSessionId = src.status.sessionId ?? sourceRoutingId
 
-    // Claude: resolve the JSONL-flushed uuid for the chosen message.
-    const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
+    // The forked message's index in its own array — Claude's resolver ignores
+    // this (it resolves by messageId, the JSONL-flushed uuid); pi's resolver
+    // is POSITION-based instead (no stable id survives a live→disk round
+    // trip — see resolveForkAnchor's/findPiForkAnchorEntryId's doc comments),
+    // so it's computed BEFORE the anchor call (not after, as it used to be)
+    // so it can be threaded through for that engine.
+    const idx = src.messages.findIndex((m) => m.id === messageId)
+
+    const result = await window.api.resolveForkAnchor(
+      sourceSessionId,
+      src.cwd,
+      messageId,
+      src.status.engineId,
+      idx
+    )
     if (!result?.anchorUuid) {
       // The message isn't flushed to the transcript yet (or vanished). Surface
       // it on the source session rather than silently doing nothing.
@@ -1129,8 +1263,8 @@ export const useSessionStore = create<SessionState>((set) => ({
 
     // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
     // to one session never mutate the other). cli.js performs the same slice by
-    // uuid when it materializes the fork, so the displayed history will match.
-    const idx = src.messages.findIndex((m) => m.id === messageId)
+    // uuid when it materializes the fork, so the displayed history will match
+    // (pi's own clone/fork RPCs perform the equivalent truncation on its side).
     const seeded = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
       ...m,
       content: m.content.map((b) => ({ ...b }))
@@ -1319,10 +1453,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   deleteProject: async (projectKey) => {
     await window.api.deleteProject(projectKey)
     // Also delete any opencode sessions in this group so they don't reappear on the next poll.
-    const opencodeSessions = useSessionStore
-      .getState()
-      .directories.find((g) => g.projectKey === projectKey)
-      ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
+    const opencodeSessions =
+      useSessionStore
+        .getState()
+        .directories.find((g) => g.projectKey === projectKey)
+        ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
     if (opencodeSessions.length > 0) {
       await Promise.allSettled(
         opencodeSessions.map((s) => window.api.deleteSession(s.sessionId, projectKey, 'opencode'))
@@ -1668,7 +1803,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
-  appendToolResult: (routingId, toolUseId, result, isError) =>
+  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -1685,7 +1820,13 @@ export const useSessionStore = create<SessionState>((set) => ({
               ...msg,
               content: [
                 ...msg.content,
-                { type: 'tool_result', toolUseId, toolResult: result, isError }
+                {
+                  type: 'tool_result',
+                  toolUseId,
+                  toolResult: result,
+                  isError,
+                  ...(fileDiffs ? { fileDiffs } : {})
+                }
               ]
             }
             break
@@ -1828,7 +1969,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  appendSubagentToolResult: (routingId, toolUseId, toolResultToolUseId, result, isError) =>
+  appendSubagentToolResult: (
+    routingId,
+    toolUseId,
+    toolResultToolUseId,
+    result,
+    isError,
+    fileDiffs
+  ) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -1846,7 +1994,13 @@ export const useSessionStore = create<SessionState>((set) => ({
             ...msg,
             content: [
               ...msg.content,
-              { type: 'tool_result', toolUseId: toolResultToolUseId, toolResult: result, isError }
+              {
+                type: 'tool_result',
+                toolUseId: toolResultToolUseId,
+                toolResult: result,
+                isError,
+                ...(fileDiffs ? { fileDiffs } : {})
+              }
             ]
           }
           break
@@ -2185,52 +2339,31 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),
 
-  setSelectedModel: (model, engineId) =>
+  setSelectedModel: (model) =>
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
       const session = state.sessions[id]
-      // Resolve the engine this model belongs to: explicit arg wins, else keep
-      // the session's current engine.
-      const targetEngine: EngineId = engineId ?? session?.selectedEngineId ?? 'claude'
-      const engineChanged = !!session && session.selectedEngineId !== targetEngine
+      const targetEngine = session?.selectedEngineId ?? 'claude'
 
       // Persist the engine-correct ModelRef into sessionEngines so it seeds
-      // selectedModel + engine on reopen. Update the engineId too when it changed.
+      // selectedModel + engine on reopen.
       const existing = state.sessionEngines[id]
-      const modelRef = modelRefForEngine(targetEngine, model)
+      const modelRef = engineMeta(targetEngine).decodeModelValue(model)
       const sessionEngines = existing
         ? {
             ...state.sessionEngines,
-            [id]: { ...existing, engineId: targetEngine, model: modelRef }
+            [id]: { ...existing, model: modelRef }
           }
         : state.sessionEngines
       if (existing) saveSessionConfig(state, { sessionEngines })
 
-      // Mirror the engine choice into localStorage (matches setLastSelectedEngineId).
-      if (engineChanged) localStorage.setItem('lastSelectedEngineId', targetEngine)
-
-      // When the engine changed, also update the session's selectedEngineId,
-      // status.engineId, and capabilities so pre-spawn gating is correct.
       // Always reset reasoningVariant on model change — different models have different variants.
       const patch: Partial<PerSessionState> = { selectedModel: model, reasoningVariant: null }
-      if (engineChanged && session) {
-        patch.selectedEngineId = targetEngine
-        patch.status = {
-          ...session.status,
-          engineId: targetEngine,
-          capabilities:
-            targetEngine === 'opencode'
-              ? resolveOpencodeCapabilities()
-              : resolveClaudeCapabilities(model)
-        }
-      }
 
       return {
         sessions: updateSession(state.sessions, id, () => patch),
-        sessionEngines,
-        // Remember the engine for the next new session.
-        ...(engineChanged ? { lastSelectedEngineId: targetEngine } : {})
+        sessionEngines
       }
     }),
 
@@ -2282,9 +2415,13 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ vendorOAuth: null })
   },
   setVendorAuthRequired: (routingId, data) =>
-    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data })) })),
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data }))
+    })),
   clearVendorAuthRequired: (routingId) =>
-    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null })) })),
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null }))
+    })),
   authorizeVendorOAuth: async (engineId, vendorId) => {
     try {
       const allOptions = await window.api.vendorAuthListOptions(engineId)
@@ -2319,16 +2456,29 @@ export const useSessionStore = create<SessionState>((set) => ({
             // invalidates the model cache main-side. (REQUIRED 1.)
             return { ok: true }
           }
-          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          useSessionStore.getState().setVendorOAuth({
+            engineId,
+            vendorId,
+            stage: 'error',
+            instructions: result.instructions
+          })
           return { ok: false }
         } catch {
           if (superseded()) return { ok: false }
-          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          useSessionStore.getState().setVendorOAuth({
+            engineId,
+            vendorId,
+            stage: 'error',
+            instructions: result.instructions
+          })
           return { ok: false }
         }
       } else {
         // method === 'code': return needsPaste so the caller can show paste box
-        return { ok: false, needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions } }
+        return {
+          ok: false,
+          needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions }
+        }
       }
     } catch {
       return { ok: false }
@@ -2352,7 +2502,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // opencode sessions always pass routingId as resumeSessionId (the server resumes
     // the prior opencode session regardless of whether messages are preloaded locally).
     const isOpencode = session.selectedEngineId === 'opencode'
-    const resumeId = (session.messages.length > 0 || isOpencode) ? routingId : undefined
+    const resumeId = session.messages.length > 0 || isOpencode ? routingId : undefined
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -2402,15 +2552,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         delete sessionEngines[oldId]
       } else {
         // Always record the engine + current model, defaulting to the session's choices
-        let modelRef = claudeModel(session.selectedModel)
-        if (session.selectedEngineId === 'opencode') {
-          const slash = session.selectedModel.indexOf('/')
-          if (slash >= 0) {
-            modelRef = opencodeModel(session.selectedModel.slice(0, slash), session.selectedModel.slice(slash + 1))
-          } else {
-            modelRef = opencodeModel('opencode', session.selectedModel)
-          }
-        }
+        const modelRef = engineMeta(session.selectedEngineId).decodeModelValue(
+          session.selectedModel
+        )
         sessionEngines[newId] = {
           engineId: session.selectedEngineId,
           model: modelRef

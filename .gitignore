@@ -16,4 +16,9 @@ bin/
 /vendor/claude-cli/
 # Vendored opencode binary — downloaded via scripts/ensure-opencode.mjs.
 /vendor/opencode-cli/
+# Local opencode source checkout for debugging bundled behavior.
+/vendor/opencode-src/
 /.cache/
+
+# pi coding agent standalone build (vendored by ensure-pi)
+/vendor/pi-cli/

@@ -227,7 +227,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
     await expect(client.connect(transport)).rejects.toThrow()
   })
 
-  it('lists all three hosted tools', async () => {
+  it('lists all four hosted tools', async () => {
     const host = await startMcpHttpHost(createOpencodeHostedToolsServer(tmp))
     hosts.push(host)
     const client = await connectClient(host)
@@ -236,6 +236,7 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
     // MCP tool names are the BARE names — opencode applies the `claudeui_` prefix.
     expect(tools.map((t) => t.name).sort()).toEqual([
       'create_mockup',
+      'dispatch_agent',
       'render_mermaid',
       'show_mockup'
     ])

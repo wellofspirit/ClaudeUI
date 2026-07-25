@@ -6,8 +6,7 @@
  *
  * Complements `session-store-actions.component.test.ts` which covers business-flow
  * actions (lifecycle, deletion, plan/mockup panels, worktree, etc.). This file
- * targets the low-level "pure reducer" behaviors from docs/test-coverage-proposal.md
- * section 2.4: upsert-by-id, streaming accumulation, tool_result attachment,
+ * targets the low-level "pure reducer" behaviors: upsert-by-id, streaming accumulation, tool_result attachment,
  * pending-approval keying, rekey semantics, multi-session isolation, BTW,
  * derived selector safety, and error lifecycle.
  */

@@ -59,8 +59,12 @@ if (src.includes(PATCH_MARKER)) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Locating control-request fallback ---')
 
+  // v2.1.219 wrapped the control-request dispatch chain in a try/finally, so the
+  // fallback tail changed from `...subtype}`);continue}else if(msg.type==="control_response")`
+  // to `...subtype}`)}finally{...}continue}else if(...)`. Match the fallback call
+  // itself (tail-less) — still globally unique.
   const anchorRe = new RegExp(
-    `else (${V})\\((${V}),\`Unsupported control request subtype: \\$\\{\\2\\.request\\.subtype\\}\`\\);continue\\}else if\\(\\2\\.type==="control_response"\\)`
+    `else (${V})\\((${V}),\`Unsupported control request subtype: \\$\\{\\2\\.request\\.subtype\\}\`\\)`
   )
 
   const anchorMatch = anchorRe.exec(src)
@@ -87,7 +91,10 @@ if (src.includes(PATCH_MARKER)) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 5000), anchorIdx + 2000)
+  // Window extended from 5000 → 8000: in v2.1.197 the stop_task handler (source
+  // of the success-response-helper pattern) moved to 5647 chars before the anchor,
+  // just outside the old 5000-char window.  8000 gives a comfortable margin.
+  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 8000), anchorIdx + 2000)
 
   // --- Success response helper (called after stop_task success) ---
   const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
@@ -129,33 +136,36 @@ if (src.includes(PATCH_MARKER)) {
     process.exit(1)
   }
 
-  // --- Yi (local_agent type check): same pattern but type==="local_agent" ---
-  // In 0.2.87+ this function is duplicated (once in task-management, once in TUI).
-  // Disambiguate by requiring a nearby function to reference the captured name
-  // with agentType!=="main-session" (only the task-management copy has this).
-  // 2.1.177: an intervening helper (e.g. `sIK`) now sits between the type-check
-  // fn and the `agentType!=="main-session"` disambiguator, so the reference is no
-  // longer immediately adjacent. Tolerate up to 400 chars of intervening code
-  // instead of requiring the disambiguator to be the very next function.
-  const yiRe = new RegExp(
-    `function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}[\\s\\S]{0,400}?\\1\\(${V}\\)&&${V}\\.agentType!=="main-session"`
+  // --- Yi (local_agent type check): same shape as wi but type==="local_agent" ---
+  // Since 0.2.87 two candidate functions define the identical
+  // `typeof x==="object"&&...&&x.type==="local_agent"` shape (task-management +
+  // TUI copies). Disambiguate by which one is used in a
+  // `<fn>(x)&&x.agentType!=="main-session"` guard — only the task-management copy
+  // is. Up to 2.1.207 the guard sat near the definition (≤400 chars) so a single
+  // bounded-gap regex worked; v2.1.219 moved it ~2.3M chars away, so match the
+  // definition and the guard usage independently rather than requiring adjacency.
+  const yiDefRe = new RegExp(
+    `function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}`,
+    'g'
   )
-  const yiMatch = yiRe.exec(src)
-  if (!yiMatch) {
+  const yiCandidates = [...new Set([...src.matchAll(yiDefRe)].map((m) => m[1]))]
+  if (yiCandidates.length === 0) {
+    console.error('ERROR: Cannot find local_agent type check function (Yi)')
+    process.exit(1)
+  }
+  const yiUsed = yiCandidates.filter((name) =>
+    new RegExp(`${name.replace(/\$/g, '\\$')}\\(${V}\\)&&${V}\\.agentType!=="main-session"`).test(
+      src
+    )
+  )
+  if (yiUsed.length !== 1) {
     console.error(
-      'ERROR: Cannot find local_agent type check function (Yi) with agentType disambiguation'
+      `ERROR: local_agent disambiguation failed — ${yiUsed.length} of ${yiCandidates.length} candidate(s) [${yiCandidates.join(', ')}] used with agentType!=="main-session". Aborting.`
     )
     process.exit(1)
   }
-  const yiFn = yiMatch[1]
+  const yiFn = yiUsed[0]
   console.log(`  local_agent check (Yi): ${yiFn}`)
-
-  // Verify Yi uniqueness
-  const allYiMatches = [...src.matchAll(new RegExp(yiRe, 'g'))]
-  if (allYiMatches.length > 1) {
-    console.error('ERROR: local_agent type check matched multiple times. Aborting.')
-    process.exit(1)
-  }
 
   // --- Ff6 (backgroundSignal resolver Map) ---
   // Found by looking for the pattern in the agent task factory:

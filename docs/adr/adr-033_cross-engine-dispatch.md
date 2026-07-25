@@ -1,0 +1,176 @@
+# ADR-033: Cross-engine agent dispatch — hosted `dispatch_agent` tool, headless subtask-style targets
+
+**Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034)
+**Date:** 2026-07-14
+**Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
+
+## Context
+
+ClaudeUI now runs two engines (Claude, opencode) fronting different model vendors. We want a session
+on either engine to delegate a task to an agent on the *other* engine — e.g. a Claude session asks a
+GPT-5-backed opencode agent to review a diff — with the same UX as a native subtask: a task card in
+the dispatching chat, approvals surfacing in the dispatching session, no separate session to manage.
+
+Both engines already consume ClaudeUI-hosted MCP tools: Claude via in-process SDK MCP servers
+(`mcpServers` option in `claude-session.ts`), opencode via the `claudeui` HTTP-MCP host injected
+through `OPENCODE_CONFIG_CONTENT` (ADR-019). The subagent/TaskCard rendering pipeline
+(`session:subagent-*`, `session:task-*`) is engine-neutral.
+
+De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/opencode-src/`):
+
+- **Abort propagates end-to-end**: session abort → Effect interrupt → turn `AbortController` →
+  AI SDK `abortSignal` → `client.callTool({signal})`. In-flight MCP calls are cancelled.
+- **opencode natively permission-gates MCP tools**: every MCP tool execution runs
+  `ctx.ask({permission: '<server>_<tool>'})` against the merged ruleset (last-match-wins wildcards,
+  default `ask`). Our `{*: allow}` baseline is why hosted tools run silently — gating the dispatch
+  tool is one appended rule in the ruleset we already `PATCH`.
+- **Deny is survivable**: opencode's default kills the turn on a bare reject, but ClaudeUI already
+  ships `experimental.continue_loop_on_deny: true` and always rejects with a message
+  (→ `CorrectedError`, inherently non-fatal) — ADR-032. Caveat: one reject cascades bare
+  auto-rejects to all other pending asks in that session; the forwarding layer must reconcile on
+  `permission.replied` events.
+- **Timeout**: opencode's `callTool` timeout (per-server config ?? 60s SDK default) resets on
+  progress notifications (`resetTimeoutOnProgress: true`).
+
+## Decision
+
+1. **One symmetric tool, `dispatch_agent({ engine, prompt, model?, session_id? })`**, hosted by
+   ClaudeUI and injected into both engines. Returns the target's final text plus a `session_id`;
+   passing `session_id` back continues the same target (multi-turn collaboration without new
+   transport). Registration:
+   - Claude: a **separate** in-process server (`claude-ui-collab`) so it does **not** ride the
+     auto-allowed `mcp__claude-ui__` prefix — it goes through `canUseTool` like an ordinary tool.
+   - opencode: registered on the existing `claudeui` hosted server (appears as
+     `claudeui_dispatch_agent`), gated by an appended `ask` rule in the session ruleset.
+2. **A single main-process `CrossEngineDispatcher` service** owns all dispatch logic: target
+   creation, guards (concurrency cap, per-dispatch timeout, model allowlist), approval forwarding,
+   result await, cancellation. Both engines' tool registrations delegate to it.
+3. **Targets are headless dispatcher-owned mini-sessions built on engine client primitives, not
+   `SessionManager`/`ISession`**: opencode targets use `OpencodeClient` directly (create session →
+   patch ruleset → synchronous `POST /session/{id}/message` — the `askSideQuestion`/judge
+   precedent); Claude targets use `sdkQuery()` directly (the `service-session.ts` precedent) with a
+   `canUseTool` callback. No sidebar entry, no renderer session, no rekey/lifecycle coupling.
+4. **Recursion is structurally impossible**: dispatcher-created targets never get the collab server
+   registered (and opencode targets additionally get a deny rule for `claudeui_dispatch_agent*`).
+   No depth counters. The tool is main-agent-only by policy; Claude-native subagents share the
+   parent's MCP channel, so enforcement there is best-effort v1 (documented limitation).
+5. **Subtask-identical UX**: the target inherits the dispatcher's autonomy mode (mapped through the
+   ADR-022 `buildRuleset` for opencode; permission mode for Claude — auto-mode judge is *not*
+   spun up for targets in v1, `full` maps to allow-all). Target approval requests are re-emitted as
+   `session:approval-request` under the **dispatching** session's routing with a reserved requestId
+   prefix (`xeng:`); the approve IPC handler routes that prefix to the dispatcher instead of the
+   session. Output streams into the dispatching chat through the existing
+   `session:subagent-*`/`session:task-*` events keyed by the dispatching `toolUseId` (TaskCard
+   renders it; engine badge added).
+6. **Config (plane ③, ADR-020)**: `engines/<engineId>.json` gains
+   `dispatch?: { allowedModels?: string[]; defaultModel?: string }` governing dispatches **into**
+   that engine, edited in a per-engine SettingsDialog section (Engines › Claude / Engines ›
+   opencode).
+7. **Long-call survival**: `create-sdk-mcp.ts` threads the MCP SDK `extra` parameter
+   (cancellation `signal`, `sendNotification`) through to tool handlers — backward-compatible; the
+   dispatch tool sends progress heartbeats (resets opencode's timeout, feeds TaskCard progress) and
+   observes `extra.signal` to interrupt the target. The injected `mcp.claudeui` block also sets an
+   explicit generous `timeout`.
+
+## Consequences
+
+- New `src/main/services/cross-engine-dispatcher.ts` (+ tool registrations in `claude-session.ts`
+  and `opencode-hosted-tools.ts`); `SessionManager` stays untouched.
+- `create-sdk-mcp.ts` handler signature gains an optional second `extra` argument; existing tools
+  (mermaid/mockup/auto-classifier) unaffected.
+- Approval IPC gains prefix routing; renderer approval UI unchanged in v1 (approvals appear as
+  ordinary tool approvals on the dispatching session).
+- Dispatched turns consume tokens on the target engine's active account — SHIPPED (M4-B): every
+  completed/failed dispatched turn is captured explicitly (per-turn cost/tokens/duration from the
+  target's own result) into the operational DB's `dispatched_usage` table (migration v6),
+  attributed to the DISPATCHING session, surfaced in UsageView's "Delegated" section and in
+  `TaskNotification.usage`. Headless turns are structurally invisible to ADR-011's JSONL scan
+  (Claude targets have no transcript; opencode targets bypass OpencodeSession's metering), so
+  this explicit capture is additive with no double-counting. A per-target cumulative
+  `dispatch.maxCostUsd` cap (M4-C) rejects continuation turns once exceeded.
+- Per ADR-030, the `crossEngineDispatch` capability flag is SHIPPED (M4-A): statically true for
+  both engines (both directions live-verified), ANDed at session level with the runtime
+  target-engine-installed check (`crossEngineDispatchAvailable`) — the collab-server registration
+  and both settings sections gate on it.
+
+## M2–M4 — decisions + as-built record
+
+(The full standalone implementation plan, `docs/v2/cross-engine-dispatch-implementation-plan.md`,
+was removed with the V2 docs post-ship — recoverable from git history. The as-built deltas that
+matter for maintenance are folded in below.)
+
+- **Caller-session identity on the shared opencode MCP host** — RESOLVED & SHIPPED (M2): a
+  ClaudeUI-provided opencode **plugin** (`resources/opencode/claudeui-xeng-plugin.ts`, injected as
+  an absolute path via `OPENCODE_CONFIG_CONTENT`'s `plugin` array) stamps the caller `sessionID`
+  into the dispatch tool's args via `tool.execute.before` (deterministic; opencode passes `args`
+  by reference before `execute`, so the mutation reaches our MCP handler —
+  `vendor/opencode-src/.../session/tools.ts:398-409`). Chosen over FIFO temporal correlation off
+  `permission.asked` (racy across concurrent same-cwd sessions) and over fixed-mode/no-forwarding
+  (breaks subtask parity). Local-file plugin loading was probed live against the vendored binary
+  before implementation and the full path verified in the real app (caller id visible in the tool
+  args on the wire). Two implementation constraints discovered: the injected arg must be a
+  **declared optional field** of the tool's zod schema (unknown keys are stripped), and file-source
+  V1 plugins must default-export an `id`.
+- **M2 shipped (opencode → Claude).** Headless Claude targets are one persistent `sdkQuery()`
+  process per target (pushable streaming-input channel; `persistSession: false` rules out
+  `--resume` continuation), driven by a manual `iterator.next()` loop — the handle's
+  `asyncIterator.return()` kills the child, so `for await`+`break` is forbidden. Concurrent
+  same-`session_id` dispatches are busy-rejected (one iterator per target). Target approvals
+  forward as `xeng:` `PendingApproval`s resolved back into the target's `canUseTool` promise.
+  `full`/`auto` callers map to `bypassPermissions` on the target (no judge for targets in v1,
+  per §5); `plan` maps to `default`.
+
+- **M3 shipped (subtask-parity UX).** Dispatched work renders via TaskCard ('task' kind; engine ·
+  model badge in the subagent slot), streams live keyed by the dispatching tool_use id (Claude
+  side: cli.js's `_meta["claudecode/toolUseId"]`, present on every MCP tools/call; opencode side:
+  plugin-stamped `__xeng_call_id`), and is stoppable. Stop rides `session:stop-task` with an
+  `isDispatch` flag; a registry miss arms a 60s **pending stop-intent** consumed at dispatch
+  registration — closes the live-verified race where the renderer's Stop is clickable before the
+  MCP call reaches the dispatcher (SSE beats the tools/call round-trip).
+
+### As-built deltas (what differed from the plan)
+
+- **Zod stripping hazard (M2):** our MCP host validates tool input with `z.object()`, which strips
+  unknown keys — the plugin-injected `__xeng_caller_session` (and M3's `__xeng_call_id`) are
+  therefore **declared optional fields** of the opencode-side tool schema (described "internal —
+  never set this yourself"), read + stripped by the handler.
+- **Collab-tool enum NOT widened (M2):** each side's `engine` enum lists only the *other* engine;
+  same-engine dispatch is guard-rejected anyway.
+- **MCP timeout (M2):** `mcp.claudeui.timeout` = 20 min in `OPENCODE_CONFIG_CONTENT` (opencode's
+  schema default is 5 s) so long Claude-target turns survive even without progress-token resets.
+- **Cycle breaks (M2):** the hosted tool gets `sessionManager`/dispatcher via setters on
+  `OpencodeServerManager` wired in `main/index.ts`; `buildRuleset` extracted to
+  `src/main/opencode/permission-ruleset.ts`. The gating ask-rule is appended **after** the user's
+  compiled rules in `applyPermissionMode`, so a blanket user allow-rule can't silently un-gate
+  dispatch.
+- **Card kind (M3):** no new ToolKind — `hostedMcpKind` maps `mcp__claude-ui-collab__dispatch_agent`
+  → `'task'` (before the generic `mcp__` fallback); both engine tool-maps discriminate the dispatch
+  input by its `engine` field, putting "engine · model" in the existing `subagent` badge slot.
+  Dispatch cards suppress the meaningless "Send to background" affordance.
+- **Streaming (M3):** Claude targets run `includePartialMessages`; the dispatcher forwards
+  stream_event deltas / assistant messages via `transformAssistantMessage` (factored to
+  `src/main/services/assistant-message.ts`, shared with ClaudeSession) / tool_results. opencode
+  targets are tapped from the existing per-cwd SSE loop reusing `event-mapper.ts`'s `mapEvent`,
+  gated on the entry's `busy` flag. All emits byte-match claude-session.ts's payload shapes and
+  no-op when the tool_use id is unknown.
+- **Stopped dispatch surfaces to the CALLER as an isError tool result** ("Dispatch stopped by
+  user.") — on opencode that's a model-visible corrected error (ADR-032), not an error-state part,
+  so the card ends neutral, not danger-bordered. Expected.
+- **Usage capture (M4):** per-turn — Claude targets from `result.usage` + `total_cost_usd` +
+  `duration_ms` (per-turn, not cumulative — but see ADR-034's amendment); opencode targets from
+  `info.tokens {input,output,reasoning}` + `info.cost`. `toolUses` = per-turn Set of **unique**
+  tool_use ids (partial/re-emitted messages re-carry the same blocks — a counter overcounts).
+  Recording is failure-isolated (`safeRecordUsage`) — a DB error drops the row with a warn, never
+  fails the dispatch.
+
+## Still-open questions
+
+- ~~Whether cli.js imposes a timeout on in-process (`mcp_message`) tool calls~~ **RESOLVED
+  (bundle-verified, M3/M4):** cli.js's MCP callTool timeout is OFF by default — it exists only
+  when `MCP_TOOL_TIMEOUT` (env) or the per-server config `timeout` is set, and it is an IDLE
+  timeout that resets on progress notifications; cli.js always passes `onprogress`, so the
+  dispatcher's 15s heartbeats keep even a configured timeout at bay. Caveat: a user-set
+  `MCP_TOOL_TIMEOUT` in the app's environment applies to dispatch like any other MCP tool.
+  cli.js also threads an abort signal into every MCP call — a turn interrupt cancels the
+  in-flight call (fires our `extra.signal`), so dispatches do not outlive an interrupted
+  dispatching turn (no orphan-reaper needed).

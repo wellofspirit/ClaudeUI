@@ -3,9 +3,9 @@
  * calls and forwards them to the RemoteServer for broadcasting to
  * connected WebSocket clients.
  *
- * Registered via ClaudeSession.addExtraWindow(bridge) — the existing
+ * Registered via BaseSession.addExtraWindow(bridge) — the existing
  * extraWindows mechanism means all session events automatically flow
- * to remote clients with zero changes to ClaudeSession.
+ * to remote clients with zero changes to BaseSession.
  */
 export class RemoteBridge {
   private destroyed = false
@@ -16,7 +16,7 @@ export class RemoteBridge {
     this.pushFn = fn
   }
 
-  /** Minimal BrowserWindow interface for ClaudeSession.extraWindows */
+  /** Minimal BrowserWindow interface for BaseSession.extraWindows */
   isDestroyed(): boolean {
     return this.destroyed
   }

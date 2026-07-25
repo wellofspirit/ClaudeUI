@@ -138,14 +138,20 @@ Audio chunks may arrive before the Deepgram WebSocket connects (the `onReady` ca
 The control request fallback warning — same anchor used by `queue-control`:
 
 ```
-else WARN(MSG,`Unsupported control request subtype: ${MSG.request.subtype}`);continue}else if(MSG.type==="control_response")
+else WARN(MSG,`Unsupported control request subtype: ${MSG.request.subtype}`)
 ```
 
 Regex:
 
 ```js
-else ([\w$]+)\(([\w$]+),`Unsupported control request subtype: \$\{\2\.request\.subtype\}`\);continue\}else if\(\2\.type==="control_response"\)
+else ([\w$]+)\(([\w$]+),`Unsupported control request subtype: \$\{\2\.request\.subtype\}`\)
 ```
+
+Tail-less since v2.1.219: the dispatch chain is now wrapped in `try/finally`, so the old
+`;continue}else if(MSG.type==="control_response")` tail no longer directly follows the fallback.
+Do not confuse with v2.1.219's second class-based dispatcher (`processControlRequest`, with a
+`throw Error("Unsupported control request subtype: "+e.request.subtype)` fallback) — that serves
+the SDK Query transport, not the stream-json stdin loop ClaudeUI drives.
 
 #### Dynamic Function Extraction
 

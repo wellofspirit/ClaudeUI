@@ -3,7 +3,8 @@
  * normalizes their input/result shapes into the SAME engine-neutral ToolView
  * the kind bodies consume (so opencode renders through ClaudeUI's rich cards).
  *
- * See docs/v2/06-tool-rendering.md §6 for the canonical opencode→kind table.
+ * The kindOf switch below IS the canonical opencode→kind table (tool ids
+ * verified against opencode-src tool/registry.ts).
  *
  * Hosted-tools MCP names: the in-process HTTP MCP server is named 'claudeui'.
  * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`,
@@ -59,6 +60,11 @@ function opencodeKindOf(toolName: string): ToolKind {
     case 'claudeui_create_mockup':
     case 'claudeui_show_mockup':
       return 'mockup'
+    // Cross-engine dispatch (ADR-033 M3) — opencode sanitizes the hosted
+    // 'claudeui' MCP server's dispatch_agent tool to this name (see
+    // opencode-hosted-tools.ts's file header). Reuses TaskCard via 'task'.
+    case 'claudeui_dispatch_agent':
+      return 'task'
     // skill/lsp/invalid → unknown (graceful; dedicated kinds are out of scope)
     default:
       return 'unknown'
@@ -80,16 +86,21 @@ function opencodeNormalize(
         output: result?.toolResult
       }
 
-    case 'fileEdit':
-      // opencode edit input: { filePath, oldString, newString }. patch differs
-      // (it carries a `patch` string, no old/new pair) → empty before/after, so
-      // the body falls back to the generic JSON view.
+    case 'fileEdit': {
+      // opencode edit input: { filePath, oldString, newString }. apply_patch has
+      // no old/new pair on its input, but its (and edit's) tool result carries
+      // real unified diffs in metadata — extractFileDiffs (event-mapper.ts) maps
+      // those onto result.fileDiffs, which we surface as `files` here so the
+      // body renders real per-file diff cards instead of the generic JSON view.
+      const fileDiffs = result?.fileDiffs
       return {
         kind: 'fileEdit',
         path: inp.filePath != null ? String(inp.filePath) : '',
         before: inp.oldString != null ? String(inp.oldString) : '',
-        after: inp.newString != null ? String(inp.newString) : ''
+        after: inp.newString != null ? String(inp.newString) : '',
+        ...(fileDiffs && fileDiffs.length > 0 ? { files: fileDiffs } : {})
       }
+    }
 
     case 'fileWrite':
       // opencode write input: { filePath, content }.
@@ -119,7 +130,18 @@ function opencodeNormalize(
         target: inp.url != null ? String(inp.url) : JSON.stringify(inp)
       }
 
-    case 'task':
+    case 'task': {
+      // Cross-engine dispatch (ADR-033 M3) — see the identical discriminator
+      // note in ClaudeEngineToolMap.ts. `engine` is present only on the
+      // dispatch tool's input, never on opencode's native task tool.
+      if (typeof inp.engine === 'string') {
+        return {
+          kind: 'task',
+          description: `Dispatch: ${inp.engine}`,
+          prompt: inp.prompt != null ? String(inp.prompt) : '',
+          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
+        }
+      }
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
@@ -128,6 +150,7 @@ function opencodeNormalize(
         model: inp.model != null ? String(inp.model) : undefined,
         background: inp.background != null ? Boolean(inp.background) : undefined
       }
+    }
 
     case 'todo': {
       const rawTodos = Array.isArray(inp.todos) ? inp.todos : []
@@ -211,7 +234,8 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
   question: 'AskUserQuestion',
   claudeui_render_mermaid: 'Mermaid',
   claudeui_create_mockup: 'Mockup',
-  claudeui_show_mockup: 'Mockup'
+  claudeui_show_mockup: 'Mockup',
+  claudeui_dispatch_agent: 'Dispatch'
 }
 
 function opencodeDisplayName(toolName: string): string {

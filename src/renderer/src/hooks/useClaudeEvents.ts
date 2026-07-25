@@ -31,6 +31,7 @@ export function useClaudeEvents(): void {
   const appendStreamingThinking = useSessionStore((s) => s.appendStreamingThinking)
   const addPendingApproval = useSessionStore((s) => s.addPendingApproval)
   const clearPendingApprovals = useSessionStore((s) => s.clearPendingApprovals)
+  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const removePendingApprovalByToolUse = useSessionStore((s) => s.removePendingApprovalByToolUse)
   const setStatus = useSessionStore((s) => s.setStatus)
   const addError = useSessionStore((s) => s.addError)
@@ -159,6 +160,11 @@ export function useClaudeEvents(): void {
           `${approval.toolName || 'Tool'} needs approval`
         )
       }),
+      // Externally-resolved approval (e.g. opencode's deny-cascade on a
+      // dispatch target, ADR-033) — remove the stale card.
+      window.api.onApprovalDismiss((routingId, { requestId }) => {
+        removePendingApproval(routingId, requestId)
+      }),
       window.api.onStatus((routingId, status) => {
         // Re-key session when SDK provides its stable session ID
         let effectiveRoutingId = routingId
@@ -171,15 +177,23 @@ export function useClaudeEvents(): void {
           }
         }
 
+        const priorState = useSessionStore.getState().sessions[effectiveRoutingId]?.status.state
+
         if (status.state === 'disconnected') {
           useSessionStore.getState().markSdkInactive(effectiveRoutingId)
           setStatus(effectiveRoutingId, { ...status, state: 'idle' })
           clearPendingApprovals(effectiveRoutingId)
+          if (priorState === 'running') {
+            useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
+          }
           return
         }
         setStatus(effectiveRoutingId, status)
         if (status.state === 'idle') {
           clearPendingApprovals(effectiveRoutingId)
+          if (priorState === 'running') {
+            useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
+          }
         }
         // Clear attention when a new turn starts
         if (status.state === 'running') {
@@ -225,8 +239,8 @@ export function useClaudeEvents(): void {
       window.api.onMessagesRetracted((routingId, { messageIds }) => {
         retractMessages(routingId, messageIds)
       }),
-      window.api.onToolResult((routingId, { toolUseId, result, isError }) => {
-        appendToolResult(routingId, toolUseId, result, isError)
+      window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs }) => {
+        appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
         // Belt-and-suspenders: when cli.js has produced a result for this
         // tool_use, any approval still sitting in the store for it is
         // necessarily stale (resolver already ran). Clear it so late
@@ -307,7 +321,8 @@ export function useClaudeEvents(): void {
           data.toolUseId,
           data.toolResultToolUseId,
           data.result,
-          data.isError
+          data.isError,
+          data.fileDiffs
         )
       }),
       window.api.onBashOutput((routingId, data) => {
@@ -477,6 +492,7 @@ export function useClaudeEvents(): void {
     appendStreamingThinking,
     addPendingApproval,
     clearPendingApprovals,
+    removePendingApproval,
     removePendingApprovalByToolUse,
     setStatus,
     addError,

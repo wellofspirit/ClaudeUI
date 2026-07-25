@@ -26,12 +26,15 @@ describe('getContextWindowSize', () => {
   })
 
   describe('implicit-1M models (no [1m] in the name)', () => {
-    it.each(['claude-fable-5', 'claude-mythos-5', 'claude-opus-4-7', 'claude-opus-4-8'])(
-      '%s → 1M',
-      (model) => {
-        expect(getContextWindowSize(model)).toBe(ONE_M)
-      }
-    )
+    it.each([
+      'claude-fable-5',
+      'claude-mythos-5',
+      'claude-opus-4-7',
+      'claude-opus-4-8',
+      'claude-sonnet-5'
+    ])('%s → 1M', (model) => {
+      expect(getContextWindowSize(model)).toBe(ONE_M)
+    })
 
     it('resolves dated ids by substring', () => {
       expect(getContextWindowSize('claude-fable-5-20260315')).toBe(ONE_M)
@@ -49,8 +52,11 @@ describe('getContextWindowSize', () => {
       expect(getContextWindowSize('opus')).toBe(ONE_M)
     })
 
-    it('sonnet, haiku, and opusplan stay at the 200K default', () => {
-      expect(getContextWindowSize('sonnet')).toBe(DEFAULT)
+    it('sonnet resolves to claude-sonnet-5 (native-1M since 2.1.197)', () => {
+      expect(getContextWindowSize('sonnet')).toBe(ONE_M)
+    })
+
+    it('haiku and opusplan stay at the 200K default', () => {
       expect(getContextWindowSize('haiku')).toBe(DEFAULT)
       expect(getContextWindowSize('opusplan')).toBe(DEFAULT)
     })

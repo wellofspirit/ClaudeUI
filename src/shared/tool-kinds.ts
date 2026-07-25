@@ -3,10 +3,11 @@
  *
  * Each engine maps its tool names onto these kinds via EngineToolMap. Renderers
  * are keyed on kind, so Claude's Bash and opencode's bash both render through
- * the 'command' kind renderer. See docs/v2/06-tool-rendering.md §3.
+ * the 'command' kind renderer. The per-engine name→kind tables live in
+ * renderer/src/components/chat/tool-registry/{Claude,Opencode}EngineToolMap.ts.
  */
 
-import type { AskUserQuestion, ContentBlock } from './types'
+import type { AskUserQuestion, ContentBlock, FileDiff } from './types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -36,7 +37,10 @@ export type ToolView =
   // no single old/new pair (e.g. Claude MultiEdit). The body falls back to the
   // generic JSON view (dumping block.toolInput) in that case — preserving today's
   // behavior where MultiEdit hit no special branch.
-  | { kind: 'fileEdit'; path: string; before: string; after: string; language?: string }
+  // `files` is set when the engine's tool result carries real per-file unified
+  // diffs (opencode apply_patch/edit — see FileDiff). When present, the body
+  // renders one diff card per file instead of the single before/after pair.
+  | { kind: 'fileEdit'; path: string; before: string; after: string; language?: string; files?: FileDiff[] }
   | { kind: 'fileWrite'; path: string; content: string; language?: string }
   | { kind: 'fileRead'; path: string; content: string; language?: string; truncated?: boolean }
   // search/web render through the generic body (JSON dump of block.toolInput +
@@ -94,6 +98,12 @@ export function hostedMcpKind(toolName: string): ToolKind | null {
     toolName === 'mcp__claude-ui-mockup__show_mockup'
   )
     return 'mockup'
+  // Cross-engine dispatch (ADR-033 M3) — Claude's dispatch_agent lives on its
+  // own 'claude-ui-collab' MCP server (collab-tool.ts, deliberately NOT the
+  // auto-allowed 'claude-ui' prefix). Reuses TaskCard via the 'task' kind so
+  // dispatched work gets the same live-streaming/progress/stop UX as a native
+  // subagent. Checked BEFORE the generic 'mcp__' fallback below.
+  if (toolName === 'mcp__claude-ui-collab__dispatch_agent') return 'task'
   if (toolName.startsWith('mcp__')) return 'mcp'
   return null
 }

@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * Expanded coverage for `UsageFetcher` (docs/test-coverage-proposal.md §3.2).
+ * Expanded coverage for `UsageFetcher`.
  *
  * These tests exercise the real `UsageFetcher` class (not a re-implemented
  * pure-function copy like usage-fetcher.test.ts does) by mocking the
@@ -155,8 +155,8 @@ describe('UsageFetcher — 429 rate-limit behavior', () => {
     // Pins current behavior: fetchDirect() handles 429 by returning an error
     // result and skipping to the next poll cycle — it does NOT consult
     // Retry-After or attempt a retry. If/when retry-after handling is added,
-    // this test should be replaced with the retry-timing assertion from
-    // docs/test-coverage-proposal.md §3.2.
+    // this test should be replaced with an assertion that the retry fires
+    // after the Retry-After interval.
     fetchMock.mockResolvedValueOnce(
       makeFetchResponse(429, { error: 'rate_limited' }, { 'retry-after': '30' })
     )

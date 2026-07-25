@@ -119,12 +119,35 @@ vi.mock('../../services/ui-config', () => ({
   loadEngineConfig: mockLoadEngineConfig
 }))
 
-// Model-discovery provides context-window sizes; mock so tests can control the
-// returned value without spinning up a real opencode server.
+// Model-discovery provides context-window sizes + per-model capabilities;
+// mock so tests can control the returned values without spinning up a real
+// opencode server.
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
+const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
+const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+// parseModelString mirrors the real "providerID/modelID" split (bare id →
+// 'opencode') since OpencodeSession.ts now imports the shared copy from
+// model-discovery.ts instead of defining it locally (Item 6b dedup).
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
-  invalidateOpencodeModelCache: vi.fn()
+  getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
+  discoverOpencodeModels: mockDiscoverOpencodeModels,
+  invalidateOpencodeModelCache: vi.fn(),
+  parseModelString: (model: string) => {
+    const slash = model.indexOf('/')
+    return slash < 0
+      ? { providerID: 'opencode', modelID: model }
+      : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+  }
+}))
+
+// discoverSkills (Item 3 — ISession.discoverSkills) delegates to
+// discoverOpencodeSkills; mock it directly so the test doesn't depend on the
+// module's internal per-cwd cache or the OpencodeServerManager/OpencodeClient
+// mocks above.
+const mockDiscoverOpencodeSkills = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+vi.mock('../command-skill-discovery', () => ({
+  discoverOpencodeSkills: mockDiscoverOpencodeSkills
 }))
 
 // ---------------------------------------------------------------------------
@@ -160,6 +183,14 @@ function setupMocks(): void {
   mockListCommands.mockReset()
   mockListSkills.mockReset()
   mockRunCommand.mockReset()
+  mockGetOpencodeModelContextWindow.mockReset()
+  mockGetOpencodeModelContextWindow.mockReturnValue(0)
+  mockGetOpencodeModelCapabilities.mockReset()
+  mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
+  mockDiscoverOpencodeModels.mockReset()
+  mockDiscoverOpencodeModels.mockResolvedValue([])
+  mockDiscoverOpencodeSkills.mockReset()
+  mockDiscoverOpencodeSkills.mockResolvedValue([])
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -215,15 +246,7 @@ function setupMocks(): void {
 
 function makeSession(model?: string, permissionMode?: string): OpencodeSession {
   const win = new MockWindow() as unknown as BrowserWindow
-  return new OpencodeSession(
-    'routing_id_1',
-    win,
-    '/tmp/test-cwd',
-    undefined,
-    undefined,
-    permissionMode,
-    model
-  )
+  return new OpencodeSession('routing_id_1', win, '/tmp/test-cwd', { permissionMode, model })
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +483,15 @@ describe('OpencodeSession — run()', () => {
       vi.useRealTimers()
     }
   })
+
+  it('eager connect warms the model discovery cache (cold-cache capability guard)', async () => {
+    const session = makeSession()
+    session.run(null) // fire-and-forget; eagerConnect runs asynchronously
+
+    await vi.waitFor(() => expect(mockDiscoverOpencodeModels).toHaveBeenCalled())
+
+    session.dispose()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -648,11 +680,25 @@ describe('OpencodeSession — resolveApproval()', () => {
     session.dispose()
   })
 
-  it('calls replyPermission with "reject" for deny', async () => {
+  it('calls replyPermission with "reject" + default "User denied" feedback for deny', async () => {
     const session = makeSession()
     await session.run('hi')
     session.resolveApproval('perm_1', 'deny')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'reject'))
+    // Deny always carries model-visible feedback → CorrectedError → the turn
+    // survives the rejection (Claude parity: claude-session.ts 'User denied').
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'reject', 'User denied')
+    )
+    session.dispose()
+  })
+
+  it('deny with answers.feedback → replyPermission(reject, <feedback>)', async () => {
+    const session = makeSession()
+    await session.run('hi')
+    session.resolveApproval('perm_1', 'deny', { feedback: 'too risky' })
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'reject', 'too risky')
+    )
     session.dispose()
   })
 })
@@ -698,6 +744,27 @@ describe('OpencodeSession — capabilities', () => {
     const caps = session.capabilities
     expect(caps.slashCommands).toBe(true)
     expect(caps.skills).toBe(true)
+    session.dispose()
+  })
+
+  it('constructor seeds capabilities.vision=true from a discovered model with attachment support', () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue({ capabilities: { attachment: true } })
+    const session = makeSession('openai/gpt-4o-vision')
+    expect(session.capabilities.vision).toBe(true)
+    session.dispose()
+  })
+
+  it('constructor seeds capabilities.vision=false for a model without image caps', () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue({ capabilities: { attachment: false } })
+    const session = makeSession('openai/gpt-3.5-turbo')
+    expect(session.capabilities.vision).toBe(false)
+    session.dispose()
+  })
+
+  it('constructor seeds capabilities.vision=false when the discovery cache is cold (undefined)', () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
+    const session = makeSession()
+    expect(session.capabilities.vision).toBe(false)
     session.dispose()
   })
 })
@@ -866,6 +933,10 @@ const GUARDS: Rule[] = [
   { permission: 'read', pattern: '*.env.*', action: 'ask' },
   { permission: 'read', pattern: '*.env.example', action: 'allow' }
 ]
+// ADR-033 M2: gates the dispatch_agent tool in EVERY mode, appended LAST
+// (after buildRuleset + the user's compiled rules) so last-match-wins can't
+// accidentally auto-allow it via a blanket user rule.
+const DISPATCH_ASK_RULE: Rule = { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
 
 describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', () => {
   beforeEach(setupMocks)
@@ -886,7 +957,8 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
       ...GUARDS,
       { permission: 'edit', pattern: '*', action: 'ask' },
       { permission: 'bash', pattern: '*', action: 'ask' },
-      { permission: 'webfetch', pattern: '*', action: 'ask' }
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
+      DISPATCH_ASK_RULE
     ])
     // Regression for the subagent hang: `task` must NOT be forced to ask.
     expect(rs.some((r) => r.permission === 'task')).toBe(false)
@@ -897,7 +969,8 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'bash', pattern: '*', action: 'ask' },
-      { permission: 'webfetch', pattern: '*', action: 'ask' }
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
+      DISPATCH_ASK_RULE
     ])
   })
 
@@ -928,7 +1001,8 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'edit', pattern: '*', action: 'deny' },
-      { permission: 'task', pattern: 'general', action: 'deny' }
+      { permission: 'task', pattern: 'general', action: 'deny' },
+      DISPATCH_ASK_RULE
     ])
     // Regression for the over-restriction: there must be NO blanket task deny.
     expect(rs.some((r) => r.permission === 'task' && r.pattern === '*')).toBe(false)
@@ -955,8 +1029,12 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     expect(rs[0]).toEqual(ALLOW_ALL)
     // …then the compiled user rules are appended (so they override the base).
     expect(rs).toContainEqual({ permission: 'bash', pattern: 'git diff*', action: 'allow' })
-    // deny is emitted last so it wins under last-match-wins.
-    expect(rs[rs.length - 1]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'deny' })
+    // deny wins over the base ruleset for `edit` under last-match-wins — it's
+    // second-to-last because the dispatch_agent ask rule (a DIFFERENT
+    // permission namespace, so it never conflicts with this one) is always
+    // appended last of all (ADR-033 M2).
+    expect(rs[rs.length - 2]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'deny' })
+    expect(rs[rs.length - 1]).toEqual(DISPATCH_ASK_RULE)
     // all three scopes are consulted.
     expect(mockLoadClaudePermissions).toHaveBeenCalledWith('user', expect.any(String))
     expect(mockLoadClaudePermissions).toHaveBeenCalledWith('project', expect.any(String))
@@ -1011,10 +1089,10 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
     session.dispose()
   })
 
-  it('deny → replyPermission(reject), no persist', async () => {
+  it('deny → replyPermission(reject, "User denied"), no persist', async () => {
     const session = await started()
     session.resolveApproval('per-3', 'deny')
-    expect(mockReplyPermission).toHaveBeenCalledWith('per-3', 'reject')
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-3', 'reject', 'User denied')
     expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -1080,13 +1158,39 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
-  it('classifier BLOCK → replyPermission(reject)', async () => {
+  it('classifier BLOCK with <reason> → replyPermission(reject, "Auto mode blocked: <reason>")', async () => {
     enableAutoMode()
-    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>yes</block>' }] })
+    mockPrompt.mockResolvedValue({
+      parts: [{ type: 'text', text: '<block>yes</block><reason>touches prod secrets</reason>' }]
+    })
     feedPermissionAsked('bash', 'per_block')
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_block', 'reject'))
+    // The judge's reason rides the reject as model-visible feedback (ADR-023
+    // transparency; wording parity with claude-session.ts 'Auto mode blocked:').
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_block',
+        'reject',
+        'Auto mode blocked: touches prod secrets'
+      )
+    )
+    session.dispose()
+  })
+
+  it('classifier BLOCK without reason → reject with the fallback feedback text', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>yes</block>' }] })
+    feedPermissionAsked('bash', 'per_block_noreason')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_block_noreason',
+        'reject',
+        'Auto mode blocked: flagged as potentially unsafe'
+      )
+    )
     session.dispose()
   })
 
@@ -1105,7 +1209,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockPrompt.mockRejectedValue(new Error('judge down'))
     feedPermissionAsked('bash', 'per_fail')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_fail', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_fail', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1122,7 +1226,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockCreateSession.mockResolvedValue({ id: SES })
     feedPermissionAsked('bash', 'per_disabled')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_dis', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_dis', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1291,7 +1395,7 @@ describe('OpencodeSession — question.asked routing', () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
     feedQuestionAsked('que_human')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_qh', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_qh', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -1312,7 +1416,7 @@ describe('OpencodeSession — question.asked routing', () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
     feedQuestionAsked('que_default')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_qd', win, '/tmp', undefined, undefined, 'default')
+    const session = new OpencodeSession('r_qd', win, '/tmp', { permissionMode: 'default' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -1681,17 +1785,49 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
 // ---------------------------------------------------------------------------
 // dequeueMessage — no-op for opencode (Phase 8c)
 //
-// dequeueMessage is not on ISession; the IPC handler already guards it with
-// isClaudeSession and returns {removed:0} for non-Claude. OpencodeSession has
-// no dequeueMessage — this test verifies the IPC-level guard is sufficient and
-// that no error propagates to a caller expecting the {removed:N} shape.
-// (The renderer's dequeue affordance simply no-ops gracefully — by design.)
+// dequeueMessage is an OPTIONAL member of ISession (Item 3 — no capability flag
+// gates it; the absence of the method is the gate). The IPC handler guards via
+// optional-call: `session?.dequeueMessage?.(value) ?? { removed: 0 }`.
+// OpencodeSession does not implement dequeueMessage — this test verifies the
+// IPC-level guard is sufficient and that no error propagates to a caller
+// expecting the {removed:N} shape. (The renderer's dequeue affordance simply
+// no-ops gracefully — by design.)
 // ---------------------------------------------------------------------------
 
 // The dequeue guard lives in the IPC layer (session.ipc.ts + remote-handlers.ts),
 // not in OpencodeSession itself, so there's nothing to test on OpencodeSession
 // directly. The existing session.ipc.test and remote-handlers.ipc.test cover it.
 // We add a capability assertion as the test anchor.
+
+// ---------------------------------------------------------------------------
+// discoverSkills — ISession.discoverSkills (Item 3)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — discoverSkills (Item 3)', () => {
+  beforeEach(setupMocks)
+
+  it('delegates to discoverOpencodeSkills with the session cwd', async () => {
+    const skills = [
+      {
+        name: 'sk1',
+        displayName: 'sk1',
+        description: '',
+        source: 'project' as const,
+        path: '/tmp/test-cwd/.claude/skills/sk1',
+        content: ''
+      }
+    ]
+    mockDiscoverOpencodeSkills.mockResolvedValueOnce(skills)
+
+    const session = makeSession()
+    const result = await session.discoverSkills('/tmp/test-cwd')
+
+    expect(mockDiscoverOpencodeSkills).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(result).toEqual(skills)
+
+    session.dispose()
+  })
+})
 
 describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => {
   beforeEach(setupMocks)
@@ -2140,7 +2276,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     const win = new MockWindow() as unknown as BrowserWindow
     // ask/default mode — auto-mode disabled
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
-    const session = new OpencodeSession('r_8e_ask', win, '/tmp', undefined, undefined, 'default')
+    const session = new OpencodeSession('r_8e_ask', win, '/tmp', { permissionMode: 'default' })
     await session.run('go')
 
     // Wait for session:approval-request to be emitted to the human
@@ -2233,7 +2369,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     session.resolveApproval('perm_child_deny_8e', 'deny')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_deny_8e', 'reject'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_deny_8e', 'reject', 'User denied')
+    )
 
     session.dispose()
   })
@@ -2274,7 +2412,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_8e_auto', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_8e_auto', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     // In auto mode the classifier is invoked (mockPrompt), then replyPermission(once)
@@ -2508,6 +2646,199 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
 })
 
 // ---------------------------------------------------------------------------
+// Live bash output streaming (Slice A) — parity with Claude's
+// bash-output-streaming patch. opencode's shell tool republishes a cumulative
+// stdout+stderr tail preview via state.metadata.output on every chunk while a
+// `bash` tool part is `running`; dispatchMapperOutput's 'message' case feeds
+// it through bashStreamGate (dedup + trailing-edge throttle, see
+// bash-stream-gate.ts) into session:bash-output. Own-session only — the
+// 'subagent-message' branch is untouched (verified separately in the Phase 8d
+// suite above, which never asserts session:bash-output).
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — live bash output streaming (Slice A)', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_bash_stream'
+
+  function bashPartEvent(
+    id: string,
+    callID: string,
+    state: { status: string; output?: string; metadata?: Record<string, unknown> }
+  ): OpencodeEvent {
+    return {
+      id,
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { input: {}, ...state }
+        }
+      }
+    } as OpencodeEvent
+  }
+
+  it('running bash part with metadata.output → session:bash-output sent with correct payload', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([bashPartEvent('e1', 'call_bash1', { status: 'running', metadata: { output: 'line1\nline2' } })])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash1', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(150) // past the ~100ms throttle window
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCall = calls.find((c) => c[0] === 'session:bash-output')
+      expect(bashCall).toBeDefined()
+      expect(bashCall![2]).toEqual({
+        toolUseId: 'call_bash1',
+        output: 'line1\nline2',
+        totalLines: 2,
+        totalBytes: Buffer.byteLength('line1\nline2', 'utf-8')
+      })
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('unchanged output re-delivered (same snapshot re-processed) → no duplicate emission', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          bashPartEvent('e1', 'call_bash2', { status: 'running', metadata: { output: 'same-output' } }),
+          bashPartEvent('e2', 'call_bash2', { status: 'running', metadata: { output: 'same-output' } })
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash2', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(150)
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCalls = calls.filter((c) => c[0] === 'session:bash-output')
+      expect(bashCalls.length).toBe(1)
+      expect(bashCalls[0][2].output).toBe('same-output')
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rapid successive updates → throttled to a single emission of the latest output', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          bashPartEvent('e1', 'call_bash3', { status: 'running', metadata: { output: 'chunk1' } }),
+          bashPartEvent('e2', 'call_bash3', { status: 'running', metadata: { output: 'chunk1chunk2' } }),
+          bashPartEvent('e3', 'call_bash3', { status: 'running', metadata: { output: 'chunk1chunk2chunk3' } })
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash3', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(200) // all three updates arrive well within one window
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCalls = calls.filter((c) => c[0] === 'session:bash-output')
+      expect(bashCalls.length).toBe(1)
+      expect(bashCalls[0][2].output).toBe('chunk1chunk2chunk3')
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('completed part → no further emissions; pending throttle timer is cleared', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          bashPartEvent('e1', 'call_bash4', { status: 'running', metadata: { output: 'partial' } }),
+          bashPartEvent('e2', 'call_bash4', { status: 'completed', output: 'final result' })
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash4', win, '/tmp')
+      await session.run('go')
+      // Completion arrives (synchronously, in the same SSE drain) before the
+      // 100ms throttle window would have elapsed — cancel() must drop the
+      // pending timer so it never fires afterward.
+      await vi.advanceTimersByTimeAsync(500)
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCalls = calls.filter((c) => c[0] === 'session:bash-output')
+      expect(bashCalls.length).toBe(0)
+
+      // The final result still reaches the renderer via the normal tool-result path.
+      const toolResultCall = calls.find((c) => c[0] === 'session:tool-result')
+      expect(toolResultCall![2]).toEqual({
+        toolUseId: 'call_bash4',
+        result: 'final result',
+        isError: false
+      })
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('non-bash tool (e.g. read) running with metadata.output → nothing sent', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          {
+            id: 'e1',
+            type: 'message.part.updated',
+            properties: {
+              sessionID: SES,
+              part: {
+                id: 'p_read1',
+                messageID: 'msg_read1',
+                type: 'tool',
+                tool: 'read',
+                callID: 'call_read1',
+                state: { status: 'running', input: {}, metadata: { output: 'should not stream' } }
+              }
+            }
+          } as OpencodeEvent
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_read1', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(500)
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      expect(calls.some((c) => c[0] === 'session:bash-output')).toBe(false)
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Child question.asked dispatch (floating AskUserQuestion hang-fix)
 //
 // A registered child subagent calls the `question` tool → question.asked emitted
@@ -2649,7 +2980,7 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
     feedChildQuestion()
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_cq_auto', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_cq_auto', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -3095,15 +3426,15 @@ describe('OpencodeSession — status-line emission', () => {
   })
 })
 
-describe('OpencodeSession — setModel() context window in capabilities', () => {
+describe('OpencodeSession — setModel() capabilities from discovery cache', () => {
   beforeEach(() => {
     setupMocks()
-    mockGetOpencodeModelContextWindow.mockReset()
-    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    mockGetOpencodeModelCapabilities.mockReset()
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
   })
 
   it('setModel with a known ctx window (64000) sets capabilities.contextWindow === 64000', async () => {
-    mockGetOpencodeModelContextWindow.mockReturnValue(64000)
+    mockGetOpencodeModelCapabilities.mockReturnValue({ limit: { context: 64000 } })
     const win = new MockWindow() as unknown as BrowserWindow
     const session = new OpencodeSession('r_setmodel_ctx', win, '/tmp')
     await session.setModel('openai/gpt-4o-mini')
@@ -3112,13 +3443,29 @@ describe('OpencodeSession — setModel() context window in capabilities', () => 
   })
 
   it('setModel with ctx window === 0 (cache miss) falls back to 200_000 optimistic default', async () => {
-    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
     const win = new MockWindow() as unknown as BrowserWindow
     const session = new OpencodeSession('r_setmodel_ctx_miss', win, '/tmp')
     await session.setModel('openai/unknown-model')
-    // ctx || undefined → resolveOpencodeCapabilities({ limit: { context: undefined } })
+    // getOpencodeModelCapabilities(...) → undefined → resolveOpencodeCapabilities(undefined)
     // opencodeModelCapabilities uses limit?.context ?? 200_000 → 200_000
     expect(session.capabilities.contextWindow).toBe(200_000)
+    session.dispose()
+  })
+
+  it('setModel to a vision-capable model flips capabilities.vision to true', async () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_setmodel_vision', win, '/tmp')
+    expect(session.capabilities.vision).toBe(false)
+
+    mockGetOpencodeModelCapabilities.mockImplementation((providerID: string, modelID: string) =>
+      providerID === 'openai' && modelID === 'gpt-4o-vision'
+        ? { capabilities: { attachment: true } }
+        : undefined
+    )
+    await session.setModel('openai/gpt-4o-vision')
+    expect(session.capabilities.vision).toBe(true)
     session.dispose()
   })
 })

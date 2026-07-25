@@ -2,7 +2,7 @@
  * EngineLogo — a small inline SVG mark identifying a session's engine.
  *
  * Claude: simplified Anthropic logomark, tinted #D97757 (Claude orange)
- * opencode: monochrome geometric logomark, inherits currentColor (theme-adaptive)
+ * opencode / pi: monochrome marks that inherit currentColor (theme-adaptive)
  *
  * Sizes: 'sm' (12px, sidebar rows), 'md' (14px, TopBar), 'lg' (16px, other uses)
  */
@@ -25,10 +25,8 @@ export function EngineLogo({
   size = 12,
   testid = 'EngineLogo'
 }: EngineLogoProps): React.JSX.Element {
-  if (engineId === 'opencode') {
-    return <OpencodeMark size={size} className={className} testid={testid} engineId={engineId} />
-  }
-  return <ClaudeMark size={size} className={className} testid={testid} engineId={engineId} />
+  const Mark = ENGINE_MARK[engineId]
+  return <Mark size={size} className={className} testid={testid} engineId={engineId} />
 }
 
 // ── Claude mark ───────────────────────────────────────────────────────────────
@@ -107,3 +105,50 @@ function OpencodeMark({
     </svg>
   )
 }
+
+// ── pi mark ───────────────────────────────────────────────────────────────────
+// Official block-form mark, adapted from pi-logo-on-dark.svg. The source uses
+// white; currentColor keeps it legible across all application themes.
+
+function PiMark({
+  size,
+  className,
+  testid,
+  engineId
+}: {
+  size: number
+  className: string
+  testid: string
+  engineId: EngineId
+}): React.JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 800 800"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-label="pi"
+      data-testid={testid}
+      data-engine={engineId}
+      style={{ flexShrink: 0 }}
+    >
+      <path
+        fill="currentColor"
+        fillRule="evenodd"
+        d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
+      />
+      <path fill="currentColor" d="M517.36 400H634.72V634.72H517.36Z" />
+    </svg>
+  )
+}
+
+// Engine → SVG mark. `satisfies Record<EngineId, …>` makes a new engine a
+// compile error until its mark is added (rather than silently rendering Claude).
+type EngineMarkProps = { size: number; className: string; testid: string; engineId: EngineId }
+const ENGINE_MARK = {
+  claude: ClaudeMark,
+  opencode: OpencodeMark,
+  pi: PiMark
+} satisfies Record<EngineId, (props: EngineMarkProps) => React.JSX.Element>

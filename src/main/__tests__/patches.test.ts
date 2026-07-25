@@ -32,9 +32,42 @@ import {
 // Read cli.js once — it's ~11MB and we don't want to re-read per test.
 const src = cliJsExists() ? readCliJs() : ''
 
-/** Upstream detection for taskstop-notification Part A (SDK >= 0.2.49). */
-const TASKSTOP_A_UPSTREAM =
+/**
+ * Upstream detection for taskstop-notification Part A.
+ *
+ * Two eras:
+ *  - SDK 0.2.49–CLI 2.1.197: a shared status validator's allowlist was
+ *    extended to include "killed" inline: `(V)=>V==="completed"||...||V==="killed"`.
+ *  - CLI 2.1.198+: that shared validator was removed entirely. The
+ *    translation is now decentralized to each kill-site call, right before
+ *    handing the status to the notification emitter (a `qu(id,status,opts)`-
+ *    shaped function with zero validation — see patch/taskstop-notification/
+ *    README.md). We detect the *behavior* instead of a token: the emitter
+ *    exists in its no-validator shape, at least one call site translates
+ *    "killed" -> "stopped" before calling it, and no call site leaks the raw
+ *    "killed" status to it.
+ */
+const TASKSTOP_A_LEGACY_UPSTREAM =
   /=\([\w$]+\)=>[\w$]+==="completed"\|\|[\w$]+==="failed"\|\|[\w$]+==="stopped"\|\|[\w$]+==="killed"/
+
+const TASKSTOP_A_NO_VALIDATOR_EMITTER =
+  /function ([\w$]+)\(([\w$]+),([\w$]+),([\w$]+)\)\{if\(!([\w$]+)\(\2\)\)return;([\w$]+)\(\{type:"system",subtype:"task_notification",task_id:\2,tool_use_id:\4\?\.toolUseId,status:\3,/
+
+function taskstopANoValidatorUpstreamed(src: string): boolean {
+  const match = src.match(TASKSTOP_A_NO_VALIDATOR_EMITTER)
+  if (!match) return false
+  const emitterName = match[1]
+  const translationExists = new RegExp(
+    `status:"killed",[\\s\\S]{1,400}?${emitterName}\\([^,]+,"stopped"`
+  ).test(src)
+  const leakExists = new RegExp(`${emitterName}\\([^,]+,"killed"`).test(src)
+  return translationExists && !leakExists
+}
+
+const TASKSTOP_A_UPSTREAM = {
+  test: (src: string): boolean =>
+    TASKSTOP_A_LEGACY_UPSTREAM.test(src) || taskstopANoValidatorUpstreamed(src)
+}
 
 /** Upstream detection for taskstop-notification Part B (SDK >= 0.2.87). */
 const TASKSTOP_B_UPSTREAM = /notified:!0[\s\S]{1,300}?[\w$]+\([\w$]+,"stopped",\{toolUseId:/
@@ -68,7 +101,10 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:subagent-D*/',
         '/*PATCHED:subagent-E*/',
         '/*PATCHED:subagent-F*/',
-        '/*PATCHED:subagent-G*/',
+        // subagent-F2 forwards stream_events past the v2.1.197 IVe/fHo pre-filter.
+        '/*PATCHED:subagent-F2*/',
+        // subagent-G (iu8 background streaming) was merged into BVe() in 2.1.197
+        // and is now covered by Patch E — its marker is intentionally absent.
         '/*PATCHED:queue-control-dequeue*/',
         '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:mcp-status-store-promise*/',
@@ -86,10 +122,13 @@ describe.skipIf(!cliJsExists())('patches', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // subagent-streaming — 7 markers A..G
+  // subagent-streaming — markers A..F + F2. Patch G (iu8 standalone background
+  // loop) was merged into BVe() upstream in 2.1.197, so its marker is absent
+  // and Patch E covers that path; F2 forwards stream_events past the 2.1.197
+  // IVe/fHo streaming pre-filter.
   // ---------------------------------------------------------------------------
   describe('subagent-streaming', () => {
-    for (const letter of ['A', 'B', 'C', 'D', 'E', 'F', 'G']) {
+    for (const letter of ['A', 'B', 'C', 'D', 'E', 'F', 'F2']) {
       const name = `subagent-${letter}`
       it(`marker ${name} present in cli.js`, () => {
         expect(hasMarker(src, name)).toBe(true)
@@ -101,9 +140,12 @@ describe.skipIf(!cliJsExists())('patches', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // taskstop-notification — upstreamed in SDK 0.2.49 (A) and 0.2.87 (B)
-  // Current SDK (0.2.97) has both upstreamed → markers are absent; we assert
-  // the upstream patterns instead so a regression in the SDK would fail.
+  // taskstop-notification — Part A upstreamed in SDK 0.2.49 (validator learns
+  // "killed"), then the validator was removed entirely by CLI 2.1.198 (status
+  // translation decentralized to each kill-site call — see README.md and
+  // TASKSTOP_A_NO_VALIDATOR_EMITTER above). Part B upstreamed in SDK 0.2.87.
+  // Current CLI (2.1.198) has both upstreamed → markers are absent; we assert
+  // the upstream patterns/behavior instead so a regression in the CLI would fail.
   // ---------------------------------------------------------------------------
   describe('taskstop-notification', () => {
     it('Part A: marker or upstream pattern present', () => {

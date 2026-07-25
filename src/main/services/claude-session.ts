@@ -16,18 +16,22 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics, fallbackBlockText } from './session-history'
+import { computeTokenMetrics, projectKeyForCwd } from './session-history'
+import { transformAssistantMessage } from './assistant-message'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
+import { scanSkills } from './skill-scanner'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
+import { createCollabServer } from './collab-tool'
+import { crossEngineDispatcher, crossEngineDispatchAvailable } from './cross-engine-dispatcher'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { accountManager } from './account-manager'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -87,17 +91,19 @@ export function getSdkExecutableOpts(): Record<string, unknown> {
 }
 import type {
   ChatMessage,
-  ContentBlock,
   McpServerConfig,
   SessionStatus,
   ApprovalDecision,
   PendingApproval,
   SandboxSettings,
   PermissionSuggestion,
-  AccountRef
+  AccountRef,
+  ModelCostEntry,
+  EngineId
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
+import type { EngineSpawnOptions } from '../providers/ISession'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -171,22 +177,17 @@ interface BackgroundPoller {
 }
 
 export class ClaudeSession extends BaseSession {
-  // Static pass-throughs to BaseSession so existing call sites in session.ipc.ts
-  // and remote-handlers.ts keep compiling without modification.
-  static override addExtraWindow(win: BrowserWindow): void {
-    BaseSession.addExtraWindow(win)
-  }
-  static override removeExtraWindow(win: BrowserWindow): void {
-    BaseSession.removeExtraWindow(win)
-  }
-  static override getExtraWindows(): Set<BrowserWindow> {
-    return BaseSession.getExtraWindows()
-  }
-
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
-    return resolveClaudeCapabilities(this.model)
+    const base = resolveClaudeCapabilities(this.model)
+    // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
+    // but the HONEST per-session value also requires the opencode binary to
+    // actually be vendored — otherwise there is no possible dispatch target.
+    return {
+      ...base,
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('claude')
+    }
   }
 
   private sessionId: string | null = null
@@ -208,7 +209,31 @@ export class ClaudeSession extends BaseSession {
   private _initMcpServers: Array<{ name: string; status: string }> = [] // cached from init message
   private _mcpAllServers: Record<string, McpServerConfig> = {} // full config loaded at session start
   private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
-  private totalCostUsd = 0
+  /**
+   * Cost tracking — base + live overlay (Slice B fix for the pre-existing
+   * cumulative double-count bug: `total_cost_usd`/`modelUsage` are CUMULATIVE
+   * WITHIN one cli.js process and reset to zero on `--resume`, so a naive `+=`
+   * on every `result` re-adds the whole running total on turn 2+).
+   *
+   * - costBaseUsd / modelCostBase: everything that happened BEFORE the
+   *   CURRENT cli.js process — seeded once from the resume transcript at
+   *   construction (see reconcileAccumulatorsFromTranscript's seedCost param),
+   *   and folded forward across a same-object respawn (a ClaudeSession CAN
+   *   spawn cli.js more than once: run() takes the "first run" branch again
+   *   whenever messageChannel is null, e.g. after cancel()'s idle-timeout
+   *   teardown followed by a later session:send on the same routingId/object —
+   *   see the fold in run()'s finally block).
+   * - liveTotalCostUsd / liveModelCosts: the latest `result` message's
+   *   cumulative values for the CURRENT process — REPLACED (never added) on
+   *   every result, per the wire semantics above.
+   *
+   * Reported totalCostUsd = costBaseUsd + liveTotalCostUsd; per-model = the
+   * base map merged with the live map, summed per model id.
+   */
+  private costBaseUsd = 0
+  private modelCostBase = new Map<string, number>()
+  private liveTotalCostUsd = 0
+  private liveModelCosts = new Map<string, number>()
   private messageChannel: MessageChannel<unknown> | null = null
   /** Single source of truth for query method signatures: the SDK layer's
    *  QueryHandle. Previously duplicated here as an inline interface; drift
@@ -249,20 +274,20 @@ export class ClaudeSession extends BaseSession {
   private accTotalDurationMs = 0
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
+  /** Epoch ms when the currently in-flight turn started; null while idle. */
+  private turnStartedAtMs: number | null = null
 
-  constructor(
-    routingId: string,
-    win: BrowserWindow,
-    cwd: string,
-    effort?: string,
-    resumeSessionId?: string,
-    permissionMode?: string,
-    model?: string,
-    sandboxConfig?: SandboxSettings,
-    thinkingMode?: string,
-    resumeSessionAt?: string,
-    forkSession?: boolean
-  ) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
+    const {
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      sandboxConfig,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    } = opts
     super(routingId, win, cwd)
     this.effort = effort || 'medium'
     this.thinkingMode =
@@ -276,10 +301,51 @@ export class ClaudeSession extends BaseSession {
     if (model) this.model = model
     if (sandboxConfig) this.sandboxConfig = sandboxConfig
     this.sendStatus()
+
+    // Slice C (ADR-033 cross-engine dispatch): seed durable dispatched-cost
+    // rows unconditionally — a fresh session simply gets zero rows back, so
+    // this is safe regardless of whether resumeSessionId is set.
+    this.seedDispatchedCosts()
+
+    // Resume seeding: the post-result reconciliation only runs after a turn
+    // completes, so a RESUMED session's accumulators would otherwise sit at 0
+    // until then — and the turn-start status-line emission (run()/dispatch)
+    // would clobber the renderer's history-loaded statusLine with zeros (a
+    // visible backwards jump at prompt-send). Seed once from the resume
+    // target's transcript, async and non-blocking; the Math.max duration
+    // guard inside makes a late-arriving seed safe even if a turn has already
+    // started. Forks are excluded: the source transcript still contains the
+    // post-anchor turns the fork truncates away, and the max() guard would
+    // make that over-count permanent — a fork's fresh transcript reconciles
+    // normally after its first result instead.
+    if (this.resumeSessionId && !this.forkSession) {
+      void this.reconcileAccumulatorsFromTranscript(
+        this.transcriptPathFor(this.resumeSessionId),
+        true
+      )
+    }
   }
 
   get willQueue(): boolean {
     return this.isProcessing
+  }
+
+  /** costBaseUsd + liveTotalCostUsd (see the field doc comment for the split). */
+  private get totalCostUsd(): number {
+    return this.costBaseUsd + this.liveTotalCostUsd
+  }
+
+  /** modelCostBase merged with liveModelCosts, summed per model id. */
+  private get modelCosts(): ModelCostEntry[] {
+    const merged = new Map<string, number>(this.modelCostBase)
+    for (const [modelId, cost] of this.liveModelCosts) {
+      merged.set(modelId, (merged.get(modelId) ?? 0) + cost)
+    }
+    return [...merged.entries()].map(([modelId, costUsd]) => ({
+      engineId: 'claude' as const,
+      modelId,
+      costUsd
+    }))
   }
 
   get status(): SessionStatus {
@@ -327,6 +393,12 @@ export class ClaudeSession extends BaseSession {
     }
   }
 
+  /** Slice C — re-emit the status line so a dispatched-cost update reaches the
+   *  TopBar tooltip live (BaseSession.addDispatchedCost's hook). */
+  protected override onDispatchedCostsChanged(): void {
+    this.send('session:status-line', this.buildStatusLineFromAccumulators())
+  }
+
   async run(
     prompt: string | null,
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
@@ -338,9 +410,20 @@ export class ClaudeSession extends BaseSession {
     const spawnOnly = prompt === null
 
     if (!spawnOnly) {
+      // Only the idle→processing transition marks a new turn start. A queued
+      // prompt sent while a turn is already in flight (run() called again
+      // before the channel push above returns) must NOT reset the in-flight
+      // turn's start time.
+      const wasIdle = !this.isProcessing
       this.isProcessing = true
       this.wasInterrupted = false
+      if (wasIdle) {
+        this.turnStartedAtMs = Date.now()
+      }
       this.sendStatus()
+      if (wasIdle) {
+        this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      }
     }
 
     // Build SDK message (skip if spawn-only)
@@ -460,6 +543,23 @@ export class ClaudeSession extends BaseSession {
       // Create in-process MCP servers for UI tools
       const uiMcpServer = createMermaidServer()
       const mockupMcpServer = createMockupServer(this.cwd)
+      // Cross-engine dispatch (ADR-033): a SEPARATE server so dispatch_agent
+      // does NOT ride the auto-allowed `mcp__claude-ui__` prefix — it goes
+      // through canUseTool like an ordinary tool. Gated on the named
+      // crossEngineDispatchAvailable('claude') capability (ADR-030/M4-A) —
+      // same underlying check (opencode binary vendored) as before, but now
+      // routed through the honest capability helper instead of a raw proxy.
+      const collabServer = crossEngineDispatchAvailable('claude')
+        ? createCollabServer({
+            engineId: this.engineId,
+            getRoutingId: () => this.routingId,
+            cwd: this.cwd,
+            getAutonomyMode: () => this.permissionMode,
+            emit: (channel, data) => this.send(channel, data),
+            addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
+              this.addDispatchedCost(engineId, modelId, costUsd)
+          })
+        : null
 
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
@@ -493,7 +593,14 @@ You have mockup tools for creating visual UI prototypes that render inline in th
 - \`directory\` (required): The directory ID from create_mockup.
 
 Workflow: create_mockup → Edit the HTML file for changes (the preview auto-refreshes on file change — no need to call show_mockup after edits).
-The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.`
+The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.${
+              collabServer
+                ? `
+
+## Cross-Engine Agent Dispatch
+You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task to an agent on a different engine (opencode, fronting non-Anthropic models such as GPT or Gemini). Useful when the user asks for another model's perspective (e.g. a second review of a diff). The result includes a session_id — pass it back to continue the same agent. The model list is user-configured; requires user approval per call.`
+                : ''
+            }`
           },
           ...(this.sandboxConfig?.enabled
             ? {
@@ -564,7 +671,13 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           mcpServers: {
             ...(this._mcpAllServers as Record<string, never>),
             'claude-ui': uiMcpServer as never,
-            'claude-ui-mockup': mockupMcpServer as never
+            'claude-ui-mockup': mockupMcpServer as never,
+            // Deliberately NOT in allowedTools and NOT auto-allowed in
+            // canUseTool — dispatch_agent must hit the normal approval path.
+            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<
+              string,
+              never
+            >)
           },
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
@@ -792,6 +905,26 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       this.activeQuery = null
       this.abortController = null
       this.isProcessing = false
+      this.turnStartedAtMs = null
+      // Respawn-boundary fold (Slice B): a ClaudeSession object CAN spawn
+      // cli.js more than once — messageChannel is now null, so the NEXT
+      // run() call on this same object takes the "first run" branch again and
+      // spawns a fresh process that resumes via `this.sessionId`. That fresh
+      // process's modelUsage/total_cost_usd start their cumulative counting
+      // over from zero (verified wire fact), so whatever the live overlay held
+      // for the process that just ended must be folded into the base now —
+      // otherwise the next process's first `result` would REPLACE (not add to)
+      // a live overlay that's about to reset, silently dropping this session's
+      // cost so far. Folding is a no-op for the externally-visible total
+      // (costBaseUsd + liveTotalCostUsd is unchanged by moving value between
+      // the two), so this never causes a visible jump — it just protects the
+      // next spawn.
+      this.costBaseUsd += this.liveTotalCostUsd
+      for (const [modelId, cost] of this.liveModelCosts) {
+        this.modelCostBase.set(modelId, (this.modelCostBase.get(modelId) ?? 0) + cost)
+      }
+      this.liveTotalCostUsd = 0
+      this.liveModelCosts.clear()
       this.sendStatus()
       this.resetInactivityTimer()
     }
@@ -818,10 +951,16 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     // can arrive under any `type` that includes session_id.
     this.captureSessionBootstrap(msg, type)
 
-    // Any assistant or stream content means we're processing a turn.
+    // Any assistant or stream content means we're processing a turn. Covers
+    // the queued-prompt case: a second prompt pushed onto the message channel
+    // while the first was in flight doesn't get its own run() turn-start (the
+    // channel push already happened), so this is where its turn actually
+    // starts once cli.js begins working on it.
     if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
       this.isProcessing = true
+      this.turnStartedAtMs = Date.now()
       this.sendStatus()
+      this.send('session:status-line', this.buildStatusLineFromAccumulators())
     }
 
     switch (msg.type) {
@@ -942,7 +1081,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       }
     }
 
-    const chatMsg = this.transformAssistantMessage(msg)
+    const chatMsg = transformAssistantMessage(msg)
 
     // Accumulate usage from every assistant message (main + sidechain)
     const hadUsage = this.accumulateUsage(msg, isSidechain)
@@ -1192,8 +1331,27 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   }
 
   private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
+    // total_cost_usd / modelUsage are CUMULATIVE WITHIN this cli.js process —
+    // REPLACE the live overlay, never add (see the field doc comment on
+    // liveTotalCostUsd/liveModelCosts for the full explanation of why `+=`
+    // here was a real bug: turn N would re-add the whole running total).
     const cost = msg.total_cost_usd || 0
-    this.totalCostUsd += cost
+    this.liveTotalCostUsd = cost
+
+    const modelUsage = msg.modelUsage
+    if (modelUsage && typeof modelUsage === 'object') {
+      const next = new Map<string, number>()
+      for (const [modelId, usage] of Object.entries(modelUsage)) {
+        const modelCost = typeof usage?.costUSD === 'number' ? usage.costUSD : 0
+        next.set(modelId, modelCost)
+      }
+      this.liveModelCosts = next
+    } else {
+      // No per-model breakdown on this result — attribute the whole turn's
+      // cost to the currently selected model rather than dropping it.
+      this.liveModelCosts = new Map([[this.model, cost]])
+    }
+
     this.isProcessing = false
 
     // NOTE (Phase 7): Claude usage_event rows are NOT recorded live here.
@@ -1223,11 +1381,14 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       }
     }
 
-    // Accumulate duration from result
+    // Accumulate duration from result — this turn just completed, so it's
+    // no longer in flight (turnStartedAtMs → null) and its wall-clock cost
+    // moves from the live "in flight" delta into the completed-turns total.
     const resultDurationMs = msg.duration_ms || 0
     const resultApiDurationMs = msg.duration_api_ms || 0
     this.accTotalDurationMs += resultDurationMs
     this.accTotalApiDurationMs += resultApiDurationMs
+    this.turnStartedAtMs = null
 
     this.send('session:result', {
       totalCostUsd: this.totalCostUsd,
@@ -1254,21 +1415,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     const logPath = this.getSessionLogPath()
     if (logPath) {
       setTimeout(() => {
-        computeTokenMetrics(logPath, this.model)
-          .then((metrics) => {
-            if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return
-            this.accInputTokens = metrics.totalInputTokens
-            this.accOutputTokens = metrics.totalOutputTokens
-            this.accCachedTokens = metrics.cachedTokens
-            this.accTotalDurationMs = metrics.totalDurationMs
-            this.accTotalApiDurationMs = metrics.totalApiDurationMs
-            this.lastContextLength = metrics.contextWindowSize
-            this.send('session:status-line', metrics)
-            this.sendMetering()
-          })
-          .catch((err) => {
-            logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
-          })
+        void this.reconcileAccumulatorsFromTranscript(logPath)
 
         // Phase 7 Pass 2 — near-live metering: now that the JSONL is flushed,
         // re-run the Claude reconciler so this turn's messages land in
@@ -1279,6 +1426,64 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           .then(({ usageReconciler }) => usageReconciler.reconcileClaude())
           .catch(() => {})
       }, 500) // delay to let SDK flush JSONL to disk
+    }
+  }
+
+  /**
+   * Reconcile the in-memory accumulators from a transcript JSONL and re-emit
+   * the status line. Shared by the post-result reconciliation (500ms after
+   * each turn) and the one-time resume seeding at spawn — both need the same
+   * rules:
+   * - Skip when the transcript yields nothing (not flushed yet / missing).
+   * - Token accumulators + context length are full replacements (the
+   *   transcript is the source of truth for the whole session to date).
+   * - totalDurationMs is a full reconstruction too (turn-span sums across
+   *   every completed turn), but guarded with max() so a conservative read
+   *   (e.g. JSONL not fully flushed) can never regress a value already shown
+   *   — duration only ever moves forward.
+   * - totalApiDurationMs has no transcript-reconstruction path (real
+   *   transcripts carry no `result` lines, the only place duration_api_ms
+   *   ever appeared), so the live accumulator is left untouched instead of
+   *   being clobbered with the permanent 0 computeTokenMetrics returns.
+   * - Emit from accumulators (not the raw metrics) so the guarded duration
+   *   and preserved API duration actually reach the renderer.
+   * - Cost is NEVER touched here unless `seedCost` is set — costBaseUsd /
+   *   modelCostBase are seeded ONCE, at construction, from the resume target's
+   *   transcript (the recompute path is only for seeding; a live session's
+   *   cost comes from cli.js's authoritative `result` messages). The recurring
+   *   post-result reconciliation (500ms after every turn) must NOT overwrite
+   *   them with the same pricing-table recompute — that would clobber the
+   *   authoritative live overlay with a less-precise historical estimate.
+   * Best-effort: failures are logged, never thrown.
+   */
+  private async reconcileAccumulatorsFromTranscript(
+    logPath: string,
+    seedCost = false
+  ): Promise<void> {
+    try {
+      const metrics = await computeTokenMetrics(logPath, this.model)
+      if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) {
+        // A resume seed that finds nothing is suspicious (the transcript we
+        // are resuming from should have content) — say so instead of silently
+        // no-opping. A wrong projectKey derivation hid behind this guard once.
+        if (seedCost) {
+          logger.warn('ClaudeSession', `Resume seed found no usable transcript at ${logPath}`)
+        }
+        return
+      }
+      this.accInputTokens = metrics.totalInputTokens
+      this.accOutputTokens = metrics.totalOutputTokens
+      this.accCachedTokens = metrics.cachedTokens
+      this.accTotalDurationMs = Math.max(this.accTotalDurationMs, metrics.totalDurationMs)
+      this.lastContextLength = metrics.contextWindowSize
+      if (seedCost) {
+        this.costBaseUsd = metrics.totalCostUsd
+        this.modelCostBase = new Map((metrics.modelCosts ?? []).map((m) => [m.modelId, m.costUsd]))
+      }
+      this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      this.sendMetering()
+    } catch (err) {
+      logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
     }
   }
 
@@ -1637,6 +1842,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     return result
   }
 
+  /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
+  discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
+    return scanSkills(cwd)
+  }
+
   /**
    * Log per-request usage data from the request-usage patch to a JSONL file.
    * Each line captures the token breakdown for a single API call, enabling
@@ -1716,7 +1926,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       totalTokens: this.accInputTokens + this.accOutputTokens + this.accCachedTokens,
       contextWindowSize: this.lastContextLength,
       usedPercentage: usedPct,
-      remainingPercentage: usedPct !== null ? 100 - usedPct : null
+      remainingPercentage: usedPct !== null ? 100 - usedPct : null,
+      turnStartedAtMs: this.turnStartedAtMs,
+      modelCosts: [...this.modelCosts, ...this.dispatchedCostEntries()]
     }
   }
 
@@ -1793,11 +2005,23 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }, 50)
   }
 
+  /** Transcript JSONL path for a given session id under this session's cwd.
+   *  Project key derivation is shared with session-history (projectKeyForCwd)
+   *  — the old inline `/`+`.`-only replace produced a nonexistent path for
+   *  every Windows cwd, silently no-opping reconciliation and resume seeding. */
+  private transcriptPathFor(sessionId: string): string {
+    return path.join(
+      os.homedir(),
+      '.claude',
+      'projects',
+      projectKeyForCwd(this.cwd),
+      `${sessionId}.jsonl`
+    )
+  }
+
   getSessionLogPath(): string | null {
     if (!this.sessionId) return null
-    // Project key mirrors the SDK's derivation: replace / and . with -
-    const projectKey = this.cwd.replace(/[/.]/g, '-')
-    return path.join(os.homedir(), '.claude', 'projects', projectKey, `${this.sessionId}.jsonl`)
+    return this.transcriptPathFor(this.sessionId)
   }
 
   getPlanContent(): string | null {
@@ -1862,6 +2086,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
 
+    // Tear down any cross-engine dispatch targets owned by this session (ADR-033).
+    crossEngineDispatcher.disposeFor(this.routingId)
+
     // Clean up voice resources
     if (this.voiceClient) {
       this.voiceClient.destroy()
@@ -1878,6 +2105,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     this.abortController?.abort()
     this.abortController = null
     this.isProcessing = false
+    this.turnStartedAtMs = null
     this.send('session:status', { ...this.status, state: 'disconnected' })
   }
 
@@ -2001,62 +2229,6 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       content: [
         { type: 'api_error', errorType: classifyApiError(text, msg.error), errorMessage: text }
       ],
-      timestamp: Date.now()
-    }
-  }
-
-  private transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {
-    const betaMessage = msg.message as Record<string, unknown> | undefined
-    if (!betaMessage) return null
-
-    const content = betaMessage.content as Array<Record<string, unknown>> | undefined
-    if (!content || !Array.isArray(content)) return null
-
-    const blocks: ContentBlock[] = content.map((block) => {
-      const blockType = block.type as string
-      if (blockType === 'text') {
-        return { type: 'text' as const, text: block.text as string }
-      } else if (blockType === 'tool_use') {
-        return {
-          type: 'tool_use' as const,
-          toolName: block.name as string,
-          toolInput: block.input as Record<string, unknown>,
-          toolUseId: block.id as string
-        }
-      } else if (blockType === 'tool_result') {
-        const resultContent = block.content
-        let text = ''
-        if (typeof resultContent === 'string') {
-          text = resultContent
-        } else if (Array.isArray(resultContent)) {
-          text = resultContent
-            .map((c: Record<string, unknown>) => (c.text as string) || '')
-            .join('\n')
-        }
-        return {
-          type: 'tool_result' as const,
-          toolUseId: block.tool_use_id as string,
-          toolResult: text,
-          isError: block.is_error as boolean
-        }
-      } else if (blockType === 'thinking') {
-        return { type: 'thinking' as const, text: block.thinking as string }
-      } else if (blockType === 'fallback') {
-        // Canonical-replacement frame for a refusal-retracted partial. The
-        // whole message is normally evicted right after via
-        // retracted_message_uuids; render a readable note in case it survives.
-        return { type: 'text' as const, text: fallbackBlockText(block) }
-      }
-      return { type: 'text' as const, text: JSON.stringify(block) }
-    })
-
-    // Use the BetaMessage id for deduplication of partial messages
-    const messageId = (betaMessage.id as string) || (msg.uuid as string) || uuid()
-
-    return {
-      id: messageId,
-      role: 'assistant',
-      content: blocks,
       timestamp: Date.now()
     }
   }

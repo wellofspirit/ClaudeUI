@@ -40,7 +40,10 @@ import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
+import { credentialSync } from './auth/vault/CredentialSync'
+import { sharedProviderService } from './shared-providers'
 import { opencodeServerManager } from './opencode/OpencodeServerManager'
+import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
@@ -188,9 +191,50 @@ function createWindow(): void {
   })
 
   const sessionManager = registerSessionIpc(mainWindow)
+
+  // Cross-engine dispatch (ADR-033 M2, opencode → Claude): thread the
+  // caller-session lookup + dispatch function into OpencodeServerManager
+  // from HERE rather than importing sessionManager/crossEngineDispatcher
+  // inside opencode-hosted-tools.ts or OpencodeServerManager.ts directly —
+  // either import would form a require-cycle (see the cycle note on
+  // CallerSessionLookup in opencode-hosted-tools.ts). main/index.ts sits
+  // above both cycles, so it's the one safe place to close the loop.
+  opencodeServerManager.setCallerSessionLookup((sessionId) => {
+    const session = sessionManager.get(sessionId)
+    if (!session || session.engineId !== 'opencode') return undefined
+    return {
+      cwd: session.cwd,
+      autonomyMode: session.getAutonomyMode?.() ?? 'default',
+      emit: (channel, data) => session.emit(channel, data),
+      addDispatchedCost: (engineId, modelId, costUsd) =>
+        session.addDispatchedCost(engineId, modelId, costUsd)
+    }
+  })
+  opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+
   authManager.setWindow(mainWindow)
   accountManager.init(mainWindow)
   claudeAuthProvider.init(mainWindow)
+  // Reconcile central credentials first, then materialize all shared-provider
+  // routes. Both are best-effort and must never block app startup.
+  void (async () => {
+    try {
+      await credentialSync.start()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `credentialSync.start() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    try {
+      await sharedProviderService.syncAll()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `sharedProviderService.syncAll() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  })()
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 
@@ -252,6 +296,7 @@ function createWindow(): void {
     logViewer.destroy()
     pluginManager.stopAll()
     automationManager.stopAll()
+    credentialSync.stop()
     remoteServer.stop()
     stopAllClassifiers()
     // Stop the service session (lightweight CLI subprocess for usage polling)

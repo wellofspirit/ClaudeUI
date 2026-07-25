@@ -20,7 +20,8 @@ import type {
   BlockUsageData,
   PluginViewWithOwner,
   VoiceState,
-  WorktreeInfo
+  WorktreeInfo,
+  FileDiff
 } from '../../../../shared/types'
 
 let bridge: TestIpcBridge
@@ -68,7 +69,13 @@ function wireEventHandlers(): void {
   onEvent<
     (
       routingId: string,
-      data: { toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
+      data: {
+        toolUseId: string
+        toolResultToolUseId: string
+        result: string
+        isError: boolean
+        fileDiffs?: FileDiff[]
+      }
     ) => void
   >('session:subagent-tool-result')((routingId, data) => {
     store().appendSubagentToolResult(
@@ -76,7 +83,8 @@ function wireEventHandlers(): void {
       data.toolUseId,
       data.toolResultToolUseId,
       data.result,
-      data.isError
+      data.isError,
+      data.fileDiffs
     )
   })
 
@@ -539,6 +547,36 @@ describe('useClaudeEvents extended component tests', () => {
       const msgs = session.subagentMessages['agent-1']
       const resultBlock = msgs.flatMap((m) => m.content).find((b) => b.type === 'tool_result')
       expect(resultBlock).toBeDefined()
+    })
+
+    it('attaches fileDiffs (opencode apply_patch/edit) to the subagent tool_result block', () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+
+      const toolMsg = makeChatMessage({
+        id: 'sub-msg-1',
+        content: [makeToolUseBlock('apply_patch', { patchText: '*** Begin Patch ***' }, 'sub-tool-1')]
+      })
+      bridge.webContents.send('session:subagent-message', routingId, {
+        toolUseId: 'agent-1',
+        message: toolMsg
+      })
+
+      const fileDiffs: FileDiff[] = [
+        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+      ]
+      bridge.webContents.send('session:subagent-tool-result', routingId, {
+        toolUseId: 'agent-1',
+        toolResultToolUseId: 'sub-tool-1',
+        result: 'Success. Updated the following files:\nM a.ts',
+        isError: false,
+        fileDiffs
+      })
+
+      const session = useSessionStore.getState().sessions[routingId]
+      const msgs = session.subagentMessages['agent-1']
+      const resultBlock = msgs.flatMap((m) => m.content).find((b) => b.type === 'tool_result')
+      expect(resultBlock?.type === 'tool_result' && resultBlock.fileDiffs).toEqual(fileDiffs)
     })
 
     it('handles error tool results', () => {

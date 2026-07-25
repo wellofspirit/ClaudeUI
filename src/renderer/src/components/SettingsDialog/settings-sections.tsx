@@ -1,6 +1,11 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { useActiveSession, useSessionStore, OPENCODE_DEFAULT_MODEL } from '../../stores/session-store'
+import {
+  useActiveSession,
+  useSessionStore,
+  OPENCODE_DEFAULT_MODEL,
+  PI_DEFAULT_MODEL
+} from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import type {
@@ -8,6 +13,7 @@ import type {
   ProxySettings,
   VoiceLanguageCode,
   AccountsState,
+  EngineId,
   EngineConfig,
   VendorConfig,
   AnthropicEndpointSettings,
@@ -15,6 +21,7 @@ import type {
   SandboxSettings,
   VendorAuthOption,
   AutoModeConfig,
+  DispatchConfig,
   ModelInfo,
   OpencodeProviderSettings,
   OpencodeConfigSettings
@@ -26,9 +33,9 @@ import {
   type EffortLevel,
   type AutonomyMode,
   type EngineCapabilities,
-  CLAUDE_ENGINE_CAPABILITIES,
-  OPENCODE_ENGINE_CAPABILITIES
+  CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
+import { engineMeta } from '../../../../shared/engine-meta'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -39,6 +46,12 @@ import {
   InfoTooltip
 } from './settings-controls'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { PiVendors } from './PiVendors'
+import { SharedProviders } from './SharedProviders'
+import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
+import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
+import { diffToPatches } from '../../../../shared/opencode-config-diff'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 
@@ -198,6 +211,7 @@ const EFFORT_LEVEL_LABEL: Record<EffortLevel, string> = {
 }
 
 const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'claude-sonnet-5', label: 'Sonnet 5' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-opus-4-7', label: 'Opus 4.7' },
   { id: 'claude-opus-4-8', label: 'Opus 4.8' },
@@ -421,23 +435,24 @@ function AutonomyModePicker(): React.JSX.Element {
 // ── opencode availability probe ──────────────────────────────────────
 
 /**
- * Whether the opencode engine is installed.
+ * Whether a given engine is installed.
  *
- * Uses `engineIsInstalled('opencode')` — a cheap, deterministic binary-on-disk
- * check that NEVER spawns a server. The earlier `vendorAuthProbe`/`getEngineModels`
- * approaches both required a successful server spawn + HTTP round-trip, so any
- * transient spawn failure (e.g. an opencode startup crash) made the engine read as
- * "not installed" and hid the very sections that configure it. Auth/model state is
- * a separate, allowed-to-fail concern — not "installed".
+ * Uses `engineIsInstalled(engineId)` — a cheap, deterministic binary-on-disk
+ * check that NEVER spawns a server/process. The earlier `vendorAuthProbe`/
+ * `getEngineModels` approaches both required a successful server spawn + HTTP
+ * round-trip, so any transient spawn failure (e.g. an opencode startup crash)
+ * made the engine read as "not installed" and hid the very sections that
+ * configure it. Auth/model state is a separate, allowed-to-fail concern — not
+ * "installed".
  *
  * Returns null while probing, then true/false.
  */
-function useOpencodeInstalled(): boolean | null {
+function useEngineInstalled(engineId: EngineId): boolean | null {
   const [installed, setInstalled] = useState<boolean | null>(null)
   useEffect(() => {
     let cancelled = false
     window.api
-      .engineIsInstalled('opencode')
+      .engineIsInstalled(engineId)
       .then((v) => {
         if (!cancelled) setInstalled(v)
       })
@@ -447,8 +462,16 @@ function useOpencodeInstalled(): boolean | null {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [engineId])
   return installed
+}
+
+function useOpencodeInstalled(): boolean | null {
+  return useEngineInstalled('opencode')
+}
+
+function usePiInstalled(): boolean | null {
+  return useEngineInstalled('pi')
 }
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
@@ -547,6 +570,207 @@ function OpencodeAutoModeSection(): React.JSX.Element {
         </>
       )}
     </div>
+  )
+}
+
+// ── cross-engine dispatch settings (ADR-033) ─────────────────────────
+
+/**
+ * Shared render/load/save core for the per-engine dispatch-config editor.
+ * Both `OpencodeDispatchSection` and `ClaudeDispatchSection` are thin
+ * copy/gating wrappers around this — the load/merge/toggle logic and markup
+ * are otherwise identical (DRY per CLAUDE.md), so they keep distinct root
+ * testids via the `testid` prop while sharing everything else.
+ *
+ * `installed`: null = still probing (shows Loading), false = gate closed
+ * (shows `notInstalledMessage`), true = render the editor. Claude has no
+ * "not installed" state (it's the bundled default engine — `engine:is-installed`
+ * always returns true for it), so `ClaudeDispatchSection` passes a literal `true`.
+ */
+function DispatchSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  defaultModelTooltip,
+  noModelsMessage,
+  footerText
+}: {
+  engineId: EngineId
+  testid: string
+  installed: boolean | null
+  notInstalledMessage?: string
+  defaultModelTooltip: string
+  noModelsMessage: string
+  footerText: string
+}): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig(engineId)
+      .then(setEngineCfg)
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const own = groups.filter((g) => g.engineId === engineId)
+        setModels(own.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [engineId])
+
+  if (engineCfg === null || installed === null) {
+    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!installed) {
+    return (
+      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        {notInstalledMessage}
+      </div>
+    )
+  }
+
+  const dispatch = engineCfg.dispatch ?? {}
+  const defaultModel = dispatch.defaultModel ?? ''
+  const allowedModels = dispatch.allowedModels ?? []
+  const maxCostUsd = dispatch.maxCostUsd
+
+  const update = (patch: Partial<DispatchConfig>): void => {
+    const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig(engineId, next).catch(() => {})
+  }
+
+  const toggleAllowed = (model: string): void => {
+    const nextList = allowedModels.includes(model)
+      ? allowedModels.filter((m) => m !== model)
+      : [...allowedModels, model]
+    // Drop the key entirely when empty — empty and absent both mean "all
+    // models allowed", and the absent form keeps the hand-editable file clean.
+    update({ allowedModels: nextList.length > 0 ? nextList : undefined })
+  }
+
+  return (
+    <div data-testid={testid} className="space-y-1">
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Default model
+          <InfoTooltip text={defaultModelTooltip} />
+        </div>
+        <select
+          data-testid={`${testid}.defaultModel`}
+          value={defaultModel}
+          onChange={(e) => update({ defaultModel: e.target.value || undefined })}
+          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        >
+          <option value="">(not set)</option>
+          {models.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.displayName || m.value}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Allowed models
+          <InfoTooltip text="Models a dispatching agent may request explicitly. With NONE checked, all models are allowed." />
+        </div>
+        <div className="space-y-0.5">
+          {models.length === 0 && (
+            <div className="text-[11px] text-text-muted/70">{noModelsMessage}</div>
+          )}
+          {models.map((m) => {
+            const checked = allowedModels.includes(m.value)
+            return (
+              <button
+                key={m.value}
+                data-testid={`${testid}.allowedModel`}
+                data-id={m.value}
+                onClick={() => toggleAllowed(m.value)}
+                className="w-full flex items-center justify-between py-1 text-[12px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
+              >
+                <span className="truncate">{m.displayName || m.value}</span>
+                <span
+                  className={`w-7 h-4 shrink-0 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`}
+                  />
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Max cost per dispatched agent (USD)
+          <InfoTooltip text="Per-dispatch-target cumulative cost cap (ADR-033 M4-C). Once a target's tracked cost meets/exceeds this value, further continuation turns on it are rejected — the target stays alive, so raising the cap or starting a fresh dispatch both recover. Leave blank for no cap." />
+        </div>
+        <input
+          data-testid={`${testid}.maxCost`}
+          type="number"
+          min="0"
+          step="0.01"
+          value={maxCostUsd ?? ''}
+          onChange={(e) => {
+            const raw = e.target.value
+            update({ maxCostUsd: raw === '' ? undefined : Number(raw) })
+          }}
+          placeholder="(no cap)"
+          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        />
+      </div>
+      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
+    </div>
+  )
+}
+
+/**
+ * Governs `dispatch_agent` calls INTO opencode (the live Claude→opencode
+ * direction). Self-contained: loads/saves its own opencode EngineConfig via
+ * window.api, editing only the `dispatch` block (never clobbers autoMode etc.).
+ */
+export function OpencodeDispatchSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchSection
+      engineId="opencode"
+      testid="OpencodeDispatchSection"
+      installed={installed}
+      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets a Claude session delegate a task to an opencode agent (e.g. a GPT-backed review)."
+      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected."
+      noModelsMessage="No opencode models detected."
+      footerText="Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed agent for a second opinion). Empty allowed-models list = any model may be requested."
+    />
+  )
+}
+
+/**
+ * Governs `dispatch_agent` calls INTO Claude (the M2 opencode→Claude
+ * direction, plus any future engine). Self-contained: loads/saves its own
+ * Claude EngineConfig via window.api, editing only the `dispatch` block
+ * (never clobbers `sandbox`/`proxy`). Claude ITSELF is always installed (the
+ * bundled default engine), but dispatch INTO Claude can only be CALLED from
+ * opencode today — so this section gates on the same opencode-installed
+ * probe as the opencode twin (ADR-030/ADR-033 M4-A: no possible caller means
+ * the config has nothing to configure).
+ */
+export function ClaudeDispatchSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchSection
+      engineId="claude"
+      testid="ClaudeDispatchSection"
+      installed={installed}
+      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller."
+      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Claude model aliases (e.g. sonnet, haiku, opus). With no default set, dispatch_agent calls without an explicit model are rejected."
+      noModelsMessage="No Claude models detected."
+      footerText="Governs dispatch_agent calls INTO Claude from other engines (e.g. an opencode session asking Claude for a second opinion). Empty allowed-models list = any model may be requested."
+    />
   )
 }
 
@@ -696,6 +920,7 @@ function ModelAllowlistDialog({
   )
   const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
   const [search, setSearch] = useState('')
+  const [freeOnly, setFreeOnly] = useState(false)
   // When the incoming allowlist is undefined (legacy "show all"), default every
   // model to checked once the list loads so saving doesn't silently hide them.
   const seededRef = useRef(current !== undefined)
@@ -720,7 +945,12 @@ function ModelAllowlistDialog({
     }
   }, [providerId])
 
+  const hasFreeModels = (models ?? []).some((m) => m.free)
   const filtered = (models ?? []).filter((m) => {
+    // Ignore a stale toggle when the loaded entries contain no free models — the
+    // chip is unmounted then, so an active filter would otherwise leave a
+    // permanently empty list (same dead-end guard as ModelPicker.displayedGroups).
+    if (freeOnly && hasFreeModels && !m.free) return false
     const q = search.trim().toLowerCase()
     if (!q) return true
     return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
@@ -783,6 +1013,21 @@ function ModelAllowlistDialog({
           >
             Clear
           </button>
+          {hasFreeModels && (
+            <button
+              type="button"
+              data-testid="ModelAllowlistDialog.freeFilter"
+              aria-pressed={freeOnly}
+              onClick={() => setFreeOnly((v) => !v)}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide transition-colors cursor-pointer border whitespace-nowrap ${
+                freeOnly
+                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                  : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
+              }`}
+            >
+              Free only
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-1">
@@ -809,7 +1054,17 @@ function ModelAllowlistDialog({
                   ✓
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="text-[12px] text-text-secondary truncate block">{m.name}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[12px] text-text-secondary truncate">{m.name}</span>
+                    {m.free && (
+                      <span
+                        data-testid="ModelAllowlistDialog.freeBadge"
+                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide shrink-0"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
                   <span className="text-[10px] text-text-muted/50 truncate block">
                     {m.id}
                     {m.releaseDate ? ` · ${m.releaseDate}` : ''}
@@ -1160,7 +1415,8 @@ function VendorOpencodeSection(): React.JSX.Element {
                           {p.name}
                         </span>
                         <span className="text-[10px] text-text-muted/50 truncate block">
-                          {p.id} · {p.modelCount} models
+                          {p.id}
+                          {p.modelCount > 0 ? ` · ${p.modelCount} models` : ''}
                           {canOauth ? ' · OAuth' : ''}
                         </span>
                       </span>
@@ -1168,7 +1424,21 @@ function VendorOpencodeSection(): React.JSX.Element {
                         {expanded ? '−' : 'Add'}
                       </span>
                     </button>
-                    {expanded && (
+                    {/* Free (credential-less) providers only ever show up here after
+                        being removed (disabledProviders) — re-adding just needs the
+                        un-disable in finishAdd, no OAuth / API key. */}
+                    {expanded && p.authState === 'free' && (
+                      <div className="px-2 pb-2 pt-1">
+                        <button
+                          data-testid="VendorOpencodeSection.addFree"
+                          onClick={() => finishAdd(p.id)}
+                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                        >
+                          Add — no credentials needed
+                        </button>
+                      </div>
+                    )}
+                    {expanded && p.authState !== 'free' && (
                       <div className="px-2 pb-2 pt-1 space-y-1.5">
                         {canOauth && (
                           <button
@@ -1388,6 +1658,183 @@ function OpencodeModelsSection(): React.JSX.Element {
   )
 }
 
+// ── pi Default model section (M3) ────────────────────────────────────
+
+/**
+ * pi's per-engine default model — lives in `EngineConfig.piConfig.defaultModel`
+ * (engines/pi.json via loadEngineConfig/saveEngineConfig), NOT a dedicated
+ * opencode.json-style settings file like OpencodeModelsSection's `cfg.model`
+ * (pi has no native-config-passthrough schema to mirror in M3). Discovered
+ * models use a visible select, with an explicit custom-ID escape hatch and a
+ * ClaudeUI-private allowlist for picker visibility and default resolution.
+ */
+function PiDefaultModelSection(): React.JSX.Element {
+  const [cfg, setCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [customMode, setCustomMode] = useState(false)
+  const [managingModels, setManagingModels] = useState(false)
+  const installed = usePiInstalled()
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('pi')
+      .then(setCfg)
+      .catch(() => setCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const pi = groups.filter((g) => g.engineId === 'pi')
+        setModels(pi.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (cfg === null || installed === null) {
+    return (
+      <div data-testid="PiDefaultModelSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
+  }
+  if (!installed) {
+    return (
+      <div data-testid="PiDefaultModelSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        pi is not installed. Model settings apply to pi sessions.
+      </div>
+    )
+  }
+
+  const current = cfg.piConfig?.defaultModel ?? ''
+  const known = current === '' || models.some((m) => m.value === current)
+  const allowlist = cfg.piConfig?.modelAllowlist
+  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
+
+  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
+    const latest = await window.api.loadEngineConfig('pi')
+    const next: EngineConfig = {
+      ...latest,
+      piConfig: { ...latest.piConfig, modelAllowlist }
+    }
+    await window.api.saveEngineConfig('pi', next)
+    setCfg(next)
+    useSessionStore.getState().reloadModels()
+    window.api
+      .getEngineModels()
+      .then((groups) =>
+        setModels(groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models))
+      )
+      .catch(() => {})
+  }
+
+  const update = (value: string): void => {
+    const next: EngineConfig = { ...cfg, piConfig: { ...cfg.piConfig, defaultModel: value || undefined } }
+    setCfg(next)
+    window.api.saveEngineConfig('pi', next).catch(() => {})
+    // Mirror the default-model choice into the store so new/reopened pi
+    // sessions pick it up immediately, and refresh the picker model list.
+    useSessionStore.getState().setPiDefaultModel(value || PI_DEFAULT_MODEL)
+    useSessionStore.getState().reloadModels()
+  }
+
+  return (
+    <div data-testid="PiDefaultModelSection" className="space-y-1">
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Default model
+          <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
+        </div>
+        {models.length > 0 ? (
+          <select
+            data-testid="PiDefaultModelSection.defaultModel"
+            value={customMode || !known ? '__custom__' : current}
+            onChange={(e) => {
+              if (e.target.value === '__custom__') setCustomMode(true)
+              else {
+                setCustomMode(false)
+                update(e.target.value)
+              }
+            }}
+            className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+          >
+            <option value="">Default ({PI_DEFAULT_MODEL})</option>
+            {models.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.displayName || m.value}
+              </option>
+            ))}
+            <option value="__custom__">Custom model ID...</option>
+          </select>
+        ) : (
+          <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
+            No pi models discovered. Authenticate a provider, then refresh models.
+          </div>
+        )}
+        {(models.length === 0 || customMode || !known) && (
+          <input
+            data-testid="PiDefaultModelSection.customModel"
+            type="text"
+            value={current}
+            onChange={(e) => update(e.target.value)}
+            placeholder="Custom provider/model-id"
+            className="mt-1 w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+          />
+        )}
+        <button
+          data-testid="PiDefaultModelSection.refresh"
+          onClick={() => {
+            window.api
+              .getEngineModels()
+              .then((groups) =>
+                setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
+              )
+              .catch(() => {})
+          }}
+          className="mt-1 text-[11px] text-accent"
+        >
+          Refresh models
+        </button>
+        <button
+          data-testid="PiDefaultModelSection.manageModels"
+          onClick={() => setManagingModels(true)}
+          className="mt-1 ml-3 text-[11px] text-accent"
+        >
+          Manage models ({allowlist === undefined ? 'all' : allowlist.length === 0 ? 'none' : `${allowlist.length} selected`})
+        </button>
+        {defaultExcluded && (
+          <div
+            data-testid="PiDefaultModelSection.excludedDefaultWarning"
+            className="mt-1 text-[10px] text-warning/90"
+          >
+            The configured default is excluded by the model allowlist. ClaudeUI will use an
+            available fallback until it is enabled or replaced.
+          </div>
+        )}
+        {!known && !defaultExcluded && (
+          <div
+            data-testid="PiDefaultModelSection.unknownWarning"
+            className="mt-1 text-[10px] text-warning/90"
+          >
+            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the provider is
+            authenticated and the model id is spelled correctly.
+          </div>
+        )}
+      </div>
+      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+        Applies to new pi sessions. Falls back to pi&rsquo;s own default (
+        {PI_DEFAULT_MODEL}) when unset.
+      </div>
+      {managingModels && (
+        <PiModelAllowlistDialog
+          providerName="pi"
+          current={allowlist}
+          onClose={() => setManagingModels(false)}
+          onSave={saveAllowlist}
+        />
+      )}
+    </div>
+  )
+}
+
 // ── opencode Providers section ───────────────────────────────────────
 
 const inputClass =
@@ -1395,11 +1842,12 @@ const inputClass =
 
 /**
  * A provider row carries two distinct identities:
- *   _key — stable React/list key + modelTexts map key; never changes during the
- *          session, so editing the provider id doesn't remount the row.
+ *   _key — stable React/list key + transient-state map key (apiKeys, expandedCaps);
+ *          never changes during the session, so editing the provider id doesn't
+ *          remount the row.
  *   _id  — the EDITABLE opencode provider id (the map key used at save time).
  */
-type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string }
+type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string; _managed?: boolean }
 
 /** Empty provider row factory — stable _key, blank editable id. */
 function newProvider(): ProviderRow {
@@ -1416,32 +1864,56 @@ function OpencodeProvidersSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
   // Local editing state for provider rows (has a transient _id key for React diffing)
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
-  // Per-row model-id textarea string
-  const [modelTexts, setModelTexts] = useState<Record<string, string>>({})
+  // Which "provider._key / modelId" capability editors are expanded.
+  const [expandedCaps, setExpandedCaps] = useState<Set<string>>(new Set())
+  // Per-row API key input — TRANSIENT UI state only, keyed by the stable _key.
+  // Never merged into the OpencodeConfigSettings payload (ADR-028: opencode.json
+  // stays credential-free); saved separately to opencode's own auth.json via
+  // vendor-auth:set-key, the same mechanism the Providers (catalog) section uses.
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
+  const [keyBusy, setKeyBusy] = useState<Record<string, boolean>>({})
+  const [keyError, setKeyError] = useState<Record<string, string>>({})
+  // Which vendor ids have stored credentials in opencode's auth.json — a
+  // read-only file peek (vendor-auth:list-keys), NOT the auth probe: the probe
+  // reports any declared custom provider as 'authenticated' whether or not it
+  // has a key, which would hide the key input for fresh providers.
+  const [credIds, setCredIds] = useState<Record<string, 'api' | 'oauth'>>({})
+
+  const reloadCredIds = (): void => {
+    window.api
+      .vendorAuthListKeys('opencode')
+      .then((ids) => setCredIds(ids))
+      .catch(() => {})
+  }
 
   useEffect(() => {
-    window.api
-      .loadOpencodeSettings()
-      .then((settings) => {
+    Promise.all([
+      window.api.loadOpencodeSettings(),
+      window.api.listSharedProviders().catch(() => [])
+    ])
+      .then(([settings, sharedProviders]) => {
         setCfg(settings)
+        const managedIds = new Set(
+          sharedProviders.map(
+            (provider) => provider.routes.opencode.providerId ?? provider.id
+          )
+        )
         // Hydrate provider rows from saved config. The saved provider id becomes
         // both the stable _key and the editable _id.
         const saved = settings.providers ?? {}
         const rows: ProviderRow[] = Object.entries(saved).map(([id, p]) => ({
           _key: id,
           _id: id,
+          _managed: managedIds.has(id),
           name: p.name ?? '',
+          npm: p.npm,
           baseURL: p.baseURL ?? '',
           models: p.models ?? []
         }))
         setProviderRows(rows)
-        setModelTexts(
-          Object.fromEntries(
-            rows.map((r) => [r._key, (r.models ?? []).map((m) => m.id).join('\n')])
-          )
-        )
       })
       .catch(() => setCfg({}))
+    reloadCredIds()
   }, [])
 
   if (cfg === null || installed === null) {
@@ -1455,21 +1927,22 @@ function OpencodeProvidersSection(): React.JSX.Element {
     )
   }
 
-  const saveProviders = (rows: ProviderRow[], texts: Record<string, string>): void => {
-    // Reconstruct providers Record from rows, mapping model text → {id,name?}[].
-    // The Record is keyed by the editable provider id (_id); model text is read
-    // by the stable row key (_key). Rows with an empty id are skipped.
+  const saveProviders = (rows: ProviderRow[]): void => {
+    // Reconstruct providers Record from rows. The Record is keyed by the editable
+    // provider id (_id). Rows with an empty id are skipped. Model id/name flow
+    // through this projection writer (ADR-031 leaf merge); model CAPABILITY fields
+    // are written separately via patchOpencodeNative and are preserved here.
     const providers: Record<string, OpencodeProviderSettings> = {}
     for (const row of rows) {
       if (!row._id.trim()) continue
-      const modelIds = (texts[row._key] ?? '')
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean)
+      const models = (row.models ?? [])
+        .filter((m) => m.id.trim())
+        .map((m) => (m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }))
       const entry: OpencodeProviderSettings = {}
       if (row.name) entry.name = row.name
+      if (row.npm) entry.npm = row.npm
       if (row.baseURL) entry.baseURL = row.baseURL
-      if (modelIds.length > 0) entry.models = modelIds.map((id) => ({ id }))
+      if (models.length > 0) entry.models = models
       providers[row._id] = entry
     }
     const next: OpencodeConfigSettings = {
@@ -1485,29 +1958,111 @@ function OpencodeProvidersSection(): React.JSX.Element {
   const updateRow = (key: string, patch: Partial<ProviderRow>): void => {
     const next = providerRows.map((r) => (r._key === key ? { ...r, ...patch } : r))
     setProviderRows(next)
-    saveProviders(next, modelTexts)
+    saveProviders(next)
   }
 
-  const updateModelText = (key: string, text: string): void => {
-    const next = { ...modelTexts, [key]: text }
-    setModelTexts(next)
-    saveProviders(providerRows, next)
+  const addModel = (key: string): void => {
+    const next = providerRows.map((r) =>
+      r._key === key ? { ...r, models: [...(r.models ?? []), { id: '' }] } : r
+    )
+    setProviderRows(next)
+    // No save yet — an empty-id model is skipped by saveProviders anyway.
+  }
+
+  const updateModel = (key: string, idx: number, patch: { id?: string; name?: string }): void => {
+    const next = providerRows.map((r) =>
+      r._key === key
+        ? { ...r, models: (r.models ?? []).map((m, i) => (i === idx ? { ...m, ...patch } : m)) }
+        : r
+    )
+    setProviderRows(next)
+    saveProviders(next)
+  }
+
+  const removeModel = (key: string, idx: number): void => {
+    const next = providerRows.map((r) =>
+      r._key === key ? { ...r, models: (r.models ?? []).filter((_, i) => i !== idx) } : r
+    )
+    setProviderRows(next)
+    saveProviders(next)
+  }
+
+  const toggleCaps = (capKey: string): void => {
+    setExpandedCaps((prev) => {
+      const n = new Set(prev)
+      if (n.has(capKey)) n.delete(capKey)
+      else n.add(capKey)
+      return n
+    })
   }
 
   const addRow = (): void => {
     const row = newProvider()
     const next = [...providerRows, row]
     setProviderRows(next)
-    setModelTexts((prev) => ({ ...prev, [row._key]: '' }))
   }
 
   const removeRow = (key: string): void => {
     const next = providerRows.filter((r) => r._key !== key)
     setProviderRows(next)
-    const nextTexts = { ...modelTexts }
-    delete nextTexts[key]
-    setModelTexts(nextTexts)
-    saveProviders(next, nextTexts)
+    saveProviders(next)
+    setApiKeys((prev) => {
+      const n = { ...prev }
+      delete n[key]
+      return n
+    })
+    setKeyBusy((prev) => {
+      const n = { ...prev }
+      delete n[key]
+      return n
+    })
+    setKeyError((prev) => {
+      const n = { ...prev }
+      delete n[key]
+      return n
+    })
+  }
+
+  /** Save the transient per-row API key to opencode's own auth.json (never opencode.json). */
+  const saveProviderKey = async (row: ProviderRow): Promise<void> => {
+    const id = row._id.trim()
+    const key = (apiKeys[row._key] ?? '').trim()
+    if (!id || !key) return
+    setKeyBusy((prev) => ({ ...prev, [row._key]: true }))
+    setKeyError((prev) => {
+      const n = { ...prev }
+      delete n[row._key]
+      return n
+    })
+    try {
+      await window.api.vendorAuthSetKey('opencode', id, key)
+      setApiKeys((prev) => ({ ...prev, [row._key]: '' }))
+      reloadCredIds()
+    } catch {
+      setKeyError((prev) => ({ ...prev, [row._key]: 'Failed to save key.' }))
+    } finally {
+      setKeyBusy((prev) => ({ ...prev, [row._key]: false }))
+    }
+  }
+
+  /** Remove credentials for a custom provider id from opencode's auth.json. */
+  const removeProviderKey = async (row: ProviderRow): Promise<void> => {
+    const id = row._id.trim()
+    if (!id) return
+    setKeyBusy((prev) => ({ ...prev, [row._key]: true }))
+    setKeyError((prev) => {
+      const n = { ...prev }
+      delete n[row._key]
+      return n
+    })
+    try {
+      await window.api.vendorAuthRemove('opencode', id)
+      reloadCredIds()
+    } catch {
+      setKeyError((prev) => ({ ...prev, [row._key]: 'Failed to remove key.' }))
+    } finally {
+      setKeyBusy((prev) => ({ ...prev, [row._key]: false }))
+    }
   }
 
   return (
@@ -1518,54 +2073,191 @@ function OpencodeProvidersSection(): React.JSX.Element {
           Custom providers (OpenAI-compatible)
         </div>
         <div className="text-[10px] text-text-muted/60 leading-relaxed">
-          Add self-hosted or compatible endpoints. Set API keys in the <em>Providers</em> section.
+          Add self-hosted or compatible endpoints. API keys entered here are stored in
+          opencode&apos;s own auth.json — the <em>Providers</em> section remains the place to add
+          and authenticate catalog providers.
         </div>
-        {providerRows.map((row) => (
-          <div key={row._key} data-testid="OpencodeProvidersSection.providerRow" data-id={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
-            <div className="flex items-center gap-1.5">
+        {providerRows.map((row) => {
+          const id = row._id.trim()
+          if (row._managed) {
+            return (
+              <div
+                key={row._key}
+                data-testid="OpencodeProvidersSection.managedProvider"
+                data-id={id}
+                className="border border-border/30 rounded-md p-2 text-[11px] text-text-secondary"
+              >
+                <div className="font-medium text-text-primary">{row.name || id}</div>
+                <div className="text-text-muted">Managed in Common · Providers & models</div>
+                <button
+                  onClick={() =>
+                    window.dispatchEvent(
+                      new CustomEvent('open-settings', {
+                        detail: { scope: 'common', section: 'shared-providers' }
+                      })
+                    )
+                  }
+                  className="mt-1 text-accent"
+                >
+                  Open shared provider
+                </button>
+              </div>
+            )
+          }
+          const hasKey = id.length > 0 && credIds[id] !== undefined
+          const busy = keyBusy[row._key] ?? false
+          const error = keyError[row._key]
+          return (
+            <div key={row._key} data-testid="OpencodeProvidersSection.providerRow" data-id={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  placeholder="Provider id (e.g. my-ollama)"
+                  value={row._id}
+                  onChange={(e) => updateRow(row._key, { _id: e.target.value })}
+                  className={`${inputClass} flex-1`}
+                />
+                <button
+                  onClick={() => removeRow(row._key)}
+                  className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
+                  title="Remove provider"
+                >
+                  ✕
+                </button>
+              </div>
               <input
                 type="text"
-                placeholder="Provider id (e.g. my-ollama)"
-                value={row._id}
-                onChange={(e) => updateRow(row._key, { _id: e.target.value })}
-                className={`${inputClass} flex-1`}
+                placeholder="Display name (optional)"
+                value={row.name ?? ''}
+                onChange={(e) => updateRow(row._key, { name: e.target.value })}
+                className={`${inputClass} w-full`}
               />
-              <button
-                onClick={() => removeRow(row._key)}
-                className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
-                title="Remove provider"
-              >
-                ✕
-              </button>
-            </div>
-            <input
-              type="text"
-              placeholder="Display name (optional)"
-              value={row.name ?? ''}
-              onChange={(e) => updateRow(row._key, { name: e.target.value })}
-              className={`${inputClass} w-full`}
-            />
-            <input
-              type="url"
-              placeholder="Base URL (e.g. http://localhost:11434/v1)"
-              value={row.baseURL ?? ''}
-              onChange={(e) => updateRow(row._key, { baseURL: e.target.value })}
-              className={`${inputClass} w-full`}
-            />
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">
-                Model ids (one per line, optional)
+              <input
+                type="url"
+                placeholder="Base URL (e.g. http://localhost:11434/v1)"
+                value={row.baseURL ?? ''}
+                onChange={(e) => updateRow(row._key, { baseURL: e.target.value })}
+                className={`${inputClass} w-full`}
+              />
+              <div>
+                <div className="text-[10px] text-text-muted mb-0.5">API key (optional)</div>
+                {hasKey ? (
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      data-testid="OpencodeProvidersSection.keyStatus"
+                      data-id={row._key}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400"
+                    >
+                      Key set
+                    </span>
+                    <button
+                      data-testid="OpencodeProvidersSection.removeKey"
+                      data-id={row._key}
+                      onClick={() => void removeProviderKey(row)}
+                      disabled={busy}
+                      className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
+                    >
+                      {busy ? 'Removing…' : 'Remove key'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="password"
+                      data-testid="OpencodeProvidersSection.apiKey"
+                      data-id={row._key}
+                      placeholder="API key"
+                      value={apiKeys[row._key] ?? ''}
+                      onChange={(e) =>
+                        setApiKeys((prev) => ({ ...prev, [row._key]: e.target.value }))
+                      }
+                      className={`${inputClass} flex-1`}
+                    />
+                    <button
+                      onClick={() => void saveProviderKey(row)}
+                      disabled={busy || !id || !(apiKeys[row._key] ?? '').trim()}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {busy ? 'Saving…' : 'Save key'}
+                    </button>
+                  </div>
+                )}
+                {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
               </div>
-              <textarea
-                placeholder={'llama3.2\nmistral-7b'}
-                value={modelTexts[row._key] ?? ''}
-                onChange={(e) => updateModelText(row._key, e.target.value)}
-                rows={3}
-                className={`${inputClass} w-full resize-none`}
-              />
+              <div className="space-y-1.5">
+                <div className="text-[10px] text-text-muted">Models (optional)</div>
+                {(row.models ?? []).map((m, idx) => {
+                  const modelId = m.id.trim()
+                  const capKey = `${row._key}/${idx}`
+                  const capsOpen = expandedCaps.has(capKey)
+                  const canEditCaps = id.length > 0 && modelId.length > 0
+                  return (
+                    <div
+                      key={idx}
+                      data-testid="OpencodeProvidersSection.modelRow"
+                      data-id={capKey}
+                      className="border border-border/20 rounded p-1.5 space-y-1"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          placeholder="Model id (e.g. llama3.2)"
+                          value={m.id}
+                          onChange={(e) => updateModel(row._key, idx, { id: e.target.value })}
+                          className={`${inputClass} flex-1`}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Display name"
+                          value={m.name ?? ''}
+                          onChange={(e) => updateModel(row._key, idx, { name: e.target.value })}
+                          className={`${inputClass} flex-1`}
+                        />
+                        <button
+                          type="button"
+                          data-testid="OpencodeProvidersSection.removeModel"
+                          data-id={capKey}
+                          onClick={() => removeModel(row._key, idx)}
+                          className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
+                          title="Remove model"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {canEditCaps ? (
+                        <button
+                          type="button"
+                          data-testid="OpencodeProvidersSection.toggleCaps"
+                          data-id={capKey}
+                          onClick={() => toggleCaps(capKey)}
+                          className="text-[10px] text-accent hover:text-accent/80 transition-colors"
+                        >
+                          {capsOpen ? '▾ Capabilities' : '▸ Capabilities'}
+                        </button>
+                      ) : (
+                        <div className="text-[10px] text-text-muted/50">
+                          Set a provider id and model id to edit capabilities.
+                        </div>
+                      )}
+                      {canEditCaps && capsOpen && (
+                        <ModelCapabilityEditor providerId={row._id.trim()} modelId={modelId} />
+                      )}
+                    </div>
+                  )
+                })}
+                <button
+                  type="button"
+                  data-testid="OpencodeProvidersSection.addModel"
+                  data-id={row._key}
+                  onClick={() => addModel(row._key)}
+                  className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+                >
+                  + Add model
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
         <button
           data-testid="OpencodeProvidersSection.addProvider"
           onClick={addRow}
@@ -1578,6 +2270,268 @@ function OpencodeProvidersSection(): React.JSX.Element {
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
         Add, remove, and authenticate built-in providers under <em>Providers</em>. Changes apply on
         the next opencode server start for each working directory.
+      </div>
+    </div>
+  )
+}
+
+// ── opencode raw-config (schema-driven) editing ─────────────────────
+
+const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
+const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
+/** The provider-model entry schema: $defs.ProviderConfig.properties.models.additionalProperties */
+const OPENCODE_MODEL_ENTRY_SCHEMA = (
+  (
+    (OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>
+  ).models as SchemaNode
+).additionalProperties as SchemaNode
+/** Model capability fields the provider editor exposes (raw opencode names). */
+const MODEL_CAP_KEYS = ['attachment', 'reasoning', 'temperature', 'tool_call', 'modalities', 'cost', 'limit']
+
+/**
+ * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
+ * the raw editor, never editable there). `provider` is patch-writable via the
+ * per-model capability editor, but curated as a whole under Custom providers.
+ */
+const CONFIG_POINTER_KEYS: Record<string, string> = {
+  model: 'Models',
+  small_model: 'Models',
+  disabled_providers: 'Providers',
+  enabled_providers: 'Providers',
+  provider: 'Custom providers',
+  agent: 'Agents',
+  mcp: 'injected at spawn',
+  permission: 'Autonomy mode'
+}
+/** Config keys the raw editor never renders as editable fields. */
+const CONFIG_EXCLUDED_KEYS = new Set(['$schema', ...Object.keys(CONFIG_POINTER_KEYS)])
+
+/**
+ * Per-model capability editor. Reads the model's raw entry from opencode's config
+ * file, edits it via the schema-driven form, and saves ONLY changed leaves through
+ * patchOpencodeNative (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
+ * Composes with the projection writer (saveOpencodeSettings) that owns id/name —
+ * both are leaf-scoped so neither clobbers the other.
+ */
+function ModelCapabilityEditor({
+  providerId,
+  modelId
+}: {
+  providerId: string
+  modelId: string
+}): React.JSX.Element {
+  const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const load = useCallback(() => {
+    window.api
+      .readOpencodeNativeRaw()
+      .then(({ config }) => {
+        const prov = (config.provider as Record<string, unknown> | undefined)?.[providerId] as
+          | Record<string, unknown>
+          | undefined
+        const models = prov?.models as Record<string, unknown> | undefined
+        const entry = (models?.[modelId] as Record<string, unknown> | undefined) ?? {}
+        setOriginal(entry)
+        setDraft(structuredClone(entry))
+      })
+      .catch(() => {
+        setOriginal({})
+        setDraft({})
+      })
+  }, [providerId, modelId])
+  useEffect(() => load(), [load])
+
+  if (original === null) {
+    return <div className="text-[10px] text-text-muted/60 px-1">Loading capabilities…</div>
+  }
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original)
+  const handleSave = async (): Promise<void> => {
+    const patches = diffToPatches(original, draft, ['provider', providerId, 'models', modelId])
+    if (patches.length === 0) return
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      await window.api.patchOpencodeNative(patches)
+      load()
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+      useSessionStore.getState().reloadModels()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      data-testid="ModelCapabilityEditor"
+      data-id={`${providerId}/${modelId}`}
+      className="rounded bg-bg-primary/30 p-1.5 space-y-1"
+    >
+      <OpencodeSchemaForm
+        schema={OPENCODE_MODEL_ENTRY_SCHEMA}
+        defs={OPENCODE_SCHEMA_DEFS}
+        value={draft}
+        onChange={setDraft}
+        pickKeys={MODEL_CAP_KEYS}
+        keyPrefix={`${providerId}.${modelId}`}
+      />
+      <div className="flex items-center gap-2 px-1">
+        <button
+          type="button"
+          data-testid="ModelCapabilityEditor.save"
+          disabled={!dirty || saving}
+          onClick={() => void handleSave()}
+          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {saving ? 'Saving…' : 'Save capabilities'}
+        </button>
+        {saved && <span className="text-[10px] text-success">Saved</span>}
+        {error && (
+          <span
+            data-testid="ModelCapabilityEditor.error"
+            className="text-[10px] text-red-400 truncate max-w-[240px]"
+            title={error}
+          >
+            {error}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * "Configuration (opencode.json)" — schema-driven editor over the top-level
+ * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers).
+ * Loads the raw config on mount, accumulates edits locally, and on Save computes
+ * a deep diff → leaf patches → patchOpencodeNative. ajv errors surface inline.
+ */
+function OpencodeRawConfigSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [filePath, setFilePath] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const load = useCallback(() => {
+    window.api
+      .readOpencodeNativeRaw()
+      .then(({ config, path }) => {
+        setOriginal(config)
+        setDraft(structuredClone(config))
+        setFilePath(path)
+      })
+      .catch(() => {
+        setOriginal({})
+        setDraft({})
+      })
+  }, [])
+  useEffect(() => load(), [load])
+
+  if (installed === null || original === null) {
+    return (
+      <div data-testid="OpencodeRawConfigSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
+  }
+  if (!installed) {
+    return (
+      <div
+        data-testid="OpencodeRawConfigSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
+        opencode is not installed. This edits opencode&apos;s own config file.
+      </div>
+    )
+  }
+
+  const configProps = (OPENCODE_CONFIG_NODE.properties as Record<string, SchemaNode>) ?? {}
+  const pickKeys = Object.keys(configProps).filter((k) => !CONFIG_EXCLUDED_KEYS.has(k))
+  const pointerKeys = Object.keys(configProps).filter((k) => k in CONFIG_POINTER_KEYS)
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original)
+  const handleSave = async (): Promise<void> => {
+    const patches = diffToPatches(original, draft)
+    if (patches.length === 0) return
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      await window.api.patchOpencodeNative(patches)
+      const { config } = await window.api.readOpencodeNativeRaw()
+      setOriginal(config)
+      setDraft(structuredClone(config))
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      data-testid="OpencodeRawConfigSection"
+      className="px-3 py-1.5 space-y-2 text-[13px] text-text-secondary"
+    >
+      <div className="text-[10px] text-text-muted/60 leading-relaxed">
+        Edit opencode&apos;s own config file directly ({filePath || 'opencode.jsonc'}). Saves touch
+        only the fields you change — comments and keys not listed here are preserved.
+      </div>
+      <OpencodeSchemaForm
+        schema={OPENCODE_CONFIG_NODE}
+        defs={OPENCODE_SCHEMA_DEFS}
+        value={draft}
+        onChange={setDraft}
+        pickKeys={pickKeys}
+      />
+      {pointerKeys.length > 0 && (
+        <div className="border-t border-border/20 pt-1.5 space-y-0.5">
+          {pointerKeys.map((k) => (
+            <div
+              key={k}
+              data-testid="OpencodeRawConfigSection.pointer"
+              data-id={k}
+              className="flex items-center justify-between text-[10px] text-text-muted/60 px-3"
+            >
+              <span className="font-mono text-text-muted">{k}</span>
+              <span>managed in {CONFIG_POINTER_KEYS[k]}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-2 px-3 pt-1">
+        <button
+          type="button"
+          data-testid="OpencodeRawConfigSection.save"
+          disabled={!dirty || saving}
+          onClick={() => void handleSave()}
+          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {saved && <span className="text-[11px] text-success">Saved</span>}
+        {error && (
+          <span
+            data-testid="OpencodeRawConfigSection.error"
+            className="text-[11px] text-red-400 truncate max-w-[360px]"
+            title={error}
+          >
+            {error}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -3041,6 +3995,45 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'claude-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'claudeDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'claude dispatch cross engine agent delegate collab model allowlist default sonnet haiku opus',
+        render: () => <ClaudeDispatchSection />
+      }
+    ]
+  },
+  {
+    id: 'shared-providers',
+    label: 'Providers & models',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'sharedProviders',
+        label: 'Providers & models',
+        keywords: 'shared provider chatgpt codex api key model pi opencode',
+        render: () => <SharedProviders />
+      }
+    ]
+  },
+  {
     id: 'effortDefaults',
     label: 'Default effort',
     icon: (
@@ -3129,6 +4122,46 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'opencode-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'opencode dispatch cross engine agent delegate collab gpt gemini model allowlist default',
+        render: () => <OpencodeDispatchSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-config',
+    label: 'Configuration',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeConfig',
+        label: 'Configuration (opencode.json)',
+        keywords:
+          'opencode config raw schema attachment modalities tool_call reasoning cost limit instructions layout formatter lsp advanced',
+        render: () => <OpencodeRawConfigSection />
+      }
+    ]
+  },
+  {
     id: 'opencode-providers',
     label: 'Custom providers',
     icon: (
@@ -3163,6 +4196,52 @@ export const SECTIONS: Section[] = [
         render: () => <OpencodeAgentsSection />
       }
     ]
+  },
+  {
+    id: 'pi-models',
+    label: 'Models',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piDefaultModel',
+        label: 'Default model',
+        keywords: 'pi model default provider openai-codex anthropic',
+        render: () => <PiDefaultModelSection />
+      }
+    ]
+  },
+  {
+    id: 'vendor-pi',
+    label: 'Providers',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'vendorPiAuth',
+        label: 'Providers & subscriptions',
+        keywords: 'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
+        render: () => <PiVendors />
+      }
+    ]
   }
 ]
 
@@ -3170,17 +4249,17 @@ export const SECTIONS: Section[] = [
 
 /** Section ids that belong to the App group (flat, directly visible) */
 const APP_SECTION_IDS = new Set([
-  'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+  'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
   'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
 ])
 
 /** Section ids that belong to Engines > Claude */
 const ENGINE_CLAUDE_SECTION_IDS = new Set([
-  'permissions', 'sandbox', 'proxy'
+  'permissions', 'sandbox', 'proxy', 'claude-dispatch'
 ])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models'])
+const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
 
 /** Section ids that belong to Vendors > Anthropic */
 const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
@@ -3192,6 +4271,18 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode', 'opencode-provid
 
 /** Section ids that belong to opencode Agents subgroup */
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
+
+/** Section ids that belong to Engines > pi (content self-gates on install).
+ *  Default model only — no auto-mode (deferred; opencode's ADR-023 gatekeeper
+ *  has no pi equivalent yet). No dispatch section: the Claude/opencode dispatch
+ *  sections configure dispatches INTO that engine (allowlist/default/cap for
+ *  incoming targets), and pi is a dispatch SOURCE only so far — nothing to
+ *  configure until pi-as-target ships (crossEngineDispatch is true for the
+ *  source direction as of M4b). */
+const ENGINE_PI_SECTION_IDS = new Set(['pi-models'])
+
+/** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
+const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
 
 /** Section ids that belong to Accounts (flat) */
 const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
@@ -3206,7 +4297,7 @@ function getSectionsForIds(ids: Set<string>, order?: string[]): Section[] {
 
 // ── Scoped navigation (Option A, ADR settings-ia-refactor) ──────────
 
-export type SettingsScope = 'common' | 'claude' | 'opencode'
+export type SettingsScope = 'common' | 'claude' | 'opencode' | 'pi'
 
 export interface ScopeSubgroup {
   id: string
@@ -3233,7 +4324,7 @@ export const SCOPES: ScopeDef[] = [
         id: 'common-app',
         label: undefined,
         sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+          'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
           'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
         ])
       }
@@ -3246,7 +4337,9 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'claude-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, ['permissions', 'sandbox', 'proxy'])
+        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, [
+          'permissions', 'sandbox', 'proxy', 'claude-dispatch'
+        ])
       },
       {
         id: 'claude-vendor',
@@ -3267,7 +4360,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'opencode-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models'])
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
       },
       {
         id: 'opencode-vendor',
@@ -3278,6 +4371,22 @@ export const SCOPES: ScopeDef[] = [
         id: 'opencode-agents',
         label: 'Agents',
         sections: getSectionsForIds(AGENTS_OPENCODE_SECTION_IDS, ['opencode-agents'])
+      }
+    ]
+  },
+  {
+    id: 'pi',
+    label: 'pi',
+    subgroups: [
+      {
+        id: 'pi-engine',
+        label: 'Engine',
+        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-models'])
+      },
+      {
+        id: 'pi-vendor',
+        label: 'Vendor',
+        sections: getSectionsForIds(VENDOR_PI_SECTION_IDS, ['vendor-pi'])
       }
     ]
   }
@@ -3311,9 +4420,7 @@ export const SECTION_CAPABILITY: Readonly<Record<string, GatingCapability>> = {
 
 /** Static per-engine capabilities for a settings scope ('common' = engine-agnostic → null). */
 export function scopeCapabilities(scope: SettingsScope): EngineCapabilities | null {
-  if (scope === 'claude') return CLAUDE_ENGINE_CAPABILITIES
-  if (scope === 'opencode') return OPENCODE_ENGINE_CAPABILITIES
-  return null
+  return scope === 'common' ? null : engineMeta(scope).capabilities
 }
 
 /**

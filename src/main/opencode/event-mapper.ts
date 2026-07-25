@@ -1,6 +1,14 @@
 import { v4 as uuid } from 'uuid'
 import type { OpencodeEvent, QuestionInfo, StoredMessage, StoredMessagePart } from './protocol/types'
-import type { ChatMessage, ContentBlock, PendingApproval, SessionResult, AskUserQuestion, TodoItem } from '../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  PendingApproval,
+  SessionResult,
+  AskUserQuestion,
+  TodoItem,
+  FileDiff
+} from '../../shared/types'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
@@ -76,6 +84,7 @@ export interface ToolPartState {
   status?: string
   input?: Record<string, unknown>
   output?: string
+  error?: string
   metadata?: Record<string, unknown>
   title?: string
 }
@@ -735,20 +744,110 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
 }
 
 /**
+ * Extract per-file unified diffs from a completed tool part's metadata, for the
+ * file-mutation tools (apply_patch / edit). Shape-gated, not tool-name-gated —
+ * bash's `{ output }` metadata (and anything else without `files`/`filediff`)
+ * never matches, so callers don't need a hardcoded tool-name allowlist.
+ *
+ * Verified against vendor/opencode-src tag v1.17.15 (byte-identical to pinned
+ * 1.17.14) tool/{apply_patch,edit,write}.ts:
+ *  - apply_patch result.metadata: `{ diff, files: [{ filePath, relativePath,
+ *    type: 'add'|'update'|'delete'|'move', patch, additions, deletions,
+ *    movePath }], diagnostics }`. The SAME shape also rides the
+ *    `permission.asked` event, but that's a different message type — this
+ *    helper only ever sees a completed/error part's `state.metadata`.
+ *  - edit result.metadata: `{ diagnostics, diff, filediff: { file, patch,
+ *    additions, deletions } }` — a SINGULAR object (always exactly one file),
+ *    not an array. `filediff.file` is edit's own absolute `filePath` input
+ *    echoed back; `input.filePath` is used only as a fallback if that's ever
+ *    absent.
+ *  - write result.metadata: `{ diagnostics, filepath, exists }` — NO diff at
+ *    all. write's `permission.asked` event carries `{ filepath, diff }`, but
+ *    that never reaches a completed part's `state.metadata`, so write
+ *    intentionally yields no fileDiffs (falls through to the `undefined`
+ *    return below — its generic/text rendering is unchanged).
+ */
+export function extractFileDiffs(
+  metadata: Record<string, unknown> | undefined,
+  input: Record<string, unknown> | undefined
+): FileDiff[] | undefined {
+  if (!metadata) return undefined
+
+  // apply_patch shape: files[]
+  if (Array.isArray(metadata.files)) {
+    const diffs: FileDiff[] = []
+    for (const raw of metadata.files as Array<Record<string, unknown>>) {
+      const patch = raw.patch
+      if (typeof patch !== 'string' || patch.length === 0) continue
+      const path =
+        (typeof raw.relativePath === 'string' && raw.relativePath) ||
+        (typeof raw.filePath === 'string' ? raw.filePath : undefined)
+      if (!path) continue
+      const changeType =
+        raw.type === 'add' || raw.type === 'update' || raw.type === 'delete' || raw.type === 'move'
+          ? raw.type
+          : undefined
+      diffs.push({
+        path,
+        patch,
+        additions: typeof raw.additions === 'number' ? raw.additions : undefined,
+        deletions: typeof raw.deletions === 'number' ? raw.deletions : undefined,
+        changeType
+      })
+    }
+    return diffs.length > 0 ? diffs : undefined
+  }
+
+  // edit shape: filediff (singular)
+  const filediff = metadata.filediff as Record<string, unknown> | undefined
+  if (filediff && typeof filediff.patch === 'string' && filediff.patch.length > 0) {
+    const path =
+      (typeof filediff.file === 'string' && filediff.file) ||
+      (typeof input?.filePath === 'string' ? input.filePath : undefined)
+    if (!path) return undefined
+    return [
+      {
+        path,
+        patch: filediff.patch,
+        additions: typeof filediff.additions === 'number' ? filediff.additions : undefined,
+        deletions: typeof filediff.deletions === 'number' ? filediff.deletions : undefined,
+        changeType: 'update'
+      }
+    ]
+  }
+
+  return undefined
+}
+
+/**
  * Check if a tool part snapshot represents a newly completed tool invocation.
  * Returns the tool result data, or null if not applicable.
  */
 export function extractToolResult(
   _partId: string,
   snap: PartSnapshot
-): { toolUseId: string; result: string; isError: boolean } | null {
+): { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] } | null {
   if (snap.type !== 'tool') return null
   const status = snap.state?.status
   if (status !== 'completed' && status !== 'error') return null
   const toolUseId = snap.callID ?? _partId
-  const rawOutput = snap.state?.output ?? (snap.state?.metadata as Record<string, unknown> | undefined)?.output
+  const metadata = snap.state?.metadata as Record<string, unknown> | undefined
+  // Error parts carry the failure text on state.error (e.g. a permission
+  // denial's CorrectedError feedback) — prefer it so the reason is visible in
+  // the tool card, live. Mirrors convertStoredMessage's history-path fallback.
+  const stateError = snap.state?.error
+  const rawOutput =
+    status === 'error' && typeof stateError === 'string' && stateError.length > 0
+      ? stateError
+      : (snap.state?.output ?? metadata?.output)
   const result = rawOutput !== undefined ? String(rawOutput) : ''
-  return { toolUseId, result, isError: status === 'error' }
+  const fileDiffs = extractFileDiffs(metadata, snap.state?.input)
+  return {
+    toolUseId,
+    result,
+    isError: status === 'error',
+    ...(fileDiffs ? { fileDiffs } : {})
+  }
 }
 
 // Helper: generate a stable uuid for user messages
@@ -770,8 +869,6 @@ export function makeUserMessageId(): string {
  * part types are silently skipped (same treatment as buildChatMessage).
  *
  * Returns null if the message has no displayable content (so the caller can skip it).
- *
- * Spec: docs/v2/followup-opencode-session-persistence.md §3c
  */
 export function convertStoredMessage(stored: StoredMessage): ChatMessage | null {
   const { info, parts } = stored
@@ -802,11 +899,13 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
       const status = part.state?.status
       if (status === 'completed' || status === 'error') {
         const rawOutput = part.state?.output ?? part.state?.error ?? ''
+        const fileDiffs = extractFileDiffs(part.state?.metadata, input)
         content.push({
           type: 'tool_result',
           toolUseId,
           toolResult: rawOutput ?? '',
-          isError: status === 'error'
+          isError: status === 'error',
+          ...(fileDiffs ? { fileDiffs } : {})
         })
       }
     }
@@ -823,4 +922,56 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
     content,
     timestamp
   }
+}
+
+/**
+ * Reconstruct accumulated ACTIVE (turn-processing) duration from opencode's
+ * stored-message history (GET /session/{id}/message), for durability across
+ * reloads. Mirrors Claude's transcript turn-span reconstruction (see
+ * session-history.ts `computeTurnSpanDurationMs`) with the same semantic:
+ * accumulated wall-clock time actively processing turns — idle time (waiting
+ * on the user) is excluded, and both engines share this definition.
+ *
+ * A turn starts at a `role: 'user'` stored message (`info.time.created`) and
+ * ends at the latest `time.completed` (fallback: `time.created`) among the
+ * assistant messages that follow it, up to the next user message. Messages
+ * are assumed to arrive in chronological order, as `listMessages` returns
+ * them. Missing/non-finite timestamps are skipped for span math (a user
+ * message with no parseable `created` drops that whole turn rather than
+ * guessing a start); negative/NaN spans are clamped to 0.
+ */
+export function computeStoredDurationMs(storedMessages: StoredMessage[]): number {
+  let totalMs = 0
+  let turnStartMs: number | null = null
+  let turnEndMs: number | null = null
+
+  const finalizeTurn = (): void => {
+    if (turnStartMs !== null && turnEndMs !== null) {
+      const span = turnEndMs - turnStartMs
+      if (Number.isFinite(span) && span > 0) totalMs += span
+    }
+    turnStartMs = null
+    turnEndMs = null
+  }
+
+  for (const stored of storedMessages) {
+    const info = stored.info
+    if (!info) continue
+    const time = info.time as { created?: number; completed?: number } | undefined
+
+    if (info.role === 'user') {
+      finalizeTurn()
+      const created = time?.created
+      turnStartMs = typeof created === 'number' && Number.isFinite(created) ? created : null
+      continue
+    }
+
+    if (info.role !== 'assistant' || turnStartMs === null) continue
+    const end = time?.completed ?? time?.created
+    if (typeof end !== 'number' || !Number.isFinite(end)) continue
+    if (turnEndMs === null || end > turnEndMs) turnEndMs = end
+  }
+  finalizeTurn()
+
+  return totalMs
 }

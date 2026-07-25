@@ -1,6 +1,6 @@
 # ADR-021: Neutral auth/account model — EngineAuthProvider, per-vendor probe
 
-**Status:** Accepted (V2 design; sequenced in `docs/v2/implementation-plan.md`)
+**Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Amends:** [ADR-014](adr-014_native-anthropic-oauth.md), [ADR-015](adr-015_multi-account-file-credentials.md)
 
@@ -9,7 +9,7 @@
 Auth differs by engine at the mechanism level: ClaudeUI *drives* Claude's OAuth (service session +
 control requests, ADR-014) and manages multi-account file credentials (ADR-015); opencode *delegates*
 (owns `auth.json`, multi-vendor) but exposes auth-setting endpoints. V2 needs one neutral interface
-over both. Detail: `docs/v2/04-auth-accounts.md`.
+over both. (The implemented model is documented in `docs/architecture.md` § "Auth / accounts".)
 
 ## Decision
 

@@ -21,6 +21,12 @@ declare global {
 
 type Listener = (...args: unknown[]) => void
 
+function sharedProviderRemoteMutation(..._args: unknown[]): Promise<never> {
+  return Promise.reject(
+    new Error('Shared provider settings can only be changed from the desktop app')
+  )
+}
+
 /**
  * Create event listener registration that mirrors preload's onEvent().
  * Events arrive via the connection's event handler.
@@ -90,7 +96,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       model?,
       thinkingMode?,
       resumeSessionAt?,
-      forkSession?
+      forkSession?,
+      engineId?
     ) =>
       connection.invoke(
         'session:create',
@@ -102,14 +109,15 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         model,
         thinkingMode,
         resumeSessionAt,
-        forkSession
+        forkSession,
+        engineId
       ) as Promise<void>,
 
     rekeySession: (oldId, newId) =>
       connection.invoke('session:rekey', oldId, newId) as Promise<void>,
 
-    resolveForkAnchor: (sessionId, cwd, messageId) =>
-      unwrap('session:resolve-fork-anchor', sessionId, cwd, messageId),
+    resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
+      unwrap('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
 
     sendPrompt: (routingId, prompt, attachments?) =>
       connection.invoke('session:send', routingId, prompt, attachments) as Promise<void>,
@@ -148,6 +156,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
         ClaudeAPI['loadOpencodeHistory']
       >,
+    // Not yet registered on RemoteDispatcher (remote/web session listing is
+    // out of M1 scope) — mirrors the opencode pair above, same pre-existing gap.
+    listPiSessionsGlobal: () =>
+      connection.invoke('session:list-pi') as ReturnType<ClaudeAPI['listPiSessionsGlobal']>,
+    loadPiHistory: (sessionId: string) =>
+      connection.invoke('session:load-pi-history', sessionId) as ReturnType<ClaudeAPI['loadPiHistory']>,
 
     loadSessionHistory: (sessionId, projectKey) =>
       connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<
@@ -193,6 +207,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onMessage: on('session:message') as ClaudeAPI['onMessage'],
     onStreamEvent: on('session:stream') as ClaudeAPI['onStreamEvent'],
     onApprovalRequest: on('session:approval-request') as ClaudeAPI['onApprovalRequest'],
+    onApprovalDismiss: on('session:approval-dismiss') as ClaudeAPI['onApprovalDismiss'],
     onStatus: on('session:status') as ClaudeAPI['onStatus'],
     onResult: on('session:result') as ClaudeAPI['onResult'],
     onError: on('session:error') as ClaudeAPI['onError'],
@@ -254,8 +269,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       ) as Promise<string>,
 
     // Task control
-    stopTask: (routingId, toolUseId) =>
-      connection.invoke('session:stop-task', routingId, toolUseId) as Promise<{
+    stopTask: (routingId, toolUseId, isDispatch) =>
+      connection.invoke('session:stop-task', routingId, toolUseId, isDispatch) as Promise<{
         success: boolean
         error?: string
       }>,
@@ -291,10 +306,35 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:get-opencode-provider-models', providerId) as ReturnType<
         ClaudeAPI['getOpencodeProviderModels']
       >,
+    getPiModelCatalogGroups: () =>
+      connection.invoke('session:get-pi-model-catalog') as ReturnType<
+        ClaudeAPI['getPiModelCatalogGroups']
+      >,
     engineIsInstalled: (engineId) =>
       connection.invoke('engine:is-installed', engineId) as ReturnType<
         ClaudeAPI['engineIsInstalled']
       >,
+    getPiBinaryPath: () =>
+      connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
+    getPiAuthStatus: () =>
+      connection.invoke('pi:auth-status') as ReturnType<ClaudeAPI['getPiAuthStatus']>,
+    listSharedProviders: () =>
+      connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
+    getSharedProviderStatuses: () =>
+      connection.invoke('shared-provider:statuses') as ReturnType<
+        ClaudeAPI['getSharedProviderStatuses']
+      >,
+    listSharedProviderModels: (id) =>
+      connection.invoke('shared-provider:models', id) as ReturnType<
+        ClaudeAPI['listSharedProviderModels']
+      >,
+    saveSharedProvider: sharedProviderRemoteMutation,
+    removeSharedProvider: sharedProviderRemoteMutation,
+    setSharedProviderRoute: sharedProviderRemoteMutation,
+    setSharedProviderApiKey: sharedProviderRemoteMutation,
+    syncSharedProvider: sharedProviderRemoteMutation,
+    disconnectSharedProvider: sharedProviderRemoteMutation,
+    setSharedProviderDefaultModel: sharedProviderRemoteMutation,
 
     // Generation
     generateTitle: (conversationText) =>
@@ -413,6 +453,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setUsageAccountFilter: (account) =>
       connection.invoke('usage:set-account-filter', account) as ReturnType<
         ClaudeAPI['setUsageAccountFilter']
+      >,
+    fetchDispatchedUsage: () =>
+      connection.invoke('usage:fetch-dispatched') as ReturnType<
+        ClaudeAPI['fetchDispatchedUsage']
       >,
 
     // Native OAuth (ADR-014) — desktop-only (opens a local browser + loopback).
@@ -541,6 +585,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveVendorConfig: async () => {},
     loadOpencodeSettings: async () => ({}),
     saveOpencodeSettings: async () => {},
+    readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
+    patchOpencodeNative: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
@@ -551,6 +597,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
     vendorAuthProbe: async () => ({}),
     vendorAuthListOptions: async () => ({}),
+    vendorAuthListKeys: async () => ({}),
     vendorAuthSetKey: async () => {},
     vendorAuthOauthAuthorize: async () => {
       throw new Error('Vendor auth is only available on the desktop app.')

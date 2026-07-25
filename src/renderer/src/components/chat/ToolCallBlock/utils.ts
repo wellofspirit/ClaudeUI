@@ -10,7 +10,7 @@ type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 export type ToolVisualState = 'pending' | 'error' | 'running' | 'success' | 'loaded' | 'idle'
 
 export interface ToolStateContext {
-  toolName: string
+  isCommandKind: boolean
   hasResult: boolean
   isHistorical: boolean
   hasApproval: boolean
@@ -36,7 +36,7 @@ export function resolveToolVisualState(ctx: ToolStateContext): ToolVisualState {
   // Running: foreground bash or background bash without notification
   const bgRunning = ctx.isBackgroundBash && ctx.bgNotificationStatus === null && !ctx.isHistorical
   const isForegroundBashRunning =
-    ctx.toolName === 'Bash' &&
+    ctx.isCommandKind &&
     !ctx.isBackgroundBash &&
     !ctx.hasResult &&
     !isPendingApproval &&
