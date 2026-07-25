@@ -62,25 +62,73 @@ export function parseClaudeRule(rule: string): { tool: string; specifier?: strin
 }
 
 /**
- * Translate a Claude specifier → an opencode `pattern` for the given category.
+ * The only two URL schemes opencode's webfetch tool will act on — it throws on
+ * anything else BEFORE asking for permission
+ * (vendor/opencode-src/packages/opencode/src/tool/webfetch.ts: `if
+ * (!params.url.startsWith("http://") && !params.url.startsWith("https://"))
+ * throw`). So enumerating both is an exhaustive, not a heuristic, cover.
+ */
+const WEBFETCH_SCHEMES = ['http://', 'https://'] as const
+
+/**
+ * What may legally follow a host in a URL: nothing (bare origin), a path, a
+ * port, or a fragment. Emitting the host with each of these terminators
+ * anchors the match to the host BOUNDARY, so `domain:example.com` cannot also
+ * match `https://example.com.evil.example/steal` the way a bare
+ * `https://example.com*` prefix would. That matters because the SAME
+ * translation feeds the ALLOW tier — turning today's inert rule into an
+ * over-grant would be a worse bug than the one being fixed.
+ *
+ * Known gap: a query string with NO path (`https://example.com?q=1`) is not
+ * covered — `?` is a single-char METAcharacter in opencode's `Wildcard.match`
+ * (vendor/.../util/wildcard.ts maps `?` → `.`), so a literal `?` is simply not
+ * expressible in a pattern. Every URL normaliser (and every browser) rewrites
+ * that form to `https://example.com/?q=1`, which the `/*` terminator covers.
+ */
+const WEBFETCH_HOST_TERMINATORS = ['', '/*', ':*', '#*'] as const
+
+/**
+ * Translate a Claude specifier → the opencode `pattern`(s) for the given
+ * category. Returns a LIST because one Claude specifier can need several
+ * opencode patterns to cover the same subject space (see WebFetch below);
+ * every emitted pattern carries the rule's action, so they are semantically
+ * one rule.
+ *
  * - Bash: Claude's `cmd:*` prefix form → opencode glob `cmd*`; an existing glob
  *   or exact command passes through.
- * - WebFetch: `domain:example.com` → `example.com*`.
+ * - WebFetch: `domain:example.com` → the URL-shaped patterns opencode actually
+ *   matches against. opencode asks with the FULL URL (`patterns: [params.url]`
+ *   in webfetch.ts), NOT the host, so the old host-shaped `example.com*`
+ *   pattern could never match `https://example.com/x` — every WebFetch domain
+ *   rule the user wrote was silently inert.
+ * - WebSearch: `domain:…` is deliberately left in its legacy host-glob form —
+ *   opencode's websearch asks with the search QUERY (`patterns: [params.query]`
+ *   in websearch.ts), which no URL-shaped pattern could match either. There is
+ *   no faithful mapping for "restrict results to a domain" in opencode's
+ *   permission model; emitting URL patterns here would only trade one inert
+ *   shape for another while implying a guarantee we cannot keep.
  * - File/other: globs and exact paths pass through (both use glob matching).
  */
-export function translateSpecifier(category: string, specifier: string | undefined): string {
-  if (!specifier) return '*'
+export function translateSpecifierPatterns(category: string, specifier: string | undefined): string[] {
+  if (!specifier) return ['*']
   if (category === 'bash') {
     const prefix = specifier.match(/^(.+):\*$/)
-    if (prefix) return `${prefix[1]}*`
-    return specifier
+    return [prefix ? `${prefix[1]}*` : specifier]
   }
-  if (category === 'webfetch' || category === 'websearch') {
+  if (category === 'webfetch') {
     const domain = specifier.match(/^domain:(.+)$/)
-    if (domain) return `${domain[1]}*`
-    return specifier
+    if (domain) {
+      return WEBFETCH_SCHEMES.flatMap((scheme) =>
+        WEBFETCH_HOST_TERMINATORS.map((tail) => `${scheme}${domain[1]}${tail}`)
+      )
+    }
+    return [specifier]
   }
-  return specifier
+  if (category === 'websearch') {
+    const domain = specifier.match(/^domain:(.+)$/)
+    return [domain ? `${domain[1]}*` : specifier]
+  }
+  return [specifier]
 }
 
 function compileTier(rules: string[], action: OpencodeAction): OpencodePermissionRule[] {
@@ -90,7 +138,9 @@ function compileTier(rules: string[], action: OpencodeAction): OpencodePermissio
     if (!parsed) continue
     const category = TOOL_TO_CATEGORY[parsed.tool]
     if (!category) continue // unmappable (e.g. MCP) — skip in v1
-    out.push({ permission: category, pattern: translateSpecifier(category, parsed.specifier), action })
+    for (const pattern of translateSpecifierPatterns(category, parsed.specifier)) {
+      out.push({ permission: category, pattern, action })
+    }
   }
   return out
 }

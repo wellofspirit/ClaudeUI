@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest'
 import { join } from 'node:path'
 import {
   parseClaudeRule,
-  translateSpecifier,
+  translateSpecifierPatterns,
   compileClaudeRulesToOpencode,
   suggestOpencodeAllowRule,
   suggestionRuleToClaudeString,
@@ -37,22 +37,48 @@ describe('parseClaudeRule', () => {
   })
 })
 
-describe('translateSpecifier', () => {
+describe('translateSpecifierPatterns', () => {
   it('bash prefix `cmd:*` → glob `cmd*`', () => {
-    expect(translateSpecifier('bash', 'git diff:*')).toBe('git diff*')
+    expect(translateSpecifierPatterns('bash', 'git diff:*')).toEqual(['git diff*'])
   })
   it('bash existing glob/exact passes through', () => {
-    expect(translateSpecifier('bash', 'npm *')).toBe('npm *')
-    expect(translateSpecifier('bash', 'ls')).toBe('ls')
+    expect(translateSpecifierPatterns('bash', 'npm *')).toEqual(['npm *'])
+    expect(translateSpecifierPatterns('bash', 'ls')).toEqual(['ls'])
   })
-  it('webfetch domain: → host glob', () => {
-    expect(translateSpecifier('webfetch', 'domain:example.com')).toBe('example.com*')
+  it('webfetch domain: → URL-shaped patterns (opencode asks with the FULL URL)', () => {
+    // vendor/opencode-src/.../tool/webfetch.ts: `ctx.ask({permission:'webfetch',
+    // patterns:[params.url]})` after rejecting non-http(s) URLs. A host-shaped
+    // `example.com*` therefore never matched anything — the rule was inert.
+    expect(translateSpecifierPatterns('webfetch', 'domain:example.com')).toEqual([
+      'http://example.com',
+      'http://example.com/*',
+      'http://example.com:*',
+      'http://example.com#*',
+      'https://example.com',
+      'https://example.com/*',
+      'https://example.com:*',
+      'https://example.com#*'
+    ])
+  })
+  it('webfetch host terminators keep the match anchored (no look-alike suffix host)', () => {
+    // Every emitted pattern ends the host at a legal URL boundary, so a bare
+    // prefix match on `example.com.evil.example` is impossible.
+    for (const p of translateSpecifierPatterns('webfetch', 'domain:example.com')) {
+      expect(p.startsWith('http://example.com') || p.startsWith('https://example.com')).toBe(true)
+      expect(p).not.toMatch(/example\.com\*$/)
+    }
+  })
+  it('webfetch non-domain specifiers pass through unchanged', () => {
+    expect(translateSpecifierPatterns('webfetch', 'https://example.com/*')).toEqual(['https://example.com/*'])
+  })
+  it('websearch keeps the legacy host glob (opencode asks with the QUERY, not a URL)', () => {
+    expect(translateSpecifierPatterns('websearch', 'domain:example.com')).toEqual(['example.com*'])
   })
   it('file globs pass through', () => {
-    expect(translateSpecifier('edit', 'src/**')).toBe('src/**')
+    expect(translateSpecifierPatterns('edit', 'src/**')).toEqual(['src/**'])
   })
   it('undefined specifier → *', () => {
-    expect(translateSpecifier('edit', undefined)).toBe('*')
+    expect(translateSpecifierPatterns('edit', undefined)).toEqual(['*'])
   })
 })
 
@@ -68,7 +94,17 @@ describe('compileClaudeRulesToOpencode', () => {
     expect(out).toEqual([
       { permission: 'bash', pattern: 'git diff*', action: 'allow' },
       { permission: 'read', pattern: '*', action: 'allow' },
-      { permission: 'webfetch', pattern: 'example.com*', action: 'ask' },
+      // One WebFetch domain rule expands to the URL forms opencode can
+      // actually ask with — all carrying the SAME action, so they remain one
+      // rule semantically and the allow→ask→deny tier order is preserved.
+      { permission: 'webfetch', pattern: 'http://example.com', action: 'ask' },
+      { permission: 'webfetch', pattern: 'http://example.com/*', action: 'ask' },
+      { permission: 'webfetch', pattern: 'http://example.com:*', action: 'ask' },
+      { permission: 'webfetch', pattern: 'http://example.com#*', action: 'ask' },
+      { permission: 'webfetch', pattern: 'https://example.com', action: 'ask' },
+      { permission: 'webfetch', pattern: 'https://example.com/*', action: 'ask' },
+      { permission: 'webfetch', pattern: 'https://example.com:*', action: 'ask' },
+      { permission: 'webfetch', pattern: 'https://example.com#*', action: 'ask' },
       { permission: 'edit', pattern: 'secrets/**', action: 'deny' }
     ])
   })
