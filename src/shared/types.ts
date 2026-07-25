@@ -1794,6 +1794,13 @@ export interface GitStatusData {
   untracked: string[]
   linesAdded: number
   linesRemoved: number
+  /**
+   * True when the untracked-file line-count pass hit its file-count or byte
+   * budget, so `linesAdded` undercounts. The files themselves are still listed.
+   */
+  lineCountsTruncated?: boolean
+  /** True when `files`/`staged`/`unstaged`/`untracked` were capped for IPC. */
+  filesTruncated?: boolean
 }
 
 export interface GitBranchData {

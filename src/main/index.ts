@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu, clipboard, crashReporter } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 import contextMenu from 'electron-context-menu'
@@ -52,6 +52,13 @@ import { getSdkVersion } from './services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
 import { loadPersistedPrices } from './services/opencode-pricing'
 import icon from '../../resources/icon.png?asset'
+
+// Crashpad must be started before app.whenReady resolves, otherwise a hard
+// crash (V8 heap exhaustion, native abort) leaves no artefact at all: those
+// aborts are not JS exceptions, so the `uncaughtException` handler at the
+// bottom of this file never fires. Local-only — nothing is ever uploaded;
+// dumps land in `app.getPath('crashDumps')`.
+crashReporter.start({ uploadToServer: false })
 
 // Privileged scheme registration MUST happen before app.whenReady fires.
 registerMockupAssetScheme()
@@ -489,4 +496,21 @@ process.on('uncaughtException', (err) => {
 })
 process.on('unhandledRejection', (reason) => {
   logger.error('process', 'Unhandled rejection', reason)
+})
+
+// Process-level crashes never surface as JS exceptions — without these the app
+// window simply disappears with nothing in the log.
+app.on('render-process-gone', (_e, contents, details) => {
+  logger.error(
+    'process',
+    `Renderer process gone (reason=${details.reason}, exitCode=${details.exitCode}, url=${
+      contents.isDestroyed() ? '<destroyed>' : contents.getURL()
+    })`
+  )
+})
+app.on('child-process-gone', (_e, details) => {
+  logger.error(
+    'process',
+    `Child process gone (type=${details.type}, reason=${details.reason}, exitCode=${details.exitCode}, name=${details.name ?? 'n/a'}, serviceName=${details.serviceName ?? 'n/a'})`
+  )
 })

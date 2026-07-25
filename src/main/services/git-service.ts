@@ -16,6 +16,64 @@ const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
 const BINARY_SNIFF_BYTES = 8000
 
 /**
+ * Hard caps for the untracked-file line-count pass.
+ *
+ * simple-git hardcodes `--untracked-files=all` on `git status`, so a working
+ * tree with an unignored `node_modules`/`dist` yields *thousands* of entries in
+ * `status.not_added`. Reading every one of them in full on every 5 s poll was
+ * the dominant term in the main-process OOM that made the app vanish without a
+ * log or a crash dump. Past either cap we stop counting lines; the files still
+ * appear in the status lists, only their line counts are missing (surfaced via
+ * `lineCountsTruncated`).
+ */
+const MAX_UNTRACKED_LINECOUNT_FILES = 200
+/** Cumulative bytes read by the untracked line-count pass, per getStatus() call. */
+const MAX_UNTRACKED_LINECOUNT_BYTES = 50 * 1024 * 1024
+
+/**
+ * Cap on the entries put into the status payload that crosses the IPC boundary
+ * (structured clone to the main window + every extra window, every poll).
+ */
+const MAX_STATUS_LIST_ENTRIES = 5000
+
+/** Entry cap for the per-file line-count cache; cleared wholesale when exceeded. */
+const LINE_COUNT_CACHE_MAX_ENTRIES = 10_000
+
+/** Number of unreadable paths sampled into the single aggregated warn per poll. */
+const READ_ERROR_SAMPLE_SIZE = 3
+
+interface LineCountCacheEntry {
+  size: number
+  mtimeMs: number
+  /** Lines attributed to this file. 0 for binary / oversized files. */
+  lines: number
+}
+
+/**
+ * Cheap change detector for the poller. Must be O(files) with a small constant
+ * and must cover everything the UI renders off a status update: the branch
+ * headline, the per-file status letters, and the aggregate line counts.
+ *
+ * Deliberately not `JSON.stringify(status)` — that re-serialised an unbounded
+ * payload (paths appear in `files` *and* in the category arrays) on every tick.
+ */
+function statusFingerprint(status: GitStatusData): string {
+  const parts: string[] = [
+    status.branch,
+    String(status.ahead),
+    String(status.behind),
+    status.trackingBranch ?? '',
+    String(status.linesAdded),
+    String(status.linesRemoved),
+    status.lineCountsTruncated ? '1' : '0',
+    status.filesTruncated ? '1' : '0',
+    String(status.files.length)
+  ]
+  for (const f of status.files) parts.push(`${f.path}:${f.index}:${f.working}`)
+  return parts.join('\n')
+}
+
+/**
  * Heuristic binary detection: open the file and scan the first 8 KB for a
  * NUL byte. This is the same heuristic git uses in `convert.c is_binary()`
  * and is what `git diff` falls back to when no `.gitattributes` rule applies.
@@ -59,7 +117,16 @@ export class GitService {
   /** Resolved git repo root (may differ from cwd when session starts in a subdirectory) */
   private repoRoot: string | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
-  private lastStatusJson = ''
+  private lastStatusFingerprint = ''
+  /** True while a polled getStatus() is outstanding — ticks arriving now are dropped. */
+  private pollInFlight = false
+  /**
+   * Bumped by every start/stop. A poll that settles after its generation was
+   * retired must not fire the callback (stopPolling during an in-flight poll).
+   */
+  private pollGeneration = 0
+  /** Line counts for untracked files, keyed by absolute path, validated by (size, mtimeMs). */
+  private lineCountCache = new Map<string, LineCountCacheEntry>()
 
   constructor(cwd: string) {
     this.cwd = cwd
@@ -95,6 +162,12 @@ export class GitService {
     }
   }
 
+  /** Record a line count for `absPath`, bounding the cache with a wholesale clear. */
+  private cacheLineCount(absPath: string, stat: fs.Stats, lines: number): void {
+    if (this.lineCountCache.size >= LINE_COUNT_CACHE_MAX_ENTRIES) this.lineCountCache.clear()
+    this.lineCountCache.set(absPath, { size: stat.size, mtimeMs: stat.mtimeMs, lines })
+  }
+
   async getStatus(): Promise<GitStatusData> {
     await this.ensureRepoRoot()
     const status = await this.git.status()
@@ -108,6 +181,7 @@ export class GitService {
     // Compute lines added/removed across staged + unstaged changes
     let linesAdded = 0
     let linesRemoved = 0
+    let lineCountsTruncated = false
     try {
       const parseNumstat = (raw: string): void => {
         for (const line of raw.trim().split('\n')) {
@@ -127,36 +201,90 @@ export class GitService {
       // Untracked files — count all their lines as additions, but skip
       // anything that's too large (V8 string-length crash) or binary (line
       // count is meaningless and reading wastes I/O).
+      //
+      // Bounded three ways: a file-count cap, a cumulative byte budget, and a
+      // (size, mtimeMs)-validated cache so an unchanged file is read at most
+      // once across polls. Unreadable files are aggregated into a single warn
+      // — per-file warns meant thousands of synchronous appendFileSync calls
+      // per poll on trees with long paths / EPERM entries.
+      let filesConsidered = 0
+      let bytesRead = 0
+      let readErrors = 0
+      const readErrorSamples: string[] = []
       for (const f of status.not_added) {
+        if (filesConsidered >= MAX_UNTRACKED_LINECOUNT_FILES) {
+          lineCountsTruncated = true
+          break
+        }
+        filesConsidered++
         try {
           const absPath = path.resolve(this.repoRoot!, f)
           const stat = await fs.promises.stat(absPath)
           if (!stat.isFile()) continue
-          if (stat.size > MAX_TEXT_FILE_BYTES) continue
-          if (await isBinaryFile(absPath)) continue
+          const cached = this.lineCountCache.get(absPath)
+          if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+            linesAdded += cached.lines
+            continue
+          }
+          if (stat.size > MAX_TEXT_FILE_BYTES) {
+            this.cacheLineCount(absPath, stat, 0)
+            continue
+          }
+          if (await isBinaryFile(absPath)) {
+            this.cacheLineCount(absPath, stat, 0)
+            continue
+          }
+          // Budget is checked immediately before the full read (and only for
+          // files we would actually read), so the guarantee is a hard "never
+          // read more than MAX_UNTRACKED_LINECOUNT_BYTES per getStatus()".
+          if (bytesRead + stat.size > MAX_UNTRACKED_LINECOUNT_BYTES) {
+            lineCountsTruncated = true
+            break
+          }
           const content = await fs.promises.readFile(absPath, 'utf-8')
+          bytesRead += stat.size
           const lineCount = content.split('\n').length
           // If file ends with newline, split produces an extra empty string
-          linesAdded += content.endsWith('\n') ? lineCount - 1 : lineCount
-        } catch (err) {
-          logger.warn('GitService', `Failed to read untracked file for line count: ${f}`, err)
+          const lines = content.endsWith('\n') ? lineCount - 1 : lineCount
+          linesAdded += lines
+          this.cacheLineCount(absPath, stat, lines)
+        } catch {
+          readErrors++
+          if (readErrorSamples.length < READ_ERROR_SAMPLE_SIZE) readErrorSamples.push(f)
         }
+      }
+      if (readErrors > 0) {
+        logger.warn(
+          'GitService',
+          `Failed to read ${readErrors} untracked file(s) for line count (e.g. ${readErrorSamples.join(', ')})`
+        )
       }
     } catch (err) {
       logger.warn('GitService', 'Failed to compute diff line counts', err)
     }
+
+    // Bound what crosses the IPC boundary — a pathological working tree would
+    // otherwise structured-clone an unbounded payload to every open window.
+    const unstagedAll = status.modified.concat(status.deleted)
+    const filesTruncated =
+      files.length > MAX_STATUS_LIST_ENTRIES ||
+      status.staged.length > MAX_STATUS_LIST_ENTRIES ||
+      unstagedAll.length > MAX_STATUS_LIST_ENTRIES ||
+      status.not_added.length > MAX_STATUS_LIST_ENTRIES
 
     return {
       branch: status.current || 'HEAD',
       ahead: status.ahead,
       behind: status.behind,
       trackingBranch: status.tracking || null,
-      files,
-      staged: status.staged,
-      unstaged: status.modified.concat(status.deleted),
-      untracked: status.not_added,
+      files: files.slice(0, MAX_STATUS_LIST_ENTRIES),
+      staged: status.staged.slice(0, MAX_STATUS_LIST_ENTRIES),
+      unstaged: unstagedAll.slice(0, MAX_STATUS_LIST_ENTRIES),
+      untracked: status.not_added.slice(0, MAX_STATUS_LIST_ENTRIES),
       linesAdded,
-      linesRemoved
+      linesRemoved,
+      ...(lineCountsTruncated ? { lineCountsTruncated: true } : {}),
+      ...(filesTruncated ? { filesTruncated: true } : {})
     }
   }
 
@@ -394,16 +522,27 @@ export class GitService {
 
   startPolling(callback: (status: GitStatusData) => void, intervalMs: number): void {
     this.stopPolling()
+    const generation = ++this.pollGeneration
     const poll = async (): Promise<void> => {
+      // In-flight guard: on a big working tree a single getStatus() can outlast
+      // the interval. Without this, invocations pile up behind simple-git's
+      // per-instance task queue and the retained parse results exhaust the
+      // main-process heap (a V8 abort, not a catchable exception).
+      if (this.pollInFlight) return
+      this.pollInFlight = true
       try {
         const status = await this.getStatus()
-        const json = JSON.stringify(status)
-        if (json !== this.lastStatusJson) {
-          this.lastStatusJson = json
+        // Retired by stopPolling()/restart while we were awaiting — drop it.
+        if (generation !== this.pollGeneration) return
+        const fingerprint = statusFingerprint(status)
+        if (fingerprint !== this.lastStatusFingerprint) {
+          this.lastStatusFingerprint = fingerprint
           callback(status)
         }
       } catch (err) {
         logger.warn('GitService', 'Polling error while fetching git status', err)
+      } finally {
+        this.pollInFlight = false
       }
     }
     // Initial poll
@@ -412,6 +551,9 @@ export class GitService {
   }
 
   stopPolling(): void {
+    // Retire the current generation so an in-flight poll can't fire the
+    // callback after the caller has torn its listener down.
+    this.pollGeneration++
     if (this.pollTimer) {
       clearInterval(this.pollTimer)
       this.pollTimer = null
@@ -420,6 +562,7 @@ export class GitService {
 
   destroy(): void {
     this.stopPolling()
+    this.lineCountCache.clear()
   }
 }
 
