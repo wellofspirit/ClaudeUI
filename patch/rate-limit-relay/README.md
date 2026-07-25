@@ -166,14 +166,21 @@ Single injection — writes `rate_limit_event` to stdout after every streaming A
 The `pF1` call site in the stream loop, after streaming completes:
 
 ```
-if(<U1>)<pF1>(<U1>.headers),<k8>=<U1>.headers
+<pF1>(<resp>.headers,<args...>),<hdr>=<resp>.headers
 ```
 
 Content pattern (stable — uses the `pF1` function name extracted dynamically):
 
 ```
-if(%V%)<pF1>(%V%.headers),%V%=%V%.headers
+<pF1>\((%V%)\.headers,<argPat>\),(%V%)=\1\.headers
 ```
+
+v2.1.219 note: the anchor no longer includes the leading `if(<resp>)` guard. Upstream
+prepended another call inside the guard (`if(as)EDu(as.headers,ke,Qe),hpo(as.headers,...)`),
+so `if(<resp>)` is not directly followed by the pF1 call anymore. The pF1-call + trailing
+`,<hdr>=<resp>.headers` assignment is still unique to the stream loop — the other pF1 call
+sites (startup refresh, non-stream interceptor) pass a headers object directly and lack the
+trailing assignment.
 
 The `pF1` function name itself is found via its unique definition pattern:
 

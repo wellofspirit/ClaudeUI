@@ -120,13 +120,36 @@ Key variables:
 | `u` | `BVe` destructured param | `nt` onMessage callback from Task.call() |
 | `d` | `BVe` destructured param | `shouldNotifyOwner = () => Fe` |
 | `s` (v197-v198) / `i` (v207+) | `BVe` destructured param | toolUseContext; `s.toolUseId` (or `i.toolUseId`) = parent tool use ID |
-| `p` | same as `d` — local alias used in Patch E injection | `() => Fe` |
+| `p` (v197–v207) / `m` (v219+) | defaulted alias `let X=d??(()=>!0)` — the Patch E gate | `() => Fe`, or `()=>!0` when no shouldNotifyOwner passed |
 | `h` | local to BVe | message collection array |
 | `ce` | loop variable | current message from sub-agent generator |
 | `W` | watchdog callback | called once per iteration |
 | `Fe` | Task.call() local | true when task is backgrounded |
 | `nt` | Task.call() local | `(MSG)=>{...}` onMessage callback |
 | `Ye` | Task.call() local | collection array fed to Tko/FVe |
+
+**v2.1.219 gate rename (CRITICAL — silent semantic break):** v2.1.219 appended
+`onRunSettled:p,onTerminalSuccess:f` to the BVe/`_Ie` signature and renamed the defaulted
+shouldNotifyOwner alias from `p` to `m` (`let m=d??(()=>!0)`). A patch that hardcodes `p()` as
+the gate still *applies* cleanly but calls `onRunSettled()` instead: the gate is always falsy
+(background stream_events silently dropped) and the run-settled callback fires spuriously per
+message. The patch now extracts the alias structurally from
+`shouldNotifyOwner:(V1)[^)]*){let (V2)=V1??(()=>!0)` and uses `V2()` as the gate. Never
+hardcode this name.
+
+**v2.1.219 Task routing + native relay:** two things changed in the runner refactor:
+
+1. The Task tool now *non-deterministically* routes even foreground (no `run_in_background`)
+   sub-agents through the spawned/async path (`_Ie` call without `onMessage`; the Task result
+   says `async_launched`). On that route the `nt`/Gr callback (Patches A/B) never sees the
+   sub-agent's messages, so Patch E's BVe-loop forwarding is the ONLY stream_event source —
+   this is why the gate bug above manifested as ~50% flaky FG streaming.
+2. A native relay now forwards spawned/background sub-agent **assistant/user** messages to the
+   SDK stream with `parent_tool_use_id` (verified live: with Patch E inert, backgrounded runs
+   still delivered tagged assistants; with Patch E also writing them, the same `message.id`
+   arrived twice). **stream_events are still not natively forwarded.** Patch E therefore skips
+   its assistant/user stdout writes when the signature contains `onRunSettled:` (relay-capable
+   builds) and keeps them for v2.1.197–v2.1.207 shapes.
 
 ### How progress messages flow to the SDK
 
@@ -522,16 +545,17 @@ Sub-agent generator → BVe() for-await loop
   │     │     (Patch B) nt: intercept BEFORE Ye.push → forward via CALLBACK → continue/return
   │     │
   │     └── (Patch E BVe) BVe for-await: injected BEFORE h.push:
-  │           if(ce.type==="stream_event"){if(p())try{process.stdout.write(...)}catch{}; continue}
+  │           if(ce.type==="stream_event"){if(GATE())try{process.stdout.write(...)}catch{}; continue}
   │           → {type:"stream_event", event:..., parent_tool_use_id:s.toolUseId}
-  │           → SDK readline → q4() parse → consumer ✓  (when backgrounded: p()=true)
+  │           → SDK readline → q4() parse → consumer ✓  (backgrounded/spawned: GATE()=true)
   │
   ├── assistant/user msg
   │     │
   │     ├── BVe calls u?.(ce) → nt receives MSG
   │     │     (Patch B) nt: forwarded via CALLBACK (agent_progress path)
   │     │
-  │     ├── (Patch E BVe) if(p()) process.stdout.write(...) → consumer ✓ (when backgrounded)
+  │     ├── (Patch E BVe, pre-v2.1.219 only) if(GATE()) process.stdout.write(...) → consumer ✓
+  │     │     (v2.1.219+: native relay forwards these — Patch E skips to avoid duplicates)
   │     │
   │     └── h.push(ce) ← collected (has .message, safe for downstream processing)
   │
@@ -597,6 +621,12 @@ function.*type==="assistant".*type==="user".*type==="progress".*compact_boundary
 ```
 
 2. Find its call site: `if(RVY(VAR))ARR.push(VAR),` inside `cR()`
+
+3. Sanity check: the call site must be inside an async generator (the injected
+   `yield` binds to the nearest enclosing generator). The patch verifies an
+   `async function*` declaration appears in a lookback window before the call
+   site. v2.1.219 grew the generator body — the decl now sits ~10.9k chars
+   before the RVY gate (was <10k), so the window is 20000 chars.
 
 ### Patch A — Content-block filter removal
 
@@ -976,35 +1006,44 @@ Patch E writes sub-agent messages directly to stdout as newline-delimited JSON.
 #### v2.1.197+ — BVe for-await injection
 
 In v2.1.197, `iu8()` and both re-background loops were unified into `BVe()`.
-BVe takes `shouldNotifyOwner:d` (called `p` locally — a function returning `Fe`,
-the done/backgrounded flag). When `Fe=true` (task backgrounded), `p()=true`.
+BVe takes `shouldNotifyOwner:d`, defaulted into a local alias — `let p=d??(()=>!0)` in
+v2.1.197–v2.1.207, `let m=d??(()=>!0)` in v2.1.219+ (new `onRunSettled:p,onTerminalSuccess:f`
+params claimed the old letters). The gate returns `Fe` (the done/backgrounded flag) on the
+sync Task path, or `true` when no shouldNotifyOwner was passed (spawned/background path).
+**The alias name MUST be extracted structurally** from
+`shouldNotifyOwner:(V1)[^)]*){let (V2)=V1??(()=>!0)` — hardcoding it caused a silent semantic
+break on v2.1.219 (`p()` called `onRunSettled` instead: gate always falsy → background
+stream_events dropped, run-settled callback fired per message).
 
 **Anchor** (unique in BVe's for-await body):
 ```
 if(WATCHDOG(), MSG.type==="system"&&MSG.subtype==="api_error")continue;ARR.push(MSG)
 ```
 
-Injection is inserted **before** the watchdog call:
+Injection is inserted **before** the watchdog call (`GATE` = the extracted alias):
 ```js
 /*PATCHED:subagent-E*/
 if(ce.type==="stream_event"){
-  if(p())try{process.stdout.write(JSON.stringify({
+  if(GATE())try{process.stdout.write(JSON.stringify({
     type:"stream_event", event:ce.event,
     parent_tool_use_id:CTX.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
   })+"\n")}catch(_e){}
   continue  // ← skip h.push for stream_events regardless of sync/async state
 }
+// Only on builds WITHOUT the native relay (no `onRunSettled:` in the signature — v2.1.197–v2.1.207):
 if(ce.type==="assistant"||ce.type==="user")
-  if(p())try{process.stdout.write(JSON.stringify({
+  if(GATE())try{process.stdout.write(JSON.stringify({
     type:ce.type, message:ce.message,
     parent_tool_use_id:CTX.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
   })+"\n")}catch(_e){}
 // Original: if(W(),ce.type==="system"&&ce.subtype==="api_error")continue; h.push(ce) follows
 ```
 
-- **stream_events**: always `continue` (skip `h.push`) to prevent `NAe` crash; write stdout only when `p()=true`.
-- **assistant/user**: write stdout when `p()=true`; fall through to original `h.push` (they're safe in `h[]`).
-- **When sync** (`Fe=false`, `p()=false`): no stdout writes — `nt`/progress-callback handles it. Stream events still skip `h[]` via `continue`.
+- **stream_events**: always `continue` (skip `h.push`) to prevent `NAe` crash; write stdout only when `GATE()=true`.
+- **assistant/user**: only injected when the signature LACKS `onRunSettled:` (pre-v2.1.219). On
+  v2.1.219+ a native relay already forwards spawned/background sub-agent assistant/user messages
+  with `parent_tool_use_id`; writing them here too duplicates the same `message.id` (verified live).
+- **When sync** (`Fe=false`, gate false): no stdout writes — `nt`/progress-callback handles it. Stream events still skip `h[]` via `continue`.
 
 `s.toolUseId` (v2.1.197-v2.1.198) / `i.toolUseId` (v2.1.207+) provides `parent_tool_use_id` directly from `toolUseContext` — no description-search lookup needed (unlike legacy Patch E).
 

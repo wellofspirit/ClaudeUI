@@ -101,7 +101,7 @@ All minified function names are extracted **dynamically** from content patterns.
 
 | What                         | Stable Anchor / Pattern                                                                                   |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Injection point (A1)         | `else <fn>(c,\`Unsupported control request subtype: ...\`);continue}else if(c.type==="control_response")` |
+| Injection point (A1)         | `else <fn>(c,\`Unsupported control request subtype: ...\`)` — tail-less since v2.1.219 (dispatch chain now wrapped in `try/finally`; ≤ v2.1.207 the anchor included `;continue}else if(c.type==="control_response")`). Do not confuse with v2.1.219's second class-based dispatcher (`processControlRequest`, `throw Error(...)` fallback) — that serves the SDK Query transport, not the stream-json stdin loop. |
 | Success response helper      | `),<fn>(c,{})}}catch` — in the stop_task handler                                                          |
 | Queue push + loop starter    | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()`                                    |
 | Queue push definition (A1)   | `function <fn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next",timestamp:` — see v2.1.197 note     |

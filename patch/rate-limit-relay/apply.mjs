@@ -127,8 +127,14 @@ console.log(`  pF1 function name: ${pf1Fn}`)
 // We handle up to 2 levels of paren nesting with:
 //   (?:[^)(]|\((?:[^)(]|\([^)(]*\))*\))*
 const argPat = `(?:[^)(]|\\((?:[^)(]|\\([^)(]*\\))*\\))*`
+// v2.1.219 prepended another call (e.g. `EDu(<resp>.headers,...)`) before the
+// pF1 call inside the `if(<resp>)` guard, so `if(<resp>)` is no longer
+// immediately followed by pF1. Anchor directly on the pF1 call plus its
+// `,<hdrVar>=<resp>.headers` capture assignment — that shape is unique to the
+// stream loop (the interceptor/refresh call sites pass headers directly as
+// `pF1(<hdrs>,...)` and lack the trailing assignment).
 const callSiteRe = new RegExp(
-  `if\\((${V})\\)${pf1Fn.replace(/\$/g, '\\$')}\\(\\1\\.headers,${argPat}\\),(${V})=\\1\\.headers`
+  `${pf1Fn.replace(/\$/g, '\\$')}\\((${V})\\.headers,${argPat}\\),(${V})=\\1\\.headers`
 )
 const callSiteMatch = callSiteRe.exec(src)
 if (!callSiteMatch) {

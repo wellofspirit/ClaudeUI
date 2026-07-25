@@ -117,8 +117,12 @@ if (src.includes(patchFMarker)) {
   const msgVar = callMatch[1]
   const idx = src.indexOf(oldStr)
 
-  // Verify it's inside the sub-agent query generator (cR in v2.1.39, WR in v2.1.47)
-  const before = src.slice(Math.max(0, idx - 10000), idx)
+  // Verify it's inside the sub-agent query generator (cR in v2.1.39, WR in v2.1.47).
+  // `yield` can only belong to the nearest enclosing generator, so a preceding
+  // `async function*` decl in the window confirms the injected `yield` is legal.
+  // v2.1.219 grew the generator body: the decl now sits ~10.9k chars before the
+  // RVY gate (was <10k), so widen the window to 20000 to keep the sanity check.
+  const before = src.slice(Math.max(0, idx - 20000), idx)
   if (!/async function\*[\w$]+\(/.test(before)) {
     console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
     process.exit(1)
@@ -701,12 +705,15 @@ if (src.includes(patchDMarker)) {
 //   stream_events, which corrupts h[] (NAe crashes on stream_event.message).
 //
 //   Fix: inject before the h.push() statement in BVe's for-await:
-//   - stream_event: if async/backgrounded mode (p()===true), write stdout; always continue
-//   - assistant/user: if async/backgrounded mode, write stdout; fall through to h.push()
+//   - stream_event: if notify-owner mode (gate()===true), write stdout; always continue
+//   - assistant/user: if notify-owner mode, write stdout; fall through to h.push()
 //
-//   `p` in BVe is the shouldNotifyOwner callback = () => Fe (the done/backgrounded flag).
-//   When sync (Fe=!1): p()=false → no stdout write (nt/progress-callback handles it).
-//   When backgrounded (Fe=!0): p()=true → write stdout directly.
+//   The gate is the defaulted shouldNotifyOwner alias (`let X=shouldNotifyOwnerParam??(()=>!0)`),
+//   extracted structurally — it was `p` in v2.1.197–207 but `m` in v2.1.219 (new
+//   onRunSettled/onTerminalSuccess params claimed `p`/`f`). Semantics:
+//   - sync Task path passes shouldNotifyOwner:()=>Fe → gate()=false while running
+//     (nt/progress-callback forwards), true after re-backgrounding → stdout.
+//   - spawned/background path passes no shouldNotifyOwner → gate()=true → stdout.
 //
 //   Anchor: if(WATCHDOG(),MSG.type==="system"&&MSG.subtype==="api_error")continue;ARR.push(MSG)
 //   (unique to BVe's for-await loop body)
@@ -795,29 +802,64 @@ if (src.includes(patchEMarker)) {
     const toolUseCtxVar = sigCandidates[0].ctxVar
     console.log(`  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`)
 
+    // Extract the shouldNotifyOwner gate. It must NOT be hardcoded: in
+    // v2.1.197–v2.1.207 the defaulted alias was `p` (`shouldNotifyOwner:d}){let p=d??(()=>!0)`),
+    // but v2.1.219 appended params (`onRunSettled:p,onTerminalSuccess:f`) and renamed the
+    // alias to `m` (`let m=d??(()=>!0)`). Hardcoding `p` silently called onRunSettled()
+    // instead — gate always falsy, so background/spawned agents never got stdout
+    // stream_events, and the run-settled callback fired spuriously per message.
+    // Match the destructured param + its defaulted alias structurally.
+    const notifyRe = new RegExp(
+      `shouldNotifyOwner:(${V})[^)]*\\)\\{let (${V})=\\1\\?\\?\\(\\(\\)=>!0\\)`
+    )
+    const notifyMatches = [...sigBefore.matchAll(new RegExp(notifyRe, 'g'))]
+    if (notifyMatches.length !== 1) {
+      console.error(
+        `ERROR: shouldNotifyOwner alias pattern matched ${notifyMatches.length} times in the 15KB prefix (expected 1). Aborting.`
+      )
+      process.exit(1)
+    }
+    const notifyFn = notifyMatches[0][2]
+    console.log(`  shouldNotifyOwner gate: ${notifyFn}() (param ${notifyMatches[0][1]})`)
+
+    // v2.1.219's runner refactor (the one that added onRunSettled/onTerminalSuccess
+    // to this signature) also added a native relay that forwards spawned/background
+    // sub-agent assistant/user messages to the SDK stream with parent_tool_use_id
+    // (verified live: with Patch E inert, background runs still delivered tagged
+    // assistants; with Patch E writing them too, the same message.id arrived twice).
+    // stream_events are still NOT natively forwarded. So on relay-capable builds,
+    // Patch E must forward ONLY stream_events; on older builds (v2.1.197–2.1.207,
+    // no onRunSettled param) it must keep forwarding assistant/user as well.
+    const hasNativeRelay = notifyMatches[0][0].includes('onRunSettled:')
+    console.log(`  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`)
+
     console.log(`Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, arr=${arrVar})`)
 
     // Inject before the full `if(WATCHDOG(),...api_error...)continue;ARR.push(MSG)` sequence.
     // We insert our check BEFORE the watchdog call so the anchor remains intact after insertion.
     //
-    // Injection:
+    // Injection (GATE = extracted shouldNotifyOwner alias):
     //   if(MSG.type==="stream_event"){
-    //     if(p())try{process.stdout.write(...)...}catch(_e){}
+    //     if(GATE())try{process.stdout.write(...)...}catch(_e){}
     //     continue  ← skip h.push regardless — stream_events must NOT enter h[]
     //   }
+    //   // only when the native relay is absent (pre-v2.1.219):
     //   if(MSG.type==="assistant"||MSG.type==="user"){
-    //     if(p())try{process.stdout.write(...)...}catch(_e){}
+    //     if(GATE())try{process.stdout.write(...)...}catch(_e){}
     //     // fall through to original h.push below
     //   }
+    const assistantUserWrite = hasNativeRelay
+      ? ''
+      : `if(${msgVar}.type==="assistant"||${msgVar}.type==="user")` +
+        `if(${notifyFn}())try{process.stdout.write(JSON.stringify({type:${msgVar}.type,message:${msgVar}.message,` +
+        `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}`
     const injection =
       `${patchEMarker}` +
       `if(${msgVar}.type==="stream_event"){` +
-      `if(p())try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
+      `if(${notifyFn}())try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
       `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}` +
       `continue}` +
-      `if(${msgVar}.type==="assistant"||${msgVar}.type==="user")` +
-      `if(p())try{process.stdout.write(JSON.stringify({type:${msgVar}.type,message:${msgVar}.message,` +
-      `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}`
+      assistantUserWrite
 
     src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
     patchCount++
