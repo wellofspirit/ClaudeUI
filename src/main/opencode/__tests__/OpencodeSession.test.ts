@@ -996,16 +996,26 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     await session.run('hi')
     const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
     // Mirrors opencode's built-in plan agent: edit denied, task denied for the
-    // `general` subagent ONLY (read-only subagents stay allowed via baseline).
+    // `general` subagent ONLY (read-only subagents stay allowed via baseline)
+    // — PLUS the bash/webfetch gates `default` carries. opencode's own plan
+    // agent leaves those on the `{*:allow}` baseline, which made ClaudeUI's
+    // plan mode strictly MORE permissive than its default mode for command
+    // execution and network fetch. The neutral autonomy ladder (ADR-022)
+    // requires plan ≤ default; see permission-conformance.test.ts.
     expect(rs).toEqual([
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'edit', pattern: '*', action: 'deny' },
       { permission: 'task', pattern: 'general', action: 'deny' },
+      { permission: 'bash', pattern: '*', action: 'ask' },
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
       DISPATCH_ASK_RULE
     ])
     // Regression for the over-restriction: there must be NO blanket task deny.
     expect(rs.some((r) => r.permission === 'task' && r.pattern === '*')).toBe(false)
+    // Regression for the plan-mode fail-open: bash must never fall through to
+    // the `{*:allow}` baseline in the most restrictive autonomy mode.
+    expect(rs.find((r) => r.permission === 'bash')?.action).toBe('ask')
     expect(mockPromptAsync.mock.calls.at(-1)?.[1]?.agent).toBe('plan')
     session.dispose()
   })
@@ -1221,6 +1231,61 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
+  it('the judge session is patched TOOL-DENIED before it is prompted', async () => {
+    // A fresh opencode session inherits the vendor's `{*: allow}` default, so an
+    // unpatched judge — fed a possibly attacker-influenced transcript and asked
+    // to reason about it — could really run bash/edit, with no human and no
+    // gate. It also blocks forever if it raises an ask nobody consumes. Mirrors
+    // askSideQuestion's deny-all patch.
+    const JUDGE_SES = 'ses_judge'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_judge_gated')
+
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_gated', 'once'))
+
+    expect(mockPatchSession).toHaveBeenCalledWith(JUDGE_SES, {
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+    })
+    // …and BEFORE the judge prompt (order matters — the ruleset must be in
+    // place before the model can call a tool).
+    const judgePatchIdx = mockPatchSession.mock.calls.findIndex((c) => c[0] === JUDGE_SES)
+    expect(judgePatchIdx).toBeGreaterThanOrEqual(0)
+    expect(mockPatchSession.mock.invocationCallOrder[judgePatchIdx]).toBeLessThan(
+      mockPrompt.mock.invocationCallOrder.at(-1)!
+    )
+    session.dispose()
+  })
+
+  it('fail-closed: a failed deny-all patch on the judge session hands the approval to the human (never prompts an ungated judge)', async () => {
+    const JUDGE_SES = 'ses_judge_patch_fail'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPatchSession.mockImplementation(async (id: string) => {
+      if (id === JUDGE_SES) throw new Error('patch refused')
+    })
+    feedPermissionAsked('bash', 'per_judge_patch_fail')
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_judge_patch_fail', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    // The judge was never prompted, so nothing auto-replied on its behalf.
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
   it('disabled auto-mode in full → emits approval to the human (no judge call)', async () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
     mockCreateSession.mockResolvedValue({ id: SES })
@@ -1235,6 +1300,71 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       expect(sent).toBe(true)
     })
     expect(mockPrompt).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Permission-patch failure must fail CLOSED. The patch is the only thing
+// between the user's chosen autonomy mode (+ deny rules) and opencode's
+// `{*: allow}` session default, so warn-and-continue silently downgraded the
+// whole turn to allow-everything on any transient failure.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — permission patch failure fails CLOSED', () => {
+  beforeEach(setupMocks)
+
+  it('run(): a failed patchSession emits session:error and NEVER sends the prompt', async () => {
+    mockPatchSession.mockRejectedValue(new Error('server said no'))
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_failclosed', win, '/tmp', { permissionMode: 'plan' })
+
+    await session.run('do something dangerous')
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    const errored = sent.find((c) => c[0] === 'session:error')
+    expect(errored, 'expected a session:error banner').toBeTruthy()
+    // send() is (channel, routingId, payload) — the message is arg 2.
+    expect(String(errored![2])).toContain('permission mode')
+    // The critical assertion: no prompt was ever sent, so the model never got
+    // a turn on an ungated session.
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('setPermissionMode(): a failed patchSession surfaces session:error without rejecting the IPC call', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_setmode_fail', win, '/tmp', { permissionMode: 'default' })
+    await session.run('hi') // establishes openSessionId with a working patch
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    mockPatchSession.mockRejectedValue(new Error('server said no'))
+    // A rejected `session:set-permission-mode` invoke would blow up in the
+    // renderer with no user-visible explanation — surface a banner instead.
+    await expect(session.setPermissionMode('plan')).resolves.toBeUndefined()
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(sent.some((c) => c[0] === 'session:error')).toBe(true)
+    session.dispose()
+  })
+
+  it('a FRESH turn re-applies the stored mode and fails closed when the patch is still down', async () => {
+    // After a failed setPermissionMode the session holds the newly requested
+    // mode but the OLD server-side ruleset (never a widened one). The next
+    // turn that owns its own applyPermissionMode must refuse to run rather
+    // than prompt with a stale ruleset. (A prompt arriving MID-turn takes the
+    // steer path, which deliberately does not re-patch — the running turn
+    // already owns its ruleset — so this drives a fresh session instead.)
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_reapply_fail', win, '/tmp', { permissionMode: 'default' })
+    await session.setPermissionMode('plan') // no live session yet → no patch attempted
+    expect(mockPatchSession).not.toHaveBeenCalled()
+
+    mockPatchSession.mockRejectedValue(new Error('still down'))
+    await session.run('now do it')
+
+    expect(mockPatchSession).toHaveBeenCalled()
+    expect(mockPromptAsync).not.toHaveBeenCalled()
     session.dispose()
   })
 })

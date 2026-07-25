@@ -78,6 +78,31 @@ const DISPATCH_AGENT_ASK_RULE: PermissionRule = {
   action: 'ask'
 }
 
+/**
+ * The ruleset every THROWAWAY opencode session is patched with before it is
+ * prompted (the auto-mode judge, `/btw` side questions). Both are tool-LESS by
+ * design — they must answer from text alone — and both are hazardous without
+ * this patch, for two independent reasons:
+ *
+ *  1. SECURITY. A fresh opencode session inherits the vendor's `{*: allow}`
+ *     default (verified: agent.ts's `defaults` = `Permission.fromConfig({"*":
+ *     "allow", …})`). The judge is fed a possibly attacker-influenced
+ *     transcript and asked to reason about it; an unpatched judge session could
+ *     be talked into really running bash/edit, with no human and no gate.
+ *  2. LIVENESS. `client.prompt` runs a SYNCHRONOUS server-side turn. An
+ *     ask-class action on a session with no SSE consumer emits a
+ *     `permission.asked` that our main consumer filters out (foreign
+ *     sessionID) and nobody ever answers → the prompt blocks forever → the
+ *     parent turn hangs.
+ *
+ * `deny` (not `ask`) is what makes it hang-proof: opencode's evaluator
+ * short-circuits a matching deny with a DeniedError BEFORE the Event.Asked
+ * path (permission/index.ts `ask()`), so nothing is ever published.
+ * `{permission:'*', pattern:'*'}` matches every tool via `Wildcard.match` →
+ * regex `.*`.
+ */
+const DENY_ALL_TOOLS_RULESET: PermissionRule[] = [{ permission: '*', pattern: '*', action: 'deny' }]
+
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
 
@@ -1067,7 +1092,19 @@ export class OpencodeSession extends BaseSession {
   async setPermissionMode(mode: string): Promise<void> {
     this.permissionMode = mode
     if (this.openSessionId && this.client) {
-      await this.applyPermissionMode(mode)
+      // applyPermissionMode now fails CLOSED (throws). Surface that as an error
+      // banner rather than rejecting the IPC call — a rejected
+      // `session:set-permission-mode` invoke would blow up in the renderer with
+      // no user-visible explanation. The session keeps the OLD server-side
+      // ruleset (never a widened one), `this.permissionMode` holds the newly
+      // requested mode, and the next `run()` re-applies it — failing the TURN
+      // if it still can't be applied. The prompt boundary, not this setter, is
+      // where the fail-closed guarantee actually has to hold.
+      try {
+        await this.applyPermissionMode(mode)
+      } catch (err) {
+        this.send('session:error', err instanceof Error ? err.message : String(err))
+      }
     }
     this.send('session:permission-mode', mode)
   }
@@ -1094,7 +1131,18 @@ export class OpencodeSession extends BaseSession {
     try {
       await this.client.patchSession(this.openSessionId, { permission: ruleset })
     } catch (err) {
-      logger.warn('OpencodeSession', `patchSession failed: ${err instanceof Error ? err.message : String(err)}`)
+      // FAIL CLOSED. This patch is the ONLY thing standing between the user's
+      // chosen autonomy mode (+ their deny rules) and the vendor's `{*: allow}`
+      // session default (agent.ts's `defaults`). Warn-and-continue meant a
+      // transient 500 / dropped connection silently downgraded a `plan` or
+      // `default` session to allow-everything for the whole turn — the model
+      // then edits and runs commands with no gate and no prompt, and the user
+      // sees nothing but a log line. Throwing propagates to `run()`'s catch,
+      // which emits `session:error` and NEVER reaches `sendPrompt`: no prompt,
+      // no tools, a visible error instead of a silent fail-open.
+      const detail = err instanceof Error ? err.message : String(err)
+      logger.error('OpencodeSession', `patchSession failed (refusing to run ungated): ${detail}`)
+      throw new Error(`Could not apply permission mode "${mode}" to the opencode session: ${detail}`)
     }
   }
 
@@ -1148,7 +1196,19 @@ export class OpencodeSession extends BaseSession {
 
   /** A JudgeFn backed by a fresh, stateless opencode judge session per call
    *  (so the judge never accumulates prior Q&As; we trade cache for correctness).
-   *  Judge model defaults to the session's own model (ADR-023), override via config. */
+   *  Judge model defaults to the session's own model (ADR-023), override via config.
+   *
+   *  The judge session is patched TOOL-DENIED before it is prompted — see
+   *  DENY_ALL_TOOLS_RULESET for why (a security judge reasoning over
+   *  attacker-influenced transcript text must not be able to execute anything,
+   *  and a synchronous prompt on a consumer-less session must not be able to
+   *  block on an unanswerable approval). The judge needs no tools: it returns a
+   *  verdict from text alone.
+   *
+   *  A patch FAILURE propagates rather than being swallowed — the caller
+   *  (`handleAutoModeApproval`) catches it and falls back to asking the human,
+   *  which is the correct fail-closed outcome. Proceeding to prompt an
+   *  un-denied session would reinstate exactly the hazard above. */
   private makeJudgeFn(): JudgeFn | null {
     const client = this.client
     if (!client) return null
@@ -1156,6 +1216,7 @@ export class OpencodeSession extends BaseSession {
     return async (system, user) => {
       const js = await client.createSession({ title: 'auto-mode-judge' })
       try {
+        await client.patchSession(js.id, { permission: DENY_ALL_TOOLS_RULESET })
         const resp = (await client.prompt(js.id, {
           model: { providerID: parsed.providerID, modelID: parsed.modelID },
           system,
