@@ -610,11 +610,26 @@ export class PiSession extends BaseSession {
 
     client.onEvent((ev) => {
       if (this._cancelled) return
+      // H19: a cancel()→run() respawn installs a NEW client; the OLD client's
+      // in-flight events can still arrive after `_cancelled` was reset to false
+      // by the new run(). Only the currently-attached client may feed the live
+      // stream — a stale event from a superseded client must be dropped.
+      if (this.client !== client) return
       const outputs = mapPiEvent(ev, this.mapperState)
       this.dispatchOutputs(outputs)
     })
     client.onExit(() => {
       if (this._cancelled) return
+      // H19: the OLD client's OS exit event can still be in flight when a
+      // cancel()→run() respawn has already installed a NEW client + bridge
+      // host (cancel() set `_cancelled`, but run() reset it to false before
+      // this fires — so the `_cancelled` guard above no longer catches it).
+      // Without this identity guard the stale handler would dispose the NEW
+      // bridge host (every later tool_call → "approval service unreachable"),
+      // null the live client, and null startedPromise (so the next run spawns a
+      // THIRD process, leaking the second). Only the attached client's own exit
+      // may run this teardown.
+      if (this.client !== client) return
       this.isProcessing = false
       this.disconnected = true
       this.client = null
@@ -950,8 +965,6 @@ export class PiSession extends BaseSession {
       return
     }
 
-    const wasBusy = this.isProcessing
-
     try {
       await this.ensureStarted()
     } catch (err) {
@@ -965,6 +978,16 @@ export class PiSession extends BaseSession {
       this.resetInactivityTimer()
       return
     }
+
+    // M-PI1: read the busy state AFTER `await ensureStarted()`, never before.
+    // Two run()s landing during the spawn window both awaited the SAME
+    // startedPromise; run #1's continuation runs first and synchronously sets
+    // isProcessing=true (below) before yielding at its own `await
+    // client.request`, so run #2 observes busy here and steers instead of
+    // sending a bare `prompt` — which pi rejects while streaming, and whose
+    // failure branch would flip isProcessing=false mid-turn (UI idle, queueing
+    // stops). Reading it before the await snapshotted false for both.
+    const wasBusy = this.isProcessing
 
     // Record the user message locally (for getMessages()). Do NOT emit
     // session:message — the renderer adds it optimistically (addUserMessage).
