@@ -86,6 +86,67 @@ describe('McpHost.ensureStarted', () => {
     expect(bConnect.connect).toHaveBeenCalledTimes(1)
   })
 
+  it('propagates abort: cancels the running handler and settles the dispatch (xhigh#10)', async () => {
+    const received: Array<Record<string, unknown>> = []
+    // A server whose handler never responds (simulates a long-running tool like
+    // dispatch_agent). We capture every message injected into the transport.
+    const instance = {
+      connect: vi.fn(
+        async (transport: { onmessage?: (m: unknown) => void; start?: () => Promise<void> }) => {
+          transport.onmessage = (m) => {
+            received.push(m as Record<string, unknown>)
+          }
+          await transport.start?.()
+        }
+      )
+    } as unknown as SdkMcpServer['instance']
+    const server: SdkMcpServer = { type: 'sdk', name: 'srv', tools: [], instance }
+    const host = new McpHost({ srv: server })
+
+    const ac = new AbortController()
+    const p = host.dispatch(
+      'srv',
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: {} },
+      { signal: ac.signal }
+    )
+
+    // The request reaches the server but never gets a response.
+    await new Promise((r) => setTimeout(r, 5))
+    expect(received.some((m) => m.id === 7)).toBe(true)
+
+    // Abort — the dispatch settles with a cancellation error AND the server is
+    // told to cancel the in-flight request so the tool stops spending.
+    ac.abort()
+    const res = (await p) as { id?: number; error?: { code: number } }
+    expect(res).toMatchObject({ jsonrpc: '2.0', id: 7, error: { code: -32800 } })
+    expect(
+      received.some(
+        (m) =>
+          m.method === 'notifications/cancelled' &&
+          (m.params as { requestId?: number } | undefined)?.requestId === 7
+      )
+    ).toBe(true)
+  })
+
+  it('returns cancellation without dispatching when the signal is already aborted', async () => {
+    const instance = {
+      connect: vi.fn(async (transport: { onmessage?: (m: unknown) => void }) => {
+        transport.onmessage = () => {
+          throw new Error('handler must not be invoked for a pre-aborted dispatch')
+        }
+      })
+    } as unknown as SdkMcpServer['instance']
+    const host = new McpHost({ srv: { type: 'sdk', name: 'srv', tools: [], instance } })
+    const ac = new AbortController()
+    ac.abort()
+    const res = (await host.dispatch(
+      'srv',
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: {} },
+      { signal: ac.signal }
+    )) as { error?: { code: number } }
+    expect(res).toMatchObject({ jsonrpc: '2.0', id: 9, error: { code: -32800 } })
+  })
+
   it('returns a jsonrpc error for unknown server names', async () => {
     const host = new McpHost({})
     const resp = await host.dispatch('does-not-exist', {
