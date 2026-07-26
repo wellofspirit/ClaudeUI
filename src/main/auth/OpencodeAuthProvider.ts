@@ -21,6 +21,7 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
+import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
@@ -315,20 +316,17 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   /** RMW-merge a Codex OAuth credential into auth.json. Preserves every other vendor entry AND any unknown field already on this vendor's own entry. Persists `accountId` when known (unlike pi, which doesn't). */
   async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
     const filePath = resolveOpencodeAuthJsonPath()
-    const dir = path.dirname(filePath)
 
-    let file: Record<string, unknown> = {}
-    try {
-      const raw = fs.readFileSync(filePath, 'utf-8')
-      const parsed: unknown = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) file = parsed as Record<string, unknown>
-    } catch {
-      // Absent or corrupt — start fresh (matches listVendorCredentialIds's degrade-to-{} posture above).
-    }
+    // Read-modify-write. readJsonFileForWrite returns {} for a MISSING file but
+    // THROWS (after a one-time backup) on a corrupt-but-present file, so this
+    // feed never overwrites a partially-written auth.json and deletes every
+    // other vendor's credential (H18/R2). The write is atomic (temp + rename),
+    // which prevents that mid-write truncation in the first place (R1).
+    const file = readJsonFileForWrite(filePath)
 
     const existing = file[vendorId]
     const entry: Record<string, unknown> = {
-      ...(existing && typeof existing === 'object' ? existing : {}),
+      ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
       type: 'oauth',
       refresh: cred.refresh,
       access: cred.access,
@@ -337,18 +335,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     if (cred.accountId) entry.accountId = cred.accountId
     file[vendorId] = entry
 
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(filePath, JSON.stringify(file, null, 2), { mode: 0o600 })
-    // Same rationale as PiAuthProvider.writeAuthFile: writeFileSync's `mode`
-    // only applies to a newly-created file, so an existing file (opencode's
-    // own) keeps its prior permissions unless chmod is forced explicitly.
-    if (process.platform !== 'win32') {
-      try {
-        fs.chmodSync(filePath, 0o600)
-      } catch (err) {
-        logger.warn('OpencodeAuth', `chmod 0600 failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
+    writeJsonAtomic(filePath, file, { indent: 2 })
 
     this.invalidateCache()
     invalidateOpencodeModelCache()

@@ -24,9 +24,10 @@ import fs from 'fs'
 import path from 'path'
 import { piAgentDir } from '../services/pi-session-list'
 import { invalidatePiModelCache } from '../pi/model-discovery'
-import { logger } from '../services/logger'
+import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import type { AccountRef, AuthState, VendorAuthMap, VendorAuthOption } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
+import { PI_API_KEY_VENDOR_IDS, PI_SUBSCRIPTION_VENDOR_IDS } from './pi-vendor-ids'
 import { credentialSync, PI_CODEX_VENDOR_ID, type CodexCredentialInput, type CodexEntrySnapshot } from './vault/CredentialSync'
 
 /**
@@ -56,67 +57,13 @@ interface PiAuthEntry {
 type PiAuthFile = Record<string, PiAuthEntry>
 
 /**
- * API-key provider ids documented in vendor/pi-cli/docs/providers.md's
- * "API Keys" table (auth.json-key column), in the table's own order. This is
- * the exact, versioned, offline reference the M3 kickoff spec calls out —
- * deliberately NOT derived from the pinned source's ~140 built-in provider
- * definitions (most of which pi supports via env-var-only resolution with no
- * dedicated auth.json UX story documented for end users).
+ * Best-effort read + parse of auth.json for READ-ONLY callers (probe /
+ * listVendorCredentialIds / readOauthEntry). Returns {} on any failure
+ * (missing file, corrupt JSON, non-object) — a read reporting "no vendors" is
+ * an acceptable degradation. The WRITE path deliberately does NOT use this
+ * (see readAuthFileForWrite): degrading a corrupt-but-present file to {} and
+ * then writing it back would delete every vendor entry it could not parse (H18).
  */
-const PI_API_KEY_VENDOR_IDS: readonly string[] = [
-  'anthropic',
-  'ant-ling',
-  'azure-openai-responses',
-  'openai',
-  'deepseek',
-  'nvidia',
-  'google',
-  'amazon-bedrock',
-  'mistral',
-  'groq',
-  'cerebras',
-  'cloudflare-ai-gateway',
-  'cloudflare-workers-ai',
-  'xai',
-  'openrouter',
-  'vercel-ai-gateway',
-  'zai',
-  'zai-coding-cn',
-  'opencode',
-  'opencode-go',
-  'radius',
-  'huggingface',
-  'fireworks',
-  'together',
-  'kimi-coding',
-  'minimax',
-  'minimax-cn',
-  'xiaomi',
-  'xiaomi-token-plan-cn',
-  'xiaomi-token-plan-ams',
-  'xiaomi-token-plan-sgp'
-]
-
-/**
- * Subscription (OAuth-capable) provider ids — VERIFIED against the pinned pi
- * source (`packages/ai/src/providers/{anthropic,openai-codex,github-copilot,
- * xai,radius}.ts`'s `id:` fields; `openai-codex` has NO apiKey auth path at
- * all — oauth only), matching providers.md's "Subscriptions" section (ChatGPT
- * Plus/Pro, Claude Pro/Max, GitHub Copilot, xAI, Radius = 5, not 4 — do not
- * guess, per the kickoff spec). `github-copilot` has no auth.json-key row in
- * providers.md's API-key TABLE (even though its provider source also accepts
- * COPILOT_GITHUB_TOKEN) — so it gets the oauth option only here, consistent
- * with deriving the api-key catalog strictly from the docs table.
- */
-const PI_SUBSCRIPTION_VENDOR_IDS: readonly string[] = [
-  'anthropic',
-  'openai-codex',
-  'github-copilot',
-  'xai',
-  'radius'
-]
-
-/** Best-effort read + parse of auth.json. Returns {} on any failure (missing file, corrupt JSON, non-object). */
 function readAuthFile(): PiAuthFile {
   try {
     const raw = fs.readFileSync(resolvePiAuthJsonPath(), 'utf-8')
@@ -128,23 +75,23 @@ function readAuthFile(): PiAuthFile {
   }
 }
 
-/** Write auth.json, creating `~/.pi/agent/` if absent and setting 0600 on POSIX (no-op mode on Windows). */
+/**
+ * Read auth.json for a read-modify-write. Returns {} for a MISSING file (fresh
+ * start) but THROWS (after backing the file up once) when the file is present
+ * but unreadable — so a mutator never clobbers a corrupt file, permanently
+ * losing other vendors' credentials (H18/R2).
+ */
+function readAuthFileForWrite(): PiAuthFile {
+  return readJsonFileForWrite(resolvePiAuthJsonPath()) as PiAuthFile
+}
+
+/**
+ * Atomically write auth.json (temp-file + rename), creating `~/.pi/agent/` if
+ * absent and forcing 0600 on POSIX. Atomicity prevents the mid-write truncation
+ * that produces the corrupt file readAuthFileForWrite must otherwise refuse.
+ */
 function writeAuthFile(data: PiAuthFile): void {
-  const filePath = resolvePiAuthJsonPath()
-  const dir = path.dirname(filePath)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 })
-  // fs.writeFileSync's `mode` only applies to a NEWLY created file — an
-  // existing file (e.g. one pi itself created) keeps its prior permissions.
-  // Force 0600 explicitly so a ClaudeUI-mediated write never widens it back
-  // out; no-op on Windows (chmod bits are meaningless there).
-  if (process.platform !== 'win32') {
-    try {
-      fs.chmodSync(filePath, 0o600)
-    } catch (err) {
-      logger.warn('PiAuth', `chmod 0600 failed: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
+  writeJsonAtomic(resolvePiAuthJsonPath(), data, { indent: 2 })
 }
 
 export class PiAuthProvider implements EngineAuthProvider {
@@ -226,7 +173,7 @@ export class PiAuthProvider implements EngineAuthProvider {
    * refreshes the probe snapshot so buildPiAccountRef() reflects it immediately.
    */
   async setVendorApiKey(vendorId: string, key: string): Promise<void> {
-    const file = readAuthFile()
+    const file = readAuthFileForWrite()
     file[vendorId] = { ...file[vendorId], type: 'api_key', key }
     writeAuthFile(file)
     invalidatePiModelCache()
@@ -235,7 +182,7 @@ export class PiAuthProvider implements EngineAuthProvider {
 
   /** Delete a provider's entry from auth.json entirely. Preserves every other entry. */
   async removeVendorAuth(vendorId: string): Promise<void> {
-    const file = readAuthFile()
+    const file = readAuthFileForWrite()
     delete file[vendorId]
     writeAuthFile(file)
     invalidatePiModelCache()
@@ -265,7 +212,7 @@ export class PiAuthProvider implements EngineAuthProvider {
    * the vault (auth-vault.json) remains the source of truth for that data.
    */
   async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
-    const file = readAuthFile()
+    const file = readAuthFileForWrite()
     file[vendorId] = {
       ...file[vendorId],
       type: 'oauth',

@@ -432,3 +432,57 @@ describe('PiAuthProvider OAuth delegation (openai-codex only)', () => {
     expect(mockCancelLogin).toHaveBeenCalledTimes(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// H18 / R2: a corrupt (partially-written) auth.json must NOT be clobbered by a
+// mutator, which would permanently delete every other vendor's credential.
+//
+// RED-FIRST NOTE: against the pre-fix code (mutators read via the best-effort
+// readAuthFile → {} on corrupt), feedOauthCredential/setVendorApiKey would
+// write a file containing ONLY the just-fed vendor — the 'sk-ant'/'github-
+// copilot' assertions below would FAIL because those vendors were dropped.
+// ---------------------------------------------------------------------------
+
+describe('PiAuthProvider — corrupt auth.json write guard (H18)', () => {
+  function writeCorruptAuthJson(bytes: string): void {
+    mkdirSync(join(testHome, '.pi', 'agent'), { recursive: true })
+    writeFileSync(authJsonPath(), bytes, 'utf-8')
+  }
+
+  // A truncated JSON object still holding two other vendors' data.
+  const corrupt =
+    '{"anthropic":{"type":"api_key","key":"sk-ant"},"github-copilot":{"type":"oauth","refresh":"r","access":"a","expires":1}'
+
+  it('feedOauthCredential REFUSES to write over a corrupt file — other vendors survive + a backup is made', async () => {
+    writeCorruptAuthJson(corrupt)
+    const provider = new PiAuthProvider()
+
+    await expect(
+      provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 123 })
+    ).rejects.toThrow(/Refusing to overwrite/)
+
+    // On-disk file untouched — still holds the OTHER vendors, byte-for-byte.
+    const onDisk = readFileSync(authJsonPath(), 'utf-8')
+    expect(onDisk).toBe(corrupt)
+    expect(onDisk).toContain('sk-ant')
+    expect(onDisk).toContain('github-copilot')
+    // A one-time recovery backup was written.
+    expect(readFileSync(`${authJsonPath()}.corrupt`, 'utf-8')).toBe(corrupt)
+    expect(mockInvalidatePiModelCache).not.toHaveBeenCalled()
+  })
+
+  it('setVendorApiKey REFUSES to write over a corrupt file', async () => {
+    writeCorruptAuthJson(corrupt)
+    const provider = new PiAuthProvider()
+    await expect(provider.setVendorApiKey('openai', 'sk-new')).rejects.toThrow(/Refusing to overwrite/)
+    expect(readFileSync(authJsonPath(), 'utf-8')).toBe(corrupt)
+  })
+
+  it('still creates a fresh auth.json when the file is simply MISSING (not corrupt)', async () => {
+    const provider = new PiAuthProvider()
+    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 123 })
+    expect(readAuthJsonRaw()).toEqual({
+      'openai-codex': { type: 'oauth', access: 'a1', refresh: 'r1', expires: 123 }
+    })
+  })
+})

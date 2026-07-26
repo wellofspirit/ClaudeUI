@@ -12,7 +12,10 @@
  *   6. Claude provider lacks per-vendor methods → graceful error
  *   7. vendor-auth routing: engineAuthRegistry routes by engineId
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // ---------------------------------------------------------------------------
 // Hoist mock functions before vi.mock() calls
@@ -379,5 +382,76 @@ describe('OpencodeAuthProvider — buildAccountRef()', () => {
     await provider.warmCache()
     const ref = provider.buildAccountRef('anthropic')
     expect(ref?.authState).toBe('authenticated')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// H18 / R2: feedOauthCredential is a read-modify-write against opencode's
+// auth.json — it must NOT overwrite a corrupt-but-present file (which would
+// delete every other vendor's credential). auth.json is resolved from
+// XDG_DATA_HOME, redirected to a temp dir here.
+//
+// RED-FIRST NOTE: pre-fix, feedOauthCredential caught the parse error and
+// "started fresh" (file = {}), so the write dropped anthropic — the survival
+// assertions below would FAIL.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeAuthProvider — feedOauthCredential corrupt guard (H18)', () => {
+  let xdg: string
+  let authPath: string
+  let originalXdg: string | undefined
+
+  beforeEach(() => {
+    setupMocks()
+    originalXdg = process.env.XDG_DATA_HOME
+    xdg = mkdtempSync(join(tmpdir(), 'opencode-auth-'))
+    process.env.XDG_DATA_HOME = xdg
+    authPath = join(xdg, 'opencode', 'auth.json')
+  })
+
+  afterEach(() => {
+    if (originalXdg === undefined) delete process.env.XDG_DATA_HOME
+    else process.env.XDG_DATA_HOME = originalXdg
+    rmSync(xdg, { recursive: true, force: true })
+  })
+
+  const corrupt = '{"anthropic":{"type":"api","key":"sk-ant"},"openai":' // truncated
+
+  it('REFUSES to write over a corrupt auth.json — other vendors survive + a backup is made', async () => {
+    mkdirSync(join(xdg, 'opencode'), { recursive: true })
+    writeFileSync(authPath, corrupt, 'utf-8')
+
+    await expect(
+      makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
+    ).rejects.toThrow(/Refusing to overwrite/)
+
+    const onDisk = readFileSync(authPath, 'utf-8')
+    expect(onDisk).toBe(corrupt)
+    expect(onDisk).toContain('sk-ant')
+    expect(readFileSync(`${authPath}.corrupt`, 'utf-8')).toBe(corrupt)
+  })
+
+  it('merges into a VALID auth.json, preserving every other vendor', async () => {
+    mkdirSync(join(xdg, 'opencode'), { recursive: true })
+    writeFileSync(authPath, JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant' } }), 'utf-8')
+
+    await makeProvider().feedOauthCredential('openai', {
+      access: 'a',
+      refresh: 'r',
+      expires: 1,
+      accountId: 'acct-1'
+    })
+
+    expect(JSON.parse(readFileSync(authPath, 'utf-8'))).toEqual({
+      anthropic: { type: 'api', key: 'sk-ant' },
+      openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, accountId: 'acct-1' }
+    })
+  })
+
+  it('creates a fresh auth.json when the file is simply MISSING', async () => {
+    await makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
+    expect(JSON.parse(readFileSync(authPath, 'utf-8'))).toEqual({
+      openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1 }
+    })
   })
 })
