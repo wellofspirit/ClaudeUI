@@ -18,12 +18,18 @@ export interface FakePty {
   resizes: Array<{ cols: number; rows: number }>
   killed: boolean
   disposed: boolean
+  /** Flow-control state, driven by pause()/resume(). */
+  paused: boolean
+  pauseCount: number
+  resumeCount: number
   spawnOptions: Record<string, unknown>
   spawnArgs: { file: string; args: string[] }
 
   write: (data: string) => void
   resize: (cols: number, rows: number) => void
   kill: (signal?: string) => void
+  pause: () => void
+  resume: () => void
   onData: (cb: (data: string) => void) => FakeDisposable
   onExit: (cb: (e: { exitCode: number; signal?: number }) => void) => FakeDisposable
 
@@ -64,6 +70,9 @@ export function createPtyStub(): PtyStubController {
       resizes: [],
       killed: false,
       disposed: false,
+      paused: false,
+      pauseCount: 0,
+      resumeCount: 0,
       spawnOptions: options,
       spawnArgs: { file, args },
 
@@ -82,6 +91,14 @@ export function createPtyStub(): PtyStubController {
         fake.killed = true
         // Simulate async exit after kill
         queueMicrotask(() => fake.emitExit(0))
+      },
+      pause() {
+        fake.paused = true
+        fake.pauseCount++
+      },
+      resume() {
+        fake.paused = false
+        fake.resumeCount++
       },
       onData(cb) {
         dataListeners.push(cb)
