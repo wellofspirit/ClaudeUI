@@ -87,14 +87,20 @@ import { RemoteDispatcher } from '../remote-dispatcher'
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function httpGet(url: string): Promise<{ status: number; body: string }> {
+async function httpGet(
+  url: string
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     http
       .get(url, (res) => {
         const chunks: Buffer[] = []
         res.on('data', (c) => chunks.push(c))
         res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') })
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf-8'),
+            headers: res.headers
+          })
         )
       })
       .on('error', reject)
@@ -159,6 +165,22 @@ describe('RemoteServer', () => {
     await server.start(port, '127.0.0.1')
     const got = await httpGet(`http://127.0.0.1:${port}/does-not-exist`)
     expect(got.status).toBe(404)
+  })
+
+  it('serves the web client with a CSP and hardening headers', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/remote`)
+    expect(got.status).toBe(200)
+    const csp = got.headers['content-security-policy']
+    expect(csp).toBeTruthy()
+    expect(csp).toContain("default-src 'self'")
+    expect(csp).toContain("script-src 'self'")
+    // Web transport necessities the renderer CSP doesn't carry.
+    expect(csp).toContain('connect-src')
+    expect(csp).toMatch(/wss:/)
+    expect(got.headers['x-content-type-options']).toBe('nosniff')
+    expect(got.headers['referrer-policy']).toBe('no-referrer')
+    expect(got.headers['x-frame-options']).toBe('SAMEORIGIN')
   })
 
   it('rejects a WebSocket client that sends no auth message within the timeout window', async () => {
@@ -328,6 +350,19 @@ describe('RemoteServer — mockup HTTP route', () => {
     expect(authed.body).not.toContain('__MOCKUP_TOKEN__')
     const anon = await httpGet(`http://127.0.0.1:${port}/remote`)
     expect(anon.body).not.toContain('__MOCKUP_TOKEN__')
+  })
+
+  it('serves static assets with nosniff (and no page CSP)', async () => {
+    // serveStatic covers the hashed JS/CSS bundles. nosniff is the important
+    // one here — CSP is a page-level policy and intentionally omitted for assets.
+    fs.mkdirSync(path.join(appDir, 'out', 'web', 'assets'), { recursive: true })
+    fs.writeFileSync(path.join(appDir, 'out', 'web', 'assets', 'app.js'), '/* bundle */')
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js`)
+    expect(got.status).toBe(200)
+    expect(got.headers['x-content-type-options']).toBe('nosniff')
+    expect(got.headers['referrer-policy']).toBe('no-referrer')
+    expect(got.headers['content-security-policy']).toBeUndefined()
   })
 
   it('delivers the mockup token over the authenticated WS (sync-full)', async () => {

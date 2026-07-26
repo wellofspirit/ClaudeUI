@@ -363,6 +363,41 @@ export class RemoteServer {
     res.end(served.body)
   }
 
+  /**
+   * Security response headers for HTML/asset responses served to remote
+   * clients. Unlike the Electron renderer (which ships a `<meta>` CSP in
+   * `src/renderer/index.html`), this origin previously sent none — yet it is
+   * exactly where the WS token lives (in the URL fragment) and where
+   * model-authored content renders. The CSP mirrors the renderer's proven
+   * policy, widened only for the web transport: `connect-src` must allow the
+   * WebSocket (ws/wss), and mockups are framed same-origin over HTTP here
+   * (the renderer frames them via the `mockup-asset:` scheme instead). The
+   * built client loads only external hashed JS/CSS (no inline scripts), so
+   * `script-src 'self'` does not break it.
+   */
+  private securityHeaders(withCsp: boolean): Record<string, string> {
+    const headers: Record<string, string> = {
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'X-Frame-Options': 'SAMEORIGIN'
+    }
+    if (withCsp) {
+      headers['Content-Security-Policy'] = [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "font-src 'self' data:",
+        "connect-src 'self' ws: wss:",
+        "frame-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "form-action 'self'"
+      ].join('; ')
+    }
+    return headers
+  }
+
   private serveWebClient(_url: URL, res: http.ServerResponse): void {
     const webDir = this.getWebClientDir()
     const indexPath = path.join(webDir, 'index.html')
@@ -374,11 +409,17 @@ export class RemoteServer {
       // authenticated WS (see handleSync → sync-full.mockupToken). This keeps
       // the low-privilege mockup token off an unauthenticated `/remote` load.
       const html = fs.readFileSync(indexPath, 'utf-8')
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        ...this.securityHeaders(true)
+      })
       res.end(html)
     } else {
       // Web client not built yet — serve a placeholder
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        ...this.securityHeaders(true)
+      })
       res.end(`<!DOCTYPE html>
 <html><head><title>ClaudeUI Remote</title></head>
 <body style="background:#1a1a2e;color:#eee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
@@ -420,7 +461,12 @@ export class RemoteServer {
       '.woff': 'font/woff'
     }
 
-    res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' })
+    // Static assets (hashed JS/CSS/fonts/images). `nosniff` in particular stops
+    // a browser MIME-sniffing a served file into an executable type.
+    res.writeHead(200, {
+      'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+      ...this.securityHeaders(false)
+    })
     fs.createReadStream(filePath).pipe(res)
   }
 
