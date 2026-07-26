@@ -254,6 +254,130 @@ describe('mapEvent — permission.asked', () => {
       throw new Error('expected approval')
     }
   })
+
+  // M-OC6: surface the real tool input to the approval/judge for MCP tools that
+  // ask with metadata:{}.
+  it('surfaces the accumulated tool-call input when metadata is empty (M-OC6)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    // The streamed tool part carrying the real args arrives BEFORE the ask.
+    mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: SESSION_ID,
+        part: {
+          id: 'prt_1',
+          messageID: 'msg_1',
+          type: 'tool',
+          tool: 'claudeui_dispatch_agent',
+          callID: 'call_9',
+          state: { status: 'pending', input: { engine: 'claude', prompt: 'do the thing' } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_mcp',
+        permission: 'claudeui_dispatch_agent',
+        tool: { messageID: 'msg_1', callID: 'call_9' },
+        metadata: {} // the MCP-tool blind spot
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    expect(out.kind).toBe('approval')
+    if (out.kind === 'approval') {
+      // Pre-fix this was {} (metadata); now it carries the real args.
+      expect(out.approval.input).toEqual({ engine: 'claude', prompt: 'do the thing' })
+    }
+  })
+
+  it('finds the tool input even when the ask omits messageID (scans all accumulators)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: SESSION_ID,
+        part: {
+          id: 'prt_2',
+          messageID: 'msg_2',
+          type: 'tool',
+          tool: 'somemcp',
+          callID: 'call_x',
+          state: { input: { a: 1 } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_x',
+        permission: 'somemcp',
+        tool: { callID: 'call_x' }, // no messageID
+        metadata: {}
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    if (out.kind === 'approval') expect(out.approval.input).toEqual({ a: 1 })
+    else throw new Error('expected approval')
+  })
+
+  it('falls back to metadata when no matching tool part carries input', () => {
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_meta',
+        permission: 'bash',
+        tool: { callID: 'call_none' },
+        metadata: { command: 'ls' }
+      }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    if (out.kind === 'approval') expect(out.approval.input).toEqual({ command: 'ls' })
+    else throw new Error('expected approval')
+  })
+})
+
+// M-OC2: permission.replied retracts the (possibly cascade-resolved) card.
+describe('mapEvent — permission.replied (M-OC2)', () => {
+  it('maps permission.replied → approval-resolved with the requestID', () => {
+    const out = mapEvent(
+      makeEvent('permission.replied', { sessionID: SESSION_ID, requestID: 'perm_1' }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    // Pre-fix this fell through to {kind:'ignore'} — the stale card never cleared.
+    expect(out.kind).toBe('approval-resolved')
+    if (out.kind === 'approval-resolved') expect(out.requestId).toBe('perm_1')
+  })
+
+  it('ignores a permission.replied with no requestID', () => {
+    const out = mapEvent(
+      makeEvent('permission.replied', { sessionID: SESSION_ID }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    expect(out.kind).toBe('ignore')
+  })
 })
 
 describe('mapEvent — session.idle', () => {

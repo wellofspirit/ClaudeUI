@@ -96,6 +96,12 @@ export type MapperOutput =
   | { kind: 'message'; message: ChatMessage }
   | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean }
   | { kind: 'approval'; approval: PendingApproval }
+  /** A pending permission was resolved server-side (M-OC2 — `permission.replied`).
+   *  Fires for the reply we originated AND for every OTHER pending permission the
+   *  vendor cascade-rejects (one reject rejects all) or cascade-approves (an
+   *  `always` auto-approves matching ones). The consumer must retract the stale
+   *  approval card for `requestId` — clicking it later would 404 forever. */
+  | { kind: 'approval-resolved'; requestId: string }
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
   /** Emitted when cost changes OR when a token-snapshot context advance is detected (input+cacheRead
    *  increased on an assistant message). The latter fires even when cost=0 (free models), so that
@@ -268,14 +274,41 @@ function handleOwnEvent(
       const patterns = props.patterns as string[] | undefined
       const suggestion = suggestOpencodeAllowRule(permission, patterns)
 
+      // M-OC6: prefer the REAL tool-call input over the wire `metadata`. MCP
+      // tools (claudeui_dispatch_agent + every bridged Claude MCP server) ask
+      // with `metadata: {}`, leaving both the approval dialog and the ADR-023
+      // auto-mode judge with zero context about what's being run. The tool part
+      // carrying `state.input` is published (message.part.updated) before the
+      // tool calls ctx.ask (verified vs vendor session/tools.ts — ctx.metadata
+      // sets `input: args`), so it's already in the accumulator here. Fall back
+      // to `metadata` (populated for built-in tools) then {}.
+      const metadata = props.metadata as Record<string, unknown> | undefined
+      const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
+      const input =
+        toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
+
       const approval: PendingApproval = {
         requestId: id,
         toolUseId: tool?.callID,
         toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {},
+        input,
         ...(suggestion ? { suggestions: [suggestion] } : {})
       }
       return { kind: 'approval', approval }
+    }
+
+    case 'permission.replied': {
+      // M-OC2: a permission was resolved on the server. The vendor publishes
+      // this for the reply we originated AND — on a `reject` — for EVERY other
+      // pending permission in the session (cascade-reject), and on `always` for
+      // matching pendings it auto-approves. Either way ClaudeUI's card for that
+      // request is now stale (a later click 404s). Surface the requestId so the
+      // consumer can retract it. Wire shape (vendor permission/index.ts +
+      // event-reducer.test.ts): `{ sessionID, requestID }` — note `requestID`,
+      // NOT `id` (which `permission.asked` uses).
+      const requestId = props.requestID as string | undefined
+      if (!requestId) return { kind: 'ignore' }
+      return { kind: 'approval-resolved', requestId }
     }
 
     case 'session.idle': {
@@ -686,6 +719,40 @@ function ensureAccumulator(
 /** Best-effort messageId from a message.updated event's properties. */
 function messageIdFromProps(props: Record<string, unknown>): string | undefined {
   return (props.messageID ?? props.messageId) as string | undefined
+}
+
+/**
+ * M-OC6: find the real input args of an in-flight tool call from the
+ * accumulated tool part (state.input), matched by callID. Returns undefined
+ * when no matching part carries a non-empty input — the caller then falls back
+ * to the wire `metadata`. Checks the named message first, then scans all
+ * accumulators (the permission event's `messageID` may be absent/mismatched).
+ */
+function findToolInput(
+  accumulators: Map<string, MessageAccumulator>,
+  messageId: string | undefined,
+  callId: string | undefined
+): Record<string, unknown> | undefined {
+  if (!callId) return undefined
+  const scan = (acc: MessageAccumulator | undefined): Record<string, unknown> | undefined => {
+    if (!acc) return undefined
+    for (const snap of acc.parts.values()) {
+      if (snap.type === 'tool' && snap.callID === callId) {
+        const input = snap.state?.input
+        if (input && Object.keys(input).length > 0) return input
+      }
+    }
+    return undefined
+  }
+  if (messageId) {
+    const found = scan(accumulators.get(messageId))
+    if (found) return found
+  }
+  for (const acc of accumulators.values()) {
+    const found = scan(acc)
+    if (found) return found
+  }
+  return undefined
 }
 
 /**

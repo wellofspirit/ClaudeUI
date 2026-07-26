@@ -920,6 +920,19 @@ export class OpencodeSession extends BaseSession {
         break
       }
 
+      case 'approval-resolved': {
+        // M-OC2: a permission was resolved server-side (`permission.replied`) —
+        // either the reply we sent, or a sibling the vendor cascade-rejected /
+        // cascade-approved. Clear our local pending bookkeeping so a later reply
+        // can't fire, and retract the (now-stale) card in the renderer via the
+        // existing dismiss channel. All are no-ops if the request is unknown.
+        const { requestId } = output
+        this.pendingApprovals.delete(requestId)
+        this.pendingQuestions.delete(requestId)
+        this.send('session:approval-dismiss', { requestId })
+        break
+      }
+
       case 'result':
         this.isProcessing = false
         // Turn just completed — its wall-clock cost moves from the live
