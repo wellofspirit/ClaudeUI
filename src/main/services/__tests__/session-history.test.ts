@@ -8,7 +8,8 @@ import * as path from 'path'
 import {
   computeTokenMetrics,
   computeTurnSpanDurationMs,
-  createTurnSpanAccumulator
+  createTurnSpanAccumulator,
+  loadBackgroundOutput
 } from '../session-history'
 
 // ---------------------------------------------------------------------------
@@ -634,5 +635,44 @@ describe('computeTokenMetrics — subagent transcripts fold into modelCosts', ()
     const m = await computeTokenMetrics(file)
     fs.unlinkSync(file)
     expect(m.modelCosts).toEqual([{ engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 3 }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R6 — loadBackgroundOutput path containment (remote-reachable, caller-supplied
+// outputFile). Without confinement this channel is an arbitrary-file-read
+// primitive (gpt#8). Reads are confined to the OS temp roots.
+// ---------------------------------------------------------------------------
+
+describe('loadBackgroundOutput containment (R6)', () => {
+  it('reads a legitimate output file inside the temp root', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-out-'))
+    const file = path.join(dir, 'tabc123.output')
+    fs.writeFileSync(file, 'background stdout here')
+    try {
+      const res = loadBackgroundOutput('proj-key', 'tabc123', file)
+      expect(res).toEqual({ content: 'background stdout here', purged: false })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an outputFile OUTSIDE the temp root (GUARD — fails pre-fix)', () => {
+    // A real, existing file well outside any temp root: this test's own repo.
+    const forbidden = path.join(process.cwd(), 'package.json')
+    expect(fs.existsSync(forbidden)).toBe(true)
+    const forbiddenContent = fs.readFileSync(forbidden, 'utf-8')
+
+    const res = loadBackgroundOutput('proj-key', 'tabc123', forbidden)
+    // Pre-fix this returned the file's contents (arbitrary read). Now it's
+    // rejected → falls through to the (non-existent) interpolated path → purged.
+    expect(res.content).not.toBe(forbiddenContent)
+    expect(res).toEqual({ content: null, purged: true })
+  })
+
+  it('refuses a projectKey that traverses out of the interpolated root', () => {
+    // No outputFile → interpolation path; a crafted projectKey must not escape.
+    const res = loadBackgroundOutput('../../../../etc', 'passwd', undefined)
+    expect(res).toEqual({ content: null, purged: true })
   })
 })
