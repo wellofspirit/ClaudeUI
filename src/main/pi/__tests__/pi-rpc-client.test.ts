@@ -23,7 +23,7 @@ function makeFakeProc(): any {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter & { setEncoding: (enc: string) => void }
     stderr: EventEmitter & { setEncoding: (enc: string) => void }
-    stdin: { writable: boolean; write: ReturnType<typeof vi.fn> }
+    stdin: EventEmitter & { writable: boolean; write: ReturnType<typeof vi.fn> }
     pid: number
     kill: ReturnType<typeof vi.fn>
   }
@@ -33,7 +33,15 @@ function makeFakeProc(): any {
   stderr.setEncoding = vi.fn()
   proc.stdout = stdout
   proc.stderr = stderr
-  proc.stdin = { writable: true, write: vi.fn() }
+  // stdin is a real Writable (EventEmitter) in Node — model it as one so the
+  // client can attach an 'error' listener (and tests can emit teardown errors).
+  const stdin = new EventEmitter() as EventEmitter & {
+    writable: boolean
+    write: ReturnType<typeof vi.fn>
+  }
+  stdin.writable = true
+  stdin.write = vi.fn()
+  proc.stdin = stdin
   proc.pid = 4242
   proc.kill = vi.fn()
   return proc
@@ -257,5 +265,24 @@ describe('PiRpcClient — dispose / onExit', () => {
     // The whole point of M-PI3: proc.kill() must NOT run before taskkill (it
     // would kill the root synchronously and orphan the tree).
     expect(proc.kill).not.toHaveBeenCalled()
+  })
+})
+
+describe('PiRpcClient — stray error events do not crash the process', () => {
+  it('attaches a stdin "error" listener so an async EPIPE is not an uncaughtException', async () => {
+    const { proc } = await startClient()
+    // Without a listener, an EventEmitter re-throws on emit('error').
+    expect(() => proc.stdin.emit('error', new Error('write EPIPE'))).not.toThrow()
+  })
+
+  it('survives a SECOND post-spawn process "error" — once("error") only covers the first', async () => {
+    const { proc } = await startClient()
+    // Pre-fix, once('error') absorbs the first error then detaches, so the
+    // second emit has no listener and re-throws. The persistent on('error')
+    // handler must absorb both.
+    expect(() => {
+      proc.emit('error', new Error('boom-1'))
+      proc.emit('error', new Error('boom-2'))
+    }).not.toThrow()
   })
 })

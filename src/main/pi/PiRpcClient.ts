@@ -71,12 +71,26 @@ export class PiRpcClient {
         if (text) logger.debug('PiRpcClient', `stderr: ${text}`)
       })
 
+      // A half-open stdin can emit an async 'error' (EPIPE) after the child
+      // dies while a request write is in flight. With no listener that becomes
+      // a process-level uncaughtException. Swallow it — handleExit already
+      // rejects every pending request (mirrors sdk/query.ts's stdin guard).
+      proc.stdin?.on('error', (err: Error) => {
+        logger.debug('PiRpcClient', `stdin error (child teardown race): ${err.message}`)
+      })
+
       // Both listeners can be attached simultaneously: on a bad binary path,
       // 'error' fires (spawn never happened) and 'spawn' never fires. On a
       // healthy spawn, 'spawn' fires first and settles the promise; a LATER
       // 'error' (e.g. EPIPE) is a no-op against an already-resolved promise.
       proc.once('spawn', () => resolve())
       proc.once('error', (err) => reject(err))
+      // once('error') above only settles the START promise. It fires at most
+      // once, so a SECOND process 'error' (or any error after spawn) would have
+      // no listener → uncaughtException. This persistent handler absorbs those.
+      proc.on('error', (err: Error) => {
+        logger.debug('PiRpcClient', `process error: ${err.message}`)
+      })
 
       proc.on('exit', (code, signal) => this.handleExit(code, signal))
     })

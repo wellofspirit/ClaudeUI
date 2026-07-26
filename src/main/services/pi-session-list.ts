@@ -137,19 +137,11 @@ function textFromUserContent(content: PiUserMessage['content']): string {
 /**
  * Title fallback chain: session_info name (last one wins — a session can be
  * renamed) → first user message's first line (trimmed, capped) → 'Untitled'.
- * Scans the WHOLE file (not just the active branch) — a rename/first-message
- * used for the sidebar label doesn't need branch-fidelity the way history
- * replay does.
  */
-function deriveTitle(entries: PiSessionEntry[]): string {
-  let sessionInfoName: string | undefined
-  let firstUserText: string | undefined
-  for (const e of entries) {
-    if (e.type === 'session_info') sessionInfoName = e.name
-    if (firstUserText === undefined && e.type === 'message' && e.message.role === 'user') {
-      firstUserText = textFromUserContent(e.message.content)
-    }
-  }
+function resolveTitle(
+  sessionInfoName: string | undefined,
+  firstUserText: string | undefined
+): string {
   const trimmedName = sessionInfoName?.trim()
   if (trimmedName) return trimmedName
   const trimmedText = firstUserText?.trim()
@@ -158,6 +150,75 @@ function deriveTitle(entries: PiSessionEntry[]): string {
     return line.length > TITLE_TEXT_CAP ? line.slice(0, TITLE_TEXT_CAP) : line
   }
   return 'Untitled'
+}
+
+/**
+ * Header + title for ONE sidebar row WITHOUT the full-file parse
+ * readPiSessionFile does. It reads the file but JSON-parses only the lines the
+ * sidebar needs: the header (first line), any session_info rename (cheap
+ * substring prefilter; last wins), and message lines up to the FIRST user
+ * message. Large assistant/user image-bearing lines after that are scanned but
+ * never parsed, so listing a directory of image-heavy sessions no longer
+ * JSON.parses megabytes of base64 per row. Title semantics are identical to
+ * readPiSessionFile + a whole-entry deriveTitle (guarded by the
+ * listPiSessionsGlobal tests). Returns null on any failure (unreadable / no
+ * header / non-session header) — same contract as readPiSessionFile.
+ */
+function readPiSessionListRow(
+  filePath: string
+): { header: PiSessionHeader; title: string } | null {
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf-8')
+  } catch {
+    return null
+  }
+  const lines = raw.split('\n')
+
+  // Header = first non-empty line, must be `type: 'session'`.
+  let idx = 0
+  let header: PiSessionHeader | null = null
+  for (; idx < lines.length; idx++) {
+    if (lines[idx].trim().length === 0) continue
+    try {
+      header = JSON.parse(lines[idx]) as PiSessionHeader
+    } catch {
+      return null
+    }
+    idx++
+    break
+  }
+  if (header?.type !== 'session') return null
+
+  let sessionInfoName: string | undefined
+  let firstUserText: string | undefined
+  for (; idx < lines.length; idx++) {
+    const line = lines[idx]
+    if (line.trim().length === 0) continue
+    // Skip the parse for lines that can't affect the title: not a session_info
+    // (last wins → must keep scanning ALL of these to end of file) and we
+    // already have the first user message. The prefilter can only
+    // FALSE-positive (a wasted parse), never false-negative — base64 image
+    // payloads contain no quotes, so they can't spuriously match.
+    const maybeSessionInfo = line.includes('"session_info"')
+    if (!maybeSessionInfo && firstUserText !== undefined) continue
+    let entry: PiSessionEntry
+    try {
+      entry = JSON.parse(line) as PiSessionEntry
+    } catch {
+      continue
+    }
+    if (entry.type === 'session_info') sessionInfoName = entry.name
+    else if (
+      firstUserText === undefined &&
+      entry.type === 'message' &&
+      entry.message.role === 'user'
+    ) {
+      firstUserText = textFromUserContent(entry.message.content)
+    }
+  }
+
+  return { header, title: resolveTitle(sessionInfoName, firstUserText) }
 }
 
 /**
@@ -171,15 +232,15 @@ export async function listPiSessionsGlobal(): Promise<SessionInfo[]> {
   const result: SessionInfo[] = []
   for (const filePath of walkAllSessionFiles()) {
     try {
-      const parsed = readPiSessionFile(filePath)
-      if (!parsed || !parsed.header.cwd) continue
+      const row = readPiSessionListRow(filePath)
+      if (!row || !row.header.cwd) continue
       const stat = fs.statSync(filePath)
-      const headerTs = Date.parse(parsed.header.timestamp)
+      const headerTs = Date.parse(row.header.timestamp)
       result.push({
-        sessionId: parsed.header.id,
-        cwd: parsed.header.cwd,
-        projectKey: cwdToProjectKey(parsed.header.cwd),
-        title: deriveTitle(parsed.entries),
+        sessionId: row.header.id,
+        cwd: row.header.cwd,
+        projectKey: cwdToProjectKey(row.header.cwd),
+        title: row.title,
         timestamp: Number.isFinite(headerTs) ? headerTs : stat.mtimeMs,
         lastActivityAt: stat.mtimeMs,
         engineId: 'pi'
