@@ -504,6 +504,36 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(result.sessionId).toBe('oc-sess-1')
   })
 
+  it('a RESOLVED info.error turn still records its real spend and folds it into the dispatching session', async () => {
+    // opencode resolves the prompt with real info.tokens/info.cost even when the
+    // turn errors (the turn ran, it just failed). Pre-fix that branch recorded
+    // costUsd/tokens as null and never folded the spend — a target whose turns
+    // keep erroring spent real money that escaped the cap AND the dispatching
+    // session's breakdown. Must now capture it (parity with Claude failed-subtype).
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    client.prompt.mockResolvedValueOnce({
+      info: {
+        error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } },
+        tokens: { input: 200, output: 80, reasoning: 20 },
+        cost: 0.05
+      },
+      parts: []
+    })
+    const ctx = makeCtx({ toolUseId: 'toolu_err_cost' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolUseId: 'toolu_err_cost',
+        targetEngine: 'opencode',
+        totalTokens: 300, // 200 + 80 + 20
+        costUsd: 0.05
+      })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.05)
+  })
+
   it('a failed createSession rolls back the server ref and returns isError', async () => {
     const { dispatcher, client, deps } = makeHarness()
     client.createSession.mockRejectedValueOnce(new Error('cannot create'))
@@ -766,6 +796,80 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
     const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
     expect(dismiss).toBeTruthy()
     expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-9` })
+  })
+})
+
+describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)', () => {
+  it('re-subscribes after a dropped SSE stream so a later permission.asked still forwards', async () => {
+    // opencode holds /event open for the server's lifetime; a non-aborted end is
+    // a transport DROP. Pre-fix runSseLoop exited on that first end and never
+    // re-subscribed, silently killing approval forwarding for the whole cwd. The
+    // stream below DROPS on its first subscription, then behaves normally — a
+    // permission.asked that arrives after the reconnect must still forward.
+    let subscribeCount = 0
+    const queue: Array<{ id: string; type: string; properties: Record<string, unknown> }> = []
+    let notify: (() => void) | null = null
+    async function* subscribeEvents(
+      signal?: AbortSignal
+    ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
+      subscribeCount++
+      if (subscribeCount === 1) return // simulate a dropped stream (ends, not aborted)
+      while (!signal?.aborted) {
+        if (queue.length === 0) {
+          await new Promise<void>((resolve) => {
+            notify = resolve
+            signal?.addEventListener('abort', () => resolve(), { once: true })
+          })
+          continue
+        }
+        yield queue.shift()!
+      }
+    }
+    const push = (type: string, properties: Record<string, unknown>): void => {
+      queue.push({ id: `e-${queue.length}`, type, properties })
+      notify?.()
+      notify = null
+    }
+
+    const client = { ...makeFakeClient().client, subscribeEvents }
+    // Hang the prompt so the target + its connection record stay alive across
+    // the reconnect (a resolved dispatch would tear the record down).
+    let releasePrompt!: () => void
+    client.prompt = vi.fn(
+      () =>
+        new Promise((r) => {
+          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
+        })
+    ) as typeof client.prompt
+
+    const serverManager = {
+      acquire: vi.fn(async () => ({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })),
+      release: vi.fn()
+    }
+    const deps: DispatcherDeps = {
+      serverManager,
+      makeClient: () => client,
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
+      dispatchTimeoutMs: 2000,
+      heartbeatMs: 50,
+      piAbortSettleGraceMs: 20,
+      sseReconnectDelayMs: 5
+    }
+    const dispatcher = new CrossEngineDispatcher(deps)
+    const ctx = makeCtx()
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    // The loop must reconnect (second subscription) after the drop + delay.
+    await vi.waitFor(() => expect(subscribeCount).toBeGreaterThanOrEqual(2))
+
+    // A permission.asked delivered on the reconnected stream forwards as before.
+    push('permission.asked', { id: 'perm-recon', sessionID: 'oc-sess-1', permission: 'bash' })
+    await vi.waitFor(() =>
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+    )
+
+    releasePrompt()
+    await pending
   })
 })
 
