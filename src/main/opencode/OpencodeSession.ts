@@ -1102,7 +1102,11 @@ export class OpencodeSession extends BaseSession {
     // process and this in-flight abort just fails silently. Captured before the
     // release nulls `this.client`.
     if (this.client && this.openSessionId) {
-      void this.client.abortSession(this.openSessionId).catch(() => {})
+      // Optional-chain the result: cancel() runs on the teardown path (dispose)
+      // and must never throw. abortSession returns a Promise in production, but
+      // a partial/mock client can return undefined — `?.catch` keeps teardown
+      // crash-proof either way.
+      void this.client.abortSession(this.openSessionId)?.catch(() => {})
     }
     if (this.conn) {
       opencodeServerManager.release(this.cwd)
