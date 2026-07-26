@@ -177,6 +177,54 @@ describe('ClaudeSession — H17 fence: a superseded run() finally leaves the liv
   })
 })
 
+describe("ClaudeSession — cancel()'s disconnected survives the dying run's finally", () => {
+  it("the terminal session:status after a run cancel() ended is 'disconnected', not 'idle'", async () => {
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-cancel-status', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    const p1 = session.run('hello') // parks in the for-await
+    session.cancel() // broadcasts disconnected, aborts, marks cancelled
+
+    // Release the run so its finally executes. Pre-fix it re-emitted the
+    // computed 'idle' status over the 'disconnected' cancel() just broadcast.
+    createdHandles[0].end()
+    await p1
+
+    const statuses = sent
+      .filter(([ch]) => ch === 'session:status')
+      .map(([, , d]) => (d as { state?: string }).state)
+    expect(statuses.at(-1)).toBe('disconnected')
+
+    void p1
+  })
+})
+
+describe('ClaudeSession — setModel reverts on control-request failure', () => {
+  it('a rejected activeQuery.setModel restores the previous model (GUARD — fails pre-fix)', async () => {
+    const { win } = makeWin()
+    mockQuery.mockImplementationOnce(() => {
+      const h = makeParkedHandle()
+      ;(h.handle as Record<string, unknown>).setModel = vi.fn(async () => {
+        throw new Error('Model not found')
+      })
+      createdHandles.push(h)
+      return h.handle
+    })
+    const session = new ClaudeSession('routing-setmodel', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    const p1 = session.run('hi') // activeQuery is assigned synchronously
+    const before = session.status.model
+
+    await expect(session.setModel('claude-nonexistent-9')).rejects.toThrow('Model not found')
+    // Pre-fix this.model stayed on the rejected model; now it reverts.
+    expect(session.status.model).toEqual(before)
+
+    void p1
+  })
+})
+
 describe('ClaudeSession — M-CL3: a DISPOSED (replaced) object cannot re-arm its idle timer', () => {
   it('disposed object: run() finally does not re-arm a timer that would disposeFor() the live routingId', async () => {
     vi.useFakeTimers()

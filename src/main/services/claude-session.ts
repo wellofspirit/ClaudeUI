@@ -253,6 +253,16 @@ export class ClaudeSession extends BaseSession {
    * the LIVE session that now owns the routingId (M-CL3).
    */
   private disposed = false
+  /**
+   * Set by cancel() (user Stop / idle timeout), cleared at the start of every
+   * run(). cancel() broadcasts a terminal `disconnected` status; without this
+   * flag the dying run's finally then re-emits its computed `idle` status a
+   * moment later (the abort it triggers only reaches the parked for-await
+   * asynchronously), clobbering `disconnected`, and re-arms the inactivity
+   * timer cancel() just cleared. The disposed/superseded fences don't cover a
+   * plain cancel(), so this guards that path specifically.
+   */
+  private cancelled = false
   /** Single source of truth for query method signatures: the SDK layer's
    *  QueryHandle. Previously duplicated here as an inline interface; drift
    *  between the two kept biting us when new methods shipped. */
@@ -422,6 +432,9 @@ export class ClaudeSession extends BaseSession {
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void> {
     this.clearInactivityTimer()
+    // A fresh run reactivates a session a prior cancel() retired — re-enable the
+    // finally's status emit / idle-timer re-arm (see the `cancelled` field doc).
+    this.cancelled = false
 
     // null prompt = spawn-only mode (for voice server, etc.)
     // Just ensure the SDK process is running without sending a message.
@@ -514,7 +527,10 @@ export class ClaudeSession extends BaseSession {
       this.rejectActiveQuery = reject
     })
 
-    // Collect stderr chunks so we can include them in error messages
+    // Collect stderr chunks so we can include them in error messages. Bounded
+    // to the last STDERR_MAX_CHUNKS entries (see the push site) so a chatty
+    // child can't grow this unbounded for the process lifetime.
+    const STDERR_MAX_CHUNKS = 200
     const stderrChunks: string[] = []
 
     try {
@@ -730,6 +746,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
                 }
               }
               stderrChunks.push(text)
+              // Bound retention: only the last handful is ever surfaced (error
+              // display slices -30/-20). A chatty child would otherwise grow
+              // this array for the whole process lifetime. 200 keeps ample
+              // crash-diagnostic context while capping memory.
+              if (stderrChunks.length > STDERR_MAX_CHUNKS) {
+                stderrChunks.splice(0, stderrChunks.length - STDERR_MAX_CHUNKS)
+              }
             }
           },
           // Resume precedence: once cli.js has minted a stable sessionId
@@ -797,6 +820,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
               }
             }
 
+            // A cancel/interrupt during the await above (the localAuto
+            // classifier), or one racing this callback's entry, may have ALREADY
+            // fired opts.signal's 'abort'. The listener added below only fires on
+            // a FUTURE abort, so without this pre-check the approval promise would
+            // hang forever and its card would linger in the UI. Bail before we
+            // even surface a request.
+            if (opts.signal.aborted) {
+              return { behavior: 'deny' as const, message: 'Cancelled' }
+            }
+
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,
@@ -817,10 +850,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
               (resolve) => {
                 this.pendingApprovals.set(requestId, { resolve })
 
-                opts.signal.addEventListener('abort', () => {
-                  this.pendingApprovals.delete(requestId)
-                  resolve({ decision: 'deny' })
-                })
+                opts.signal.addEventListener(
+                  'abort',
+                  () => {
+                    this.pendingApprovals.delete(requestId)
+                    resolve({ decision: 'deny' })
+                  },
+                  { once: true }
+                )
               }
             )
 
@@ -979,7 +1016,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // object (replaced under its routingId) must never emit on the shared
       // routingId or re-arm a timer whose later cancel() would tear down the
       // LIVE session that now owns that routingId.
-      if (!superseded && !this.disposed) {
+      if (!superseded && !this.disposed && !this.cancelled) {
         this.sendStatus()
         this.resetInactivityTimer()
       }
@@ -1036,6 +1073,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         this.handleSystemMessage(msg)
         return
       case 'control_response':
+        // NOTE: currently unreachable. sdk/query.ts's handleInbound consumes
+        // every `control_response` via ControlChannel.handleResponse and returns
+        // before pushing to the queue, so dispatchMessage never sees one — the
+        // session:error surfacing in handleControlResponse cannot fire from here.
+        // Control errors DO surface as rejections of the specific awaited control
+        // request. Making the generic surfacing fire would need a control-error
+        // hook exposed from the SDK layer (sdk/control.ts); left in place as a
+        // forward-compat safety net if query.ts ever routes these up.
         this.handleControlResponse(msg)
         return
       case 'request_usage':
@@ -1581,9 +1626,21 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   async setModel(model: string): Promise<void> {
+    const previousModel = this.model
     this.model = model
     if (this.activeQuery) {
-      await this.activeQuery.setModel(model)
+      try {
+        await this.activeQuery.setModel(model)
+      } catch (err) {
+        // Revert on failure — leaving this.model on a model cli.js rejected
+        // skews capabilities, context-window sizing and the cost fallback
+        // against a model the session isn't actually running (setPermissionMode
+        // reverts the same way). Re-emit so the renderer resyncs to the real
+        // model, then propagate so the caller sees the failure.
+        this.model = previousModel
+        this.sendStatus()
+        throw err
+      }
     }
     // Re-emit status so capabilities (derived from model) are up to date in the renderer.
     this.sendStatus()
@@ -2133,6 +2190,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   cancel(): void {
+    // Retire the object until the next run() — see the `cancelled` field doc.
+    // Guards the dying run's finally from re-emitting `idle` over the
+    // `disconnected` broadcast below and from re-arming the idle timer.
+    this.cancelled = true
+
     // Deny all pending approvals
     for (const [, entry] of this.pendingApprovals) {
       entry.resolve({ decision: 'deny' })

@@ -370,7 +370,13 @@ export async function computeTokenMetrics(
           // sum below — no realistic transcript has both). duration_ms is
           // deliberately NOT accumulated here — the turn-span accumulator
           // (above) is the sole source for the emitted totalDurationMs.
-          totalCostUsd += (data.total_cost_usd as number) || 0
+          //
+          // total_cost_usd is CUMULATIVE-per-process — REPLACE, never add (same
+          // invariant handleResultMessage enforces on the live overlay, where
+          // `+=` was a documented bug: N result lines in one process would each
+          // re-add the whole running total). Keep the last value; fall back to
+          // the running figure when a line omits the field.
+          totalCostUsd = (data.total_cost_usd as number) || totalCostUsd
           totalApiDurationMs += (data.duration_api_ms as number) || 0
         }
       } catch (err) {

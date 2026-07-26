@@ -39,12 +39,34 @@ class PairedTransport implements Transport {
         resolver(message)
         return
       }
+      // A message carrying an id we never issued AND a `method` is a
+      // SERVER-INITIATED request (sampling/createMessage, elicitation,
+      // roots/list). Our cli.js peer doesn't route these, so dropping it left
+      // the hosted server's Protocol layer awaiting a response forever. Reply
+      // with a JSON-RPC error so its pending request settles. Latent today
+      // (our SDK servers are tool-only) but a correctness hazard if one ever
+      // initiates a request.
+      if ('method' in message) {
+        this.onmessage?.({
+          jsonrpc: '2.0',
+          id: message.id,
+          error: { code: -32601, message: 'Server-initiated requests are not supported' }
+        } as unknown as JSONRPCMessage)
+        return
+      }
     }
     // Otherwise it's a notification / unsolicited — drop on the floor.
     // (Our cli.js peer doesn't expect unsolicited messages from SDK MCP servers.)
   }
 
   async close(): Promise<void> {
+    // Settle anything still awaiting a server response so a dispatch in flight
+    // when the transport closes rejects instead of hanging (`pending` was
+    // previously never drained on close).
+    for (const [id, resolver] of this.pending) {
+      resolver(cancelledResponse(id))
+    }
+    this.pending.clear()
     this.onclose?.()
   }
 

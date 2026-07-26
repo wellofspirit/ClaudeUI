@@ -161,4 +161,54 @@ describe('McpHost.ensureStarted', () => {
       error: { code: -32601 }
     })
   })
+
+  it('replies with an error to a SERVER-INITIATED request instead of dropping it (would hang the server)', async () => {
+    const received: Array<Record<string, unknown>> = []
+    let transport: { onmessage?: (m: unknown) => void; send: (m: unknown) => Promise<void> }
+    const instance = {
+      connect: vi.fn(async (t: { onmessage?: (m: unknown) => void; start?: () => Promise<void> }) => {
+        transport = t as typeof transport
+        t.onmessage = (m) => received.push(m as Record<string, unknown>)
+        await t.start?.()
+      })
+    } as unknown as SdkMcpServer['instance']
+    const host = new McpHost({ srv: { type: 'sdk', name: 'srv', tools: [], instance } })
+
+    // Kick a dispatch (don't await — the fake server never responds) so
+    // ensureStarted() runs connect() and wires onmessage/transport.
+    void host.dispatch('srv', { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+    await new Promise((r) => setTimeout(r, 5))
+    received.length = 0 // ignore the tools/list inject echo
+
+    // The server now initiates a request (sampling/createMessage) carrying an id
+    // we never issued. Previously this fell through send()'s "drop on the floor"
+    // branch and the server's Protocol layer awaited a reply forever.
+    await transport!.send({ jsonrpc: '2.0', id: 999, method: 'sampling/createMessage', params: {} })
+    expect(received).toContainEqual({
+      jsonrpc: '2.0',
+      id: 999,
+      error: { code: -32601, message: 'Server-initiated requests are not supported' }
+    })
+  })
+
+  it('close() settles a dispatch still awaiting a server response instead of leaving it hanging', async () => {
+    let transport: { onmessage?: (m: unknown) => void; close: () => Promise<void> }
+    const instance = {
+      connect: vi.fn(
+        async (t: { onmessage?: (m: unknown) => void; start?: () => Promise<void> }) => {
+          transport = t as typeof transport
+          t.onmessage = () => {} // server never responds
+          await t.start?.()
+        }
+      )
+    } as unknown as SdkMcpServer['instance']
+    const host = new McpHost({ srv: { type: 'sdk', name: 'srv', tools: [], instance } })
+
+    const p = host.dispatch('srv', { jsonrpc: '2.0', id: 5, method: 'tools/call', params: {} })
+    await new Promise((r) => setTimeout(r, 5)) // request injected + pending, no response
+    await transport!.close()
+
+    const res = (await p) as { id?: number; error?: { code: number } }
+    expect(res).toMatchObject({ jsonrpc: '2.0', id: 5, error: { code: -32800 } })
+  })
 })

@@ -676,3 +676,28 @@ describe('loadBackgroundOutput containment (R6)', () => {
     expect(res).toEqual({ content: null, purged: true })
   })
 })
+
+describe('computeTokenMetrics — result-line cost is cumulative-per-process (replace, not add)', () => {
+  it('takes the LAST result total_cost_usd, not the SUM of all result lines (GUARD — fails pre-fix)', async () => {
+    // Real transcripts carry no `result` lines today (this branch is latent),
+    // but if they return, total_cost_usd is cumulative-per-process — the last
+    // line already contains the running total. `+=` double-counted it.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-result-cost-'))
+    const file = path.join(dir, 'x.jsonl')
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'result', total_cost_usd: 5 }),
+        JSON.stringify({ type: 'result', total_cost_usd: 8 })
+      ].join('\n') + '\n',
+      'utf-8'
+    )
+    try {
+      const metrics = await computeTokenMetrics(file)
+      // Replace semantics → 8 (the last cumulative), NOT 13 (5 + 8).
+      expect(metrics.totalCostUsd).toBe(8)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
