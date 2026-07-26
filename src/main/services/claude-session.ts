@@ -16,7 +16,8 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics, projectKeyForCwd } from './session-history'
+import { computeTokenMetrics } from './session-history'
+import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
@@ -2006,15 +2007,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   /** Transcript JSONL path for a given session id under this session's cwd.
-   *  Project key derivation is shared with session-history (projectKeyForCwd)
-   *  — the old inline `/`+`.`-only replace produced a nonexistent path for
-   *  every Windows cwd, silently no-opping reconciliation and resume seeding. */
+   *  Project key derivation is the shared `cwdToProjectKey` (replaces EVERY
+   *  non-alphanumeric char with '-', matching cli.js's on-disk naming) — the
+   *  old inline `/`+`.`-only replace produced a nonexistent path for every
+   *  Windows cwd (and any cwd with `_`/space), silently no-opping
+   *  reconciliation and resume seeding. */
   private transcriptPathFor(sessionId: string): string {
     return path.join(
       os.homedir(),
       '.claude',
       'projects',
-      projectKeyForCwd(this.cwd),
+      cwdToProjectKey(this.cwd),
       `${sessionId}.jsonl`
     )
   }

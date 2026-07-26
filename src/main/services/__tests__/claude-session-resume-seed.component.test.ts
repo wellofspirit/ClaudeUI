@@ -50,9 +50,6 @@ vi.mock('../claude-mcp', () => ({
 }))
 vi.mock('../session-history', () => ({
   computeTokenMetrics: mockComputeTokenMetrics,
-  // Real derivation — transcriptPathFor's Windows-vs-POSIX behavior is part
-  // of what these tests guard.
-  projectKeyForCwd: (cwd: string) => cwd.replace(/[\\/:.]/g, '-'),
   fallbackBlockText: vi.fn(() => '')
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
