@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import simpleGit from 'simple-git'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
@@ -125,6 +126,120 @@ describe('removeWorktree', () => {
     // removeWorktree uses --force internally, so dirty state should not block.
     await removeWorktree(info.worktreePath, info.worktreeBranch, info.gitRoot)
     expect(fs.existsSync(info.worktreePath)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// removeWorktree — containment + branch protection (audit C2)
+// ---------------------------------------------------------------------------
+
+describe('removeWorktree containment', () => {
+  let repo: TempGitRepo
+  let outside: string
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    // A sibling directory OUTSIDE the repo entirely — the classic C2 target.
+    outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'claudeui-outside-'))
+    await fs.promises.writeFile(path.join(outside, 'keepme.txt'), 'precious\n', 'utf-8')
+  })
+
+  afterEach(async () => {
+    await repo.cleanup()
+    try {
+      await fs.promises.rm(outside, { recursive: true, force: true, maxRetries: 5 })
+    } catch {
+      /* ignore */
+    }
+  })
+
+  it('refuses to remove a path outside the managed worktrees directory (and never rm -rf it)', async () => {
+    await expect(removeWorktree(outside, 'main', repo.path)).rejects.toThrow(
+      /outside the managed directory/
+    )
+    // The out-of-tree directory and its contents are untouched.
+    expect(fs.existsSync(outside)).toBe(true)
+    expect(fs.existsSync(path.join(outside, 'keepme.txt'))).toBe(true)
+  })
+
+  it('refuses to remove the repository root itself', async () => {
+    await expect(removeWorktree(repo.path, 'main', repo.path)).rejects.toThrow(
+      /outside the managed directory/
+    )
+    expect(fs.existsSync(path.join(repo.path, 'README.md'))).toBe(true)
+  })
+
+  it('a contained non-worktree path is handled without touching anything outside', async () => {
+    // A stray directory inside .claude/worktrees that is NOT a registered worktree.
+    const stray = path.join(repo.path, '.claude', 'worktrees', 'stray')
+    await fs.promises.mkdir(stray, { recursive: true })
+    await fs.promises.writeFile(path.join(stray, 'f.txt'), 'x\n', 'utf-8')
+
+    await expect(removeWorktree(stray, 'main', repo.path)).resolves.toBeUndefined()
+
+    // Nothing outside the repo was affected.
+    expect(fs.existsSync(path.join(outside, 'keepme.txt'))).toBe(true)
+  })
+
+  it('derives the branch from git records — a renderer-supplied branch name is ignored', async () => {
+    const info = await createWorktree(repo.path, 'inject')
+    // A valuable, non-checked-out branch the renderer must not be able to target
+    // by passing its name as the "branch" argument.
+    await simpleGit(repo.path).raw(['branch', 'important-release'])
+
+    // Malicious/incorrect renderer-supplied branch.
+    await removeWorktree(info.worktreePath, 'important-release', info.gitRoot)
+
+    const branches = await simpleGit(repo.path).branch()
+    // The targeted branch survives; only the porcelain-derived branch is removed.
+    expect(branches.all).toContain('important-release')
+    expect(branches.all).not.toContain('worktree-inject')
+    expect(fs.existsSync(info.worktreePath)).toBe(false)
+  })
+
+  it('never deletes main/master even when passed as the branch argument', async () => {
+    const info = await createWorktree(repo.path, 'safe')
+    await removeWorktree(info.worktreePath, 'main', info.gitRoot)
+
+    const branches = await simpleGit(repo.path).branch()
+    expect(branches.all).toContain('main')
+    expect(branches.all).not.toContain('worktree-safe')
+    expect(fs.existsSync(info.worktreePath)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// createWorktree — name validation (audit M-GT3)
+// ---------------------------------------------------------------------------
+
+describe('createWorktree name validation', () => {
+  let repo: TempGitRepo
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+  })
+
+  afterEach(async () => {
+    await repo.cleanup()
+  })
+
+  it.each(['../evil', '..', '.', 'a/b', 'a\\b', '', 'foo/../../etc', '.hidden', ' leading'])(
+    'rejects unsafe name %j',
+    async (name) => {
+      await expect(createWorktree(repo.path, name)).rejects.toThrow(/Invalid worktree name/)
+      // No directory should have been created under the managed root.
+      const base = path.join(repo.path, '.claude', 'worktrees')
+      if (fs.existsSync(base)) {
+        const entries = await fs.promises.readdir(base)
+        expect(entries).toEqual([])
+      }
+    }
+  )
+
+  it('accepts a valid name with the allowed punctuation set', async () => {
+    const info = await createWorktree(repo.path, 'ok_name-1.2')
+    expect(info.worktreeName).toBe('ok_name-1.2')
+    expect(fs.existsSync(info.worktreePath)).toBe(true)
   })
 })
 

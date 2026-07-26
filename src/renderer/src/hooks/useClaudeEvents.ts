@@ -16,6 +16,16 @@ function notifyIfNeeded(routingId: string, title: string, body: string): void {
 
 const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
 
+/**
+ * Built-in tool names whose result text is trusted to declare an entered
+ * worktree. Gating on an EXACT name (not a `/worktree/i` substring over every
+ * tool) closes the injection funnel behind audit C2: a third-party MCP tool
+ * named e.g. `mcp__evil__worktree_helper` can no longer plant a `worktreePath`
+ * that later flows into `worktree:remove`. `EnterWorktree` is the only cli.js
+ * built-in that emits "Created worktree at: <path> on branch: <branch>".
+ */
+export const WORKTREE_ENTER_TOOL_NAMES = new Set(['EnterWorktree'])
+
 /** Rebuild todos from all messages when a task-related tool call is detected */
 function rebuildTodos(routingId: string): void {
   const { sessions, setTodos } = useSessionStore.getState()
@@ -262,7 +272,7 @@ export function useClaudeEvents(): void {
               if (
                 toolBlock &&
                 toolBlock.type === 'tool_use' &&
-                /worktree/i.test(toolBlock.toolName)
+                WORKTREE_ENTER_TOOL_NAMES.has(toolBlock.toolName)
               ) {
                 // SDK result format: "Created worktree at <path> on branch <branch>. ..."
                 const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
