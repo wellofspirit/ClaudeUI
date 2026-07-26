@@ -303,9 +303,11 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     if (getProxyAllSubprocesses()) env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
     else delete env.CLAUDEUI_PROXY_SUBPROCESSES
   } else {
-    delete env.HTTP_PROXY
-    delete env.HTTPS_PROXY
-    delete env.ALL_PROXY
+    // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
+    // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
+    // (docs/protocol/01-transport §1.5); deleting them left a user behind a
+    // corporate/env proxy with no connectivity (M-CL4). Only clear our own
+    // marker so the default subprocess-proxy-strip behavior applies.
     delete env.CLAUDEUI_PROXY_SUBPROCESSES
   }
 
@@ -316,10 +318,12 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   if (endpoint) {
     env.ANTHROPIC_BASE_URL = endpoint.ANTHROPIC_BASE_URL
     env.ANTHROPIC_AUTH_TOKEN = endpoint.ANTHROPIC_AUTH_TOKEN
-  } else {
-    delete env.ANTHROPIC_BASE_URL
-    delete env.ANTHROPIC_AUTH_TOKEN
   }
+  // No in-app endpoint configured: do NOT delete inherited ANTHROPIC_BASE_URL/
+  // ANTHROPIC_AUTH_TOKEN. A user routing through a gateway/LiteLLM via their own
+  // env relies on them and the stock CLI supports them (M-CL4). These inherited
+  // values are the user's own shell env — the Codex/vault path never writes
+  // ANTHROPIC_* to process.env, so this cannot leak vault tokens into Claude.
 
   // Scoped model override: each field is set only when non-empty so partial
   // overrides leave cli.js's defaults intact for the unset families.

@@ -11,13 +11,17 @@ describe('buildEnv anthropic endpoint overlay', () => {
     setEndpointEnv(null)
   })
 
-  it('no endpoint set → ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN stripped from overlay', () => {
+  it('no in-app endpoint → inherited ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN are PRESERVED (M-CL4)', () => {
+    // A user routing through a gateway/LiteLLM via their own shell env relies on
+    // these and the stock CLI supports them; deleting them (the old behavior)
+    // silently removed their token auth + endpoint. These are the user's own
+    // env — the vault path never writes ANTHROPIC_* to process.env.
     const env = buildEnv({
-      ANTHROPIC_BASE_URL: 'http://should-not-leak',
-      ANTHROPIC_AUTH_TOKEN: 'should-not-leak'
+      ANTHROPIC_BASE_URL: 'http://gateway.corp',
+      ANTHROPIC_AUTH_TOKEN: 'user-shell-token'
     })
-    expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
-    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://gateway.corp')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('user-shell-token')
   })
 
   it('endpoint set → overlays both env vars on the spawn env', () => {
