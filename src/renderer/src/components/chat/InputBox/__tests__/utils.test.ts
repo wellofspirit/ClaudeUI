@@ -133,7 +133,7 @@ describe('resolveSendAction', () => {
     expect(result.type).toBe('send-prompt')
   })
 
-  it('queue path does not include attachments', () => {
+  it('queue path includes attachments (an image queued mid-turn is not dropped)', () => {
     const files = [
       {
         id: '1',
@@ -145,8 +145,12 @@ describe('resolveSendAction', () => {
       }
     ]
     const result = resolveSendAction({ ...baseCtx, isRunning: true, attachedFiles: files })
-    // Queue only sends text, not attachments
-    expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
+    expect(result.type).toBe('queue-prompt')
+    if (result.type === 'queue-prompt') {
+      expect(result.prompt).toBe('Hello Claude')
+      expect(result.attachments).toHaveLength(1)
+      expect(result.attachments![0].mediaType).toBe('image/png')
+    }
   })
 })
 

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useRef, useCallback, useEffect, useMemo } from 'react'
 import {
   useSessionStore,
   useActiveSession,
@@ -107,7 +107,13 @@ export function InputBox(): React.JSX.Element {
 
   const permissionMode = useActiveSession((s) => s.permissionMode)
 
-  const [attachedFiles, setAttachedFiles] = useState<FileAttachment[]>([])
+  // Attachments live per-session in the store (mirrors draftText) so a file
+  // attached in session A can never be sent from B, and is restored on return
+  // to A (gpt#14). Async file reads apply to the session they were dropped into.
+  const attachedFiles = useActiveSession((s) => s.draftAttachments)
+  const addDraftAttachments = useSessionStore((s) => s.addDraftAttachments)
+  const removeDraftAttachment = useSessionStore((s) => s.removeDraftAttachment)
+  const setDraftAttachments = useSessionStore((s) => s.setDraftAttachments)
 
   // Slash command autocomplete — merge SDK commands with filesystem-scanned custom commands
   const slashCommands = useSessionStore((s) => s.slashCommands)
@@ -455,12 +461,15 @@ export function InputBox(): React.JSX.Element {
     })
     if (action.type === 'noop') return
 
-    setText('')
-    if (attachedFiles.length > 0) setAttachedFiles([])
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    const clearInput = (): void => {
+      setText('')
+      if (activeSessionId) setDraftAttachments(activeSessionId, [])
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    }
 
     switch (action.type) {
       case 'side-question': {
+        clearInput()
         const { setBtwQuestion, setBtwResponse } = useSessionStore.getState()
         setBtwQuestion(activeSessionId!, action.question)
         window.api
@@ -474,17 +483,35 @@ export function InputBox(): React.JSX.Element {
         return
       }
       case 'clear-session': {
+        clearInput()
         const { sessions, createNewSession } = useSessionStore.getState()
         const session = sessions[activeSessionId!]
         if (session) createNewSession(uuid(), session.cwd)
         return
       }
-      case 'queue-prompt': {
-        await window.api.sendPrompt(activeSessionId!, action.prompt)
-        return
-      }
+      case 'queue-prompt':
       case 'send-prompt': {
-        await doSend(action.prompt, action.attachments)
+        // Clear the input only AFTER the send resolves. On failure (remote
+        // disconnect, spawn error) the draft + attachments are left intact and
+        // the error surfaced, so the prompt is never silently lost (gpt#15).
+        const sessionId = activeSessionId!
+        try {
+          if (action.type === 'queue-prompt') {
+            await window.api.sendPrompt(sessionId, action.prompt, action.attachments)
+          } else {
+            await doSend(action.prompt, action.attachments)
+          }
+        } catch (err) {
+          useSessionStore.getState().addError(sessionId, `Failed to send message: ${err}`)
+          return
+        }
+        // Only clear the textarea if the user is still on this session; always
+        // clear the attachments of the session the send targeted.
+        if (useSessionStore.getState().activeSessionId === sessionId) {
+          setText('')
+          if (textareaRef.current) textareaRef.current.style.height = 'auto'
+        }
+        setDraftAttachments(sessionId, [])
         return
       }
     }
@@ -575,7 +602,11 @@ export function InputBox(): React.JSX.Element {
   const visionEnabled = capabilities.vision
   const addFiles = useCallback(
     async (files: File[]) => {
-      if (!visionEnabled) return
+      if (!visionEnabled || !activeSessionId) return
+      // Capture the target session NOW: file reads are async and the user may
+      // switch sessions before they finish. The finished attachments land on the
+      // session they were dropped into, never the now-active one (gpt#14).
+      const targetSessionId = activeSessionId
       const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
       if (accepted.length === 0) return
       const newAttachments: FileAttachment[] = []
@@ -597,9 +628,9 @@ export function InputBox(): React.JSX.Element {
           window.api.logError('InputBox', `Failed to process file ${file.name}: ${err}`)
         }
       }
-      if (newAttachments.length > 0) setAttachedFiles((prev) => [...prev, ...newAttachments])
+      if (newAttachments.length > 0) addDraftAttachments(targetSessionId, newAttachments)
     },
-    [visionEnabled]
+    [visionEnabled, activeSessionId, addDraftAttachments]
   )
 
   const handleFileChange = useCallback(
@@ -622,9 +653,12 @@ export function InputBox(): React.JSX.Element {
     [addFiles]
   )
 
-  const removeFile = useCallback((id: string) => {
-    setAttachedFiles((prev) => prev.filter((i) => i.id !== id))
-  }, [])
+  const removeFile = useCallback(
+    (id: string) => {
+      if (activeSessionId) removeDraftAttachment(activeSessionId, id)
+    },
+    [activeSessionId, removeDraftAttachment]
+  )
 
   const handleSelectModel = useCallback(
     (value: string) => {
