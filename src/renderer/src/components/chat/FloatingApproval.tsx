@@ -277,12 +277,16 @@ function FloatingQuestionCard({ approval }: { approval: PendingApproval }): Reac
     type: 'tool_use',
     toolUseId: approval.toolUseId ?? approval.requestId,
     toolName: 'AskUserQuestion',
-    toolInput: approval.input as Record<string, unknown>
+    toolInput: (approval.input as Record<string, unknown>) ?? {}
   }
-  // approval.input is {questions: AskUserQuestion[]} — already normalized by event-mapper
+  // approval.input is {questions: AskUserQuestion[]} — already normalized by
+  // event-mapper. Null-guard the access: a malformed approval with no input must
+  // not throw here (that unmounts the whole app to a blank screen — M-RN2).
   const questionView = {
     kind: 'question' as const,
-    questions: ((approval.input as Record<string, unknown>).questions as import('../../../../shared/types').AskUserQuestion[]) ?? []
+    questions:
+      ((approval.input as Record<string, unknown> | undefined)
+        ?.questions as import('../../../../shared/types').AskUserQuestion[]) ?? []
   }
   return <AskUserQuestionBlock block={synthetic} view={questionView} approval={approval} />
 }
