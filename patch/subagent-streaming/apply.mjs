@@ -687,7 +687,15 @@ if (src.includes(patchDMarker)) {
     src = src.replace(oldBg, newBg)
     console.log('Patched background agent output writer.')
   } else {
-    console.log('WARNING: Background agent output writer not found.')
+    // This sub-patch inserts NO marker of its own, so the final verify loop
+    // (which only checks patchDMarker from the primary text-fn patch above)
+    // cannot catch its absence. A silent skip ships background `.output` files
+    // with thinking blocks missing while Patch D still counts as applied. If
+    // an upstream reshape moves this map, fail loudly instead of shipping
+    // silently-degraded background transcripts.
+    console.error('ERROR: Background agent output writer not found (Patch D sub-patch).')
+    console.error('The background polling .map() structure may have changed upstream.')
+    process.exit(1)
   }
 
   patchCount++
