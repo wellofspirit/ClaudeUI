@@ -12,6 +12,25 @@
 
 export const MOCKUP_ASSET_SCHEME = 'mockup-asset'
 
+/**
+ * Canonical mockup-id shape: an 8-char lowercase hex string (4 random bytes).
+ * The id is interpolated verbatim into the privileged scheme's HOSTNAME
+ * (`<id>.m`), which is what browsers key origin/storage isolation on. A
+ * malformed id (containing `/`, `?`, `@`, `.`, uppercase, …) could smuggle
+ * extra authority/path/query segments into the URL or collapse two mockups
+ * onto one origin, defeating the per-mockup isolation this scheme exists for.
+ * The protocol/route side already rejects anything but this shape, so a build
+ * that produces a non-conforming id is broken regardless — fail fast here at
+ * construction time rather than emitting a URL that silently 404s or leaks.
+ */
+const MOCKUP_ID_RE = /^[a-f0-9]{8}$/
+
+function assertValidMockupId(id: string): void {
+  if (!MOCKUP_ID_RE.test(id)) {
+    throw new Error(`Invalid mockup id: ${JSON.stringify(id)} (must match ${MOCKUP_ID_RE})`)
+  }
+}
+
 function toBase64Url(input: string): string {
   const bytes = new TextEncoder().encode(input)
   let binary = ''
@@ -31,6 +50,7 @@ export interface BuildMockupUrlOpts {
 }
 
 export function buildMockupUrl(cwd: string, id: string, opts?: BuildMockupUrlOpts): string {
+  assertValidMockupId(id)
   const b64 = toBase64Url(cwd)
   const params = new URLSearchParams()
   if (opts?.dark) params.set('dark', '1')
@@ -45,6 +65,7 @@ export function buildMockupUrl(cwd: string, id: string, opts?: BuildMockupUrlOpt
  * renderer-side message bridge to validate `event.origin`.
  */
 export function mockupOriginFor(id: string): string {
+  assertValidMockupId(id)
   return `${MOCKUP_ASSET_SCHEME}://${id}.m`
 }
 
@@ -79,6 +100,7 @@ export function buildMockupHttpUrl(
   id: string,
   opts: BuildMockupHttpUrlOpts
 ): string {
+  assertValidMockupId(id)
   const b64 = toBase64Url(cwd)
   const params = new URLSearchParams()
   params.set('token', opts.token)

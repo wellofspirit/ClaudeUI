@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { buildMockupUrl, mockupOriginFor, MOCKUP_ASSET_SCHEME } from '../mockup-url'
+import {
+  buildMockupUrl,
+  buildMockupHttpUrl,
+  mockupOriginFor,
+  MOCKUP_ASSET_SCHEME
+} from '../mockup-url'
 
 describe('buildMockupUrl', () => {
   it('puts id as a sub-origin and b64cwd in the path', () => {
@@ -80,6 +85,33 @@ describe('buildMockupUrl', () => {
     const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4)
     const decoded = Buffer.from(padded, 'base64url').toString('utf-8')
     expect(decoded).toBe('C:\\Users\\me\\proj')
+  })
+
+  it('rejects a malformed id that could smuggle authority/path/query segments', () => {
+    // These would otherwise interpolate straight into the scheme hostname and
+    // break origin isolation (e.g. an id containing `/`, `?`, `@`, `.`).
+    for (const bad of [
+      'aaaa/bbbb', // path injection
+      'aaaaaaaa?x', // query injection
+      'a@evil.com', // authority injection
+      'AAAAAAAA', // uppercase (origins are case-folded → collision risk)
+      'deadbeef1', // too long
+      'deadbee', // too short
+      'zzzzzzzz', // non-hex
+      '' // empty
+    ]) {
+      expect(() => buildMockupUrl('/x', bad)).toThrow(/Invalid mockup id/)
+      expect(() => mockupOriginFor(bad)).toThrow(/Invalid mockup id/)
+      expect(() => buildMockupHttpUrl('http://host', '/x', bad, { token: 't' })).toThrow(
+        /Invalid mockup id/
+      )
+    }
+  })
+
+  it('accepts a canonical 8-char lowercase hex id', () => {
+    expect(() => buildMockupUrl('/x', 'f92abf54')).not.toThrow()
+    expect(() => mockupOriginFor('f92abf54')).not.toThrow()
+    expect(() => buildMockupHttpUrl('http://host', '/x', 'f92abf54', { token: 't' })).not.toThrow()
   })
 
   it('produces a parseable URL with the expected structure', () => {

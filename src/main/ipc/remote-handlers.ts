@@ -656,11 +656,29 @@ export function registerRemoteHandlers(
     { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
   >()
 
+  const closeMockupWatcher = (key: string): void => {
+    const entry = mockupWatchers.get(key)
+    if (!entry) return
+    try {
+      entry.watcher.close()
+    } catch {
+      /* already closed */
+    }
+    if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+    mockupWatchers.delete(key)
+  }
+
   dispatcher.register('mockup:watch', async (cwd: string, directory: string) => {
     const key = `${cwd}:${directory}`
     if (mockupWatchers.has(key)) return // already watching
 
-    const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
+    // `cwd`/`directory` are caller-supplied and reachable remotely. Confine the
+    // recursive watch to a direct child of the project's mockups root — same
+    // containment as mockup:read-html — so `directory: '../../..'` can't arm a
+    // recursive fs.watch over an arbitrary tree.
+    const mockupsRoot = path.resolve(path.join(cwd, '.claude', 'ui', 'mockups'))
+    const dirPath = path.resolve(path.join(mockupsRoot, directory))
+    if (!isPathInside(mockupsRoot, dirPath)) return
     if (!fs.existsSync(dirPath)) return
 
     const entry = {
@@ -682,17 +700,17 @@ export function registerRemoteHandlers(
       }, 200)
     })
 
+    // Without an 'error' listener a watcher fault (on Windows, deleting the
+    // watched dir raises one asynchronously) becomes a process-level
+    // uncaughtException, and the dead watcher would otherwise stay in the map
+    // behind the has() guard above — permanently blocking re-watch. Drop it.
+    entry.watcher.on('error', () => closeMockupWatcher(key))
+
     mockupWatchers.set(key, entry)
   })
 
   dispatcher.register('mockup:unwatch', async (cwd: string, directory: string) => {
-    const key = `${cwd}:${directory}`
-    const entry = mockupWatchers.get(key)
-    if (entry) {
-      entry.watcher.close()
-      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
-      mockupWatchers.delete(key)
-    }
+    closeMockupWatcher(`${cwd}:${directory}`)
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
