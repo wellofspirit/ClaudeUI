@@ -10,9 +10,20 @@
  *              Dedup by message_id: live opencode rows + Claude reconciled rows
  *              never collide (different message_id namespaces); re-runs are
  *              idempotent via ON CONFLICT(message_id) DO NOTHING.
- *   opencode → via the API (GET /session + /session/{id}/message) against the
- *              running per-cwd server — NOT by parsing the on-disk store.
- *              Best-effort: skipped if no server is up.
+ *   opencode → sessions are enumerated GLOBALLY (across every cwd) by reading
+ *              opencode's own session DB directly — the same source the sidebar
+ *              uses (listOpencodeSessionsGlobal). Messages are then fetched over
+ *              the HTTP API (/session/{id}/message), which IS global-by-id.
+ *              Best-effort: skipped if opencode isn't installed / no server is up.
+ *
+ *              Why not GET /session? It is PROJECT-scoped (only the serve-cwd's
+ *              git-root project — verified against vendor v1.17.14:
+ *              session.list() → listByProject(projectID=ctx.project.id); the
+ *              directory/scope query params only NARROW within that project, and
+ *              the cross-project listGlobal is not exposed over HTTP). A shared
+ *              server at PERSISTED_SESSIONS_DIR would therefore only ever see
+ *              ClaudeUI's own service sessions and never terminal `opencode` runs
+ *              in real project cwds — the whole point of this reconciler (M-DB1).
  *
  * Failures are swallowed (logged) — reconcile is advisory and must never throw
  * into the caller.
@@ -25,6 +36,7 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from './logger'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
+import { listOpencodeSessionsGlobal } from './opencode-session-list'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 
 /** How often the periodic reconcile runs. */
@@ -125,25 +137,36 @@ class UsageReconciler {
   }
 
   /**
-   * Reconcile opencode usage via the API. Best-effort — acquires the per-cwd
-   * server (PERSISTED_SESSIONS_DIR, like model-discovery), lists sessions, then
-   * lists each session's messages and imports assistant messages with tokens.
+   * Reconcile opencode usage. Best-effort:
+   *   1. Enumerate ALL sessions across every cwd by reading opencode's global
+   *      session DB directly (listOpencodeSessionsGlobal) — see the file header
+   *      for why GET /session can't do this (M-DB1).
+   *   2. Acquire the shared server (PERSISTED_SESSIONS_DIR) and fetch each
+   *      session's messages over HTTP — /session/{id}/message is global-by-id
+   *      (it requires the session by id with no project filter), so the shared
+   *      server can read any cwd's messages.
+   *   3. Import assistant messages that carry tokens (dedup by message id).
+   *
+   * Caveat: readOpencodeSessionRows returns only top-level, non-archived
+   * sessions (parent_id IS NULL). Child/forked sessions are excluded — a minor
+   * residual, since opencode fork is disabled in ClaudeUI and terminal runs are
+   * top-level; the previous GET /session miss was total for out-of-project cwds.
    */
   async reconcileOpencode(): Promise<void> {
     let acquired = false
     try {
+      const sessions = await listOpencodeSessionsGlobal().catch(() => [])
+      if (sessions.length === 0) return
+
       const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
       acquired = true
       const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
 
-      const sessions = await client.listSessions().catch(() => [])
-      if (sessions.length === 0) return
-
       const rows: UsageEventRow[] = []
       for (const session of sessions) {
-        const messages = await client.listMessages(session.id).catch(() => [])
+        const messages = await client.listMessages(session.sessionId).catch(() => [])
         for (const m of messages) {
-          const row = this.opencodeMessageToRow(m.info, session.id)
+          const row = this.opencodeMessageToRow(m.info, session.sessionId)
           if (row) rows.push(row)
         }
       }

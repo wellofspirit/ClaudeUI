@@ -18,14 +18,14 @@ const {
   mockGetClaudeEntries,
   mockAcquire,
   mockRelease,
-  mockListSessions,
+  mockListSessionsGlobal,
   mockListMessages,
   MockOpencodeClient
 } = vi.hoisted(() => ({
   mockGetClaudeEntries: vi.fn(),
   mockAcquire: vi.fn(),
   mockRelease: vi.fn(),
-  mockListSessions: vi.fn(),
+  mockListSessionsGlobal: vi.fn(),
   mockListMessages: vi.fn(),
   MockOpencodeClient: vi.fn()
 }))
@@ -43,6 +43,11 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
 
 vi.mock('../../opencode/OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
+}))
+
+// M-DB1: enumeration now goes through the global DB reader, not GET /session.
+vi.mock('../opencode-session-list', () => ({
+  listOpencodeSessionsGlobal: mockListSessionsGlobal
 }))
 
 vi.mock('../persisted-sessions-dir', () => ({
@@ -87,14 +92,15 @@ beforeEach(() => {
   mockGetClaudeEntries.mockReset()
   mockAcquire.mockReset()
   mockRelease.mockReset()
-  mockListSessions.mockReset()
+  mockListSessionsGlobal.mockReset()
   mockListMessages.mockReset()
   MockOpencodeClient.mockReset()
   MockOpencodeClient.mockImplementation(function () {
-    return { listSessions: mockListSessions, listMessages: mockListMessages }
+    return { listMessages: mockListMessages }
   })
   // Default: opencode unavailable + no Claude entries (overridden per test)
   mockGetClaudeEntries.mockResolvedValue([])
+  mockListSessionsGlobal.mockResolvedValue([])
   mockAcquire.mockRejectedValue(new Error('no server'))
 })
 afterEach(() => closeDb())
@@ -232,7 +238,9 @@ describe('reconcileOpencode', () => {
   it('imports assistant messages with tokens as usage_event (dedup by message id)', async () => {
     mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
     mockRelease.mockReturnValue(undefined)
-    mockListSessions.mockResolvedValue([{ id: 'ses_oc_1' }])
+    // M-DB1: global enumeration (not GET /session) surfaces terminal opencode
+    // sessions in any cwd; messages are then fetched by id over HTTP.
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_1' }])
     mockListMessages.mockResolvedValue([
       {
         info: {
@@ -271,10 +279,66 @@ describe('reconcileOpencode', () => {
     expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted-sessions')
   })
 
+  it('M-DB1: enumerates sessions across multiple cwds and imports each (via global DB, not GET /session)', async () => {
+    mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
+    // Two sessions from DIFFERENT project cwds — exactly what GET /session (which
+    // is project-scoped to the serve cwd) would MISS. The global DB reader sees
+    // both, and messages are fetched per session by id.
+    mockListSessionsGlobal.mockResolvedValue([
+      { sessionId: 'ses_projA' },
+      { sessionId: 'ses_projB' }
+    ])
+    mockListMessages.mockImplementation(async (sessionId: string) => {
+      if (sessionId === 'ses_projA')
+        return [
+          {
+            info: {
+              id: 'msg_A',
+              role: 'assistant',
+              providerID: 'openai',
+              modelID: 'gpt-4o',
+              cost: 0.02,
+              tokens: { input: 100, output: 50 }
+            }
+          }
+        ]
+      return [
+        {
+          info: {
+            id: 'msg_B',
+            role: 'assistant',
+            providerID: 'openai',
+            modelID: 'gpt-4o',
+            cost: 0.03,
+            tokens: { input: 200, output: 80 }
+          }
+        }
+      ]
+    })
+
+    await usageReconciler.reconcileOpencode()
+
+    expect(getUsageEventByMessageId('msg_A')).toBeDefined()
+    expect(getUsageEventByMessageId('msg_B')).toBeDefined()
+    // Both cwds' sessions were queried for messages.
+    expect(mockListMessages).toHaveBeenCalledWith('ses_projA')
+    expect(mockListMessages).toHaveBeenCalledWith('ses_projB')
+  })
+
   it('skips cleanly when no opencode server is available', async () => {
+    // Sessions exist (from the global DB) but the server can't be acquired.
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_1' }])
     mockAcquire.mockRejectedValue(new Error('server down'))
     await expect(usageReconciler.reconcileOpencode()).resolves.toBeUndefined()
     expect(countUsageEvents()).toBe(0)
+  })
+
+  it('skips cleanly (no server acquire) when there are no opencode sessions', async () => {
+    mockListSessionsGlobal.mockResolvedValue([])
+    await expect(usageReconciler.reconcileOpencode()).resolves.toBeUndefined()
+    expect(countUsageEvents()).toBe(0)
+    // No sessions → never touches the server.
+    expect(mockAcquire).not.toHaveBeenCalled()
   })
 
   it('does not overwrite a live opencode row already present (dedup)', async () => {
@@ -282,7 +346,7 @@ describe('reconcileOpencode', () => {
       liveRow({ id: 'oc_live', engineId: 'opencode', vendorId: 'openai', messageId: 'msg_oc_dup', inputTokens: 42, source: 'live' })
     )
     mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
-    mockListSessions.mockResolvedValue([{ id: 'ses_oc_1' }])
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_1' }])
     mockListMessages.mockResolvedValue([
       {
         info: {
@@ -323,7 +387,7 @@ describe('reconcileAll', () => {
       }
     ])
     mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
-    mockListSessions.mockResolvedValue([{ id: 'ses_x' }])
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_x' }])
     mockListMessages.mockResolvedValue([
       {
         info: { id: 'msg_both_oc', role: 'assistant', providerID: 'openai', modelID: 'gpt-4o', cost: 0.01, tokens: { input: 1, output: 1 } }
