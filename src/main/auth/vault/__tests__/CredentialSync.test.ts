@@ -29,11 +29,13 @@ import {
   REFRESH_MARGIN_MS,
   RETRY_BASE_MS,
   MAX_TRANSIENT_RETRIES,
+  GIVE_UP_BACKOFF_BASE_MS,
   type VaultLike,
   type CodexFeedTarget,
   type CodexCredentialInput,
   type CodexEntrySnapshot
 } from '../CredentialSync'
+import type { FSWatcher } from 'node:fs'
 import type { VaultCredential } from '../codex-oauth'
 
 // ---------------------------------------------------------------------------
@@ -873,6 +875,93 @@ describe('CredentialSync — refresh scheduler', () => {
     expect(sync.needsReauth).toBe(false)
   })
 
+  it('escalating give-up backoff: after a full transient cycle it waits GIVE_UP_BACKOFF_BASE_MS (not 0), and the next give-up escalates to 2x', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const { vault } = makeFakeVault({
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 1000 // margin already passed → normal schedule fires ~immediately
+    })
+    const refreshAccessToken = vi.fn(async () => {
+      throw new Error('fetch failed') // always transient
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeFeedTarget().target, opencode: fakeFeedTarget().target })
+
+    await sync.start()
+    // Drive the first transient-retry cycle to exhaustion: attempts at
+    // t=0, +30s, +90s, +180s (the 4th trips give-up).
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 3)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(4)
+
+    // PRE-FIX: give-up re-scheduled at delay 0 → a tiny advance fires attempt 5.
+    // POST-FIX: it backs off GIVE_UP_BACKOFF_BASE_MS first.
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(4)
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(5)
+
+    // Second transient cycle to exhaustion → give-up #2.
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 3)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(8)
+
+    // Escalation: at only `base` elapsed since give-up #2 it must NOT fire (a
+    // non-escalated backoff would have); by 2*base it does.
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(8)
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(9)
+
+    sync.stop()
+  })
+
+  it('a successful refresh resets the escalating give-up backoff to the normal schedule', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const { vault } = makeFakeVault({
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 1000
+    })
+    const refreshAccessToken = vi
+      .fn<() => Promise<{ access_token: string; refresh_token: string; expires_in: number }>>()
+      // First give-up cycle: 4 transient failures.
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      // Then the give-up backoff attempt succeeds and reschedules off the new expiry.
+      .mockResolvedValue({ access_token: 'a2', refresh_token: 'r2', expires_in: 3600 })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeFeedTarget().target, opencode: fakeFeedTarget().target })
+
+    await sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 3)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(4)
+    // give-up backoff → success → reschedule from the ROTATED token's expiry.
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(5)
+    expect(refreshAccessToken).toHaveBeenLastCalledWith('r1')
+    // Next refresh is the normal margin-based one (giveUpCount was reset), off r2.
+    refreshAccessToken.mockClear()
+    await vi.advanceTimersByTimeAsync(3_600_000 - REFRESH_MARGIN_MS + 1)
+    expect(refreshAccessToken).toHaveBeenCalledWith('r2')
+
+    sync.stop()
+  })
+
   it('stop() clears pending timers — no further refresh attempt fires', async () => {
     vi.useFakeTimers()
     const now = Date.now()
@@ -1276,6 +1365,43 @@ describe('CredentialSync — fs-watch resync', () => {
       await sleep(450) // past the debounce window
       expect(save).toHaveBeenCalledTimes(1)
       expect(save).toHaveBeenCalledWith(expect.objectContaining({ refresh: 'r4' }))
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('an FSWatcher error closes and drops the watcher so it can be re-created (no unhandled process error)', async () => {
+    const now = Date.now()
+    const initial: VaultCredential = {
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 999_999
+    }
+    const { vault } = makeFakeVault(initial)
+    const pi = makeRealFeedTarget(piFile)
+    const opencode = makeRealFeedTarget(opencodeFile)
+    writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
+
+    const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+
+    try {
+      const watchers = (sync as unknown as { watchers: Map<string, FSWatcher> }).watchers
+      const piWatcher = watchers.get('pi')
+      expect(piWatcher).toBeDefined()
+
+      // PRE-FIX (no 'error' listener): emitting 'error' on an EventEmitter with
+      // no listener throws synchronously at the process level. POST-FIX the
+      // handler swallows it, closes the watcher, and drops it from the map so it
+      // is no longer blocked by the `watchers.has(engine)` guard.
+      expect(() => piWatcher!.emit('error', new Error('simulated watcher failure'))).not.toThrow()
+      expect(watchers.has('pi')).toBe(false)
+
+      // A subsequent feed re-arms the watcher (recovery, not permanent death).
+      await sync.feedAll(initial)
+      expect(watchers.has('pi')).toBe(true)
     } finally {
       sync.stop()
     }

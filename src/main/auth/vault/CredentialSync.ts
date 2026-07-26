@@ -69,8 +69,13 @@ export const DEFAULT_WATCH_DEBOUNCE_MS = 500
 
 /** Linear backoff step for a transient (non-401) refresh failure: attempt N waits N * this. */
 export const RETRY_BASE_MS = 30 * 1000
-/** After this many consecutive transient failures, give up the retry loop and fall back to the normal schedule (which fires ~immediately, since the original margin has already passed). */
+/** After this many consecutive transient failures, give up the current retry loop and re-arm on an escalating give-up backoff (below) rather than the normal schedule — the normal schedule fires ~immediately since the original margin has already passed, which would otherwise hammer the token endpoint in a perpetual ~5-requests/3-min loop during an outage. */
 export const MAX_TRANSIENT_RETRIES = 3
+
+/** Base wait after a full transient-retry cycle exhausts. The give-up delay escalates linearly per consecutive give-up cycle (base * N) up to the ceiling, so an extended endpoint outage backs off instead of re-firing immediately. Reset on any successful refresh / adoption / fresh login (via scheduleRefresh). */
+export const GIVE_UP_BACKOFF_BASE_MS = 5 * 60 * 1000
+/** Ceiling for the escalating give-up backoff. The refresh token typically outlives this, so backing off this long is safe — a recovered endpoint refreshes on the next wake (or the engine adopts, resetting the loop). */
+export const GIVE_UP_BACKOFF_MAX_MS = 60 * 60 * 1000
 
 // ---------------------------------------------------------------------------
 // Structural interfaces (deliberately NOT importing the concrete classes —
@@ -182,6 +187,8 @@ export class CredentialSync {
   private refreshTimer: ReturnType<typeof setTimeout> | undefined
   private retryTimer: ReturnType<typeof setTimeout> | undefined
   private retryCount = 0
+  /** Consecutive give-up cycles (each = a full transient-retry chain exhausting). Drives the escalating give-up backoff; reset to 0 by scheduleRefresh() on any healthy re-arm. */
+  private giveUpCount = 0
   private refreshInFlight: Promise<void> | null = null
   private _needsReauth = false
 
@@ -369,6 +376,7 @@ export class CredentialSync {
     this.stop()
     this._needsReauth = false
     this.retryCount = 0
+    this.giveUpCount = 0
     const failures: unknown[] = []
     await Promise.all([
       this.removeChatgptCredential().catch((err) => failures.push(err)),
@@ -468,12 +476,22 @@ export class CredentialSync {
   // -------------------------------------------------------------------------
 
   private scheduleRefresh(cred: VaultCredential): void {
+    // A normal (non-give-up) schedule means we are healthy again — reset the
+    // escalating give-up backoff. Every recovery path (doRefresh success,
+    // adoption, completeLogin, start) routes through here, so this is the single
+    // reset point; the give-up path deliberately re-arms via armRefreshTimer()
+    // to keep escalating.
+    this.giveUpCount = 0
+    this.armRefreshTimer(Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now()))
+  }
+
+  /** Arm the refresh timer at an explicit delay, clearing any prior refresh/retry timer. */
+  private armRefreshTimer(delayMs: number): void {
     this.clearRefreshTimer()
     this.clearRetryTimer()
-    const delay = Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now())
     this.refreshTimer = setTimeout(() => {
       void this.runRefresh()
-    }, delay)
+    }, delayMs)
   }
 
   private clearRefreshTimer(): void {
@@ -527,7 +545,7 @@ export class CredentialSync {
       tokens = await this.refreshAccessTokenFn(cred.refresh)
     } catch (err) {
       if (this.isCurrent(generation) && (await this.isStillCurrentCredential(generation, refreshedIdentity)))
-        this.handleRefreshError(err, cred)
+        this.handleRefreshError(err)
       return
     }
     if (!this.isCurrent(generation)) return
@@ -562,7 +580,7 @@ export class CredentialSync {
     return current?.refresh === refresh
   }
 
-  private handleRefreshError(err: unknown, cred: VaultCredential): void {
+  private handleRefreshError(err: unknown): void {
     if (isRefreshRevoked(err)) {
       this._needsReauth = true
       this.clearRefreshTimer()
@@ -577,12 +595,18 @@ export class CredentialSync {
 
     this.retryCount += 1
     if (this.retryCount > MAX_TRANSIENT_RETRIES) {
+      this.retryCount = 0
+      this.giveUpCount += 1
+      // Escalating backoff instead of scheduleRefresh() (which would fire
+      // ~immediately, since the refresh margin has already passed, and hammer
+      // the endpoint). Reset back to the normal schedule on the next success/
+      // adoption via scheduleRefresh().
+      const backoff = Math.min(GIVE_UP_BACKOFF_BASE_MS * this.giveUpCount, GIVE_UP_BACKOFF_MAX_MS)
       logger.error(
         'CredentialSync',
-        `refresh failed ${this.retryCount - 1} time(s) transiently — giving up this cycle: ${errMessage(err)}`
+        `refresh failed ${MAX_TRANSIENT_RETRIES} time(s) transiently — backing off ${backoff}ms before retry (give-up cycle ${this.giveUpCount}): ${errMessage(err)}`
       )
-      this.retryCount = 0
-      this.scheduleRefresh(cred)
+      this.armRefreshTimer(backoff)
       return
     }
 
@@ -646,6 +670,25 @@ export class CredentialSync {
       const watcher = fs.watch(dir, (_event, changedFilename) => {
         if (!changedFilename || changedFilename !== filename) return
         this.debounceWatch(engine)
+      })
+      // An FSWatcher error (e.g. on Windows, deleting the watched dir raises an
+      // async 'error') with no listener would throw at the process level. Handle
+      // it: close the dead watcher and drop it from the map so the next feed /
+      // schedule can re-create it (the `watchers.has(engine)` guard at the top of
+      // startWatcher would otherwise leave external-rotation adoption dead until
+      // app restart). Only evict THIS watcher, not a replacement that superseded
+      // it.
+      watcher.on('error', (err) => {
+        logger.warn(
+          'CredentialSync',
+          `watcher(${engine}) error — closing so it can be re-created: ${errMessage(err)}`
+        )
+        try {
+          watcher.close()
+        } catch {
+          /* already closed */
+        }
+        if (this.watchers.get(engine) === watcher) this.watchers.delete(engine)
       })
       this.watchers.set(engine, watcher)
     } catch (err) {
