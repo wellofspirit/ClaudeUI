@@ -209,7 +209,19 @@ export function query(input: QueryInput): QueryHandle {
       handleInbound(line, { control, mcpHost, queue, options, hookCallbacks })
     },
     (err) => {
-      queue.finish(new Error(`Failed to parse CLI stream-json: ${err.message}`))
+      // H16: a single malformed line (a stray non-JSON debug print from cli.js
+      // or a plugin) must NOT tear down a LIVE session. Finishing the queue
+      // here reported the session dead while the child + its MCP subprocesses
+      // kept running to app quit — the for-await consumer's next() REJECTS, and
+      // IteratorClose (the iterator's return(), which calls killChild) is
+      // skipped when next() itself rejects, so the child was never signalled.
+      // The next run() then spawned a SECOND `--resume` process alongside the
+      // orphan. Skip the bad line instead; the child's own exit/error events
+      // (below) remain the authoritative teardown signals.
+      wireLog.record('in', { __malformedLine: true, error: err.message })
+      if (process.env.DEBUG_SDK || process.env.DEBUG_HARNESS) {
+        console.error(`[sdk] skipped malformed stream-json line: ${err.message}`)
+      }
     }
   )
   void reader // reader self-attaches; reference kept to silence unused warning

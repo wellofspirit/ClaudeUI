@@ -138,6 +138,12 @@ class ServiceSession {
     } catch (err) {
       if (ac.signal.aborted) return
       logger.debug('ServiceSession', `Service session error: ${err}`)
+      // H16 defense-in-depth: the for-await's next() rejected, so IteratorClose
+      // (the handle's return()/killChild) was skipped — abort our own
+      // controller to guarantee the CLI child + its MCP children are torn down
+      // rather than orphaned. Idempotent when the child already exited (the
+      // abort listener is removed on the child's exit event).
+      ac.abort()
     } finally {
       if (this.abortController === ac) {
         this.activeQuery = null
