@@ -13,7 +13,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock, FileDiff } from '../../shared/types'
-import type { PiAgentMessage, PiAssistantContentBlock, PiEvent, PiToolExecutionPartialResult } from './pi-protocol'
+import type { PiAgentMessage, PiAssistantContentBlock, PiAssistantMessage, PiEvent, PiToolExecutionPartialResult } from './pi-protocol'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -166,26 +166,55 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         recordPiEditToolPaths(state, msg.content)
 
         const message = buildPiChatMessage(messageId, msg.content)
-        const cost = msg.usage.cost.total
+        // `usage` is guarded defensively: an errored/aborted turn (M-PI2) may
+        // carry a partial or absent usage snapshot, and this branch now runs for
+        // those too.
+        const usage = msg.usage as PiAssistantMessage['usage'] | undefined
+        const cost = usage?.cost?.total ?? 0
         state.totalCostUsd += cost
 
-        const outputs: PiMapperOutput[] = [
-          { kind: 'message', message },
-          {
+        const outputs: PiMapperOutput[] = []
+
+        // M-PI4: only surface a message that has content. An instant Esc-abort
+        // ends the turn with an EMPTY assistant message; the persisted converter
+        // (pi-session-list.ts `convertPiEntryMessage`) drops empty-content
+        // assistant messages, so the LIVE stream must too — otherwise the
+        // store's message array (which feeds POSITION-based pi fork anchoring in
+        // fork-anchor.ts) drifts one ahead of the on-disk transcript and every
+        // later fork silently drops the wrong turn.
+        if (message.content.length > 0) {
+          outputs.push({ kind: 'message', message })
+        }
+
+        if (usage) {
+          outputs.push({
             kind: 'usage',
             provider: msg.provider,
             modelId: msg.model,
             tokens: {
-              input: msg.usage.input,
-              output: msg.usage.output,
-              cacheRead: msg.usage.cacheRead,
-              cacheWrite: msg.usage.cacheWrite,
-              ...(msg.usage.reasoning != null ? { reasoning: msg.usage.reasoning } : {})
+              input: usage.input,
+              output: usage.output,
+              cacheRead: usage.cacheRead,
+              cacheWrite: usage.cacheWrite,
+              ...(usage.reasoning != null ? { reasoning: usage.reasoning } : {})
             },
             costUsd: cost,
             messageId
-          }
-        ]
+          })
+        }
+
+        // M-PI2: surface a failed turn (parity with Claude/opencode). pi ends an
+        // errored turn — expired token, exhausted rate limit — with
+        // stopReason:'error' and an errorMessage, previously swallowed into an
+        // empty assistant message with no banner. 'aborted' is a user Stop, NOT
+        // an error, so it never raises a banner.
+        if (msg.stopReason === 'error') {
+          outputs.push({
+            kind: 'error',
+            message: msg.errorMessage || 'pi reported a turn error'
+          })
+        }
+
         return outputs
       }
 

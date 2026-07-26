@@ -203,6 +203,93 @@ describe('mapPiEvent — abort', () => {
   })
 })
 
+describe('mapPiEvent — empty assistant message (M-PI4 fork-anchor parity)', () => {
+  it('does NOT emit a message for an empty-content assistant message_end (instant Esc-abort)', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+
+    // Instant abort: the turn ends before any content was produced.
+    const empty = assistantMsg({ content: [], stopReason: 'aborted' })
+    const out = mapPiEvent({ type: 'message_end', message: empty }, state)
+
+    // Pre-fix this emitted a {kind:'message'} with empty content, which the
+    // persisted converter drops — skewing every later position-based fork.
+    expect(out.some((o) => o.kind === 'message')).toBe(false)
+    // Usage is still surfaced (cost accounting must not be lost).
+    expect(out.some((o) => o.kind === 'usage')).toBe(true)
+  })
+
+  it('still emits a message when the aborted turn has partial content', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ content: [{ type: 'text', text: 'hi' }], stopReason: 'aborted' })
+      },
+      state
+    )
+    expect(out.some((o) => o.kind === 'message')).toBe(true)
+  })
+})
+
+describe('mapPiEvent — turn error surfacing (M-PI2)', () => {
+  it('emits an error output for stopReason:error with the errorMessage', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+
+    const errored = assistantMsg({
+      content: [],
+      stopReason: 'error',
+      errorMessage: 'Rate limit exceeded'
+    })
+    const out = mapPiEvent({ type: 'message_end', message: errored }, state)
+
+    // Pre-fix the error was swallowed — an empty message with no banner.
+    const err = out.find((o) => o.kind === 'error')
+    expect(err).toBeDefined()
+    if (err && err.kind === 'error') expect(err.message).toBe('Rate limit exceeded')
+    // Empty errored turn also drops the empty message (M-PI4) but keeps usage.
+    expect(out.some((o) => o.kind === 'message')).toBe(false)
+    expect(out.some((o) => o.kind === 'usage')).toBe(true)
+  })
+
+  it('falls back to a generic message when stopReason:error carries no errorMessage', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const out = mapPiEvent(
+      { type: 'message_end', message: assistantMsg({ content: [], stopReason: 'error' }) },
+      state
+    )
+    const err = out.find((o) => o.kind === 'error')
+    expect(err && err.kind === 'error' ? err.message : '').toMatch(/pi reported a turn error/)
+  })
+
+  it('does NOT emit an error for a normal stop or a user abort', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const stopped = mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ content: [{ type: 'text', text: 'done' }], stopReason: 'stop' })
+      },
+      state
+    )
+    expect(stopped.some((o) => o.kind === 'error')).toBe(false)
+
+    const state2 = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state2)
+    const aborted = mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ content: [{ type: 'text', text: 'x' }], stopReason: 'aborted' })
+      },
+      state2
+    )
+    expect(aborted.some((o) => o.kind === 'error')).toBe(false)
+  })
+})
+
 describe('mapPiEvent — compaction_end', () => {
   it('with a result: emits a compact_separator message using the summary\'s first line', () => {
     const state = createPiMapperState()
