@@ -17,6 +17,7 @@ import type { ChildProcess } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
 import type { PiEvent, PiRpcCommand, PiRpcResponse } from './pi-protocol'
 import { logger } from '../services/logger'
+import { killProcessTree } from '../services/process-tree'
 
 export interface PiRpcClientOptions {
   cwd: string
@@ -138,15 +139,10 @@ export class PiRpcClient {
   dispose(): void {
     const proc = this.proc
     if (!proc || this.exited) return
-    if (process.platform === 'win32' && proc.pid != null) {
-      // SIGTERM on Windows only kills the parent; taskkill /T /F reaps the whole tree
-      // (pi shells out to bash for the `bash` tool). Still call proc.kill() so the
-      // in-process 'exit' event fires (needed for pending-request/exit-handler cleanup).
-      proc.kill()
-      spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore' })
-    } else {
-      proc.kill('SIGTERM')
-    }
+    // M-PI3: taskkill MUST reap the tree before proc.kill() runs — see
+    // killProcessTree. taskkill terminating the root still fires the 'exit'
+    // event pending-request/exit-handler cleanup relies on.
+    killProcessTree(proc)
   }
 
   get pid(): number | undefined {

@@ -11,6 +11,7 @@ import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
 import type { CallerSessionLookup, DispatchAgentFn } from './opencode-hosted-tools'
 import type { OpencodeMcpEntry } from './claude-mcp-bridge'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
+import { killProcessTree } from '../services/process-tree'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
 
@@ -477,15 +478,10 @@ export class OpencodeServerManager {
   }
 
   private killProcess(child: ChildProcess): void {
-    if (process.platform === 'win32' && child.pid != null) {
-      // SIGTERM on Windows only kills the parent; taskkill /T /F reaps the whole tree.
-      // We still call child.kill() so the in-process 'exit' event fires (needed for
-      // the handle-drop listener wired in resolveHandle).
-      child.kill()
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
-    } else {
-      child.kill('SIGTERM')
-    }
+    // M-OC4: taskkill MUST reap the tree before child.kill() runs — see
+    // killProcessTree. taskkill terminating the root still fires the 'exit'
+    // event the handle-drop listener (resolveHandle) relies on.
+    killProcessTree(child)
   }
 
   /** For testing: the count of live (resolved) servers. */

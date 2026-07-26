@@ -228,13 +228,23 @@ describe('PiRpcClient — dispose / onExit', () => {
     expect(exits).toEqual([[0, null]])
   })
 
-  it('dispose() kills the process', async () => {
+  it('dispose() terminates the process (SIGTERM off-Windows, taskkill tree-kill on Windows)', async () => {
     const { client, proc } = await startClient()
+    mockSpawn.mockClear() // isolate any taskkill spawn from the initial pi spawn
     client.dispose()
-    expect(proc.kill).toHaveBeenCalled()
+    if (process.platform === 'win32') {
+      // Windows: taskkill reaps the whole tree (M-PI3); it fires 'exit' itself.
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'taskkill',
+        ['/pid', String(proc.pid), '/T', '/F'],
+        expect.objectContaining({ stdio: 'ignore' })
+      )
+    } else {
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM')
+    }
   })
 
-  it('dispose() on Windows also tree-kills via taskkill /T /F', async () => {
+  it('dispose() on Windows tree-kills via taskkill and does NOT pre-empt with proc.kill (M-PI3)', async () => {
     if (process.platform !== 'win32') return
     const { client, proc } = await startClient()
     mockSpawn.mockClear() // isolate the taskkill spawn call from the initial pi spawn
@@ -244,5 +254,8 @@ describe('PiRpcClient — dispose / onExit', () => {
       ['/pid', String(proc.pid), '/T', '/F'],
       expect.objectContaining({ stdio: 'ignore' })
     )
+    // The whole point of M-PI3: proc.kill() must NOT run before taskkill (it
+    // would kill the root synchronously and orphan the tree).
+    expect(proc.kill).not.toHaveBeenCalled()
   })
 })
