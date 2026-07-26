@@ -242,7 +242,7 @@ export class CredentialSync {
     const generation = this.lifecycleGeneration
     const cred = await this.reconcileOnStart(generation)
     try {
-      await this.removeDisabledCopies()
+      await this.removeDisabledCopies(cred)
     } catch (err) {
       logger.warn(
         'CredentialSync',
@@ -513,15 +513,27 @@ export class CredentialSync {
       logger.debug('CredentialSync', 'doRefresh: no vault credential — nothing to refresh')
       return
     }
+    // Identity of the credential we are about to refresh. The generation guard
+    // below only covers a disconnect (which bumps lifecycleGeneration); it does
+    // NOT cover a watch-adoption or another refresh landing a DIFFERENT vault
+    // credential during the network await. Compare against this after the await
+    // and bail if we were superseded — otherwise a late invalid_grant on the
+    // OLD token would falsely set needsReauth AND clear the freshly-armed timer
+    // of a now-valid credential (M-AT2).
+    const refreshedIdentity = cred.refresh
 
     let tokens: TokenResponse
     try {
       tokens = await this.refreshAccessTokenFn(cred.refresh)
     } catch (err) {
-      if (this.isCurrent(generation)) this.handleRefreshError(err, cred)
+      if (this.isCurrent(generation) && (await this.isStillCurrentCredential(generation, refreshedIdentity)))
+        this.handleRefreshError(err, cred)
       return
     }
     if (!this.isCurrent(generation)) return
+    // A concurrent adoption/refresh replaced the vault credential while our
+    // network call was in flight — our (now-stale) result must not overwrite it.
+    if (!(await this.isStillCurrentCredential(generation, refreshedIdentity))) return
 
     this.retryCount = 0
     this._needsReauth = false
@@ -537,6 +549,17 @@ export class CredentialSync {
     if (!this.isCurrent(generation)) return
     await this.feedAll(next)
     if (this.isCurrent(generation)) this.scheduleRefresh(next)
+  }
+
+  /**
+   * True iff the vault still holds the credential we set out to refresh (matched
+   * by refresh token) AND this lifecycle generation is still current. Re-reads
+   * the vault; used as the post-await identity guard in doRefresh (M-AT2).
+   */
+  private async isStillCurrentCredential(generation: number, refresh: string): Promise<boolean> {
+    const current = await this.vault.load()
+    if (!this.isCurrent(generation)) return false
+    return current?.refresh === refresh
   }
 
   private handleRefreshError(err: unknown, cred: VaultCredential): void {
@@ -748,14 +771,55 @@ export class CredentialSync {
     await this.vault.removeCredential('chatgpt')
   }
 
-  private async removeDisabledCopies(): Promise<void> {
+  /**
+   * On start, remove the Codex copy from any DISABLED route — but only the one
+   * ClaudeUI actually MANAGED (ADR-037: "removes only its ClaudeUI-managed
+   * credential"). Provenance is the vault credential: with no vault credential
+   * ClaudeUI has vended nothing, and a disabled route's Codex entry is the
+   * user's own (e.g. a manual `pi /login`); a matching refresh token proves the
+   * entry is the one we vended. Removing an unmanaged / mismatched entry would
+   * destroy a credential we never owned (M-AT3).
+   */
+  private async removeDisabledCopies(vaultCred: VaultCredential | null): Promise<void> {
+    if (!vaultCred) return
     const routes = this.routes()
     await Promise.allSettled([
-      routes.pi ? undefined : this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID),
+      routes.pi ? undefined : this.removeManagedCopy('pi', this.piTarget, PI_CODEX_VENDOR_ID, vaultCred.refresh),
       routes.opencode
         ? undefined
-        : this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
+        : this.removeManagedCopy(
+            'opencode',
+            this.opencodeTarget,
+            OPENCODE_CODEX_VENDOR_ID,
+            vaultCred.refresh
+          )
     ])
+  }
+
+  /** Remove a disabled route's Codex entry ONLY when it is the credential ClaudeUI vended (refresh token matches the vault's). A read failure or a mismatched/absent entry is left untouched (fail-safe: never delete when unsure). */
+  private async removeManagedCopy(
+    label: EngineKey,
+    target: CodexFeedTarget | undefined,
+    vendorId: string,
+    vaultRefresh: string
+  ): Promise<void> {
+    if (!target) return
+    let entry: CodexEntrySnapshot | null
+    try {
+      entry = await target.readOauthEntry(vendorId)
+    } catch (err) {
+      logger.warn('CredentialSync', `removeDisabledCopies: readOauthEntry(${label}) failed — preserving: ${errMessage(err)}`)
+      return
+    }
+    if (!entry) return // nothing to remove
+    if (entry.refresh !== vaultRefresh) {
+      logger.info(
+        'CredentialSync',
+        `removeDisabledCopies: ${label} holds an unmanaged Codex credential — preserving`
+      )
+      return
+    }
+    await this.removeOne(label, target, vendorId)
   }
 
   private isCurrent(generation: number): boolean {

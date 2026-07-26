@@ -314,22 +314,58 @@ describe('CredentialSync route policy', () => {
     expect(opencode.feed).not.toHaveBeenCalled()
   })
 
-  it('removes stale disabled credentials on startup with a readable or empty vault', async () => {
+  it('removes a disabled route copy ONLY when it is the managed vault credential; never with an empty vault (M-AT3)', async () => {
+    // Connected vault (refresh 'r') and the disabled opencode store holds the
+    // SAME credential ClaudeUI vended → ours to clean up.
     const readable = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
     const readablePi = fakeFeedTarget()
     const readableOpencode = fakeFeedTarget()
+    readableOpencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
     const readableSync = new CredentialSync({ vault: readable.vault, getEnabledRoutes: piOnly })
     readableSync.configure({ pi: readablePi.target, opencode: readableOpencode.target })
     await readableSync.start()
     expect(readableOpencode.remove).toHaveBeenCalledWith('openai')
     readableSync.stop()
 
+    // Empty vault → ClaudeUI managed nothing → a disabled store's credential is
+    // the user's own; never remove it (this is the M-AT3 data-loss fix).
     const emptyPi = fakeFeedTarget()
     const emptyOpencode = fakeFeedTarget()
+    emptyOpencode.read.mockResolvedValue({ access: 'u', refresh: 'user-own', expires: Date.now() + 999_999 })
     const emptySync = new CredentialSync({ vault: makeFakeVault(null).vault, getEnabledRoutes: piOnly })
     emptySync.configure({ pi: emptyPi.target, opencode: emptyOpencode.target })
     await emptySync.start()
-    expect(emptyOpencode.remove).toHaveBeenCalledWith('openai')
+    expect(emptyOpencode.remove).not.toHaveBeenCalled()
+  })
+
+  it('preserves a user-created disabled-route Codex credential when the vault is empty (M-AT3 guard)', async () => {
+    // User ran `pi /login` themselves; ClaudeUI never connected ChatGPT.
+    const pi = fakeFeedTarget()
+    pi.read.mockResolvedValue({ access: 'ua', refresh: 'user-refresh', expires: Date.now() + 999_999 })
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({
+      vault: makeFakeVault(null).vault,
+      getEnabledRoutes: () => ({ pi: false, opencode: true })
+    })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+    // Pre-fix start() unconditionally removed the disabled route's codex entry.
+    expect(pi.remove).not.toHaveBeenCalled()
+    sync.stop()
+  })
+
+  it('preserves an unmanaged disabled-route copy whose token does not match the vault (M-AT3)', async () => {
+    // Connected vault ('r'), but the disabled opencode store holds a DIFFERENT
+    // (user-owned) credential → not ClaudeUI-vended → must be left intact.
+    const { vault } = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
+    const pi = fakeFeedTarget()
+    const opencode = fakeFeedTarget()
+    opencode.read.mockResolvedValue({ access: 'u', refresh: 'user-own', expires: Date.now() + 999_999 })
+    const sync = new CredentialSync({ vault, getEnabledRoutes: piOnly })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+    expect(opencode.remove).not.toHaveBeenCalled()
+    sync.stop()
   })
 
   it('starts a newly enabled target watcher after a successful feed', async () => {
@@ -357,6 +393,9 @@ describe('CredentialSync route policy', () => {
     try {
       const pi = fakeFeedTarget()
       const opencode = fakeFeedTarget()
+      // Disabled store holds the managed credential (matches the vault), so the
+      // provenance-checked cleanup proceeds to removeVendorAuth — which fails.
+      opencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: Date.now() + 60 * 60 * 1000 })
       opencode.remove.mockRejectedValueOnce(new Error('auth file is locked'))
       const sync = new CredentialSync({
         vault: makeFakeVault({
@@ -394,7 +433,8 @@ describe('CredentialSync route policy', () => {
     })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
-    expect(opencode.read).not.toHaveBeenCalled()
+    // (opencode.read may now be consulted for disabled-copy provenance; the
+    // watcher — authFilePath — must still never be armed for a disabled route.)
     expect(opencodeAuthFilePath).not.toHaveBeenCalled()
     sync.stop()
   })
@@ -413,8 +453,10 @@ describe('CredentialSync route policy', () => {
     const sync = new CredentialSync({ vault, getEnabledRoutes: piOnly })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
-    expect(opencode.read).not.toHaveBeenCalled()
+    // A disabled route is never adopted from (no save), and its mismatched
+    // (user-owned) credential is preserved (not removed).
     expect(save).not.toHaveBeenCalled()
+    expect(opencode.remove).not.toHaveBeenCalled()
     sync.stop()
   })
 
@@ -852,6 +894,71 @@ describe('CredentialSync — refresh scheduler', () => {
     sync.stop()
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
     expect(refreshAccessToken).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2a. Refresh identity guard (M-AT2) — a late refresh of the OLD credential
+// must not clobber state after a watch-adoption landed a newer one.
+//
+// RED-FIRST NOTE: pre-fix, doRefresh's catch was `if (isCurrent(generation))
+// handleRefreshError(...)`. Adoption does NOT bump the generation, so the stale
+// invalid_grant still ran handleRefreshError → set needsReauth AND cleared the
+// freshly-armed timer. Both post-fix assertions (needsReauth false, timer alive)
+// FAIL against that code.
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync — refresh identity guard (M-AT2)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('a superseded refresh (adoption landed a newer credential mid-flight) does NOT set needsReauth or clear the adopted timer', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const { vault, state } = makeFakeVault({
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 1000
+    })
+    let rejectRefresh: ((err: unknown) => void) | undefined
+    const refreshAccessToken = vi.fn(
+      () =>
+        new Promise<{ access_token: string; refresh_token: string; expires_in: number }>(
+          (_resolve, reject) => {
+            rejectRefresh = reject
+          }
+        )
+    )
+    const pi = fakeFeedTarget()
+    // pi's store holds a newer, externally-rotated credential to be adopted.
+    pi.read.mockResolvedValue({ access: 'a2', refresh: 'r2', expires: now + 5_000_000 })
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    // Kick a refresh of C1 — loads C1, calls refreshAccessToken('r1') (pending).
+    const refreshP = sync.refreshNow()
+    await Promise.resolve()
+    expect(refreshAccessToken).toHaveBeenCalledWith('r1')
+
+    // A watch-adoption of the newer C2 lands while refresh(C1) is in flight.
+    await (
+      sync as unknown as { handleExternalChange(engine: 'pi'): Promise<void> }
+    ).handleExternalChange('pi')
+    expect(state.current?.refresh).toBe('r2')
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // adoption armed a refresh timer
+
+    // The stale refresh(C1) now settles with invalid_grant (r1 was rotated out).
+    rejectRefresh!(new Error('Token refresh failed: 400 - {"error":"invalid_grant"}'))
+    await refreshP
+
+    // Identity guard: the superseded failure must be ignored entirely.
+    expect(sync.needsReauth).toBe(false)
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // adopted timer survived
+    expect(state.current?.refresh).toBe('r2') // vault still holds the adopted credential
+    sync.stop()
   })
 })
 
