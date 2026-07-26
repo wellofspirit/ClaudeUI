@@ -16,6 +16,7 @@ import {
   type TranscriptMessage
 } from './auto-classifier'
 import { logger } from './logger'
+import { isPathInside } from './path-containment'
 import {
   resolveThinkingMode,
   resolveEffort,
@@ -103,15 +104,41 @@ const AUTOMATION_DIR = path.join(os.homedir(), '.claude', 'ui', 'automation')
 /** @deprecated Legacy single-file storage — migrated to per-file on first load */
 const LEGACY_AUTOMATIONS_FILE = path.join(AUTOMATION_DIR, 'automations.json')
 
+/**
+ * Strict slug for an automation id (audit M-AU3). Renderer-supplied ids flow
+ * into path.join — including the destructive `fs.rmSync(runsDir(id), …)` in
+ * delete() — so an id like `../..` would escape the automation dir and delete
+ * arbitrary directories above it. A hostile/compromised renderer or the remote
+ * surface is the trigger. Real ids are uuid v4 (hex + hyphens); this allows
+ * that plus conservative slug punctuation and rejects any `.`, `/` or `\`
+ * needed for traversal.
+ */
+const AUTOMATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+
+/** True iff `id` is a safe automation/run id (no path-traversal characters). */
+export function isValidAutomationId(id: unknown): id is string {
+  return typeof id === 'string' && AUTOMATION_ID_RE.test(id)
+}
+
+/** Throw unless `id` is a safe id. The single choke point before any path.join. */
+function assertValidAutomationId(id: unknown): asserts id is string {
+  if (!isValidAutomationId(id)) {
+    throw new Error(`Invalid automation id: ${JSON.stringify(id)}`)
+  }
+}
+
 function automationFile(id: string): string {
+  assertValidAutomationId(id)
   return path.join(AUTOMATION_DIR, `${id}.json`)
 }
 
 function runsDir(automationId: string): string {
+  assertValidAutomationId(automationId)
   return path.join(AUTOMATION_DIR, 'runs', automationId)
 }
 
 function runsIndexFile(automationId: string): string {
+  // automationId is validated by runsDir(); no separate assert needed.
   return path.join(runsDir(automationId), 'runs.json')
 }
 
@@ -313,14 +340,19 @@ export class AutomationManager {
   }
 
   delete(id: string): void {
+    // M-AU3: reject a traversal id BEFORE any side effect (schedule cancel, list
+    // mutation, and — critically — the recursive rmSync below).
+    assertValidAutomationId(id)
     this.cancelSchedule(id)
     // Abort active run if any
     this.cancelRun(id)
     this.automations = this.automations.filter((a) => a.id !== id)
     this.deleteAutomationFile(id)
-    // Clean up run history on disk
+    // Clean up run history on disk. runsDir() re-validates the id, and we
+    // additionally confirm containment under AUTOMATION_DIR before the recursive
+    // delete — defense in depth for the one irreversible operation here.
     const dir = runsDir(id)
-    if (fs.existsSync(dir)) {
+    if (isPathInside(AUTOMATION_DIR, dir) && fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true })
     }
     this.notifyAutomationsChanged()
@@ -569,31 +601,59 @@ export class AutomationManager {
       this.currentRunIds.delete(automation.id)
       // Keep sessionId alive so user can send follow-up messages
 
-      // Update automation metadata
-      automation.lastRunAt = run.startedAt
-      automation.lastRunStatus = run.status === 'running' ? 'error' : run.status
-      this.saveAutomation(automation)
+      // M-AU2: if the automation was deleted while this run was in flight,
+      // do NOT re-persist anything. delete() runs synchronously (abort the run,
+      // drop it from the in-memory list, unlink its files) BEFORE this finally
+      // fires on the abort unwind, so re-writing here would resurrect a zombie
+      // automation file + runs dir (the in-memory list no longer has it and the
+      // watcher is suppressed, so it silently reappears on next reload).
+      const stillExists =
+        this.automations.some((a) => a.id === automation.id) ||
+        fs.existsSync(automationFile(automation.id))
+      if (!stillExists) {
+        // Skip all persistence/scheduling for a deleted automation. (No `return`
+        // here — a return inside finally would swallow exceptions; guard with the
+        // else branch instead.)
+        logger.debug(
+          'AutomationManager',
+          `Run for deleted automation ${automation.id} finished — skipping persist (M-AU2)`
+        )
+      } else {
+        // M-AU1: `automation` was captured at schedule time; a user edit mid-run
+        // (upsert rewrote its prompt/schedule and persisted a NEW object) would
+        // be clobbered if we saved the stale captured object back. Merge only the
+        // run-result fields onto the LATEST persisted object instead, and keep
+        // the in-memory list pointing at that merged object.
+        const latest =
+          readJson<Automation>(automationFile(automation.id)) ??
+          this.automations.find((a) => a.id === automation.id) ??
+          automation
+        latest.lastRunAt = run.startedAt
+        latest.lastRunStatus = run.status === 'running' ? 'error' : run.status
+        const memIdx = this.automations.findIndex((a) => a.id === automation.id)
+        if (memIdx >= 0) this.automations[memIdx] = latest
+        this.saveAutomation(latest)
 
-      // Update run index — merge into the disk entry to preserve fields
-      // (like sessionId/projectKey) that were set during runOneShotQuery
-      const updatedRuns = this.loadRuns(automation.id)
-      const idx = updatedRuns.findIndex((r) => r.id === runId)
-      if (idx >= 0) {
-        updatedRuns[idx] = { ...updatedRuns[idx], ...run }
-      }
-      this.saveRuns(automation.id, updatedRuns)
+        // Update run index — merge into the disk entry to preserve fields
+        // (like sessionId/projectKey) that were set during runOneShotQuery
+        const updatedRuns = this.loadRuns(automation.id)
+        const idx = updatedRuns.findIndex((r) => r.id === runId)
+        if (idx >= 0) {
+          updatedRuns[idx] = { ...updatedRuns[idx], ...run }
+        }
+        this.saveRuns(automation.id, updatedRuns)
 
-      // Notify renderer
-      this.notifyRunUpdate(automation.id, run)
-      this.notifyAutomationsChanged()
+        // Notify renderer
+        this.notifyRunUpdate(automation.id, run)
+        this.notifyAutomationsChanged()
 
-      // Native notification
-      this.sendNativeNotification(automation, run)
+        // Native notification
+        this.sendNativeNotification(latest, run)
 
-      // Schedule next run if still enabled
-      const current = this.automations.find((a) => a.id === automation.id)
-      if (current?.enabled) {
-        this.scheduleNext(current)
+        // Schedule next run if still enabled — off the LATEST schedule (M-AU1).
+        if (latest.enabled) {
+          this.scheduleNext(latest)
+        }
       }
     }
   }
