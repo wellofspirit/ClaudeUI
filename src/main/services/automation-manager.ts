@@ -532,10 +532,28 @@ export class AutomationManager {
     }
     this.emitRunMessage(automationId, userMsg)
 
+    // Attribute this follow-up turn's spend to the run that owns the resumed
+    // session. runOneShotQuery's `result` handler persists cost only when
+    // currentRunIds has an entry (executeRun sets it; sendMessage never did), so
+    // pre-fix every follow-up turn's cost was recorded NOWHERE. The follow-up
+    // continues the same session, so its spend folds into that session's run.
+    const runsForFollowUp = this.loadRuns(automationId)
+    const ownerRun =
+      runsForFollowUp.find((r) => r.sessionId === sessionId) ?? runsForFollowUp[0]
+    if (ownerRun) this.currentRunIds.set(automationId, ownerRun.id)
+
     // Resume the session with a one-shot sdkQuery
-    this.runOneShotQuery(automation, prompt, sessionId).catch((err) => {
-      logger.error('AutomationManager', `sendMessage failed for ${automationId}: ${err}`)
-    })
+    this.runOneShotQuery(automation, prompt, sessionId)
+      .catch((err) => {
+        logger.error('AutomationManager', `sendMessage failed for ${automationId}: ${err}`)
+      })
+      .finally(() => {
+        // runOneShotQuery's finally clears activeRuns/processingAutomations but
+        // NOT currentRunIds (executeRun owns that for scheduled runs). Clear the
+        // follow-up association we set above so a later scheduled run isn't
+        // misattributed to this run id.
+        this.currentRunIds.delete(automationId)
+      })
   }
 
   private emitRunMessage(automationId: string, message: ChatMessage): void {
