@@ -34,7 +34,7 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
   | { type: 'tool_result'; toolUseId: string; toolResult: string; isError?: boolean; fileDiffs?: FileDiff[] }
-  | { type: 'thinking'; text: string }
+  | { type: 'thinking'; text: string; durationMs?: number }
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
   | { type: 'api_error'; errorType: string; errorMessage: string }
   | { type: 'compact_separator'; text?: string }
