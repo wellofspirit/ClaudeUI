@@ -736,6 +736,85 @@ describe('GitService.discardFile', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Path containment for file operations (audit M-GT2 / gpt#5)
+//
+// Every IPC-exposed file op must reject a repo-relative path that escapes the
+// repository root. The most dangerous is discardFile: a `../secret` path fails
+// both `git show` probes, is classified untracked, and pre-fix was fs.unlink'd
+// outside the repo.
+// ---------------------------------------------------------------------------
+
+describe('GitService path containment', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+  let sentinel: string
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+    // A precious file OUTSIDE the repo, addressable via `../` from repo root.
+    sentinel = path.resolve(repo.path, '..', `claudeui-sentinel-${Date.now()}.txt`)
+    await fs.promises.writeFile(sentinel, 'do-not-touch\n', 'utf-8')
+  })
+
+  afterEach(async () => {
+    try {
+      await fs.promises.rm(sentinel, { force: true, maxRetries: 5 })
+    } catch {
+      /* ignore */
+    }
+    await repo.cleanup()
+  })
+
+  const relToSentinel = (): string => `../${path.basename(sentinel)}`
+
+  it('discardFile refuses a ../ path and never unlinks the outside file', async () => {
+    await expect(svc.discardFile(relToSentinel())).rejects.toThrow(/outside the repository/)
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('discardFile refuses a deep traversal that escapes via a subdirectory', async () => {
+    await expect(svc.discardFile(`sub/../../${path.basename(sentinel)}`)).rejects.toThrow(
+      /outside the repository/
+    )
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('getFileContents refuses a ../ path', async () => {
+    await expect(svc.getFileContents(relToSentinel(), false)).rejects.toThrow(
+      /outside the repository/
+    )
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('getFilePatch refuses a ../ path', async () => {
+    await expect(svc.getFilePatch(relToSentinel(), false)).rejects.toThrow(/outside the repository/)
+  })
+
+  it('stageFile refuses a ../ path', async () => {
+    await expect(svc.stageFile(relToSentinel())).rejects.toThrow(/outside the repository/)
+  })
+
+  it('unstageFile refuses a ../ path', async () => {
+    await expect(svc.unstageFile(relToSentinel())).rejects.toThrow(/outside the repository/)
+  })
+
+  it('still operates on a legitimately nested in-repo path', async () => {
+    // A file in a subdirectory must remain fully functional post-containment.
+    await repo.writeFile('nested/dir/file.txt', 'v1\n')
+    await repo.commit('seed nested')
+    await repo.writeFile('nested/dir/file.txt', 'v2\n')
+
+    const { oldContent, newContent } = await svc.getFileContents('nested/dir/file.txt', false)
+    expect(norm(oldContent)).toBe('v1\n')
+    expect(norm(newContent)).toBe('v2\n')
+
+    await svc.discardFile('nested/dir/file.txt')
+    expect(norm(await repo.readFile('nested/dir/file.txt'))).toBe('v1\n')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // startPolling / stopPolling
 // ---------------------------------------------------------------------------
 

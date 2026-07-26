@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { GitStatusData, GitBranchData, GitFileStatus } from '../../shared/types'
 import { logger } from './logger'
+import { isPathInside } from './path-containment'
 
 /**
  * Skip line counting / diff content for files larger than this. A multi-GB
@@ -160,6 +161,22 @@ export class GitService {
     } catch {
       return false
     }
+  }
+
+  /**
+   * Resolve a repo-relative `filePath` to an absolute path, throwing if it
+   * escapes the repository root (audit M-GT2 / gpt#5). Every IPC-exposed file
+   * operation routes its path through here so a renderer/model-supplied
+   * `../secret` can be neither read (`git show` / `readFile`) nor deleted
+   * (`fs.unlink`). Callers MUST have run `ensureRepoRoot()` first.
+   */
+  private resolveContained(filePath: string): string {
+    const root = this.repoRoot ?? this.cwd
+    const abs = path.resolve(root, filePath)
+    if (!isPathInside(root, abs)) {
+      throw new Error(`Refusing file operation on path outside the repository: ${filePath}`)
+    }
+    return abs
   }
 
   /** Record a line count for `absPath`, bounding the cache with a wholesale clear. */
@@ -333,6 +350,9 @@ export class GitService {
     ignoreWhitespace: boolean = false
   ): Promise<{ patch: string; isBinary?: boolean }> {
     await this.ensureRepoRoot()
+    // Reject traversal before handing the path to git or reading it (throws
+    // out of the try below so the IPC layer surfaces a failed result).
+    const absPath = this.resolveContained(filePath)
     const args: string[] = ['diff']
     if (staged) args.push('--cached')
     if (ignoreWhitespace) args.push('-w')
@@ -351,7 +371,6 @@ export class GitService {
       // Empty patch — could be an untracked file.
       // Generate a unified diff manually since `git diff --no-index` exits
       // with code 1 when differences exist and simple-git treats that as error.
-      const absPath = path.resolve(this.repoRoot!, filePath)
       let stat: fs.Stats
       try {
         stat = await fs.promises.stat(absPath)
@@ -399,7 +418,8 @@ export class GitService {
     staged: boolean
   ): Promise<{ oldContent: string; newContent: string }> {
     await this.ensureRepoRoot()
-    const absPath = path.resolve(this.repoRoot!, filePath)
+    // Reject traversal before any `git show` / working-tree read.
+    const absPath = this.resolveContained(filePath)
     const normEol = (s: string): string => s.replace(/\r\n/g, '\n')
 
     try {
@@ -452,10 +472,14 @@ export class GitService {
   }
 
   async stageFile(filePath: string): Promise<void> {
+    await this.ensureRepoRoot()
+    this.resolveContained(filePath)
     await this.git.add(filePath)
   }
 
   async unstageFile(filePath: string): Promise<void> {
+    await this.ensureRepoRoot()
+    this.resolveContained(filePath)
     await this.git.reset(['HEAD', '--', filePath])
   }
 
@@ -496,6 +520,10 @@ export class GitService {
    */
   async discardFile(filePath: string): Promise<void> {
     await this.ensureRepoRoot()
+    // Reject traversal FIRST — a `../secret` path fails both `git show` probes
+    // below, gets classified untracked, and would otherwise be fs.unlink'd
+    // outside the repo (audit gpt#5).
+    const absPath = this.resolveContained(filePath)
     // Check if file is tracked by trying to show it from HEAD
     let tracked = true
     try {
@@ -511,7 +539,6 @@ export class GitService {
 
     if (!tracked) {
       // Untracked file — delete from disk
-      const absPath = path.resolve(this.repoRoot!, filePath)
       await fs.promises.unlink(absPath)
     } else {
       // Tracked file — unstage and restore working tree to HEAD
