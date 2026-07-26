@@ -59,6 +59,14 @@ class AuthManager {
 
   setWindow(win: BrowserWindow): void {
     this.window = win
+    // Reset the login-success subscribers on each window generation. setWindow()
+    // is called once per createWindow (index.ts), immediately BEFORE the
+    // per-window init() calls that (re-)register their callbacks
+    // (AccountManager.init + ClaudeAuthProvider.init). Without this reset,
+    // onSuccessCbs is append-only, so a macOS window re-creation (activate after
+    // all windows closed) stacks a duplicate callback each time — unbounded
+    // growth and duplicate side effects (N DB upserts + N broadcasts per login).
+    this.onSuccessCbs = []
   }
 
   /** Subscribe to successful logins (used by the account manager to capture the
@@ -96,7 +104,17 @@ class AuthManager {
    * success/error transition is broadcast via `auth:state`.
    */
   async signIn(): Promise<AuthFlowState> {
-    const handle = await serviceSession.getControlHandle()
+    // Never let a spawn-path throw escape as a rejected promise: callers
+    // fire-and-forget this (AccountManager.addAccount → `void signIn()`), so a
+    // rejection would be an unhandled rejection AND the renderer would get no
+    // auth:state error. getControlHandle() and openExternal() below can throw,
+    // so both are guarded and funnel into broadcastError() instead.
+    let handle: Awaited<ReturnType<typeof serviceSession.getControlHandle>>
+    try {
+      handle = await serviceSession.getControlHandle()
+    } catch (err) {
+      return this.broadcastError(`Could not start the login service session: ${errText(err)}`)
+    }
     if (!handle) {
       return this.broadcastError('Could not start the login service session.')
     }
@@ -114,7 +132,11 @@ class AuthManager {
 
     this.pendingState = parseState(urls.manualUrl)
     if (urls.automaticUrl) {
-      await shell.openExternal(urls.automaticUrl)
+      try {
+        await shell.openExternal(urls.automaticUrl)
+      } catch (err) {
+        return this.broadcastError(`Failed to open the login page: ${errText(err)}`)
+      }
     }
 
     // Await the loopback redirect in the background — do not block the caller.
