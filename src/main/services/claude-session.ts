@@ -126,6 +126,13 @@ class MessageChannel<T> {
   private waiting: ((result: IteratorResult<T>) => void) | null = null
   private isDone = false
 
+  /** True once end() has been called — pushes silently no-op from here on, so
+   *  callers (run()'s send path, H17) must (re-)establish a fresh channel
+   *  rather than push into this one. */
+  get isEnded(): boolean {
+    return this.isDone
+  }
+
   push(msg: T): void {
     if (this.isDone) return
     if (this.waiting) {
@@ -236,6 +243,16 @@ export class ClaudeSession extends BaseSession {
   private liveTotalCostUsd = 0
   private liveModelCosts = new Map<string, number>()
   private messageChannel: MessageChannel<unknown> | null = null
+  /**
+   * Set once by dispose() — the object has been permanently retired (replaced
+   * under its routingId by SessionManager.create, or torn down at app quit).
+   * Distinct from cancel(), which tears down the current cli.js process but
+   * leaves the object usable for a later run() (idle timeout / user Stop). A
+   * disposed object must NOT emit on the shared routingId or re-arm its idle
+   * timer — otherwise its late run()-finally / idle-fired cancel() would clobber
+   * the LIVE session that now owns the routingId (M-CL3).
+   */
+  private disposed = false
   /** Single source of truth for query method signatures: the SDK layer's
    *  QueryHandle. Previously duplicated here as an inline interface; drift
    *  between the two kept biting us when new methods shipped. */
@@ -461,11 +478,19 @@ export class ClaudeSession extends BaseSession {
       }
     }
 
-    if (this.messageChannel) {
+    if (this.messageChannel && !this.messageChannel.isEnded) {
       // Session already active — push message (or no-op for spawn-only)
       if (sdkMessage) this.messageChannel.push(sdkMessage)
       return
     }
+
+    // H17: the channel exists but is ENDED — cancel() (user Stop, or an
+    // idle-timeout auto-cancel firing as the user hit Enter) ended it, but the
+    // run()-finally that nulls it hasn't executed yet. Pushing here would
+    // silently vanish AFTER sendPrompt already broadcast session:user-message.
+    // Fall through to the first-run branch to (re-)establish a fresh cli.js
+    // process; the run()-finally of the superseded run is fenced by channel
+    // identity below so it can't clobber this new run's state.
 
     // First run — start persistent session with streaming input mode.
     // Passing an AsyncIterable (instead of a string) keeps the CLI subprocess
@@ -474,6 +499,12 @@ export class ClaudeSession extends BaseSession {
     this.messageChannel = channel
     if (sdkMessage) channel.push(sdkMessage)
     this.abortController = new AbortController()
+    // Captured for the finally: `this.abortController`/`this.messageChannel` may
+    // be REPLACED by a superseding run (H17 re-establish on an ended channel)
+    // before this run's for-await unwinds. The finally aborts THIS run's own
+    // controller and only touches the shared fields when they still point here.
+    const myAbort = this.abortController
+    const myChannel = channel
 
     // Reset the active-query promise for this run. ensureActiveQuery() awaits
     // it instead of polling. Rejection path fires on any failure before
@@ -895,18 +926,34 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         this.send('session:error', parts.join('\n'))
       }
     } finally {
-      this.messageChannel?.end()
-      this.messageChannel = null
-      // Reject any in-flight ensureActiveQuery() awaits so callers don't
-      // hang forever on a session that never produced a handle.
-      this.rejectActiveQuery?.(new Error('Session ended before query handle was produced'))
-      this.resolveActiveQuery = null
-      this.rejectActiveQuery = null
-      this.activeQueryPromise = null
-      this.activeQuery = null
-      this.abortController = null
-      this.isProcessing = false
-      this.turnStartedAtMs = null
+      // A superseding run (H17 re-establish, or a same-object respawn) has
+      // already swapped in a fresh channel/controller/query when this no longer
+      // holds. In that case this run's teardown must touch ONLY its own child,
+      // never the shared fields the new run now owns.
+      const superseded = this.messageChannel !== myChannel
+
+      // H16: guarantee THIS run's cli.js child is torn down. If the for-await
+      // above exited via a next() rejection, IteratorClose (the handle's
+      // return()/killChild) is skipped — abort this run's OWN controller
+      // (captured locally) to fire killChild. Idempotent on the normal exit
+      // path (child already exited, abort listener already removed) and when
+      // cancel() already aborted it.
+      myAbort.abort()
+
+      if (!superseded) {
+        this.messageChannel?.end()
+        this.messageChannel = null
+        // Reject any in-flight ensureActiveQuery() awaits so callers don't
+        // hang forever on a session that never produced a handle.
+        this.rejectActiveQuery?.(new Error('Session ended before query handle was produced'))
+        this.resolveActiveQuery = null
+        this.rejectActiveQuery = null
+        this.activeQueryPromise = null
+        this.activeQuery = null
+        this.abortController = null
+        this.isProcessing = false
+        this.turnStartedAtMs = null
+      }
       // Respawn-boundary fold (Slice B): a ClaudeSession object CAN spawn
       // cli.js more than once — messageChannel is now null, so the NEXT
       // run() call on this same object takes the "first run" branch again and
@@ -926,8 +973,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       }
       this.liveTotalCostUsd = 0
       this.liveModelCosts.clear()
-      this.sendStatus()
-      this.resetInactivityTimer()
+      // M-CL3 / H17: only the run that still owns the shared state may emit
+      // status + re-arm the idle timer. A run superseded by a same-object
+      // re-establish must leave the new run's status/timer alone; a DISPOSED
+      // object (replaced under its routingId) must never emit on the shared
+      // routingId or re-arm a timer whose later cancel() would tear down the
+      // LIVE session that now owns that routingId.
+      if (!superseded && !this.disposed) {
+        this.sendStatus()
+        this.resetInactivityTimer()
+      }
     }
   }
 
@@ -2109,7 +2164,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.abortController = null
     this.isProcessing = false
     this.turnStartedAtMs = null
-    this.send('session:status', { ...this.status, state: 'disconnected' })
+    // M-CL3: a dispose()-driven cancel (object replaced under its routingId)
+    // must NOT broadcast disconnected on the shared routingId — the LIVE
+    // replacement session now owns it and emits its own status. A normal
+    // cancel() (user Stop / idle timeout, object stays usable) still surfaces
+    // the disconnect.
+    if (!this.disposed) {
+      this.send('session:status', { ...this.status, state: 'disconnected' })
+    }
   }
 
   /** Interrupt the current turn without killing the session.
@@ -2548,8 +2610,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.send('session:status', this.status)
   }
 
-  /** Dispose: cancel the session and release all resources. */
+  /** Dispose: permanently retire the session and release all resources. Unlike
+   *  cancel() (which leaves the object usable for a later run() — idle timeout /
+   *  user Stop), this marks the object retired so its late run()-finally can't
+   *  emit status / re-arm the idle timer on a routingId a replacement now owns
+   *  (M-CL3). Sets the flag BEFORE cancel() so cancel()'s own status emit is
+   *  suppressed too. */
   dispose(): void {
+    this.disposed = true
     this.cancel()
   }
 }

@@ -47,6 +47,7 @@ import { SessionManager } from '../session-manager'
 function makeFakeSession(routingId: string): {
   routingId: string
   cancel: ReturnType<typeof vi.fn>
+  dispose: ReturnType<typeof vi.fn>
   setInactivityTimeout: ReturnType<typeof vi.fn>
   getSessionId: () => string | null
   getMessages: () => never[]
@@ -54,6 +55,7 @@ function makeFakeSession(routingId: string): {
   return {
     routingId,
     cancel: vi.fn(),
+    dispose: vi.fn(),
     setInactivityTimeout: vi.fn(),
     getSessionId: () => null,
     getMessages: () => []
@@ -84,6 +86,29 @@ describe('SessionManager.rekey — dispatched_usage id chain (Slice C)', () => {
     const mgr = new SessionManager()
     mgr.rekey('nonexistent', 'new-id')
     expect(mockRenameDispatchedUsage).not.toHaveBeenCalled()
+  })
+
+  // M-CL3: create-over-existing must dispose() (permanently retire + fence) the
+  // old object, NOT merely cancel() it — cancel() leaves the object usable and
+  // its late run()-finally would re-arm an idle timer whose cancel() later
+  // broadcasts disconnected for, and disposeFor()s, the LIVE replacement.
+  it('disposes (not just cancels) the existing session when replacing under the same routingId', () => {
+    const created: ReturnType<typeof makeFakeSession>[] = []
+    mockCreateSession.mockImplementation((_engineId: string, routingId: string) => {
+      const s = makeFakeSession(routingId)
+      created.push(s)
+      return s
+    })
+    const mgr = new SessionManager()
+
+    mgr.create('route-replace', {} as never, '/tmp/proj')
+    mgr.create('route-replace', {} as never, '/tmp/proj') // replacement
+
+    const first = created[0]
+    expect(first.dispose).toHaveBeenCalledTimes(1)
+    expect(first.cancel).not.toHaveBeenCalled()
+    // The live session is the second object.
+    expect(mgr.get('route-replace')).toBe(created[1])
   })
 
   it('a throwing renameDispatchedUsage never breaks rekey (best-effort, logged)', () => {
