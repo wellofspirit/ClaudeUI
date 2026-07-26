@@ -1,0 +1,157 @@
+name: CI
+
+# Pull-request / feature-branch gates (H21). Before this workflow existed NOTHING
+# ran on a PR: lint and format:check ran in no workflow at all, and the only tests
+# ran inside the release/pre-release build jobs — i.e. AFTER a push to main /
+# pre-release had already started publishing a tag. This workflow runs the full
+# headless gate set on every PR and every non-release-branch push, independently
+# of the release path (it publishes nothing and does not gate the release
+# workflows, which keep their own build+test step before the release job).
+#
+# Deliberately scoped to ubuntu-latest: it is the fast/cheap safety net that
+# catches typecheck/lint/format/logic regressions BEFORE merge. Cross-OS coverage
+# (windows-2022 + macos) still runs in release.yml / pre-release.yml before any
+# tag is published, so a Windows-only regression is caught at push-to-pre-release
+# time. Add an os matrix here if PR-time Windows coverage becomes worth the cost.
+
+on:
+  pull_request:
+  push:
+    # main / pre-release get their own release pipelines; don't double-run here.
+    branches-ignore:
+      - main
+      - pre-release
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  gates:
+    name: Typecheck, lint, format & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned to 24.15.0 to match the release workflows: Node 24.16.0 ships a
+          # libuv that aborts on Windows when fs.watch() targets a single file,
+          # cascading vitest workers to "failed". Kept identical here for parity.
+          node-version: 24.15.0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Read claude CLI version
+        id: cli-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache claude CLI source binary
+        uses: actions/cache@v4
+        with:
+          path: .cache/claude-cli
+          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      # Full install (runs postinstall: install-app-deps + ensure-cli/opencode/pi),
+      # mirroring the release workflows. postinstall's ensure-cli also proves the
+      # cli.js patches still APPLY against the pinned claudeCliVersion — a patch
+      # that no longer applies fails the install and turns CI red. (Behavioural
+      # correctness of the applied patches is a separate, live-only concern — see
+      # the patch-tests job below.)
+      - name: Install dependencies
+        run: bun install
+
+      # bun can leave a Node-ABI better-sqlite3 behind; install-app-deps (run
+      # again explicitly, idempotent) rebuilds native modules for the Electron ABI.
+      - name: Rebuild native modules
+        run: bun run rebuild:native
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Format check
+        run: bun run format:check
+
+      - name: Tests (unit + component + e2e + git)
+        run: bun run test:ci
+
+  patch-tests:
+    name: Patch behavioural tests (live Claude — manual)
+    # These drive a REAL authenticated Claude Code session: they spawn the
+    # rebundled bun-claude binary, prompt the model, and assert on the observed
+    # stream-json wire behaviour (patch/test-all.mjs → 11 per-patch harnesses).
+    # They therefore need live Claude credentials + network, cost tokens, and are
+    # inherently model-behaviour-flaky — so they CANNOT be a required headless PR
+    # gate and are NOT wired into test:ci (the release pipeline depends on that).
+    # Run them on demand via "Run workflow"; set an ANTHROPIC_API_KEY repo secret
+    # for auth. This is the only automated check that catches the applies-but-
+    # misbinds patch failure class (e.g. the documented 2.1.219 p→m rename).
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Read claude CLI version
+        id: cli-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache claude CLI source binary
+        uses: actions/cache@v4
+        with:
+          path: .cache/claude-cli
+          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
+
+      # postinstall builds the patched bun-claude binary the harnesses spawn.
+      - name: Install dependencies (builds patched bun-claude)
+        run: bun install
+
+      - name: Run patch behavioural tests
+        run: bun run test:patch
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Surface harness probe stderr on failure (see reference memory).
+          DEBUG_HARNESS: '1'

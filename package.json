@@ -41,6 +41,7 @@
     "test:git": "vitest run --project git",
     "test:git:changed": "vitest run --project git --changed",
     "test:ci": "vitest run --project unit --project component --project e2e --project git",
+    "test:patch": "node patch/test-all.mjs",
     "test:watch": "vitest --project unit"
   },
   "dependencies": {
