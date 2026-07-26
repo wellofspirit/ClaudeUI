@@ -202,4 +202,25 @@ describe('AuthVault lifecycle compatibility', () => {
     cancelledVault.cancelLogin()
     expect(cancelled.cancel).toHaveBeenCalled()
   })
+
+  it('supersedes a SETTLED (abandoned) flow so re-login is not blocked', async () => {
+    // First flow reaches a terminal outcome (its 5-min timeout / error) but
+    // completeLogin() is never called, so activeFlow is never cleared. isSettled()
+    // reports true → the next beginLogin() must supersede it, not throw.
+    const settled = flow({ isSettled: () => true })
+    const fresh = flow()
+    let n = 0
+    const vault = new AuthVault({ loginFlowFactory: () => (n++ === 0 ? settled : fresh) })
+    await vault.beginLogin()
+    const res = await vault.beginLogin()
+    expect(res.authorizeUrl).toBe('https://example.test/auth')
+    expect(fresh.start).toHaveBeenCalled()
+  })
+
+  it('still blocks a concurrent LIVE flow (single-flight guard preserved)', async () => {
+    const live = flow({ isSettled: () => false })
+    const vault = new AuthVault({ loginFlowFactory: () => live })
+    await vault.beginLogin()
+    await expect(vault.beginLogin()).rejects.toThrow(/already in progress/)
+  })
 })

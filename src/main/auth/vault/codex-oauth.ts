@@ -97,6 +97,13 @@ export interface LoginFlow {
   start(): Promise<{ authorizeUrl: string; state: string }>
   waitForCallback(): Promise<VaultCredential>
   cancel(): void
+  /**
+   * Optional: true once the flow has started and since reached a terminal
+   * outcome (its pending wait settled + cleared). AuthVault uses it to detect
+   * and supersede a zombie flow whose completeLogin() was never called, instead
+   * of blocking re-login. Fakes may omit it (treated as "not settled").
+   */
+  isSettled?(): boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -351,10 +358,12 @@ type TerminalResult = { ok: true; cred: VaultCredential } | { ok: false; err: Er
 
 /**
  * Drives the authorize → loopback-redirect → exchange handshake for exactly
- * one login attempt. `start()` arms the pending-callback promise AND the
- * timeout atomically (before returning), so there is no window between
- * "authorize URL handed to the caller" and "server ready to accept the
- * redirect" — waitForCallback() just returns the already-armed promise.
+ * one login attempt. `start()` arms the pending-callback promise, binds the
+ * loopback server, and only THEN arms the timeout — all before returning — so
+ * there is no window between "authorize URL handed to the caller" and "server
+ * ready to accept the redirect"; waitForCallback() just returns the already-
+ * armed promise. (The timeout is deliberately armed AFTER listen() so a bind
+ * failure can't leak a timer that later rejects a never-awaited promise.)
  *
  * The server closes itself after ANY terminal outcome (success, error, CSRF
  * mismatch, missing code, /cancel, timeout, or cancel()) — callers never need
@@ -397,11 +406,24 @@ export class CodexLoginFlow implements LoginFlow {
     this.pendingPromise = new Promise<VaultCredential>((resolve, reject) => {
       this.pending = { resolve, reject }
     })
+
+    // Bind the loopback server BEFORE arming the timeout. Arming the timeout
+    // first leaks it when listen() fails (e.g. EADDRINUSE on the fixed port
+    // 1455 while a stale login server is still bound): the timer survives the
+    // thrown start() and, `timeoutMs` later, rejects a pendingPromise no one is
+    // awaiting — an unhandled rejection. On a bind failure, tear the (optimist-
+    // ically armed) pending wait down and rethrow so the flow is left inert.
+    try {
+      await this.listen()
+    } catch (err) {
+      this.pending = undefined
+      this.pendingPromise = undefined
+      throw err
+    }
+
     this.timeoutHandle = setTimeout(() => {
       void this.terminate({ ok: false, err: new Error('OAuth callback timeout - authorization took too long') })
     }, this.timeoutMs)
-
-    await this.listen()
 
     return { authorizeUrl: buildAuthorizeUrl(this.redirectUri, this.pkce, this.state), state: this.state }
   }
@@ -411,6 +433,17 @@ export class CodexLoginFlow implements LoginFlow {
       throw new Error('CodexLoginFlow: call start() before waitForCallback()')
     }
     return this.pendingPromise
+  }
+
+  /**
+   * True once start() has run and the flow has since reached ANY terminal
+   * outcome (timeout, cancel, error, CSRF mismatch, or a successful callback) —
+   * its pending wait was settled and cleared by terminate(). AuthVault uses
+   * this to supersede a zombie flow (one whose completeLogin() was never
+   * called) on the next beginLogin() instead of blocking re-login forever.
+   */
+  isSettled(): boolean {
+    return this.pendingPromise !== undefined && this.pending === undefined
   }
 
   /** Reject the pending wait (if any) and close the server. Safe to call with no active flow. */
@@ -459,6 +492,14 @@ export class CodexLoginFlow implements LoginFlow {
       return
     }
     if (url.pathname === '/cancel') {
+      // NOTE (accepted DoS, deferred): this loopback endpoint takes no state and
+      // is reachable by any local process, which can therefore abort a pending
+      // ChatGPT-connect attempt. It is DoS-only — PKCE + the state check in
+      // handleCallback() block credential injection — and a hostile local
+      // process has equivalent aborts anyway (e.g. pre-binding port 1455, now
+      // handled gracefully by start()). A state-authenticated guard is deferred
+      // rather than risk the un-live-testable login flow (this endpoint is also
+      // unused in-app: cancellation goes through cancel(), not HTTP).
       this.respond(res, 200, 'text/plain', 'Login cancelled')
       void this.terminate({ ok: false, err: new Error('Login cancelled') })
       return
@@ -473,6 +514,13 @@ export class CodexLoginFlow implements LoginFlow {
     const errorDescription = url.searchParams.get('error_description')
 
     if (error) {
+      // NOTE (accepted DoS, deferred): an error= callback terminates before the
+      // state check below, so a local process can abort a pending login by
+      // hitting /auth/callback?error=x without a valid state. Same disposition
+      // as /cancel: DoS-only (no injection past PKCE + state), and reordering a
+      // state check ahead of error surfacing risks masking a genuine OAuth error
+      // on this un-live-testable flow (RFC 6749 §4.1.2.1 echoes state on errors,
+      // but we don't want to bet the error path on server conformance).
       const message = errorDescription || error
       this.respond(res, 200, 'text/html; charset=utf-8', renderErrorPage(message))
       void this.terminate({ ok: false, err: new Error(message) })
