@@ -112,6 +112,38 @@ function binaryAddedPatch(filePath: string): string {
   ].join('\n')
 }
 
+/** MiB, one decimal place — for human-readable "too large" markers. */
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const MAX_TEXT_FILE_MIB = MAX_TEXT_FILE_BYTES / (1024 * 1024)
+
+/**
+ * Placeholder patch for a *tracked* file whose diff would exceed the payload
+ * cap (audit M-GT1). Returned with `isBinary: true` so the diff view shows its
+ * "preview not shown" notice rather than parsing/rendering a multi-hundred-MB
+ * string — the same escape hatch tracked binaries already use. The message body
+ * is carried for the non-desktop consumers (remote surface) that read `patch`.
+ */
+function tooLargePatch(filePath: string, bytes: number): string {
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    `File too large to display (${formatMiB(bytes)}); diff suppressed above the ${MAX_TEXT_FILE_MIB} MB limit`,
+    ''
+  ].join('\n')
+}
+
+/** Sentinel returned by getFileContents when one side exceeds the size cap. */
+function tooLargeContentMarker(bytes: number): string {
+  return `⟪ File too large to display (${formatMiB(bytes)}) — exceeds the ${MAX_TEXT_FILE_MIB} MB diff limit ⟫\n`
+}
+
+/** Sentinel returned by getFileContents for a binary working-tree file. */
+function binaryContentMarker(): string {
+  return `⟪ Binary file — preview not shown ⟫\n`
+}
+
 export class GitService {
   private git: SimpleGit
   private cwd: string
@@ -177,6 +209,23 @@ export class GitService {
       throw new Error(`Refusing file operation on path outside the repository: ${filePath}`)
     }
     return abs
+  }
+
+  /**
+   * Best-effort byte size of a git object at `spec` (e.g. `HEAD:path`, `:path`),
+   * via `git cat-file -s`. Returns null when the object is absent or the command
+   * fails. Used by getFileContents/getFilePatch to cap oversized blobs BEFORE
+   * `git show`/`git diff` buffers them into a JS string — a multi-GB blob read as
+   * utf-8 crashes the main process on V8's String::kMaxLength (audit M-GT1).
+   */
+  private async blobSize(spec: string): Promise<number | null> {
+    try {
+      const raw = await this.git.raw(['cat-file', '-s', spec])
+      const n = parseInt(raw.trim(), 10)
+      return Number.isFinite(n) ? n : null
+    } catch {
+      return null
+    }
   }
 
   /** Record a line count for `absPath`, bounding the cache with a wholesale clear. */
@@ -359,8 +408,35 @@ export class GitService {
     args.push('--', filePath)
 
     try {
+      // Cap oversized TRACKED files before git buffers a giant diff and we IPC a
+      // multi-hundred-MB string (audit M-GT1). The dominant real-world trigger is
+      // a huge tracked blob (sqlite/duckdb/generated json/log) sitting in the
+      // working tree: stat it cheaply, and only when it's over the cap pay for the
+      // two cat-file probes that confirm it's actually tracked (an untracked
+      // oversized file must fall through to the untracked binary/size guard below,
+      // which emits the /dev/null "Binary files differ" placeholder).
+      let workingSize = 0
+      try {
+        const st = await fs.promises.stat(absPath)
+        if (st.isFile()) workingSize = st.size
+      } catch {
+        /* absent (e.g. a deletion) → 0; the length backstop still covers it */
+      }
+      if (workingSize > MAX_TEXT_FILE_BYTES) {
+        const tracked =
+          (await this.blobSize(`HEAD:${filePath}`)) != null ||
+          (await this.blobSize(`:${filePath}`)) != null
+        if (tracked) return { patch: tooLargePatch(filePath, workingSize), isBinary: true }
+      }
+
       const patch = await this.git.raw(args)
       if (patch) {
+        // Backstop for cases the working-tree stat can't pre-empt (a huge diff of
+        // a file that is small on disk now but large at HEAD, a rename, etc.):
+        // never hand the renderer a payload past the cap.
+        if (patch.length > MAX_TEXT_FILE_BYTES) {
+          return { patch: tooLargePatch(filePath, patch.length), isBinary: true }
+        }
         // Tracked-file path: git itself emits "Binary files ... differ" for
         // binary content. Surface that to the renderer so it can show a
         // proper notice instead of "No changes".
@@ -422,44 +498,40 @@ export class GitService {
     const absPath = this.resolveContained(filePath)
     const normEol = (s: string): string => s.replace(/\r\n/g, '\n')
 
+    // Read a git object as text, size-capped (audit M-GT1). Returns a marker
+    // string when the blob is over the cap (never buffers the huge blob), the
+    // content when present, or null when the object is absent / show fails (so
+    // callers can fall back to another rev, preserving the prior semantics).
+    const showGuarded = async (spec: string): Promise<string | null> => {
+      const size = await this.blobSize(spec)
+      if (size != null && size > MAX_TEXT_FILE_BYTES) return tooLargeContentMarker(size)
+      try {
+        return await this.git.show([spec])
+      } catch {
+        return null
+      }
+    }
+
     try {
       if (staged) {
-        let oldContent = ''
-        try {
-          oldContent = await this.git.show([`HEAD:${filePath}`])
-        } catch (err) {
-          logger.warn('GitService', `Failed to get HEAD content for staged file: ${filePath}`, err)
-        }
-        let newContent = ''
-        try {
-          newContent = await this.git.show([`:${filePath}`])
-        } catch (err) {
-          logger.warn('GitService', `Failed to get index content for staged file: ${filePath}`, err)
-        }
+        const oldContent = (await showGuarded(`HEAD:${filePath}`)) ?? ''
+        const newContent = (await showGuarded(`:${filePath}`)) ?? ''
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       } else {
-        let oldContent = ''
-        try {
-          oldContent = await this.git.show([`:${filePath}`])
-        } catch (err) {
-          logger.warn(
-            'GitService',
-            `Failed to get index content for unstaged file: ${filePath}`,
-            err
-          )
-          try {
-            oldContent = await this.git.show([`HEAD:${filePath}`])
-          } catch (err2) {
-            logger.warn(
-              'GitService',
-              `Failed to get HEAD content for untracked file: ${filePath}`,
-              err2
-            )
-          }
-        }
+        // old side: index blob, falling back to HEAD blob (matches prior behavior).
+        const oldContent =
+          (await showGuarded(`:${filePath}`)) ?? (await showGuarded(`HEAD:${filePath}`)) ?? ''
+        // new side: working-tree file, capped by size and screened for binary so
+        // a multi-GB blob is never read as utf-8 (V8 kMaxLength crash) and raw
+        // bytes never land in the diff view.
         let newContent = ''
         try {
-          newContent = await fs.promises.readFile(absPath, 'utf-8')
+          const stat = await fs.promises.stat(absPath)
+          if (stat.isFile()) {
+            if (stat.size > MAX_TEXT_FILE_BYTES) newContent = tooLargeContentMarker(stat.size)
+            else if (await isBinaryFile(absPath)) newContent = binaryContentMarker()
+            else newContent = await fs.promises.readFile(absPath, 'utf-8')
+          }
         } catch (err) {
           logger.warn('GitService', `Failed to read working tree file: ${filePath}`, err)
         }

@@ -699,6 +699,73 @@ describe('GitService.getFileContents', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Tracked content / diff size caps (audit M-GT1)
+//
+// Before the cap, clicking a huge TRACKED file buffered it fully (git show /
+// git diff into a JS string) and IPC'd a multi-hundred-MB payload — and a
+// multi-GB tracked blob crashed the main process on V8's String::kMaxLength.
+// getFilePatch must return a "too large" placeholder (isBinary) instead of the
+// giant diff; getFileContents must return a marker per oversized side, never
+// the content.
+// ---------------------------------------------------------------------------
+
+describe('GitService tracked size caps (M-GT1)', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+  // 10 MiB + 1 of printable 'a' — over the 10 MiB cap, and NOT binary (no NUL),
+  // so this exercises the size cap independently of the binary heuristic.
+  const OVERSIZE = 10 * 1024 * 1024 + 1
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+    // Commit a huge tracked text file, then modify it so there is a real diff.
+    await fs.promises.writeFile(path.join(repo.path, 'huge.txt'), Buffer.alloc(OVERSIZE, 0x61))
+    await repo.git.add('huge.txt')
+    await repo.commit('add huge tracked file')
+    await fs.promises.appendFile(path.join(repo.path, 'huge.txt'), 'zzz\n')
+  })
+
+  afterEach(async () => {
+    await repo.cleanup()
+  })
+
+  it('getFilePatch returns a too-large placeholder for an oversized tracked file (no giant diff)', async () => {
+    const { patch, isBinary } = await svc.getFilePatch('huge.txt', false)
+    expect(isBinary).toBe(true)
+    // The placeholder — never the 10 MiB of content, never a real hunk.
+    expect(patch.length).toBeLessThan(1024)
+    expect(patch).toMatch(/too large/i)
+    expect(patch.includes('@@')).toBe(false)
+    // A long run of the file's bytes must not appear.
+    expect(patch.includes('a'.repeat(1000))).toBe(false)
+  })
+
+  it('getFileContents returns a marker per oversized side, never the content', async () => {
+    const { oldContent, newContent } = await svc.getFileContents('huge.txt', false)
+    // old side = the committed index blob (10 MiB) → marker.
+    expect(oldContent).toMatch(/too large/i)
+    expect(oldContent.length).toBeLessThan(512)
+    // new side = the working-tree file (10 MiB) → marker.
+    expect(newContent).toMatch(/too large/i)
+    expect(newContent.length).toBeLessThan(512)
+    expect(newContent.includes('a'.repeat(1000))).toBe(false)
+  })
+
+  it('does not affect a normal-sized tracked file (cap is non-vacuous)', async () => {
+    await repo.writeFile('small.txt', 'one\ntwo\n')
+    await repo.commit('seed small')
+    await repo.writeFile('small.txt', 'one\ntwo\nthree\n')
+    const { patch, isBinary } = await svc.getFilePatch('small.txt', false)
+    expect(isBinary).toBeUndefined()
+    expect(norm(patch)).toMatch(/\+three/m)
+    const { oldContent, newContent } = await svc.getFileContents('small.txt', false)
+    expect(norm(oldContent)).toBe('one\ntwo\n')
+    expect(norm(newContent)).toBe('one\ntwo\nthree\n')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // discardFile
 // ---------------------------------------------------------------------------
 
