@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, Menu, clipboard, crashReporter } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu, clipboard, crashReporter, dialog } from 'electron'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
@@ -632,12 +632,42 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Global error handlers — catch anything that slips through
+// Global error handlers — catch anything that slips through.
+//
+// Deliberate choice: we do NOT force-quit on an uncaught exception. A desktop
+// app that hard-exits mid-operation loses in-flight user work (unsaved edits,
+// running turns) and, given how much of the process is independent (multiple
+// engines, git/pty/usage services), one subsystem throwing rarely corrupts the
+// others. But swallowing silently is also wrong — the process may now be in an
+// inconsistent state — so we (a) log at error with an explicit unstable-state
+// flag (surfaced in-app via the log viewer) and (b) surface ONCE to the user
+// with a dialog so it isn't invisible. The once-guard prevents a dialog storm
+// if the same fault re-fires.
+let unexpectedErrorSurfaced = false
+function surfaceUnexpectedError(kind: string, detail: unknown): void {
+  logger.error(
+    'process',
+    `${kind} — process may be in an inconsistent state (not exiting; see stack)`,
+    detail
+  )
+  if (unexpectedErrorSurfaced) return
+  unexpectedErrorSurfaced = true
+  try {
+    const message = detail instanceof Error ? detail.message : String(detail)
+    dialog.showErrorBox(
+      'ClaudeUI hit an unexpected error',
+      `${kind}:\n${message}\n\nThe app is still running but may be unstable — consider restarting. ` +
+        `Full details are in the log viewer.`
+    )
+  } catch {
+    /* dialog can fail very early in startup or on headless CI — logging above is enough */
+  }
+}
 process.on('uncaughtException', (err) => {
-  logger.error('process', 'Uncaught exception', err)
+  surfaceUnexpectedError('Uncaught exception', err)
 })
 process.on('unhandledRejection', (reason) => {
-  logger.error('process', 'Unhandled rejection', reason)
+  surfaceUnexpectedError('Unhandled rejection', reason)
 })
 
 // Process-level crashes never surface as JS exceptions — without these the app
