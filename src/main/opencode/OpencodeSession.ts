@@ -199,6 +199,15 @@ export class OpencodeSession extends BaseSession {
   // run(prompt) await the SAME promise, so a prompt sent before the eager
   // acquire resolves does NOT trigger a second acquire (ref-count stays 1).
   private connectingPromise: Promise<void> | null = null
+  // Memoized in-flight "establish" (connect + create/resume session + SSE +
+  // permission mode) for the FIRST prompt of a turn. A second prompt landing
+  // during the connect window (client + openSessionId both still null, up to
+  // ~15s) awaits this SAME promise and then steers into the one session it
+  // created, instead of taking the main path and calling createSession a second
+  // time — which orphaned one session and lost the events filtered to the
+  // overwritten openSessionId (M-OC1). Cleared once the first prompt's run()
+  // settles (its finally).
+  private establishingPromise: Promise<void> | null = null
 
   // The opencode session id to resume (passed from sidebar when clicking a
   // persisted opencode session). When set, we skip createSession and replay
@@ -386,66 +395,43 @@ export class OpencodeSession extends BaseSession {
       return
     }
 
+    // ── Second prompt during the connect window (M-OC1) ──────────────────────
+    // The steer guard above needs client + openSessionId, both still null while
+    // the FIRST prompt is connecting (up to ~15s). A second prompt landing here
+    // must NOT fall through to the main path — both would pass `!openSessionId`
+    // and call createSession, orphaning one session and losing the events
+    // filtered to the overwritten id. Wait for the in-flight establish, then
+    // re-enter: the steer guard now holds (client + openSessionId set), so this
+    // prompt coalesces into the SINGLE session instead of creating a second.
+    if (this.establishingPromise) {
+      try {
+        await this.establishingPromise
+      } catch {
+        return // the first prompt's establish failed; it already surfaced session:error
+      }
+      if (this._cancelled || !this.client || !this.openSessionId || !this.isProcessing) return
+      return this.run(prompt, attachments)
+    }
+
     this.isProcessing = true
     this.sendStatus()
 
+    // Memoize the establish phase (connect + create/resume + SSE + permission)
+    // so a second prompt during the connect window (above) awaits the SAME
+    // establish and never creates a duplicate session (M-OC1).
+    const establishing = this.establishSession()
+    this.establishingPromise = establishing
     try {
-      // 1. Connect (memoized — shares the in-flight acquire with eagerConnect so
-      //    a prompt sent before the eager acquire resolves never double-acquires).
-      await this.ensureConnected()
-      // Cancelled mid-connect (e.g. idle timeout or user cancel) — bail cleanly
-      // instead of dereferencing a null client/session below.
-      if (!this.client || this._cancelled) {
+      await establishing
+      // Cancelled mid-connect (idle timeout / user cancel) or no session could
+      // be established — bail cleanly instead of dereferencing a null
+      // client/session below.
+      if (!this.client || this._cancelled || !this.openSessionId) {
         this.isProcessing = false
         this.sendStatus()
         this.resetInactivityTimer()
         return
       }
-
-      // 2. Create or resume opencode session
-      if (!this.openSessionId) {
-        if (this.resumeSessionId) {
-          // Resume: reuse the prior session id (skip createSession).
-          // Verify the session exists first — if not, fall back to creating fresh.
-          try {
-            await this.client.getSession(this.resumeSessionId)
-            this.openSessionId = this.resumeSessionId
-            logger.info('OpencodeSession', `Resuming opencode session ${this.openSessionId}`)
-          } catch {
-            logger.warn(
-              'OpencodeSession',
-              `Resume session ${this.resumeSessionId} not found — creating fresh session`
-            )
-            this.resumeSessionId = undefined
-          }
-        }
-        if (!this.openSessionId) {
-          // Omit `title` so opencode stamps its default placeholder
-          // ("New session - <ISO>"). That placeholder is what gates opencode's
-          // own async title generation (SessionPrompt.ensureTitle fires only when
-          // `isDefaultTitle(session.title)` holds). Passing `title: ''` here would
-          // store an empty string — which opencode treats as a deliberate
-          // user-set title and so NEVER auto-titles — leaving the session
-          // permanently "Untitled". The placeholder is mapped back to a friendly
-          // label in opencode-session-list.ts until generation lands a real title.
-          const s = await this.client.createSession({})
-          this.openSessionId = s.id
-        }
-        // Emit status with the session id so the renderer can rekey
-        this.sendStatus()
-
-        // 2a. On resume: replay stored history BEFORE accepting new prompts.
-        // This paints the prior transcript in the chat view so the user sees context.
-        if (this.resumeSessionId && this.openSessionId === this.resumeSessionId) {
-          await this.replayStoredHistory(this.openSessionId)
-        }
-      }
-
-      // 3. Start SSE consumer BEFORE sending prompt (so no events are missed)
-      this.ensureSSEConsumer()
-
-      // 4. Apply autonomy/permission mode
-      await this.applyPermissionMode(this.permissionMode)
 
       // 5. Record the user message in local history (for getMessages()). Do NOT
       // emit session:message — the renderer adds the user message optimistically
@@ -468,7 +454,71 @@ export class OpencodeSession extends BaseSession {
       this.send('session:error', err instanceof Error ? err.message : String(err))
       this.sendStatus()
       this.resetInactivityTimer()
+    } finally {
+      // Release the memo once THIS prompt's run() settles — a later prompt that
+      // arrives after the turn is established takes the steer path directly.
+      this.establishingPromise = null
     }
+  }
+
+  /**
+   * Establish the opencode session for a turn: acquire the connection, create
+   * or resume the opencode session, start the SSE consumer, and apply the
+   * permission mode. Extracted from run() and memoized there (establishingPromise)
+   * so two prompts landing during the connect window share ONE establish and
+   * create exactly ONE session (M-OC1). Leaves client/openSessionId null when
+   * cancelled mid-connect; the caller checks and bails.
+   */
+  private async establishSession(): Promise<void> {
+    // 1. Connect (memoized — shares the in-flight acquire with eagerConnect so
+    //    a prompt sent before the eager acquire resolves never double-acquires).
+    await this.ensureConnected()
+    if (!this.client || this._cancelled) return
+
+    // 2. Create or resume opencode session
+    if (!this.openSessionId) {
+      if (this.resumeSessionId) {
+        // Resume: reuse the prior session id (skip createSession).
+        // Verify the session exists first — if not, fall back to creating fresh.
+        try {
+          await this.client.getSession(this.resumeSessionId)
+          this.openSessionId = this.resumeSessionId
+          logger.info('OpencodeSession', `Resuming opencode session ${this.openSessionId}`)
+        } catch {
+          logger.warn(
+            'OpencodeSession',
+            `Resume session ${this.resumeSessionId} not found — creating fresh session`
+          )
+          this.resumeSessionId = undefined
+        }
+      }
+      if (!this.openSessionId) {
+        // Omit `title` so opencode stamps its default placeholder
+        // ("New session - <ISO>"). That placeholder is what gates opencode's
+        // own async title generation (SessionPrompt.ensureTitle fires only when
+        // `isDefaultTitle(session.title)` holds). Passing `title: ''` here would
+        // store an empty string — which opencode treats as a deliberate
+        // user-set title and so NEVER auto-titles — leaving the session
+        // permanently "Untitled". The placeholder is mapped back to a friendly
+        // label in opencode-session-list.ts until generation lands a real title.
+        const s = await this.client.createSession({})
+        this.openSessionId = s.id
+      }
+      // Emit status with the session id so the renderer can rekey
+      this.sendStatus()
+
+      // 2a. On resume: replay stored history BEFORE accepting new prompts.
+      // This paints the prior transcript in the chat view so the user sees context.
+      if (this.resumeSessionId && this.openSessionId === this.resumeSessionId) {
+        await this.replayStoredHistory(this.openSessionId)
+      }
+    }
+
+    // 3. Start SSE consumer BEFORE sending prompt (so no events are missed)
+    this.ensureSSEConsumer()
+
+    // 4. Apply autonomy/permission mode
+    await this.applyPermissionMode(this.permissionMode)
   }
 
   /**
