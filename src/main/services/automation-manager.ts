@@ -145,6 +145,9 @@ function writeJson(filePath: string, data: unknown): void {
 // ---------------------------------------------------------------------------
 
 export class AutomationManager {
+  /** Largest delay setTimeout honors before the runtime clamps it to 1ms. */
+  private static readonly MAX_TIMER_DELAY_MS = 2_147_483_647
+
   private win: BrowserWindow
   private automations: Automation[] = []
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -397,9 +400,9 @@ export class AutomationManager {
       return
     }
 
-    const timer = setTimeout(() => {
-      this.timers.delete(automation.id)
-      // Skip if a run is already active for this automation
+    this.armTimer(automation.id, delayMs, () => {
+      // The leaf timer already removed itself from the map (see armTimer).
+      // Skip if a run is already active for this automation.
       if (this.activeRuns.has(automation.id)) {
         logger.debug('AutomationManager', `Skipping ${automation.name}: previous run still active`)
         this.scheduleNext(automation)
@@ -408,9 +411,35 @@ export class AutomationManager {
       this.executeRun(automation).catch((err) => {
         logger.error('AutomationManager', `Run failed for ${automation.name}: ${err}`)
       })
-    }, delayMs)
+    })
+  }
 
-    this.timers.set(automation.id, timer)
+  /**
+   * Arm the single pending timer for an automation, chaining multiple
+   * setTimeouts when the delay exceeds the 32-bit limit. Node (and browsers)
+   * clamp a setTimeout delay > 2^31-1 ms (~24.85 days) down to 1ms, firing it
+   * almost immediately — so a quarterly/yearly cron or a multi-week interval
+   * would fire back-to-back in a tight loop (H11). We instead sleep in
+   * MAX_TIMER_DELAY_MS chunks and only run `onFire` once the FULL delay has
+   * elapsed. The timers map always holds exactly the currently-pending timer
+   * for the id, so cancelSchedule()/edit cleanup and the activeRuns overlap
+   * guard keep working across the chain.
+   */
+  private armTimer(id: string, delayMs: number, onFire: () => void): void {
+    const remaining = Math.max(0, delayMs)
+    if (remaining > AutomationManager.MAX_TIMER_DELAY_MS) {
+      const timer = setTimeout(() => {
+        // Re-arm for the remainder — this is a re-schedule, NOT an execution.
+        this.armTimer(id, remaining - AutomationManager.MAX_TIMER_DELAY_MS, onFire)
+      }, AutomationManager.MAX_TIMER_DELAY_MS)
+      this.timers.set(id, timer)
+    } else {
+      const timer = setTimeout(() => {
+        this.timers.delete(id)
+        onFire()
+      }, remaining)
+      this.timers.set(id, timer)
+    }
   }
 
   private cancelSchedule(id: string): void {

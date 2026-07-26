@@ -282,6 +282,43 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.stopAll()
   })
 
+  it('H11: a long (30-day) interval chains past the 32-bit clamp and does not fire early', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    vi.useFakeTimers()
+    try {
+      const executeSpy = vi
+        .spyOn(mgr as any, 'executeRun')
+        .mockResolvedValue({ costUsd: 0, lastText: '' })
+
+      const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000 // 2_592_000_000 ms > 2^31-1
+      mgr.upsert(
+        makeAutomation({
+          id: 'h11-long',
+          enabled: true,
+          schedule: { type: 'interval', intervalMs: THIRTY_DAYS }
+        })
+      )
+
+      const MAX = 2_147_483_647
+      // One full clamp window elapses. Pre-fix the runtime clamps the 30-day
+      // delay to 1ms and executeRun fires almost immediately; post-fix this only
+      // re-arms the chained remainder.
+      await vi.advanceTimersByTimeAsync(MAX)
+      expect(executeSpy).not.toHaveBeenCalled()
+      // A timer is still pending (the chained remainder) — the schedule isn't wedged.
+      expect((mgr as any).timers.has('h11-long')).toBe(true)
+
+      // Advancing the remaining ~14 days fires exactly one run.
+      await vi.advanceTimersByTimeAsync(THIRTY_DAYS)
+      expect(executeSpy).toHaveBeenCalledTimes(1)
+
+      mgr.stopAll()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('concurrent runs: two automations execute independently with separate run state', async () => {
     const { mgr } = await freshManager()
     mgr.load()

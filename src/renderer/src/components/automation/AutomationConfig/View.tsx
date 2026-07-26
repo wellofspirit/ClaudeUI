@@ -14,6 +14,7 @@ import {
   type StatusKind,
   unitMultiplier,
   naturalUnit,
+  clampIntervalMs,
   computeNextRuns,
   formatScheduleSummary,
   deriveStatus
@@ -498,11 +499,14 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
       : 1
   const setIntervalValue = (n: number): void => {
     const clamped = Math.max(1, Math.floor(n) || 1)
-    setSchedule({ type: 'interval', intervalMs: clamped * unitMultiplier(intervalUnit) })
+    setSchedule({
+      type: 'interval',
+      intervalMs: clampIntervalMs(clamped * unitMultiplier(intervalUnit))
+    })
   }
   const changeIntervalUnit = (u: IntervalUnit): void => {
     setIntervalUnit(u)
-    setSchedule({ type: 'interval', intervalMs: intervalValue * unitMultiplier(u) })
+    setSchedule({ type: 'interval', intervalMs: clampIntervalMs(intervalValue * unitMultiplier(u)) })
   }
 
   return (

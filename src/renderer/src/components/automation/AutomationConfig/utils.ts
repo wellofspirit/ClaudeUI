@@ -75,6 +75,19 @@ export function unitMultiplier(u: IntervalUnit): number {
   return MS_PER_MINUTE
 }
 
+/**
+ * Upper bound for interval schedules. The scheduler chains setTimeouts past the
+ * 32-bit clamp (~24.85 days), so long intervals are safe to persist; this cap
+ * (1 year) is belt-and-braces against absurd inputs that would otherwise
+ * overflow or make the next-run preview meaningless.
+ */
+export const MAX_INTERVAL_MS = 365 * MS_PER_DAY
+
+/** Clamp an interval to [1 minute, MAX_INTERVAL_MS]. */
+export function clampIntervalMs(ms: number): number {
+  return Math.min(Math.max(MS_PER_MINUTE, Math.floor(ms) || MS_PER_MINUTE), MAX_INTERVAL_MS)
+}
+
 /** Pick the largest unit that divides `ms` cleanly; falls back to minutes. */
 export function naturalUnit(ms: number): IntervalUnit {
   if (ms > 0 && ms % MS_PER_DAY === 0) return 'days'
