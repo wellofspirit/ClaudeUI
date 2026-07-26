@@ -162,6 +162,21 @@ export function mapEvent(
     return handleChildEvent(ev, eventSessionId, accumulators, childSessions)
   }
 
+  // ── Route: session.error with no sessionID → surface (don't drop) ─────────
+  // The vendor marks `sessionID` optional on session.error and publishes plugin
+  // crashes without one (plugin/index.ts). ClaudeUI always loads
+  // claudeui-xeng-plugin, so a plugin fault would fall straight through to the
+  // "ignore" fallback below and surface NOWHERE. Route it to a generic error so
+  // the user at least sees that something failed. (A sessionID that IS present
+  // but matches neither own nor a child belongs to another session and stays
+  // ignored — only the sessionID-less global error is adopted here.)
+  if (!eventSessionId && ev.type === 'session.error') {
+    const err = props.error as { data?: Record<string, unknown> } | undefined
+    const message =
+      (err?.data?.message as string | undefined) ?? 'An opencode plugin or server error occurred'
+    return { kind: 'error', message }
+  }
+
   // ── Route: unknown foreign session → ignore ───────────────────────────────
   return { kind: 'ignore' }
 }

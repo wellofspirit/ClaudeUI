@@ -66,6 +66,31 @@ describe('mapEvent — cross-session filter', () => {
       expect(out.delta).toBe('child text')
     }
   })
+
+  it('surfaces a session.error that carries NO sessionID (plugin crash) instead of dropping it', () => {
+    // The vendor publishes plugin faults as session.error with no sessionID
+    // (plugin/index.ts). ClaudeUI always loads claudeui-xeng-plugin, so such a
+    // crash matched neither the own nor a child branch and fell through to
+    // {kind:'ignore'} — surfacing nowhere. It must now become a generic error.
+    const ev = makeEvent('session.error', {
+      error: { name: 'UnknownError', data: { message: 'plugin boom' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, new Map())
+    expect(out.kind).toBe('error')
+    if (out.kind === 'error') expect(out.message).toBe('plugin boom')
+  })
+
+  it('still IGNORES a session.error scoped to an unrelated foreign session', () => {
+    // A sessionID that IS present but matches neither own nor a child belongs to
+    // someone else — it must stay ignored (only the sessionID-less GLOBAL error
+    // is adopted).
+    const ev = makeEvent('session.error', {
+      sessionID: 'ses_SOMEONE_ELSE',
+      error: { name: 'UnknownError', data: { message: 'not ours' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, new Map())
+    expect(out.kind).toBe('ignore')
+  })
 })
 
 describe('mapEvent — message.part.delta', () => {
