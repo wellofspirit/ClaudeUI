@@ -24,18 +24,19 @@ describe('auto-classifier-tool', () => {
   })
 
   describe('ClassifyResultHandler callback', () => {
-    it('receives structured result with all required fields', () => {
+    it('receives the correlation id + structured result with all required fields', () => {
       const handler = vi.fn<ClassifyResultHandler>()
       const result: ClassifyResult = {
         thinking: 'This is a read-only operation',
         shouldBlock: false,
         reason: 'Local file read within project scope'
       }
-      handler(result)
-      expect(handler).toHaveBeenCalledWith(result)
-      expect(handler.mock.calls[0][0].thinking).toBe('This is a read-only operation')
-      expect(handler.mock.calls[0][0].shouldBlock).toBe(false)
-      expect(handler.mock.calls[0][0].reason).toBe('Local file read within project scope')
+      handler('req-1', result)
+      expect(handler).toHaveBeenCalledWith('req-1', result)
+      expect(handler.mock.calls[0][0]).toBe('req-1')
+      expect(handler.mock.calls[0][1].thinking).toBe('This is a read-only operation')
+      expect(handler.mock.calls[0][1].shouldBlock).toBe(false)
+      expect(handler.mock.calls[0][1].reason).toBe('Local file read within project scope')
     })
 
     it('handles block results', () => {
@@ -45,8 +46,8 @@ describe('auto-classifier-tool', () => {
         shouldBlock: true,
         reason: 'Git destructive: force push to remote'
       }
-      handler(result)
-      expect(handler.mock.calls[0][0].shouldBlock).toBe(true)
+      handler('req-2', result)
+      expect(handler.mock.calls[0][1].shouldBlock).toBe(true)
     })
   })
 })

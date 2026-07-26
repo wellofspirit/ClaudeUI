@@ -77,6 +77,8 @@ function ensureClassifierPrompt(): void {
 // ---------------------------------------------------------------------------
 
 interface PendingClassification {
+  /** Correlation id — the verdict must echo this to resolve this request. */
+  id: string
   resolve: (result: ClassifyResult) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
@@ -88,6 +90,9 @@ class ClassifierSession {
   private pending: PendingClassification | null = null
   private running = false
   private messageCount = 0
+  /** Monotonic per-session request counter — sourced for the correlation id.
+   *  NOT reset on restart so ids stay unique across the session object's life. */
+  private requestSeq = 0
 
   /** Maximum messages before we restart to keep context clean */
   private static MAX_MESSAGES = 100
@@ -123,7 +128,8 @@ class ClassifierSession {
       throw new Error('Classifier busy — concurrent classification not supported')
     }
 
-    const userMessage = buildClassificationMessage(toolName, toolInput, transcript)
+    const requestId = String(++this.requestSeq)
+    const userMessage = buildClassificationMessage(requestId, toolName, toolInput, transcript)
     this.channel!.push({
       type: 'user',
       session_id: '',
@@ -135,10 +141,15 @@ class ClassifierSession {
     return new Promise<ClassifyResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending = null
+        // The cli.js turn for this request keeps running after we give up — its
+        // late verdict must never resolve a FUTURE classify(). Tear the session
+        // down (abort + clear channel) so the next classify() starts a fresh
+        // one; the id correlation below is the second line of defense.
+        this.stop()
         reject(new Error('Classifier timeout'))
       }, ClassifierSession.TIMEOUT_MS)
 
-      this.pending = { resolve, reject, timer }
+      this.pending = { id: requestId, resolve, reject, timer }
     })
   }
 
@@ -148,15 +159,28 @@ class ClassifierSession {
     const channel = new MessageChannel<unknown>()
     this.channel = channel
     this.abortController = new AbortController()
+    // Identity for THIS session generation. stop()+restart (on timeout / context
+    // limit) replaces this.abortController; the old background loop's teardown
+    // then runs late and must NOT clobber the newer session's running/pending.
+    const myAbort = this.abortController
     this.messageCount = 0
 
-    const classifierMcp = createClassifierServer((result) => {
-      if (this.pending) {
-        clearTimeout(this.pending.timer)
-        const { resolve } = this.pending
-        this.pending = null
-        resolve(result)
+    const classifierMcp = createClassifierServer((id, result) => {
+      const p = this.pending
+      if (!p) return // no request awaiting — orphan/late verdict, drop
+      if (p.id !== id) {
+        // Verdict for a DIFFERENT (superseded/timed-out) request. Resolving the
+        // current pending with it would apply a stale verdict to the wrong tool
+        // call (H12) — drop it and keep waiting for the correlated verdict.
+        logger.debug(
+          'AutoClassifier',
+          `Dropping classify_result id=${id} — awaiting id=${p.id} for ${this.sessionId}`
+        )
+        return
       }
+      clearTimeout(p.timer)
+      this.pending = null
+      p.resolve(result)
     })
 
     const execOpts = getSdkExecutableOpts()
@@ -198,7 +222,7 @@ class ClassifierSession {
           // We only care about errors here; the MCP tool handler resolves results
           if (message && typeof message === 'object') {
             const msg = message as Record<string, unknown>
-            if (msg.type === 'error') {
+            if (msg.type === 'error' && this.abortController === myAbort) {
               logger.error('AutoClassifier', `Classifier error: ${JSON.stringify(msg)}`)
               if (this.pending) {
                 clearTimeout(this.pending.timer)
@@ -212,14 +236,19 @@ class ClassifierSession {
       } catch (err) {
         logger.error('AutoClassifier', `Classifier stream error: ${err}`)
       } finally {
-        this.running = false
-        logger.debug('AutoClassifier', `Classifier session ended for ${this.sessionId}`)
-        // Reject any pending classification
-        if (this.pending) {
-          clearTimeout(this.pending.timer)
-          const { reject } = this.pending
-          this.pending = null
-          reject(new Error('Classifier session ended'))
+        // If a newer session (stop()+restart) has replaced this one, its teardown
+        // owns running/pending now — do not clobber it (would reject the NEW
+        // request's pending with a spurious "session ended").
+        if (this.abortController === myAbort) {
+          this.running = false
+          logger.debug('AutoClassifier', `Classifier session ended for ${this.sessionId}`)
+          // Reject any pending classification
+          if (this.pending) {
+            clearTimeout(this.pending.timer)
+            const { reject } = this.pending
+            this.pending = null
+            reject(new Error('Classifier session ended'))
+          }
         }
       }
     })()
@@ -335,12 +364,15 @@ export function stopAllClassifiers(): void {
 // ---------------------------------------------------------------------------
 
 function buildClassificationMessage(
+  id: string,
   toolName: string,
   toolInput: Record<string, unknown>,
   transcript: string
 ): string {
   const inputStr = JSON.stringify(toolInput, null, 2)
-  return `<transcript>
+  return `Request id: ${id}
+
+<transcript>
 ${transcript}
 </transcript>
 
@@ -350,7 +382,7 @@ The agent is attempting to use the tool \`${toolName}\` with the following input
 ${inputStr}
 \`\`\`
 
-Classify this action. You MUST call the classify_result tool with your decision.`
+Classify this action. You MUST call the classify_result tool with your decision, passing \`id\` set to "${id}" (copied exactly from the Request id above).`
 }
 
 // ---------------------------------------------------------------------------
