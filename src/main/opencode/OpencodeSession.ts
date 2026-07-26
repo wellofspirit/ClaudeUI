@@ -208,6 +208,15 @@ export class OpencodeSession extends BaseSession {
   // overwritten openSessionId (M-OC1). Cleared once the first prompt's run()
   // settles (its finally).
   private establishingPromise: Promise<void> | null = null
+  // Replay-once memo. On resume BOTH eagerConnect() (run(null)) and
+  // establishSession() (run(prompt)) gate on `!openSessionId` with an await
+  // window between the check and the set, so a prompt arriving during the eager
+  // connect can drive both into replayStoredHistory() for the same session —
+  // replaying the whole transcript (and re-emitting every session:message)
+  // twice. Memoize on the sessionId: the second caller awaits the SAME in-flight
+  // replay (preserving the history-before-new-prompt ordering) and never re-runs.
+  private replayInFlight: Promise<void> | null = null
+  private replayedSessionId: string | null = null
 
   // The opencode session id to resume (passed from sidebar when clicking a
   // persisted opencode session). When set, we skip createSession and replay
@@ -530,8 +539,25 @@ export class OpencodeSession extends BaseSession {
    * (parity with live turns — no divergent renderer path).
    *
    * Best-effort: any failure is swallowed and logged; it NEVER blocks the new prompt.
+   *
+   * Memoized (replayInFlight / replayedSessionId) so eagerConnect() and
+   * establishSession() racing on resume replay exactly once — see the field docs.
    */
   private async replayStoredHistory(sessionId: string): Promise<void> {
+    if (this.replayedSessionId === sessionId) return
+    if (this.replayInFlight) return this.replayInFlight
+    this.replayInFlight = this.replayStoredHistoryInner(sessionId)
+    try {
+      await this.replayInFlight
+      // Inner swallows its own errors, so reaching here means "attempted" —
+      // never replay this session again (a retry would double-emit history).
+      this.replayedSessionId = sessionId
+    } finally {
+      this.replayInFlight = null
+    }
+  }
+
+  private async replayStoredHistoryInner(sessionId: string): Promise<void> {
     if (!this.client) return
     try {
       const storedMessages = await this.client.listMessages(sessionId)
@@ -1068,6 +1094,16 @@ export class OpencodeSession extends BaseSession {
     // once the SSE consumer stops; a firing timer after teardown would send()
     // to a session that's going away.
     this.bashStreamGate.cancelAll()
+    // Interrupt the turn server-side BEFORE releasing our server ref. Releasing
+    // only KILLS the opencode process when we hold the LAST ref; if another
+    // same-cwd session keeps the server alive, our turn would otherwise keep
+    // running headless (no SSE consumer), burning tokens until it finishes.
+    // Fire-and-forget: if we ARE the last ref the release below kills the
+    // process and this in-flight abort just fails silently. Captured before the
+    // release nulls `this.client`.
+    if (this.client && this.openSessionId) {
+      void this.client.abortSession(this.openSessionId).catch(() => {})
+    }
     if (this.conn) {
       opencodeServerManager.release(this.cwd)
       this.conn = null

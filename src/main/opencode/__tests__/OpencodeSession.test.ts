@@ -647,6 +647,17 @@ describe('OpencodeSession — cancel()', () => {
     expect(mockRelease).toHaveBeenCalledWith('/tmp/test-cwd')
   })
 
+  it('aborts the turn server-side on cancel (so a same-cwd server that survives our release does not keep running headless)', async () => {
+    const session = makeSession()
+    await session.run('hello') // establishes openSessionId = ses_opencode_1
+    mockAbortSession.mockClear()
+    session.cancel()
+    // Fire-and-forget abort of OUR session before the ref release. Pre-fix
+    // cancel() never sent abortSession, so a turn on a server kept alive by
+    // another same-cwd session kept burning tokens with no SSE consumer.
+    expect(mockAbortSession).toHaveBeenCalledWith('ses_opencode_1')
+  })
+
   it('emits status with state=idle after cancel', async () => {
     const win = new MockWindow() as unknown as BrowserWindow
     mockCreateSession.mockResolvedValue({ id: 'ses_c' })
