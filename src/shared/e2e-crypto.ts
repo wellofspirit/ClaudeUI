@@ -5,6 +5,10 @@
 const SALT = new TextEncoder().encode('ClaudeUI-E2E-v1')
 const INFO = new TextEncoder().encode('aes-gcm-256')
 const NONCE_BYTES = 12
+/** Width of the per-connection monotonic sequence counter prepended to the
+ *  authenticated plaintext (uint32, big-endian). 4 billion frames per
+ *  connection is far beyond any realistic session. */
+const SEQ_BYTES = 4
 
 /**
  * End-to-end encryption using AES-256-GCM.
@@ -14,10 +18,26 @@ const NONCE_BYTES = 12
  * module is isomorphic — zero npm dependencies.
  *
  * Key derivation: HKDF-SHA256 from the raw 32-byte pre-shared key.
- * Wire format:    base64( nonce[12] || ciphertext || gcm_tag[16] )
+ * Wire format:    base64( nonce[12] || AES-GCM( seq[4] || json )[+16 tag] )
+ *
+ * Replay protection (xhigh#2): each encrypted frame carries a monotonic
+ * per-connection sequence number INSIDE the authenticated plaintext, so it
+ * cannot be forged or shifted without failing the GCM tag. The receiver
+ * rejects any frame whose seq is <= the last one it accepted (per direction),
+ * which stops a tunnel intermediary from replaying a captured
+ * prompt/approval/config-write frame. A fresh {@link E2ECrypto} instance is
+ * created per E2E session on both ends, so the counters reset per connection.
+ *
+ * Limit: this defends against replay, not against a live man-in-the-middle who
+ * also holds the pre-shared key — which E2E already precludes (the key travels
+ * only in the QR/link fragment, never over the wire).
  */
 export class E2ECrypto {
   private key: CryptoKey | null = null
+  /** Next outbound sequence number (this direction). */
+  private sendSeq = 0
+  /** Highest inbound sequence number accepted so far (this direction). */
+  private recvSeq = 0
 
   /** Derive the AES-256-GCM key from a hex-encoded 32-byte secret. */
   async init(e2eKeyHex: string): Promise<void> {
@@ -50,19 +70,26 @@ export class E2ECrypto {
 
   /**
    * Encrypt a JSON-serializable message.
-   * @returns base64-encoded `nonce || ciphertext || gcm_tag`
+   * @returns base64-encoded `nonce || AES-GCM( seq || json )`
    */
   async encrypt(msg: object): Promise<string> {
     if (!this.key) throw new Error('E2ECrypto not initialized')
 
     const subtle = getSubtle()
-    const plaintext = new TextEncoder().encode(JSON.stringify(msg))
-    const nonce = getRandomValues(NONCE_BYTES)
+    const json = new TextEncoder().encode(JSON.stringify(msg))
 
+    // Prepend a monotonic seq to the plaintext so it is authenticated by the
+    // GCM tag (tamper-evident) and available to the receiver's replay check.
+    const seq = ++this.sendSeq
+    const framed = new Uint8Array(SEQ_BYTES + json.length)
+    new DataView(framed.buffer).setUint32(0, seq, false) // big-endian
+    framed.set(json, SEQ_BYTES)
+
+    const nonce = getRandomValues(NONCE_BYTES)
     const ciphertext = await subtle.encrypt(
       { name: 'AES-GCM', iv: nonce as BufferSource },
       this.key,
-      plaintext
+      framed
     )
 
     // Concatenate nonce + ciphertext (which includes the 16-byte GCM auth tag)
@@ -75,7 +102,7 @@ export class E2ECrypto {
 
   /**
    * Decrypt a base64-encoded payload back to a parsed object.
-   * @throws if decryption fails (wrong key, tampered data, etc.)
+   * @throws if decryption fails (wrong key, tampered data, replayed frame, …)
    */
   async decrypt(payload: string): Promise<unknown> {
     if (!this.key) throw new Error('E2ECrypto not initialized')
@@ -83,16 +110,26 @@ export class E2ECrypto {
     const subtle = getSubtle()
     const data = base64ToBytes(payload)
 
-    if (data.length < NONCE_BYTES + 16) {
+    if (data.length < NONCE_BYTES + SEQ_BYTES + 16) {
       throw new Error('E2E payload too short')
     }
 
     const nonce = data.slice(0, NONCE_BYTES)
     const ciphertext = data.slice(NONCE_BYTES)
 
-    const plaintext = await subtle.decrypt({ name: 'AES-GCM', iv: nonce }, this.key, ciphertext)
+    const framed = new Uint8Array(
+      await subtle.decrypt({ name: 'AES-GCM', iv: nonce }, this.key, ciphertext)
+    )
 
-    return JSON.parse(new TextDecoder().decode(plaintext))
+    // Reject replays: a captured frame carries its original seq, which is <=
+    // the last one we accepted. In-order frames strictly increase.
+    const seq = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(0, false)
+    if (seq <= this.recvSeq) {
+      throw new Error(`E2E replay detected (seq ${seq} <= ${this.recvSeq})`)
+    }
+    this.recvSeq = seq
+
+    return JSON.parse(new TextDecoder().decode(framed.subarray(SEQ_BYTES)))
   }
 }
 

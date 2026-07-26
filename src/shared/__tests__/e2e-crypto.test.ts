@@ -120,6 +120,66 @@ describe('E2ECrypto', () => {
     })
   })
 
+  // R4 — per-connection replay protection. A tunnel intermediary must not be
+  // able to replay a captured (encrypt-once) frame. Modeled as two instances
+  // sharing the key: `sender` encrypts, `receiver` decrypts (its recv counter).
+  describe('replay protection', () => {
+    it('rejects a replayed (duplicate) frame', async () => {
+      const sender = new E2ECrypto()
+      const receiver = new E2ECrypto()
+      await sender.init(TEST_KEY_HEX)
+      await receiver.init(TEST_KEY_HEX)
+
+      const frame = await sender.encrypt({ cmd: 'approve' })
+      // First delivery is accepted…
+      expect(await receiver.decrypt(frame)).toEqual({ cmd: 'approve' })
+      // …a verbatim replay of the SAME frame is rejected.
+      await expect(receiver.decrypt(frame)).rejects.toThrow(/replay/i)
+    })
+
+    it('accepts strictly-increasing (in-order) frames', async () => {
+      const sender = new E2ECrypto()
+      const receiver = new E2ECrypto()
+      await sender.init(TEST_KEY_HEX)
+      await receiver.init(TEST_KEY_HEX)
+
+      const p1 = await sender.encrypt({ n: 1 })
+      const p2 = await sender.encrypt({ n: 2 })
+      const p3 = await sender.encrypt({ n: 3 })
+      expect(await receiver.decrypt(p1)).toEqual({ n: 1 })
+      expect(await receiver.decrypt(p2)).toEqual({ n: 2 })
+      expect(await receiver.decrypt(p3)).toEqual({ n: 3 })
+    })
+
+    it('rejects an out-of-order (stale-seq) frame', async () => {
+      const sender = new E2ECrypto()
+      const receiver = new E2ECrypto()
+      await sender.init(TEST_KEY_HEX)
+      await receiver.init(TEST_KEY_HEX)
+
+      const p1 = await sender.encrypt({ n: 1 })
+      const p2 = await sender.encrypt({ n: 2 })
+      // Deliver p2 first (accepted), then the older p1 — rejected as a replay.
+      expect(await receiver.decrypt(p2)).toEqual({ n: 2 })
+      await expect(receiver.decrypt(p1)).rejects.toThrow(/replay/i)
+    })
+
+    it('counters are per-instance — two directions do not collide', async () => {
+      // A single instance encrypts (send dir) AND decrypts (recv dir); the two
+      // counters are independent, so encrypting doesn't consume recv seqs.
+      const a = new E2ECrypto()
+      const b = new E2ECrypto()
+      await a.init(TEST_KEY_HEX)
+      await b.init(TEST_KEY_HEX)
+
+      const aToB = await a.encrypt({ dir: 'a->b', n: 1 })
+      const bToA = await b.encrypt({ dir: 'b->a', n: 1 })
+      // Each side's first inbound frame is seq 1 and must be accepted.
+      expect(await b.decrypt(aToB)).toEqual({ dir: 'a->b', n: 1 })
+      expect(await a.decrypt(bToA)).toEqual({ dir: 'b->a', n: 1 })
+    })
+  })
+
   describe('not initialized errors', () => {
     it('encrypt throws when not initialized', async () => {
       const crypto = new E2ECrypto()
