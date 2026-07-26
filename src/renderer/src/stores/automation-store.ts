@@ -88,6 +88,13 @@ export const useAutomationStore = create<AutomationState>((set) => ({
     set((s) => {
       // Only append if viewing this automation's currently selected run
       if (automationId !== s.selectedAutomationId) return s
+      // Don't leak a new run's stream into a DIFFERENT run being viewed. The
+      // run-message IPC carries no runId (main-process, out of scope), so we
+      // gate on "the selected run is the running run": when a specific
+      // (finished/historical) run is selected while another run streams, skip
+      // (M-RN1). selectedRunId === null (no specific run) keeps prior behavior.
+      const runningRunId = s.runs[automationId]?.find((r) => r.status === 'running')?.id
+      if (runningRunId && s.selectedRunId && s.selectedRunId !== runningRunId) return s
       if (!s.runMessages) return { runMessages: [message] }
       // Upsert by id (assistant partial messages share the same id)
       const idx = s.runMessages.findIndex((m) => m.id === message.id)
