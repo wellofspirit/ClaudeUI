@@ -7,14 +7,13 @@ import { createWebSocketApi } from './api-adapter'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
 import type { FullStateSnapshot } from '../shared/remote-protocol'
 
-// Parse connection params from URL
-const params = new URLSearchParams(window.location.search)
-const token = params.get('t') || ''
-
-// E2E key is in the URL fragment — browsers never send fragments to servers,
-// so this key never traverses the network (only scanned via QR code)
-const hash = window.location.hash
-const e2eKeyHex = hash.startsWith('#k=') ? hash.slice(3) : undefined
+// The access token AND the optional E2E key both ride the URL fragment.
+// Browsers never send the fragment to the server, so neither ever appears in
+// the HTTP request line — keeping the token out of tunnel/CDN access logs (H2).
+// They reach the client only by scanning the QR code / opening the copied link.
+const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+const token = fragment.get('t') || ''
+const e2eKeyHex = fragment.get('k') || undefined
 
 if (!token) {
   document.body.innerHTML = `
@@ -45,6 +44,15 @@ if (!token) {
     }, [])
 
     const handleFullState = useCallback((snapshot: FullStateSnapshot) => {
+      // The mockup-scoped token arrives with the full snapshot over the
+      // authenticated WS (it is no longer injected into the served HTML — R3).
+      // The api-adapter reads it lazily via window.__MOCKUP_TOKEN__ when building
+      // iframe URLs, and AppContent only renders after `ready`, so it's set in
+      // time for the first mockup open.
+      const mockupToken = connection.getMockupToken()
+      if (mockupToken) {
+        ;(window as unknown as { __MOCKUP_TOKEN__?: string }).__MOCKUP_TOKEN__ = mockupToken
+      }
       // Apply the full snapshot to the Zustand store (settings, sessions, config)
       import('@renderer/stores/session-store').then(({ useSessionStore }) => {
         useSessionStore.getState().applyRemoteSnapshot(snapshot)
@@ -52,26 +60,18 @@ if (!token) {
       })
     }, [])
 
-    const handleCatchup = useCallback(
-      (events: Array<{ seq: number; channel: string; args: unknown[] }>) => {
-        // Catchup events are replayed by the api-adapter's event handler, which is
-        // already wired up — they flow through the normal onMessage/onStreamEvent/etc.
-        // paths. Nothing to do here beyond acknowledging receipt.
-        void events
-      },
-      []
-    )
+    // Catchup events are replayed through the connection's live onEvent handler
+    // (see connection.ts sync-catchup), so main.tsx needs no event knowledge.
 
     useEffect(() => {
       connection.setStateHandler(handleStateChange)
       connection.setFullStateHandler(handleFullState)
-      connection.setCatchupHandler(handleCatchup)
       connection.connect()
 
       return () => {
         connection.destroy()
       }
-    }, [handleStateChange, handleFullState, handleCatchup])
+    }, [handleStateChange, handleFullState])
 
     return (
       <>

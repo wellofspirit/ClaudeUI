@@ -173,7 +173,7 @@ export function RemoteAccessModalView({
                       <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                       <path d="M7 11V7a5 5 0 0110 0v4" />
                     </svg>
-                    E2E encrypted via Cloudflare Tunnel
+                    End-to-end encrypted messages over a Cloudflare tunnel
                   </div>
                 )}
               </div>
@@ -260,7 +260,7 @@ export function RemoteAccessModalView({
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                           <path d="M7 11V7a5 5 0 0110 0v4" />
                         </svg>
-                        <span className="text-success text-[11px]">E2E Encrypted</span>
+                        <span className="text-success text-[11px]">End-to-end encrypted</span>
                       </>
                     )}
                     {isTunnelError && (

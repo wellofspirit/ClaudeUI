@@ -301,26 +301,41 @@ describe('RemoteServer — mockup HTTP route', () => {
     appPathRef.current = ''
   })
 
-  /** Pull the injected mockup token out of the served web-client HTML. */
-  function extractMockupToken(html: string): string | null {
-    const m = html.match(/window\.__MOCKUP_TOKEN__="([a-f0-9]{64})"/)
-    return m ? m[1] : null
+  /** Pull the mockup token from a WS full-sync (its new, authenticated home). */
+  async function fetchMockupTokenViaWs(wsToken: string): Promise<string | null> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: wsToken })
+    await client.ready
+    const token = await new Promise<string | null>((resolve) => {
+      const off = client.onMessage((msg) => {
+        if (msg.type === 'sync-full') {
+          off()
+          resolve((msg as { mockupToken?: string }).mockupToken ?? null)
+        }
+      })
+      void client.send({ type: 'sync', lastSeq: 0 })
+    })
+    client.close()
+    return token
   }
 
-  it('injects a mockup token into /remote only when the WS token matches', async () => {
+  // R3 — the WS token now rides the URL fragment and never reaches the HTTP GET,
+  // so the low-privilege mockup token is NO LONGER injected into the served HTML
+  // (an unauthenticated visitor to /remote must not obtain it). It is delivered
+  // over the authenticated WS instead.
+  it('does not inject the mockup token into the served HTML', async () => {
     const res = await server.start(port, '127.0.0.1')
-
     const authed = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
-    const token = extractMockupToken(authed.body)
+    expect(authed.body).not.toContain('__MOCKUP_TOKEN__')
+    const anon = await httpGet(`http://127.0.0.1:${port}/remote`)
+    expect(anon.body).not.toContain('__MOCKUP_TOKEN__')
+  })
+
+  it('delivers the mockup token over the authenticated WS (sync-full)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const token = await fetchMockupTokenViaWs(res.token)
     expect(token).toMatch(/^[a-f0-9]{64}$/)
     // The mockup token must NOT be the WS token.
     expect(token).not.toBe(res.token)
-
-    const anon = await httpGet(`http://127.0.0.1:${port}/remote`)
-    expect(extractMockupToken(anon.body)).toBeNull()
-
-    const wrong = await httpGet(`http://127.0.0.1:${port}/remote?t=${'0'.repeat(64)}`)
-    expect(extractMockupToken(wrong.body)).toBeNull()
   })
 
   it('rejects /mockup requests without the mockup token', async () => {
@@ -339,13 +354,178 @@ describe('RemoteServer — mockup HTTP route', () => {
 
   it('serves the mockup HTML with a valid mockup token (end-to-end)', async () => {
     const res = await server.start(port, '127.0.0.1')
-    const page = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
-    const token = extractMockupToken(page.body)!
+    const token = (await fetchMockupTokenViaWs(res.token))!
 
     const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${token}`)
     expect(got.status).toBe(200)
     expect(got.body).toContain('remote mockup')
     // The serve-time bridge must be injected.
     expect(got.body).toContain('data-omelette="1"')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R2 — E2E enforcement. Once the server has an E2E key (tunnel mode), it must
+// refuse any client that doesn't activate E2E, and must reject plaintext frames
+// after activation (no silent cleartext fallback — H3).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — E2E enforcement (R2)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  async function rawConnect(): Promise<WebSocket> {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    return ws
+  }
+  function nextJson(ws: WebSocket): Promise<Record<string, unknown>> {
+    return new Promise((resolve) => ws.once('message', (raw) => resolve(JSON.parse(raw.toString()))))
+  }
+  function onClose(ws: WebSocket): Promise<number | undefined> {
+    return new Promise((resolve) => ws.once('close', (code) => resolve(code)))
+  }
+
+  it('closes a client that authenticates but never activates E2E (GUARD)', async () => {
+    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    const ws = await rawConnect()
+    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
+    const authResp = await nextJson(ws)
+    expect(authResp).toMatchObject({ type: 'auth-response', ok: true })
+
+    const closed = onClose(ws)
+    // First post-auth frame is NOT e2e-activate — must be refused, not run cleartext.
+    ws.send(JSON.stringify({ type: 'sync', lastSeq: 0 }))
+    expect(await closed).toBe(4004)
+  })
+
+  it('rejects (closes on) a plaintext frame after E2E activation (GUARD)', async () => {
+    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    const ws = await rawConnect()
+    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
+    await nextJson(ws) // auth-response
+    ws.send(JSON.stringify({ type: 'e2e-activate' }))
+    const ack = await nextJson(ws)
+    expect(ack).toMatchObject({ type: 'e2e-ack' })
+
+    const closed = onClose(ws)
+    // A spliced plaintext frame post-activation fails GCM decrypt → closed.
+    ws.send(JSON.stringify({ type: 'invoke', id: '1', channel: 'session:get-models', args: [] }))
+    expect(await closed).toBe(4002)
+  })
+
+  it('a fully E2E client completes the handshake (non-vacuity)', async () => {
+    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    const ws = await rawConnect()
+    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
+    await nextJson(ws)
+    ws.send(JSON.stringify({ type: 'e2e-activate' }))
+    const ack = await nextJson(ws)
+    expect(ack).toMatchObject({ type: 'e2e-ack' })
+    // The connection stays open (server counts it as a live client).
+    expect(server.getStatus().connectedClients).toBe(1)
+    ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R7 — sync epoch. A reconnect carrying a lastSeq from a different process
+// epoch must get a full snapshot, not a false "caught up" empty catchup (M-DB4).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — sync epoch (R7)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  function nextSync(client: Awaited<ReturnType<typeof connectRemoteClient>>): Promise<Record<string, unknown>> {
+    return new Promise((resolve) => {
+      const off = client.onMessage((msg) => {
+        if (msg.type === 'sync-full' || msg.type === 'sync-catchup') {
+          off()
+          resolve(msg as unknown as Record<string, unknown>)
+        }
+      })
+    })
+  }
+
+  it('a fresh sync returns a full snapshot carrying the epoch', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await client.ready
+    const p = nextSync(client)
+    await client.send({ type: 'sync', lastSeq: 0 })
+    const msg = await p
+    expect(msg.type).toBe('sync-full')
+    expect(typeof msg.epoch).toBe('string')
+    client.close()
+  })
+
+  it('a sync with a STALE epoch returns a full snapshot, not a false catchup (GUARD)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    // Seed some events so a same-epoch catchup would be possible.
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await client.ready
+    const p = nextSync(client)
+    // lastSeq > 0 but a mismatched epoch — pre-fix this returned an empty
+    // catchup (false "caught up"); now it must be a full snapshot.
+    await client.send({ type: 'sync', lastSeq: 5, epoch: 'epoch-from-a-previous-process' })
+    const msg = await p
+    expect(msg.type).toBe('sync-full')
+    client.close()
+  })
+
+  it('a sync with the CURRENT epoch returns a catchup', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 3 })
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await client.ready
+
+    // Learn the current epoch from a fresh full sync.
+    const fullP = nextSync(client)
+    await client.send({ type: 'sync', lastSeq: 0 })
+    const full = await fullP
+    const epoch = full.epoch as string
+
+    // Now catch up from seq 1 with the matching epoch → events 2 and 3.
+    const catchP = nextSync(client)
+    await client.send({ type: 'sync', lastSeq: 1, epoch })
+    const msg = await catchP
+    expect(msg.type).toBe('sync-catchup')
+    expect((msg.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([2, 3])
+    expect(msg.epoch).toBe(epoch)
+    client.close()
   })
 })

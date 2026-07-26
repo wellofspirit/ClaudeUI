@@ -151,7 +151,7 @@ export class RemoteServer {
     // Start idle timeout checker
     this.idleTimer = setInterval(() => this.checkIdleClients(), 60_000)
 
-    const lanUrl = `http://${this.boundHost}:${this.port}/remote?t=${this.token}`
+    const lanUrl = `http://${this.boundHost}:${this.port}/remote#t=${this.token}`
     logger.info(
       'remote-server',
       `Remote server started on ${bindAddr}:${this.port} (URL host: ${this.boundHost})`
@@ -217,10 +217,13 @@ export class RemoteServer {
     let tunnelUrl: string | null = null
 
     if (tunnelStatus.url && this.token) {
-      // Build tunnel URL with token in query and E2E key in fragment
-      tunnelUrl = `${tunnelStatus.url}/remote?t=${this.token}`
+      // Token rides the URL fragment (never sent to the server/edge in the HTTP
+      // request line, so it can't leak into tunnel/CDN access logs — H2). The
+      // E2E key rides the same fragment. Both are read client-side from
+      // `location.hash`.
+      tunnelUrl = `${tunnelStatus.url}/remote#t=${this.token}`
       if (this.e2eKey) {
-        tunnelUrl += `#k=${this.e2eKey}`
+        tunnelUrl += `&k=${this.e2eKey}`
       }
     }
 
@@ -228,7 +231,7 @@ export class RemoteServer {
       running: this.httpServer !== null,
       port: this.port || null,
       token: this.token || null,
-      lanUrl: this.port ? `http://${this.boundHost}:${this.port}/remote?t=${this.token}` : null,
+      lanUrl: this.port ? `http://${this.boundHost}:${this.port}/remote#t=${this.token}` : null,
       tunnelUrl,
       tunnelState: this.e2eKey !== null ? tunnelStatus.state : null,
       tunnelError: tunnelStatus.error,
@@ -292,22 +295,17 @@ export class RemoteServer {
     res.end(served.body)
   }
 
-  private serveWebClient(url: URL, res: http.ServerResponse): void {
+  private serveWebClient(_url: URL, res: http.ServerResponse): void {
     const webDir = this.getWebClientDir()
     const indexPath = path.join(webDir, 'index.html')
 
     if (fs.existsSync(indexPath)) {
-      let html = fs.readFileSync(indexPath, 'utf-8')
-      // Hand the mockup-scoped token to the (authenticated) web client so it
-      // can build mockup iframe URLs. Gated on the WS token so an unauthorized
-      // visitor who reaches the port can't obtain it. Never exposes the WS
-      // token itself. JSON.stringify-escaping is safe for a hex string.
-      if (url.searchParams.get('t') === this.token) {
-        const inject = `<script>window.__MOCKUP_TOKEN__=${JSON.stringify(this.mockupToken)}</script>`
-        html = html.includes('</head>')
-          ? html.replace('</head>', `${inject}</head>`)
-          : inject + html
-      }
+      // Serve the client HTML verbatim. The WS token now rides the URL fragment
+      // and never reaches this HTTP GET, so it can't gate anything here; the
+      // mockup-scoped token is instead handed to the client over the
+      // authenticated WS (see handleSync → sync-full.mockupToken). This keeps
+      // the low-privilege mockup token off an unauthenticated `/remote` load.
+      const html = fs.readFileSync(indexPath, 'utf-8')
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end(html)
     } else {
@@ -391,8 +389,12 @@ export class RemoteServer {
       const client = this.clients.get(ws)
 
       try {
-        if (client?.e2e?.isReady && !rawStr.startsWith('{')) {
-          // Encrypted message — decrypt first
+        if (client?.e2e?.isReady) {
+          // Once E2E is active, EVERY frame must be encrypted. Never fall back
+          // to JSON.parse on a plaintext `{...}` frame — that would let an
+          // on-path party splice cleartext invoke/sync frames into an
+          // "encrypted" session (H3). A plaintext frame here fails the GCM
+          // auth below and the connection is closed.
           msg = (await client.e2e.decrypt(rawStr)) as WsClientMessage
         } else {
           msg = JSON.parse(rawStr)
@@ -444,21 +446,26 @@ export class RemoteServer {
         return
       }
 
-      // Handle E2E activation (right after auth, before any encrypted messages)
-      if (awaitingE2E && msg.type === 'e2e-activate') {
-        const c = this.clients.get(ws)
-        if (c && this.e2eKey) {
-          const e2e = new E2ECrypto()
-          await e2e.init(this.e2eKey)
-          c.e2e = e2e
-          // Send ack plaintext (last plaintext message)
-          ws.send(JSON.stringify({ type: 'e2e-ack' }))
-          logger.info('remote-server', `E2E encryption activated for client ${ip}`)
+      // E2E is configured for this server: the first post-auth frame MUST be
+      // `e2e-activate`. Anything else (a client that never activates E2E) is
+      // refused rather than silently allowed to run cleartext (H3).
+      if (awaitingE2E) {
+        if (msg.type === 'e2e-activate') {
+          const c = this.clients.get(ws)
+          if (c && this.e2eKey) {
+            const e2e = new E2ECrypto()
+            await e2e.init(this.e2eKey)
+            c.e2e = e2e
+            // Send ack plaintext (last plaintext message)
+            ws.send(JSON.stringify({ type: 'e2e-ack' }))
+            logger.info('remote-server', `E2E encryption activated for client ${ip}`)
+          }
+          awaitingE2E = false
+          return
         }
-        awaitingE2E = false
+        ws.close(4004, 'E2E activation required')
         return
       }
-      awaitingE2E = false
 
       // Update activity timestamp
       if (client) client.lastActivity = Date.now()
@@ -468,7 +475,7 @@ export class RemoteServer {
           await this.handleInvoke(ws, msg)
           break
         case 'sync':
-          await this.handleSync(ws, msg.lastSeq)
+          await this.handleSync(ws, msg.lastSeq, msg.epoch)
           break
         case 'pong':
           // Keepalive response, nothing to do
@@ -508,22 +515,28 @@ export class RemoteServer {
     }
   }
 
-  private async handleSync(ws: WebSocket, lastSeq: number): Promise<void> {
-    if (lastSeq === 0) {
-      // Fresh connection — send full state
+  private async handleSync(ws: WebSocket, lastSeq: number, epoch?: string): Promise<void> {
+    const currentEpoch = this.eventLog.epoch()
+    const mockupToken = this.mockupToken || undefined
+
+    // Fresh connection (lastSeq 0), OR a reconnect carrying a lastSeq from a
+    // DIFFERENT process epoch (the desktop app restarted, so our seq counter is
+    // back near 0) — the client's lastSeq is meaningless. Send a full snapshot
+    // rather than a catchup that would falsely report "caught up" (M-DB4).
+    if (lastSeq === 0 || epoch !== currentEpoch) {
       const state = await this.eventLog.getFullState()
-      this.sendTo(ws, { type: 'sync-full', state })
+      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken })
       return
     }
 
-    // Try to catch up from the event log
+    // Same epoch — try to catch up from the event log.
     const events = this.eventLog.getAfter(lastSeq)
     if (events === null) {
       // Too far behind — send full state
       const state = await this.eventLog.getFullState()
-      this.sendTo(ws, { type: 'sync-full', state })
+      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken })
     } else {
-      this.sendTo(ws, { type: 'sync-catchup', events })
+      this.sendTo(ws, { type: 'sync-catchup', events, epoch: currentEpoch })
     }
   }
 

@@ -21,7 +21,6 @@ export type ConnectionState =
 type EventCallback = (channel: string, ...args: unknown[]) => void
 type StateCallback = (state: ConnectionState, error?: string) => void
 type FullStateCallback = (state: FullStateSnapshot) => void
-type CatchupCallback = (events: Array<{ seq: number; channel: string; args: unknown[] }>) => void
 
 interface PendingInvoke {
   resolve: (data: unknown) => void
@@ -48,12 +47,27 @@ export class RemoteConnection {
   private url: string
   private state: ConnectionState = 'connecting'
   private lastSeq = 0
+  /**
+   * Event-log epoch that `lastSeq` belongs to. Sent back on every `sync` so the
+   * server can tell a same-process reconnect (catchup) from a cross-restart one
+   * (full snapshot) — see M-DB4. Undefined until the first sync response.
+   */
+  private epoch?: string
   private reqId = 0
   private pendingInvokes = new Map<string, PendingInvoke>()
   private reconnectAttempt = 0
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
   private destroyed = false
+  /** Mockup-scoped token delivered over the authenticated WS (see sync-full). */
+  private mockupTokenValue?: string
+  /**
+   * Serializes E2E encrypt+send so frames go out in the order they were
+   * enqueued. Without this, two concurrent `encrypt()` calls could resolve out
+   * of order and deliver a higher seq before a lower one — which the peer's
+   * replay guard would then drop as a "replay" (R4).
+   */
+  private sendQueue: Promise<void> = Promise.resolve()
 
   // E2E encryption
   private e2eKeyHex?: string
@@ -63,7 +77,6 @@ export class RemoteConnection {
   private onEvent: EventCallback | null = null
   private onStateChange: StateCallback | null = null
   private onFullState: FullStateCallback | null = null
-  private onCatchup: CatchupCallback | null = null
 
   constructor(url: string, token: string, e2eKeyHex?: string) {
     // Convert http(s) URL to ws(s), strip path and fragment
@@ -84,9 +97,14 @@ export class RemoteConnection {
   setFullStateHandler(cb: FullStateCallback): void {
     this.onFullState = cb
   }
-  /** Set callback for catchup event batches (reconnect). */
-  setCatchupHandler(cb: CatchupCallback): void {
-    this.onCatchup = cb
+
+  /**
+   * Mockup-scoped token handed to the client over the authenticated WS. Read by
+   * the web api-adapter (via `window.__MOCKUP_TOKEN__`) to build iframe URLs.
+   * Undefined until the first full snapshot arrives.
+   */
+  getMockupToken(): string | undefined {
+    return this.mockupTokenValue
   }
 
   /** Start the connection. */
@@ -156,19 +174,8 @@ export class RemoteConnection {
     }
 
     this.ws.onmessage = async (ev): Promise<void> => {
-      let msg: WsServerMessage
-      const rawData = ev.data as string
-      try {
-        if (this.e2e?.isReady && !rawData.startsWith('{')) {
-          // Encrypted message — decrypt first
-          msg = (await this.e2e.decrypt(rawData)) as WsServerMessage
-        } else {
-          msg = JSON.parse(rawData)
-        }
-      } catch {
-        return
-      }
-      this.handleMessage(msg)
+      const msg = await this.decodeIncoming(ev.data as string)
+      if (msg) this.handleMessage(msg)
     }
 
     this.ws.onclose = (): void => {
@@ -183,6 +190,25 @@ export class RemoteConnection {
     }
   }
 
+  /**
+   * Decode an inbound frame. Once E2E is active EVERY frame must be encrypted —
+   * we never fall back to `JSON.parse` on a plaintext `{...}` frame, so an
+   * on-path party cannot splice cleartext frames into an "encrypted" session
+   * (H3). A plaintext or tampered/replayed frame fails `decrypt()` and is
+   * dropped (returns null). Exposed (private, but unit-tested via cast) so the
+   * decrypt-enforcement path can be exercised without a live WebSocket.
+   */
+  private async decodeIncoming(rawData: string): Promise<WsServerMessage | null> {
+    try {
+      if (this.e2e?.isReady) {
+        return (await this.e2e.decrypt(rawData)) as WsServerMessage
+      }
+      return JSON.parse(rawData) as WsServerMessage
+    } catch {
+      return null
+    }
+  }
+
   private handleMessage(msg: WsServerMessage): void {
     switch (msg.type) {
       case 'auth-response':
@@ -193,7 +219,7 @@ export class RemoteConnection {
             this.initE2E()
           } else {
             this.setState('syncing')
-            this.sendRaw({ type: 'sync', lastSeq: this.lastSeq })
+            this.sendSync()
           }
         } else {
           this.setState('failed', msg.error || 'Authentication failed')
@@ -205,23 +231,34 @@ export class RemoteConnection {
       case 'e2e-ack':
         // E2E is now active — proceed to sync (all subsequent messages are encrypted)
         this.setState('syncing')
-        this.send({ type: 'sync', lastSeq: this.lastSeq })
+        this.sendSync()
         break
 
       case 'sync-full':
-        this.lastSeq = (msg as WsSyncFull).state.seq
-        this.onFullState?.((msg as WsSyncFull).state)
-        this.setState('connected')
-        this.startPing()
+        {
+          const full = msg as WsSyncFull
+          this.epoch = full.epoch
+          if (full.mockupToken) this.mockupTokenValue = full.mockupToken
+          this.lastSeq = full.state.seq
+          this.onFullState?.(full.state)
+          this.setState('connected')
+          this.startPing()
+        }
         break
 
       case 'sync-catchup':
         {
-          const events = (msg as WsSyncCatchup).events
-          if (events.length > 0) {
-            this.lastSeq = events[events.length - 1].seq
+          const catchup = msg as WsSyncCatchup
+          this.epoch = catchup.epoch
+          // Replay each missed event through the SAME live handler the `event`
+          // case uses, in seq order — otherwise every reconnect silently
+          // discards the disconnect-window's messages/approvals/status. Advance
+          // lastSeq as we go so a mid-replay live event doesn't look like a gap.
+          for (const ev of catchup.events) {
+            if (ev.seq <= this.lastSeq) continue // already applied
+            this.onEvent?.(ev.channel, ...ev.args)
+            this.lastSeq = ev.seq
           }
-          this.onCatchup?.(events)
           this.setState('connected')
           this.startPing()
         }
@@ -230,10 +267,15 @@ export class RemoteConnection {
       case 'event':
         {
           const event = msg as WsEvent
-          // Detect seq gap
+          // Already-applied / duplicate (e.g. a live event that overlaps a
+          // catchup batch) — ignore.
+          if (event.seq <= this.lastSeq) break
+          // Gap detected: a message was missed. Request a catchup and do NOT
+          // apply this out-of-order event as if it were contiguous — the
+          // catchup redelivers everything from lastSeq, this event included.
           if (event.seq > this.lastSeq + 1 && this.lastSeq > 0) {
-            // Gap detected — request catchup
-            this.send({ type: 'sync', lastSeq: this.lastSeq })
+            this.sendSync()
+            break
           }
           this.lastSeq = event.seq
           this.onEvent?.(event.channel, ...event.args)
@@ -266,15 +308,22 @@ export class RemoteConnection {
     }
   }
 
+  /** Request a sync/catchup, echoing the epoch our lastSeq belongs to (R7). */
+  private sendSync(): void {
+    this.send({ type: 'sync', lastSeq: this.lastSeq, epoch: this.epoch })
+  }
+
   /** Send a message, encrypting if E2E is active. */
   private send(msg: WsClientMessage): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
 
     if (this.e2e?.isReady) {
-      this.e2e.encrypt(msg).then((payload) => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(payload)
-        }
+      // Serialize encrypt+send so frames leave in enqueue order — see sendQueue.
+      const e2e = this.e2e
+      this.sendQueue = this.sendQueue.then(async () => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return
+        const payload = await e2e.encrypt(msg)
+        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(payload)
       })
     } else {
       this.ws.send(JSON.stringify(msg))

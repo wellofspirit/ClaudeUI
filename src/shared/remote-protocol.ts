@@ -44,18 +44,38 @@ export interface WsAuthResponse {
 export interface WsSyncRequest {
   type: 'sync'
   lastSeq: number
+  /**
+   * The event-log epoch (per-process instance id) under which `lastSeq` was
+   * accumulated. Absent on a brand-new connection. When it does not match the
+   * server's current epoch (e.g. the desktop app was restarted), `lastSeq` is
+   * meaningless and the server MUST answer with a full snapshot rather than a
+   * catchup that would falsely report "caught up" (M-DB4).
+   */
+  epoch?: string
 }
 
 /** Server → Client: catchup (replay missed events) */
 export interface WsSyncCatchup {
   type: 'sync-catchup'
   events: EventEntry[]
+  /** Current event-log epoch — the client stores it to send back on reconnect. */
+  epoch: string
 }
 
 /** Server → Client: full state snapshot (too far behind or fresh connect) */
 export interface WsSyncFull {
   type: 'sync-full'
   state: FullStateSnapshot
+  /** Current event-log epoch — the client stores it to send back on reconnect. */
+  epoch: string
+  /**
+   * Mockup-scoped, low-privilege token for building `/mockup` iframe URLs.
+   * Delivered over the authenticated (and, on a tunnel, E2E-encrypted) WS
+   * channel rather than the served HTML, so it is never handed to an
+   * unauthenticated visitor who merely loads `/remote` (the WS token now
+   * rides the URL fragment and is invisible to the HTTP GET — R3/H2).
+   */
+  mockupToken?: string
 }
 
 /** Bidirectional keepalive */
