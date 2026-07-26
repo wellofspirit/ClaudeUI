@@ -69,6 +69,25 @@ export function watchSession(
     }, 100)
   })
 
+  // fs.watch emits 'error' on Windows when the watched JSONL is deleted/renamed.
+  // Without a listener that becomes a process-level uncaughtException, and the
+  // dead entry lingers in `watchers` so `watchers.has(routingId)` permanently
+  // blocks re-watching (M-CL5). Tear the dead watcher down so a later
+  // watchSession() can re-establish it.
+  watcher.on('error', (err) => {
+    logger.warn('SessionWatcher', `watch error for ${sessionId}; removing dead watcher`, err)
+    const cur = watchers.get(routingId)
+    if (cur && cur.watcher === watcher) {
+      if (cur.debounceTimer) clearTimeout(cur.debounceTimer)
+      watchers.delete(routingId)
+    }
+    try {
+      watcher.close()
+    } catch {
+      /* already dead */
+    }
+  })
+
   entry.watcher = watcher
   watchers.set(routingId, entry)
 }

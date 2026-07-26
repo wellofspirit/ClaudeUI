@@ -298,7 +298,7 @@ export function watchSubagent(
 
     // Watch for further changes
     try {
-      entry.watcher = fs.watch(filePath, () => {
+      const w = fs.watch(filePath, () => {
         if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
         entry.debounceTimer = setTimeout(() => {
           const { messages: newMsgs, newOffset: updatedOffset } = readNewMessages(
@@ -311,6 +311,25 @@ export function watchSubagent(
           }
         }, 150)
       })
+      // fs.watch emits 'error' on Windows when the watched file is deleted. With
+      // no listener that becomes an uncaughtException, and the dead entry keeps
+      // `watched.has(toolUseId)` true so re-watching is blocked (M-CL5). Drop
+      // the dead watcher so a later watchSubagent() can re-establish it.
+      w.on('error', (err) => {
+        logger.warn('SubagentWatcher', 'watch error; removing dead watcher', { filePath, err })
+        const cur = watched.get(toolUseId)
+        if (cur && cur.watcher === w) {
+          if (cur.debounceTimer) clearTimeout(cur.debounceTimer)
+          cur.watcher = null
+          watched.delete(toolUseId)
+        }
+        try {
+          w.close()
+        } catch {
+          /* already dead */
+        }
+      })
+      entry.watcher = w
     } catch (err) {
       logger.warn('SubagentWatcher', 'Failed to watch file, may have been removed', {
         filePath,
