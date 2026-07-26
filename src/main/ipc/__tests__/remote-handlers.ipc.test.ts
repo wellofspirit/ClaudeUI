@@ -47,7 +47,84 @@ vi.mock('../../services/ui-config', () => uiConfigMocks)
 
 vi.mock('../../opencode/model-discovery', () => ({
   resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free'),
-  invalidateOpencodeModelCache: vi.fn()
+  invalidateOpencodeModelCache: vi.fn(),
+  discoverOpencodeModels: vi.fn(async () => []),
+  discoverOpencodeProviderCatalog: vi.fn(async () => []),
+  getOpencodeProviderModels: vi.fn(async () => [])
+}))
+
+vi.mock('../../opencode/OpencodeServerManager', () => ({
+  opencodeServerManager: { isBinaryAvailable: vi.fn(() => false) }
+}))
+
+vi.mock('../../pi/model-discovery', () => ({
+  discoverPiModels: vi.fn(async () => []),
+  getPiModelCatalogGroups: vi.fn(async () => []),
+  // Also consumed by the shared-providers graph pulled in transitively.
+  invalidatePiModelCache: vi.fn(),
+  resolvePiSpawnModel: vi.fn(async (m?: string) => m),
+  getPiModelCatalog: vi.fn(async () => []),
+  effortLevelsFromModel: vi.fn(() => [])
+}))
+
+vi.mock('../../pi/pi-locate', () => ({
+  piBinaryAvailable: vi.fn(() => false),
+  locatePiBinary: vi.fn(() => null)
+}))
+
+vi.mock('../../auth/vault/CredentialSync', () => ({
+  credentialSync: { getStatus: vi.fn(() => ({ connected: false })) }
+}))
+
+vi.mock('../../services/account-manager', () => ({
+  accountManager: { getState: vi.fn(() => ({ enabled: false, accounts: [] })) }
+}))
+
+vi.mock('../../services/session-watcher', () => ({
+  watchSession: vi.fn(),
+  unwatchSession: vi.fn()
+}))
+
+vi.mock('../../services/opencode-session-list', () => ({
+  listOpencodeSessionsGlobal: vi.fn(async () => []),
+  loadOpencodeSessionHistory: vi.fn(async () => [])
+}))
+
+// NB: pi-session-list is a lightweight fs reader whose `piAgentDir` export is
+// also used by the shared-providers graph — mocking it wholesale drops that and
+// breaks the import chain, so we let the real module load (remote-handlers only
+// calls its list/history fns on invoke, which these tests don't exercise).
+
+// A GitService stub whose methods return sentinel values so the git:* dispatch
+// tests can assert routing + get/release bracketing without a real repo.
+const gitSvcStub = vi.hoisted(() => ({
+  isGitRepo: vi.fn(async () => true),
+  getStatus: vi.fn(async () => ({ files: [] })),
+  getBranches: vi.fn(async () => ['main']),
+  checkout: vi.fn(async () => {}),
+  createBranch: vi.fn(async () => {}),
+  getFilePatch: vi.fn(async () => 'diff'),
+  getFileContents: vi.fn(async () => 'contents'),
+  stageFile: vi.fn(async () => {}),
+  unstageFile: vi.fn(async () => {}),
+  discardFile: vi.fn(async () => {}),
+  stageAll: vi.fn(async () => {}),
+  unstageAll: vi.fn(async () => {}),
+  commit: vi.fn(async () => 'sha'),
+  push: vi.fn(async () => {}),
+  pushWithUpstream: vi.fn(async () => {}),
+  pull: vi.fn(async () => {}),
+  fetch: vi.fn(async () => {})
+}))
+
+const gitManagerSpies = vi.hoisted(() => ({
+  get: vi.fn(() => gitSvcStub),
+  release: vi.fn(),
+  getIfExists: vi.fn(() => gitSvcStub)
+}))
+
+vi.mock('../../services/git-service', () => ({
+  gitServiceManager: gitManagerSpies
 }))
 
 vi.mock('../../sdk/proxy', () => ({
@@ -538,6 +615,20 @@ describe('registerRemoteHandlers', () => {
       ).rejects.toThrow()
     })
 
+    // R6 GUARD (fails pre-fix — the handler joined cwd+directory with no
+    // containment, so a '../'-laden directory escaped the mockups root).
+    it('mockup:read-html rejects a path-traversal directory', async () => {
+      // Drop a file OUTSIDE the mockups root that a traversal would try to reach.
+      const outside = path.join(cwd, '.claude', 'ui', 'secret.html')
+      fs.writeFileSync(outside, '<h1>secret</h1>')
+      await expect(
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, '../../secret'))
+      ).rejects.toThrow(/Invalid mockup directory/)
+      // Sanity: the in-root path still works (non-vacuous).
+      const ok = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      expect(ok).toBe('<h1>hello</h1>')
+    })
+
     it('mockup:watch/unwatch are idempotent and tolerate a missing directory', async () => {
       // Missing dir → no-op, no throw.
       await expect(
@@ -551,6 +642,100 @@ describe('registerRemoteHandlers', () => {
       await expect(
         dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
       ).resolves.toBeUndefined()
+    })
+  })
+
+  // R5 — full channel parity (user decision: register every non-BLOCKED channel
+  // the web api-adapter invokes). These were previously missing from the
+  // dispatcher, so the web client hit "Channel not available" for git, live
+  // transcript watching, multi-engine catalogs, account state, etc.
+  describe('full channel parity (R5)', () => {
+    it('registers the full git surface incl. mutations', () => {
+      const channels = dispatcher.channels()
+      for (const ch of [
+        'git:check-repo',
+        'git:status',
+        'git:branches',
+        'git:checkout',
+        'git:create-branch',
+        'git:file-patch',
+        'git:file-contents',
+        'git:stage-file',
+        'git:unstage-file',
+        'git:discard-file',
+        'git:stage-all',
+        'git:unstage-all',
+        'git:commit',
+        'git:push',
+        'git:push-with-upstream',
+        'git:pull',
+        'git:fetch'
+      ]) {
+        expect(channels).toContain(ch)
+      }
+      // Web no-ops — deliberately NOT registered (desktop-driven polling).
+      expect(channels).not.toContain('git:start-watching')
+      expect(channels).not.toContain('git:stop-watching')
+    })
+
+    it('registers the multi-engine + account + generation channels', () => {
+      const channels = dispatcher.channels()
+      for (const ch of [
+        'session:list-opencode',
+        'session:load-opencode-history',
+        'session:list-pi',
+        'session:load-pi-history',
+        'session:get-engine-models',
+        'session:get-pi-model-catalog',
+        'session:get-opencode-providers',
+        'session:get-opencode-provider-models',
+        'session:watch-session',
+        'session:unwatch-session',
+        'session:set-reasoning-variant',
+        'session:write-custom-title',
+        'session:generate-title',
+        'session:generate-commit-message',
+        'engine:is-installed',
+        'pi:auth-status',
+        'pi:binary-path',
+        'account:get'
+      ]) {
+        expect(channels).toContain(ch)
+      }
+    })
+
+    it('git:commit dispatches to the service with get/release bracketing', async () => {
+      const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'))
+      expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
+      expect(gitSvcStub.commit).toHaveBeenCalledWith('msg')
+      expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+      expect(res).toBe('sha')
+    })
+
+    it('git service is released even when the operation throws', async () => {
+      gitSvcStub.push.mockRejectedValueOnce(new Error('remote rejected'))
+      await expect(dispatcher.handle(makeRequest('git:push', '/tmp/proj'))).rejects.toThrow(
+        'remote rejected'
+      )
+      expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+    })
+
+    it('account:get returns the account-manager state', async () => {
+      const res = await dispatcher.handle(makeRequest('account:get'))
+      expect(res).toEqual({ enabled: false, accounts: [] })
+    })
+
+    it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'claude'))).toBe(true)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'))).toBe(false)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'))).toBe(false)
+    })
+
+    it('does NOT register account mutations (denylist still holds)', () => {
+      const channels = dispatcher.channels()
+      for (const ch of ['account:add', 'account:switch', 'account:delete', 'account:set-enabled']) {
+        expect(channels).not.toContain(ch)
+      }
     })
   })
 

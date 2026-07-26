@@ -7,12 +7,19 @@ type Handler = (...args: any[]) => Promise<unknown>
 /**
  * Routes WebSocket invoke messages to handler functions.
  * Handlers are extracted from the IPC layer and registered here for dual use.
- * Only channels in the allowlist are exposed to remote clients.
+ *
+ * Gating model: this is a DENYLIST over an explicit registration set, NOT an
+ * allowlist. A channel is reachable over remote iff (a) `registerRemoteHandlers`
+ * explicitly registered it AND (b) it is not in {@link BLOCKED}. `register()`
+ * silently drops any channel in the denylist, so listing a channel in BLOCKED
+ * guarantees it can never be exposed even if a future edit tries to register it.
+ * The web client gets full parity with the desktop surface EXCEPT the denied
+ * channels (window/terminal/native-OAuth/account-mutation/pick-folder/…).
  */
 export class RemoteDispatcher {
   private handlers = new Map<string, Handler>()
 
-  /** Channels explicitly blocked from remote access. */
+  /** Channels explicitly blocked from remote access (the denylist). */
   private static readonly BLOCKED = new Set([
     'window:minimize',
     'window:maximize',
