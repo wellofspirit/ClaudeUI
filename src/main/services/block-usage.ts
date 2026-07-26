@@ -549,7 +549,6 @@ export class BlockUsageService {
     }
   }
 
-
   // -------------------------------------------------------------------------
   // Account log
   // -------------------------------------------------------------------------
@@ -669,8 +668,8 @@ export class BlockUsageService {
         }
         if (mtime < cutoff) continue
 
-        // Reparse only this file
-        const entries = await this.parseJsonlFile(filePath, cutoff)
+        // Reparse only this file (full parse; cache holds all entries — M-DB5)
+        const entries = await this.parseJsonlFile(filePath)
         this.fileCache.set(filePath, { mtime, entries })
 
         // Merge new (unseen) entries into the cache
@@ -752,9 +751,7 @@ export class BlockUsageService {
 
     // Apply the account filter for the view (persisted summaries stay unfiltered)
     const viewEntries = this.accountFilter
-      ? dbEntries.filter(
-          (e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter
-        )
+      ? dbEntries.filter((e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter)
       : dbEntries
 
     const blocks = this.groupIntoBlocks(viewEntries)
@@ -781,7 +778,12 @@ export class BlockUsageService {
     // Phase 9a: pass viewEntries so updateProjection can reconstruct cumTokensAt(ts)
     // from the DB window samples (survives app restart).
     if (currentBlock) {
-      currentBlock.projectedUsage = this.updateProjection(currentBlock, currentWindowEnd, now, viewEntries)
+      currentBlock.projectedUsage = this.updateProjection(
+        currentBlock,
+        currentWindowEnd,
+        now,
+        viewEntries
+      )
     }
 
     // Carry projections to newly completed blocks
@@ -1335,7 +1337,8 @@ export class BlockUsageService {
     }
 
     // Don't add a sample if API data is stale or values are too small
-    if (apiAge > 5 * MS_PER_MINUTE) return this.computeProjectionWLS(block, currentWindowEnd, blockEntries)
+    if (apiAge > 5 * MS_PER_MINUTE)
+      return this.computeProjectionWLS(block, currentWindowEnd, blockEntries)
     if (apiPercent < MIN_API_PERCENT_FOR_SAMPLE || currentTok <= 0) return null
 
     // Deduplicate: skip if the latest sample has the same tokens AND percent
@@ -1382,18 +1385,17 @@ export class BlockUsageService {
     // Entries are scoped to this block (block.startTime) inside buildDbProjectionSamples
     // so prior blocks' tokens don't inflate the through-origin WLS fit.
     if (currentWindowEnd) {
-      const dbSamples = this.buildDbProjectionSamples(currentWindowEnd, block.startTime, blockEntries)
+      const dbSamples = this.buildDbProjectionSamples(
+        currentWindowEnd,
+        block.startTime,
+        blockEntries
+      )
       samples = dbSamples.length > 0 ? dbSamples : (this.projectionSamples as AggProjectionSample[])
     } else {
       samples = this.projectionSamples as AggProjectionSample[]
     }
 
-    return computeWLS(
-      samples,
-      totalTokens(block.tokens),
-      block.costUsd,
-      Date.now()
-    )
+    return computeWLS(samples, totalTokens(block.tokens), block.costUsd, Date.now())
   }
 
   /**
@@ -1503,7 +1505,7 @@ export class BlockUsageService {
       if (cached && cached.mtime === mtime) {
         entries = cached.entries
       } else {
-        entries = await this.parseJsonlFile(filePath, cutoff)
+        entries = await this.parseJsonlFile(filePath)
         this.fileCache.set(filePath, { mtime, entries })
       }
 
@@ -1521,7 +1523,20 @@ export class BlockUsageService {
     return allEntries
   }
 
-  private parseJsonlFile(filePath: string, cutoff: number): Promise<ParsedEntry[]> {
+  /**
+   * Parse a single JSONL file into ParsedEntry[], keeping EVERY dated
+   * assistant-usage entry regardless of age.
+   *
+   * M-DB5: this deliberately does NOT filter by a parse-time cutoff. The result
+   * is cached by mtime and shared between scanAllJsonl (cutoff = now-7d) and
+   * backfillHistoricalSummaries via scanJsonlWithCutoff(0). If the parse dropped
+   * pre-cutoff entries, the 7d scan (which runs first) would poison the cache
+   * with a truncated list and the later cutoff-0 backfill would cache-hit and
+   * never see pre-7d entries. Caching the FULL parse and letting each caller
+   * apply its own per-entry cutoff (they already do) fixes that. The tiny extra
+   * parse cost is offset by parsing each file at most once instead of twice.
+   */
+  private parseJsonlFile(filePath: string): Promise<ParsedEntry[]> {
     return new Promise((resolve) => {
       const entries: ParsedEntry[] = []
 
@@ -1541,7 +1556,8 @@ export class BlockUsageService {
 
           const timestamp = data.timestamp ? new Date(data.timestamp as string).getTime() : 0
 
-          if (!timestamp || timestamp < cutoff) return
+          // Keep all dated entries; callers apply their own per-entry cutoff.
+          if (!timestamp) return
 
           const usage = data.message.usage
           const rawModel = (data.message.model as string) || 'unknown'
@@ -2022,7 +2038,7 @@ export class BlockUsageService {
       if (cached && cached.mtime === mtime) {
         entries = cached.entries
       } else {
-        entries = await this.parseJsonlFile(filePath, cutoff)
+        entries = await this.parseJsonlFile(filePath)
         this.fileCache.set(filePath, { mtime, entries })
       }
 
