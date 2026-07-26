@@ -15,6 +15,7 @@ import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
 import type { EngineId, ModelRef, AccountInfo, DispatchedUsageSummary } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
+import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
 // Metering types (Phase 7 — Pass 1)
@@ -270,14 +271,45 @@ export function runMigrations(db: Db, migrations: Migration[] = MIGRATIONS): voi
   // user_version is an integer stored in the SQLite header (no table needed).
   const currentVersion = (db.pragma('user_version', { simple: true }) as number | null) ?? 0
 
+  // Downgrade guard: an OLDER binary opening a DB that a NEWER build already
+  // migrated forward sees a user_version above everything it knows about. Do NOT
+  // run or rewind anything — warn and proceed read-forward. SQLite tolerates
+  // unknown extra tables/columns, so most reads still work; forcing a rewind (or
+  // throwing) would brick the app for a user who merely downgraded.
+  const latestVersion = migrations.reduce((max, m) => Math.max(max, m.version), 0)
+  if (currentVersion > latestVersion) {
+    logger.warn(
+      'DB',
+      `operational.db user_version ${currentVersion} is newer than this build supports ` +
+        `(max ${latestVersion}); it was likely created by a newer ClaudeUI. Proceeding ` +
+        `without migrating — schema mismatches may cause errors.`
+    )
+    return
+  }
+
   const pending = migrations
     .filter((m) => m.version > currentVersion)
     .sort((a, b) => a.version - b.version)
   if (pending.length === 0) return
 
+  // Each migration's `up` + its user_version bump run inside ONE transaction so a
+  // mid-migration failure (e.g. a future ALTER TABLE that half-applies) rolls
+  // back BOTH the partial DDL and the version bump. The DB then reopens at the
+  // last good version and retries, instead of being left at a half-applied
+  // schema that is permanently unopenable. SQLite DDL and `PRAGMA user_version`
+  // are both transactional (rolled back on ROLLBACK). Manual BEGIN/COMMIT (not
+  // db.transaction()) matches the existing bulk-write pattern in this file and
+  // the node:sqlite test stub, which does not implement db.transaction().
   for (const migration of pending) {
-    migration.up(db)
-    db.pragma(`user_version = ${migration.version}`)
+    db.prepare('BEGIN').run()
+    try {
+      migration.up(db)
+      db.pragma(`user_version = ${migration.version}`)
+      db.prepare('COMMIT').run()
+    } catch (err) {
+      db.prepare('ROLLBACK').run()
+      throw err
+    }
   }
 }
 
@@ -305,7 +337,18 @@ function getDb(): Db {
 
   runMigrations(db)
 
+  // Publish the singleton BEFORE pruning so pruneUsageTables()'s own getDb()
+  // resolves to this instance (no re-open / recursion).
   _db = db
+
+  // Bounded periodic prune (M-DB3): once per process open, off the hot insert
+  // path. Best-effort — a prune failure must never prevent the DB from opening.
+  try {
+    pruneUsageTables()
+  } catch (err) {
+    logger.warn('DB', `usage-table prune on open failed (non-fatal): ${err}`)
+  }
+
   return _db
 }
 
@@ -411,9 +454,9 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
  */
 export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   const db = getDb()
-  const row = db
-    .prepare('SELECT * FROM session_meta WHERE session_id = ?')
-    .get(sessionId) as SessionMetaRow | undefined
+  const row = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(sessionId) as
+    | SessionMetaRow
+    | undefined
   return row ? rowToMeta(row) : undefined
 }
 
@@ -467,9 +510,9 @@ export function allSessionMeta(): Record<string, SessionMeta> {
  */
 export function renameSessionMeta(oldId: string, newId: string, fallback?: SessionMeta): void {
   const db = getDb()
-  const existing = db
-    .prepare('SELECT * FROM session_meta WHERE session_id = ?')
-    .get(oldId) as SessionMetaRow | undefined
+  const existing = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(oldId) as
+    | SessionMetaRow
+    | undefined
 
   if (existing) {
     db.prepare(
@@ -504,9 +547,7 @@ export function importSessionEnginesOnce(
   sessionEngines: Record<string, { engineId: string; model?: ModelRef }>
 ): void {
   const db = getDb()
-  const count = (
-    db.prepare('SELECT COUNT(*) as n FROM session_meta').get() as { n: number }
-  ).n
+  const count = (db.prepare('SELECT COUNT(*) as n FROM session_meta').get() as { n: number }).n
   if (count > 0) return // already populated — skip
 
   const entries = Object.entries(sessionEngines)
@@ -562,9 +603,7 @@ function rowToAccountInfo(row: AccountRow): AccountInfo {
 /** Return all accounts from the DB, ordered by created_at ascending. */
 export function getAllAccounts(): AccountInfo[] {
   const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM account ORDER BY created_at ASC')
-    .all() as AccountRow[]
+  const rows = db.prepare('SELECT * FROM account ORDER BY created_at ASC').all() as AccountRow[]
   return rows.map(rowToAccountInfo)
 }
 
@@ -738,9 +777,9 @@ export function insertUsageEvents(events: UsageEventRow[]): void {
 /** Retrieve a single usage event by message_id (used in tests). */
 export function getUsageEventByMessageId(messageId: string): UsageEventRow | undefined {
   const db = getDb()
-  const row = db
-    .prepare('SELECT * FROM usage_event WHERE message_id = ?')
-    .get(messageId) as UsageEventDbRow | undefined
+  const row = db.prepare('SELECT * FROM usage_event WHERE message_id = ?').get(messageId) as
+    | UsageEventDbRow
+    | undefined
   return row ? rowToUsageEvent(row) : undefined
 }
 
@@ -754,9 +793,7 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
   const db = getDb()
   const rows = engineId
     ? (db
-        .prepare(
-          'SELECT * FROM usage_event WHERE ts >= ? AND engine_id = ? ORDER BY ts ASC'
-        )
+        .prepare('SELECT * FROM usage_event WHERE ts >= ? AND engine_id = ? ORDER BY ts ASC')
         .all(cutoffTs, engineId) as UsageEventDbRow[])
     : (db
         .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
@@ -807,15 +844,63 @@ export function recordWindowSample(sample: WindowSampleRow): void {
   ).run(sample.id, sample.ts, sample.accountUuid, sample.usedPercent, sample.canonicalEnd)
 }
 
-/** Retrieve window samples for an account ordered by ts ascending (used in tests + Pass 2 WLS). */
+/**
+ * Retrieve the MOST RECENT `limit` window samples for an account, returned in
+ * ascending ts order (used in tests + Pass 2 WLS).
+ *
+ * M-DB2: this selects DESC + reverses (rather than `ORDER BY ts ASC LIMIT`).
+ * usage_window_sample is never pruned per-window and accumulates one row per
+ * poll cycle, so past `limit` lifetime samples an ASC LIMIT returns the OLDEST
+ * rows and the ACTIVE window's samples (needed by buildDbProjectionSamples,
+ * which filters on `canonicalEnd === currentWindowEnd`) never appear — the WLS
+ * projection then silently falls back to the in-memory ring forever. Taking the
+ * newest `limit` guarantees the current window is always represented; reversing
+ * restores the ascending contract callers expect.
+ */
 export function getWindowSamples(accountUuid: string, limit = 100): WindowSampleRow[] {
   const db = getDb()
   const rows = db
-    .prepare(
-      'SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts ASC LIMIT ?'
-    )
+    .prepare('SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts DESC LIMIT ?')
     .all(accountUuid, limit) as WindowSampleDbRow[]
-  return rows.map(rowToWindowSample)
+  // Reverse the DESC page back to ascending ts for consumers.
+  return rows.reverse().map(rowToWindowSample)
+}
+
+// ---------------------------------------------------------------------------
+// Usage-table pruning (M-DB3)
+// usage_event and usage_window_sample were never pruned in production and grew
+// without bound. Both are only ever READ over recent horizons, so we sweep the
+// rest on a bounded, once-per-open cadence (see getDb) — never per-insert.
+// ---------------------------------------------------------------------------
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+// usage_event is read only at a 7-day lookback (block-usage's getUsageEventsSince
+// callers) and older days live durably in daily_usage, so 90d is a very
+// conservative floor that keeps well over a week of margin for the reconciler.
+const USAGE_EVENT_RETENTION_DAYS = 90
+// usage_window_sample is read as the newest-N per account for the ACTIVE (a few
+// hours old) window, so 30d never risks the current window while capping growth.
+const WINDOW_SAMPLE_RETENTION_DAYS = 30
+
+/**
+ * Prune the unbounded usage tables (M-DB3). Deletes usage_event rows older than
+ * `usageEventDays` (default 90) and usage_window_sample rows older than
+ * `windowSampleDays` (default 30). Both retentions far exceed every read path,
+ * so the current 5h window's samples (M-DB2) and the 7d event scan window always
+ * survive. A bounded periodic sweep — run once per DB open, never per-insert.
+ * Returns the delete counts for diagnostics/tests. Idempotent (a second call
+ * with the same clock deletes nothing).
+ */
+export function pruneUsageTables(
+  now: number = Date.now(),
+  retention: { usageEventDays?: number; windowSampleDays?: number } = {}
+): { usageEventsDeleted: number; windowSamplesDeleted: number } {
+  const db = getDb()
+  const eventCutoff = now - (retention.usageEventDays ?? USAGE_EVENT_RETENTION_DAYS) * MS_PER_DAY
+  const wsCutoff = now - (retention.windowSampleDays ?? WINDOW_SAMPLE_RETENTION_DAYS) * MS_PER_DAY
+  const e = db.prepare('DELETE FROM usage_event WHERE ts < ?').run(eventCutoff)
+  const w = db.prepare('DELETE FROM usage_window_sample WHERE ts < ?').run(wsCutoff)
+  return { usageEventsDeleted: e.changes, windowSamplesDeleted: w.changes }
 }
 
 // ---------------------------------------------------------------------------
@@ -954,9 +1039,7 @@ export function deleteDailyUsageForDate(date: string): void {
 /** All daily_usage rows ordered by date asc (the chart's source). */
 export function getAllDailyUsage(): DailyUsageRow[] {
   const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM daily_usage ORDER BY date ASC')
-    .all() as DailyUsageDbRow[]
+  const rows = db.prepare('SELECT * FROM daily_usage ORDER BY date ASC').all() as DailyUsageDbRow[]
   return rows.map(rowToDailyUsage)
 }
 

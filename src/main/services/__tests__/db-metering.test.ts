@@ -18,6 +18,7 @@ import {
   getUsageEventByMessageId,
   recordWindowSample,
   getWindowSamples,
+  pruneUsageTables,
   upsertDailyUsage,
   seedDailyUsageIfAbsent,
   getAllDailyUsage,
@@ -83,22 +84,26 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
       runMigrations(db)
       // Insert a row, then insert again with the same message_id — second must be
       // silently dropped (ON CONFLICT DO NOTHING).
-      db.prepare(`
+      db.prepare(
+        `
         INSERT INTO usage_event
           (id, ts, engine_id, vendor_id, model_id, input_tokens, output_tokens,
            cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
            session_id, message_id, source)
         VALUES ('id1', 1, 'claude', 'anthropic', 'claude-sonnet-4-6', 100, 50, 0, 0, 0, null, 'msg_abc', 'live')
         ON CONFLICT(message_id) DO NOTHING
-      `).run()
-      db.prepare(`
+      `
+      ).run()
+      db.prepare(
+        `
         INSERT INTO usage_event
           (id, ts, engine_id, vendor_id, model_id, input_tokens, output_tokens,
            cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
            session_id, message_id, source)
         VALUES ('id2', 2, 'claude', 'anthropic', 'claude-sonnet-4-6', 999, 999, 0, 0, 0, null, 'msg_abc', 'live')
         ON CONFLICT(message_id) DO NOTHING
-      `).run()
+      `
+      ).run()
       const rows = db.prepare('SELECT * FROM usage_event WHERE message_id = ?').all('msg_abc')
       expect(rows).toHaveLength(1)
       // First insert wins — id1 not id2
@@ -150,7 +155,7 @@ describe('insertUsageEvent / getUsageEventByMessageId', () => {
       cacheWrite1hTokens: 10,
       cacheReadTokens: 100,
       equivCostUsd: 0.0123,
-      engineCostUsd: 0.0120,
+      engineCostUsd: 0.012,
       sessionId: 'ses_abc',
       messageId: 'msg_roundtrip',
       source: 'live'
@@ -169,7 +174,7 @@ describe('insertUsageEvent / getUsageEventByMessageId', () => {
     expect(found!.cacheWrite1hTokens).toBe(10)
     expect(found!.cacheReadTokens).toBe(100)
     expect(found!.equivCostUsd).toBeCloseTo(0.0123)
-    expect(found!.engineCostUsd).toBeCloseTo(0.0120)
+    expect(found!.engineCostUsd).toBeCloseTo(0.012)
     expect(found!.sessionId).toBe('ses_abc')
     expect(found!.messageId).toBe('msg_roundtrip')
     expect(found!.source).toBe('live')
@@ -301,14 +306,41 @@ describe('recordWindowSample / getWindowSamples', () => {
     expect(getWindowSamples('acct_Y')).toHaveLength(1)
   })
 
-  it('respects limit parameter', () => {
+  it('respects limit parameter by returning the NEWEST rows, ascending (M-DB2)', () => {
     for (let i = 0; i < 10; i++) {
       recordWindowSample(makeSample({ accountUuid: 'limit_test', ts: i * 1000 }))
     }
     const rows = getWindowSamples('limit_test', 5)
     expect(rows).toHaveLength(5)
-    // Should be the first 5 (oldest, since ordered ASC)
-    expect(rows[0].ts).toBe(0)
+    // The newest 5 (ts 5000..9000), returned in ascending ts order — NOT the
+    // oldest 5. Selecting the oldest (the old ASC-LIMIT behaviour) is exactly
+    // the M-DB2 bug: the current window would never appear past `limit` samples.
+    expect(rows.map((r) => r.ts)).toEqual([5000, 6000, 7000, 8000, 9000])
+  })
+
+  it('keeps the CURRENT window in the result once >limit lifetime samples exist (M-DB2 guard)', () => {
+    const OLD_END = 1_000_000
+    const CUR_END = 9_000_000
+    // 120 samples for an old, expired window, then 10 for the current window.
+    for (let i = 0; i < 120; i++) {
+      recordWindowSample(
+        makeSample({ accountUuid: 'm2', ts: i, canonicalEnd: OLD_END, usedPercent: 1 })
+      )
+    }
+    for (let i = 0; i < 10; i++) {
+      recordWindowSample(
+        makeSample({ accountUuid: 'm2', ts: 200 + i, canonicalEnd: CUR_END, usedPercent: 50 })
+      )
+    }
+    // Default limit 100. The old ASC-LIMIT-100 returned the OLDEST 100 (all
+    // OLD_END) and buildDbProjectionSamples' `canonicalEnd === currentWindowEnd`
+    // filter then matched nothing forever. Newest-100 keeps the current window.
+    const rows = getWindowSamples('m2')
+    expect(rows).toHaveLength(100)
+    expect(rows.filter((r) => r.canonicalEnd === CUR_END)).toHaveLength(10)
+    // Ascending contract preserved after the internal DESC page + reverse.
+    const tsList = rows.map((r) => r.ts)
+    expect(tsList).toEqual([...tsList].sort((a, b) => a - b))
   })
 
   it('multiple samples per window are allowed (no unique constraint)', () => {
@@ -316,6 +348,59 @@ describe('recordWindowSample / getWindowSamples', () => {
     recordWindowSample(makeSample({ accountUuid: 'ua2', canonicalEnd: 100 }))
     const rows = getWindowSamples('ua2')
     expect(rows).toHaveLength(2) // both rows kept
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pruneUsageTables (M-DB3)
+// ---------------------------------------------------------------------------
+
+describe('pruneUsageTables (M-DB3)', () => {
+  const DAY = 24 * 60 * 60 * 1000
+
+  it('prunes old window samples but keeps the current window (coordinates with M-DB2)', () => {
+    const now = Date.now()
+    // Old sample (60d ago, expired window) + current-window sample (1h ago).
+    recordWindowSample(makeSample({ accountUuid: 'p', ts: now - 60 * DAY, canonicalEnd: 111 }))
+    recordWindowSample(
+      makeSample({ accountUuid: 'p', ts: now - 1 * 60 * 60 * 1000, canonicalEnd: 222 })
+    )
+
+    const res = pruneUsageTables(now)
+    expect(res.windowSamplesDeleted).toBe(1)
+
+    const rows = getWindowSamples('p')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].canonicalEnd).toBe(222) // the current window survives
+  })
+
+  it('prunes usage_event rows past the retention floor, keeps recent ones', () => {
+    const now = Date.now()
+    insertUsageEvent(makeEvent({ messageId: 'old_evt', ts: now - 200 * DAY }))
+    insertUsageEvent(makeEvent({ messageId: 'recent_evt', ts: now - 1 * DAY }))
+
+    const res = pruneUsageTables(now)
+    expect(res.usageEventsDeleted).toBe(1)
+    expect(getUsageEventByMessageId('old_evt')).toBeUndefined()
+    expect(getUsageEventByMessageId('recent_evt')).toBeDefined()
+  })
+
+  it('honours custom retention windows', () => {
+    const now = Date.now()
+    recordWindowSample(makeSample({ accountUuid: 'r', ts: now - 10 * DAY }))
+    const res = pruneUsageTables(now, { windowSampleDays: 5 })
+    expect(res.windowSamplesDeleted).toBe(1)
+    expect(getWindowSamples('r')).toHaveLength(0)
+  })
+
+  it('is idempotent — a second sweep with the same clock deletes nothing', () => {
+    const now = Date.now()
+    recordWindowSample(makeSample({ accountUuid: 'i', ts: now - 100 * DAY }))
+    insertUsageEvent(makeEvent({ messageId: 'i_old', ts: now - 100 * DAY }))
+    pruneUsageTables(now)
+    const res2 = pruneUsageTables(now)
+    expect(res2.windowSamplesDeleted).toBe(0)
+    expect(res2.usageEventsDeleted).toBe(0)
   })
 })
 
