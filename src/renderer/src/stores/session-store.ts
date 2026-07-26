@@ -2166,16 +2166,27 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { settings }
     }),
 
-  // Apply session config from an external source — no save back to disk
+  // Apply session config from an external source — no save back to disk.
+  // Only overwrite a field when the payload GENUINELY carries it: the
+  // file-watcher `config:sessions-changed` payload is the on-disk sessions.json
+  // which strips sessionEngines (it lives in the DB), so `?? {}` would zero the
+  // receiving instance's engine/model map on every external sync (H15). Treat a
+  // missing key as "leave the current value intact".
   applyExternalSessionConfig: (config) =>
-    set(() => ({
-      recentSessionIds: config.recentSessions ?? [],
-      pinnedSessionIds: config.pinnedSessions ?? [],
-      customTitles: config.customTitles ?? {},
-      worktreeInfoMap: config.worktreeInfoMap ?? {},
-      hiddenSessionIds: config.hiddenSessions ?? [],
-      hiddenProjectKeys: config.hiddenProjects ?? [],
-      sessionEngines: config.sessionEngines ?? {}
+    set((state) => ({
+      recentSessionIds:
+        'recentSessions' in config ? (config.recentSessions ?? []) : state.recentSessionIds,
+      pinnedSessionIds:
+        'pinnedSessions' in config ? (config.pinnedSessions ?? []) : state.pinnedSessionIds,
+      customTitles: 'customTitles' in config ? (config.customTitles ?? {}) : state.customTitles,
+      worktreeInfoMap:
+        'worktreeInfoMap' in config ? (config.worktreeInfoMap ?? {}) : state.worktreeInfoMap,
+      hiddenSessionIds:
+        'hiddenSessions' in config ? (config.hiddenSessions ?? []) : state.hiddenSessionIds,
+      hiddenProjectKeys:
+        'hiddenProjects' in config ? (config.hiddenProjects ?? []) : state.hiddenProjectKeys,
+      sessionEngines:
+        'sessionEngines' in config ? (config.sessionEngines ?? {}) : state.sessionEngines
     })),
 
   // Apply a full state snapshot from the remote server (initial sync)
@@ -2202,7 +2213,12 @@ export const useSessionStore = create<SessionState>((set) => ({
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
           reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
-          statusLine: snap.statusLine
+          statusLine: snap.statusLine,
+          // H15 — hydrate the live engine identity so a remote first-send steers
+          // the running session instead of respawning it as Claude (InputBox.doSend).
+          sdkActive: snap.sdkActive ?? EMPTY_SESSION_STATE.sdkActive,
+          selectedEngineId: snap.selectedEngineId ?? EMPTY_SESSION_STATE.selectedEngineId,
+          selectedModel: snap.selectedModel ?? EMPTY_SESSION_STATE.selectedModel
         }
       }
 
@@ -2218,7 +2234,12 @@ export const useSessionStore = create<SessionState>((set) => ({
         recentSessionIds: snapshot.recentSessionIds ?? [],
         pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
         customTitles: snapshot.customTitles ?? {},
-        worktreeInfoMap: snapshot.worktreeInfoMap ?? {}
+        worktreeInfoMap: snapshot.worktreeInfoMap ?? {},
+        // H15 — hydrate the engine/model map + hidden lists so a subsequent save
+        // from this client round-trips the real state, not an empty map.
+        sessionEngines: snapshot.sessionEngines ?? {},
+        hiddenSessionIds: snapshot.hiddenSessions ?? [],
+        hiddenProjectKeys: snapshot.hiddenProjects ?? []
       }
     }),
 
@@ -3057,6 +3078,9 @@ export function getRemoteStateSnapshot(): {
       slashCommands: SlashCommandInfo[]
       customCommands: SlashCommandInfo[]
       sdkSkillNames: string[]
+      sdkActive: boolean
+      selectedEngineId: EngineId
+      selectedModel: string
     }
   >
   directories: DirectoryGroup[]
@@ -3066,6 +3090,9 @@ export function getRemoteStateSnapshot(): {
   pinnedSessionIds: string[]
   customTitles: Record<string, string>
   worktreeInfoMap: Record<string, WorktreeInfo>
+  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  hiddenSessions: string[]
+  hiddenProjects: string[]
 } {
   const state = useSessionStore.getState()
   const sessions: Record<string, unknown> = {}
@@ -3092,7 +3119,12 @@ export function getRemoteStateSnapshot(): {
       statusLine: s.statusLine,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,
-      sdkSkillNames: state.sdkSkillNames
+      sdkSkillNames: state.sdkSkillNames,
+      // H15 — a remote client needs the live engine identity so its first send
+      // steers the running session instead of respawning it as Claude.
+      sdkActive: s.sdkActive,
+      selectedEngineId: s.selectedEngineId,
+      selectedModel: s.selectedModel
     }
   }
 
@@ -3104,6 +3136,12 @@ export function getRemoteStateSnapshot(): {
     recentSessionIds: state.recentSessionIds,
     pinnedSessionIds: state.pinnedSessionIds,
     customTitles: state.customTitles,
-    worktreeInfoMap: state.worktreeInfoMap
+    worktreeInfoMap: state.worktreeInfoMap,
+    // H15 — carry the per-session engine/model map + hidden lists so a remote
+    // client's save round-trips the real state instead of an empty map that
+    // would wipe every session's engine mapping on the desktop.
+    sessionEngines: state.sessionEngines,
+    hiddenSessions: state.hiddenSessionIds,
+    hiddenProjects: state.hiddenProjectKeys
   }
 }

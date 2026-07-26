@@ -120,7 +120,9 @@ import type {
   StatusLineData,
   DirectoryGroup,
   SlashCommandInfo,
-  WorktreeInfo
+  WorktreeInfo,
+  EngineId,
+  ModelRef
 } from './types'
 
 export interface PerSessionSnapshot {
@@ -144,6 +146,15 @@ export interface PerSessionSnapshot {
   statusLine: StatusLineData | null
   slashCommands: SlashCommandInfo[]
   sdkSkillNames: string[]
+  /** Whether cli.js/the engine is live for this session. A remote client MUST
+   *  carry this so its first send steers the running session instead of
+   *  respawning it (as Claude) — see H15 / InputBox.doSend. */
+  sdkActive?: boolean
+  /** Engine chosen at session-creation time — so a remote first-send spawns the
+   *  correct engine rather than defaulting to claude. */
+  selectedEngineId?: EngineId
+  /** Model picker value within the selected engine. */
+  selectedModel?: string
 }
 
 export interface FullStateSnapshot {
@@ -165,6 +176,14 @@ export interface FullStateSnapshot {
   customTitles: Record<string, string>
   /** Worktree info map */
   worktreeInfoMap: Record<string, WorktreeInfo>
+  /** Per-session engine + model map (sessionId → { engineId, model? }). Carried
+   *  so a remote client's saves don't round-trip an empty map that wipes every
+   *  session's engine/model mapping on the desktop (H15). */
+  sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
+  /** Hidden session ids — carried for the same non-destructive-save reason. */
+  hiddenSessions?: string[]
+  /** Hidden project keys — carried for the same non-destructive-save reason. */
+  hiddenProjects?: string[]
 }
 
 // Re-export RemoteStatus from the main types (canonical definition)
