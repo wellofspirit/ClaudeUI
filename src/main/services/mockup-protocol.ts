@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import { join, resolve, extname, sep } from 'path'
 import { MOCKUP_ASSET_SCHEME, MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
 import { getMockupSecuritySettings, type MockupSecuritySettings } from './mockup-settings'
+import { isPathInside } from './path-containment'
 
 export { MOCKUP_ASSET_SCHEME }
 
@@ -42,8 +43,12 @@ const CDN_FONT = [
  * pairs with this CSP. The sub-origin wall is the real isolation boundary;
  * CSP is defense-in-depth.
  *
- * `connect-src` is dynamic — the user can extend it via settings. `http:`
- * is gated behind a separate toggle (HTTPS-only by default).
+ * `connect-src` is constrained to the user's configured allowlist — there is
+ * deliberately NO blanket `https:`/`wss:`. A blanket wildcard made the whole
+ * allowlist feature dead code and gave model-authored mockup JS a two-way
+ * channel to any HTTPS/WSS origin, contradicting the tool contract shipped to
+ * the model (M-MK1). Plaintext (`http:`/`ws:`) allowlist entries are honored
+ * only when the `allowHttp` toggle is on (HTTPS-only by default).
  */
 export function buildMockupCsp(
   settings: MockupSecuritySettings,
@@ -59,10 +64,13 @@ export function buildMockupCsp(
   const scheme = selfSource
   const connectExtras: string[] = []
   for (const origin of settings.connectAllowlist) {
-    // The textarea stores bare origins or wildcards; trust already-validated entries.
+    // The textarea stores bare origins or wildcards (already validated for CSP
+    // safety). Drop plaintext-scheme entries unless allowHttp is on so the
+    // toggle stays meaningful and the default posture is HTTPS-only.
+    if (/^(?:http|ws):\/\//i.test(origin) && !settings.allowHttp) continue
     connectExtras.push(origin)
   }
-  const httpFallback = settings.allowHttp ? ' http: ws:' : ''
+  const connectSrc = [`'self'`, scheme, ...connectExtras].join(' ')
 
   return [
     `default-src 'none'`,
@@ -73,7 +81,7 @@ export function buildMockupCsp(
     `font-src 'self' ${scheme} data: ${CDN_FONT.join(' ')}`,
     `img-src 'self' ${scheme} data: blob: https:`,
     `media-src 'self' ${scheme} data: blob: https:`,
-    `connect-src 'self' ${scheme} https: wss:${httpFallback}${connectExtras.length ? ' ' + connectExtras.join(' ') : ''}`,
+    `connect-src ${connectSrc}`,
     `worker-src 'self' ${scheme} blob:`,
     `frame-src 'none'`,
     `object-src 'none'`,
@@ -112,7 +120,7 @@ export const ASSET_EXT_MIME: Record<string, string> = {
 
 export type RouteDecision =
   | { kind: 'html'; id: string; mockupDir: string; dark: boolean }
-  | { kind: 'asset'; id: string; path: string; mime: string }
+  | { kind: 'asset'; id: string; path: string; mime: string; mockupDir: string }
   | { kind: 'error'; status: number; reason: string }
 
 /**
@@ -197,7 +205,7 @@ export function routeMockupParts(
     return { kind: 'error', status: 403, reason: 'file type not allowed' }
   }
 
-  return { kind: 'asset', id, path: targetPath, mime }
+  return { kind: 'asset', id, path: targetPath, mime, mockupDir }
 }
 
 /**
@@ -254,6 +262,37 @@ export interface ServedMockup {
  * the server origin for HTTP. Asset responses carry `Access-Control-Allow-Origin: *`
  * because the web client's sandboxed iframe loads them from an opaque origin.
  */
+/**
+ * Resolve symlinks/junctions in `file` and confirm the REAL path is still
+ * inside the REAL mockup dir. The lexical check in `routeMockupParts` runs
+ * before any I/O, but `readFile` follows links — a symlink placed inside the
+ * mockup dir pointing at `/etc/passwd` (or a Windows junction) would otherwise
+ * escape containment (M-MK1 / gpt#13). Returns the real file path when
+ * contained, or a tagged error otherwise. A missing file / dangling symlink
+ * surfaces as 404 (no existence leak); a real escape surfaces as 403.
+ */
+async function realpathContained(
+  root: string,
+  file: string
+): Promise<{ ok: true; path: string } | { ok: false; status: number; reason: string }> {
+  let realRoot: string
+  try {
+    realRoot = await fs.promises.realpath(root)
+  } catch {
+    return { ok: false, status: 404, reason: 'Not found' }
+  }
+  let realFile: string
+  try {
+    realFile = await fs.promises.realpath(file)
+  } catch {
+    return { ok: false, status: 404, reason: 'Not found' }
+  }
+  if (!isPathInside(realRoot, realFile)) {
+    return { ok: false, status: 403, reason: 'path traversal blocked' }
+  }
+  return { ok: true, path: realFile }
+}
+
 export async function serveMockup(
   decision: RouteDecision,
   selfSource: string
@@ -268,9 +307,20 @@ export async function serveMockup(
     }
 
     if (decision.kind === 'html') {
+      const real = await realpathContained(
+        decision.mockupDir,
+        join(decision.mockupDir, 'index.html')
+      )
+      if (!real.ok) {
+        return {
+          status: real.status,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          body: real.reason
+        }
+      }
       let html: string
       try {
-        html = await fs.promises.readFile(join(decision.mockupDir, 'index.html'), 'utf-8')
+        html = await fs.promises.readFile(real.path, 'utf-8')
       } catch {
         return {
           status: 404,
@@ -291,9 +341,17 @@ export async function serveMockup(
       }
     }
 
+    const realAsset = await realpathContained(decision.mockupDir, decision.path)
+    if (!realAsset.ok) {
+      return {
+        status: realAsset.status,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: realAsset.reason
+      }
+    }
     let body: Buffer
     try {
-      body = await fs.promises.readFile(decision.path)
+      body = await fs.promises.readFile(realAsset.path)
     } catch {
       return {
         status: 404,

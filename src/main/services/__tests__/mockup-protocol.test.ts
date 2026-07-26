@@ -18,7 +18,8 @@ import {
   rewriteHtml,
   ASSET_EXT_MIME,
   buildMockupCsp,
-  OMELETTE_BOOTSTRAP
+  OMELETTE_BOOTSTRAP,
+  MOCKUP_ASSET_SCHEME
 } from '../mockup-protocol'
 
 const CWD = '/Users/daniel/work/ClaudeUI'
@@ -146,7 +147,8 @@ describe('routeAndValidate', () => {
         kind: 'asset',
         id: ID,
         path: resolve(join(MOCKUP_DIR, 'logo.png')),
-        mime: 'image/png'
+        mime: 'image/png',
+        mockupDir: MOCKUP_DIR
       })
     })
 
@@ -367,23 +369,41 @@ describe('buildMockupCsp', () => {
     expect(csp).toMatch(/script-src[^;]*https:\/\/code\.jquery\.com/)
   })
 
-  it('permits https: and wss: in connect-src by default, blocks http:', () => {
+  it('connect-src has NO blanket https:/wss: — it is constrained to the allowlist (M-MK1)', () => {
     const csp = buildMockupCsp({ connectAllowlist: [], allowHttp: false })
     const connect = csp.split('; ').find((d) => d.startsWith('connect-src'))!
-    expect(connect).toContain('https:')
-    expect(connect).toContain('wss:')
+    // The blanket wildcard made the whole allowlist feature dead code.
+    expect(connect).not.toMatch(/\bhttps:/)
+    expect(connect).not.toMatch(/\bwss:/)
     expect(connect).not.toMatch(/\bhttp:/)
     expect(connect).not.toMatch(/\bws:/)
+    // Default posture: only own-origin sources, no external connectivity.
+    expect(connect).toBe(`connect-src 'self' ${MOCKUP_ASSET_SCHEME}:`)
   })
 
-  it('adds http: and ws: to connect-src when allowHttp=true', () => {
-    const csp = buildMockupCsp({ connectAllowlist: [], allowHttp: true })
-    const connect = csp.split('; ').find((d) => d.startsWith('connect-src'))!
-    expect(connect).toMatch(/\bhttp:/)
-    expect(connect).toMatch(/\bws:/)
+  it('honors https allowlist entries; drops plaintext entries unless allowHttp=true', () => {
+    const off = buildMockupCsp({
+      connectAllowlist: ['https://api.example.com', 'http://dev.local:3000'],
+      allowHttp: false
+    })
+    const connectOff = off.split('; ').find((d) => d.startsWith('connect-src'))!
+    expect(connectOff).toContain('https://api.example.com')
+    // Plaintext entry stripped when HTTPS-only.
+    expect(connectOff).not.toContain('http://dev.local:3000')
+
+    const on = buildMockupCsp({
+      connectAllowlist: ['https://api.example.com', 'http://dev.local:3000'],
+      allowHttp: true
+    })
+    const connectOn = on.split('; ').find((d) => d.startsWith('connect-src'))!
+    expect(connectOn).toContain('https://api.example.com')
+    expect(connectOn).toContain('http://dev.local:3000')
+    // Still no blanket wildcard even with allowHttp on.
+    expect(connectOn).not.toMatch(/(^|\s)https:(\s|$)/)
+    expect(connectOn).not.toMatch(/(^|\s)http:(\s|$)/)
   })
 
-  it('appends user-provided allowlist entries to connect-src', () => {
+  it('appends user-provided (bare-host / wildcard) allowlist entries to connect-src', () => {
     const csp = buildMockupCsp({
       connectAllowlist: ['api.example.com', '*.vendor.io'],
       allowHttp: false
@@ -496,5 +516,27 @@ describe('serveMockup', () => {
     )
     expect(served.status).toBe(403)
     expect(String(served.body)).toContain('path traversal')
+  })
+
+  it('blocks a symlink/junction that escapes the mockup dir (M-MK1 / gpt#13)', async () => {
+    // Secret file OUTSIDE the mockup dir.
+    const outside = fs.mkdtempSync(join(os.tmpdir(), 'mockup-outside-'))
+    fs.writeFileSync(join(outside, 'secret.js'), 'STOLEN')
+
+    // A link INSIDE the mockup dir pointing at the outside dir. 'junction'
+    // works on Windows without elevation; ignored (plain symlink) elsewhere.
+    const dir = join(cwd, '.claude', 'ui', 'mockups', ID)
+    fs.symlinkSync(outside, join(dir, 'link'), 'junction')
+
+    const decision = routeHttpMockup(`/mockup/${ID}/${b64}/link/secret.js`, new URLSearchParams())
+    // Lexical routing allows it — the link is textually under the mockup dir.
+    expect(decision.kind).toBe('asset')
+
+    // But realpath resolution catches the escape and refuses to serve it.
+    const served = await serveMockup(decision, 'http://localhost:5000')
+    expect(served.status).toBe(403)
+    expect(String(served.body)).not.toContain('STOLEN')
+
+    fs.rmSync(outside, { recursive: true, force: true })
   })
 })
