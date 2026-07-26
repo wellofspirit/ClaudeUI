@@ -61,9 +61,19 @@ function getPinnedVersion() {
 function isCacheHit(version) {
   const versionFile = join(VENDOR_DIR, 'version.json')
   if (!existsSync(versionFile)) return false
+  // The binary must actually be present — an AV quarantine or partial checkout
+  // can leave version.json behind with no executable (M-BD1).
+  const binName = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
+  if (!existsSync(join(VENDOR_DIR, binName))) return false
   try {
     const saved = JSON.parse(readFileSync(versionFile, 'utf8'))
-    return saved.version === version
+    // Match platform/arch too — a checkout copied across machines/architectures
+    // otherwise keeps a wrong-arch binary the version alone can't detect.
+    return (
+      saved.version === version &&
+      saved.platform === process.platform &&
+      saved.arch === process.arch
+    )
   } catch {
     return false
   }
