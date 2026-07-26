@@ -36,11 +36,19 @@ export function QuitWorktreeModal(): React.JSX.Element | null {
     window.api.confirmQuit()
   }
 
+  const handleCancel = (): void => {
+    // Tell main to abort the pending quit (clear the fallback timer; services
+    // were never torn down) BEFORE clearing local state. Without this, the 5s
+    // fallback in the main process would force-quit even though the user cancelled.
+    window.api.cancelQuit()
+    setQuitWorktrees(null)
+  }
+
   return (
     <QuitWorktreeModalView
       quitWorktrees={quitWorktrees}
       removing={removing}
-      onCancel={() => setQuitWorktrees(null)}
+      onCancel={handleCancel}
       onKeepAll={handleKeepAll}
       onRemoveAll={handleRemoveAll}
     />

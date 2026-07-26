@@ -212,6 +212,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     // App
     confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+    cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
 
     // Git
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),

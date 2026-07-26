@@ -230,6 +230,7 @@ const api: ClaudeAPI = {
 
   // App lifecycle
   confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+  cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
 
   // Git operations — all handlers use safeHandler, so unwrap the { ok, data } envelope
   gitCheckRepo: (cwd: string) => unwrap<boolean>('git:check-repo', cwd),

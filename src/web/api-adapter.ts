@@ -379,8 +379,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     },
     listWorktrees: async () => [],
 
-    // App lifecycle
+    // App lifecycle — quit is desktop-only; no-ops that resolve on web.
     confirmQuit: async () => {}, // No-op on web
+    cancelQuit: async () => {}, // No-op on web
 
     // Git — route through remote server
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),

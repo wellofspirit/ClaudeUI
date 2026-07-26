@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, Menu, clipboard, crashReporter } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
 import contextMenu from 'electron-context-menu'
 
@@ -51,7 +52,34 @@ import { stopAllClassifiers } from './services/auto-classifier'
 import { getSdkVersion } from './services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
 import { loadPersistedPrices } from './services/opencode-pricing'
+import { QuitCoordinator } from './quit-coordinator'
+import {
+  isAllowedExternalUrl,
+  isInAppNavigation,
+  isAllowedWebviewNavigation,
+  buildVscodeUrl,
+  type AppOrigin
+} from './shell-security'
 import icon from '../../resources/icon.png?asset'
+
+// Single-instance lock (M-BT1). A second launch must NOT run a full second
+// instance: both would write ~/.claude/ui/*.json (last-writer-wins corruption),
+// both would run watchers/pollers, and services would be duplicated. Acquire the
+// lock before constructing any window or service. If another instance already
+// owns it, quit immediately — the primary focuses itself via 'second-instance'
+// below. All window/service construction (createWindow, whenReady) is gated on
+// this flag so the doomed instance does effectively nothing.
+//
+// Production default is single-instance. Dev (`bun run dev`) and the verifier
+// (scripts/app-shot.mjs sets CLAUDEUI_ALLOW_MULTIPLE_INSTANCES=1) opt out so a
+// built app and a dev/verifier instance can run side by side. When enforcement
+// is off, gotSingleInstanceLock stays true so all the gating below runs normally
+// — this exempts only dev/verifier, not a real user's accidental double-launch.
+const enforceSingleInstance = !is.dev && process.env.CLAUDEUI_ALLOW_MULTIPLE_INSTANCES !== '1'
+const gotSingleInstanceLock = enforceSingleInstance ? app.requestSingleInstanceLock() : true
+if (!gotSingleInstanceLock) {
+  app.quit()
+}
 
 // Crashpad must be started before app.whenReady resolves, otherwise a hard
 // crash (V8 heap exhaustion, native abort) leaves no artefact at all: those
@@ -69,7 +97,8 @@ delete process.env.CLAUDECODE
 // macOS GUI apps don't inherit login shell environment variables, so tools
 // like node/bun aren't found and user-defined vars from .zprofile are missing.
 // Spawn a login shell to capture the full environment.
-if (process.platform === 'darwin') {
+// Skipped in a doomed second instance — no point paying the (up to 5s) spawn.
+if (gotSingleInstanceLock && process.platform === 'darwin') {
   try {
     const loginShell = process.env.SHELL || '/bin/zsh'
     // Use null-delimited output to handle values containing newlines
@@ -109,7 +138,19 @@ if (process.platform === 'darwin') {
   }
 }
 
-let logViewer: LogViewer
+// Process-lifetime references to window-lifetime constructs. Hoisted to module
+// scope so (a) the single before-quit teardown reaches the LIVE services, (b) a
+// macOS `activate` re-create can stop/replace the previous ones instead of
+// leaking them, and (c) 'second-instance' can focus the current window.
+// TODO(audit): services are still *constructed* inside the window-lifetime
+// createWindow — this is idempotency hardening (R5), not the full move to
+// whenReady/process-lifetime ownership.
+let logViewer: LogViewer | undefined
+let currentWindow: BrowserWindow | undefined
+let currentRemoteServer: RemoteServer | undefined
+let currentPluginManager: PluginManager | undefined
+let currentAutomationManager: ReturnType<typeof registerAutomationIpc> | undefined
+let quitCoordinator: QuitCoordinator | undefined
 
 // Right-click context menu — provides spell-check suggestions in editable
 // fields, standard cut/copy/paste/select-all, and a "Copy as Markdown"
@@ -170,6 +211,37 @@ function createWindow(): void {
       webviewTag: true
     }
   })
+  currentWindow = mainWindow
+
+  // Navigation guard (H4). The main window runs a full-privilege preload
+  // (`window.api`) with sandbox:false. Without this, any top-frame navigation —
+  // a dropped URL/.html, a script-set `location`, a webview navigating the top
+  // frame — would load a FOREIGN document in this webContents with the preload
+  // still attached, handing that origin createTerminal(cwd), session:create, etc.
+  // The app is a SPA: legitimate routing is same-document (hash) and never fires
+  // will-navigate, so any top-frame navigation off the app origin is hostile.
+  const appOrigin: AppOrigin =
+    is.dev && process.env['ELECTRON_RENDERER_URL']
+      ? { mode: 'dev-origin', origin: new URL(process.env['ELECTRON_RENDERER_URL']).origin }
+      : {
+          mode: 'file-prefix',
+          // pathToFileURL handles Windows drive letters + percent-encoding; force a
+          // trailing slash so a sibling like `renderer-evil/` can't match the prefix.
+          prefix: pathToFileURL(join(__dirname, '../renderer')).href.replace(/\/?$/, '/')
+        }
+  const blockForeignNavigation = (details: { url: string; preventDefault: () => void }): void => {
+    if (!isInAppNavigation(details.url, appOrigin)) {
+      details.preventDefault()
+      logger.warn('main', `Blocked navigation away from app origin: ${details.url}`)
+    }
+  }
+  mainWindow.webContents.on('will-navigate', (details) => blockForeignNavigation(details))
+  mainWindow.webContents.on('will-frame-navigate', (details) => {
+    // Only the top frame carries the privileged preload. Sub-frames (e.g. the
+    // mockup-asset:// preview iframes) get no preload and are origin-isolated,
+    // so their navigations are ordinary web navigations and must not be blocked.
+    if (details.isMainFrame) blockForeignNavigation(details)
+  })
 
   // Guard webview creation: only allow plugin views with the correct preload.
   // This prevents any XSS in the renderer from spawning arbitrary webviews.
@@ -188,7 +260,27 @@ function createWindow(): void {
     }
   })
 
+  // xhigh#4: re-validate webview navigation, not just attachment. plugin-preload
+  // derives its pluginId from the page's query param at preload time, so a plugin
+  // page navigated to remote content would keep the plugin preload and could
+  // present a different pluginId. Block any navigation/redirect away from a
+  // file:// plugin origin.
+  mainWindow.webContents.on('did-attach-webview', (_e, webviewContents) => {
+    const guardWebview = (details: { url: string; preventDefault: () => void }): void => {
+      if (!isAllowedWebviewNavigation(details.url)) {
+        details.preventDefault()
+        logger.warn('main', `Blocked plugin webview navigation to non-file origin: ${details.url}`)
+      }
+    }
+    webviewContents.on('will-navigate', (details) => guardWebview(details))
+    webviewContents.on('will-frame-navigate', (details) => guardWebview(details))
+    webviewContents.on('will-redirect', (details) => guardWebview(details))
+  })
+
   // Renderer → main process log relay (so all logs go to one terminal + log viewer)
+  // removeAllListeners first so a macOS `activate` re-create doesn't stack a new
+  // listener on top of the old one (mirrors the log:error dedupe below).
+  ipcMain.removeAllListeners('log:relay')
   ipcMain.on('log:relay', (_e, level: string, source: string, message: string) => {
     const logLevel = level as 'debug' | 'info' | 'warn' | 'error'
     if (logLevel === 'error') logger.error(source, message)
@@ -243,26 +335,38 @@ function createWindow(): void {
     }
   })()
   registerTerminalIpc(mainWindow)
+  // Stop the previous automation manager (macOS re-create) before replacing it,
+  // then hoist so the single before-quit teardown reaches the live instance.
+  currentAutomationManager?.stopAll()
   const automationManager = registerAutomationIpc(mainWindow)
+  currentAutomationManager = automationManager
 
-  // Remote access server
+  // Remote access server. Stop any previous server first (macOS re-create) so it
+  // doesn't keep listening on its old port with its stale token / RemoteBridge.
+  currentRemoteServer?.stop()
   const remoteDispatcher = new RemoteDispatcher()
   const remoteServer = new RemoteServer(remoteDispatcher)
+  currentRemoteServer = remoteServer
   remoteServer.setWindow(mainWindow)
   registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
 
   // Log viewer (standalone debug window) — init early so renderer console
   // capture starts before plugins load. Backend logs are captured from
-  // process start via logRing in logger.ts.
+  // process start via logRing in logger.ts. Destroy the previous instance first
+  // (macOS re-create) so its logger subscription doesn't leak.
+  logViewer?.destroy()
   logViewer = new LogViewer(mainWindow)
 
-  // Plugin system
+  // Plugin system. Stop the previous manager (macOS re-create) before replacing
+  // it, then hoist so the single before-quit teardown reaches the live instance.
+  currentPluginManager?.stopAll()
   const pluginManager = new PluginManager({
     win: mainWindow,
     sessionManager,
     automationManager,
     remoteDispatcher
   })
+  currentPluginManager = pluginManager
   pluginManager.loadAll().catch((err) => {
     logger.error('main', `Plugin system load error: ${err}`)
   })
@@ -295,42 +399,49 @@ function createWindow(): void {
     return remoteServer.getStatus()
   })
 
-  // Before-quit: give renderer a chance to prompt about active worktrees
-  let quitConfirmed = false
-  let quitTimeout: ReturnType<typeof setTimeout> | null = null
+  // Before-quit: give the renderer a chance to prompt about active worktrees.
+  // The coordinator + its listener are created exactly ONCE (macOS `activate`
+  // may call createWindow again). Its dependency closures read the module-level
+  // service refs, so the single listener always tears down the LIVE services —
+  // and only on the real quit, never on a cancelled first pass (the verified bug
+  // this fixes: services were destroyed on the first, possibly-cancelled pass,
+  // and cancel still force-quit ~5s later because there was no cancel path).
+  if (!quitCoordinator) {
+    quitCoordinator = new QuitCoordinator({
+      notifyRenderer: () => {
+        if (currentWindow && !currentWindow.isDestroyed()) {
+          currentWindow.webContents.send('app:before-quit')
+        }
+      },
+      teardownServices: () => {
+        logViewer?.destroy()
+        currentPluginManager?.stopAll()
+        currentAutomationManager?.stopAll()
+        credentialSync.stop()
+        currentRemoteServer?.stop()
+        stopAllClassifiers()
+        // Stop the service session (lightweight CLI subprocess for usage polling)
+        serviceSession.stop()
+        // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
+        // children don't orphan on quit. Idempotent — safe to run on every invocation.
+        opencodeServerManager.dispose()
+      },
+      quit: () => app.quit()
+    })
+    app.on('before-quit', (e) => {
+      quitCoordinator!.handleBeforeQuit(() => e.preventDefault())
+    })
+  }
 
-  app.on('before-quit', (e) => {
-    logViewer.destroy()
-    pluginManager.stopAll()
-    automationManager.stopAll()
-    credentialSync.stop()
-    remoteServer.stop()
-    stopAllClassifiers()
-    // Stop the service session (lightweight CLI subprocess for usage polling)
-    serviceSession.stop()
-    // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
-    // children don't orphan on quit. Idempotent — safe to run on every invocation.
-    opencodeServerManager.dispose()
-    if (quitConfirmed) return
-    e.preventDefault()
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('app:before-quit')
-    }
-    // Fallback: if renderer doesn't respond in 5 seconds, quit anyway
-    if (quitTimeout) clearTimeout(quitTimeout)
-    quitTimeout = setTimeout(() => {
-      quitConfirmed = true
-      app.quit()
-    }, 5000)
-  })
-
-  // Remove previous handler if re-registered (macOS dock re-open)
+  // Renderer confirmed the quit prompt (Keep-all / Remove-all). Re-registered per
+  // window with the same removeHandler dedupe used elsewhere; delegates to the
+  // single module-level coordinator.
   ipcMain.removeHandler('app:quit-confirm')
-  ipcMain.handle('app:quit-confirm', () => {
-    if (quitTimeout) clearTimeout(quitTimeout)
-    quitConfirmed = true
-    app.quit()
-  })
+  ipcMain.handle('app:quit-confirm', () => quitCoordinator?.confirm())
+  // Renderer cancelled the quit prompt: clear the fallback timer and leave the
+  // services untouched (they were never torn down on the first pass).
+  ipcMain.removeHandler('app:quit-cancel')
+  ipcMain.handle('app:quit-cancel', () => quitCoordinator?.cancel())
 
   // Renderer error logging → main process log file
   ipcMain.removeAllListeners('log:error')
@@ -352,7 +463,15 @@ function createWindow(): void {
   })
   ipcMain.handle('window:close', () => mainWindow.close())
   ipcMain.handle('app:open-in-vscode', (_e, cwd: string) => {
-    shell.openExternal(`vscode://file/${cwd}`)
+    // vscode:// is a fixed, app-initiated scheme, but the cwd is caller-supplied:
+    // validate/normalise it so a malicious cwd can't inject a second URL or a
+    // query/fragment into the interpolation.
+    const url = buildVscodeUrl(cwd)
+    if (!url) {
+      logger.warn('main', `Refused open-in-vscode for unsafe cwd: ${JSON.stringify(cwd)}`)
+      return
+    }
+    void shell.openExternal(url)
   })
 
   // Send maximize/unmaximize state changes to renderer
@@ -369,11 +488,18 @@ function createWindow(): void {
 
   // Close log viewer (and any other child windows) when the main window closes
   mainWindow.on('closed', () => {
-    logViewer.close()
+    logViewer?.close()
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    // Scheme allowlist (R2): only web + mail links may reach the OS. Anything
+    // else (file:, javascript:, custom program-launching schemes) is refused —
+    // one non-markdown link away from file:///C:/…exe otherwise.
+    if (isAllowedExternalUrl(details.url)) {
+      void shell.openExternal(details.url)
+    } else {
+      logger.warn('main', `Blocked openExternal for disallowed scheme: ${details.url}`)
+    }
     return { action: 'deny' }
   })
 
@@ -386,10 +512,26 @@ function createWindow(): void {
   }
 }
 
+// Focus the existing window if a second instance is launched (M-BT1). The second
+// instance quits itself (see requestSingleInstanceLock above); this fires in the
+// PRIMARY so the user's re-launch surfaces the already-running window.
+if (gotSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (!currentWindow || currentWindow.isDestroyed()) return
+    if (currentWindow.isMinimized()) currentWindow.restore()
+    currentWindow.show()
+    currentWindow.focus()
+  })
+}
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+  // A doomed second instance has already called app.quit() above — do not build
+  // the menu, construct services, or create a window (M-BT1).
+  if (!gotSingleInstanceLock) return
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -449,7 +591,7 @@ app.whenReady().then(() => {
           {
             label: 'Open Log Viewer',
             accelerator: isMac ? 'Cmd+Shift+L' : 'Ctrl+Shift+L',
-            click: () => logViewer.open()
+            click: () => logViewer?.open()
           },
           { type: 'separator' as const },
           // On Windows/Linux, About lives here; on macOS it's in the app menu

@@ -910,6 +910,8 @@ interface SessionAPI {
   loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
+  /** Cancel a pending quit prompt: clears the fallback timer, leaves services running. */
+  cancelQuit(): Promise<void>
   testProxyConnection(
     proxy: ProxySettings
   ): Promise<{ ok: boolean; latencyMs: number; error?: string }>
