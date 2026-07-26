@@ -1183,6 +1183,21 @@ export class CrossEngineDispatcher {
             'Start a fresh dispatch without session_id.'
         )
       }
+      // M-XE1: busy-reject BEFORE touching entry state — same rationale as the
+      // Claude/pi targets. opencode drives ONE turn per session over a single
+      // ambient SSE tap gated by `entry.busy`; two concurrent same-session_id
+      // dispatch_agent calls (their MCP handlers overlap within one assistant
+      // turn) would both clear the cost-cap check before either records spend,
+      // both prompt() the same session, and the first finisher's `finally`
+      // would flip `busy` off and reset `turnToolUseIds` out from under the
+      // still-running second turn. Reject the second call; the running turn is
+      // left completely undisturbed (no abort, no removal, no ctx swap).
+      if (existing.busy) {
+        return errorResult(
+          `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
+          req.sessionId
+        )
+      }
       // ADR-033 M4-C: reject a continuation turn once this target's tracked
       // cumulative cost has met/exceeded the configured cap. The target stays
       // alive — raising dispatch.maxCostUsd or starting a fresh dispatch both

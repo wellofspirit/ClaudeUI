@@ -401,6 +401,60 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(client.prompt).not.toHaveBeenCalled()
   })
 
+  it('M-XE1 busy target: a concurrent same-session_id opencode dispatch is REJECTED without disturbing the running turn', async () => {
+    // Two dispatch_agent calls with the same session_id can run concurrently
+    // (their MCP handlers overlap within one assistant turn). opencode drives
+    // one turn per session over a single busy-gated SSE tap; letting the second
+    // through would prompt() the same session twice and reset turnToolUseIds /
+    // flip busy off under the still-running first turn. So the second must
+    // busy-reject (M-XE1 — the opencode branch previously lacked this check
+    // that the Claude/pi branches already had).
+    const { dispatcher, client } = makeHarness()
+    const ctx = makeCtx()
+
+    // Turn 1: establish the session_id (default mock prompt resolves at once).
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.sessionId).toBe('oc-sess-1')
+
+    // Turn 2: continuation left in flight — its prompt() never resolves.
+    let releaseSecond: (v: unknown) => void = () => {}
+    client.prompt.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseSecond = resolve))
+    )
+    const second = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
+      ctx
+    )
+    await tick()
+
+    // Turn 3: concurrent continuation while turn 2 is mid-flight → busy-reject.
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: 'oc-sess-1' },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('already running')
+    expect(third.sessionId).toBe('oc-sess-1')
+
+    // The busy-reject never issued a prompt: still exactly turn1 + turn2 = 2
+    // (pre-fix this would be 3 — the guard assertion).
+    expect(client.prompt).toHaveBeenCalledTimes(2)
+
+    // The in-flight turn still completes normally with ITS OWN result.
+    releaseSecond({ parts: [{ type: 'text', text: 'second answer' }] })
+    const secondResult = await second
+    expect(secondResult.isError).toBeUndefined()
+    expect(secondResult.text).toBe('second answer')
+
+    // The target stays continuable once the busy window closes.
+    const fourth = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'four', sessionId: 'oc-sess-1' },
+      ctx
+    )
+    expect(fourth.text).toBe('target answer')
+    expect(client.createSession).toHaveBeenCalledTimes(1)
+  })
+
   it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
     const { dispatcher } = makeHarness()
     const first = await dispatcher.dispatch(
