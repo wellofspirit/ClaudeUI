@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
 import { logger } from './logger'
+import { writeFileAtomicSync } from './write-json-atomic'
 import {
   allSessionMeta,
   setSessionMeta,
@@ -74,8 +75,12 @@ const lastWrittenContent = new Map<string, string>()
 function writeJson(filePath: string, data: unknown): void {
   ensureDir()
   const json = JSON.stringify(data, null, 2)
+  // lastWrittenContent must equal the exact bytes on disk (the watcher skips
+  // our own writes by content), so serialize once and hand the SAME string to
+  // the atomic writer — a byte-for-byte drop-in for the old writeFileSync,
+  // now temp-file + rename so a concurrent reader never sees a torn file (P1).
   lastWrittenContent.set(filePath, json)
-  fs.writeFileSync(filePath, json, { mode: 0o600 })
+  writeFileAtomicSync(filePath, json, { mode: 0o600 })
 }
 
 /**

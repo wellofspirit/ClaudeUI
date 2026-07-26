@@ -23,6 +23,7 @@ import type {
 } from '../../shared/types'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
+import { writeJsonAtomic } from './write-json-atomic'
 import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
 import {
   groupEntriesIntoBlocks,
@@ -1700,7 +1701,7 @@ export class BlockUsageService {
       if (!fs.existsSync(USAGE_DIR)) {
         fs.mkdirSync(USAGE_DIR, { recursive: true })
       }
-      fs.writeFileSync(filePath, JSON.stringify(daily), { mode: 0o600 })
+      writeJsonAtomic(filePath, daily, { mode: 0o600 })
     } catch (err) {
       logger.error('BlockUsage', 'Failed to persist daily file', err)
     }
@@ -1721,7 +1722,7 @@ export class BlockUsageService {
             otherDaily.completedBlocks.push(block)
           }
         }
-        fs.writeFileSync(otherPath, JSON.stringify(otherDaily), { mode: 0o600 })
+        writeJsonAtomic(otherPath, otherDaily, { mode: 0o600 })
       } catch (err) {
         logger.error('BlockUsage', `Failed to persist blocks to ${otherDate}`, err)
       }
@@ -1913,7 +1914,7 @@ export class BlockUsageService {
       if (!fs.existsSync(USAGE_DIR)) {
         fs.mkdirSync(USAGE_DIR, { recursive: true })
       }
-      fs.writeFileSync(filePath, JSON.stringify(daily), { mode: 0o600 })
+      writeJsonAtomic(filePath, daily, { mode: 0o600 })
     } catch (err) {
       logger.error('BlockUsage', `Failed to persist daily summary for ${date}`, err)
     }

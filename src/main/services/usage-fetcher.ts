@@ -30,6 +30,7 @@ import { logger } from './logger'
 import { recordWindowSample } from './db'
 import { canonicalizeWindowEnd } from './usage-windows'
 import { getSecurestorageEnv } from '../sdk/securestorage-env'
+import { writeJsonAtomicAsync } from './write-json-atomic'
 
 /** The currently authenticated Claude account (from ~/.claude.json). */
 export interface ActiveAccount {
@@ -762,7 +763,10 @@ export class UsageFetcher {
       const raw = await readFile(path, 'utf-8')
       const file = JSON.parse(raw) as CredentialsFile
       file.claudeAiOauth = newCreds
-      await writeFile(path, JSON.stringify(file, null, 2), 'utf-8')
+      // Atomic (temp + rename): .credentials.json is the LIVE Claude OAuth store
+      // the CLI also writes; a torn write here could lock the user out. Same
+      // 2-space format as before, now crash-safe (P1).
+      await writeJsonAtomicAsync(path, file, { indent: 2 })
     } catch {
       /* best effort */
     }
