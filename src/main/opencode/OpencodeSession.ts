@@ -370,7 +370,17 @@ export class OpencodeSession extends BaseSession {
       try {
         await this.sendPrompt(prompt, attachments)
       } catch (err) {
-        logger.warn('OpencodeSession', `steer send failed: ${err instanceof Error ? err.message : String(err)}`)
+        // The steer was NOT delivered. Emitting session:steer-consumed here
+        // (the pre-fix behavior) told the renderer the message was sent while it
+        // silently vanished (M-OC9). Roll back the optimistic history push and
+        // surface the failure instead — do NOT consume the message.
+        logger.warn(
+          'OpencodeSession',
+          `steer send failed: ${err instanceof Error ? err.message : String(err)}`
+        )
+        this.messageHistory = this.messageHistory.filter((m) => m !== userMsg)
+        this.send('session:error', err instanceof Error ? err.message : String(err))
+        return
       }
       this.send('session:steer-consumed', { prompt })
       return
@@ -729,8 +739,14 @@ export class OpencodeSession extends BaseSession {
   }
 
   private async consumeEvents(): Promise<void> {
-    if (!this.client || !this.openSessionId) return
-    const signal = this.sseAbort!.signal
+    const abort = this.sseAbort
+    if (!abort) return
+    const signal = abort.signal
+    if (!this.client || !this.openSessionId) {
+      // Never actually started — release the guard so a later run() can retry.
+      if (this.sseAbort === abort) this.sseAbort = null
+      return
+    }
     // Starts at liveTotalCostUsd (0 for a fresh/just-resumed session) — NOT
     // this.totalCostUsd (costBaseUsd + liveTotalCostUsd) — because
     // sumAccumulatorCosts (event-mapper.ts) always REPLACES this ref with a
@@ -752,6 +768,23 @@ export class OpencodeSession extends BaseSession {
     } catch (err) {
       if (!signal.aborted) {
         logger.error('OpencodeSession', `SSE stream error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    } finally {
+      // The event stream ended. opencode holds this subscription open for the
+      // whole session, so a NON-aborted end means the server died or the
+      // transport broke (the vendor also ends the stream on instance dispose).
+      // Pre-fix, sseAbort stayed non-null → ensureSSEConsumer() no-opped forever,
+      // isProcessing stayed stuck true, interrupt() waited on a session.idle that
+      // never comes, and every later run() steered into a dead session (H20).
+      // Clear the guard so the next run() re-establishes the consumer; on an
+      // unexpected mid-turn end, unwedge isProcessing and surface the drop.
+      const deliberate = signal.aborted
+      if (this.sseAbort === abort) this.sseAbort = null
+      if (!deliberate && this.isProcessing) {
+        this.isProcessing = false
+        this.send('session:error', 'opencode connection lost — resend to reconnect')
+        this.sendStatus()
+        this.resetInactivityTimer()
       }
     }
   }

@@ -218,9 +218,10 @@ function setupMocks(): void {
   mockAbortSession.mockResolvedValue(undefined)
   mockPatchSession.mockResolvedValue(undefined)
   mockReplyPermission.mockResolvedValue(undefined)
-  mockSubscribeEvents.mockImplementation(async function* () {
-    // empty SSE stream
-  })
+  // Real opencode SSE stays open for the whole session — park until aborted so
+  // consumeEvents' end-of-stream recovery (H20) only fires on a genuine close,
+  // not on the mock spontaneously returning.
+  mockSubscribeEvents.mockImplementation(parkingStream)
 
   // Reset the OpencodeClient constructor mock to return fresh mock instances.
   // Must use a regular function (not arrow) so it works correctly with `new`.
@@ -777,10 +778,30 @@ describe('OpencodeSession — capabilities', () => {
 // opencode message id, with the FINAL tokens (not the sum of the two snapshots).
 // ---------------------------------------------------------------------------
 
-/** Build an async-iterable SSE stream from a fixed list of events. */
-function streamOf(events: OpencodeEvent[]): () => AsyncGenerator<OpencodeEvent> {
-  return async function* () {
+/** Resolve when the abort signal fires (or immediately if already aborted). Used
+ *  to keep mocked SSE streams open for the session's lifetime, mirroring the real
+ *  opencode subscription (which never spontaneously returns). */
+function parkUntilAborted(signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve()
+    signal?.addEventListener('abort', () => resolve())
+  })
+}
+
+/** A mock SSE stream that yields nothing and stays open until aborted — the
+ *  realistic default (opencode holds the subscription open for the session). */
+// eslint-disable-next-line require-yield
+const parkingStream = async function* (signal?: AbortSignal): AsyncGenerator<OpencodeEvent> {
+  await parkUntilAborted(signal)
+}
+
+/** Build an async-iterable SSE stream from a fixed list of events, then park (as
+ *  a real opencode stream does) until aborted — so consumeEvents' H20 recovery
+ *  isn't tripped by the mock ending mid-turn. */
+function streamOf(events: OpencodeEvent[]): (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent> {
+  return async function* (signal?: AbortSignal) {
     for (const ev of events) yield ev
+    await parkUntilAborted(signal)
   }
 }
 
@@ -1135,12 +1156,13 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
   }
 
   function feedPermissionAsked(permission: string, id = 'per_a', callID = 'c1'): void {
-    mockSubscribeEvents.mockImplementation(async function* () {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'e1',
         type: 'permission.asked',
         properties: { sessionID: SES, id, permission, patterns: ['x'], tool: { callID } }
       } as OpencodeEvent
+      await parkUntilAborted(signal)
     })
   }
 
@@ -1499,7 +1521,7 @@ describe('OpencodeSession — question.asked routing', () => {
 
   function feedQuestionAsked(id = 'que_r1', callID = 'call_q1'): void {
     mockCreateSession.mockResolvedValue({ id: SES })
-    mockSubscribeEvents.mockImplementation(async function* () {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'eq1',
         type: 'question.asked',
@@ -1517,6 +1539,7 @@ describe('OpencodeSession — question.asked routing', () => {
           tool: { callID }
         }
       } as OpencodeEvent
+      await parkUntilAborted(signal)
     })
   }
 
@@ -1582,7 +1605,7 @@ describe('OpencodeSession — resolveApproval question branch', () => {
     }>
   ): Promise<void> {
     mockCreateSession.mockResolvedValue({ id: SES })
-    mockSubscribeEvents.mockImplementation(async function* () {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'eq',
         type: 'question.asked',
@@ -1593,6 +1616,7 @@ describe('OpencodeSession — resolveApproval question branch', () => {
           tool: { callID: 'call_test' }
         }
       } as OpencodeEvent
+      await parkUntilAborted(signal)
     })
     await session.run('go')
     // Wait for the approval to reach the UI
@@ -3596,6 +3620,96 @@ describe('OpencodeSession — setModel() capabilities from discovery cache', () 
     )
     await session.setModel('openai/gpt-4o-vision')
     expect(session.capabilities.vision).toBe(true)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// H20 + M-OC9 — dead SSE recovery and steer-consumed only on delivered sends.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — dead SSE recovery (H20)', () => {
+  beforeEach(setupMocks)
+
+  it('an unexpected mid-turn stream end clears sseAbort, resets isProcessing, and surfaces session:error', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    // Server dies: the subscription returns immediately (NOT via cancel/abort)
+    // while the turn is still in flight (no session.idle).
+    mockSubscribeEvents.mockImplementation(async function* () {
+      // ends right away
+    })
+    const session = new OpencodeSession('r_h20', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:error'
+      )
+      expect(sent).toBe(true)
+    })
+
+    // isProcessing unwedged (would be stuck true pre-fix → interrupt() hangs).
+    expect(session.status.state).toBe('idle')
+    // Guard cleared so a later run() can re-establish the consumer.
+    expect((session as unknown as { sseAbort: AbortController | null }).sseAbort).toBeNull()
+
+    session.dispose()
+  })
+
+  it('a deliberate cancel does NOT emit a session:error from the stream end', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_h20_cancel', win, '/tmp')
+    await session.run('go')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    session.cancel() // aborts the subscription deliberately
+    await new Promise<void>((r) => setTimeout(r, 0))
+
+    const errored = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+      (c) => c[0] === 'session:error'
+    )
+    expect(errored).toBe(false)
+  })
+})
+
+describe('OpencodeSession — steer delivery (M-OC9)', () => {
+  beforeEach(setupMocks)
+
+  it('a failed steer send does NOT emit session:steer-consumed and surfaces session:error', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    // Parking stream keeps isProcessing=true so the second run() steers.
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_oc9', win, '/tmp')
+    await session.run('initial') // establishes client + openSessionId; isProcessing stays true
+    expect(session.status.state).toBe('running')
+
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    // The steer's send fails (server gone).
+    mockPromptAsync.mockRejectedValueOnce(new Error('server gone'))
+    await session.run('steer that never lands')
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(false)
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    // The undelivered message is not retained in local history.
+    const userMsgs = session.getMessages().filter((m) => m.role === 'user')
+    expect(userMsgs.some((m) => m.content.some((b) => b.type === 'text' && b.text === 'steer that never lands'))).toBe(false)
+
+    session.dispose()
+  })
+
+  it('a successful steer send DOES emit session:steer-consumed', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_oc9_ok', win, '/tmp')
+    await session.run('initial')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    await session.run('steer that lands')
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(true)
+
     session.dispose()
   })
 })
