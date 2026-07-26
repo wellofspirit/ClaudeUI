@@ -229,6 +229,10 @@ export function Sidebar({
   const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const isMobile = useIsMobile()
+  // Monotonic token guarding async session selection: clicking slow-loading A
+  // then fast-loading B must land on B. Each click bumps the token; a load only
+  // commits if it's still the latest (gpt#18 / xhigh#14).
+  const selectionSeq = useRef(0)
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
   const [worktreesModalCwd, setWorktreesModalCwd] = useState<string | null>(null)
   const [cleanupWorktree, setCleanupWorktree] = useState<{
@@ -419,8 +423,13 @@ export function Sidebar({
 
   const handleClickSession = async (info: SessionInfo): Promise<void> => {
     const routingId = info.sessionId
-    // Already loaded?
-    if (useSessionStore.getState().sessions[routingId]) {
+    // Bump the selection token first, so any in-flight slower load for a prior
+    // click sees a newer token after its awaits and bails before committing.
+    const seq = ++selectionSeq.current
+    // Already loaded and still resident (an evicted entry is re-hydrated from
+    // disk below, exactly like a never-loaded session)?
+    const inMemory = useSessionStore.getState().sessions[routingId]
+    if (inMemory && !inMemory.evicted) {
       switchSession(routingId)
       if (isMobile && onToggleCollapse) onToggleCollapse()
       return
@@ -447,6 +456,8 @@ export function Sidebar({
       // Best-effort history load (returns [] if opencode is down) — paints the
       // transcript immediately rather than waiting for the first new prompt.
       const messages = await window.api.loadOpencodeHistory(info.sessionId).catch(() => [])
+      // A newer click superseded this one while history loaded — discard.
+      if (seq !== selectionSeq.current) return
       loadHistoricalSession(routingId, messages, info.cwd)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
@@ -470,6 +481,7 @@ export function Sidebar({
       useSessionStore.setState({ sessionEngines })
       window.api.saveSessionConfig({ sessionEngines })
       const messages = await window.api.loadPiHistory(info.sessionId).catch(() => [])
+      if (seq !== selectionSeq.current) return
       loadHistoricalSession(routingId, messages, info.cwd)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
@@ -504,6 +516,8 @@ export function Sidebar({
         if (msgs.length > 0) subagentMessages[toolUseId] = msgs
       }
     }
+    // A newer click superseded this one while history + subagents loaded — discard.
+    if (seq !== selectionSeq.current) return
     loadHistoricalSession(
       routingId,
       messages,
