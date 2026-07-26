@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import * as https from 'node:https'
-import * as http from 'node:http'
+import { createHash } from 'node:crypto'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,62 @@ const DOWNLOAD_URLS: Record<string, string> = {
 const TUNNEL_URL_REGEX = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/
 const START_TIMEOUT_MS = 60_000
 const RESTART_DELAY_MS = 3_000
+
+/**
+ * Pinned SHA-256 digests (lowercase hex) for the cloudflared assets at
+ * {@link CLOUDFLARED_VERSION}, keyed by `${platform}-${arch}` (same keys as
+ * {@link DOWNLOAD_URLS}). The digest is of the downloaded artifact: the raw
+ * binary for linux/windows, the `.tgz` for macOS.
+ *
+ * When a key is present the downloaded file is verified against it and a
+ * mismatch aborts before the binary is ever made executable (M-RM1). When a
+ * key is absent, integrity rests on the enforced end-to-end HTTPS transfer
+ * (GitHub → objects.githubusercontent.com, both TLS-authenticated; the
+ * https→http downgrade that made a redirect MITM possible is refused).
+ *
+ * NOTE: these must be filled with the authentic digests published for the
+ * pinned release before they provide real pinning — see
+ * `docs/adr` / the release-bump checklist. They are intentionally left empty
+ * rather than guessed, so verification fails closed only against a real pin.
+ */
+const CLOUDFLARED_CHECKSUMS: Record<string, string> = {
+  // 'win32-x64': '<sha256-hex>',
+  // 'win32-arm64': '<sha256-hex>',
+  // 'darwin-x64': '<sha256-hex>',      // digest of the .tgz
+  // 'darwin-arm64': '<sha256-hex>',    // digest of the .tgz
+  // 'linux-x64': '<sha256-hex>',
+  // 'linux-arm64': '<sha256-hex>',
+}
+
+/**
+ * Throw unless `u` is a well-formed https URL. Used on the initial download URL
+ * AND on every redirect target so an on-path attacker can't downgrade the
+ * transfer to plaintext HTTP and swap in a malicious binary (M-RM1).
+ */
+export function assertHttpsUrl(u: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(u)
+  } catch {
+    throw new Error(`Invalid download URL: ${u}`)
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`Refusing non-HTTPS download URL (possible MITM downgrade): ${u}`)
+  }
+}
+
+/**
+ * Verify a file's SHA-256 against an expected lowercase-hex digest; throws on
+ * mismatch. Exported for unit testing.
+ */
+export function verifyFileChecksum(filePath: string, expectedHex: string): void {
+  const actual = createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+  if (actual.toLowerCase() !== expectedHex.toLowerCase()) {
+    throw new Error(
+      `cloudflared checksum mismatch: expected ${expectedHex.toLowerCase()}, got ${actual}`
+    )
+  }
+}
 
 // ---------------------------------------------------------------------------
 // TunnelManager
@@ -124,6 +180,28 @@ export class TunnelManager {
     const tmpPath = isTgz ? path.join(binDir, 'cloudflared.tgz') : binaryPath + '.tmp'
     await this.download(url, tmpPath)
 
+    // Verify the downloaded artifact against the pinned digest BEFORE it is
+    // extracted, renamed into place, or made executable (M-RM1). A mismatch
+    // deletes the file and aborts.
+    const expected = CLOUDFLARED_CHECKSUMS[key]
+    if (expected) {
+      try {
+        verifyFileChecksum(tmpPath, expected)
+      } catch (err) {
+        try {
+          fs.unlinkSync(tmpPath)
+        } catch {
+          /* best effort */
+        }
+        throw err
+      }
+    } else {
+      logger.warn(
+        'tunnel-manager',
+        `No pinned checksum for cloudflared ${key}; integrity relies on the enforced HTTPS transfer only`
+      )
+    }
+
     if (isTgz) {
       // macOS: extract the binary from the tarball
       execFileSync('tar', ['-xzf', tmpPath, '-C', binDir])
@@ -159,21 +237,39 @@ export class TunnelManager {
     return path.join(os.homedir(), '.claude', 'ui', 'cloudflared')
   }
 
-  /** Download a URL to a local file path. Follows redirects. */
+  /**
+   * Download an https URL to a local file path. Follows redirects but refuses
+   * any https→http (or otherwise non-https) redirect target — an attacker able
+   * to MITM a redirect must not be able to downgrade the transfer to plaintext
+   * and plant a binary (M-RM1).
+   */
   private download(url: string, destPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const file = fs.createWriteStream(destPath)
+      const fail = (err: Error): void => {
+        file.close()
+        try {
+          fs.unlinkSync(destPath)
+        } catch {
+          /* best effort cleanup */
+        }
+        reject(err)
+      }
       const request = (targetUrl: string, redirectCount = 0): void => {
         if (redirectCount > 5) {
-          file.close()
-          reject(new Error('Too many redirects'))
+          fail(new Error('Too many redirects'))
           return
         }
-        // Handle both http and https
-        const mod = targetUrl.startsWith('https') ? https : http
-        mod
+        // Enforce https on both the initial URL and every redirect hop.
+        try {
+          assertHttpsUrl(targetUrl)
+        } catch (err) {
+          fail(err as Error)
+          return
+        }
+        https
           .get(targetUrl, (res: import('node:http').IncomingMessage) => {
-            // Follow redirects
+            // Follow redirects — the next hop is re-validated as https above.
             if (
               res.statusCode &&
               res.statusCode >= 300 &&
@@ -185,8 +281,7 @@ export class TunnelManager {
               return
             }
             if (res.statusCode !== 200) {
-              file.close()
-              reject(new Error(`Download failed: HTTP ${res.statusCode}`))
+              fail(new Error(`Download failed: HTTP ${res.statusCode}`))
               return
             }
             res.pipe(file)
@@ -196,13 +291,7 @@ export class TunnelManager {
             })
           })
           .on('error', (err: Error) => {
-            file.close()
-            try {
-              fs.unlinkSync(destPath)
-            } catch {
-              /* best effort cleanup */
-            }
-            reject(err)
+            fail(err)
           })
       }
       request(url)

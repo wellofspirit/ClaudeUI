@@ -529,3 +529,119 @@ describe('RemoteServer — sync epoch (R7)', () => {
     client.close()
   })
 })
+
+// ---------------------------------------------------------------------------
+// M-RM2: listen-failure state reset
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — listen failure resets state (M-RM2)', () => {
+  it('a start() that fails to bind does not leave the server stuck "running"', async () => {
+    const port = await ephemeralPort()
+    const occupant = new RemoteServer(new RemoteDispatcher())
+    await occupant.start(port, '127.0.0.1')
+    try {
+      const victim = new RemoteServer(new RemoteDispatcher())
+      // Binding the already-occupied port rejects (EADDRINUSE).
+      await expect(victim.start(port, '127.0.0.1')).rejects.toThrow()
+
+      // Pre-fix: httpServer stayed non-null → running:true with port 0, and
+      // every later start() threw "already running". Now state is fully reset.
+      const status = victim.getStatus()
+      expect(status.running).toBe(false)
+      expect(status.port).toBeNull()
+      expect(status.token).toBeNull()
+
+      // A retry on a free port must now succeed (not throw "already running").
+      const freePort = await ephemeralPort()
+      const res = await victim.start(freePort, '127.0.0.1')
+      expect(res.port).toBe(freePort)
+      expect(victim.getStatus().running).toBe(true)
+      victim.stop()
+    } finally {
+      occupant.stop()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M-RM3: WS origin check + limits
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — WS origin + limits (M-RM3)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** Open a raw ws with an optional Origin header; resolve how it terminated. */
+  function connectWithOrigin(
+    origin?: string
+  ): Promise<{ opened: boolean; error: boolean; closeCode?: number }> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, origin ? { origin } : undefined)
+      let opened = false
+      ws.once('open', () => {
+        opened = true
+      })
+      ws.once('unexpected-response', () => resolve({ opened, error: true }))
+      ws.once('error', () => resolve({ opened, error: true }))
+      ws.once('close', (code) => resolve({ opened, error: false, closeCode: code }))
+    })
+  }
+
+  it('rejects a cross-origin WS upgrade', async () => {
+    await server.start(port, '127.0.0.1')
+    const result = await connectWithOrigin('http://evil.example')
+    expect(result.opened).toBe(false)
+    expect(result.error).toBe(true)
+    expect(server.getStatus().connectedClients).toBe(0)
+  })
+
+  it('accepts a same-origin WS upgrade and lets it authenticate', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    // Origin host === request Host (127.0.0.1:port) → allowed.
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { origin: `http://127.0.0.1:${port}` })
+    const authResp = await new Promise<{ ok: boolean }>((resolve, reject) => {
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: res.token })))
+      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+      ws.once('error', reject)
+      ws.once('unexpected-response', () => reject(new Error('upgrade rejected')))
+    })
+    expect(authResp.ok).toBe(true)
+    expect(server.getStatus().connectedClients).toBe(1)
+    ws.close()
+  })
+
+  it('throttles an IP after repeated failed auth attempts', async () => {
+    await server.start(port, '127.0.0.1')
+    const bogus = 'f'.repeat(64)
+
+    const failOnce = (): Promise<number | undefined> =>
+      new Promise((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+        ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: bogus })))
+        ws.once('close', (code) => resolve(code))
+        ws.once('error', () => resolve(undefined))
+      })
+
+    // Burn the failed-auth budget (MAX_FAILED_AUTH = 10).
+    for (let i = 0; i < 10; i++) {
+      const code = await failOnce()
+      expect(code).toBe(4001)
+    }
+    // The next connection is refused up front with the throttle close code.
+    const throttled = await failOnce()
+    expect(throttled).toBe(4006)
+  })
+})

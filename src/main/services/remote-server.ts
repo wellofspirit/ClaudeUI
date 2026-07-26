@@ -26,6 +26,18 @@ import type { NetworkInterfaceInfo } from '../../shared/types'
 const PING_INTERVAL_MS = 15_000
 const IDLE_TIMEOUT_MS = 30 * 60_000 // 30 minutes
 
+// DoS hardening (M-RM3). Token entropy already makes these limits about
+// resource exhaustion, not access control.
+/** Cap on total sockets (authenticated + pre-auth pending). */
+const MAX_CONNECTIONS = 64
+/** Max distinct failed-auth attempts from one IP within the window before new
+ *  connections from that IP are refused for the rest of the window. */
+const MAX_FAILED_AUTH = 10
+const FAILED_AUTH_WINDOW_MS = 60_000
+/** Pre-auth frames (auth / e2e-activate) are tiny; ws's default 100 MiB
+ *  maxPayload is a pre-auth memory-amplification vector. */
+const WS_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 // 4 MiB
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
@@ -58,6 +70,10 @@ export class RemoteServer {
   private idleTimer?: ReturnType<typeof setInterval>
   private tunnel: TunnelManager
   private e2eKey: string | null = null
+  /** Pre-auth sockets currently open (counted toward {@link MAX_CONNECTIONS}). */
+  private pendingConnections = 0
+  /** Per-IP failed-auth tracking for the sliding {@link FAILED_AUTH_WINDOW_MS} window. */
+  private failedAuth = new Map<string, { count: number; firstAt: number }>()
 
   /** Callback to notify the desktop renderer of status changes. */
   private statusCallback: ((status: RemoteStatus) => void) | null = null
@@ -126,22 +142,71 @@ export class RemoteServer {
     // Create HTTP server
     this.httpServer = http.createServer((req, res) => this.handleHttp(req, res))
 
-    // Create WebSocket server on the same HTTP server
-    this.wss = new WebSocketServer({ server: this.httpServer })
+    // Durable 'error' handler: during the listen phase it rejects the start
+    // promise (e.g. EADDRINUSE); afterwards it just logs, so a late socket
+    // error never becomes an unhandled 'error' event (which would crash).
+    // Attached to BOTH the http server and the WebSocketServer because `ws`
+    // re-emits the underlying server's errors onto the wss instance.
+    let onListenError: ((err: Error) => void) | null = null
+    const handleServerError = (err: Error): void => {
+      if (onListenError) {
+        const fn = onListenError
+        onListenError = null
+        fn(err)
+        return
+      }
+      logger.error('remote-server', `remote server socket error: ${err.message}`)
+    }
+    this.httpServer.on('error', handleServerError)
+
+    // Create WebSocket server on the same HTTP server. `verifyClient` rejects
+    // cross-origin browser upgrades and `maxPayload` bounds pre-auth frame size
+    // (M-RM3).
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      maxPayload: WS_MAX_PAYLOAD_BYTES,
+      verifyClient: (info) => this.verifyWsOrigin(info.origin, info.req)
+    })
+    this.wss.on('error', handleServerError)
     this.wss.on('connection', (ws, req) => this.handleConnection(ws, req))
 
-    // Start listening
-    const actualPort = await new Promise<number>((resolve, reject) => {
-      this.httpServer!.listen(requestedPort, bindAddr, () => {
-        const addr = this.httpServer!.address()
-        if (addr && typeof addr === 'object') {
-          resolve(addr.port)
-        } else {
-          reject(new Error('Failed to get server address'))
-        }
+    // Start listening. On failure (e.g. EADDRINUSE) tear down the half-created
+    // state so getStatus() doesn't report `running` with port 0 and a later
+    // start() isn't permanently blocked by the "already running" guard (M-RM2).
+    let actualPort: number
+    try {
+      actualPort = await new Promise<number>((resolve, reject) => {
+        onListenError = reject
+        this.httpServer!.listen(requestedPort, bindAddr, () => {
+          onListenError = null
+          const addr = this.httpServer!.address()
+          if (addr && typeof addr === 'object') {
+            resolve(addr.port)
+          } else {
+            reject(new Error('Failed to get server address'))
+          }
+        })
       })
-      this.httpServer!.on('error', reject)
-    })
+    } catch (err) {
+      try {
+        this.wss?.close()
+      } catch {
+        /* ignore */
+      }
+      try {
+        this.httpServer?.close()
+      } catch {
+        /* server never bound */
+      }
+      this.wss = null
+      this.httpServer = null
+      this.token = ''
+      this.mockupToken = ''
+      this.e2eKey = null
+      this.port = 0
+      this.boundHost = ''
+      throw err
+    }
 
     this.port = actualPort
 
@@ -206,7 +271,10 @@ export class RemoteServer {
     this.eventLog.clear()
     this.port = 0
     this.token = ''
+    this.mockupToken = ''
     this.boundHost = ''
+    this.pendingConnections = 0
+    this.failedAuth.clear()
     logger.info('remote-server', 'Remote server stopped')
     this.notifyStatus()
   }
@@ -374,6 +442,31 @@ export class RemoteServer {
     let authenticated = false
     let awaitingE2E = false
 
+    // Connection cap + per-IP failed-auth throttle (M-RM3). Both gate BEFORE
+    // any per-connection state (timers, buffers) is allocated.
+    if (this.clients.size + this.pendingConnections >= MAX_CONNECTIONS) {
+      logger.warn('remote-server', `Refusing connection from ${ip}: connection limit reached`)
+      ws.close(4005, 'Too many connections')
+      return
+    }
+    if (this.isAuthThrottled(ip)) {
+      logger.warn('remote-server', `Refusing connection from ${ip}: too many failed auth attempts`)
+      ws.close(4006, 'Too many failed attempts')
+      return
+    }
+
+    // Count this socket as pending until it authenticates or closes.
+    this.pendingConnections++
+    let pendingCounted = true
+    const clearPending = (): void => {
+      if (pendingCounted) {
+        pendingCounted = false
+        // Clamp: stop() resets the counter to 0, so a pre-auth socket that
+        // closes afterwards must not drive it negative.
+        this.pendingConnections = Math.max(0, this.pendingConnections - 1)
+      }
+    }
+
     // Auth timeout — must authenticate within 10 seconds
     const authTimeout = setTimeout(() => {
       if (!authenticated) {
@@ -414,6 +507,8 @@ export class RemoteServer {
           clearTimeout(authTimeout)
           if (this.verifyToken(msg.token)) {
             authenticated = true
+            clearPending()
+            this.failedAuth.delete(ip)
             const newClient: AuthenticatedClient = {
               ws,
               ip,
@@ -437,6 +532,7 @@ export class RemoteServer {
               awaitingE2E = true
             }
           } else {
+            this.recordFailedAuth(ip)
             ws.send(JSON.stringify({ type: 'auth-response', ok: false, error: 'Invalid token' }))
             ws.close(4001, 'Invalid token')
           }
@@ -488,6 +584,7 @@ export class RemoteServer {
 
     ws.on('close', () => {
       clearTimeout(authTimeout)
+      clearPending()
       const client = this.clients.get(ws)
       if (client?.pingTimer) clearInterval(client.pingTimer)
       this.clients.delete(ws)
@@ -553,6 +650,49 @@ export class RemoteServer {
     } catch {
       return false
     }
+  }
+
+  /**
+   * WS upgrade gate (M-RM3). Browsers always send `Origin` on a WS upgrade, so
+   * a same-origin check (Origin host === request Host) blocks a page on some
+   * other LAN/tunnel origin from opening sockets — and works transparently for
+   * both direct LAN access and the tunnel (the client connects to the same host
+   * it was served from). A missing Origin means a non-browser client (native
+   * app / CLI), which the browser-page threat doesn't cover; allow it — the
+   * token still gates every privileged action.
+   */
+  private verifyWsOrigin(origin: string | undefined, req: http.IncomingMessage): boolean {
+    if (!origin) return true
+    try {
+      const originHost = new URL(origin).host
+      const reqHost = req.headers.host
+      if (originHost && reqHost && originHost === reqHost) return true
+    } catch {
+      /* malformed Origin — fall through to reject */
+    }
+    logger.warn('remote-server', `Rejected WS upgrade with cross-origin Origin: ${origin}`)
+    return false
+  }
+
+  /** True if `ip` has exceeded the failed-auth budget within the current window. */
+  private isAuthThrottled(ip: string): boolean {
+    const rec = this.failedAuth.get(ip)
+    if (!rec) return false
+    if (Date.now() - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
+      this.failedAuth.delete(ip)
+      return false
+    }
+    return rec.count >= MAX_FAILED_AUTH
+  }
+
+  private recordFailedAuth(ip: string): void {
+    const now = Date.now()
+    const rec = this.failedAuth.get(ip)
+    if (!rec || now - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
+      this.failedAuth.set(ip, { count: 1, firstAt: now })
+      return
+    }
+    rec.count++
   }
 
   /** Send a message to a specific client (encrypts if E2E is active). */
