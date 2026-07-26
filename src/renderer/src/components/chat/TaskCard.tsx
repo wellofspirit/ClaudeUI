@@ -188,22 +188,24 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
 
   const handleStopTask = async (): Promise<void> => {
     if (!activeSessionId) return
-    setTaskStopping(activeSessionId, toolUseId)
+    // Capture the session id: switching sessions within the 10s fallback window
+    // must still clear THIS session's stop pill, not whichever is active later.
+    const rid = activeSessionId
+    setTaskStopping(rid, toolUseId)
     // isDispatch: routes to the dispatcher with a durable stop-intent — a
     // dispatch card can show "running" before the dispatch has even reached
     // the main process (ADR-033 M3), so the plain toolUseId lookup can miss.
-    const result = await window.api.stopTask(activeSessionId, toolUseId, isDispatch)
+    const result = await window.api.stopTask(rid, toolUseId, isDispatch)
 
     if (!result.success) {
       window.api.logError('TaskCard', `Failed to stop task: ${result.error}`)
-      clearTaskStopping(activeSessionId, toolUseId)
+      clearTaskStopping(rid, toolUseId)
       return
     }
 
     // Set timeout to clear state if notification doesn't arrive within 10s
     setTimeout(() => {
-      const rid = useSessionStore.getState().activeSessionId
-      if (rid) clearTaskStopping(rid, toolUseId)
+      clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 

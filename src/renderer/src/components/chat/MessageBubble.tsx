@@ -289,7 +289,14 @@ export const MessageBubble = memo(function MessageBubble({
             message.timestamp >= thinkingStartedAt
           // Active thinking is rendered by the standalone ThinkingBlock in ChatPanel
           if (isActive) return null
-          return <ThinkingBlock key={item.index} text={item.block.text || ''} isActive={false} />
+          return (
+            <ThinkingBlock
+              key={item.index}
+              text={item.block.text || ''}
+              isActive={false}
+              durationMs={item.block.durationMs}
+            />
+          )
         }
         if (item.kind === 'other') {
           return <ContentBlockView key={item.index} block={item.block} />
