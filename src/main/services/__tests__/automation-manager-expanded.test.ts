@@ -346,6 +346,42 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.stopAll()
   })
 
+  it('records the cost of a sendMessage follow-up turn onto the resumed run', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    // Initial scheduled run: establishes the session id + a first cost.
+    sdkMode = {
+      kind: 'events',
+      events: [
+        { type: 'system', subtype: 'init', session_id: 'ses-followup' },
+        { type: 'result', total_cost_usd: 0.01 }
+      ]
+    }
+    mgr.upsert(makeAutomation({ id: 'followup-1' }))
+    await mgr.runNow('followup-1')
+
+    const afterRun = mgr.listRuns('followup-1')
+    expect(afterRun).toHaveLength(1)
+    expect(afterRun[0].totalCostUsd).toBeCloseTo(0.01)
+    expect((mgr as any).sessionIds.get('followup-1')).toBe('ses-followup')
+
+    // A follow-up message resumes the session and spends more. Pre-fix its cost
+    // landed NOWHERE (currentRunIds was empty for follow-ups → the result
+    // handler skipped persistence). It must now fold onto the resumed run.
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0.02 }] }
+    mgr.sendMessage('followup-1', 'do more')
+
+    await vi.waitFor(() => {
+      const runs = mgr.listRuns('followup-1')
+      expect(runs[0].totalCostUsd).toBeCloseTo(0.03) // 0.01 + 0.02
+    })
+    // The follow-up association is cleared afterward (no leak into later runs).
+    expect((mgr as any).currentRunIds.has('followup-1')).toBe(false)
+
+    mgr.stopAll()
+  })
+
   it('cancel mid-run: cancelRun aborts the SDK query and clears active-run state', async () => {
     const { mgr } = await freshManager()
     mgr.load()

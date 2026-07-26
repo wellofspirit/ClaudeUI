@@ -33,6 +33,7 @@ const {
   mockLoadEngineConfig,
   mockListCommands,
   mockListSkills,
+  mockListMessages,
   MockOpencodeClient
 } = vi.hoisted(() => ({
   mockAcquire: vi.fn(),
@@ -46,6 +47,7 @@ const {
   mockLoadEngineConfig: vi.fn(),
   mockListCommands: vi.fn(),
   mockListSkills: vi.fn(),
+  mockListMessages: vi.fn(),
   MockOpencodeClient: vi.fn()
 }))
 
@@ -114,6 +116,7 @@ beforeEach(() => {
   mockPatchSession.mockResolvedValue(undefined)
   mockListCommands.mockResolvedValue([])
   mockListSkills.mockResolvedValue([])
+  mockListMessages.mockResolvedValue([])
   mockSubscribeEvents.mockImplementation(parkingStream)
   MockOpencodeClient.mockImplementation(function () {
     return {
@@ -123,7 +126,8 @@ beforeEach(() => {
       patchSession: mockPatchSession,
       subscribeEvents: mockSubscribeEvents,
       listCommands: mockListCommands,
-      listSkills: mockListSkills
+      listSkills: mockListSkills,
+      listMessages: mockListMessages
     }
   })
 })
@@ -163,5 +167,47 @@ describe('OpencodeSession — M-OC1: two prompts during the connect window', () 
       return parts.find((p) => p.type === 'text')?.text
     })
     expect(new Set(texts)).toEqual(new Set(['alpha', 'beta']))
+  })
+})
+
+describe('OpencodeSession — replay-once on resume (duplicate history replay)', () => {
+  it('replays stored history exactly once when a prompt races the eager resume', async () => {
+    // Gate getSession so BOTH eagerConnect (run(null)) and establishSession
+    // (run(prompt)) pass their `!openSessionId` check and PARK in getSession
+    // before either sets openSessionId — the exact window where pre-fix both go
+    // on to call replayStoredHistory for the same session (the transcript, and
+    // every session:message, replayed twice). The memo must collapse the two
+    // replays into a single listMessages call.
+    mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
+
+    let getSessionCalls = 0
+    let releaseGetSession!: () => void
+    const gate = new Promise<void>((r) => {
+      releaseGetSession = r
+    })
+    mockGetSession.mockImplementation(() => {
+      getSessionCalls++
+      return gate.then(() => ({ id: 'ses_opencode_1' }))
+    })
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('routing_oc_replay', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude',
+      resumeSessionId: 'ses_opencode_1'
+    })
+
+    session.run(null) // eagerConnect → resume path → parks in getSession
+    const p = session.run('resume then ask') // establishSession → parks in getSession
+
+    // Wait until BOTH callers are parked in getSession (both past their
+    // `!openSessionId` guard, neither has set it yet).
+    for (let i = 0; i < 60 && getSessionCalls < 2; i++) await flush()
+    expect(getSessionCalls).toBe(2)
+
+    releaseGetSession()
+    await p
+    await flush()
+
+    expect(mockListMessages).toHaveBeenCalledTimes(1)
   })
 })

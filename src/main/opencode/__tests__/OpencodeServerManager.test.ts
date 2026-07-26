@@ -545,6 +545,28 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(hosts[1].closed).toBe(true)
   })
 
+  it('dispose() during an in-flight spawn reaps the resolving server instead of orphaning it', async () => {
+    // Widen the spawn window so dispose() lands while spawnFn is still pending.
+    const { spawnFn, calls } = makeSpawnFn(25)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    const acquiring = mgr.acquire('/work/proj') // spawn in flight
+    await new Promise((r) => setTimeout(r, 5)) // ensure spawnFn was entered
+    mgr.dispose() // dispose BEFORE the spawn resolves
+
+    // Pre-fix, the spawn resolved AFTER dispose() cleared `handles`, re-inserting
+    // its handle (an orphaned opencode.exe surviving app quit). Now it must self-
+    // terminate: the acquire rejects, no handle is registered, and the child +
+    // MCP host we DID spawn are both reaped.
+    await expect(acquiring).rejects.toThrow(/disposed/)
+    expect(mgr.activeCount).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].child.killed).toBe(true)
+    await new Promise((r) => setTimeout(r, 10)) // let close() run
+    expect(hosts[0].closed).toBe(true)
+  })
+
   it('generates a distinct random password (Basic auth header) per server', async () => {
     const { spawnFn } = makeSpawnFn()
     const { startMcpHostFn } = makeMcpHostFn()
