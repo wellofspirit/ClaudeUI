@@ -228,9 +228,15 @@ function spawnServer(
     }, 15_000)
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      // Once the port is parsed the buffers are never read again (all reject
+      // paths gate on `!resolved`). Keep the listener attached so the pipe
+      // still drains — but stop appending, or `stdout` grows unbounded for the
+      // whole server lifetime as opencode keeps logging (a slow main-process
+      // leak). Same for stderr below.
+      if (resolved) return
       stdout += chunk.toString()
       const m = PORT_PATTERN.exec(stdout)
-      if (m && !resolved) {
+      if (m) {
         resolved = true
         clearTimeout(timeout)
         const port = parseInt(m[1], 10)
@@ -241,6 +247,9 @@ function spawnServer(
     child.stderr?.on('data', (chunk: Buffer) => {
       // Warnings (e.g. unset password) AND fatal startup errors land here. We
       // accumulate rather than ignore so the reject paths can surface the cause.
+      // After resolve, stderr is never read again — stop accumulating so it
+      // doesn't grow unbounded (see the stdout note above).
+      if (resolved) return
       stderr += chunk.toString()
     })
 
@@ -295,6 +304,14 @@ export class OpencodeServerManager {
    * instead of each launching a server (the race FIX 1 closes).
    */
   private pending = new Map<string, Promise<ServerHandle>>()
+  /**
+   * Set once dispose() runs. A spawn already in flight when dispose() is called
+   * would otherwise re-insert its resolved handle into `handles` AFTER dispose()
+   * cleared the map — an orphaned `opencode.exe` surviving app quit (there is no
+   * Windows job object reaping it). The spawn checks this flag right before the
+   * insert and self-terminates instead.
+   */
+  private disposed = false
   private binary: string | null = null
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string
@@ -404,6 +421,16 @@ export class OpencodeServerManager {
         process: child,
         mcpHost
       }
+
+      // dispose() ran while this spawn was in flight: do NOT register the handle
+      // (it would leak past app quit — see `disposed`). Reap what we just spawned
+      // and reject so the pending entry is cleared like any other spawn failure.
+      if (this.disposed) {
+        this.killProcess(child)
+        await mcpHost.close().catch(() => {})
+        throw new Error('OpencodeServerManager disposed during spawn')
+      }
+
       this.handles.set(key, handle)
 
       // If the server dies unexpectedly (crash, external kill), drop the handle
@@ -469,6 +496,9 @@ export class OpencodeServerManager {
 
   /** Kill all servers — call on app shutdown. */
   dispose(): void {
+    // Set BEFORE reaping so any spawn still resolving self-terminates at its
+    // pre-insert check instead of registering an orphan (see `disposed`).
+    this.disposed = true
     for (const handle of this.handles.values()) {
       this.killProcess(handle.process)
       handle.mcpHost.close().catch(() => {})
