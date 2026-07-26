@@ -123,26 +123,53 @@ function fetchText(url, redirects = 0) {
 
 function fetchBinary(url, outPath, redirects = 0) {
   return new Promise((resolve, reject) => {
-    httpsGet(url, { headers: UA }, (res) => {
+    let done = false
+    const settleReject = (err) => {
+      if (done) return
+      done = true
+      reject(err)
+    }
+    const req = httpsGet(url, { headers: UA }, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        if (redirects > 5) return reject(new Error('too many redirects'))
+        if (redirects > 5) return settleReject(new Error('too many redirects'))
+        res.resume() // drain the redirect body so the socket can close
+        done = true
         return resolve(fetchBinary(res.headers.location, outPath, redirects + 1))
       }
-      if (res.statusCode !== 200) return reject(new Error(`GET ${url} → ${res.statusCode}`))
+      if (res.statusCode !== 200) {
+        res.resume()
+        return settleReject(new Error(`GET ${url} → ${res.statusCode}`))
+      }
       const total = parseInt(res.headers['content-length'] || '0', 10)
       let seen = 0
       const ws = createWriteStream(outPath)
+      const bail = (err) => {
+        req.destroy()
+        ws.destroy()
+        settleReject(err)
+      }
       res.on('data', (chunk) => {
         seen += chunk.length
         if (total) process.stdout.write(`\r  downloaded ${mb(seen)}/${mb(total)}…  `)
       })
+      // pipe() does NOT forward source-stream errors — a mid-body connection
+      // reset would otherwise leave the promise pending and hang the build.
+      res.on('error', bail)
+      ws.on('error', bail)
       res.pipe(ws)
       ws.on('finish', () => {
+        done = true
         process.stdout.write('\n')
         ws.close(resolve)
       })
-      ws.on('error', reject)
-    }).on('error', reject)
+    })
+    req.on('error', settleReject)
+    // Guard against a stalled body (reset with no FIN): abort if the socket is
+    // idle for 60s rather than blocking the build indefinitely.
+    req.setTimeout(60_000, () => {
+      if (done) return
+      req.destroy(new Error(`download stalled (no data for 60s): ${url}`))
+    })
   })
 }
 
@@ -157,13 +184,37 @@ async function resolveBinary(arg) {
     return { binPath: p, version: null }
   }
   let version = arg.version
-  if (version === 'latest' || version === 'stable') {
+  const isMovingTag = version === 'latest' || version === 'stable'
+  const { key, binName } = detectPlatform()
+  const cachedBinPath = (v) =>
+    join(ROOT, '.cache', 'claude-cli', `claude-${v}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`)
+
+  // Offline cache short-circuit (pinned versions only). Previously resolveBinary
+  // always fetched manifest.json to learn the expected checksum, so every
+  // ensure-cli (thus every `bun install`/build) hard-required downloads.claude.ai
+  // even on a full cache hit. If we already verified a cached binary, we record
+  // that checksum in a sibling `.sha256` sidecar; a subsequent run that still
+  // matches it can be trusted without any network. Fail-safe: any mismatch (or a
+  // missing/stale sidecar) simply falls through to the normal verified-download
+  // path below. Moving tags must still resolve remotely.
+  if (!isMovingTag && !arg.force) {
+    const binPath = cachedBinPath(version)
+    const sidecar = `${binPath}.sha256`
+    if (existsSync(binPath) && existsSync(sidecar)) {
+      const expected = readFileSync(sidecar, 'utf8').trim()
+      if (expected && sha256File(binPath) === expected) {
+        log(`cache hit (offline, sidecar-verified sha256): ${binPath}`)
+        return { binPath, version }
+      }
+    }
+  }
+
+  if (isMovingTag) {
     version = (await fetchText(`${DL_BASE}/${version}`)).trim()
   }
   log(`upstream version: ${version}`)
 
   const manifest = JSON.parse(await fetchText(`${DL_BASE}/${version}/manifest.json`))
-  const { key, binName } = detectPlatform()
   const entry = manifest.platforms[key]
   if (!entry) {
     throw new Error(
@@ -173,15 +224,14 @@ async function resolveBinary(arg) {
 
   const cacheDir = join(ROOT, '.cache', 'claude-cli')
   mkdirSync(cacheDir, { recursive: true })
-  const binPath = join(
-    cacheDir,
-    `claude-${version}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`
-  )
+  const binPath = cachedBinPath(version)
+  const sidecar = `${binPath}.sha256`
 
   if (existsSync(binPath) && !arg.force) {
     const have = sha256File(binPath)
     if (have === entry.checksum) {
       log(`cache hit: ${binPath}`)
+      writeFileSync(sidecar, `${entry.checksum}\n`) // enable future offline hits
       return { binPath, version }
     }
     log(`cache stale (sha mismatch), re-downloading`)
@@ -199,6 +249,7 @@ async function resolveBinary(arg) {
     throw new Error(`SHA256 mismatch: expected ${entry.checksum}, got ${got}`)
   }
   log(`sha256 verified: ${got}`)
+  writeFileSync(sidecar, `${entry.checksum}\n`) // enable future offline hits
   return { binPath, version }
 }
 
