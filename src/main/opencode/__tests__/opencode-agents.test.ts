@@ -405,6 +405,37 @@ describe('saveAgent', () => {
     expect(text).toMatch(/options/)
     expect(text).toMatch(/reasoningEffort/)
   })
+
+  // M-OC8: editing an agent that lives in the SINGULAR `agent/` dir must
+  // overwrite it in place — not create a shadow copy in `agents/` that the
+  // reader (which searches `agent/` first) never surfaces.
+  it('overwrites an existing agent in-place in agent/ (singular), no shadow copy', () => {
+    // The agent already lives in the singular dir with an old model.
+    writeAgentFile(
+      path.join(configDir, 'agent'),
+      'inplace',
+      '---\ndescription: old\nmode: all\nmodel: old/model\n---\nold body'
+    )
+
+    saveAgent({
+      name: 'inplace',
+      scope: 'global',
+      mode: 'all',
+      model: 'new/model',
+      prompt: 'new body',
+    })
+
+    // The singular file was updated…
+    const singular = fs.readFileSync(path.join(configDir, 'agent', 'inplace.md'), 'utf8')
+    expect(singular).toMatch(/new\/model/)
+    expect(singular).toMatch(/new body/)
+    // …and NO shadow file was created in agents/ (pre-fix this existed and won).
+    expect(fs.existsSync(path.join(configDir, 'agents', 'inplace.md'))).toBe(false)
+
+    // The reader reflects the edit (proves the edit "sticks").
+    const detail = readAgent('inplace', 'global')
+    expect(detail?.model).toBe('new/model')
+  })
 })
 
 describe('deleteAgent', () => {
