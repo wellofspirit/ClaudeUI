@@ -8,7 +8,7 @@
  * Electron-ABI .node binary.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
 import {
   getSessionMeta,
@@ -22,6 +22,7 @@ import {
   type Migration,
   type Db
 } from '../db'
+import { logger } from '../logger'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
 beforeEach(() => {
@@ -159,6 +160,104 @@ describe('migration framework — user_version guard', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Migration framework — transactional application (each up + version bump atomic)
+// ---------------------------------------------------------------------------
+
+describe('migration framework — transactional application', () => {
+  it('rolls back partial DDL + the version bump when a migration throws mid-way', () => {
+    const db = openRawDb()
+    try {
+      const migrations: Migration[] = [
+        {
+          version: 1,
+          up: (d) => {
+            // A valid statement applies first...
+            d.exec('CREATE TABLE m1_ok (id INTEGER)')
+            // ...then the migration fails partway (models a future ALTER TABLE
+            // that half-applies). Without the enclosing transaction the CREATE
+            // above autocommits and the table leaks — leaving the DB at a
+            // half-applied schema.
+            d.exec('THIS IS NOT VALID SQL')
+          }
+        }
+      ]
+      expect(() => runMigrations(db, migrations)).toThrow()
+
+      // Version must NOT have advanced.
+      expect(userVersion(db)).toBe(0)
+
+      // Discriminator: the table created before the throw must have been rolled
+      // back. Pre-fix (no transaction) it would persist via autocommit.
+      const n = (
+        db
+          .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='m1_ok'")
+          .get() as { n: number }
+      ).n
+      expect(n).toBe(0)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('commits a successful migration atomically (table + version both land)', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db, [{ version: 1, up: (d) => d.exec('CREATE TABLE ok1 (id INTEGER)') }])
+      expect(userVersion(db)).toBe(1)
+      expect(() => db.prepare('SELECT * FROM ok1').all()).not.toThrow()
+    } finally {
+      db.close()
+    }
+  })
+
+  it('a later migration failing leaves earlier committed migrations intact', () => {
+    const db = openRawDb()
+    try {
+      const migrations: Migration[] = [
+        { version: 1, up: (d) => d.exec('CREATE TABLE keep_me (id INTEGER)') },
+        { version: 2, up: (d) => d.exec('NOPE NOT SQL') }
+      ]
+      expect(() => runMigrations(db, migrations)).toThrow()
+      // v1 committed in its own transaction; v2 rolled back → version stays 1.
+      expect(userVersion(db)).toBe(1)
+      expect(() => db.prepare('SELECT * FROM keep_me').all()).not.toThrow()
+    } finally {
+      db.close()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Migration framework — downgrade guard (older binary, newer DB)
+// ---------------------------------------------------------------------------
+
+describe('migration framework — downgrade guard', () => {
+  it('does not run or rewind anything when user_version exceeds the known max', () => {
+    const db = openRawDb()
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      // Simulate a DB migrated forward by a newer build.
+      db.pragma('user_version = 99')
+      const applied: number[] = []
+      const migrations: Migration[] = [
+        { version: 1, up: () => applied.push(1) },
+        { version: 2, up: () => applied.push(2) }
+      ]
+
+      expect(() => runMigrations(db, migrations)).not.toThrow()
+      expect(applied).toEqual([]) // nothing ran
+      expect(userVersion(db)).toBe(99) // NOT rewound
+      // Discriminator: pre-fix the newer version was silently accepted with no
+      // warning; the guard must warn exactly once.
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally {
+      warn.mockRestore()
+      db.close()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Migrations — via the repository singleton (getDb wiring)
 // ---------------------------------------------------------------------------
 
@@ -186,7 +285,11 @@ describe('migrations via repository', () => {
     })
     const meta = getSessionMeta('s-pi')
     expect(meta?.engineId).toBe('pi')
-    expect(meta?.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+    expect(meta?.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
   })
 })
 
@@ -319,8 +422,11 @@ describe('renameSessionMeta', () => {
 describe('importSessionEnginesOnce', () => {
   it('imports entries from sessionEngines when table is empty', () => {
     importSessionEnginesOnce({
-      's1': { engineId: 'claude', model: { engineId: 'claude', vendorId: 'anthropic', modelId: 'claude-opus-4-8' } },
-      's2': { engineId: 'claude' }
+      s1: {
+        engineId: 'claude',
+        model: { engineId: 'claude', vendorId: 'anthropic', modelId: 'claude-opus-4-8' }
+      },
+      s2: { engineId: 'claude' }
     })
     expect(getSessionMeta('s1')?.engineId).toBe('claude')
     expect(getSessionMeta('s1')?.model?.modelId).toBe('claude-opus-4-8')
@@ -337,7 +443,10 @@ describe('importSessionEnginesOnce', () => {
 
   it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {
     importSessionEnginesOnce({
-      's-pi': { engineId: 'pi', model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' } }
+      's-pi': {
+        engineId: 'pi',
+        model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' }
+      }
     })
     expect(getSessionMeta('s-pi')?.engineId).toBe('pi')
     expect(getSessionMeta('s-pi')?.model?.modelId).toBe('gpt-5.6-luna')
@@ -362,7 +471,10 @@ describe('importSessionEnginesOnce', () => {
 
   it('preserves opencode engineId through import', () => {
     importSessionEnginesOnce({
-      'oc': { engineId: 'opencode', model: { engineId: 'opencode', vendorId: 'openai', modelId: 'gpt-4o' } }
+      oc: {
+        engineId: 'opencode',
+        model: { engineId: 'opencode', vendorId: 'openai', modelId: 'gpt-4o' }
+      }
     })
     const meta = getSessionMeta('oc')
     expect(meta?.engineId).toBe('opencode')
