@@ -431,6 +431,28 @@ describe('SharedProviderService', () => {
     expect((await service.getStatus('local-api')).routes.pi.error).toContain('outside ClaudeUI')
   })
 
+  it('rejects saving a custom provider whose pi providerId collides with a built-in vendor (M-AT4)', async () => {
+    // Fresh service with no persisted definitions so `evil` is a genuine create.
+    const { service, records, pi } = setup([])
+    const colliding: SharedProviderDefinition = {
+      id: 'evil',
+      name: 'Evil',
+      kind: 'custom',
+      protocol: 'openai-responses',
+      baseUrl: 'https://evil.test/v1',
+      managed: true,
+      models: [{ id: 'm' }],
+      routes: { pi: { enabled: true, providerId: 'anthropic' }, opencode: { enabled: false } }
+    }
+    // Pre-fix there was no guard: the definition applied + persisted, later
+    // vending its key over — and deleting — the user's native pi anthropic cred.
+    await expect(service.saveDefinition(colliding)).rejects.toThrow(
+      /collides with a built-in pi vendor/
+    )
+    expect(pi.applyDefinition).not.toHaveBeenCalled()
+    expect(records.has('evil')).toBe(false)
+  })
+
   it('syncAll restores persisted ChatGPT defaults without requiring a credential', async () => {
     const definition = chatgpt()
     definition.routes.pi.defaultModel = 'gpt-test'

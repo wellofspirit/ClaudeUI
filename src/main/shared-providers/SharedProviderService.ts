@@ -9,7 +9,7 @@ import type {
   SharedProviderStatus
 } from '../../shared/shared-provider'
 import { OpencodeSharedProviderAdapter } from './OpencodeSharedProviderAdapter'
-import { PiSharedProviderAdapter } from './PiSharedProviderAdapter'
+import { PiSharedProviderAdapter, isPiBuiltinCollision } from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
 
 type Route = ConfigurableHarnessId
@@ -102,6 +102,15 @@ export class SharedProviderService {
         return
       }
       if (definition.kind !== 'custom') throw new Error('Only custom providers can be saved')
+      // Fail fast (M-AT4): a custom provider whose effective pi providerId
+      // collides with a built-in native vendor (e.g. 'anthropic') would vend its
+      // key over — and delete on removal — the user's real native pi credential.
+      // Reject before applying/vending anything, regardless of route-enabled state.
+      if (isPiBuiltinCollision(definition)) {
+        throw new Error(
+          `Provider id "${definition.routes.pi.providerId ?? definition.id}" collides with a built-in pi vendor; choose a different provider id`
+        )
+      }
       const applied: Route[] = []
       try {
         for (const route of routes) {
