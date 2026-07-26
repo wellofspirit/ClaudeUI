@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
+import { useSessionStore, buildTodosFromMessages, resolveRoutingId } from '../stores/session-store'
 
 /** Send a system notification if the session is not currently focused */
 function notifyIfNeeded(routingId: string, title: string, body: string): void {
@@ -128,6 +128,10 @@ export function useClaudeEvents(): void {
       // When queued (sent while session is running), store as queuedText instead of adding
       // to the chat stream — the message will appear in chat when actually consumed by cli.js.
       window.api.onUserMessage((routingId, data) => {
+        // Resolve a possibly-stale (pre-rekey) id to the canonical session id at
+        // the event boundary so every handler targets the same session across a
+        // rekey (xhigh#9). No-op when no rekey mapping applies.
+        routingId = resolveRoutingId(routingId)
         const store = useSessionStore.getState()
         if (!store.sessions[routingId]) return
         if (data.queued) {
@@ -135,7 +139,9 @@ export function useClaudeEvents(): void {
         } else {
           store.addUserMessage(
             routingId,
-            `msg-${Date.now()}`,
+            // crypto.randomUUID (not Date.now) so two user messages within the
+            // same ms can't collide into a duplicate React key (Low).
+            `msg-${crypto.randomUUID()}`,
             data.prompt,
             undefined,
             data.attachments
@@ -143,6 +149,7 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onMessage((routingId, msg) => {
+        routingId = resolveRoutingId(routingId)
         addMessage(routingId, msg)
 
         // Rebuild todos when task-related tool calls arrive
@@ -152,6 +159,7 @@ export function useClaudeEvents(): void {
         if (hasTaskTool) rebuildTodos(routingId)
       }),
       window.api.onStreamEvent((routingId, data) => {
+        routingId = resolveRoutingId(routingId)
         if (data.type === 'thinking') {
           appendStreamingThinking(routingId, data.text)
         } else {
@@ -159,6 +167,7 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onApprovalRequest((routingId, approval) => {
+        routingId = resolveRoutingId(routingId)
         addPendingApproval(routingId, approval)
         const state = useSessionStore.getState()
         if (state.activeSessionId !== routingId || !document.hasFocus()) {
@@ -173,7 +182,7 @@ export function useClaudeEvents(): void {
       // Externally-resolved approval (e.g. opencode's deny-cascade on a
       // dispatch target, ADR-033) — remove the stale card.
       window.api.onApprovalDismiss((routingId, { requestId }) => {
-        removePendingApproval(routingId, requestId)
+        removePendingApproval(resolveRoutingId(routingId), requestId)
       }),
       window.api.onStatus((routingId, status) => {
         // Re-key session when SDK provides its stable session ID
@@ -219,6 +228,7 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onResult((routingId) => {
+        routingId = resolveRoutingId(routingId)
         // Dismiss completed task list when turn ends
         const state = useSessionStore.getState()
         const session = state.sessions[routingId]
@@ -237,19 +247,21 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onVendorAuthRequired((routingId, data) => {
-        useSessionStore.getState().setVendorAuthRequired(routingId, data)
+        useSessionStore.getState().setVendorAuthRequired(resolveRoutingId(routingId), data)
       }),
       window.api.onError((routingId, error) => {
+        routingId = resolveRoutingId(routingId)
         addError(routingId, error)
         window.api.logError('session', `[routingId=${routingId}] ${error}`)
       }),
       window.api.onWarning((routingId, warning) => {
-        addWarning(routingId, warning)
+        addWarning(resolveRoutingId(routingId), warning)
       }),
       window.api.onMessagesRetracted((routingId, { messageIds }) => {
-        retractMessages(routingId, messageIds)
+        retractMessages(resolveRoutingId(routingId), messageIds)
       }),
       window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs }) => {
+        routingId = resolveRoutingId(routingId)
         appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
         // Belt-and-suspenders: when cli.js has produced a result for this
         // tool_use, any approval still sitting in the store for it is
@@ -307,12 +319,13 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onTaskProgress((routingId, data) => {
-        updateTaskProgress(routingId, data)
+        updateTaskProgress(resolveRoutingId(routingId), data)
       }),
       window.api.onTaskNotification((routingId, data) => {
-        addTaskNotification(routingId, data)
+        addTaskNotification(resolveRoutingId(routingId), data)
       }),
       window.api.onSubagentStream((routingId, data) => {
+        routingId = resolveRoutingId(routingId)
         if (data.type === 'thinking') {
           appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
         } else {
@@ -320,14 +333,14 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onSubagentMessage((routingId, data) => {
-        addSubagentMessage(routingId, data.toolUseId, data.message)
+        addSubagentMessage(resolveRoutingId(routingId), data.toolUseId, data.message)
       }),
       window.api.onSubagentMessageBatch((routingId, data) => {
-        appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
+        appendSubagentMessageBatch(resolveRoutingId(routingId), data.toolUseId, data.messages)
       }),
       window.api.onSubagentToolResult((routingId, data) => {
         appendSubagentToolResult(
-          routingId,
+          resolveRoutingId(routingId),
           data.toolUseId,
           data.toolResultToolUseId,
           data.result,
@@ -336,22 +349,28 @@ export function useClaudeEvents(): void {
         )
       }),
       window.api.onBashOutput((routingId, data) => {
-        setBashOutput(routingId, data.toolUseId, data.output, data.totalLines, data.totalBytes)
+        setBashOutput(
+          resolveRoutingId(routingId),
+          data.toolUseId,
+          data.output,
+          data.totalLines,
+          data.totalBytes
+        )
       }),
       window.api.onBackgroundOutput((routingId, data) => {
-        setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
+        setBackgroundOutput(resolveRoutingId(routingId), data.toolUseId, data.tail, data.totalSize)
       }),
       window.api.onStatusLine((routingId, data) => {
-        setStatusLine(routingId, data)
+        setStatusLine(resolveRoutingId(routingId), data)
       }),
       window.api.onMetering((routingId, data) => {
-        useSessionStore.getState().setMetering(routingId, data)
+        useSessionStore.getState().setMetering(resolveRoutingId(routingId), data)
       }),
       window.api.onPlanSteps((routingId, todos) => {
-        useSessionStore.getState().setTodos(routingId, todos)
+        useSessionStore.getState().setTodos(resolveRoutingId(routingId), todos)
       }),
       window.api.onPermissionMode((routingId, mode) => {
-        setPermissionMode(mode, routingId)
+        setPermissionMode(mode, resolveRoutingId(routingId))
       }),
       window.api.onSlashCommands((_routingId, commands) => {
         setSlashCommands(commands)
@@ -362,12 +381,13 @@ export function useClaudeEvents(): void {
         setSdkSkillNames(names)
       }),
       window.api.onSandboxViolation((routingId, message) => {
-        addSandboxViolation(routingId, message)
+        addSandboxViolation(resolveRoutingId(routingId), message)
       }),
       window.api.onSteerConsumed((routingId) => {
-        useSessionStore.getState().consumeQueuedText(routingId)
+        useSessionStore.getState().consumeQueuedText(resolveRoutingId(routingId))
       }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
+        routingId = resolveRoutingId(routingId)
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
         if (statusLine) setStatusLine(routingId, statusLine)
         rebuildTodos(routingId)
@@ -451,13 +471,13 @@ export function useClaudeEvents(): void {
       }),
       // Voice input events
       window.api.onVoiceTranscript((routingId, data) => {
-        appendVoiceTranscript(routingId, data.text, data.isFinal)
+        appendVoiceTranscript(resolveRoutingId(routingId), data.text, data.isFinal)
       }),
       window.api.onVoiceState((routingId, state) => {
-        setVoiceState(routingId, state)
+        setVoiceState(resolveRoutingId(routingId), state)
       }),
       window.api.onVoiceError((routingId, error) => {
-        addError(routingId, error)
+        addError(resolveRoutingId(routingId), error)
       }),
       // Plugin views
       window.api.onPluginViewsChanged((views) => {

@@ -44,7 +44,8 @@ import type {
   EngineId,
   ModelRef,
   EngineConfig,
-  FileDiff
+  FileDiff,
+  FileAttachment
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -453,6 +454,16 @@ export interface PerSessionState {
   streamingThinking: string
   thinkingStartedAt: number | null
   thinkingDurationMs: number | null
+  /** Duration of the most-recently sealed thinking span awaiting attachment to
+   *  the next committed thinking block (see addMessage). Decouples the seal point
+   *  (appendStreamingText) from the block-commit point (addMessage) so each
+   *  thinking block records its OWN duration instead of all reading one scalar. */
+  pendingThinkingDurationMs: number | null
+  /** True once the heavy arrays (messages, subagentMessages, bash/background
+   *  outputs) have been evicted from memory for an inactive session. The entry
+   *  is kept resident (draft/effort/engine preserved) and re-hydrated from disk
+   *  on reselection via loadHistoricalSession. */
+  evicted: boolean
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
@@ -484,6 +495,9 @@ export interface PerSessionState {
   metering: MeteringSnapshot | null
   queuedText: string
   draftText: string
+  /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
+   *  in session A can never be sent from B, and is restored on return to A. */
+  draftAttachments: FileAttachment[]
   selectedModel: string
   /** Engine chosen at session-creation time. Immutable after the session spawns. */
   selectedEngineId: EngineId
@@ -534,6 +548,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   streamingThinking: '',
   thinkingStartedAt: null,
   thinkingDurationMs: null,
+  pendingThinkingDurationMs: null,
+  evicted: false,
   // Full caps assumed for new sessions before the first status event.
   status: {
     state: 'idle',
@@ -570,6 +586,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   metering: null,
   queuedText: '',
   draftText: '',
+  draftAttachments: [],
   selectedModel: 'default',
   selectedEngineId: 'claude' as EngineId,
   worktreeInfo: null,
@@ -614,6 +631,21 @@ function createEmptySession(cwd: string): PerSessionState {
 const rekeyMap = new Map<string, string>()
 
 /**
+ * Resolve a possibly-stale (pre-rekey) routingId to the canonical session id.
+ * When a session rekeys to its SDK id, the main process keeps emitting events
+ * with the old routingId until it processes the rekey IPC round-trip. Resolving
+ * at the event boundary (useClaudeEvents) makes ALL handlers — messages,
+ * streams, approvals, tool results — target the same id, so a rekey can no
+ * longer split-brain a session (xhigh#9). Returns the input unchanged when no
+ * mapping applies (pre-rekey, or the mapped session no longer exists).
+ */
+export function resolveRoutingId(routingId: string): string {
+  const mapped = rekeyMap.get(routingId)
+  if (mapped && useSessionStore.getState().sessions[mapped]) return mapped
+  return routingId
+}
+
+/**
  * Monotonic token for the in-flight vendor-OAuth `auto` flow. Each
  * authorizeVendorOAuth() captures the current token; cancelVendorOAuth()
  * bumps it. The long-lived `oauthCallback` await checks its captured token
@@ -655,6 +687,76 @@ function ensureSession(
 ): Record<string, PerSessionState> {
   if (sessions[routingId]) return sessions
   return { ...sessions, [routingId]: createEmptySession('') }
+}
+
+/**
+ * How many recently-viewed transcripts stay fully resident (besides the active
+ * session, pinned sessions, and watched/running ones). Older on-disk
+ * transcripts have their heavy arrays evicted and are re-hydrated on reselect.
+ */
+const MAX_RESIDENT_TRANSCRIPTS = 10
+
+/**
+ * Evict the heavy per-session arrays (messages / subagent messages / bash +
+ * background outputs) for sessions that are neither active, recently-viewed,
+ * pinned, watched, running, nor awaiting an approval — bounding renderer heap
+ * (Opus B). The lightweight entry stays resident (draft, effort, model, engine,
+ * status, todos), and the transcript re-hydrates from disk on reselection via
+ * loadHistoricalSession (the `evicted` flag routes Sidebar.handleClickSession
+ * back through the disk-load path). Only on-disk sessions are eligible, so an
+ * evicted transcript is always reloadable — a fresh, not-yet-flushed session is
+ * never touched. Returns the same map reference when nothing was evicted.
+ */
+function evictColdSessions(
+  sessions: Record<string, PerSessionState>,
+  activeSessionId: string | null,
+  recentSessionIds: string[],
+  pinnedSessionIds: string[],
+  directories: DirectoryGroup[]
+): Record<string, PerSessionState> {
+  const keep = new Set<string>()
+  if (activeSessionId) keep.add(activeSessionId)
+  for (const id of recentSessionIds.slice(0, MAX_RESIDENT_TRANSCRIPTS)) keep.add(id)
+  for (const id of pinnedSessionIds) keep.add(id)
+
+  const onDisk = new Set<string>()
+  for (const group of directories) {
+    for (const s of group.sessions) onDisk.add(s.sessionId)
+  }
+
+  let changed = false
+  const next: Record<string, PerSessionState> = {}
+  for (const id in sessions) {
+    const sess = sessions[id]
+    const canEvict =
+      !keep.has(id) &&
+      !sess.evicted &&
+      !sess.sdkActive &&
+      !sess.isWatching &&
+      sess.pendingApprovals.length === 0 &&
+      sess.messages.length > 0 &&
+      onDisk.has(id)
+    if (canEvict) {
+      changed = true
+      next[id] = {
+        ...sess,
+        evicted: true,
+        isHistorical: true,
+        messages: [],
+        streamingText: '',
+        streamingThinking: '',
+        subagentMessages: {},
+        subagentStreamingText: {},
+        subagentStreamingThinking: {},
+        bashOutputs: {},
+        backgroundOutputs: {},
+        backgroundWatcherCounts: {}
+      }
+    } else {
+      next[id] = sess
+    }
+  }
+  return changed ? next : sessions
 }
 
 interface SessionState {
@@ -892,6 +994,12 @@ interface SessionState {
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
+  /** Append unsent attachments to a specific session (keyed by routingId — see impl). */
+  addDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
+  /** Remove one unsent attachment from a session by attachment id. */
+  removeDraftAttachment: (routingId: string, id: string) => void
+  /** Replace a session's unsent attachments (used to clear after a successful send). */
+  setDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Set the active session's model picker value within its selected engine. */
   setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
@@ -1051,10 +1159,25 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
+      const withAttention = updateSession(cleaned.sessions, routingId, () => ({
+        needsAttention: false
+      }))
+      // Bound the renderer heap (Opus B): evict the heavy transcript arrays of
+      // cold, on-disk sessions on every switch. The active/recent/pinned/running/
+      // watched sessions are always kept; an evicted session re-hydrates from
+      // disk on reselect (Sidebar routes an evicted entry through
+      // loadHistoricalSession rather than the resident fast-path).
+      const sessions = evictColdSessions(
+        withAttention,
+        routingId,
+        cleaned.recentSessionIds,
+        state.pinnedSessionIds,
+        state.directories
+      )
       return {
         activeSessionId: routingId,
         activeView: { type: 'chat' } as ActiveView,
-        sessions: updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false })),
+        sessions,
         recentSessionIds: cleaned.recentSessionIds
       }
     }),
@@ -1176,7 +1299,11 @@ export const useSessionStore = create<SessionState>((set) => ({
     warnings?
   ) =>
     set((state) => {
-      const base = createEmptySession(cwd)
+      // Re-hydrating an evicted entry: start from the resident (lightweight)
+      // entry so draft / effort / thinking / permission mode survive the round
+      // trip. A genuinely fresh load starts from a blank session.
+      const prior = state.sessions[routingId]
+      const base = prior?.evicted ? prior : createEmptySession(cwd)
       // Per-session model memory: restore the persisted model when present, so
       // reopening a session brings back the model you last used in it. The engine
       // is restored too (an opencode session reopens as opencode). When NO model
@@ -1194,20 +1321,35 @@ export const useSessionStore = create<SessionState>((set) => ({
         engineMeta(persistedEngineId).defaultModelValue(
           perEngineDefaultModel(persistedEngineId, state.opencodeDefaultModel, state.piDefaultModel)
         )
+      // Engine identity for the LOCAL historical-load path (gpt#3): the restored
+      // engine must also drive status.engineId + capabilities, otherwise a pi /
+      // opencode session reopens with Claude defaults and fork/spawn resolution
+      // uses Claude semantics. (The remote-snapshot path seeds these from the
+      // snapshot's own status — untouched here.)
+      const modelInfo = state.availableModels.find(
+        (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
+      )
       return {
         sessions: {
           ...state.sessions,
           [routingId]: {
             ...base,
+            cwd,
             messages,
             isHistorical: true,
-            taskNotifications: taskNotifications || [],
-            subagentMessages: subagentMessages || {},
-            statusLine: statusLine ?? null,
-            warnings: warnings || [],
-            worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
+            evicted: false,
+            taskNotifications: taskNotifications ?? base.taskNotifications,
+            subagentMessages: subagentMessages ?? base.subagentMessages,
+            statusLine: statusLine ?? base.statusLine ?? null,
+            warnings: warnings ?? base.warnings,
+            worktreeInfo: state.worktreeInfoMap[routingId] ?? base.worktreeInfo ?? null,
             selectedEngineId: persistedEngineId,
-            selectedModel
+            selectedModel,
+            status: {
+              ...base.status,
+              engineId: persistedEngineId,
+              capabilities: engineMeta(persistedEngineId).seedCapabilities(selectedModel, modelInfo)
+            }
           }
         }
       }
@@ -1276,7 +1418,19 @@ export const useSessionStore = create<SessionState>((set) => ({
         newRoutingId,
         ...s.recentSessionIds.filter((id) => id !== newRoutingId)
       ].slice(0, s.settings.maxRecentSessions)
-      saveSessionConfig(s, { recentSessionIds })
+      // Engine identity for the fork (gpt#3): the branch inherits the source's
+      // engine, so its status.engineId/capabilities and the persisted
+      // sessionEngines entry must match — otherwise the fork spawns Claude with
+      // a pi/opencode model (InputBox.doSend reads selectedEngineId).
+      const forkEngineId = src.selectedEngineId
+      const sessionEngines = {
+        ...s.sessionEngines,
+        [newRoutingId]: {
+          engineId: forkEngineId,
+          model: engineMeta(forkEngineId).decodeModelValue(src.selectedModel)
+        }
+      }
+      saveSessionConfig(s, { recentSessionIds, sessionEngines })
       const baseSession = createEmptySession(src.cwd)
       return {
         sessions: {
@@ -1288,17 +1442,24 @@ export const useSessionStore = create<SessionState>((set) => ({
             // InputBox (gated on forkOrigin) overrides the resume target.
             isHistorical: true,
             forkOrigin: { sourceSessionId, anchorUuid },
-            // Inherit the source's model/permission/effort/thinking choices.
+            // Inherit the source's engine/model/permission/effort/thinking choices.
+            selectedEngineId: forkEngineId,
             selectedModel: src.selectedModel,
             permissionMode: src.permissionMode,
             effort: src.effort,
             thinkingMode: src.thinkingMode,
-            reasoningVariant: src.reasoningVariant
+            reasoningVariant: src.reasoningVariant,
+            status: {
+              ...baseSession.status,
+              engineId: src.status.engineId,
+              capabilities: src.status.capabilities
+            }
           }
         },
         activeSessionId: newRoutingId,
         activeView: { type: 'chat' } as ActiveView,
-        recentSessionIds
+        recentSessionIds,
+        sessionEngines
       }
     })
     return newRoutingId
@@ -1520,26 +1681,39 @@ export const useSessionStore = create<SessionState>((set) => ({
 
       const idx = session.messages.findIndex((m) => m.id === message.id)
       const hasNonThinking = message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
-      const thinkingUpdate =
-        session.thinkingStartedAt && hasNonThinking
-          ? {
-              streamingThinking: '',
-              thinkingDurationMs: Date.now() - session.thinkingStartedAt,
-              thinkingStartedAt: null
-            }
-          : {}
+      const sealedDuration =
+        session.thinkingStartedAt && hasNonThinking ? Date.now() - session.thinkingStartedAt : null
 
-      let updatedMessages: ChatMessage[]
-      if (idx < 0) {
-        updatedMessages = [...session.messages, message]
-      } else {
-        const existing = session.messages[idx]
-        const merged = {
-          ...message,
-          content: mergeContentBlocks(existing.content, message.content)
-        }
-        updatedMessages = session.messages.map((m, i) => (i === idx ? merged : m))
+      let committed: ChatMessage =
+        idx < 0
+          ? message
+          : {
+              ...message,
+              content: mergeContentBlocks(session.messages[idx].content, message.content)
+            }
+
+      // Record the finished thinking span's duration on the block itself, so each
+      // thinking block renders its OWN "Thought for Xs" instead of all reading a
+      // single per-session scalar (Low). The span may seal here (all-in-one
+      // message) or earlier in appendStreamingText (streaming), in which case the
+      // duration was parked in pendingThinkingDurationMs and is consumed now.
+      const durationToStamp = sealedDuration ?? session.pendingThinkingDurationMs
+      let didStamp = false
+      if (durationToStamp != null) {
+        const content = committed.content.map((b) => {
+          if (b.type === 'thinking' && b.durationMs == null) {
+            didStamp = true
+            return { ...b, durationMs: durationToStamp }
+          }
+          return b
+        })
+        if (didStamp) committed = { ...committed, content }
       }
+
+      const updatedMessages =
+        idx < 0
+          ? [...session.messages, committed]
+          : session.messages.map((m, i) => (i === idx ? committed : m))
 
       return {
         sessions: {
@@ -1548,7 +1722,11 @@ export const useSessionStore = create<SessionState>((set) => ({
             ...session,
             messages: updatedMessages,
             streamingText: '',
-            ...thinkingUpdate
+            ...(sealedDuration != null
+              ? { streamingThinking: '', thinkingDurationMs: sealedDuration, thinkingStartedAt: null }
+              : {}),
+            // Keep the parked duration only if it wasn't attached to a block here.
+            pendingThinkingDurationMs: didStamp ? null : durationToStamp
           }
         }
       }
@@ -1616,11 +1794,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = sessions[routingId]
 
       if (session.thinkingStartedAt) {
+        const duration = Date.now() - session.thinkingStartedAt
         return {
-          sessions: updateSession(sessions, routingId, (s) => ({
-            streamingText: s.streamingText + text,
+          sessions: updateSession(sessions, routingId, () => ({
+            streamingText: session.streamingText + text,
             streamingThinking: '',
-            thinkingDurationMs: Date.now() - s.thinkingStartedAt!,
+            thinkingDurationMs: duration,
+            // Park the sealed span's duration so the addMessage that finalizes
+            // THIS thinking block stamps its own durationMs (per-block "Thought
+            // for Xs"), not a shared per-session scalar. thinkingStartedAt is
+            // nulled here, so without this the consuming addMessage has nothing
+            // to read.
+            pendingThinkingDurationMs: duration,
             thinkingStartedAt: null
           }))
         }
@@ -2336,7 +2521,9 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = state.sessions[routingId]
       if (!session || !session.queuedText) return state
       const userMsg = {
-        id: `steer-${Date.now()}`,
+        // crypto.randomUUID (not Date.now) so two steers within the same ms can't
+        // collide into a duplicate React key (Low).
+        id: `steer-${crypto.randomUUID()}`,
         role: 'user' as const,
         content: [{ type: 'text' as const, text: session.queuedText }],
         timestamp: Date.now()
@@ -2358,6 +2545,38 @@ export const useSessionStore = create<SessionState>((set) => ({
       const id = state.activeSessionId
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
+    }),
+
+  // Draft attachments are keyed by routingId (captured at drop time) rather than
+  // read from activeSessionId, so an async file read that completes after the
+  // user switches sessions lands on the session it was dropped into — never the
+  // now-active one (gpt#14). Unknown ids are a no-op.
+  addDraftAttachments: (routingId, attachments) =>
+    set((state) => {
+      if (!state.sessions[routingId] || attachments.length === 0) return {}
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          draftAttachments: [...s.draftAttachments, ...attachments]
+        }))
+      }
+    }),
+
+  removeDraftAttachment: (routingId, id) =>
+    set((state) => {
+      if (!state.sessions[routingId]) return {}
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          draftAttachments: s.draftAttachments.filter((a) => a.id !== id)
+        }))
+      }
+    }),
+
+  setDraftAttachments: (routingId, attachments) =>
+    set((state) => {
+      if (!state.sessions[routingId]) return {}
+      return {
+        sessions: updateSession(state.sessions, routingId, () => ({ draftAttachments: attachments }))
+      }
     }),
 
   setSelectedModel: (model) =>
