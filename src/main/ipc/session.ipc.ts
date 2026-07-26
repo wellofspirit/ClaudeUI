@@ -16,6 +16,7 @@ import {
   resolveForkAnchor
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
+import { isPathInside } from '../services/path-containment'
 import {
   loadSettings,
   loadSessionConfig,
@@ -1898,12 +1899,19 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     })
   )
 
-  // Mockup preview — read HTML from mockup directory
+  // Mockup preview — read HTML from mockup directory. `cwd`/`directory` are
+  // caller-supplied (and reachable remotely), so confine the read to a direct
+  // child of the project's mockups root — a crafted `directory` (e.g. '../../..')
+  // must not traverse out. Mirrors mockup-protocol.ts's path-traversal guard.
   ipcMain.handle(
     'mockup:read-html',
     safeHandler(async (_e: unknown, cwd: string, directory: string) => {
-      const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
-      return fs.promises.readFile(htmlPath, 'utf-8')
+      const mockupsRoot = path.resolve(path.join(cwd, '.claude', 'ui', 'mockups'))
+      const mockupDir = path.resolve(path.join(mockupsRoot, directory))
+      if (!isPathInside(mockupsRoot, mockupDir)) {
+        throw new Error('Invalid mockup directory')
+      }
+      return fs.promises.readFile(path.join(mockupDir, 'index.html'), 'utf-8')
     })
   )
 

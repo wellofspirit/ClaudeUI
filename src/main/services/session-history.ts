@@ -14,6 +14,7 @@ import type {
   EngineId
 } from '../../shared/types'
 import { logger } from './logger'
+import { isPathInside } from './path-containment'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
 import { resolvePiForkAnchor } from './pi-session-list'
@@ -1339,6 +1340,32 @@ export function buildSubagentFileMap(
  * Load background bash task output from /tmp.
  */
 /**
+ * Temp roots under which cli.js background-task `.output` files legitimately
+ * live. cli.js chooses the path (background bash writes to a temp file) and
+ * reports it in the task-notification `<output-file>`; this channel is reachable
+ * remotely with a CALLER-supplied `outputFile`, so without confinement it is an
+ * arbitrary-file-read primitive (gpt#8). We confine reads to the OS temp
+ * directory. Containment choice + limit:
+ *  - Root: `os.tmpdir()` plus, on POSIX, `/tmp` and `/private/tmp` — because
+ *    cli.js on macOS writes under `/tmp` (a symlink to `/private/tmp`) whereas
+ *    `os.tmpdir()` there is `/var/folders/...` and would miss those files.
+ *  - This blocks the dangerous targets (home dir, `~/.ssh`,
+ *    `~/.claude/.credentials.json`, project source, `/etc/...`). It does NOT
+ *    police co-tenant files already inside the shared temp dir — a far weaker,
+ *    pre-existing local-trust concern, not a remote arbitrary-read.
+ */
+function backgroundOutputRoots(): string[] {
+  const roots = [os.tmpdir()]
+  if (process.platform !== 'win32') roots.push('/tmp', '/private/tmp')
+  return roots
+}
+
+/** True iff `file` resolves under one of the legitimate temp output roots. */
+function isContainedBackgroundOutput(file: string): boolean {
+  return backgroundOutputRoots().some((root) => isPathInside(root, file))
+}
+
+/**
  * Load background bash task output.
  * Tries outputFile (from task-notification) first, falls back to path interpolation.
  */
@@ -1347,27 +1374,35 @@ export function loadBackgroundOutput(
   taskId: string,
   outputFile?: string
 ): { content: string | null; purged: boolean } {
-  // Try the explicit output file path first (from task-notification XML)
-  if (outputFile && fs.existsSync(outputFile)) {
-    try {
-      const content = fs.readFileSync(outputFile, 'utf-8')
-      return { content, purged: false }
-    } catch (err) {
-      logger.warn('SessionHistory', 'Failed to read background output file', err)
+  // Try the explicit output file path first (from task-notification XML). Reject
+  // any path outside the legitimate temp output roots — the caller may be a
+  // remote client supplying an arbitrary path.
+  if (outputFile) {
+    if (isContainedBackgroundOutput(outputFile)) {
+      if (fs.existsSync(outputFile)) {
+        try {
+          const content = fs.readFileSync(outputFile, 'utf-8')
+          return { content, purged: false }
+        } catch (err) {
+          logger.warn('SessionHistory', 'Failed to read background output file', err)
+        }
+      }
+    } else {
+      logger.warn(
+        'SessionHistory',
+        `Rejected out-of-root background outputFile: ${outputFile}`
+      )
     }
   }
 
-  // Fallback: interpolate path
+  // Fallback: interpolate path. projectKey/taskId are caller-supplied too, so
+  // confirm the joined path stays under the per-uid claude temp root (a crafted
+  // projectKey like '../../..' would otherwise escape via path.join).
   const uid = process.getuid?.() ?? 0
-  const outputPath = path.join(
-    '/private/tmp',
-    `claude-${uid}`,
-    projectKey,
-    'tasks',
-    `${taskId}.output`
-  )
+  const base = path.join('/private/tmp', `claude-${uid}`)
+  const outputPath = path.join(base, projectKey, 'tasks', `${taskId}.output`)
 
-  if (!fs.existsSync(outputPath)) {
+  if (!isPathInside(base, outputPath) || !fs.existsSync(outputPath)) {
     return { content: null, purged: true }
   }
 
