@@ -960,10 +960,21 @@ export class BlockUsageService {
       const rows = getUsageEventsSince(cutoff)
       if (rows.length === 0) return
 
+      // The day that CONTAINS the cutoff is only PARTIALLY covered by the scan
+      // window — its events before `cutoff` are excluded. Rolling it up would
+      // overwrite the durable full-day total (stored by an earlier rollup while
+      // the day was fully inside the window) with a shrinking partial sum as the
+      // window slides forward, so days silently decay to near-zero once they
+      // cross the boundary while the app runs (H13). Skip it; every OTHER day in
+      // the window is fully covered (all its events are ≥ cutoff), and "today"
+      // only grows. This is a pure JS guard — no schema/upsert-semantics change.
+      const partialDate = dateStrFromTimestamp(cutoff)
+
       // Bucket by (date, engineId, vendorId, modelId).
       const buckets = new Map<string, DailyUsageRow>()
       for (const r of rows) {
         const date = dateStrFromTimestamp(r.ts)
+        if (date === partialDate) continue // boundary day sliding out — leave its stored total intact
         const key = `${date}|${r.engineId}|${r.vendorId}|${r.modelId}`
         let b = buckets.get(key)
         if (!b) {
