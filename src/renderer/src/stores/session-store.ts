@@ -623,11 +623,35 @@ function createEmptySession(cwd: string): PerSessionState {
 }
 
 /**
+ * Insert into a module-level cache Map, evicting the oldest entries once `cap`
+ * is exceeded. These caches live for the whole renderer process, so without a
+ * bound they grow monotonically across a long-running session (RN8).
+ *
+ * Maps iterate in insertion order, so the first key is the oldest. Re-writing an
+ * existing key deletes-then-sets it, which moves it to the back — a refresh
+ * counts as recent, so a hot key can't be evicted just because it was first
+ * seen long ago.
+ */
+function setCapped<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
+  map.delete(key)
+  map.set(key, value)
+  while (map.size > cap) {
+    const oldest = map.keys().next()
+    if (oldest.done) break
+    map.delete(oldest.value)
+  }
+}
+
+/**
  * Maps old (pre-rekey) routingIds → new (SDK session) IDs.
  * When the store rekeys a session, the main process may still send events
  * with the old routingId until it processes the rekey IPC round-trip.
  * This map lets setStatusLine (and potentially other handlers) resolve them.
+ *
+ * Bounded: only *recent* rekeys matter (the main process catches up within one
+ * IPC round-trip), and stale ids die with their session.
  */
+const REKEY_MAP_MAX = 200
 const rekeyMap = new Map<string, string>()
 
 /**
@@ -661,7 +685,11 @@ let vendorOAuthFlowToken = 0
  * When polling updates arrive they're cached here so that newly-loaded
  * or switched-to sessions with the same cwd get instant git status
  * instead of waiting for the next poll cycle.
+ *
+ * Bounded (RN8): it's a convenience cache, and a miss just means the session
+ * waits one poll cycle for its real status.
  */
+const GIT_STATUS_CACHE_MAX = 100
 const gitStatusCache = new Map<string, GitStatusData>()
 
 /** Helper to update a specific session's state */
@@ -1580,6 +1608,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       delete customTitles[sessionId]
       const worktreeInfoMap = { ...state.worktreeInfoMap }
       delete worktreeInfoMap[sessionId]
+      // The persisted engine/model row is keyed by routingId too — without this
+      // it survives every delete and accumulates forever (RN8).
+      const sessionEngines = { ...state.sessionEngines }
+      delete sessionEngines[sessionId]
       const sessions = { ...state.sessions }
       delete sessions[sessionId]
       // Drop the session from its directory group; drop the group itself if now empty
@@ -1596,7 +1628,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         pinnedSessionIds,
         hiddenSessionIds,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionEngines
       })
       return {
         recentSessionIds,
@@ -1604,6 +1637,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenSessionIds,
         customTitles,
         worktreeInfoMap,
+        sessionEngines,
         sessions,
         directories,
         activeSessionId
@@ -1641,10 +1675,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
       const customTitles = { ...state.customTitles }
       const worktreeInfoMap = { ...state.worktreeInfoMap }
+      // Persisted engine/model rows are keyed by routingId — purge them with the
+      // rest of the project's state so they can't accumulate forever (RN8).
+      const sessionEngines = { ...state.sessionEngines }
       const sessions = { ...state.sessions }
       for (const id of projectSessionIds) {
         delete customTitles[id]
         delete worktreeInfoMap[id]
+        delete sessionEngines[id]
         delete sessions[id]
       }
       const directories = state.directories.filter((g) => g.projectKey !== projectKey)
@@ -1658,7 +1696,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenSessionIds,
         hiddenProjectKeys,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionEngines
       })
       return {
         recentSessionIds,
@@ -1667,6 +1706,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenProjectKeys,
         customTitles,
         worktreeInfoMap,
+        sessionEngines,
         sessions,
         directories,
         activeSessionId
@@ -2001,6 +2041,15 @@ export const useSessionStore = create<SessionState>((set) => ({
             (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
           )
           if (hasToolUse) {
+            // Idempotent: a replayed onToolResult (reconnect catchup / history
+            // replay) must not append a second tool_result block for the same
+            // toolUseId. The renderer only shows the first, so the duplicates
+            // were invisible while still growing the message forever (RN10).
+            // First result wins — no caller replaces an existing result.
+            const alreadyHasResult = msg.content.some(
+              (b) => b.type === 'tool_result' && b.toolUseId === toolUseId
+            )
+            if (alreadyHasResult) return state
             messages[i] = {
               ...msg,
               content: [
@@ -2764,7 +2813,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   rekeySession: (oldId, newId) => {
     // Record the mapping so events arriving with the old routingId can be resolved
-    rekeyMap.set(oldId, newId)
+    setCapped(rekeyMap, oldId, newId, REKEY_MAP_MAX)
     set((state) => {
       if (oldId === newId) return state
       const session = state.sessions[oldId]
@@ -2877,7 +2926,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   setGitStatus: (routingId, status) =>
     set((state) => {
       const session = state.sessions[routingId]
-      if (session?.cwd) gitStatusCache.set(session.cwd, status)
+      if (session?.cwd) setCapped(gitStatusCache, session.cwd, status, GIT_STATUS_CACHE_MAX)
       return { sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status })) }
     }),
 

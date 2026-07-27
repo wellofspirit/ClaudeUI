@@ -686,6 +686,23 @@ describe('deleteSession', () => {
     expect(store().directories).toEqual([])
   })
 
+  // RN8 — the persisted engine/model row is keyed by routingId; without an
+  // explicit delete it outlived every session and grew the config forever.
+  it('drops the sessionEngines row and persists the pruned map', async () => {
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s2', '/test')
+    expect(store().sessionEngines['s1']).toBeDefined()
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    await store().deleteSession('s1', 'proj-key')
+
+    expect(store().sessionEngines['s1']).toBeUndefined()
+    expect(store().sessionEngines['s2']).toBeDefined() // sibling untouched
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.sessionEngines['s1']).toBeUndefined()
+    expect(persisted.sessionEngines['s2']).toBeDefined()
+  })
+
   it('does not mutate store when the IPC call rejects', async () => {
     ;(window.api.deleteSession as any).mockRejectedValueOnce(new Error('EBUSY'))
     store().createNewSession('s1', '/a')
@@ -819,6 +836,43 @@ describe('deleteProject', () => {
     expect(store().sessions['s3']).toBeDefined()
     // Active session cleared since it was inside the deleted project
     expect(store().activeSessionId).toBeNull()
+  })
+
+  // RN8 — same as deleteSession, for every routingId the project takes with it.
+  it('drops the sessionEngines rows for every purged session and persists the pruned map', async () => {
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s2', '/test') // in-memory-only, same cwd
+    store().createNewSession('s3', '/other')
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: '/test',
+          projectKey: 'proj-key',
+          folderName: 'test',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'a',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
+    })
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    await store().deleteProject('proj-key')
+
+    expect(store().sessionEngines['s1']).toBeUndefined()
+    expect(store().sessionEngines['s2']).toBeUndefined()
+    expect(store().sessionEngines['s3']).toBeDefined() // other project untouched
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.sessionEngines['s1']).toBeUndefined()
+    expect(persisted.sessionEngines['s2']).toBeUndefined()
+    expect(persisted.sessionEngines['s3']).toBeDefined()
   })
 
   it('keeps activeSessionId when the active session is not inside the deleted project', async () => {
