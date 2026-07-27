@@ -9,8 +9,23 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { RemoteConnection } from '../connection'
 
 // connection.ts references WebSocket.OPEN inside send(); jsdom has no WebSocket.
+// Instances are recorded so the reconnect/revive tests can count constructions.
 class FakeWebSocket {
   static OPEN = 1
+  static instances: FakeWebSocket[] = []
+  readyState = 0
+  onopen: unknown = null
+  onmessage: unknown = null
+  onclose: unknown = null
+  onerror: unknown = null
+  constructor(public url: string) {
+    FakeWebSocket.instances.push(this)
+  }
+  send(): void {}
+  close(): void {
+    this.readyState = 3
+    ;(this.onclose as (() => void) | null)?.()
+  }
 }
 ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
 
@@ -18,10 +33,13 @@ interface Internals {
   handleMessage(msg: unknown): void
   decodeIncoming(raw: string): Promise<unknown>
   sendSync(): void
+  scheduleReconnect(): void
   lastSeq: number
   epoch?: string
   e2e: unknown
   ws: unknown
+  destroyed: boolean
+  reconnectTimer?: ReturnType<typeof setTimeout>
 }
 
 function makeConn(): { conn: RemoteConnection; internals: Internals; events: unknown[][] } {
@@ -180,6 +198,64 @@ describe('RemoteConnection', () => {
       internals.lastSeq = 7
       internals.sendSync()
       expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 7, epoch: 'epoch-Z' })
+    })
+  })
+
+  // RN5 — `destroy()` used to latch `destroyed` forever, so React StrictMode's
+  // dev double-mount (effect → cleanup/destroy → effect/connect) left the web
+  // client permanently unable to open a socket.
+  describe('destroy → connect revival (RN5)', () => {
+    beforeEach(() => {
+      FakeWebSocket.instances = []
+    })
+
+    it('constructs a NEW WebSocket when connect() follows destroy()', () => {
+      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      conn.connect()
+      expect(FakeWebSocket.instances).toHaveLength(1)
+
+      conn.destroy() // StrictMode cleanup
+      conn.connect() // StrictMode re-mount
+
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      conn.destroy()
+    })
+
+    it('detaches handlers from the discarded socket so its close cannot revive-race', () => {
+      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      conn.connect()
+      const first = FakeWebSocket.instances[0]
+      expect(first.onclose).toBeTypeOf('function')
+
+      conn.destroy()
+
+      expect(first.onopen).toBeNull()
+      expect(first.onmessage).toBeNull()
+      expect(first.onclose).toBeNull()
+      expect(first.onerror).toBeNull()
+    })
+
+    it('keeps auth failure from *scheduling* a reconnect, yet an explicit connect() revives', () => {
+      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+      expect(FakeWebSocket.instances).toHaveLength(1)
+
+      const internals = conn as unknown as Internals
+      internals.handleMessage({ type: 'auth-response', ok: false, error: 'bad token' })
+      expect(states.at(-1)).toBe('failed')
+      expect(internals.destroyed).toBe(true)
+
+      // A scheduled reconnect stays suppressed after an auth failure.
+      internals.scheduleReconnect()
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(internals.reconnectTimer).toBeUndefined()
+
+      // ...but a deliberate new connect() (fresh lifecycle) still works.
+      conn.connect()
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      conn.destroy()
     })
   })
 })

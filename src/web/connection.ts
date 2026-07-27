@@ -107,8 +107,22 @@ export class RemoteConnection {
     return this.mockupTokenValue
   }
 
-  /** Start the connection. */
+  /**
+   * Start (or restart) the connection.
+   *
+   * An explicit `connect()` is a fresh lifecycle, so it clears the `destroyed`
+   * flag that `destroy()` — or an auth failure — latched. Only *scheduled*
+   * reconnects stay suppressed by that flag: after an auth failure the backoff
+   * loop still stops, and only a deliberate new `connect()` revives us.
+   *
+   * Without this reset, React StrictMode's dev double-mount
+   * (effect → cleanup/`destroy()` → effect/`connect()`) left the web client
+   * permanently dead, because `createWebSocket()` early-returns when destroyed
+   * (RN5). Production (no double-mount) was unaffected.
+   */
   connect(): void {
+    this.destroyed = false
+    this.reconnectAttempt = 0
     this.setState('connecting')
     this.createWebSocket()
   }
@@ -137,8 +151,17 @@ export class RemoteConnection {
     this.destroyed = true
     this.clearTimers()
     if (this.ws) {
-      this.ws.close(1000, 'Client closing')
+      // Detach the handlers BEFORE closing. `close()` fires `onclose`
+      // asynchronously, so a discarded socket's close event could otherwise
+      // land after a later `connect()` revived us — clearing the *new*
+      // connection's timers and scheduling a spurious reconnect.
+      const ws = this.ws
+      ws.onopen = null
+      ws.onmessage = null
+      ws.onclose = null
+      ws.onerror = null
       this.ws = null
+      ws.close(1000, 'Client closing')
     }
     // Reject all pending invokes
     for (const [, pending] of this.pendingInvokes) {
