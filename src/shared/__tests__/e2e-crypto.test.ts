@@ -25,6 +25,33 @@ describe('E2ECrypto', () => {
       const crypto = new E2ECrypto()
       await expect(crypto.init('a'.repeat(66))).rejects.toThrow('E2E key must be 32 bytes')
     })
+
+    // hardening-5 — parseInt(..., 16) yields NaN for a non-hex pair, which
+    // Uint8Array coerces to 0. A malformed but correctly-sized "key" therefore
+    // passed the `raw.length !== 32` check and silently became an all-zero
+    // secret that both peers agreed on.
+    it.each([
+      ['a'.repeat(63) + 'g'],
+      ['g'.repeat(64)],
+      ['zz' + 'a'.repeat(62)],
+      ['a'.repeat(62) + '!!'],
+      ['a'.repeat(32) + '-'.repeat(32)]
+    ])('throws for a 64-char NON-hex key %#  (GUARD — fails pre-fix)', async (bad) => {
+      const crypto = new E2ECrypto()
+      await expect(crypto.init(bad)).rejects.toThrow(/Invalid hex string/)
+      expect(crypto.isReady).toBe(false)
+    })
+
+    it('throws for an odd-length hex key instead of a RangeError', async () => {
+      const crypto = new E2ECrypto()
+      await expect(crypto.init('a'.repeat(65))).rejects.toThrow(/Invalid hex string/)
+    })
+
+    it('accepts mixed-case valid hex', async () => {
+      const crypto = new E2ECrypto()
+      await crypto.init('AbCdEf01'.repeat(8))
+      expect(crypto.isReady).toBe(true)
+    })
   })
 
   describe('encrypt/decrypt roundtrip', () => {

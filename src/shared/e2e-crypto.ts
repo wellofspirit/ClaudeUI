@@ -151,7 +151,16 @@ function getRandomValues(length: number): Uint8Array {
   return buf
 }
 
+/**
+ * Strict hex decode. `parseInt(..., 16)` returns NaN for a non-hex pair, which
+ * Uint8Array coerces to 0 — so a malformed 64-char "key" silently became an
+ * all-zero secret that both ends would happily agree on (opus5 hardening-5).
+ * Reject anything that is not an even-length run of hex digits instead.
+ */
 function hexToBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+    throw new Error('Invalid hex string (expected an even-length run of hex digits)')
+  }
   const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
