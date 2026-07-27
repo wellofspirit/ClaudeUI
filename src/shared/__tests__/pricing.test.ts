@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { equivalentCostUsd, registerSupplementalPricing } from '../pricing'
+import { equivalentCostUsd, registerSupplementalPricing, ANTHROPIC_MODEL_PRICING } from '../pricing'
 import type { TokenCostInput, PricingEntry } from '../pricing'
 
 // ---------------------------------------------------------------------------
@@ -416,5 +416,57 @@ describe('equivalentCostUsd — vendor-agnostic fallback for unrecognized vendor
       cacheReadTokens: 0
     })
     expect(cost).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ANTHROPIC_MODEL_PRICING — the vendor-less view consumed by block-usage.ts
+// (BD-h: block-usage used to carry a byte-identical duplicate of this table).
+// ---------------------------------------------------------------------------
+
+describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
+  it('preserves declared order — first substring match wins', () => {
+    const order = ANTHROPIC_MODEL_PRICING.map((e) => e.match)
+    expect(order).toEqual([
+      'fable',
+      'mythos',
+      'opus-4-5',
+      'opus-4-6',
+      'opus-4-7',
+      'opus-4-8',
+      'opus-4',
+      'opus',
+      'sonnet',
+      'haiku-4',
+      'haiku-3',
+      'haiku'
+    ])
+    // The ordering constraint that actually matters: the cheap 4.5+ entries must
+    // precede the catch-all 'opus-4' (4.0/4.1 pricing) and 'opus'.
+    expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))
+    expect(order.indexOf('opus-4')).toBeLessThan(order.indexOf('opus'))
+    expect(order.indexOf('haiku-4')).toBeLessThan(order.indexOf('haiku'))
+  })
+
+  it('carries the pricing numbers block-usage bills on, without a vendorId field', () => {
+    const fable = ANTHROPIC_MODEL_PRICING[0]
+    expect(fable.match).toBe('fable')
+    expect(fable.pricing).toEqual({
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    })
+    // Entries are {match, pricing} only — block-usage's lookup has no vendor axis.
+    for (const entry of ANTHROPIC_MODEL_PRICING) {
+      expect(Object.keys(entry).sort()).toEqual(['match', 'pricing'])
+    }
+  })
+
+  it('agrees with equivalentCostUsd for the same model (one table, not two)', () => {
+    const sonnet = ANTHROPIC_MODEL_PRICING.find((e) => e.match === 'sonnet')!
+    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({ outputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(sonnet.pricing.outputPerMTok)
   })
 })

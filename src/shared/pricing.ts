@@ -193,6 +193,18 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
   }
 ]
 
+/**
+ * The Anthropic entries as a vendor-less `{ match, pricing }` list, in declared
+ * order (first substring match wins — `opus-4-5` MUST precede `opus-4`).
+ *
+ * Single source of truth for main/services/block-usage.ts, whose model→price
+ * lookup is Anthropic-only (it reads ~/.claude JSONL transcripts) and used to
+ * carry a byte-identical copy of this table. Derived once at module load — the
+ * lookup runs per JSONL entry, so it must not allocate per call.
+ */
+export const ANTHROPIC_MODEL_PRICING: ReadonlyArray<{ match: string; pricing: ModelPricing }> =
+  ANTHROPIC_PRICING.map(({ match, pricing }) => ({ match, pricing }))
+
 // ---------------------------------------------------------------------------
 // OpenAI pricing (best-effort, flagship models)
 // Cache fields use 0.5× input for cache read; OpenAI does not have a separate

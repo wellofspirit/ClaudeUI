@@ -2,6 +2,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
+import { ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../../shared/pricing'
 
 // We test the pure functions exported or accessible from block-usage.ts.
 // Since many are module-private, we extract the logic into testable units
@@ -12,136 +13,10 @@ import { describe, it, expect } from 'vitest'
 // Replicated helpers (these are module-private in block-usage.ts)
 // ---------------------------------------------------------------------------
 
-interface ModelPricing {
-  inputPerMTok: number
-  outputPerMTok: number
-  cacheWritePerMTok: number // 5-minute TTL rate (1.25× input)
-  cacheWrite1hPerMTok: number // 1-hour TTL rate (2× input)
-  cacheReadPerMTok: number
-}
-
-const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
-  {
-    match: 'fable',
-    pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 50,
-      cacheWritePerMTok: 12.5,
-      cacheWrite1hPerMTok: 20,
-      cacheReadPerMTok: 1
-    }
-  },
-  {
-    match: 'mythos',
-    pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 50,
-      cacheWritePerMTok: 12.5,
-      cacheWrite1hPerMTok: 20,
-      cacheReadPerMTok: 1
-    }
-  },
-  {
-    match: 'opus-4-5',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-6',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-7',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-8',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4',
-    pricing: {
-      inputPerMTok: 15,
-      outputPerMTok: 75,
-      cacheWritePerMTok: 18.75,
-      cacheWrite1hPerMTok: 30,
-      cacheReadPerMTok: 1.5
-    }
-  },
-  {
-    match: 'opus',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'sonnet',
-    pricing: {
-      inputPerMTok: 3,
-      outputPerMTok: 15,
-      cacheWritePerMTok: 3.75,
-      cacheWrite1hPerMTok: 6,
-      cacheReadPerMTok: 0.3
-    }
-  },
-  {
-    match: 'haiku-4',
-    pricing: {
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cacheWritePerMTok: 1.25,
-      cacheWrite1hPerMTok: 2,
-      cacheReadPerMTok: 0.1
-    }
-  },
-  {
-    match: 'haiku-3',
-    pricing: {
-      inputPerMTok: 0.8,
-      outputPerMTok: 4,
-      cacheWritePerMTok: 1,
-      cacheWrite1hPerMTok: 1.6,
-      cacheReadPerMTok: 0.08
-    }
-  },
-  {
-    match: 'haiku',
-    pricing: {
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cacheWritePerMTok: 1.25,
-      cacheWrite1hPerMTok: 2,
-      cacheReadPerMTok: 0.1
-    }
-  }
-]
+// MODEL_PRICING / ModelPricing are no longer replicated here: block-usage.ts
+// derives its table from the shared pricing module, so the tests below exercise
+// the REAL table (a drift in shared/pricing.ts now fails these assertions).
+const MODEL_PRICING = ANTHROPIC_MODEL_PRICING
 
 const DEFAULT_PRICING: ModelPricing = {
   inputPerMTok: 3,

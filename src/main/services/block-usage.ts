@@ -46,7 +46,7 @@ import {
   type DailyUsageRow
 } from './db'
 import { v4 as uuid } from 'uuid'
-import { equivalentCostUsd } from '../../shared/pricing'
+import { equivalentCostUsd, ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { BaseSession } from '../providers/BaseSession'
 
 // ---------------------------------------------------------------------------
@@ -77,146 +77,10 @@ interface ApiWindow {
 // https://platform.claude.com/docs/en/about-claude/pricing
 // ---------------------------------------------------------------------------
 
-interface ModelPricing {
-  inputPerMTok: number
-  outputPerMTok: number
-  /** 5-minute TTL cache write rate (1.25× input) */
-  cacheWritePerMTok: number
-  /** 1-hour TTL cache write rate (2× input) */
-  cacheWrite1hPerMTok: number
-  cacheReadPerMTok: number
-}
-
-const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
-  // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50)
-  {
-    match: 'fable',
-    pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 50,
-      cacheWritePerMTok: 12.5,
-      cacheWrite1hPerMTok: 20,
-      cacheReadPerMTok: 1
-    }
-  },
-  {
-    match: 'mythos',
-    pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 50,
-      cacheWritePerMTok: 12.5,
-      cacheWrite1hPerMTok: 20,
-      cacheReadPerMTok: 1
-    }
-  },
-  // Opus 4.5+ (cheaper — match these first before the older opus-4 variants)
-  {
-    match: 'opus-4-5',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-6',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-7',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-8',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  // Opus 4.0 / 4.1 (older, more expensive)
-  {
-    match: 'opus-4',
-    pricing: {
-      inputPerMTok: 15,
-      outputPerMTok: 75,
-      cacheWritePerMTok: 18.75,
-      cacheWrite1hPerMTok: 30,
-      cacheReadPerMTok: 1.5
-    }
-  },
-  // Opus fallback (assume newer pricing)
-  {
-    match: 'opus',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  // Sonnet (all versions: 3.7, 4, 4.5, 4.6)
-  {
-    match: 'sonnet',
-    pricing: {
-      inputPerMTok: 3,
-      outputPerMTok: 15,
-      cacheWritePerMTok: 3.75,
-      cacheWrite1hPerMTok: 6,
-      cacheReadPerMTok: 0.3
-    }
-  },
-  // Haiku 4.5
-  {
-    match: 'haiku-4',
-    pricing: {
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cacheWritePerMTok: 1.25,
-      cacheWrite1hPerMTok: 2,
-      cacheReadPerMTok: 0.1
-    }
-  },
-  // Haiku 3.5
-  {
-    match: 'haiku-3',
-    pricing: {
-      inputPerMTok: 0.8,
-      outputPerMTok: 4,
-      cacheWritePerMTok: 1,
-      cacheWrite1hPerMTok: 1.6,
-      cacheReadPerMTok: 0.08
-    }
-  },
-  // Haiku (fallback)
-  {
-    match: 'haiku',
-    pricing: {
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cacheWritePerMTok: 1.25,
-      cacheWrite1hPerMTok: 2,
-      cacheReadPerMTok: 0.1
-    }
-  }
-]
+// block-usage's pricing table is the Anthropic slice of the shared table
+// (src/shared/pricing.ts) — same entries, same order, same numbers. It used to
+// be a byte-identical duplicate; it is now derived so the two can't drift.
+const MODEL_PRICING = ANTHROPIC_MODEL_PRICING
 
 // Default pricing (sonnet-tier) for unknown models
 const DEFAULT_PRICING: ModelPricing = {
