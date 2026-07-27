@@ -1530,6 +1530,10 @@ export class OpencodeSession extends BaseSession {
       this.recordedUsageMessageIds.add(messageId)
 
       const tokens = acc.tokens
+      // Reasoning tokens are billed as OUTPUT tokens by every provider opencode
+      // meters this way (acc.cost already includes them) — fold them into the
+      // output figure so the row's token counts and equiv cost don't undercount.
+      const outputTokens = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
 
       if (!acc.isChild) {
         // Slice B — per-model cost breakdown: attribute this message's final
@@ -1555,7 +1559,7 @@ export class OpencodeSession extends BaseSession {
           modelId: parsed.modelID,
           tokens: {
             input: tokens?.input ?? 0,
-            output: tokens?.output ?? 0,
+            output: outputTokens,
             cacheWrite: tokens?.cache?.write ?? 0,
             cacheWrite1h: 0, // opencode does not distinguish 1h cache writes
             cacheRead: tokens?.cache?.read ?? 0
@@ -1581,7 +1585,7 @@ export class OpencodeSession extends BaseSession {
           modelId: acc.model.modelID,
           tokens: {
             input: tokens?.input ?? 0,
-            output: tokens?.output ?? 0,
+            output: outputTokens,
             cacheWrite: tokens?.cache?.write ?? 0,
             cacheWrite1h: 0,
             cacheRead: tokens?.cache?.read ?? 0
@@ -1611,7 +1615,9 @@ export class OpencodeSession extends BaseSession {
       const t = acc.tokens
       if (!t) continue
       input += t.input ?? 0
-      output += t.output ?? 0
+      // Reasoning tokens are billed as output — fold them in, matching the
+      // recordTurnUsage accounting (BD-j) so the status line agrees with usage.
+      output += (t.output ?? 0) + (t.reasoning ?? 0)
       cacheWrite += t.cache?.write ?? 0
       cacheRead += t.cache?.read ?? 0
     }

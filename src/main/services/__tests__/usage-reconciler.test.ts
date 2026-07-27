@@ -279,6 +279,35 @@ describe('reconcileOpencode', () => {
     expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted-sessions')
   })
 
+  it('BD-j: folds tokens.reasoning into outputTokens (reasoning is billed as output)', async () => {
+    mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
+    mockRelease.mockReturnValue(undefined)
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_reason' }])
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg_oc_reasoning',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+          cost: 0.02,
+          tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } },
+          time: { created: 4242 }
+        }
+      }
+    ])
+
+    await usageReconciler.reconcileOpencode()
+
+    const row = getUsageEventByMessageId('msg_oc_reasoning')
+    expect(row).toBeDefined()
+    expect(row!.inputTokens).toBe(100)
+    // 50 output + 25 reasoning — reasoning rides inside outputTokens (schema unchanged)
+    expect(row!.outputTokens).toBe(75)
+    // equiv billed on 75 output, not 50: gpt-4o $2.5 in / $10 out per MTok
+    expect(row!.equivCostUsd!).toBeCloseTo((100 / 1e6) * 2.5 + (75 / 1e6) * 10)
+  })
+
   it('M-DB1: enumerates sessions across multiple cwds and imports each (via global DB, not GET /session)', async () => {
     mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
     // Two sessions from DIFFERENT project cwds — exactly what GET /session (which

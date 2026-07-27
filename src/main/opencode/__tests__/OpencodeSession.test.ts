@@ -872,17 +872,18 @@ describe('OpencodeSession — usage_event recording', () => {
     expect(row.engineId).toBe('opencode')
     expect(row.vendorId).toBe('openai')
     expect(row.modelId).toBe('gpt-4o')
-    // FINAL snapshot — output 90, NOT 20+90=110
+    // FINAL snapshot — output 90+12, NOT (20+5)+(90+12)=127
     expect(row.inputTokens).toBe(100)
-    expect(row.outputTokens).toBe(90)
+    // BD-j: reasoning IS folded into output (providers bill it as output tokens,
+    // and info.cost already includes it) — 90 output + 12 reasoning.
+    expect(row.outputTokens).toBe(102)
     expect(row.cacheWriteTokens).toBe(4)
     expect(row.cacheReadTokens).toBe(10)
-    // reasoning is NOT folded into input/output
     // engine cost is the per-message cumulative cost snapshot
     expect(row.engineCostUsd).toBeCloseTo(0.002)
     // equiv cost via pricing table: gpt-4o input $2.5/MTok, output $10/MTok, cacheRead $1.25/MTok
     const expectedEquiv =
-      (100 / 1_000_000) * 2.5 + (90 / 1_000_000) * 10 + (4 / 1_000_000) * 2.5 + (10 / 1_000_000) * 1.25
+      (100 / 1_000_000) * 2.5 + (102 / 1_000_000) * 10 + (4 / 1_000_000) * 2.5 + (10 / 1_000_000) * 1.25
     expect(row.equivCostUsd!).toBeCloseTo(expectedEquiv)
     expect(row.source).toBe('live')
     session.dispose()
@@ -2805,6 +2806,75 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
 
     // Child without model → NOT recorded (no row at all)
     expect(getUsageEventByMessageId('msg_child_no_model')).toBeUndefined()
+
+    session.dispose()
+  })
+
+  it('BD-j: folds tokens.reasoning into outputTokens for parent AND child rows', async () => {
+    // opencode reports reasoning tokens separately, but every provider it meters
+    // this way bills them as OUTPUT tokens (info.cost already includes them).
+    // Both recordUsageEvent call sites in recordTurnUsage must fold them in.
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_rz', messageID: 'msg_par_rz',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e2', type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: 'msg_par_reasoning', role: 'assistant', cost: 0.01,
+                    tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } } }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e3', type: 'message.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            info: {
+              id: 'msg_child_reasoning',
+              role: 'assistant',
+              providerID: 'anthropic',
+              modelID: 'claude-sonnet-4-6',
+              cost: 0.007,
+              tokens: { input: 200, output: 100, reasoning: 40, cache: { read: 0, write: 0 } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e4', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_rz', messageID: 'msg_child_reasoning', type: 'text', text: 'done' }
+          }
+        } as OpencodeEvent,
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+
+    await vi.waitFor(() => expect(getUsageEventByMessageId('msg_par_reasoning')).toBeDefined())
+
+    const parentRow = getUsageEventByMessageId('msg_par_reasoning')!
+    expect(parentRow.inputTokens).toBe(100)
+    expect(parentRow.outputTokens).toBe(75) // 50 output + 25 reasoning
+
+    const childRow = getUsageEventByMessageId('msg_child_reasoning')!
+    expect(childRow).toBeDefined()
+    expect(childRow.inputTokens).toBe(200)
+    expect(childRow.outputTokens).toBe(140) // 100 output + 40 reasoning
 
     session.dispose()
   })

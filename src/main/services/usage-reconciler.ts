@@ -205,7 +205,10 @@ class UsageReconciler {
       | { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }
       | undefined
     const input = tokens?.input ?? 0
-    const output = tokens?.output ?? 0
+    // Reasoning tokens are billed as OUTPUT tokens by every provider opencode
+    // meters this way (info.cost already includes them) — fold them into the
+    // output figure so our token counts and equiv cost don't undercount.
+    const output = (tokens?.output ?? 0) + (tokens?.reasoning ?? 0)
     const cacheWrite = tokens?.cache?.write ?? 0
     const cacheRead = tokens?.cache?.read ?? 0
     const engineCost = typeof info.cost === 'number' ? info.cost : null
