@@ -26,6 +26,19 @@ const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
  */
 export const WORKTREE_ENTER_TOOL_NAMES = new Set(['EnterWorktree'])
 
+/**
+ * Display name for an entered worktree: the path's last segment, falling back
+ * to the branch with its `worktree-` prefix stripped.
+ *
+ * Splits on BOTH separators — a Windows worktree path (`D:\wt\feature-x`) has
+ * no `/`, so a `/`-only split yielded the ENTIRE path as the display name
+ * (RN11). Exported so the hook's behavior is tested directly rather than via a
+ * copy of this expression in the test harness.
+ */
+export function deriveWorktreeName(wtPath: string, wtBranch: string): string {
+  return wtPath.split(/[\\/]/).pop() || wtBranch.replace(/^worktree-/, '')
+}
+
 /** Rebuild todos from all messages when a task-related tool call is detected */
 function rebuildTodos(routingId: string): void {
   const { sessions, setTodos } = useSessionStore.getState()
@@ -301,7 +314,7 @@ export function useClaudeEvents(): void {
                   const wtPath = pathMatch.trim()
                   const wtBranch = branchMatch.trim()
                   // Derive name from path (last segment) or branch (strip worktree- prefix)
-                  const wtName = wtPath.split('/').pop() || wtBranch.replace(/^worktree-/, '')
+                  const wtName = deriveWorktreeName(wtPath, wtBranch)
                   store.setWorktreeInfo(routingId, {
                     worktreePath: wtPath,
                     worktreeBranch: wtBranch,

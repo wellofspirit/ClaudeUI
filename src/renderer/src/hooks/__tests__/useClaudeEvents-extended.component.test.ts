@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../stores/session-store'
-import { WORKTREE_ENTER_TOOL_NAMES } from '../useClaudeEvents'
+import { WORKTREE_ENTER_TOOL_NAMES, deriveWorktreeName } from '../useClaudeEvents'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -274,7 +274,9 @@ function wireEventHandlers(): void {
             if (pathMatch && branchMatch) {
               const wtPath = pathMatch.trim()
               const wtBranch = branchMatch.trim()
-              const wtName = wtPath.split('/').pop() || wtBranch.replace(/^worktree-/, '')
+              // Use the REAL helper (not a copy) so this harness can't drift
+              // away from the hook's actual name derivation.
+              const wtName = deriveWorktreeName(wtPath, wtBranch)
               s.setWorktreeInfo(routingId, {
                 worktreePath: wtPath,
                 worktreeBranch: wtBranch,
@@ -1478,6 +1480,39 @@ describe('useClaudeEvents extended component tests', () => {
       expect(session.worktreeInfo).not.toBeNull()
       expect(session.worktreeInfo?.worktreePath).toBe('/project/worktrees/my-branch')
       expect(session.worktreeInfo?.worktreeBranch).toBe('my-branch')
+    })
+
+    // RN11 — a Windows worktree path has no '/', so the old `split('/')` put the
+    // ENTIRE path in the sidebar/header where the branch folder belongs.
+    it('derives the worktree display name from a Windows backslash path', () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, 'D:\\project\\app')
+
+      useSessionStore
+        .getState()
+        .addMessage(
+          routingId,
+          makeChatMessage({ content: [makeToolUseBlock('EnterWorktree', {}, 'wt-win-1')] })
+        )
+
+      bridge.webContents.send('session:tool-result', routingId, {
+        toolUseId: 'wt-win-1',
+        result: 'Created worktree at D:\\project\\worktrees\\my-branch on branch my-branch.',
+        isError: false
+      })
+
+      const wt = useSessionStore.getState().sessions[routingId].worktreeInfo
+      expect(wt?.worktreePath).toBe('D:\\project\\worktrees\\my-branch')
+      expect(wt?.worktreeName).toBe('my-branch')
+    })
+
+    it('deriveWorktreeName handles posix, windows, trailing separators, and the branch fallback', () => {
+      expect(deriveWorktreeName('/project/worktrees/feat', 'feat')).toBe('feat')
+      expect(deriveWorktreeName('D:\\project\\worktrees\\feat', 'feat')).toBe('feat')
+      expect(deriveWorktreeName('D:\\project/worktrees\\feat', 'feat')).toBe('feat')
+      // Trailing separator → empty last segment → branch fallback (prefix stripped)
+      expect(deriveWorktreeName('/project/worktrees/', 'worktree-feat')).toBe('feat')
+      expect(deriveWorktreeName('', 'worktree-feat')).toBe('feat')
     })
 
     it('does not set worktreeInfo when toolName does not match /worktree/i', () => {

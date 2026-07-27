@@ -54,7 +54,10 @@ const EXT_TO_LANG: Record<string, string> = {
 /** Resolve a file path to a Prism language identifier */
 export function getLang(filePath?: string): string {
   if (!filePath) return 'plaintext'
-  const name = filePath.split('/').pop()?.toLowerCase() || ''
+  // Split on BOTH separators: a Windows path (`D:\proj\Dockerfile`) has no `/`,
+  // so a `/`-only split kept the whole path as the "name" and the extensionless
+  // lookup below missed (RN11).
+  const name = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
   // Handle extensionless files like Dockerfile, Makefile
   if (EXT_TO_LANG[name]) return EXT_TO_LANG[name]
   const ext = name.split('.').pop() || ''
