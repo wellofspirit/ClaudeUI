@@ -225,6 +225,56 @@ describe('ClaudeSession — setModel reverts on control-request failure', () => 
   })
 })
 
+describe('ClaudeSession — hardening-6: spawn-only run() re-arms the idle timer', () => {
+  it('run(null) on a LIVE channel leaves the inactivity timer armed (GUARD — fails pre-fix)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { win } = makeWin()
+      const session = new ClaudeSession('routing-spawn-only', win, '/tmp/proj')
+
+      // Establish a live (non-ended) messageChannel; the run parks in for-await.
+      const p1 = session.run('first')
+      expect(mockQuery).toHaveBeenCalledTimes(1)
+
+      // Spawn-only run (voice server, etc.): run() clears the idle timer up
+      // front, then takes the live-channel early return with nothing to push.
+      // Pre-fix nothing re-armed the timer, so the cli.js child was never
+      // reaped: cancel() (→ disposeFor) never fired.
+      await session.run(null)
+      expect(mockQuery).toHaveBeenCalledTimes(1) // no new spawn
+
+      mockDisposeFor.mockClear()
+      vi.advanceTimersByTime(16 * 60 * 1000)
+      expect(mockDisposeFor).toHaveBeenCalledTimes(1)
+
+      void p1
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('run(prompt) on a live channel still defers re-arming to the turn result', async () => {
+    vi.useFakeTimers()
+    try {
+      const { win } = makeWin()
+      const session = new ClaudeSession('routing-live-push', win, '/tmp/proj')
+
+      const p1 = session.run('first')
+      await session.run('second') // pushed into the live channel — turn in flight
+      expect(mockQuery).toHaveBeenCalledTimes(1)
+
+      mockDisposeFor.mockClear()
+      vi.advanceTimersByTime(16 * 60 * 1000)
+      // An in-flight turn must NOT be idle-timed-out; `result` re-arms instead.
+      expect(mockDisposeFor).not.toHaveBeenCalled()
+
+      void p1
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('ClaudeSession — M-CL3: a DISPOSED (replaced) object cannot re-arm its idle timer', () => {
   it('disposed object: run() finally does not re-arm a timer that would disposeFor() the live routingId', async () => {
     vi.useFakeTimers()

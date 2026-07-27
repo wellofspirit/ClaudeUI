@@ -493,7 +493,15 @@ export class ClaudeSession extends BaseSession {
 
     if (this.messageChannel && !this.messageChannel.isEnded) {
       // Session already active — push message (or no-op for spawn-only)
-      if (sdkMessage) this.messageChannel.push(sdkMessage)
+      if (sdkMessage) {
+        this.messageChannel.push(sdkMessage)
+      } else {
+        // hardening-6: run() cleared the idle timer above. A pushed message
+        // starts a turn whose `result` re-arms it; a spawn-only run(null)
+        // (voice server, etc.) starts nothing, so without this the timer stays
+        // disarmed forever and the cli.js child is never reaped.
+        this.resetInactivityTimer()
+      }
       return
     }
 
