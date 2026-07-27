@@ -10,7 +10,7 @@ interface LogEntry {
 
 type LogViewerApi = {
   ready: () => void
-  onEntry: (cb: (entry: LogEntry) => void) => void
+  onEntryBatch: (cb: (entries: LogEntry[]) => void) => void
   onBatch: (cb: (entries: LogEntry[]) => void) => void
   getTheme: () => Promise<string | null>
   setTheme: (theme: string) => void
@@ -37,6 +37,20 @@ const LEVEL_LABELS: Record<string, string> = {
 }
 const THEMES = ['dark', 'light', 'monokai'] as const
 type Theme = (typeof THEMES)[number]
+
+/**
+ * Hard cap on retained log entries (RN9). 2× the main-side ring buffer of 5000,
+ * so a viewer opened at boot still holds everything the main process would
+ * replay, while a long-lived viewer can no longer grow its array (and the DOM
+ * built from it) without bound.
+ */
+export const MAX_LOG_ENTRIES = 10_000
+
+/** Append `batch` to `prev`, dropping the oldest entries beyond the cap. */
+export function capEntries(prev: LogEntry[], batch: LogEntry[]): LogEntry[] {
+  const next = prev.concat(batch)
+  return next.length > MAX_LOG_ENTRIES ? next.slice(next.length - MAX_LOG_ENTRIES) : next
+}
 
 function sourceClass(src: string): string {
   if (src === 'renderer' || src === 'renderer:error') return 'renderer'
@@ -174,10 +188,10 @@ export function LogViewer(): React.JSX.Element {
     })
 
     api.onBatch((batch) => {
-      setEntries((prev) => [...prev, ...batch])
+      setEntries((prev) => capEntries(prev, batch))
     })
-    api.onEntry((entry) => {
-      setEntries((prev) => [...prev, entry])
+    api.onEntryBatch((batch) => {
+      setEntries((prev) => capEntries(prev, batch))
     })
     api.ready()
   }, [])
