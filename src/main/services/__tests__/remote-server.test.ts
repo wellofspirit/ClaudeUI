@@ -36,6 +36,20 @@ vi.mock('electron', () => ({
   }
 }))
 
+// LOW-RW9 guard seam: wrap `crypto.timingSafeEqual` with a spy (real impl still
+// runs) so a test can prove the /mockup token compare goes through the
+// constant-time path instead of a raw `!==`.
+const { timingSafeEqualSpy } = vi.hoisted(() => ({ timingSafeEqualSpy: vi.fn() }))
+
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>()
+  const timingSafeEqual = (a: NodeJS.ArrayBufferView, b: NodeJS.ArrayBufferView): boolean => {
+    timingSafeEqualSpy(a, b)
+    return actual.timingSafeEqual(a, b)
+  }
+  return { ...actual, default: { ...actual, timingSafeEqual }, timingSafeEqual }
+})
+
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
 // uses two static methods (addExtraWindow/removeExtraWindow). Stub the module.
 vi.mock('../claude-session', () => ({
@@ -385,6 +399,45 @@ describe('RemoteServer — mockup HTTP route', () => {
       `http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`
     )
     expect(got.status).toBe(403)
+  })
+
+  // LOW-RW9 — the mockup token used to be compared with `!==`, which short-
+  // circuits on the first differing character and leaks a prefix oracle to a
+  // remote attacker who can time /mockup responses.
+  it('compares the mockup token in constant time (GUARD — fails pre-fix)', async () => {
+    await server.start(port, '127.0.0.1')
+    timingSafeEqualSpy.mockClear()
+    const got = await httpGet(
+      `http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`
+    )
+    expect(got.status).toBe(403)
+    // Pre-fix the raw `!==` never reached crypto.timingSafeEqual.
+    expect(timingSafeEqualSpy).toHaveBeenCalledTimes(1)
+    const [a, b] = timingSafeEqualSpy.mock.calls[0] as [Buffer, Buffer]
+    expect(a.length).toBe(32)
+    expect(b.length).toBe(32)
+  })
+
+  it('rejects a wrong token of a DIFFERENT length without throwing', async () => {
+    await server.start(port, '127.0.0.1')
+    timingSafeEqualSpy.mockClear()
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=abcd`)
+    expect(got.status).toBe(403)
+    // Length mismatch must short-circuit — timingSafeEqual throws on unequal
+    // lengths, so reaching it would 500 instead of 403.
+    expect(timingSafeEqualSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects every token when the server has no mockup token', async () => {
+    await server.start(port, '127.0.0.1')
+    // Uninitialized / stopped state: an empty server token must authenticate
+    // nothing — not even an empty client token (Buffer.from('', 'hex') pairs
+    // would otherwise compare equal).
+    ;(server as unknown as { mockupToken: string }).mockupToken = ''
+    expect((await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=`)).status).toBe(403)
+    expect(
+      (await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`)).status
+    ).toBe(403)
   })
 
   it('serves the mockup HTML with a valid mockup token (end-to-end)', async () => {

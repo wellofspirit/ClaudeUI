@@ -38,6 +38,27 @@ const FAILED_AUTH_WINDOW_MS = 60_000
  *  maxPayload is a pre-auth memory-amplification vector. */
 const WS_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 // 4 MiB
 
+/**
+ * Constant-time comparison for the server's hex tokens (WS token + mockup
+ * token). Both are `crypto.randomBytes(32).toString('hex')`, so they decode to
+ * a fixed 32-byte buffer; a length mismatch (or non-hex garbage, which decodes
+ * short) short-circuits before `timingSafeEqual`, which requires equal lengths.
+ *
+ * An empty/absent value on either side is always a mismatch — a stopped server
+ * (token '') must not authenticate a client that also sends ''.
+ */
+function safeTokenEqual(serverToken: string, clientToken: string | null | undefined): boolean {
+  if (!serverToken || !clientToken) return false
+  try {
+    const serverBuf = Buffer.from(serverToken, 'hex')
+    const clientBuf = Buffer.from(clientToken, 'hex')
+    if (serverBuf.length === 0 || serverBuf.length !== clientBuf.length) return false
+    return crypto.timingSafeEqual(serverBuf, clientBuf)
+  } catch {
+    return false
+  }
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
@@ -348,7 +369,9 @@ export class RemoteServer {
     req: http.IncomingMessage,
     res: http.ServerResponse
   ): Promise<void> {
-    if (!this.mockupToken || url.searchParams.get('token') !== this.mockupToken) {
+    // LOW-RW9: constant-time compare — `!==` on the raw string leaks a prefix
+    // oracle to a remote attacker who can time /mockup responses.
+    if (!safeTokenEqual(this.mockupToken, url.searchParams.get('token'))) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('Forbidden')
       return
@@ -688,14 +711,7 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   private verifyToken(clientToken: string): boolean {
-    try {
-      const serverBuf = Buffer.from(this.token, 'hex')
-      const clientBuf = Buffer.from(clientToken, 'hex')
-      if (serverBuf.length !== clientBuf.length) return false
-      return crypto.timingSafeEqual(serverBuf, clientBuf)
-    } catch {
-      return false
-    }
+    return safeTokenEqual(this.token, clientToken)
   }
 
   /**
