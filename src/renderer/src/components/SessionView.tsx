@@ -211,14 +211,9 @@ export function SessionView(): React.JSX.Element {
         // Engine capability gate: skip modes the engine can't offer (e.g. 'plan'
         // when !capabilities.plan). Claude has plan=true, so the full cycle stands.
         const canPlan = session?.status.capabilities.plan ?? true
-        // localAuto is not in the cycle — treat it as 'auto' for cycling purposes
-        const cycleMode =
-          permissionMode === 'localAuto'
-            ? 'auto'
-            : (permissionMode as (typeof PERMISSION_MODES)[number])
         const advance = (from: (typeof PERMISSION_MODES)[number]): (typeof PERMISSION_MODES)[number] =>
           PERMISSION_MODES[(PERMISSION_MODES.indexOf(from) + 1) % PERMISSION_MODES.length]
-        let next = advance(cycleMode)
+        let next = advance(permissionMode as (typeof PERMISSION_MODES)[number])
         // Plan mode is gated on the engine's plan capability — skip it if absent.
         if (next === 'plan' && !canPlan) {
           next = advance('plan')
@@ -227,7 +222,8 @@ export function SessionView(): React.JSX.Element {
         if (next === 'auto' && !session?.sdkActive) {
           next = advance('auto')
         }
-        // Don't optimistically update for 'auto' — main process may redirect to 'localAuto'
+        // Don't optimistically update for 'auto' — main process may reject it and
+        // broadcast a fallback to 'default' instead.
         if (next !== 'auto') setPermissionMode(next, activeSessionId)
         window.api.setPermissionMode(activeSessionId, next).catch(() => {
           // SDK rejected the mode change — revert to previous mode

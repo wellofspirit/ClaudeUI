@@ -20,8 +20,7 @@ const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
   plan: 'plan',
   default: 'ask',
   acceptEdits: 'autoEdit',
-  auto: 'full',
-  localAuto: 'full'
+  auto: 'full'
 }
 
 const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
@@ -62,10 +61,6 @@ describe('AutonomyMode ↔ PermissionMode mapping', () => {
 
   it('maps "auto" PermissionMode → full AutonomyMode', () => {
     expect(PERMISSION_TO_AUTONOMY['auto']).toBe('full')
-  })
-
-  it('maps "localAuto" PermissionMode → full AutonomyMode (treat as full)', () => {
-    expect(PERMISSION_TO_AUTONOMY['localAuto']).toBe('full')
   })
 
   it('round-trips: autonomy → permission → autonomy for all modes', () => {

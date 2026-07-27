@@ -9,6 +9,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 // method and init-message/status-message sync without pulling in Electron/SDK deps.
 // ---------------------------------------------------------------------------
 
+const AUTO_REJECTED_WARNING =
+  'Auto mode was rejected (disabled by your organization?) — falling back to manual approvals.'
+
 type SendFn = (channel: string, ...args: unknown[]) => void
 
 interface MockQuery {
@@ -32,19 +35,9 @@ class TestClaudeSession {
     this.sent.push({ channel, args })
   }
 
-  /** Mirrors claude-session.ts setPermissionMode — including localAuto handling */
+  /** Mirrors claude-session.ts setPermissionMode */
   async setPermissionMode(mode: string): Promise<void> {
     const previousMode = this.permissionMode
-
-    // localAuto is our own mode — SDK runs as acceptEdits underneath
-    if (mode === 'localAuto') {
-      this.permissionMode = mode
-      this.send('session:permission-mode', mode)
-      if (this.activeQuery) {
-        await this.activeQuery.setPermissionMode('acceptEdits')
-      }
-      return
-    }
 
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
@@ -53,10 +46,12 @@ class TestClaudeSession {
         await this.activeQuery.setPermissionMode(mode)
       } catch (err) {
         if (mode === 'auto') {
-          // SDK rejected auto mode — fall back to local auto
-          this.permissionMode = 'localAuto'
-          this.send('session:permission-mode', 'localAuto')
-          await this.activeQuery.setPermissionMode('acceptEdits')
+          // SDK rejected auto mode — org admin disabled it, or a model/feature
+          // gate failed. Fall back to manual approval and surface a notice.
+          this.permissionMode = 'default'
+          this.send('session:permission-mode', 'default')
+          this.send('session:warning', AUTO_REJECTED_WARNING)
+          await this.activeQuery.setPermissionMode('default')
           return
         }
         // Other mode changes that fail — revert to previous
@@ -67,21 +62,19 @@ class TestClaudeSession {
     }
   }
 
-  /** Simulates receiving a system.init message and syncing permissionMode.
-   *  Suppresses sync when in localAuto — SDK reports acceptEdits underneath. */
+  /** Simulates receiving a system.init message and syncing permissionMode. */
   handleInitMessage(msg: { permissionMode?: string }): void {
     const initMode = msg.permissionMode
-    if (initMode && initMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+    if (initMode && initMode !== this.permissionMode) {
       this.permissionMode = initMode
       this.send('session:permission-mode', initMode)
     }
   }
 
-  /** Simulates receiving a system.status message and syncing permissionMode.
-   *  Suppresses sync when in localAuto — SDK reports acceptEdits underneath. */
+  /** Simulates receiving a system.status message and syncing permissionMode. */
   handleStatusMessage(msg: { permissionMode?: string }): void {
     const newMode = msg.permissionMode
-    if (newMode && newMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+    if (newMode && newMode !== this.permissionMode) {
       this.permissionMode = newMode
       this.send('session:permission-mode', newMode)
     }
@@ -143,46 +136,28 @@ describe('ClaudeSession permission mode', () => {
     })
   })
 
-  describe('localAuto fallback', () => {
-    it('falls back to localAuto when SDK rejects auto', async () => {
+  describe('auto mode rejection fallback', () => {
+    it('falls back to default when SDK rejects auto, and warns', async () => {
       session.permissionMode = 'default'
       const setMode = vi
         .fn()
         .mockRejectedValueOnce(new Error('auto mode gate failed')) // rejects 'auto'
-        .mockResolvedValue(undefined) // accepts 'acceptEdits'
+        .mockResolvedValue(undefined) // accepts 'default'
       session.activeQuery = { setPermissionMode: setMode }
 
       // Should NOT throw — auto rejection is handled gracefully
       await session.setPermissionMode('auto')
 
-      expect(session.permissionMode).toBe('localAuto')
-      // Sent 'auto' optimistically, then 'localAuto' on fallback
+      expect(session.permissionMode).toBe('default')
+      // Sent 'auto' optimistically, then 'default' on fallback, plus a warning notice
       expect(session.sent).toEqual([
         { channel: 'session:permission-mode', args: ['auto'] },
-        { channel: 'session:permission-mode', args: ['localAuto'] }
+        { channel: 'session:permission-mode', args: ['default'] },
+        { channel: 'session:warning', args: [AUTO_REJECTED_WARNING] }
       ])
-      // SDK was called with 'auto' (rejected), then 'acceptEdits' (accepted)
+      // SDK was called with 'auto' (rejected), then 'default' (accepted)
       expect(setMode).toHaveBeenCalledWith('auto')
-      expect(setMode).toHaveBeenCalledWith('acceptEdits')
-    })
-
-    it('sets SDK to acceptEdits when directly entering localAuto', async () => {
-      const setMode = vi.fn().mockResolvedValue(undefined)
-      session.activeQuery = { setPermissionMode: setMode }
-
-      await session.setPermissionMode('localAuto')
-
-      expect(session.permissionMode).toBe('localAuto')
-      expect(setMode).toHaveBeenCalledWith('acceptEdits')
-      expect(setMode).not.toHaveBeenCalledWith('localAuto')
-      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['localAuto'] }])
-    })
-
-    it('handles localAuto without active query (pre-session)', async () => {
-      session.activeQuery = null
-      await session.setPermissionMode('localAuto')
-      expect(session.permissionMode).toBe('localAuto')
-      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['localAuto'] }])
+      expect(setMode).toHaveBeenCalledWith('default')
     })
 
     it('auto mode succeeds when SDK accepts it (paid Anthropic plans)', async () => {
@@ -191,10 +166,10 @@ describe('ClaudeSession permission mode', () => {
 
       await session.setPermissionMode('auto')
 
-      // SDK accepted — stays as 'auto', not 'localAuto'
+      // SDK accepted — stays as 'auto'
       expect(session.permissionMode).toBe('auto')
       expect(setMode).toHaveBeenCalledWith('auto')
-      expect(setMode).toHaveBeenCalledTimes(1) // no fallback to acceptEdits
+      expect(setMode).toHaveBeenCalledTimes(1) // no fallback to default
     })
   })
 
@@ -225,21 +200,6 @@ describe('ClaudeSession permission mode', () => {
       session.handleInitMessage({ permissionMode: 'acceptEdits' })
       expect(session.permissionMode).toBe('acceptEdits')
     })
-
-    it('suppresses init sync when in localAuto mode', () => {
-      session = new TestClaudeSession('localAuto')
-      // SDK reports 'acceptEdits' (the underlying mode) — should be ignored
-      session.handleInitMessage({ permissionMode: 'acceptEdits' })
-      expect(session.permissionMode).toBe('localAuto')
-      expect(session.sent).toEqual([])
-    })
-
-    it('suppresses init sync of default when in localAuto mode', () => {
-      session = new TestClaudeSession('localAuto')
-      session.handleInitMessage({ permissionMode: 'default' })
-      expect(session.permissionMode).toBe('localAuto')
-      expect(session.sent).toEqual([])
-    })
   })
 
   describe('status message sync', () => {
@@ -260,21 +220,6 @@ describe('ClaudeSession permission mode', () => {
       expect(session.permissionMode).toBe('default')
       expect(session.sent).toEqual([])
     })
-
-    it('suppresses status sync when in localAuto mode', () => {
-      session.permissionMode = 'localAuto'
-      // SDK reports 'acceptEdits' — should be ignored to preserve localAuto
-      session.handleStatusMessage({ permissionMode: 'acceptEdits' })
-      expect(session.permissionMode).toBe('localAuto')
-      expect(session.sent).toEqual([])
-    })
-
-    it('suppresses any status sync when in localAuto mode', () => {
-      session.permissionMode = 'localAuto'
-      session.handleStatusMessage({ permissionMode: 'default' })
-      expect(session.permissionMode).toBe('localAuto')
-      expect(session.sent).toEqual([])
-    })
   })
 
   describe('constructor', () => {
@@ -286,10 +231,6 @@ describe('ClaudeSession permission mode', () => {
       expect(new TestClaudeSession('auto').permissionMode).toBe('auto')
     })
 
-    it('accepts localAuto as initial mode', () => {
-      expect(new TestClaudeSession('localAuto').permissionMode).toBe('localAuto')
-    })
-
     it('accepts all valid modes', () => {
       for (const mode of [
         'default',
@@ -297,8 +238,7 @@ describe('ClaudeSession permission mode', () => {
         'bypassPermissions',
         'plan',
         'dontAsk',
-        'auto',
-        'localAuto'
+        'auto'
       ]) {
         expect(new TestClaudeSession(mode).permissionMode).toBe(mode)
       }

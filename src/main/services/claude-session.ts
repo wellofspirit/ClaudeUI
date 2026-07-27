@@ -38,13 +38,6 @@ import { accountManager } from './account-manager'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { resolveUsageProvider } from './usage-provider'
 import {
-  getClassifier,
-  stopClassifier,
-  isSafeTool,
-  buildTranscript,
-  type TranscriptMessage
-} from './auto-classifier'
-import {
   resolveThinkingMode,
   resolveClaudeCapabilities,
   type ThinkingMode
@@ -785,51 +778,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
               return { behavior: 'allow' as const, updatedInput: input }
             }
 
-            // --- Local auto mode: classify tool calls instead of prompting user ---
-            if (this.permissionMode === 'localAuto') {
-              // Fast path: safe tools are always allowed
-              if (isSafeTool(toolName)) {
-                logger.debug('AutoClassifier', `Fast-path allow: ${toolName}`)
-                return { behavior: 'allow' as const, updatedInput: input }
-              }
-
-              try {
-                const transcriptMsgs: TranscriptMessage[] = this.messageHistory.map((m) => ({
-                  role: m.role,
-                  content: m.content.map((b) => ({
-                    type: b.type,
-                    ...('text' in b ? { text: b.text } : {}),
-                    ...('toolName' in b ? { toolName: b.toolName, toolInput: b.toolInput } : {}),
-                    ...('toolResult' in b ? { toolResult: b.toolResult } : {})
-                  }))
-                }))
-                const transcript = buildTranscript(transcriptMsgs)
-
-                const classifier = getClassifier(this.routingId)
-                const result = await classifier.classify(toolName, input, transcript)
-
-                logger.debug(
-                  'AutoClassifier',
-                  `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`
-                )
-
-                if (!result.shouldBlock) {
-                  return { behavior: 'allow' as const, updatedInput: input }
-                }
-
-                // Blocked — notify UI and deny
-                return { behavior: 'deny' as const, message: `Auto mode blocked: ${result.reason}` }
-              } catch (err) {
-                // Classifier failed — fall through to manual approval
-                logger.warn(
-                  'AutoClassifier',
-                  `Classifier failed for ${toolName}, falling back to manual approval: ${err}`
-                )
-              }
-            }
-
-            // A cancel/interrupt during the await above (the localAuto
-            // classifier), or one racing this callback's entry, may have ALREADY
+            // A cancel/interrupt racing this callback's entry may have ALREADY
             // fired opts.signal's 'abort'. The listener added below only fires on
             // a FUTURE abort, so without this pre-check the approval promise would
             // hang forever and its card would linger in the UI. Bail before we
@@ -1156,10 +1105,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
         // Sync permission mode from init — the CLI may have rejected the
         // requested mode (e.g. auto-mode gate/model check failed) and fallen
-        // back to default. Don't overwrite localAuto — SDK runs as acceptEdits
-        // underneath.
+        // back to default.
         const initMode = sys.permissionMode
-        if (initMode && initMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+        if (initMode && initMode !== this.permissionMode) {
           this.permissionMode = initMode
           this.send('session:permission-mode', initMode)
         }
@@ -1260,9 +1208,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   private handleSystemMessage(msg: SystemMessage): void {
     if (msg.subtype === 'status') {
-      // Don't overwrite localAuto — SDK runs as acceptEdits underneath.
       const newMode = msg.permissionMode
-      if (newMode && newMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+      if (newMode && newMode !== this.permissionMode) {
         this.permissionMode = newMode
         this.send('session:permission-mode', newMode)
       }
@@ -1605,16 +1552,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   async setPermissionMode(mode: string): Promise<void> {
     const previousMode = this.permissionMode
 
-    // localAuto is our own mode — SDK runs as acceptEdits underneath
-    if (mode === 'localAuto') {
-      this.permissionMode = mode
-      this.send('session:permission-mode', mode)
-      if (this.activeQuery) {
-        await this.activeQuery.setPermissionMode('acceptEdits')
-      }
-      return
-    }
-
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
@@ -1624,11 +1561,18 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         await this.activeQuery.setPermissionMode(mode as import('../sdk').PermissionMode)
       } catch (err) {
         if (mode === 'auto') {
-          // SDK rejected auto mode (feature gate / model check) — fall back to local auto
-          logger.debug('ClaudeSession', 'SDK rejected auto mode, falling back to localAuto')
-          this.permissionMode = 'localAuto'
-          this.send('session:permission-mode', 'localAuto')
-          await this.activeQuery.setPermissionMode('acceptEdits')
+          // SDK rejected auto mode — org admin disabled it, or a model/feature
+          // gate failed. Fall back to manual approval rather than silently
+          // substituting our own classifier (that would bypass the org's
+          // policy). Surface a visible notice so the user knows why.
+          logger.debug('ClaudeSession', 'SDK rejected auto mode, falling back to default')
+          this.permissionMode = 'default'
+          this.send('session:permission-mode', 'default')
+          this.send(
+            'session:warning',
+            'Auto mode was rejected (disabled by your organization?) — falling back to manual approvals.'
+          )
+          await this.activeQuery.setPermissionMode('default')
           return
         }
         // Other mode changes that fail — revert to previous
@@ -2230,9 +2174,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.voiceClient = null
     }
     this.voiceServerPort = null
-
-    // Stop the auto-mode classifier session (if any)
-    stopClassifier(this.routingId)
 
     // End the message channel before aborting so the SDK's streamInput
     // loop can unblock and the CLI subprocess exits cleanly

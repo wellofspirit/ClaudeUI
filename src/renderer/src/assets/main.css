@@ -55,8 +55,6 @@ pre .token.table {
   --color-mode-plan-dim: #1a5c52;
   --color-mode-auto: #d97706;
   --color-mode-auto-dim: #92400e;
-  --color-mode-local-auto: #c2710a;
-  --color-mode-local-auto-dim: #8a4f08;
 
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
@@ -84,8 +82,6 @@ pre .token.table {
   --color-mode-plan-dim: #4bbcac;
   --color-mode-auto: #b45309;
   --color-mode-auto-dim: #d97706;
-  --color-mode-local-auto: #a85e0a;
-  --color-mode-local-auto-dim: #c2810e;
 }
 
 /* ── Monokai theme ── */
@@ -111,8 +107,6 @@ pre .token.table {
   --color-mode-plan-dim: #7aa31e;
   --color-mode-auto: #e6db74;
   --color-mode-auto-dim: #b8ad50;
-  --color-mode-local-auto: #cc8a2e;
-  --color-mode-local-auto-dim: #9a6820;
 }
 
 body {

@@ -374,8 +374,7 @@ const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
   plan: 'plan',
   default: 'ask',
   acceptEdits: 'autoEdit',
-  auto: 'full',
-  localAuto: 'full'
+  auto: 'full'
 }
 
 const AUTONOMY_LABELS: Record<AutonomyMode, string> = {

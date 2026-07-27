@@ -2443,7 +2443,11 @@ export const useSessionStore = create<SessionState>((set) => ({
           subagentMessages: snap.subagentMessages,
           subagentStreamingText: snap.subagentStreamingText,
           subagentStreamingThinking: snap.subagentStreamingThinking,
-          permissionMode: snap.permissionMode as PermissionMode,
+          // Coerce a stale 'localAuto' from an older (pre-removal) remote server —
+          // that mode no longer exists on this client's PermissionMode union.
+          permissionMode: (snap.permissionMode === 'localAuto'
+            ? 'auto'
+            : snap.permissionMode) as PermissionMode,
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
           reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
