@@ -58,6 +58,11 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
       store().addPendingApproval(routingId, approval)
     }
   )
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
+    }
+  )
   onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
     (routingId, status) => {
       let effective = routingId
@@ -75,7 +80,8 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
         return
       }
       store().setStatus(effective, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effective)
+      // Do NOT clear pending approvals on idle — background subagents outlive
+      // the parent turn's result. See useClaudeEvents.ts's onStatus.
     }
   )
   onEvent<(routingId: string, mode: PermissionMode) => void>('session:permission-mode')(
@@ -87,6 +93,7 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
   >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
     store().appendToolResult(routingId, toolUseId, result, isError)
+    if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
   })
 
   return cleanups

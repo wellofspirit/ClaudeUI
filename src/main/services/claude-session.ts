@@ -863,6 +863,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
                   () => {
                     this.pendingApprovals.delete(requestId)
                     resolve({ decision: 'deny' })
+                    this.send('session:approval-dismiss', { requestId })
                   },
                   { once: true }
                 )
@@ -870,6 +871,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
             )
 
             this.pendingApprovals.delete(requestId)
+            // Mirror OpencodeSession's approval-resolved emit (M-OC2): tells
+            // remote/multi-window views to drop the card even though they
+            // never saw the local click. The renderer's removal is
+            // idempotent by requestId, so this echo is harmless locally.
+            this.send('session:approval-dismiss', { requestId })
 
             if (decision === 'allow') {
               const updatedInput = answers ? { ...input, answers } : input
@@ -2204,8 +2210,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.cancelled = true
 
     // Deny all pending approvals
-    for (const [, entry] of this.pendingApprovals) {
+    for (const [requestId, entry] of this.pendingApprovals) {
       entry.resolve({ decision: 'deny' })
+      this.send('session:approval-dismiss', { requestId })
     }
     this.pendingApprovals.clear()
 
@@ -2252,8 +2259,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.wasInterrupted = true
 
       // Deny pending approvals so the SDK's canUseTool callbacks unblock
-      for (const [, entry] of this.pendingApprovals) {
+      for (const [requestId, entry] of this.pendingApprovals) {
         entry.resolve({ decision: 'deny' })
+        this.send('session:approval-dismiss', { requestId })
       }
       this.pendingApprovals.clear()
 

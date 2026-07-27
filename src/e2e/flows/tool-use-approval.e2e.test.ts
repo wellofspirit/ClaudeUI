@@ -55,6 +55,13 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
       store().addPendingApproval(routingId, approval)
     }
   )
+  // Externally-resolved approval (main resolved it without a local click, or a
+  // dispatch-cascade deny) — remove the stale card. Mirrors useClaudeEvents.ts.
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
+    }
+  )
   onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
     (routingId, status) => {
       let effective = routingId
@@ -72,7 +79,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
         return
       }
       store().setStatus(effective, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effective)
+      // Do NOT clear pending approvals on idle — background subagents outlive
+      // the parent turn's result. Card removal is driven by explicit events
+      // (approval-dismiss, tool_result matching, user resolution) only.
     }
   )
   onEvent<(routingId: string) => void>('session:result')((routingId) => {
@@ -87,6 +96,10 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
   >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
     store().appendToolResult(routingId, toolUseId, result, isError)
+    // Belt-and-suspenders (mirrors useClaudeEvents.ts): a tool_result for this
+    // toolUseId means its resolver already ran, so any approval still sitting
+    // in the store for it is stale.
+    if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
   })
 
   return cleanups
@@ -95,6 +108,19 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
 beforeEach(async () => {
   resetFactoryCounter()
   app = await bootTestApp()
+
+  // Simulate main's normal-resolution path: resolveApproval() resolves the
+  // promise AND emits session:approval-dismiss (see claude-session.ts's
+  // canUseTool, updated so remote/multi-window views drop the card too).
+  app.bridge.ipcMain.removeHandler?.('session:approval-response')
+  app.bridge.ipcMain.handle(
+    'session:approval-response',
+    async (_: unknown, routingId: string, requestId: string) => {
+      app.emit('session:approval-dismiss', routingId, { requestId })
+      return { ok: true, data: null }
+    }
+  )
+
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},
@@ -112,7 +138,7 @@ afterEach(() => {
 })
 
 describe('E2E: tool use approval flow', () => {
-  it('full tool approval → result → continuation → idle clears pendingApprovals', () => {
+  it('full tool approval → result → continuation → idle (approval already cleared by tool_result, not by idle)', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
     app.emit(
@@ -134,7 +160,8 @@ describe('E2E: tool use approval flow', () => {
       makePendingApproval({
         requestId: 'req-1',
         toolName: 'Bash',
-        input: { command: 'ls' }
+        input: { command: 'ls' },
+        toolUseId: 'tool-1'
       })
     )
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
@@ -146,11 +173,14 @@ describe('E2E: tool use approval flow', () => {
       isError: false
     })
 
+    // The tool_result above already resolved the approval (removePendingApprovalByToolUse) —
+    // idle below is a no-op for pendingApprovals, not the thing that clears them.
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
+
     // Continuation text
     app.emit('session:stream', routingId, { type: 'text', text: 'Found two files.' })
     app.emit('session:message', routingId, makeAssistantMessage('Found two files.'))
 
-    // Status idle clears approvals
     app.emit('session:result', routingId)
     app.emit(
       'session:status',
@@ -236,5 +266,82 @@ describe('E2E: tool use approval flow', () => {
     const bResult = byId.get('tool-B')
     if (aResult && aResult.type === 'tool_result') expect(aResult.toolResult).toBe('content of A')
     if (bResult && bResult.type === 'tool_result') expect(bResult.toolResult).toBe('content of B')
+  })
+
+  it('a subagent approval (toolUseId with no matching main-transcript tool_use) survives idle; explicit resolution still clears it', async () => {
+    const routingId = 'r1'
+    useSessionStore.getState().createNewSession(routingId, '/test')
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'running', sessionId: routingId })
+    )
+
+    // The main transcript only knows about the Task tool_use that spawned the
+    // subagent — 'tool-subagent-1' below never appears as a tool_use block in
+    // it. That's exactly what a background subagent's OWN can_use_tool
+    // request looks like from the renderer's perspective: cli.js's parent
+    // turn can end (result → status idle) while the subagent — and its
+    // approval — is still running.
+    const toolUseMsg = makeChatMessage({
+      content: [makeToolUseBlock('Task', { description: 'audit the repo' }, 'tool-parent')]
+    })
+    app.emit('session:message', routingId, toolUseMsg)
+
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({
+        requestId: 'req-subagent',
+        toolName: 'Bash',
+        toolUseId: 'tool-subagent-1'
+      })
+    )
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
+
+    // Parent turn ends — cli.js emits `result` then status idle — before the
+    // subagent's approval has been answered.
+    app.emit('session:result', routingId)
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId })
+    )
+
+    // Regression guard: the approval must survive idle. Wiping it here would
+    // desync the renderer from main's pendingApprovals map, which still holds
+    // the unresolved promise — the subagent would then hang forever waiting
+    // for a response no UI can ever send.
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
+
+    // The user resolves it through the normal approval-response path — main
+    // acknowledges via session:approval-dismiss (see claude-session.ts's
+    // canUseTool normal-resolution emit).
+    await app.api.respondApproval(routingId, 'req-subagent', 'allow')
+
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
+  })
+
+  it('session:approval-dismiss removes exactly the matching approval', () => {
+    const routingId = 'r1'
+    useSessionStore.getState().createNewSession(routingId, '/test')
+
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({ requestId: 'req-keep', toolName: 'Read' })
+    )
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({ requestId: 'req-dismiss', toolName: 'Bash' })
+    )
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(2)
+
+    app.emit('session:approval-dismiss', routingId, { requestId: 'req-dismiss' })
+
+    const remaining = useSessionStore.getState().sessions[routingId].pendingApprovals
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0].requestId).toBe('req-keep')
   })
 })

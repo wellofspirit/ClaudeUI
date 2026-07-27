@@ -222,7 +222,13 @@ export function useClaudeEvents(): void {
         }
         setStatus(effectiveRoutingId, status)
         if (status.state === 'idle') {
-          clearPendingApprovals(effectiveRoutingId)
+          // Do NOT clear pending approvals here: background subagents (Task
+          // tool) outlive the parent turn's `result`, and their can_use_tool
+          // requests may arrive — or remain unresolved — after cli.js reports
+          // idle. Card removal is driven exclusively by explicit events
+          // (session:approval-dismiss, tool_result matching via
+          // removePendingApprovalByToolUse, or the user's own resolution),
+          // never inferred from turn state.
           if (priorState === 'running') {
             useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
           }
