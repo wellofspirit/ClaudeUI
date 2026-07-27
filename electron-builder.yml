@@ -1,4 +1,4 @@
-appId: com.electron.app
+appId: com.claudeui.app
 productName: ClaudeUI
 directories:
   buildResources: build
@@ -87,6 +87,8 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
+# No `publish:` block on purpose. There is no electron-updater dependency, so
+# nothing consumes an update feed; the scaffolded placeholder feed pointed at an
+# uncontrolled domain (example.com) and would silently become a live update
+# channel the moment auto-update was wired up. Re-add it only together with a
+# domain we own.
