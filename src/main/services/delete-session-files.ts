@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { SEGMENT_TRAVERSAL } from './path-containment'
 
 /**
  * Filesystem delete helpers for session / project data.
@@ -8,8 +9,6 @@ import * as path from 'path'
  * Extracted from session.ipc.ts so they can be unit-tested without pulling in
  * the entire IPC module's import graph (SDK, proxy, MCP, services, etc.).
  */
-
-const SEGMENT_TRAVERSAL = /[\\/]|\.\./
 
 function defaultProjectsRoot(): string {
   return path.join(os.homedir(), '.claude', 'projects')

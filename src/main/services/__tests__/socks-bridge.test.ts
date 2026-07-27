@@ -25,7 +25,7 @@ vi.mock('../logger', () => ({
   }
 }))
 
-import { startSocksBridge, stopSocksBridge, getBridgePort } from '../socks-bridge'
+import { startSocksBridge, stopSocksBridge, getBridgePort, socks5Connect } from '../socks-bridge'
 
 // ---------------------------------------------------------------------------
 // Minimal SOCKS5 server for tests
@@ -309,5 +309,63 @@ describe('socks-bridge', () => {
     const tunneled = await httpConnectThrough(p2, 'anthropic.com:443')
     expect(socks.connects.at(-1)).toEqual({ host: 'anthropic.com', port: 443 })
     tunneled.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOW-RW5 — socks5Connect is exported so the proxy connectivity test in
+// session.ipc.ts reuses this TCP-framing-correct handshake instead of its own
+// hand-rolled, one-message-per-chunk copy (which failed on a split reply).
+// ---------------------------------------------------------------------------
+
+describe('socks5Connect (exported for the proxy connectivity test)', () => {
+  let socks: FakeSocks5Server
+
+  afterEach(async () => {
+    await socks?.close()
+  })
+
+  it('is exported and resolves a tunneled socket for a domain target', async () => {
+    socks = await startFakeSocks5Server()
+    const { socket, leftover } = await socks5Connect(
+      { socksHost: '127.0.0.1', socksPort: socks.port },
+      'api.anthropic.com',
+      443
+    )
+    expect(socks.connects.at(-1)).toEqual({ host: 'api.anthropic.com', port: 443 })
+    expect(leftover.length).toBe(0)
+    socket.destroy()
+  })
+
+  it('completes when the greeting reply is split across TCP chunks', async () => {
+    socks = await startFakeSocks5Server({ fragmentGreeting: true })
+    const { socket } = await socks5Connect(
+      { socksHost: '127.0.0.1', socksPort: socks.port },
+      'api.anthropic.com',
+      443
+    )
+    expect(socks.connects.at(-1)).toEqual({ host: 'api.anthropic.com', port: 443 })
+    socket.destroy()
+  })
+
+  it('returns bytes coalesced into the CONNECT reply as `leftover`', async () => {
+    socks = await startFakeSocks5Server({ connectReplyTrailer: Buffer.from('EARLY') })
+    const { socket, leftover } = await socks5Connect(
+      { socksHost: '127.0.0.1', socksPort: socks.port },
+      'api.anthropic.com',
+      443
+    )
+    expect(leftover.toString()).toBe('EARLY')
+    socket.destroy()
+  })
+
+  it('rejects when the SOCKS server is unreachable', async () => {
+    socks = await startFakeSocks5Server()
+    const dead = socks.port
+    await socks.close()
+    await expect(
+      socks5Connect({ socksHost: '127.0.0.1', socksPort: dead }, 'api.anthropic.com', 443)
+    ).rejects.toBeInstanceOf(Error)
+    socks = await startFakeSocks5Server() // afterEach closes it
   })
 })

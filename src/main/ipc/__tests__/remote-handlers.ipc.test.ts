@@ -142,7 +142,11 @@ vi.mock('../../sdk/model-env', () => ({
 
 vi.mock('../../services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
-  stopSocksBridge: vi.fn(async () => {})
+  stopSocksBridge: vi.fn(async () => {}),
+  // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
+  socks5Connect: vi.fn(async () => {
+    throw new Error('socks5Connect not stubbed for this test')
+  })
 }))
 
 vi.mock('../../services/claude-settings', () => ({
@@ -897,6 +901,65 @@ describe('registerRemoteHandlers', () => {
         'config:settings-changed',
         expect.not.objectContaining({ sandbox: expect.anything() })
       )
+    })
+  })
+  // LOW-RW3 — session:write-custom-title interpolates both caller-supplied
+  // identifiers straight into ~/.claude/projects/<projectKey>/<sessionId>.jsonl.
+  // This handler is reachable by ANY token-holding remote client, so a
+  // traversal segment let a remote peer append attacker-controlled JSON to an
+  // arbitrary *.jsonl on the host.
+  describe('session:write-custom-title path-segment validation', () => {
+    let appendSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      appendSpy = vi.spyOn(fs.promises, 'appendFile').mockResolvedValue(undefined)
+    })
+
+    afterEach(() => {
+      appendSpy.mockRestore()
+    })
+
+    it.each([
+      ['..', 'sess-1'],
+      ['a/b', 'sess-1'],
+      ['a\\b', 'sess-1'],
+      ['../../..', 'sess-1'],
+      ['proj', '..'],
+      ['proj', 'a/b'],
+      ['proj', 'a\\b'],
+      ['proj', '../../etc/evil']
+    ])(
+      'rejects traversal (projectKey=%j, sessionId=%j) without writing (GUARD — fails pre-fix)',
+      async (projectKey, sessionId) => {
+        await expect(
+          dispatcher.handle(
+            makeRequest('session:write-custom-title', sessionId, projectKey, 'pwned')
+          )
+        ).rejects.toThrow(/Invalid (sessionId|projectKey)/)
+        expect(appendSpy).not.toHaveBeenCalled()
+      }
+    )
+
+    it('rejects empty identifiers without writing', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('session:write-custom-title', '', 'proj', 't'))
+      ).rejects.toThrow(/Invalid sessionId/)
+      await expect(
+        dispatcher.handle(makeRequest('session:write-custom-title', 'sess-1', '', 't'))
+      ).rejects.toThrow(/Invalid projectKey/)
+      expect(appendSpy).not.toHaveBeenCalled()
+    })
+
+    it('still writes for plain identifiers, under the projects root', async () => {
+      await dispatcher.handle(
+        makeRequest('session:write-custom-title', 'sess-1', '-d-proj', 'My title')
+      )
+      expect(appendSpy).toHaveBeenCalledTimes(1)
+      const [target, payload] = appendSpy.mock.calls[0]
+      expect(String(target)).toBe(
+        path.join(os.homedir(), '.claude', 'projects', '-d-proj', 'sess-1.jsonl')
+      )
+      expect(String(payload)).toContain('"customTitle":"My title"')
     })
   })
 })

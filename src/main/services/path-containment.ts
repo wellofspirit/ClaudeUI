@@ -32,3 +32,23 @@ export function isPathInside(root: string, candidate: string): boolean {
     !path.isAbsolute(rel)
   )
 }
+
+/**
+ * Characters that disqualify a string from being used as a SINGLE path segment:
+ * either separator (so it cannot reach into a sibling directory) or a `..`
+ * component (so it cannot climb out of its root).
+ */
+export const SEGMENT_TRAVERSAL = /[\\/]|\.\./
+
+/**
+ * Throw unless `value` is a non-empty, traversal-free single path segment.
+ *
+ * Use this on every caller-supplied identifier that gets interpolated into a
+ * filesystem path (`path.join(root, projectKey, `${sessionId}.jsonl`)`).
+ * `isPathInside` guards a *resolved* path; this guards the *segment* before it
+ * is joined, which is what the ~/.claude/projects handlers need.
+ */
+export function assertSafePathSegment(value: string, label: string): void {
+  if (typeof value !== 'string' || value.length === 0) throw new Error(`Invalid ${label}`)
+  if (SEGMENT_TRAVERSAL.test(value) || value.includes('\0')) throw new Error(`Invalid ${label}`)
+}

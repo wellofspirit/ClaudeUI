@@ -16,7 +16,8 @@ import {
   resolveForkAnchor
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
-import { isPathInside } from '../services/path-containment'
+import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { socks5Connect } from '../services/socks-bridge'
 import {
   loadSettings,
   loadSessionConfig,
@@ -471,7 +472,6 @@ async function testProxyConnection(
 ): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
   const http = await import('node:http')
   const tls = await import('node:tls')
-  const net = await import('node:net')
 
   const start = Date.now()
   const TARGET_HOST = 'api.anthropic.com'
@@ -520,120 +520,49 @@ async function testProxyConnection(
   }
 
   if (proxy.type === 'socks5') {
-    // SOCKS5 handshake (RFC 1928) → connect to target → TLS verify
+    // SOCKS5 handshake (RFC 1928) → connect to target → TLS verify.
+    // LOW-RW5: the handshake is socks-bridge.ts's socks5Connect. The hand-rolled
+    // copy that used to live here assumed one SOCKS5 message per TCP chunk, so a
+    // split greeting/CONNECT reply failed the proxy test spuriously.
     return new Promise((resolve) => {
+      let settled = false
+      // The outer 10s budget stays authoritative (socks5Connect's own 15s
+      // internal timeout would otherwise outlive it).
       const timer = setTimeout(() => {
-        socket.destroy()
+        if (settled) return
+        settled = true
         resolve({ ok: false, latencyMs: Date.now() - start, error: 'Connection timed out (10s)' })
       }, TIMEOUT_MS)
 
-      const socket = net.connect({ host: proxy.hostname, port: proxy.port })
-
-      socket.on('error', (err) => {
-        clearTimeout(timer)
-        resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
-      })
-
-      socket.once('connect', () => {
-        // Step 1: greeting — offer no-auth (0x00) and user/pass (0x02)
-        const methods = proxy.username
-          ? Buffer.from([0x05, 0x02, 0x00, 0x02])
-          : Buffer.from([0x05, 0x01, 0x00])
-        socket.write(methods)
-      })
-
-      let phase: 'greeting' | 'auth' | 'connect' = 'greeting'
-
-      socket.on('data', async (data: Buffer) => {
-        if (phase === 'greeting') {
-          if (data.length < 2 || data[0] !== 0x05) {
-            clearTimeout(timer)
+      socks5Connect(
+        {
+          socksHost: proxy.hostname,
+          socksPort: proxy.port,
+          username: proxy.username,
+          password: proxy.password
+        },
+        TARGET_HOST,
+        TARGET_PORT
+      )
+        .then(async ({ socket, leftover }) => {
+          if (settled) {
+            // Outer timeout already answered — drop the late tunnel.
             socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'Invalid SOCKS5 greeting response'
-            })
             return
           }
-          const method = data[1]
-          if (method === 0x02 && proxy.username) {
-            // Step 2: username/password auth (RFC 1929)
-            phase = 'auth'
-            const uBuf = Buffer.from(proxy.username, 'utf8')
-            const pBuf = Buffer.from(proxy.password, 'utf8')
-            const authBuf = Buffer.alloc(3 + uBuf.length + pBuf.length)
-            authBuf[0] = 0x01 // version
-            authBuf[1] = uBuf.length
-            uBuf.copy(authBuf, 2)
-            authBuf[2 + uBuf.length] = pBuf.length
-            pBuf.copy(authBuf, 3 + uBuf.length)
-            socket.write(authBuf)
-          } else if (method === 0x00) {
-            // No auth required — send connect request
-            phase = 'connect'
-            socket.write(buildSocks5ConnectRequest(TARGET_HOST, TARGET_PORT))
-          } else if (method === 0xff) {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'SOCKS5 proxy rejected authentication methods'
-            })
-          }
-        } else if (phase === 'auth') {
-          if (data.length < 2 || data[1] !== 0x00) {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'SOCKS5 authentication failed'
-            })
-            return
-          }
-          // Auth succeeded — send connect request
-          phase = 'connect'
-          socket.write(buildSocks5ConnectRequest(TARGET_HOST, TARGET_PORT))
-        } else if (phase === 'connect') {
-          if (data.length < 2 || data[0] !== 0x05) {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'Invalid SOCKS5 connect response'
-            })
-            return
-          }
-          if (data[1] !== 0x00) {
-            const errors: Record<number, string> = {
-              0x01: 'general failure',
-              0x02: 'connection not allowed',
-              0x03: 'network unreachable',
-              0x04: 'host unreachable',
-              0x05: 'connection refused',
-              0x06: 'TTL expired',
-              0x07: 'command not supported',
-              0x08: 'address type not supported'
-            }
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: `SOCKS5: ${errors[data[1]] || `error 0x${data[1].toString(16)}`}`
-            })
-            return
-          }
-          // Tunnel established — remove listeners, verify with TLS
+          settled = true
           clearTimeout(timer)
-          socket.removeAllListeners('data')
-          const result = await verifyThroughTls(socket)
-          resolve(result)
-        }
-      })
+          // For TLS the client speaks first, so the proxy should not have sent
+          // anything past the CONNECT reply — but never drop bytes if it did.
+          if (leftover.length > 0) socket.unshift(leftover)
+          resolve(await verifyThroughTls(socket))
+        })
+        .catch((err: Error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
+        })
     })
   }
 
@@ -682,20 +611,6 @@ async function testProxyConnection(
 
     req.end()
   })
-}
-
-/** Build a SOCKS5 connect request for a domain:port target. */
-function buildSocks5ConnectRequest(host: string, port: number): Buffer {
-  const hostBuf = Buffer.from(host, 'utf8')
-  const buf = Buffer.alloc(7 + hostBuf.length)
-  buf[0] = 0x05 // SOCKS version
-  buf[1] = 0x01 // CONNECT
-  buf[2] = 0x00 // reserved
-  buf[3] = 0x03 // domain name
-  buf[4] = hostBuf.length
-  hostBuf.copy(buf, 5)
-  buf.writeUInt16BE(port, 5 + hostBuf.length)
-  return buf
 }
 
 /** Shared SessionManager — created once, used by both IPC and remote handlers. */
@@ -991,6 +906,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle(
     'session:write-custom-title',
     async (_e, sessionId: string, projectKey: string, title: string) => {
+      // LOW-RW3: both identifiers are caller-supplied and interpolated straight
+      // into a path — a `..`/separator segment would append attacker-controlled
+      // JSON to any *.jsonl on disk. Same check as deleteSessionFiles(); the
+      // remote twin of this handler (remote-handlers.ts) is reachable by any
+      // token-holding remote client, so the guard must exist on both.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
       const filePath = path.join(
         os.homedir(),
         '.claude',

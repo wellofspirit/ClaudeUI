@@ -11,7 +11,7 @@ import {
   loadBackgroundOutput,
   resolveForkAnchor
 } from '../services/session-history'
-import { isPathInside } from '../services/path-containment'
+import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { accountManager } from '../services/account-manager'
@@ -449,6 +449,12 @@ export function registerRemoteHandlers(
   dispatcher.register(
     'session:write-custom-title',
     async (sessionId: string, projectKey: string, title: string) => {
+      // LOW-RW3: reachable by any token-holding remote client. Without this,
+      // projectKey='../..' + a crafted sessionId appends attacker-controlled
+      // JSON to an arbitrary *.jsonl on the host. Mirrors the desktop handler
+      // in session.ipc.ts and deleteSessionFiles().
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
       const filePath = path.join(
         os.homedir(),
         '.claude',

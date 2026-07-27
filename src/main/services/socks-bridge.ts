@@ -15,7 +15,7 @@ import * as http from 'node:http'
 import * as net from 'node:net'
 import { logger } from './logger'
 
-interface SocksBridgeConfig {
+export interface SocksBridgeConfig {
   socksHost: string
   socksPort: number
   username?: string
@@ -53,8 +53,11 @@ function connectReplyLen(b: Buffer): number | null {
  * socket (paused) plus any `leftover` bytes that were coalesced into the same
  * chunk as the CONNECT reply — those are the start of the tunneled stream and
  * the caller must forward them to the client before piping the rest.
+ *
+ * Exported so the proxy connectivity test (session.ipc.ts) shares this
+ * TCP-framing-correct handshake instead of hand-rolling its own.
  */
-function socks5Connect(
+export function socks5Connect(
   config: SocksBridgeConfig,
   targetHost: string,
   targetPort: number
