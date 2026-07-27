@@ -37,7 +37,7 @@ describe('createSdkMcpServer — SdkToolExtra threading (ADR-033 Slice A)', () =
     for (const c of clients.splice(0)) await c.close().catch(() => {})
   })
 
-  it('a legacy one-arg handler (mermaid/mockup/auto-classifier shape) still works unchanged', async () => {
+  it('a legacy one-arg handler (mermaid/mockup shape) still works unchanged', async () => {
     const legacyTool = tool(
       'legacy_echo',
       'Echoes the input — one-arg handler, ignores extra entirely.',

@@ -455,7 +455,7 @@ export interface SdkToolExtra {
  * A tool registered on an in-process SDK MCP server. The schema is a record
  * of Zod validators (or any runtime with `.parse()`), matching the upstream
  * `tool()` helper's signature. `extra` is optional so existing one-arg
- * handlers (mermaid, mockup, auto-classifier) keep compiling unchanged.
+ * handlers (mermaid, mockup) keep compiling unchanged.
  */
 export interface SdkMcpTool {
   name: string

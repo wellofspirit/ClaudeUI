@@ -78,12 +78,6 @@ vi.mock('../account-manager', () => ({
 vi.mock('../../auth/ClaudeAuthProvider', () => ({
   claudeAuthProvider: { buildAccountRef: vi.fn(() => null), updateAuthSource: vi.fn() }
 }))
-vi.mock('../auto-classifier', () => ({
-  getClassifier: vi.fn(),
-  stopClassifier: vi.fn(),
-  isSafeTool: vi.fn(() => false),
-  buildTranscript: vi.fn(() => '')
-}))
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../claude-session'

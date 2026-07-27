@@ -12,9 +12,9 @@
  *      re-resolve against the current TEMP_HOME.
  *   3. Dynamic-import the manager AFTER seeding TEMP_HOME.
  *
- * The SDK, claude-session, session-history, auto-classifier, and logger are
- * all mocked — we're testing AutomationManager's lifecycle / persistence
- * logic, not its downstream integrations.
+ * The SDK, claude-session, session-history, and logger are all mocked — we're
+ * testing AutomationManager's lifecycle / persistence logic, not its
+ * downstream integrations.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -116,13 +116,6 @@ vi.mock('../claude-session', () => ({
 
 vi.mock('../session-history', () => ({
   loadSessionHistory: vi.fn(async () => ({ messages: [] }))
-}))
-
-vi.mock('../auto-classifier', () => ({
-  isSafeTool: () => true,
-  getClassifier: () => ({ classify: vi.fn(async () => ({ shouldBlock: false, reason: '' })) }),
-  buildTranscript: () => '',
-  stopClassifier: vi.fn()
 }))
 
 vi.mock('../logger', () => ({

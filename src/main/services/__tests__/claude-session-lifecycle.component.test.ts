@@ -66,12 +66,6 @@ vi.mock('../account-manager', () => ({
 vi.mock('../../auth/ClaudeAuthProvider', () => ({
   claudeAuthProvider: { buildAccountRef: vi.fn(() => null), updateAuthSource: vi.fn() }
 }))
-vi.mock('../auto-classifier', () => ({
-  getClassifier: vi.fn(),
-  stopClassifier: vi.fn(),
-  isSafeTool: vi.fn(() => false),
-  buildTranscript: vi.fn(() => '')
-}))
 
 import { ClaudeSession } from '../claude-session'
 import type { BrowserWindow } from 'electron'

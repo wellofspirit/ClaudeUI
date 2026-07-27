@@ -48,7 +48,6 @@ import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
-import { stopAllClassifiers } from './services/auto-classifier'
 import { getSdkVersion } from './services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
 import { loadPersistedPrices } from './services/opencode-pricing'
@@ -419,7 +418,6 @@ function createWindow(): void {
         currentAutomationManager?.stopAll()
         credentialSync.stop()
         currentRemoteServer?.stop()
-        stopAllClassifiers()
         // Stop the service session (lightweight CLI subprocess for usage polling)
         serviceSession.stop()
         // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
