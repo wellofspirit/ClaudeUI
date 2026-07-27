@@ -3,6 +3,14 @@
  * Extends the existing setup with window.api stub support.
  */
 
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// Redirect logger.ts's file output before anything in the test module graph
+// can import it — otherwise every test run appends fixture noise to the real
+// ~/.claude/ui/logs. `??=` lets an outer invocation still redirect explicitly.
+process.env.CLAUDE_UI_LOG_DIR ??= join(tmpdir(), 'claudeui-vitest-logs')
+
 import '@testing-library/jest-dom/vitest'
 
 // Do not probe Node 25+'s native localStorage getter: without

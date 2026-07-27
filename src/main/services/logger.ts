@@ -3,7 +3,9 @@ import { readdir, unlink, appendFile } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
-const LOG_DIR = join(homedir(), '.claude', 'ui', 'logs')
+// CLAUDE_UI_LOG_DIR lets tests/embedders redirect file output away from the
+// real user log dir; resolved once here at module load.
+const LOG_DIR = process.env.CLAUDE_UI_LOG_DIR || join(homedir(), '.claude', 'ui', 'logs')
 
 // ---------------------------------------------------------------------------
 // File-write policy (M-LG1)
