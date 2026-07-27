@@ -195,6 +195,13 @@ export class CredentialSync {
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
   private watchDebounceTimers = new Map<EngineKey, ReturnType<typeof setTimeout>>()
+  /**
+   * Engines currently inside a feed-triggered adoption (M-AT1). The adopt path
+   * calls feedAll() again, which re-enters feedOne() for the same engine; this
+   * makes the recursion bound explicit (one level) instead of relying on the
+   * freshly-adopted refresh token happening to match on the second pass.
+   */
+  private adoptingFromFeed = new Set<EngineKey>()
 
   constructor(deps: CredentialSyncDeps = {}) {
     this.vault = deps.vault ?? authVault
@@ -461,6 +468,26 @@ export class CredentialSync {
       logger.warn('CredentialSync', `feedAll: no ${label} target configured — skipping`)
       return false
     }
+    if (await this.engineOutranksFeed(label, target, vendorId, cred)) {
+      logger.info(
+        'CredentialSync',
+        `feedAll: ${label} holds a strictly-newer credential — skipping the write and adopting instead`
+      )
+      // Arm the watcher regardless of which branch we took: the watch is what
+      // catches the NEXT external rotation, and skipping the write must not
+      // leave this engine unwatched.
+      this.startWatcher(label, target)
+      this.adoptingFromFeed.add(label)
+      try {
+        // Reuse the watch-adoption path verbatim rather than duplicating it —
+        // it re-reads the entry, re-compares against the vault, and carries its
+        // own lifecycleGeneration guards through every await.
+        await this.handleExternalChange(label)
+      } finally {
+        this.adoptingFromFeed.delete(label)
+      }
+      return false
+    }
     try {
       await target.feedOauthCredential(vendorId, cred)
       this.startWatcher(label, target)
@@ -469,6 +496,49 @@ export class CredentialSync {
       logger.warn('CredentialSync', `feedAll: ${label} write failed: ${errMessage(err)}`)
       return false
     }
+  }
+
+  /**
+   * Pre-write freshness compare (M-AT1). `feedOauthCredential` overwrites the
+   * engine's entry unconditionally, so an engine that rotated its own token
+   * after our last read gets its NEWER refresh token destroyed by the feed —
+   * and the watch event that follows sees `entry.refresh === vaultCred.refresh`
+   * and files it as "our own write", masking the loss. With rotating refresh
+   * tokens the clobbered token can be the only live one, so the damage only
+   * surfaces later as an `invalid_grant` and a forced re-login.
+   *
+   * True means the engine's on-disk entry strictly beats what we are about to
+   * write — the same rule reconcileOnStart() uses for "engine beats vault":
+   * a DIFFERENT refresh token (not our own prior write) AND a NEWER expiry
+   * (never regress to a stale copy).
+   *
+   * A read failure returns false (write proceeds, as before the fix) — the
+   * feed must not become dependent on a readable engine store.
+   *
+   * REMAINING TOCTOU: the engine can still write between this read and our
+   * write. Closing that window entirely needs cross-process file locking over
+   * both engines' auth stores (out of scope); this removes the common
+   * lost-rotation case, not the instantaneous race.
+   */
+  private async engineOutranksFeed(
+    label: EngineKey,
+    target: CodexFeedTarget,
+    vendorId: string,
+    cred: CodexCredentialInput
+  ): Promise<boolean> {
+    if (this.adoptingFromFeed.has(label)) return false
+    let entry: CodexEntrySnapshot | null
+    try {
+      entry = await target.readOauthEntry(vendorId)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `feedAll: ${label} pre-write read failed — writing anyway: ${errMessage(err)}`
+      )
+      return false
+    }
+    if (!entry) return false
+    return entry.refresh !== cred.refresh && entry.expires > cred.expires
   }
 
   // -------------------------------------------------------------------------

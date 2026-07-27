@@ -1407,3 +1407,153 @@ describe('CredentialSync — fs-watch resync', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// 6. Feed clobber guard (M-AT1)
+//
+// RED-FIRST NOTE: pre-fix `feedOne` called `feedOauthCredential` unconditionally,
+// so the ENGINE-NEWER case below wrote the STALE vault credential over the
+// engine's freshly-rotated one and left the vault holding the dead token — both
+// `expect(pi.feed).not.toHaveBeenCalledWith(... 'r-vault')` and
+// `expect(state.current?.refresh).toBe('r-eng')` fail against the old code.
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync.feedAll — engine rotation clobber guard (M-AT1)', () => {
+  /** A fakeFeedTarget whose readOauthEntry resolves to a preset snapshot (or null). */
+  function readable(snapshot: CodexEntrySnapshot | null): {
+    target: CodexFeedTarget
+    feed: ReturnType<typeof vi.fn>
+    read: ReturnType<typeof vi.fn>
+  } {
+    const t = fakeFeedTarget()
+    t.read.mockResolvedValue(snapshot)
+    return { target: t.target, feed: t.feed, read: t.read }
+  }
+
+  /** Far enough out that the adoption's scheduleRefresh() never fires mid-test. */
+  const FAR = REFRESH_MARGIN_MS + 60_000
+
+  it('ENGINE-NEWER-SKIPS: never overwrites an engine credential with a different refresh token AND a newer expiry — it adopts instead, per engine', async () => {
+    const now = Date.now()
+    const vaultCred: VaultCredential = {
+      type: 'oauth',
+      access: 'a-vault',
+      refresh: 'r-vault',
+      expires: now + 1000
+    }
+    const { vault, state } = makeFakeVault(vaultCred)
+    // pi rotated behind our back — strictly newer.
+    const pi = readable({ access: 'a-eng', refresh: 'r-eng', expires: now + FAR })
+    // opencode is stale — the skip must be PER-ENGINE, so this one still gets written.
+    const opencode = readable({ access: 'a-oc', refresh: 'r-oc', expires: now + 500 })
+    const refreshAccessToken = vi.fn(async () => {
+      throw new Error('refresh must not run in this test')
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(vaultCred)
+
+      // The stale vault credential never reached pi's store.
+      expect(pi.feed).not.toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-vault' })
+      )
+      expect(result.pi).toBe(false)
+
+      // …and the engine's credential was adopted into the vault instead.
+      expect(state.current?.refresh).toBe('r-eng')
+      expect(state.current?.expires).toBe(now + FAR)
+
+      // The other engine is judged independently: it was stale, so it was written
+      // — and the adoption re-synced it to the newest credential afterwards.
+      expect(opencode.feed).toHaveBeenCalledWith(
+        'openai',
+        expect.objectContaining({ refresh: 'r-eng' })
+      )
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('ENGINE-OLDER-WRITES: a different refresh token with an OLDER expiry is a stale copy — the vault still wins', async () => {
+    const now = Date.now()
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'a-vault',
+      refresh: 'r-vault',
+      expires: now + FAR
+    }
+    const { vault, state } = makeFakeVault(cred)
+    const pi = readable({ access: 'a-old', refresh: 'r-old', expires: now + 1000 })
+    const opencode = readable(null)
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(cred)
+      expect(result).toEqual({ pi: true, opencode: true })
+      expect(pi.feed).toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-vault' })
+      )
+      expect(state.current?.refresh).toBe('r-vault')
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('SAME-REFRESH-WRITES: an identical refresh token is our own previous write (no rotation) even with a newer expiry — the write proceeds', async () => {
+    const now = Date.now()
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'a-new',
+      refresh: 'r-same',
+      expires: now + 1000
+    }
+    const { vault } = makeFakeVault(cred)
+    const pi = readable({ access: 'a-stale-access', refresh: 'r-same', expires: now + FAR })
+    const opencode = readable(null)
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(cred)
+      expect(result.pi).toBe(true)
+      expect(pi.feed).toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-same', access: 'a-new' })
+      )
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('READ-FAILURE-WRITES: an unreadable engine store must not block the feed', async () => {
+    const now = Date.now()
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'a',
+      refresh: 'r-vault',
+      expires: now + FAR
+    }
+    const { vault } = makeFakeVault(cred)
+    const pi = readable(null)
+    pi.read.mockRejectedValue(new Error('EACCES: auth.json unreadable'))
+    const opencode = readable(null)
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(cred)
+      expect(result).toEqual({ pi: true, opencode: true })
+      expect(pi.feed).toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-vault' })
+      )
+    } finally {
+      sync.stop()
+    }
+  })
+})
