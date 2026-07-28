@@ -132,6 +132,7 @@ import {
   backgroundTask,
   dequeueMessage,
   askSideQuestion,
+  setPermissionMode,
   setEffort,
   setThinkingMode,
   getPlanContent,
@@ -780,9 +781,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     askSideQuestion(manager, routingId, question)
   )
 
-  ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) => {
-    await manager.get(routingId)?.setPermissionMode(mode)
-  })
+  ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) =>
+    setPermissionMode(manager, win, routingId, mode)
+  )
 
   // Voice input handlers (Claude-only: capabilities.voice)
   ipcMain.handle(

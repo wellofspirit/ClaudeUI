@@ -59,6 +59,7 @@ import {
   backgroundTask,
   dequeueMessage,
   askSideQuestion,
+  setPermissionMode,
   setEffort,
   setThinkingMode,
   getPlanContent,
@@ -351,9 +352,9 @@ export function registerRemoteHandlers(
     dequeueMessage(manager, routingId, value)
   )
 
-  dispatcher.register('session:set-permission-mode', async (routingId: string, mode: string) => {
-    await manager.get(routingId)?.setPermissionMode(mode)
-  })
+  dispatcher.register('session:set-permission-mode', async (routingId: string, mode: string) =>
+    setPermissionMode(manager, win, routingId, mode)
+  )
 
   dispatcher.register('session:set-model', async (routingId: string, model: string) => {
     await manager.get(routingId)?.setModel(model)

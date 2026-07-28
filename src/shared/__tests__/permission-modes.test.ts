@@ -4,7 +4,13 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { nextPermissionMode, claudeAutoModeAvailable } from '../permission-modes'
+import {
+  nextPermissionMode,
+  claudeAutoModeAvailable,
+  autoModeAvailableForEngine,
+  PERMISSION_MODE_CYCLE,
+  PERMISSION_MODE_LABELS
+} from '../permission-modes'
 import type { ModelInfo, PermissionMode } from '../types'
 
 describe('nextPermissionMode', () => {
@@ -78,5 +84,39 @@ describe('claudeAutoModeAvailable', () => {
       { engineId: undefined, supportsAutoMode: false }
     ]
     expect(claudeAutoModeAvailable(models)).toBe(false)
+  })
+})
+
+describe('PERMISSION_MODE_LABELS', () => {
+  it('covers every PERMISSION_MODE_CYCLE entry with a non-empty label', () => {
+    for (const mode of PERMISSION_MODE_CYCLE) {
+      expect(PERMISSION_MODE_LABELS[mode]).toBeTruthy()
+    }
+  })
+})
+
+describe('autoModeAvailableForEngine', () => {
+  it('is always true for a non-claude engine, even with every model reporting no support', () => {
+    const models: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[] = [
+      { engineId: 'opencode', supportsAutoMode: false },
+      { engineId: 'pi', supportsAutoMode: false }
+    ]
+    expect(autoModeAvailableForEngine('opencode', models)).toBe(true)
+    expect(autoModeAvailableForEngine('pi', models)).toBe(true)
+  })
+
+  it('delegates to claudeAutoModeAvailable for the claude engine', () => {
+    const allUnsupported: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[] = [
+      { engineId: 'claude', supportsAutoMode: false }
+    ]
+    expect(autoModeAvailableForEngine('claude', allUnsupported)).toBe(false)
+    expect(claudeAutoModeAvailable(allUnsupported)).toBe(false)
+  })
+
+  it('treats an undefined engineId as claude', () => {
+    const allUnsupported: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[] = [
+      { engineId: 'claude', supportsAutoMode: false }
+    ]
+    expect(autoModeAvailableForEngine(undefined, allUnsupported)).toBe(false)
   })
 })

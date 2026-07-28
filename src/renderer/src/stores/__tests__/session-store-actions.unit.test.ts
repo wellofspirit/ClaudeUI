@@ -46,7 +46,8 @@ beforeEach(() => {
     killTerminal: vi.fn(),
     deleteSession: vi.fn().mockResolvedValue(undefined),
     deleteProject: vi.fn().mockResolvedValue(undefined),
-    logError: vi.fn()
+    logError: vi.fn(),
+    setPermissionMode: vi.fn().mockResolvedValue(undefined)
   } as any
 
   useSessionStore.setState({
@@ -752,6 +753,63 @@ describe('clearConversation', () => {
   it('is a no-op when the session does not exist', () => {
     expect(() => store().clearConversation('ghost')).not.toThrow()
     expect(store().sessions['ghost']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Extra: changePermissionMode — centralized apply semantics for the desktop
+// Shift+Tab handler + the mobile mode picker (both call this action now).
+// ---------------------------------------------------------------------------
+
+describe('changePermissionMode', () => {
+  it('pre-spawn: optimistically updates the store AND calls the api for auto', async () => {
+    store().createNewSession('r1', '/p')
+    expect(store().sessions['r1'].sdkActive).toBe(false)
+
+    store().changePermissionMode('r1', 'auto')
+
+    expect(store().sessions['r1'].permissionMode).toBe('auto')
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'auto')
+  })
+
+  it('live session: does NOT optimistically update for auto, but still calls the api', async () => {
+    store().createNewSession('r1', '/p')
+    useSessionStore.setState((st) => ({
+      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
+    }))
+
+    store().changePermissionMode('r1', 'auto')
+
+    // Main process owns the broadcast for a live session's auto rejection —
+    // the store must NOT jump ahead of it.
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'auto')
+  })
+
+  it('live session: DOES optimistically update for a non-auto mode', () => {
+    store().createNewSession('r1', '/p')
+    useSessionStore.setState((st) => ({
+      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
+    }))
+
+    store().changePermissionMode('r1', 'acceptEdits')
+
+    expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
+  })
+
+  it('reverts to the previous mode when the api call rejects', async () => {
+    store().createNewSession('r1', '/p')
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+    ;(window.api.setPermissionMode as any).mockRejectedValueOnce(new Error('rejected by SDK'))
+
+    store().changePermissionMode('r1', 'acceptEdits')
+    // Optimistic update applies immediately (non-auto mode).
+    expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
+
+    // Let the rejected promise's .catch() handler run.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store().sessions['r1'].permissionMode).toBe('default')
   })
 })
 

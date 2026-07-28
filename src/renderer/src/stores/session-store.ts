@@ -1009,6 +1009,7 @@ interface SessionState {
     snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
   ) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
+  changePermissionMode: (routingId: string, next: PermissionMode) => void
   setEffort: (
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
     routingId?: string
@@ -2487,6 +2488,28 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ permissionMode: mode })) }
     }),
+
+  // Centralizes the apply semantics for a permission-mode change, shared by
+  // the desktop Shift+Tab handler and the mobile mode picker (any client that
+  // lets the user pick a mode).
+  //
+  // Don't optimistically update for 'auto' on a LIVE session — the main
+  // process may reject it and broadcast a fallback to 'default' instead.
+  // Pre-spawn there is no main-side session to reject/broadcast anything
+  // (manager.get() is a no-op), so update the store directly; the mode still
+  // rides into spawn via createSession, and init-sync corrects it if the
+  // account can't use auto.
+  changePermissionMode: (routingId, next) => {
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
+    const previous = session?.permissionMode ?? 'default'
+    if (next !== 'auto' || !session?.sdkActive) state.setPermissionMode(next, routingId)
+    window.api.setPermissionMode(routingId, next).catch(() => {
+      // SDK rejected the mode change — revert to previous mode (the main
+      // process already sent the reverted mode via session:permission-mode).
+      state.setPermissionMode(previous, routingId)
+    })
+  },
 
   setEffort: (effort, routingId) =>
     set((state) => {

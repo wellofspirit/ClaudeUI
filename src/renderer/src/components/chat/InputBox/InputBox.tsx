@@ -12,6 +12,8 @@ import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
+import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
+import type { PermissionMode } from '../../../../../shared/types'
 import {
   claudeModelCapabilities,
   modelResolveThinkingMode,
@@ -751,6 +753,23 @@ export function InputBox(): React.JSX.Element {
     window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
   }, [])
 
+  // Mobile mode picker (MobileConfigSheet) — mirrors the desktop Shift+Tab
+  // gates in SessionView so both surfaces agree on what's selectable. Hidden
+  // pre-session: the welcome screen has no session to target (Shift+Tab
+  // early-returns there too).
+  const showModePicker = !!activeSessionId
+  const canPlan = capabilities.plan ?? true
+  const autoAvailable = useMemo(
+    () => autoModeAvailableForEngine(sessionEngineId ?? effectiveEngineId, models),
+    [sessionEngineId, effectiveEngineId, models]
+  )
+  const handleSelectMode = useCallback(
+    (mode: PermissionMode) => {
+      if (activeSessionId) useSessionStore.getState().changePermissionMode(activeSessionId, mode)
+    },
+    [activeSessionId]
+  )
+
   // --- Derived values for context ---
 
   const isVoiceActive =
@@ -821,6 +840,9 @@ export function InputBox(): React.JSX.Element {
       placeholder={placeholder}
       textClassName={textClassName}
       permissionMode={permissionMode}
+      showModePicker={showModePicker}
+      canPlan={canPlan}
+      autoAvailable={autoAvailable}
       slashMenuOpen={slashMenuOpen}
       slashCommands={slashCommands}
       slashFilter={slashFilter}
@@ -859,6 +881,7 @@ export function InputBox(): React.JSX.Element {
       onRemoveFile={removeFile}
       onSlashSelect={handleSlashSelect}
       onFileMentionConfirm={handleFileMentionConfirm}
+      onSelectMode={handleSelectMode}
       onSelectModel={handleSelectModel}
       onSelectEngine={activeSessionId ? setSelectedEngine : setLastSelectedEngineId}
       onSelectEffort={handleSelectEffort}

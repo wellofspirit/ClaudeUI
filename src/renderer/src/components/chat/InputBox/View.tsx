@@ -5,7 +5,8 @@ import type {
   SlashCommandInfo,
   DirEntry,
   VoiceState,
-  EngineId
+  EngineId,
+  PermissionMode
 } from '../../../../../shared/types'
 import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
@@ -60,6 +61,12 @@ export interface InputBoxViewProps {
 
   // Permission mode
   permissionMode: string
+  /** Show/hide the mobile mode-picker row (MobileConfigSheet). Hidden pre-session (welcome screen has no session to target). */
+  showModePicker?: boolean
+  /** Engine capability gate for the 'plan' mode option. */
+  canPlan?: boolean
+  /** Availability gate for the 'auto' mode option (Claude account/org gate; always true for other engines). */
+  autoAvailable?: boolean
 
   // Menus
   slashMenuOpen: boolean
@@ -111,6 +118,7 @@ export interface InputBoxViewProps {
   onRemoveFile: (id: string) => void
   onSlashSelect: (name: string) => void
   onFileMentionConfirm: (entry: DirEntry) => void
+  onSelectMode?: (mode: PermissionMode) => void
   onSelectModel: (value: string) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectEffort: (level: EffortLevel) => void
@@ -512,6 +520,10 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   selectedModel={props.selectedModel}
                   selectedEngineId={props.selectedEngineId}
                   engineLocked={props.engineLocked}
+                  showModePicker={props.showModePicker ?? false}
+                  permissionMode={props.permissionMode as PermissionMode}
+                  canPlan={props.canPlan ?? true}
+                  autoAvailable={props.autoAvailable ?? true}
                   showEnginePicker={props.showEnginePicker}
                   showModelPicker={props.showModelPicker ?? true}
                   showThinkingPicker={props.showThinkingPicker ?? true}
@@ -522,6 +534,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   effort={props.effort}
                   effortSupported={props.effortSupported}
                   allowedEffortLevels={props.allowedEffortLevels}
+                  onSelectMode={props.onSelectMode ?? (() => {})}
                   onSelectEngine={props.onSelectEngine}
                   onSelectModel={props.onSelectModel}
                   onSelectThinking={props.onSelectThinking}

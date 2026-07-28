@@ -18,6 +18,7 @@ import { logger } from '../services/logger'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { BaseSession } from '../providers/BaseSession'
+import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -81,6 +82,45 @@ export function sendPrompt(
   }
   for (const w of BaseSession.getExtraWindows()) {
     if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
+  }
+}
+
+/**
+ * Apply a permission-mode change, or — when no session exists yet
+ * (pre-spawn) — echo it to every other window looking at this routingId.
+ *
+ * A live session owns its own broadcast (`session.setPermissionMode` sends
+ * `session:permission-mode` itself, including the reverted mode if the SDK
+ * rejects the change), so this just delegates. Pre-spawn there is no session
+ * object to broadcast from, but multiple clients (desktop + remote) can be
+ * looking at the same pre-spawn session simultaneously — without this echo, a
+ * pre-spawn mode pick on one client would never reach the others. The
+ * originator's own optimistic store update (see `changePermissionMode` in
+ * session-store.ts) makes the echo idempotent there; it only does real work
+ * for every OTHER window. `mode` arrives as an untyped string over the
+ * remote-reachable channel, so validate against PERMISSION_MODE_CYCLE before
+ * echoing arbitrary values.
+ */
+export async function setPermissionMode(
+  manager: SessionManager,
+  win: BrowserWindow,
+  routingId: string,
+  mode: string
+): Promise<void> {
+  if (!PERMISSION_MODE_CYCLE.includes(mode as (typeof PERMISSION_MODE_CYCLE)[number])) {
+    logger.warn('IPC', `session:set-permission-mode: rejecting unknown mode "${mode}"`)
+    return
+  }
+  const session = manager.get(routingId)
+  if (session) {
+    await session.setPermissionMode(mode)
+    return
+  }
+  if (!win.isDestroyed()) {
+    win.webContents.send('session:permission-mode', routingId, mode)
+  }
+  for (const w of BaseSession.getExtraWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('session:permission-mode', routingId, mode)
   }
 }
 

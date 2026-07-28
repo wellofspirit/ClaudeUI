@@ -4,9 +4,17 @@
  * the renderer or a test runner.
  */
 
-import type { ModelInfo, PermissionMode } from './types'
+import type { EngineId, ModelInfo, PermissionMode } from './types'
 
 export const PERMISSION_MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'auto'] as const
+
+/** Display labels for the mode-pill vocabulary (InputBox View, MobileConfigSheet). */
+export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
+  default: 'Default',
+  acceptEdits: 'Accept Edits',
+  plan: 'Plan',
+  auto: 'Auto'
+}
 
 /**
  * Advance one step through PERMISSION_MODE_CYCLE, wrapping around. Modes
@@ -52,4 +60,17 @@ export function claudeAutoModeAvailable(
   const claudeModels = models.filter((m) => (m.engineId ?? 'claude') === 'claude')
   if (claudeModels.length === 0) return true
   return !claudeModels.every((m) => m.supportsAutoMode === false)
+}
+
+/**
+ * Whether 'auto' permission mode is usable for the given engine. Non-Claude
+ * engines' 'auto' is a local full-autonomy mode with no account gate, so it's
+ * always available there; Claude delegates to `claudeAutoModeAvailable`'s
+ * model-fetch-derived gate.
+ */
+export function autoModeAvailableForEngine(
+  engineId: EngineId | undefined,
+  models: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[]
+): boolean {
+  return (engineId ?? 'claude') === 'claude' ? claudeAutoModeAvailable(models) : true
 }
