@@ -639,6 +639,10 @@ export interface ModelInfo {
   supportsEffort?: boolean
   supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
   supportsAdaptiveThinking?: boolean
+  /** Whether the 'auto' permission mode is usable with this model/account.
+   *  From the initialize response's models[]; absent on older CLIs — treat
+   *  absence as supported (auto mode is default-available on subscriptions). */
+  supportsAutoMode?: boolean
   /** Engine that owns this model entry. Defaults to 'claude' when absent (legacy). */
   engineId?: EngineId
   /** Vendor id within the engine. */

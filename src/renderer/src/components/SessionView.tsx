@@ -20,8 +20,7 @@ import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
-
-const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
+import { nextPermissionMode, claudeAutoModeAvailable } from '../../../shared/permission-modes'
 
 export const SidebarContext = createContext<{
   collapsed: boolean
@@ -211,20 +210,20 @@ export function SessionView(): React.JSX.Element {
         // Engine capability gate: skip modes the engine can't offer (e.g. 'plan'
         // when !capabilities.plan). Claude has plan=true, so the full cycle stands.
         const canPlan = session?.status.capabilities.plan ?? true
-        const advance = (from: (typeof PERMISSION_MODES)[number]): (typeof PERMISSION_MODES)[number] =>
-          PERMISSION_MODES[(PERMISSION_MODES.indexOf(from) + 1) % PERMISSION_MODES.length]
-        let next = advance(permissionMode as (typeof PERMISSION_MODES)[number])
-        // Plan mode is gated on the engine's plan capability — skip it if absent.
-        if (next === 'plan' && !canPlan) {
-          next = advance('plan')
-        }
-        // Auto mode requires an active SDK session — skip to next mode if session not started
-        if (next === 'auto' && !session?.sdkActive) {
-          next = advance('auto')
-        }
-        // Don't optimistically update for 'auto' — main process may reject it and
-        // broadcast a fallback to 'default' instead.
-        if (next !== 'auto') setPermissionMode(next, activeSessionId)
+        // Auto mode is default-available (subscription accounts get it out of the
+        // box); the only negative gate is Claude's launch-time model info reporting
+        // that no available model supports it. Non-Claude engines' 'auto' is a local
+        // full-autonomy mode with no account gate, so it's always available there.
+        const engineId = session?.selectedEngineId ?? 'claude'
+        const autoAvailable =
+          engineId === 'claude' ? claudeAutoModeAvailable(state.availableModels) : true
+        const next = nextPermissionMode(permissionMode, { canPlan, autoAvailable })
+        // Don't optimistically update for 'auto' on a LIVE session — the main process
+        // may reject it and broadcast a fallback to 'default' instead. Pre-spawn there
+        // is no main-side session to reject/broadcast anything (manager.get() is a
+        // no-op), so update the store directly; the mode still rides into spawn via
+        // createSession, and init-sync corrects it if the account can't use auto.
+        if (next !== 'auto' || !session?.sdkActive) setPermissionMode(next, activeSessionId)
         window.api.setPermissionMode(activeSessionId, next).catch(() => {
           // SDK rejected the mode change — revert to previous mode
           // (the main process already sent the reverted mode via session:permission-mode)
