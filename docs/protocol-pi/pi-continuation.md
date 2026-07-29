@@ -10,7 +10,7 @@ prior context. Read this, then the pointers at the bottom. Status as of branch `
 
 pi = [earendil-works/pi](https://github.com/earendil-works/pi), Mario Zechner's minimal coding
 agent. It's ClaudeUI's **third engine** (after `claude` and `opencode`), behind the engine-neutral
-`ISession` seam. Pinned to `package.json#piCliVersion` = **0.80.10**.
+`ISession` seam. Pinned to `package.json#piCliVersion` = **0.82.1**.
 
 **Architecturally pi is "Claude-shaped," not "opencode-shaped":** no server — one
 `pi --mode rpc` child process per session, LF-framed JSONL over stdio. Two things pi lacks that
@@ -218,7 +218,7 @@ are in the scratchpad (`scratchpad/specs/m*.md`) — pattern them for the next m
 - **ADR-035** `docs/adr/adr-035_pi-engine-backend.md` — the authoritative design record.
 - **`docs/protocol-pi/README.md`** — verified wire facts (transport, events, sessions, auth,
   extensions). Version-exact protocol docs ship in `vendor/pi-cli/docs/*.md`.
-- Source questions: **shallow-clone the pinned tag** (`git clone --depth 1 --branch v0.80.10
+- Source questions: **shallow-clone the pinned tag** (`git clone --depth 1 --branch v0.82.1
   https://github.com/earendil-works/pi`) — there is deliberately NO vendored pi source clone.
 - Auto-memory `project-pi-engine-integration` (loads each session) — the one-line status + gotchas.
 - opencode is the structural template throughout: when unsure how pi should do X, read how

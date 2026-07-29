@@ -8,9 +8,10 @@
  *   - vendor/pi-cli/docs/rpc.md            — commands, responses, events
  *   - vendor/pi-cli/docs/session-format.md — on-disk session entry shapes
  *
- * Verified doc drift (v0.80.10 — docs/protocol-pi/README.md "Verified doc
- * drift" section):
- *   1. AssistantMessage.usage additionally carries `reasoning` + `totalTokens`.
+ * Verified doc drift (v0.82.1, first verified v0.80.10 — docs/protocol-pi/
+ * README.md "Verified doc drift" section):
+ *   1. AssistantMessage.usage additionally carries `reasoning` (`totalTokens`
+ *      became documented in 0.82.1).
  *   2. get_commands entries carry `sourceInfo` rather than flat path/location
  *      (see `PiCommandSourceInfo` below — wired in M2b).
  *   3. get_state with no configured model returns a placeholder Model object
@@ -95,7 +96,7 @@ export interface PiGetSessionStatsData {
  * `get_last_assistant_text` (ADR-033 M4c — the cross-engine dispatch TARGET's
  * simplest reliable way to get a turn's final text, vs. accumulating `message`
  * MapperOutputs across the turn). Doc says `{"text": null}` when no assistant
- * messages exist yet; VERIFIED DOC DRIFT (M4c probe against v0.80.10): the
+ * messages exist yet; VERIFIED DOC DRIFT (M4c probe, re-verified v0.82.1): the
  * real response is `data: {}` (the `text` key is entirely ABSENT, not `null`)
  * in that case — callers must read `data?.text` defensively either way.
  */
@@ -193,9 +194,9 @@ export interface PiUsage {
   output: number
   cacheRead: number
   cacheWrite: number
-  /** Verified doc drift #1 (v0.80.10) — rides the wire despite the shipped docs omitting it. */
+  /** Verified doc drift #1 (re-verified v0.82.1) — rides the wire despite the shipped docs omitting it. */
   reasoning?: number
-  /** Verified doc drift #1 (v0.80.10). */
+  /** Was doc drift #1 at v0.80.10; documented in the 0.82.1 rpc.md. */
   totalTokens?: number
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
 }
