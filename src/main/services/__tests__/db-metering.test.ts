@@ -50,7 +50,8 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      expect(userVersion(db)).toBe(6)
+      // Bump alongside MIGRATIONS in db.ts — currently v7 (remote_config).
+      expect(userVersion(db)).toBe(7)
     } finally {
       db.close()
     }

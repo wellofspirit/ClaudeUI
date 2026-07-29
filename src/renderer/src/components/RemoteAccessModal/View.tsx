@@ -213,6 +213,17 @@ export function RemoteAccessModalView({
               >
                 {starting ? 'Starting...' : 'Start Remote Server'}
               </button>
+
+              {/* Surfaces a failed listen attempt (e.g. from a failed autostart —
+                  there's no modal open at that point to show it any other way). */}
+              {status?.lastError && (
+                <div
+                  data-testid="RemoteAccessModal.lastError"
+                  className="w-full text-danger text-[11px] text-center px-2"
+                >
+                  {status.lastError}
+                </div>
+              )}
             </div>
           ) : status ? (
             /* Running state */

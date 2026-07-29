@@ -258,6 +258,35 @@ const MIGRATIONS: Migration[] = [
           ON dispatched_usage(from_routing_id);
       `)
     }
+  },
+  {
+    // v7 — Remote-server persisted config + password credential (Phase 1 of
+    // remote auth). Single-row table (id fixed to 1 via CHECK) mirrors the
+    // singleton nature of "the" remote server config — no per-profile config
+    // exists yet. NEVER expose password_salt/password_hash/kdf_params over
+    // IPC (see remote:get-config in main/index.ts) — this table is the one
+    // place those bytes live; UISettings must never carry them (a remote
+    // client can read/write UISettings via config:save-settings).
+    //
+    // tls_mode is a placeholder column (wired in Phase 3) so a later
+    // migration doesn't need to ALTER TABLE just to add it.
+    version: 7,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS remote_config (
+          id                  INTEGER PRIMARY KEY CHECK (id = 1),
+          port                INTEGER NOT NULL DEFAULT 0,
+          bind_host           TEXT,
+          autostart           INTEGER NOT NULL DEFAULT 0,
+          tls_mode            INTEGER NOT NULL DEFAULT 0,
+          password_salt       TEXT,
+          password_hash       TEXT,
+          kdf_params          TEXT,
+          password_updated_at INTEGER,
+          updated_at          INTEGER NOT NULL
+        );
+      `)
+    }
   }
 ]
 
@@ -1231,4 +1260,153 @@ export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string
     newRoutingId,
     oldRoutingId
   )
+}
+
+// ---------------------------------------------------------------------------
+// Remote-server config repository (Phase 1 — persisted remote-server config)
+// Single-row table (id fixed to 1). password_salt/password_hash/kdf_params
+// NEVER cross IPC (see remote:get-config in main/index.ts) — they're read
+// here only by remote-auth.ts (credential verification) and the accessors
+// below. setRemoteConfig/setRemotePassword each preserve the columns owned
+// by the OTHER accessor (read-modify-write against the current row).
+// ---------------------------------------------------------------------------
+
+interface RemoteConfigDbRow {
+  id: number
+  port: number
+  bind_host: string | null
+  autostart: number
+  tls_mode: number
+  password_salt: string | null
+  password_hash: string | null
+  kdf_params: string | null
+  password_updated_at: number | null
+  updated_at: number
+}
+
+export interface RemoteConfigRow {
+  port: number
+  bindHost: string | null
+  autostart: boolean
+  tlsMode: number
+  passwordSalt: string | null
+  passwordHash: string | null
+  kdfParams: string | null
+  passwordUpdatedAt: number | null
+  updatedAt: number
+}
+
+function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
+  return {
+    port: row.port,
+    bindHost: row.bind_host,
+    autostart: row.autostart === 1,
+    tlsMode: row.tls_mode,
+    passwordSalt: row.password_salt,
+    passwordHash: row.password_hash,
+    kdfParams: row.kdf_params,
+    passwordUpdatedAt: row.password_updated_at,
+    updatedAt: row.updated_at
+  }
+}
+
+function getRemoteConfigDbRow(db: Db): RemoteConfigDbRow | undefined {
+  return db.prepare('SELECT * FROM remote_config WHERE id = 1').get() as
+    | RemoteConfigDbRow
+    | undefined
+}
+
+/** Read the singleton remote-server config row, or null if never written. */
+export function getRemoteConfig(): RemoteConfigRow | null {
+  const db = getDb()
+  const row = getRemoteConfigDbRow(db)
+  return row ? rowToRemoteConfig(row) : null
+}
+
+/**
+ * Upsert the singleton remote-server config row. Only touches
+ * port/bind_host/autostart/tls_mode — password columns are left untouched on
+ * an existing row (SQLite `INSERT ... ON CONFLICT DO UPDATE` only reassigns
+ * the columns named in the SET clause) and default to NULL on first insert.
+ * Fields omitted from `partial` keep their current value (or the column
+ * default if the row doesn't exist yet).
+ */
+export function setRemoteConfig(partial: {
+  port?: number
+  bindHost?: string | null
+  autostart?: boolean
+  tlsMode?: number
+}): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  const port = partial.port ?? existing?.port ?? 0
+  const bindHost = partial.bindHost !== undefined ? partial.bindHost : (existing?.bind_host ?? null)
+  const autostart =
+    partial.autostart !== undefined ? (partial.autostart ? 1 : 0) : (existing?.autostart ?? 0)
+  const tlsMode = partial.tlsMode ?? existing?.tls_mode ?? 0
+
+  db.prepare(
+    `INSERT INTO remote_config (id, port, bind_host, autostart, tls_mode, updated_at)
+     VALUES (1, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       port       = excluded.port,
+       bind_host  = excluded.bind_host,
+       autostart  = excluded.autostart,
+       tls_mode   = excluded.tls_mode,
+       updated_at = excluded.updated_at`
+  ).run(port, bindHost, autostart, tlsMode, Date.now())
+}
+
+/**
+ * Upsert the password credential columns, preserving the config columns
+ * (port/bindHost/autostart/tlsMode) untouched on an existing row. `salt` and
+ * `hash` are lowercase hex; `kdfParams` is the JSON blob from
+ * remote-auth.ts's computeStoredCredential.
+ */
+export function setRemotePassword(salt: string, hash: string, kdfParams: string): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  const now = Date.now()
+
+  db.prepare(
+    `INSERT INTO remote_config (
+       id, port, bind_host, autostart, tls_mode,
+       password_salt, password_hash, kdf_params, password_updated_at, updated_at
+     ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       password_salt       = excluded.password_salt,
+       password_hash       = excluded.password_hash,
+       kdf_params          = excluded.kdf_params,
+       password_updated_at = excluded.password_updated_at,
+       updated_at          = excluded.updated_at`
+  ).run(
+    existing?.port ?? 0,
+    existing?.bind_host ?? null,
+    existing?.autostart ?? 0,
+    existing?.tls_mode ?? 0,
+    salt,
+    hash,
+    kdfParams,
+    now,
+    now
+  )
+}
+
+/**
+ * NULL out the password credential columns (salt/hash/kdf_params/updated_at).
+ * No-op if the row doesn't exist yet (nothing to clear).
+ */
+export function clearRemotePassword(): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  if (!existing) return
+  db.prepare(
+    `UPDATE remote_config SET
+       password_salt = NULL,
+       password_hash = NULL,
+       kdf_params = NULL,
+       password_updated_at = NULL,
+       updated_at = ?
+     WHERE id = 1`
+  ).run(Date.now())
 }

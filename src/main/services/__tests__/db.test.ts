@@ -19,6 +19,10 @@ import {
   importSessionEnginesOnce,
   runMigrations,
   closeDb,
+  getRemoteConfig,
+  setRemoteConfig,
+  setRemotePassword,
+  clearRemotePassword,
   type Migration,
   type Db
 } from '../db'
@@ -127,14 +131,14 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v6)', () => {
+  it('applies the real production migration set (v1–v7)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
       runMigrations(db)
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
-      // v5: daily_usage, v6: dispatched_usage
-      expect(userVersion(db)).toBe(6)
+      // v5: daily_usage, v6: dispatched_usage, v7: remote_config
+      expect(userVersion(db)).toBe(7)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -153,6 +157,9 @@ describe('migration framework — user_version guard', () => {
       // dispatched_usage must exist (ADR-033 M4-B v6 migration).
       const dispatchedRows = db.prepare('SELECT * FROM dispatched_usage').all()
       expect(dispatchedRows).toEqual([])
+      // remote_config must exist (Phase 1 remote-auth v7 migration).
+      const remoteRows = db.prepare('SELECT * FROM remote_config').all()
+      expect(remoteRows).toEqual([])
     } finally {
       db.close()
     }
@@ -479,5 +486,89 @@ describe('importSessionEnginesOnce', () => {
     const meta = getSessionMeta('oc')
     expect(meta?.engineId).toBe('opencode')
     expect(meta?.model?.modelId).toBe('gpt-4o')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// remote_config repository (Phase 1 — persisted remote-server config)
+// ---------------------------------------------------------------------------
+
+describe('remote_config repository', () => {
+  it('getRemoteConfig returns null before any row is written', () => {
+    expect(getRemoteConfig()).toBeNull()
+  })
+
+  it('setRemoteConfig then getRemoteConfig round-trips the config fields', () => {
+    setRemoteConfig({ port: 4568, bindHost: '192.168.1.5', autostart: true, tlsMode: 0 })
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(4568)
+    expect(config?.bindHost).toBe('192.168.1.5')
+    expect(config?.autostart).toBe(true)
+    expect(config?.tlsMode).toBe(0)
+    // No password written yet.
+    expect(config?.passwordHash).toBeNull()
+    expect(config?.passwordSalt).toBeNull()
+    expect(config?.kdfParams).toBeNull()
+    expect(config?.passwordUpdatedAt).toBeNull()
+  })
+
+  it('setRemoteConfig with a partial update preserves fields not included', () => {
+    setRemoteConfig({ port: 5000, bindHost: '10.0.0.1', autostart: false, tlsMode: 0 })
+    setRemoteConfig({ autostart: true }) // only autostart changes
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(5000)
+    expect(config?.bindHost).toBe('10.0.0.1')
+    expect(config?.autostart).toBe(true)
+  })
+
+  it('setRemoteConfig accepts bindHost: null to mean "all interfaces"', () => {
+    setRemoteConfig({ bindHost: '10.0.0.1' })
+    expect(getRemoteConfig()?.bindHost).toBe('10.0.0.1')
+    setRemoteConfig({ bindHost: null })
+    expect(getRemoteConfig()?.bindHost).toBeNull()
+  })
+
+  it('setRemotePassword sets passwordHash-derived state and preserves config columns', () => {
+    setRemoteConfig({ port: 4568, bindHost: '192.168.1.5', autostart: true, tlsMode: 0 })
+    setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
+    const config = getRemoteConfig()
+    // Config columns set by the earlier setRemoteConfig call must survive.
+    expect(config?.port).toBe(4568)
+    expect(config?.bindHost).toBe('192.168.1.5')
+    expect(config?.autostart).toBe(true)
+    // Password columns now populated.
+    expect(config?.passwordSalt).toBe('aa'.repeat(16))
+    expect(config?.passwordHash).toBe('bb'.repeat(32))
+    expect(config?.kdfParams).toBe('{"algo":"scrypt"}')
+    expect(config?.passwordUpdatedAt).not.toBeNull()
+  })
+
+  it('clearRemotePassword nulls the password columns and preserves config columns', () => {
+    setRemoteConfig({ port: 4568, bindHost: '192.168.1.5', autostart: true, tlsMode: 0 })
+    setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
+    clearRemotePassword()
+    const config = getRemoteConfig()
+    expect(config?.passwordSalt).toBeNull()
+    expect(config?.passwordHash).toBeNull()
+    expect(config?.kdfParams).toBeNull()
+    expect(config?.passwordUpdatedAt).toBeNull()
+    // Config columns untouched.
+    expect(config?.port).toBe(4568)
+    expect(config?.bindHost).toBe('192.168.1.5')
+    expect(config?.autostart).toBe(true)
+  })
+
+  it('clearRemotePassword is a no-op when no row exists yet', () => {
+    expect(() => clearRemotePassword()).not.toThrow()
+    expect(getRemoteConfig()).toBeNull()
+  })
+
+  it('setRemotePassword on a fresh db (no prior setRemoteConfig) defaults config columns', () => {
+    setRemotePassword('cc'.repeat(16), 'dd'.repeat(32), '{"algo":"scrypt"}')
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(0)
+    expect(config?.bindHost).toBeNull()
+    expect(config?.autostart).toBe(false)
+    expect(config?.passwordHash).toBe('dd'.repeat(32))
   })
 })

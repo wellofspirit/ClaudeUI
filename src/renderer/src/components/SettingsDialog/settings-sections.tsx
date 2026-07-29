@@ -46,6 +46,7 @@ import {
   InfoTooltip
 } from './settings-controls'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { RemoteServerSettings } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
 import { SharedProviders } from './SharedProviders'
 import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
@@ -3251,6 +3252,12 @@ export const SECTIONS: Section[] = [
             tooltip="When on, the local view auto-switches to sessions created or used by the remote client. When off, remote sessions still run in the background but the local view stays put."
           />
         )
+      },
+      {
+        key: 'remoteServerConfig',
+        label: 'Remote server',
+        keywords: 'remote port password autostart bind interface server',
+        render: () => <RemoteServerSettings />
       }
     ]
   },

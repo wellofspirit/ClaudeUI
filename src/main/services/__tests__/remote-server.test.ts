@@ -739,6 +739,64 @@ describe('RemoteServer — listen failure resets state (M-RM2)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// lastError — RemoteStatus surfaces the most recent listen-failure message
+// (Phase 1 remote-auth). Autostart has no modal open to report a failed
+// start to, so this field is how the Settings UI learns about it instead.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — lastError (RemoteStatus)', () => {
+  it('a failed start() (port already in use) sets getStatus().lastError', async () => {
+    const port = await ephemeralPort()
+    // Occupy the port with a plain http server so start() genuinely fails to bind.
+    const occupant = http.createServer()
+    await new Promise<void>((resolve) => occupant.listen(port, '127.0.0.1', resolve))
+    try {
+      const server = new RemoteServer(new RemoteDispatcher())
+      expect(server.getStatus().lastError).toBeNull()
+      await expect(server.start(port, '127.0.0.1')).rejects.toThrow()
+      const status = server.getStatus()
+      expect(status.lastError).not.toBeNull()
+      expect(status.lastError).toMatch(/EADDRINUSE/)
+    } finally {
+      await new Promise<void>((resolve) => occupant.close(() => resolve()))
+    }
+  })
+
+  it('a subsequent successful start() clears lastError', async () => {
+    const occupiedPort = await ephemeralPort()
+    const occupant = http.createServer()
+    await new Promise<void>((resolve) => occupant.listen(occupiedPort, '127.0.0.1', resolve))
+    const server = new RemoteServer(new RemoteDispatcher())
+    try {
+      await expect(server.start(occupiedPort, '127.0.0.1')).rejects.toThrow()
+      expect(server.getStatus().lastError).not.toBeNull()
+
+      const freePort = await ephemeralPort()
+      await server.start(freePort, '127.0.0.1')
+      expect(server.getStatus().lastError).toBeNull()
+    } finally {
+      server.stop()
+      await new Promise<void>((resolve) => occupant.close(() => resolve()))
+    }
+  })
+
+  it('stop() clears lastError', async () => {
+    const occupiedPort = await ephemeralPort()
+    const occupant = http.createServer()
+    await new Promise<void>((resolve) => occupant.listen(occupiedPort, '127.0.0.1', resolve))
+    const server = new RemoteServer(new RemoteDispatcher())
+    try {
+      await expect(server.start(occupiedPort, '127.0.0.1')).rejects.toThrow()
+      expect(server.getStatus().lastError).not.toBeNull()
+      server.stop()
+      expect(server.getStatus().lastError).toBeNull()
+    } finally {
+      await new Promise<void>((resolve) => occupant.close(() => resolve()))
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // M-RM3: WS origin check + limits
 // ---------------------------------------------------------------------------
 

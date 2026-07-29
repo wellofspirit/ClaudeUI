@@ -37,6 +37,12 @@ import { registerAutomationIpc } from './ipc/automation.ipc'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-handlers'
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
+import {
+  getRemoteConfig,
+  setRemoteConfig as dbSetRemoteConfig,
+  clearRemotePassword
+} from './services/db'
+import { provisionPassword } from './services/remote-auth'
 import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
@@ -178,6 +184,32 @@ contextMenu({
     }
   ]
 })
+
+/**
+ * Sanitized view of the persisted remote-server config for `remote:get-config`
+ * / `remote:set-config` responses — NEVER includes password_salt/
+ * password_hash/kdf_params (only a `passwordSet` boolean derived from
+ * whether a hash is stored). Defaults mirror the DB column defaults so the
+ * shape is stable even before any row has been written.
+ */
+function sanitizedRemoteConfig(): {
+  port: number
+  bindHost: string | null
+  autostart: boolean
+  tlsMode: number
+  passwordSet: boolean
+  passwordUpdatedAt: number | null
+} {
+  const config = getRemoteConfig()
+  return {
+    port: config?.port ?? 0,
+    bindHost: config?.bindHost ?? null,
+    autostart: config?.autostart ?? false,
+    tlsMode: config?.tlsMode ?? 0,
+    passwordSet: config?.passwordHash != null,
+    passwordUpdatedAt: config?.passwordUpdatedAt ?? null
+  }
+}
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
@@ -379,7 +411,16 @@ function createWindow(): void {
   ipcMain.handle('plugin:preload-path', () => join(__dirname, '../preload/plugin-preload.js'))
 
   // Remote access IPC handlers
-  for (const ch of ['remote:interfaces', 'remote:start', 'remote:stop', 'remote:status']) {
+  for (const ch of [
+    'remote:interfaces',
+    'remote:start',
+    'remote:stop',
+    'remote:status',
+    'remote:get-config',
+    'remote:set-config',
+    'remote:set-password',
+    'remote:clear-password'
+  ]) {
     ipcMain.removeHandler(ch)
   }
   ipcMain.handle('remote:interfaces', () => {
@@ -388,7 +429,16 @@ function createWindow(): void {
   ipcMain.handle(
     'remote:start',
     async (_e, opts?: { port?: number; host?: string; tunnel?: boolean }) => {
-      return await remoteServer.start(opts?.port ?? 0, opts?.host, { tunnel: opts?.tunnel })
+      // Fixed port/bind-host now come from the persisted config so a
+      // configured port takes effect on every start, not just autostart.
+      // `opts.host` (from the modal's interface picker) still overrides the
+      // persisted bind host for a one-off start; `opts.port` is intentionally
+      // NOT consulted here — the modal never sends one, and the persisted
+      // port is the single source of truth for "what port do we listen on".
+      const config = getRemoteConfig()
+      const port = config?.port ?? 0
+      const host = opts?.host ?? config?.bindHost ?? undefined
+      return await remoteServer.start(port, host, { tunnel: opts?.tunnel })
     }
   )
   ipcMain.handle('remote:stop', () => {
@@ -397,6 +447,53 @@ function createWindow(): void {
   ipcMain.handle('remote:status', () => {
     return remoteServer.getStatus()
   })
+
+  // Remote-server config + credential IPC (Phase 1 of remote auth). Desktop-
+  // renderer-only: all four channels are in RemoteDispatcher.BLOCKED and are
+  // never registered on the remote dispatcher (remote-handlers.ts), so a
+  // remote client can never reach them. remote:get-config NEVER returns
+  // password_salt/password_hash/kdf_params — only a passwordSet boolean.
+  ipcMain.handle('remote:get-config', () => sanitizedRemoteConfig())
+  ipcMain.handle(
+    'remote:set-config',
+    (
+      _e,
+      partial: { port?: number; bindHost?: string | null; autostart?: boolean; tlsMode?: number }
+    ) => {
+      if (partial.port !== undefined && partial.port !== 0) {
+        if (partial.port < 1024 || partial.port > 65535) {
+          throw new Error('Port must be 0 (random) or between 1024 and 65535')
+        }
+      }
+      dbSetRemoteConfig(partial)
+      return sanitizedRemoteConfig()
+    }
+  )
+  ipcMain.handle('remote:set-password', (_e, password: string) => {
+    provisionPassword(password)
+  })
+  ipcMain.handle('remote:clear-password', () => {
+    clearRemotePassword()
+  })
+
+  // Autostart: fire-and-forget so a listen failure (e.g. EADDRINUSE from a
+  // stale previous instance) never blocks or crashes app startup. The error
+  // reaches the UI through RemoteStatus.lastError (set by RemoteServer.start's
+  // catch block), not through this try/catch — this one is just a backstop
+  // logger so an unexpected throw (not a listen failure) doesn't go silent.
+  void (async () => {
+    try {
+      const config = getRemoteConfig()
+      if (config?.autostart) {
+        await remoteServer.start(config.port, config.bindHost ?? undefined)
+      }
+    } catch (err) {
+      logger.error(
+        'main',
+        `Remote server autostart failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  })()
 
   // Before-quit: give the renderer a chance to prompt about active worktrees.
   // The coordinator + its listener are created exactly ONCE (macOS `activate`

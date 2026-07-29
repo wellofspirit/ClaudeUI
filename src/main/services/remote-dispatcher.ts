@@ -43,7 +43,18 @@ export class RemoteDispatcher {
     'account:switch',
     'account:delete',
     // Spawns a local opencode server — meaningless and unsafe over remote (Phase 9b).
-    'usage:refresh-prices'
+    'usage:refresh-prices',
+    // Remote-server config + credential (Phase 1 of remote auth). A remote
+    // client must never read/rotate its own auth credential or flip
+    // transport/autostart flags for the server it's connected through —
+    // mirrors the auth/account entries above. remote:get-config also never
+    // returns password_salt/password_hash/kdf_params even to the desktop IPC
+    // caller, but blocking it here means a compromised/rogue remote client
+    // can't even learn `passwordSet`/`passwordUpdatedAt`.
+    'remote:get-config',
+    'remote:set-config',
+    'remote:set-password',
+    'remote:clear-password'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

@@ -95,6 +95,8 @@ export class RemoteServer {
   private pendingConnections = 0
   /** Per-IP failed-auth tracking for the sliding {@link FAILED_AUTH_WINDOW_MS} window. */
   private failedAuth = new Map<string, { count: number; firstAt: number }>()
+  /** Message from the most recent failed listen attempt (see {@link RemoteStatus.lastError}). */
+  private lastStartError: string | null = null
 
   /** Callback to notify the desktop renderer of status changes. */
   private statusCallback: ((status: RemoteStatus) => void) | null = null
@@ -226,9 +228,12 @@ export class RemoteServer {
       this.e2eKey = null
       this.port = 0
       this.boundHost = ''
+      this.lastStartError = err instanceof Error ? err.message : String(err)
+      this.notifyStatus()
       throw err
     }
 
+    this.lastStartError = null
     this.port = actualPort
 
     // Register bridge as extra window for all session events
@@ -296,6 +301,7 @@ export class RemoteServer {
     this.boundHost = ''
     this.pendingConnections = 0
     this.failedAuth.clear()
+    this.lastStartError = null
     logger.info('remote-server', 'Remote server stopped')
     this.notifyStatus()
   }
@@ -325,7 +331,8 @@ export class RemoteServer {
       tunnelState: this.e2eKey !== null ? tunnelStatus.state : null,
       tunnelError: tunnelStatus.error,
       connectedClients: this.clients.size,
-      clientIps: Array.from(this.clients.values()).map((c) => c.ip)
+      clientIps: Array.from(this.clients.values()).map((c) => c.ip),
+      lastError: this.lastStartError
     }
   }
 

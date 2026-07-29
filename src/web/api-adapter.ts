@@ -547,9 +547,26 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       tunnelState: null,
       tunnelError: null,
       connectedClients: 0,
-      clientIps: []
+      clientIps: [],
+      lastError: null
     }),
     onRemoteStatus: () => () => {},
+    // Persisted remote-server config (Phase 1) is main-only IPC on the
+    // desktop — never registered on the remote dispatcher (see
+    // RemoteDispatcher.BLOCKED), so a remote/web client must never be able to
+    // read/rotate the credential or flip transport/autostart flags.
+    getRemoteConfig: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    setRemoteConfig: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    setRemotePassword: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    clearRemotePassword: async () => {
+      throw new Error('Not available in remote mode')
+    },
 
     // Voice input — not available on web (audio hardware is on the server)
     voiceStartServer: async () => {},

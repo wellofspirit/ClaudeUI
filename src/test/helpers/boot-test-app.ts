@@ -341,6 +341,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
     getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
     onRemoteStatus: onEvent('remote:status'),
+    getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
+    setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
+    setRemotePassword: (password) => ipcRenderer.invoke('remote:set-password', password),
+    clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
 
     voiceStartServer: (routingId) => unwrap('voice:start-server', routingId),
     voiceStopServer: (routingId) => unwrap('voice:stop-server', routingId),

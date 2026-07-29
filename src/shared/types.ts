@@ -1158,6 +1158,16 @@ export interface NetworkInterfaceInfo {
   priority: number // lower = more preferred (1 = LAN, 9 = CGNAT/VPN)
 }
 
+/** Sanitized remote-server config — NEVER carries password_salt/password_hash/kdf_params. */
+export interface RemoteConfig {
+  port: number
+  bindHost: string | null
+  autostart: boolean
+  tlsMode: number
+  passwordSet: boolean
+  passwordUpdatedAt: number | null
+}
+
 interface RemoteAPI {
   getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
   startRemoteServer(opts?: {
@@ -1168,6 +1178,21 @@ interface RemoteAPI {
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
+  /** Persisted remote-server config (fixed port, bind host, autostart, tls
+   *  placeholder, password status). Main-only — never reachable via the
+   *  remote WS dispatcher (RemoteDispatcher.BLOCKED). */
+  getRemoteConfig(): Promise<RemoteConfig>
+  /** Partial update of the persisted config; returns the fresh sanitized config. */
+  setRemoteConfig(partial: {
+    port?: number
+    bindHost?: string | null
+    autostart?: boolean
+    tlsMode?: number
+  }): Promise<RemoteConfig>
+  /** Provision a new remote-access password. Throws (min length 12) on validation failure. */
+  setRemotePassword(password: string): Promise<void>
+  /** Clear the remote-access password credential. */
+  clearRemotePassword(): Promise<void>
 }
 
 export type TunnelState =
@@ -1188,6 +1213,11 @@ export interface RemoteStatus {
   tunnelError: string | null
   connectedClients: number
   clientIps: string[]
+  /** Message from the most recent failed `start()` listen attempt (e.g.
+   *  EADDRINUSE), or null if the last start succeeded / no start has failed
+   *  since the last stop(). Surfaces autostart failures, which are otherwise
+   *  invisible (no modal open to report them to). */
+  lastError: string | null
 }
 
 // ---------------------------------------------------------------------------

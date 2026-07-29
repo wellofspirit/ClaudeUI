@@ -68,7 +68,14 @@ describe('RemoteDispatcher', () => {
       'terminal:write',
       'terminal:resize',
       'terminal:kill',
-      'terminal:kill-by-cwd'
+      'terminal:kill-by-cwd',
+      // Remote-server config + credential (Phase 1 of remote auth) — a remote
+      // client must never read/rotate its own auth credential or flip
+      // transport/autostart flags.
+      'remote:get-config',
+      'remote:set-config',
+      'remote:set-password',
+      'remote:clear-password'
     ] as const
 
     it.each(BLOCKED_CHANNELS)(
