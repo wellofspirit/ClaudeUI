@@ -155,6 +155,77 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** Poll until `predicate` holds. Generous deadline — nominal completion is
+ *  tens of ms; the slack only matters under full-suite CPU starvation. */
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`waitFor timed out: ${label}`)
+    await sleep(10)
+  }
+}
+
+/**
+ * Fire an IDEMPOTENT `trigger` (an auth-file write) and poll until `done`.
+ * If the watch event never arrives, re-fire the trigger every `refireMs`.
+ *
+ * The re-fire is the actual de-flaker: on macOS, fs.watch arms its FSEvents
+ * stream asynchronously, so a write landing right after `sync.start()` can be
+ * LOST outright — no event, ever. That (not CPU starvation) is what made this
+ * suite flake: a fixed sleep(350) — or any pure wait — times out on a lost
+ * event, while a re-written file re-provokes the (by then live) watcher.
+ * Triggers must be idempotent: re-firing after `done` already flipped, or
+ * re-delivering the same content twice, must not change the asserted outcome
+ * (all triggers below re-write identical content, so extra reconciles hit
+ * CredentialSync's own refresh-equality loop guard).
+ *
+ * `refireMs` must comfortably EXCEED the sync's watchDebounceMs — every event
+ * RESETS the debounce timer, so re-firing faster than the debounce would
+ * starve the reconcile forever.
+ */
+async function triggerUntil(
+  trigger: () => void,
+  done: () => boolean,
+  label: string,
+  refireMs = 500,
+  timeoutMs = 10_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  trigger()
+  let lastFire = Date.now()
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`triggerUntil timed out: ${label}`)
+    if (Date.now() - lastFire >= refireMs) {
+      trigger()
+      lastFire = Date.now()
+    }
+    await sleep(10)
+  }
+}
+
+/**
+ * Shadow the private `handleExternalChange` with a per-engine completion
+ * counter so the fs-watch tests can wait for a guarded reconcile to have
+ * actually RUN before asserting it did NOT adopt — a fixed sleep could pass
+ * without the reconcile ever running (and did, silently, when the watch
+ * event was lost — see triggerUntil).
+ */
+function instrumentReconciles(sync: CredentialSync): (engine: 'pi' | 'opencode') => number {
+  const internals = sync as unknown as {
+    handleExternalChange(engine: 'pi' | 'opencode'): Promise<void>
+  }
+  const original = internals.handleExternalChange.bind(sync)
+  const counts = { pi: 0, opencode: 0 }
+  internals.handleExternalChange = async (engine): Promise<void> => {
+    try {
+      await original(engine)
+    } finally {
+      counts[engine]++
+    }
+  }
+  return (engine) => counts[engine]
+}
+
 // ---------------------------------------------------------------------------
 // 0. isRefreshRevoked classification (Finding B)
 //
@@ -1260,30 +1331,46 @@ describe('CredentialSync — fs-watch resync', () => {
     writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
 
     const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    const reconciles = instrumentReconciles(sync)
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await sync.start()
+    await sync.start() // vault ties pi (same refresh) — no adopt, no feed, no watch events yet
 
     try {
-      writeRaw(piFile, 'openai-codex', { access: 'a2', refresh: 'r2', expires: now + 1_999_999 })
-      await sleep(350)
-
+      const rotated = { access: 'a2', refresh: 'r2', expires: now + 1_999_999 }
+      await triggerUntil(
+        () => writeRaw(piFile, 'openai-codex', rotated),
+        () => save.mock.calls.length >= 1,
+        'external rotation adopted'
+      )
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({ refresh: 'r2', expires: now + 1_999_999 })
       )
+      // The re-feed of the other store happens inside the same reconcile,
+      // right after save() — no further fs event needed, a plain wait is safe.
+      await waitFor(() => opencode.feed.mock.calls.length >= 1, 'other store re-fed')
       expect(opencode.feed).toHaveBeenCalledWith(
         'openai',
         expect.objectContaining({ refresh: 'r2' })
       )
 
       // feedAll's own re-write of pi's file (re-syncing the source engine
-      // too) fires the SAME watcher again — the loop guard (refresh token
-      // now matches the vault's) must prevent a second adopt.
-      await sleep(350)
+      // too) fires the SAME watcher again with content matching the vault —
+      // exactly what the re-fired trigger below re-provokes if that event is
+      // lost. Wait for a guarded reconcile to have RUN strictly after the
+      // adopting one completed, then assert the loop guard (refresh token now
+      // matches the vault's) prevented a second adopt.
+      await waitFor(() => reconciles('pi') >= 1, 'adopting reconcile to complete')
+      const basePi = reconciles('pi')
+      await triggerUntil(
+        () => writeRaw(piFile, 'openai-codex', rotated),
+        () => reconciles('pi') > basePi,
+        'guarded self-write reconcile to run'
+      )
       expect(save).toHaveBeenCalledTimes(1)
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it("the vault's OWN feedAll write does not trigger an adopt (loop guard)", async () => {
     const now = Date.now()
@@ -1298,17 +1385,32 @@ describe('CredentialSync — fs-watch resync', () => {
     const opencode = makeRealFeedTarget(opencodeFile)
 
     const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    const reconciles = instrumentReconciles(sync)
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await sync.start()
+    await sync.start() // engines empty, vault newest — no writes at start
 
     try {
       await sync.feedAll(initial) // writes refresh='r1' — identical to the vault's current credential
-      await sleep(350)
+      // Wait for a guarded reconcile per engine to have actually RUN before
+      // asserting neither adopted. The re-fired writeRaw carries the SAME
+      // content feedAll just wrote, so it re-provokes the identical guard
+      // path if the original watch event was lost.
+      const rewrite = { access: initial.access, refresh: initial.refresh, expires: initial.expires }
+      await triggerUntil(
+        () => writeRaw(piFile, 'openai-codex', rewrite),
+        () => reconciles('pi') >= 1,
+        'guarded pi reconcile to run'
+      )
+      await triggerUntil(
+        () => writeRaw(opencodeFile, 'openai', rewrite),
+        () => reconciles('opencode') >= 1,
+        'guarded opencode reconcile to run'
+      )
       expect(save).not.toHaveBeenCalled()
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it('ignores an externally-written credential that is OLDER (earlier expires) than the vault current one', async () => {
     const now = Date.now()
@@ -1324,17 +1426,22 @@ describe('CredentialSync — fs-watch resync', () => {
     writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
 
     const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    const reconciles = instrumentReconciles(sync)
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await sync.start()
+    await sync.start() // vault ties pi — no adopt, no feed, no watch events yet
 
     try {
-      writeRaw(piFile, 'openai-codex', { access: 'a0', refresh: 'r0', expires: now + 1000 }) // different + OLDER
-      await sleep(350)
+      await triggerUntil(
+        // different + OLDER
+        () => writeRaw(piFile, 'openai-codex', { access: 'a0', refresh: 'r0', expires: now + 1000 }),
+        () => reconciles('pi') >= 1,
+        'older-credential reconcile to run'
+      )
       expect(save).not.toHaveBeenCalled()
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it('debounces rapid successive external writes into a single reconciliation using the LAST value', async () => {
     const now = Date.now()
@@ -1349,7 +1456,12 @@ describe('CredentialSync — fs-watch resync', () => {
     const opencode = makeRealFeedTarget(opencodeFile)
     writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
 
-    const sync = new CredentialSync({ vault, watchDebounceMs: 150 })
+    // Debounce is deliberately WIDE relative to the 20ms write spacing: the
+    // coalescing property under test only breaks if a single inter-write gap
+    // exceeds the whole window, and 1000ms keeps that unreachable even under
+    // full-suite CPU starvation (150ms did not — a starved loop iteration
+    // could blow through it and produce a second, mid-sequence save).
+    const sync = new CredentialSync({ vault, watchDebounceMs: 1000 })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
 
@@ -1360,15 +1472,30 @@ describe('CredentialSync — fs-watch resync', () => {
           refresh: `r${i}`,
           expires: now + 2_000_000 + i
         })
-        await sleep(20) // well within the 150ms debounce window
+        await sleep(20) // well within the debounce window
       }
-      await sleep(450) // past the debounce window
+      // The single debounced reconcile fires ~1000ms after the LAST event and
+      // reads the file at that moment — so the one save must carry r4
+      // whichever subset of the burst's events actually got delivered. The
+      // re-fired trigger (final value only, refire > debounce) covers total
+      // event loss; a post-save straggler hits the loop guard (r4 == vault).
+      await triggerUntil(
+        () =>
+          writeRaw(piFile, 'openai-codex', {
+            access: 'a4',
+            refresh: 'r4',
+            expires: now + 2_000_004
+          }),
+        () => save.mock.calls.length >= 1,
+        'debounced reconcile to run',
+        2_500 // must exceed the 1000ms debounce — see triggerUntil
+      )
       expect(save).toHaveBeenCalledTimes(1)
       expect(save).toHaveBeenCalledWith(expect.objectContaining({ refresh: 'r4' }))
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it('an FSWatcher error closes and drops the watcher so it can be re-created (no unhandled process error)', async () => {
     const now = Date.now()
