@@ -236,6 +236,10 @@ export interface PerSessionSnapshot {
   pendingApprovals: PendingApproval[]
   todos: TodoItem[]
   taskNotifications: TaskNotification[]
+  /** Started-but-not-finished tasks (task_started with no task_notification
+   *  yet) — without this a remote client that connects or resyncs mid-task
+   *  reads an async-launched Task as already complete. */
+  activeTasks?: Record<string, { taskId: string; taskType: string }>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
   subagentStreamingText: Record<string, string>

@@ -62,6 +62,7 @@ export function useClaudeEvents(): void {
   const retractMessages = useSessionStore((s) => s.retractMessages)
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
+  const setTaskStarted = useSessionStore((s) => s.setTaskStarted)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
   const addSubagentMessage = useSessionStore((s) => s.addSubagentMessage)
   const appendSubagentMessageBatch = useSessionStore((s) => s.appendSubagentMessageBatch)
@@ -340,6 +341,9 @@ export function useClaudeEvents(): void {
       window.api.onTaskProgress((routingId, data) => {
         updateTaskProgress(resolveRoutingId(routingId), data)
       }),
+      window.api.onTaskStarted((routingId, data) => {
+        setTaskStarted(resolveRoutingId(routingId), data)
+      }),
       window.api.onTaskNotification((routingId, data) => {
         addTaskNotification(resolveRoutingId(routingId), data)
       }),
@@ -549,6 +553,7 @@ export function useClaudeEvents(): void {
     retractMessages,
     appendToolResult,
     updateTaskProgress,
+    setTaskStarted,
     addTaskNotification,
     addSubagentMessage,
     appendSubagentMessageBatch,

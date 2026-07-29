@@ -50,6 +50,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
+  const activeTasks = useActiveSession((s) => s.activeTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
   const [expanded, setExpanded] = useState(true)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -109,7 +110,13 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const resultText =
     resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  const isRunning = isBackground ? !bgNotification : !hasResult
+  // Same lifecycle predicate as TaskCard: a task_started record with no
+  // task_notification yet means RUNNING, regardless of tool_result /
+  // background-flag state (Claude 2.1.219+ async-launches Tasks and omits
+  // run_in_background). Tasks without a record (opencode/pi children) keep
+  // the legacy heuristic.
+  const hasActiveTask = !!activeTasks[toolUseId]
+  const isRunning = hasActiveTask ? true : isBackground ? !bgNotification : !hasResult
 
   const isError = isBackground ? bgNotification?.status === 'failed' : resultBlock?.isError
 

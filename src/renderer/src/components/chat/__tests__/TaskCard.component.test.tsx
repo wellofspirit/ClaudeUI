@@ -50,6 +50,130 @@ const defaultTaskView = {
   subagent: 'explore'
 }
 
+// ---------------------------------------------------------------------------
+// Async-launched task lifecycle (activeTasks / session:task-started)
+// ---------------------------------------------------------------------------
+//
+// Claude 2.1.219+ makes Agent/Task subagents background-by-default: the
+// Agent tool_use gets an IMMEDIATE tool_result ("Async agent launched
+// successfully...") and the input usually omits run_in_background. Pre-fix,
+// TaskCard derived isRunning from `isBackground ? !bgNotification : !hasResult`
+// — with isBackground false (input omits the flag) and hasResult true (the
+// instant tool_result), the card read as complete on arrival, hiding the Stop
+// button entirely. The fix: a store record in `activeTasks` (set on
+// session:task-started, cleared on session:task-notification) is now the
+// authoritative "is this task running" signal, checked BEFORE the legacy
+// tool_result/background-flag heuristic.
+describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  const asyncResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Async agent launched successfully. agentId: agent-abc123',
+    isError: false
+  }
+
+  it('(a) tool_result present + activeTasks record → still shows running + Stop (must fail pre-fix)', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    render(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+
+  it('(a cont.) "Send to background" is suppressed for an already-async task', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    render(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('(b) task-notification arrives → completed, Stop button gone', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    const { rerender } = render(
+      <TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />
+    )
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+
+    useSessionStore.getState().addTaskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: 'call_task_1',
+      status: 'completed',
+      outputFile: '',
+      summary: 'done',
+      usage: undefined
+    })
+
+    rerender(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('(c) no activeTasks record + tool_result → completed (opencode/legacy transcripts unaffected)', () => {
+    // No setTaskStarted call — this engine/path never emits task_started.
+    render(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('(d) historical session → never running, even with an activeTasks record', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true }
+      }
+    }))
+
+    // No tool_result at all — historical transcripts can render a task with no result.
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('activeTasks record with NO tool_result yet also shows running + Stop (spawn-to-first-result gap)', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+})
+
 describe('TaskCard — inline task approval', () => {
   let app: TestApp
   let respondCalls: Array<{ requestId: string; decision: string }>

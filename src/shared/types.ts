@@ -577,6 +577,24 @@ export interface TaskProgress {
   elapsedTimeSeconds: number
 }
 
+/**
+ * Emitted the moment cli.js spawns a Task/Agent (or background Bash) — mirrors
+ * `session:task-notification`'s payload conventions but for the START edge.
+ * Claude 2.1.219+ makes Agent/Task tasks background-by-default and the tool_use
+ * input usually omits `run_in_background`, so the renderer can no longer infer
+ * "is this task actually still running" from tool input alone (an immediate
+ * "Async agent launched successfully" tool_result would otherwise read as
+ * complete). This event is the authoritative "task exists and is running"
+ * signal; task-notification is the authoritative terminal signal. A task with
+ * no task-started record (opencode/pi child sessions, historical transcripts)
+ * falls back to the pre-existing tool_result/background-flag heuristic.
+ */
+export interface TaskStartedData {
+  toolUseId: string
+  taskId: string
+  taskType: string
+}
+
 export interface TaskNotification {
   taskId: string
   toolUseId: string | null
@@ -827,6 +845,8 @@ interface SessionAPI {
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
   onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
   onTaskNotification(cb: (routingId: string, data: TaskNotification) => void): () => void
+  /** Task exists and is running — see TaskStartedData for why this is needed. */
+  onTaskStarted(cb: (routingId: string, data: TaskStartedData) => void): () => void
   onSubagentStream(cb: (routingId: string, data: SubagentStreamDelta) => void): () => void
   onSubagentMessage(cb: (routingId: string, data: SubagentMessageData) => void): () => void
   onSubagentMessageBatch(

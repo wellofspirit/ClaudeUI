@@ -217,6 +217,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onToolResult: on('session:tool-result') as ClaudeAPI['onToolResult'],
     onTaskProgress: on('session:task-progress') as ClaudeAPI['onTaskProgress'],
     onTaskNotification: on('session:task-notification') as ClaudeAPI['onTaskNotification'],
+    onTaskStarted: on('session:task-started') as ClaudeAPI['onTaskStarted'],
     onSubagentStream: on('session:subagent-stream') as ClaudeAPI['onSubagentStream'],
     onSubagentMessage: on('session:subagent-message') as ClaudeAPI['onSubagentMessage'],
     onSubagentMessageBatch: on(

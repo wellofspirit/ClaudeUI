@@ -115,6 +115,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onToolResult: onEvent('session:tool-result'),
     onTaskProgress: onEvent('session:task-progress'),
     onTaskNotification: onEvent('session:task-notification'),
+    onTaskStarted: onEvent('session:task-started'),
     onSubagentStream: onEvent('session:subagent-stream'),
     onSubagentMessage: onEvent('session:subagent-message'),
     onSubagentMessageBatch: onEvent('session:subagent-message-batch'),

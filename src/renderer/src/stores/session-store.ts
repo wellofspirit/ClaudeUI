@@ -19,6 +19,7 @@ import type {
   TodoItem,
   TaskProgress,
   TaskNotification,
+  TaskStartedData,
   PermissionMode,
   ModelInfo,
   DirectoryGroup,
@@ -471,6 +472,18 @@ export interface PerSessionState {
   todos: TodoItem[]
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
+  /**
+   * Tasks that have received a `task_started` wire event but no matching
+   * `task_notification` yet — keyed by toolUseId. This is the authoritative
+   * "is this task actually still running" signal (see TaskStartedData):
+   * Claude 2.1.219+ makes Agent/Task background-by-default and often omits
+   * `run_in_background` on the tool_use input, so TaskCard can no longer
+   * infer running-vs-complete from tool input + tool_result alone. A record
+   * here means "running" regardless of tool_result/background-flag state;
+   * only opencode/pi child sessions and historical transcripts (which never
+   * emit task_started) fall back to the old heuristic.
+   */
+  activeTasks: Record<string, { taskId: string; taskType: string }>
   openedTaskToolUseIds: string[]
   rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>
@@ -567,6 +580,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   todos: [],
   taskProgressMap: {},
   taskNotifications: [],
+  activeTasks: {},
   openedTaskToolUseIds: [],
   rightPanel: 'none',
   subagentMessages: {},
@@ -944,6 +958,8 @@ interface SessionState {
   ) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
+  /** Record a task_started event — see PerSessionState.activeTasks doc comment. */
+  setTaskStarted: (routingId: string, data: TaskStartedData) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
   bulkSetSubagentMessages: (
     routingId: string,
@@ -2086,6 +2102,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
+  setTaskStarted: (routingId, data) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        activeTasks: {
+          ...s.activeTasks,
+          [data.toolUseId]: { taskId: data.taskId, taskType: data.taskType }
+        }
+      }))
+    })),
+
   addTaskNotification: (routingId, notification) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => {
@@ -2096,10 +2122,15 @@ export const useSessionStore = create<SessionState>((set) => ({
         const bashOutputs = notification.toolUseId
           ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.bashOutputs)
           : s.bashOutputs
+        // The task has reached a terminal state — it's no longer "active".
+        const activeTasks = notification.toolUseId
+          ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.activeTasks)
+          : s.activeTasks
         return {
           taskNotifications: [...s.taskNotifications, notification],
           stoppingTaskIds,
-          bashOutputs
+          bashOutputs,
+          activeTasks
         }
       })
     })),
@@ -2455,6 +2486,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           pendingApprovals: snap.pendingApprovals,
           todos: snap.todos,
           taskNotifications: snap.taskNotifications,
+          activeTasks: snap.activeTasks ?? {},
           taskProgressMap: snap.taskProgressMap,
           subagentMessages: snap.subagentMessages,
           subagentStreamingText: snap.subagentStreamingText,
@@ -3394,6 +3426,7 @@ export function getRemoteStateSnapshot(): {
       pendingApprovals: PendingApproval[]
       todos: TodoItem[]
       taskNotifications: TaskNotification[]
+      activeTasks: Record<string, { taskId: string; taskType: string }>
       taskProgressMap: Record<string, TaskProgress>
       subagentMessages: Record<string, ChatMessage[]>
       subagentStreamingText: Record<string, string>
@@ -3436,6 +3469,7 @@ export function getRemoteStateSnapshot(): {
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
       taskNotifications: s.taskNotifications,
+      activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,
       subagentMessages: s.subagentMessages,
       subagentStreamingText: s.subagentStreamingText,

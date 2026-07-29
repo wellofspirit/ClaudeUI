@@ -76,6 +76,7 @@ beforeEach(() => {
         todos: [],
         taskProgressMap: {},
         taskNotifications: [],
+        activeTasks: {},
         openedTaskToolUseIds: [],
         rightPanel: 'none',
         subagentMessages: {},

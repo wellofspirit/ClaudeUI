@@ -1034,6 +1034,37 @@ describe('removePendingApproval', () => {
 // Task / subagent actions
 // ---------------------------------------------------------------------------
 
+// setTaskStarted / activeTasks (Async-agent Stop-button regression):
+// Claude 2.1.219+ makes Agent/Task background-by-default and the tool_use
+// input usually omits run_in_background, so TaskCard can no longer infer
+// running-vs-complete from tool input alone. task_started/task_notification
+// are the authoritative signals — this is the store-level state machine
+// behind that fix.
+describe('setTaskStarted', () => {
+  it('records an activeTasks entry keyed by toolUseId', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
+    expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
+      taskId: 'task-abc',
+      taskType: 'local_agent'
+    })
+  })
+
+  it('does not affect other in-flight tasks', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    store().setTaskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_bash' })
+    expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
+      taskId: 'task-a',
+      taskType: 'local_agent'
+    })
+    expect(store().sessions['r1'].activeTasks['tool-2']).toEqual({
+      taskId: 'task-b',
+      taskType: 'local_bash'
+    })
+  })
+})
+
 describe('addTaskNotification', () => {
   it('appends notification to taskNotifications', () => {
     store().createNewSession('r1', '/test')
@@ -1064,6 +1095,40 @@ describe('addTaskNotification', () => {
     store().setTaskStopping('r1', 'tool-1')
     store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
     expect(store().sessions['r1'].stoppingTaskIds).toContain('tool-1')
+  })
+
+  it('clears the matching activeTasks entry (task_started -> task_notification lifecycle)', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
+    expect(store().sessions['r1'].activeTasks['tool-1']).toBeDefined()
+
+    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
+
+    expect(store().sessions['r1'].activeTasks['tool-1']).toBeUndefined()
+  })
+
+  it('leaves other activeTasks entries untouched', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    store().setTaskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_agent' })
+
+    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
+
+    expect(store().sessions['r1'].activeTasks['tool-1']).toBeUndefined()
+    expect(store().sessions['r1'].activeTasks['tool-2']).toEqual({
+      taskId: 'task-b',
+      taskType: 'local_agent'
+    })
+  })
+
+  it('does not modify activeTasks when toolUseId is null', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
+    expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
+      taskId: 'task-a',
+      taskType: 'local_agent'
+    })
   })
 })
 

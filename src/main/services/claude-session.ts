@@ -1287,12 +1287,26 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * stop depending on the regex-extraction inside detectTaskMapping for the
    * notification plumbing. (We still need detectTaskMapping for the output
    * file path, which only ships in tool_result.)
+   *
+   * Also relayed to the renderer as `session:task-started` — the only
+   * reliable "this task is running" signal since 2.1.219 made Agent/Task
+   * background-by-default: the tool_use input usually omits
+   * `run_in_background`, and the immediate "Async agent launched
+   * successfully" tool_result would otherwise read as completion. The
+   * renderer treats a task as running until the matching `session:task-
+   * notification` arrives, regardless of tool_result/background-flag state.
    */
   private handleTaskStarted(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const toolUseId = msg.tool_use_id || ''
     if (!taskId || !toolUseId) return
     this.taskIdMap.set(taskId, toolUseId)
+
+    this.send('session:task-started', {
+      toolUseId,
+      taskId,
+      taskType: msg.task_type || ''
+    })
   }
 
   /**
@@ -1336,7 +1350,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private handleTaskNotification(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const outputFile = msg.output_file || ''
-    const matchedToolUseId = this.taskIdMap.get(taskId) || null
+    // taskIdMap is populated by task_started/detectTaskMapping and is the
+    // normal path, but the wire's own tool_use_id (docs/protocol/04-system-
+    // subtypes.md §4.4) is a reliable fallback for the rare case the reverse
+    // lookup misses (e.g. task_started never arrived, or the mapping was
+    // already evicted by an earlier stopTask/task_updated race).
+    const matchedToolUseId = this.taskIdMap.get(taskId) || msg.tool_use_id || null
     if (matchedToolUseId) {
       this.markBackgroundDone(matchedToolUseId)
       this.taskIdMap.delete(taskId)
