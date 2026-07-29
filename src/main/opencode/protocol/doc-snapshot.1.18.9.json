@@ -1,5 +1,5 @@
 {
-  "_note": "Trimmed OpenAPI snapshot for opencode 1.17.14. Full /doc is ~390KB; we keep only the contract-relevant fields the smoke test validates.",
+  "_note": "Trimmed OpenAPI snapshot for opencode 1.18.9. Full /doc is ~430KB; we keep only the contract-relevant fields the smoke test validates. knownEventTypes now also lists the handled-but-previously-undeclared types (session.idle, session.error, todo.updated, question.*, command.executed) — all verified present in the 1.18.9 /doc Event union.",
   "info": {
     "title": "opencode",
     "version": "1.0.0",
@@ -12,6 +12,8 @@
     "session.updated",
     "session.deleted",
     "session.status",
+    "session.idle",
+    "session.error",
     "message.updated",
     "message.removed",
     "message.part.updated",
@@ -27,7 +29,12 @@
     "session.next.tool.success",
     "session.next.tool.failed",
     "permission.asked",
-    "permission.replied"
+    "permission.replied",
+    "question.asked",
+    "question.replied",
+    "question.rejected",
+    "command.executed",
+    "todo.updated"
   ],
   "v1OperationIds": [
     "session.list",

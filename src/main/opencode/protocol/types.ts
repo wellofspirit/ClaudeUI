@@ -1,4 +1,4 @@
-// Trimmed types derived from opencode 1.17.14 /doc snapshot
+// Trimmed types derived from opencode 1.18.9 /doc snapshot
 
 export interface ModelCapabilities {
   temperature: boolean
@@ -241,6 +241,11 @@ export const EVENT_TYPES = {
   QUESTION_REPLIED: 'question.replied',
   QUESTION_REJECTED: 'question.rejected',
   COMMAND_EXECUTED: 'command.executed',
+  // Handled by the event mapper since M2 but only declared here as of the
+  // 1.18.9 bump (they were absent from the 1.17.14 snapshot's list too).
+  SESSION_IDLE: 'session.idle',
+  SESSION_ERROR: 'session.error',
+  TODO_UPDATED: 'todo.updated',
 } as const
 
 export type KnownEventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]

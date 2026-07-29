@@ -831,8 +831,8 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
  * bash's `{ output }` metadata (and anything else without `files`/`filediff`)
  * never matches, so callers don't need a hardcoded tool-name allowlist.
  *
- * Verified against vendor/opencode-src tag v1.17.15 (byte-identical to pinned
- * 1.17.14) tool/{apply_patch,edit,write}.ts:
+ * Verified against vendor/opencode-src tag v1.17.15 (byte-identical to 1.17.14;
+ * tool/{apply_patch,edit,write}.ts unchanged through pinned v1.18.9):
  *  - apply_patch result.metadata: `{ diff, files: [{ filePath, relativePath,
  *    type: 'add'|'update'|'delete'|'move', patch, additions, deletions,
  *    movePath }], diagnostics }`. The SAME shape also rides the

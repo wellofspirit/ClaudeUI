@@ -52,7 +52,7 @@ import { SharedProviders } from './SharedProviders'
 import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.9.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 

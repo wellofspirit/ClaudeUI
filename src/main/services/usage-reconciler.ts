@@ -17,7 +17,8 @@
  *              Best-effort: skipped if opencode isn't installed / no server is up.
  *
  *              Why not GET /session? It is PROJECT-scoped (only the serve-cwd's
- *              git-root project — verified against vendor v1.17.14:
+ *              git-root project — verified against vendor v1.17.14 (session
+ *              module unchanged through pinned v1.18.9):
  *              session.list() → listByProject(projectID=ctx.project.id); the
  *              directory/scope query params only NARROW within that project, and
  *              the cross-project listGlobal is not exposed over HTTP). A shared

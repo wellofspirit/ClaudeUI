@@ -25,7 +25,7 @@ import { resolveOpencodeConfigFile } from './opencode-config'
 import { detectEol, safeRead, jsoncParseSafe, writeIfChanged } from './opencode-jsonc-io'
 import { isPlainObject } from '../../shared/opencode-config-diff'
 import type { RawConfigPatch } from '../../shared/types'
-import schemaJson from '../../shared/opencode-config-schema.1.17.14.json'
+import schemaJson from '../../shared/opencode-config-schema.1.18.9.json'
 
 // ─── Patch shape ────────────────────────────────────────────────────────────
 
