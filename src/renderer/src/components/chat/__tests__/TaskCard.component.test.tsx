@@ -174,6 +174,53 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// "Open in panel" — the mobile task-takeover entry point (see MobileTaskView)
+// ---------------------------------------------------------------------------
+//
+// TaskCard has no isMobile branching at all: "Open in panel" is unconditionally
+// rendered whenever the collapsed footer shows (hasResult || isRunning), on
+// both desktop and mobile. On desktop it opens the TaskDetailPanel side panel;
+// on mobile the same openTaskPanel action now drives SessionView's full-screen
+// MobileTaskView takeover instead. This locks that the button stays reachable
+// and wired to openTaskPanel regardless of viewport.
+describe('TaskCard — "Open in panel" (mobile takeover entry point)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  const completedResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'done',
+    isError: false
+  }
+
+  it('is visible on the collapsed completed card', () => {
+    render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.openInPanel')).toBeInTheDocument()
+  })
+
+  it('clicking it opens the task panel via openTaskPanel (rightPanel + openedTaskToolUseIds)', () => {
+    render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.openInPanel'))
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.rightPanel).toBe('task')
+    expect(session.openedTaskToolUseIds).toContain('call_task_1')
+  })
+})
+
 describe('TaskCard — inline task approval', () => {
   let app: TestApp
   let respondCalls: Array<{ requestId: string; decision: string }>

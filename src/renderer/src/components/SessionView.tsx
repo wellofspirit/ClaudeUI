@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, createContext, useContext } from 'rea
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
+import { MobileTaskView } from './MobileTaskView'
 import { GitPanel } from './git/GitPanel'
 import { PlanReviewPanel } from './plan/PlanReviewPanel'
 import { MockupPanel } from './MockupPanel'
@@ -312,7 +313,9 @@ export function SessionView(): React.JSX.Element {
             <div
               className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed || isMobile ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}
             >
-              {activeView.type === 'usage' ? (
+              {isMobile && rightPanel === 'task' ? (
+                <MobileTaskView />
+              ) : activeView.type === 'usage' ? (
                 <UsageView onClose={() => setActiveView({ type: 'chat' })} />
               ) : activeView.type === 'automations' ? (
                 <AutomationView onClose={() => setActiveView({ type: 'chat' })} />

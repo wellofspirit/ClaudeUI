@@ -4,9 +4,11 @@ import { findTaskBlocks } from './utils'
 import { TaskDetailPanelView, type TaskEntryDescriptor } from './View'
 
 export function TaskDetailPanel({
-  style
+  style,
+  variant
 }: {
   style?: React.CSSProperties
+  variant?: 'panel' | 'fullscreen'
 }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskPanelOpen = useActiveSession((s) => s.rightPanel === 'task')
@@ -30,6 +32,7 @@ export function TaskDetailPanel({
   return (
     <TaskDetailPanelView
       style={style}
+      variant={variant}
       entries={entries}
       onClose={() => activeSessionId && closeTaskPanel(activeSessionId)}
     />
