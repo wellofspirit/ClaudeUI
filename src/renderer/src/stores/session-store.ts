@@ -1006,7 +1006,8 @@ interface SessionState {
     sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
   }) => void
   applyRemoteSnapshot: (
-    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
+    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot,
+    isResync?: boolean
   ) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   changePermissionMode: (routingId: string, next: PermissionMode) => void
@@ -2424,9 +2425,23 @@ export const useSessionStore = create<SessionState>((set) => ({
         'sessionEngines' in config ? (config.sessionEngines ?? {}) : state.sessionEngines
     })),
 
-  // Apply a full state snapshot from the remote server (initial sync)
-  applyRemoteSnapshot: (snapshot) =>
-    set(() => {
+  // Apply a full state snapshot from the remote server (initial sync, or a
+  // reconnect re-sync when `isResync` is true).
+  //
+  // First hydration (isResync falsy): the snapshot wins wholesale — there is no
+  // local state worth preserving yet.
+  //
+  // Re-sync (isResync true): a mobile client that backgrounded/returned may have
+  // navigated to a historical session (loadHistoricalSession) the desktop
+  // snapshot knows nothing about, or may simply be looking at a different
+  // session than the desktop's current `activeSessionId`. Unconditionally
+  // adopting the snapshot here routes the next prompt to the wrong session (or
+  // the wrong engine) — see the mobile-picker-bug investigation. So: keep the
+  // local `activeSessionId` when set, and merge session entries rather than
+  // replacing the map (snapshot entries still win where both sides know the
+  // session — only local-only entries are preserved).
+  applyRemoteSnapshot: (snapshot, isResync) =>
+    set((state) => {
       // Rebuild per-session state from the snapshot
       const sessions: Record<string, PerSessionState> = {}
       for (const [id, snap] of Object.entries(snapshot.sessions)) {
@@ -2465,10 +2480,28 @@ export const useSessionStore = create<SessionState>((set) => ({
       const settings = { ...DEFAULT_SETTINGS, ...(snapshot.settings as Partial<AppSettings>) }
       applyTheme(settings.theme)
 
+      // Merge the sessions map: snapshot entries win where both sides know the
+      // session, but local-only entries (mobile-hydrated historical sessions
+      // the snapshot never saw) survive.
+      const mergedSessions: Record<string, PerSessionState> = isResync
+        ? { ...state.sessions, ...sessions }
+        : sessions
+
+      let activeSessionId = snapshot.activeSessionId
+      if (isResync) {
+        // Preserve the local active session unless there isn't one — and only
+        // if it still resolves to a real entry post-merge. A local
+        // `activeSessionId` pointing at nothing (shouldn't happen, but a stale
+        // pointer is worse than falling back) drops to the snapshot's choice
+        // rather than rendering a broken view (EMPTY_SESSION_STATE).
+        const preserved = state.activeSessionId ?? snapshot.activeSessionId
+        activeSessionId = preserved && mergedSessions[preserved] ? preserved : snapshot.activeSessionId
+      }
+
       return {
-        sessions,
+        sessions: mergedSessions,
         directories: snapshot.directories,
-        activeSessionId: snapshot.activeSessionId,
+        activeSessionId,
         settings,
         recentSessionIds: snapshot.recentSessionIds ?? [],
         pinnedSessionIds: snapshot.pinnedSessionIds ?? [],

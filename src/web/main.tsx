@@ -59,6 +59,11 @@ function RemoteApp(): React.JSX.Element {
   /** Latest advertised password params, so a rejection can re-show the form
    *  (and know which cache entry to drop) without re-fetching auth-info. */
   const pwParams = useRef<PasswordParams | null>(null)
+  /** Flips true after the first `sync-full` is applied. A later `sync-full`
+   *  (background/foreground reconnect) is a RE-sync, not a first hydration —
+   *  applyRemoteSnapshot must not clobber local navigation (e.g. a
+   *  mobile-hydrated historical session) with the desktop's snapshot. */
+  const hasHydratedRef = useRef(false)
 
   const handleStateChange = useCallback((state: ConnectionState, err?: string) => {
     setConnState(state)
@@ -85,9 +90,12 @@ function RemoteApp(): React.JSX.Element {
     if (mockupToken) {
       ;(window as unknown as { __MOCKUP_TOKEN__?: string }).__MOCKUP_TOKEN__ = mockupToken
     }
-    // Apply the full snapshot to the Zustand store (settings, sessions, config)
+    // Apply the full snapshot to the Zustand store (settings, sessions, config).
+    // isResync=true from the second sync-full onward — see hasHydratedRef.
+    const isResync = hasHydratedRef.current
+    hasHydratedRef.current = true
     import('@renderer/stores/session-store').then(({ useSessionStore }) => {
-      useSessionStore.getState().applyRemoteSnapshot(snapshot)
+      useSessionStore.getState().applyRemoteSnapshot(snapshot, isResync)
       setReady(true)
     })
   }, [])
