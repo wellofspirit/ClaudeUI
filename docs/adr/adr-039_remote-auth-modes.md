@@ -1,6 +1,6 @@
 # ADR-039 — Remote-access auth modes: token, password, and tailnet identity
 
-**Status:** Proposed
+**Status:** Accepted
 **Relates to:** ADR-007 (two settings stores — remote config lives in the operational DB, not
 UISettings), ADR-027 (`data-testid` conventions for the Settings/modal surfaces), ADR-030
 (capability honesty — the status must not claim a path that does not work)
@@ -84,9 +84,22 @@ same socket. They only get an actionable error if they present nothing at all.
 `Tailscale-Funnel-Request`. We never enable Funnel, so its presence means unexpected public exposure,
 and Funnel traffic carries no identity headers by design.
 
-Residual risk, accepted: any process on this machine can reach the loopback port and forge the
-identity headers, so TLS mode widens local trust from "the app's own user" to "any local process".
-Every non-loopback path is still gated by the token or the password.
+## Accepted residual risks
+
+Both are consciously accepted rather than mitigated (the fixes were weighed and judged not worth
+their cost for this threat model):
+
+1. **Local-process identity forgery.** In TLS mode any process on this machine can reach the loopback
+   port and forge the `Tailscale-User-Login` header, so TLS mode widens local trust from "the app's
+   own user" to "any local process". This has no complete fix — Tailscale itself documents
+   loopback-binding as the mitigation and treats same-device processes as residual, and `serve`
+   cannot carry a backend secret. Every non-loopback path is still gated by the token or the password.
+2. **Throttle budget resets on restart.** `failedAuth` (both the 10/60 s token budget and the
+   5/5 min password budget) is in-memory and cleared by `stop()`, so an app restart hands an
+   attacker a fresh brute-force budget. With autostart this happens routinely (login, crashes).
+   Accepted because the password is user-chosen with a 12-char floor and scrypt makes each online
+   guess expensive; persisting the counters to the DB is a clean future fix if a stronger stance is
+   wanted.
 
 ## Supporting rules
 
