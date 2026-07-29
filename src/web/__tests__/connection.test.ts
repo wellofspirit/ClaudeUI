@@ -241,6 +241,75 @@ describe('RemoteConnection', () => {
     })
   })
 
+  // Hardening — inbound decrypts are NOT guaranteed to resolve in the order
+  // their frames arrived (WebCrypto completion order is not FIFO). Without
+  // serialization, a later frame's decrypt resolving first would get handled
+  // first too. recvQueue chains onmessage's decode+handle so a later frame's
+  // processing can't even start until the earlier one's has finished.
+  describe('inbound decrypt serialization (recvQueue) — GUARD', () => {
+    it('handles frames in arrival order even when a later decrypt resolves before an earlier one', async () => {
+      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      const internals = conn as unknown as Internals
+
+      // Record handleMessage call order directly (shadows the real method on
+      // the instance) — isolates the recvQueue ordering guarantee from
+      // handleMessage's own event/seq semantics.
+      const handled: string[] = []
+      internals.handleMessage = ((msg: unknown) => {
+        handled.push((msg as { marker: string }).marker)
+      }) as Internals['handleMessage']
+
+      // Fake decrypt: each raw frame's Promise is pre-created (a deferred)
+      // BEFORE either frame is delivered, so resolving it is decoupled from
+      // whether decrypt() has actually been CALLED for that frame yet — with
+      // the fix, B's decrypt isn't even invoked until A's whole frame has
+      // been handled, so "resolving B's decrypt" must still work even though
+      // nothing is awaiting it yet.
+      function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+        let resolve!: (v: T) => void
+        const promise = new Promise<T>((res) => {
+          resolve = res
+        })
+        return { promise, resolve }
+      }
+      const deferredA = deferred<{ marker: string }>()
+      const deferredB = deferred<{ marker: string }>()
+      const byFrame: Record<string, { promise: Promise<{ marker: string }> }> = {
+        FRAME_A: deferredA,
+        FRAME_B: deferredB
+      }
+      internals.e2e = {
+        isReady: true,
+        // Explicit `await` (not `return byFrame[raw].promise`) — matches the
+        // real E2ECrypto.decrypt(), which awaits `subtle.decrypt()`
+        // internally. Returning the promise directly short-circuits a
+        // microtask hop that this test's ordering assertion depends on.
+        decrypt: async (raw: string) => await byFrame[raw].promise
+      }
+
+      const before = FakeWebSocket.instances.length
+      conn.connect()
+      const ws = FakeWebSocket.instances[before]
+      const onmessage = ws.onmessage as (ev: { data: string }) => void
+
+      // Frame A arrives, then frame B — back to back, both synchronous.
+      onmessage({ data: 'FRAME_A' })
+      onmessage({ data: 'FRAME_B' })
+
+      // Resolve B's decrypt BEFORE A's.
+      deferredB.resolve({ marker: 'B' })
+      deferredA.resolve({ marker: 'A' })
+
+      await new Promise((r) => setTimeout(r, 50))
+
+      // GUARD: still handled in arrival order (A, B) — without recvQueue,
+      // B's earlier release would make it handled first.
+      expect(handled).toEqual(['A', 'B'])
+
+      conn.destroy()
+    })
+  })
+
   // R3/R7 — the full snapshot carries the epoch + mockup token; the client
   // stores both and echoes the epoch on the next sync.
   describe('sync-full epoch + mockup token (R3/R7)', () => {

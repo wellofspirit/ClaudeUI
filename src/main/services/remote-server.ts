@@ -543,7 +543,15 @@ export class RemoteServer {
       }
     }, 10_000)
 
-    ws.on('message', async (raw) => {
+    // Serializes inbound decrypt+dispatch per connection so frames are
+    // processed in arrival order. `decrypt()` completion is not guaranteed
+    // FIFO (WebCrypto), so without this a later frame's decrypt could
+    // resolve before an earlier one's — and the replay guard inside it
+    // (E2ECrypto's recvSeq) would then reject the earlier frame as a
+    // "replay", closing the socket with 4002.
+    let recvQueue: Promise<void> = Promise.resolve()
+
+    const handleFrame = async (raw: WebSocket.RawData): Promise<void> => {
       const rawStr = raw.toString()
 
       // Determine if this message is encrypted (base64 blob, not JSON)
@@ -641,7 +649,12 @@ export class RemoteServer {
 
       switch (msg.type) {
         case 'invoke':
-          await this.handleInvoke(ws, msg)
+          // Fire-and-forget: invokes were effectively concurrent before this
+          // queue existed, and must stay so — a slow dispatcher call (e.g. a
+          // long-running session op) must not stall subsequent frames
+          // (pings/pongs/syncs) behind it in the queue. handleInvoke has its
+          // own try/catch, so no unhandled rejection.
+          void this.handleInvoke(ws, msg)
           break
         case 'sync':
           await this.handleSync(ws, msg.lastSeq, msg.epoch)
@@ -653,6 +666,20 @@ export class RemoteServer {
           // Unknown message type, ignore
           break
       }
+    }
+
+    ws.on('message', (raw) => {
+      // `.catch` per link: a throw escaping handleFrame (e.g. from
+      // handleSync/notifyStatus) must not poison the chain, or every later
+      // frame from this client would be silently skipped.
+      recvQueue = recvQueue
+        .then(() => handleFrame(raw))
+        .catch((err) => {
+          logger.error(
+            'remote-server',
+            `Frame handler failed from ${ip}: ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
     })
 
     ws.on('close', () => {

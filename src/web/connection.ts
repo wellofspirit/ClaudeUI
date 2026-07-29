@@ -68,6 +68,15 @@ export class RemoteConnection {
    * replay guard would then drop as a "replay" (R4).
    */
   private sendQueue: Promise<void> = Promise.resolve()
+  /**
+   * Serializes inbound decrypt+handle so frames are processed in
+   * arrival order. Without this, concurrent `decrypt()` calls in `onmessage`
+   * could resolve out of order — WebCrypto completion order is not
+   * guaranteed FIFO — and the replay guard (e2e-crypto.ts's `recvSeq`) would
+   * reject the earlier-sent frame as a "replay" once the later one lands
+   * first.
+   */
+  private recvQueue: Promise<void> = Promise.resolve()
 
   // E2E encryption
   private e2eKeyHex?: string
@@ -190,15 +199,28 @@ export class RemoteConnection {
       return
     }
 
+    // Fresh chain per socket so a reconnect doesn't drag a stale queue along.
+    this.recvQueue = Promise.resolve()
+
     this.ws.onopen = (): void => {
       this.reconnectAttempt = 0
       this.setState('authenticating')
       this.sendRaw({ type: 'auth', token: this.token })
     }
 
-    this.ws.onmessage = async (ev): Promise<void> => {
-      const msg = await this.decodeIncoming(ev.data as string)
-      if (msg) this.handleMessage(msg)
+    this.ws.onmessage = (ev): void => {
+      // Chain (not `await` directly) so frames are decrypted+handled in
+      // arrival order — see recvQueue. The `.catch` per link keeps a throw
+      // from an app callback (via handleMessage) from poisoning the chain —
+      // a rejected recvQueue would silently skip every later frame.
+      this.recvQueue = this.recvQueue
+        .then(async () => {
+          const msg = await this.decodeIncoming(ev.data as string)
+          if (msg) this.handleMessage(msg)
+        })
+        .catch((err) => {
+          console.error('RemoteConnection: frame handler failed', err)
+        })
     }
 
     this.ws.onclose = (): void => {

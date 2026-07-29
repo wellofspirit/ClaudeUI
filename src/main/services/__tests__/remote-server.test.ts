@@ -553,6 +553,70 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     expect(server.getStatus().connectedClients).toBe(1)
     ws.close()
   })
+
+  // Hardening — inbound decrypts are NOT guaranteed to resolve in frame-arrival
+  // order (WebCrypto completion order is not FIFO). Without per-connection
+  // serialization, a later frame's decrypt resolving first sets recvSeq ahead,
+  // and the earlier frame's decrypt then fails its own replay check — closing
+  // the socket with 4002 even though nothing was actually replayed.
+  it('processes two encrypted frames in arrival order even when the first frame decrypts slowly (GUARD)', async () => {
+    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    const ws = await rawConnect()
+    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
+    await nextJson(ws)
+    ws.send(JSON.stringify({ type: 'e2e-activate' }))
+    const rawAck = await nextRaw(ws)
+    const clientCrypto = await serverKeyedCrypto() // stands in for the client's own E2ECrypto
+    expect(await clientCrypto.decrypt(rawAck)).toEqual({ type: 'e2e-ack' })
+
+    // Reach the server's per-connection client record and delay only the
+    // FIRST decrypt() call ~50ms (wrapping the original) — simulates
+    // WebCrypto resolving a later frame's decrypt before an earlier one's.
+    const clients = (server as unknown as { clients: Map<unknown, { e2e: E2ECrypto }> }).clients
+    const client = [...clients.values()][0]
+    const originalDecrypt = client.e2e.decrypt.bind(client.e2e)
+    let decryptCalls = 0
+    client.e2e.decrypt = async (payload: string): Promise<unknown> => {
+      decryptCalls++
+      if (decryptCalls === 1) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      return originalDecrypt(payload)
+    }
+
+    const responses: Record<string, unknown>[] = []
+    ws.on('message', (raw) => {
+      void clientCrypto.decrypt(raw.toString()).then((msg) => {
+        responses.push(msg as Record<string, unknown>)
+      })
+    })
+
+    // Two encrypted invoke frames on a nonexistent channel — an error
+    // invoke-response still counts as "processed", which is all this test
+    // needs to prove.
+    const frame1 = await clientCrypto.encrypt({
+      type: 'invoke',
+      id: '1',
+      channel: 'no-such-channel',
+      args: []
+    })
+    const frame2 = await clientCrypto.encrypt({
+      type: 'invoke',
+      id: '2',
+      channel: 'no-such-channel',
+      args: []
+    })
+    ws.send(frame1)
+    ws.send(frame2)
+
+    // Give both invoke-responses (or a replay-close) time to happen.
+    await new Promise((r) => setTimeout(r, 300))
+
+    // GUARD: stays open (no bogus replay-close) and both frames were handled.
+    expect(ws.readyState).toBe(WebSocket.OPEN)
+    expect(responses.map((r) => r.id).sort()).toEqual(['1', '2'])
+    ws.close()
+  })
 })
 
 // ---------------------------------------------------------------------------
