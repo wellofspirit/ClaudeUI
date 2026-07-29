@@ -100,6 +100,9 @@ const ENOENT = (): TailscaleExecFailure =>
 // Recording exec stub. Routes on argv so a single table drives a whole test.
 // ---------------------------------------------------------------------------
 
+/** First entry of BINARY_CANDIDATES for the platform the tests run on. */
+const FIRST_CANDIDATE = process.platform === 'win32' ? 'tailscale.exe' : 'tailscale'
+
 interface StubOpts {
   /** Candidate paths that "exist". Anything else rejects with ENOENT. */
   installedAt?: string[]
@@ -117,7 +120,7 @@ interface Stub {
 
 function makeStub(opts: StubOpts = {}): Stub {
   const calls: Stub['calls'] = []
-  const installed = opts.installedAt ?? ['tailscale']
+  const installed = opts.installedAt ?? [FIRST_CANDIDATE]
   let serveStatusIdx = 0
 
   const resolveOr = (v: string | (() => never)): string => {
@@ -172,7 +175,7 @@ describe('TailscaleManager.detect', () => {
     expect(d.dnsName.endsWith('.')).toBe(false)
     expect(d.version).toBe('1.98.5') // line 1, first token — not the long version
     expect(d.certDomains).toEqual(['cg-mac.tail3140f8.ts.net'])
-    expect(d.binaryPath).toBe('tailscale')
+    expect(d.binaryPath).toBe(FIRST_CANDIDATE)
   })
 
   it('reports not-installed when no candidate binary execs', async () => {
@@ -199,7 +202,7 @@ describe('TailscaleManager.detect', () => {
     expect(d.state).toBe('daemon-down')
     if (d.state === 'ok') return
     expect(d.message).toMatch(/daemon is not running/i)
-    expect(d.binaryPath).toBe('tailscale')
+    expect(d.binaryPath).toBe(FIRST_CANDIDATE)
   })
 
   it('reports daemon-down for BackendState Stopped (daemon alive, Tailscale off)', async () => {
