@@ -16,7 +16,29 @@ export type ConnectionState =
   | 'syncing'
   | 'connected'
   | 'reconnecting'
+  /**
+   * The presented credential was definitively rejected (wrong password) or has
+   * been revoked under us (close 4008), or the key is throttled (4006). Unlike
+   * `'failed'` this is RECOVERABLE by the app: it re-prompts and calls
+   * `setCredential()` + `connect()` on the same instance. Reconnect backoff is
+   * suppressed until then so we don't hammer the server with a dead credential.
+   */
+  | 'auth-rejected'
   | 'failed'
+
+/**
+ * Exactly one field is honoured by the server, which branches on `pwProof`
+ * first. `token` comes from the URL fragment (QR scan); `pwProof` is
+ * `hex(scrypt(...))` derived from the user's password (see password-proof.ts).
+ */
+export interface RemoteCredential {
+  token?: string
+  pwProof?: string
+}
+
+/** Close codes that mean "this credential will not work again as-is". */
+const CLOSE_CREDENTIALS_CHANGED = 4008
+const CLOSE_THROTTLED = 4006
 
 type EventCallback = (channel: string, ...args: unknown[]) => void
 type StateCallback = (state: ConnectionState, error?: string) => void
@@ -43,7 +65,7 @@ const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
  */
 export class RemoteConnection {
   private ws: WebSocket | null = null
-  private token: string
+  private credential: RemoteCredential
   private url: string
   private state: ConnectionState = 'connecting'
   private lastSeq = 0
@@ -59,6 +81,13 @@ export class RemoteConnection {
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
   private destroyed = false
+  /**
+   * Set when the server definitively rejected the current credential (or the key
+   * is throttled). Suppresses the reconnect backoff WITHOUT latching
+   * `destroyed`, so the app can re-prompt and revive this same instance —
+   * `window.api` is bound to it and cannot be re-pointed at a replacement.
+   */
+  private authRejected = false
   /** Mockup-scoped token delivered over the authenticated WS (see sync-full). */
   private mockupTokenValue?: string
   /**
@@ -87,11 +116,23 @@ export class RemoteConnection {
   private onStateChange: StateCallback | null = null
   private onFullState: FullStateCallback | null = null
 
-  constructor(url: string, token: string, e2eKeyHex?: string) {
+  constructor(url: string, credential: RemoteCredential, e2eKeyHex?: string) {
     // Convert http(s) URL to ws(s), strip path and fragment
     this.url = url.replace(/^http/, 'ws').replace(/\/remote.*$/, '')
-    this.token = token
-    this.e2eKeyHex = e2eKeyHex
+    this.credential = credential
+    // A password client never has an E2E key: tunnel mode refuses password auth
+    // precisely because the key rides the fragment the client doesn't have.
+    this.e2eKeyHex = credential.pwProof !== undefined ? undefined : e2eKeyHex
+  }
+
+  /**
+   * Replace the credential before a (re)connect — used by the password flow to
+   * retry after a rejection without discarding the instance `window.api` is
+   * bound to. Does not touch a live socket; call `connect()` after it.
+   */
+  setCredential(credential: RemoteCredential): void {
+    this.credential = credential
+    if (credential.pwProof !== undefined) this.e2eKeyHex = undefined
   }
 
   /** Set callback for incoming events. */
@@ -131,6 +172,7 @@ export class RemoteConnection {
    */
   connect(): void {
     this.destroyed = false
+    this.authRejected = false
     this.reconnectAttempt = 0
     this.setState('connecting')
     this.createWebSocket()
@@ -205,7 +247,13 @@ export class RemoteConnection {
     this.ws.onopen = (): void => {
       this.reconnectAttempt = 0
       this.setState('authenticating')
-      this.sendRaw({ type: 'auth', token: this.token })
+      // Send exactly one credential field — the server refuses to fall through
+      // from one method to another, so sending both would be meaningless.
+      if (this.credential.pwProof !== undefined) {
+        this.sendRaw({ type: 'auth', pwProof: this.credential.pwProof })
+      } else {
+        this.sendRaw({ type: 'auth', token: this.credential.token })
+      }
     }
 
     this.ws.onmessage = (ev): void => {
@@ -223,8 +271,23 @@ export class RemoteConnection {
         })
     }
 
-    this.ws.onclose = (): void => {
+    this.ws.onclose = (ev): void => {
       this.clearTimers()
+      // Two server close codes mean "don't just retry": the credential was
+      // rotated out from under us (4008, sent only to password clients) or the
+      // key is throttled (4006, refused BEFORE any auth frame — so there is no
+      // auth-response to learn it from).
+      const code = (ev as CloseEvent | undefined)?.code
+      if (code === CLOSE_CREDENTIALS_CHANGED || code === CLOSE_THROTTLED) {
+        this.authRejected = true
+        this.setState(
+          'auth-rejected',
+          code === CLOSE_THROTTLED
+            ? 'Too many attempts — wait a few minutes'
+            : 'Credentials changed — sign in again'
+        )
+        return
+      }
       if (!this.destroyed) {
         this.scheduleReconnect()
       }
@@ -266,6 +329,18 @@ export class RemoteConnection {
             this.setState('syncing')
             this.sendSync()
           }
+        } else if (this.credential.pwProof !== undefined) {
+          // Password path: recoverable. Do NOT latch `destroyed` — the app
+          // re-prompts and revives this instance with a fresh proof. A
+          // `retryable: true` failure is transient instead, so let the normal
+          // backoff handle it.
+          if (msg.retryable === true) {
+            this.setState('reconnecting', msg.error)
+          } else {
+            this.authRejected = true
+            this.setState('auth-rejected', msg.error || 'Authentication failed')
+          }
+          this.ws?.close()
         } else {
           this.setState('failed', msg.error || 'Authentication failed')
           this.destroyed = true // Don't reconnect on auth failure
@@ -420,7 +495,9 @@ export class RemoteConnection {
   }
 
   private scheduleReconnect(): void {
-    if (this.destroyed) return
+    // `authRejected` stops the backoff without latching `destroyed`, so the app
+    // can revive this instance via setCredential() + connect().
+    if (this.destroyed || this.authRejected) return
 
     const delay = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)]
     this.reconnectAttempt++

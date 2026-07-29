@@ -27,10 +27,28 @@ export interface WsEvent {
   args: unknown[]
 }
 
-/** Client → Server: auth handshake */
+/**
+ * Client → Server: auth handshake.
+ *
+ * Exactly ONE credential is honoured. The server branches on `pwProof` first,
+ * then `token`, and never falls through from a failed method to another — so a
+ * client cannot try a weak credential and then a strong one on the same socket.
+ *
+ * `token` is optional as of Phase 2 (it was required before). The legacy
+ * `{ type:'auth', token }` frame is byte-identical, so an older `/remote`
+ * bundle cached in a phone browser still authenticates.
+ */
 export interface WsAuthRequest {
   type: 'auth'
-  token: string
+  /** Random per-start bearer token from the URL fragment. */
+  token?: string
+  /**
+   * Password proof: `hex(H)` where
+   * `H = scrypt(NFC(password), salt, dkLen, {N,r,p})` using the salt/params
+   * advertised by `GET /remote/auth-info`. The server compares `sha256(H)`
+   * against the stored hash — see `src/main/services/remote-auth.ts`.
+   */
+  pwProof?: string
 }
 
 /** Server → Client: auth result */
@@ -38,6 +56,46 @@ export interface WsAuthResponse {
   type: 'auth-response'
   ok: boolean
   error?: string
+  /** Which method the server accepted. Present on success. */
+  method?: RemoteAuthMethod
+  /**
+   * Failure only. `false` = the presented credential is definitively rejected;
+   * the client must stop retrying with it (and drop any cached copy) rather
+   * than spinning the reconnect backoff. Absent = unspecified, treat as
+   * definitive.
+   */
+  retryable?: boolean
+}
+
+/**
+ * KDF parameters for the password credential — the parsed form of
+ * `remote_config.kdf_params`. Advertised verbatim by `/remote/auth-info` so a
+ * future cost bump does not silently break older clients: the client MUST
+ * derive from these and never from hardcoded constants.
+ */
+export interface RemoteKdfParams {
+  algo: 'scrypt'
+  N: number
+  r: number
+  p: number
+  dkLen: number
+}
+
+/**
+ * Unauthenticated pre-handshake discovery (`GET /remote/auth-info`).
+ *
+ * Contains NO secret material — a salt is public by construction, and the
+ * method list is observable anyway by attempting each method. It must never
+ * carry the WS token, the mockup token, the E2E key, the password hash, the
+ * hostname, version strings, or `lastError` (fingerprinting / path leaks).
+ */
+export interface RemoteAuthInfo {
+  /** Bumped when the handshake grammar changes; a client refuses an unknown major. */
+  version: 1
+  /** Methods this server will accept on a new connection. Never empty while running. */
+  methods: RemoteAuthMethod[]
+  /** Present iff `methods` includes `'password'`. */
+  password?: { saltHex: string; kdf: RemoteKdfParams }
 }
 
 /** Client → Server: state sync request */
@@ -142,7 +200,8 @@ import type {
   SlashCommandInfo,
   WorktreeInfo,
   EngineId,
-  ModelRef
+  ModelRef,
+  RemoteAuthMethod
 } from './types'
 
 export interface PerSessionSnapshot {
@@ -206,5 +265,5 @@ export interface FullStateSnapshot {
   hiddenProjects?: string[]
 }
 
-// Re-export RemoteStatus from the main types (canonical definition)
-export type { RemoteStatus } from './types'
+// Re-export RemoteStatus / RemoteAuthMethod from the main types (canonical definition)
+export type { RemoteStatus, RemoteAuthMethod } from './types'

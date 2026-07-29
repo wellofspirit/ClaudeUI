@@ -52,7 +52,7 @@ interface Internals {
 }
 
 function makeConn(): { conn: RemoteConnection; internals: Internals; events: unknown[][] } {
-  const conn = new RemoteConnection('http://host:1/remote', 'tok')
+  const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
   const events: unknown[][] = []
   conn.setEventHandler((channel, ...args) => events.push([channel, ...args]))
   return { conn, internals: conn as unknown as Internals, events }
@@ -197,7 +197,7 @@ describe('RemoteConnection', () => {
     }
 
     it('drops a plaintext ack once ready, but decodes+handles an encrypted one and sends an encrypted sync', async () => {
-      const conn = new RemoteConnection('http://host:1/remote', 'tok', TEST_KEY_HEX)
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' }, TEST_KEY_HEX)
       const states: string[] = []
       conn.setStateHandler((s) => states.push(s))
       const internals = conn as unknown as Internals
@@ -248,7 +248,7 @@ describe('RemoteConnection', () => {
   // processing can't even start until the earlier one's has finished.
   describe('inbound decrypt serialization (recvQueue) — GUARD', () => {
     it('handles frames in arrival order even when a later decrypt resolves before an earlier one', async () => {
-      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
       const internals = conn as unknown as Internals
 
       // Record handleMessage call order directly (shadows the real method on
@@ -341,6 +341,128 @@ describe('RemoteConnection', () => {
     })
   })
 
+  // Phase 2 — password credential. The proof replaces the token in the auth
+  // frame, and a rejection must NOT be the dead end the token path is: the app
+  // re-prompts and revives the SAME instance (window.api is bound to it).
+  describe('password credential (Phase 2)', () => {
+    it('sends pwProof (not token) in the auth frame', () => {
+      const conn = new RemoteConnection('http://host:1/remote', { pwProof: 'ab'.repeat(32) })
+      const internals = conn as unknown as Internals
+      conn.connect()
+      const ws = FakeWebSocket.instances.at(-1)!
+      // Swap in a capturing OPEN socket, then fire the real onopen handler so
+      // the auth frame it builds is recorded.
+      const { sent } = attachFakeSocket(internals)
+      ;(ws.onopen as () => void)()
+      expect(JSON.parse(sent[0])).toEqual({ type: 'auth', pwProof: 'ab'.repeat(32) })
+      conn.destroy()
+    })
+
+    it('a rejected proof reports auth-rejected and does NOT latch destroyed (GUARD)', () => {
+      const conn = new RemoteConnection('http://host:1/remote', { pwProof: 'ab'.repeat(32) })
+      const states: Array<[string, string | undefined]> = []
+      conn.setStateHandler((s, e) => states.push([s, e]))
+      const internals = conn as unknown as Internals
+      attachFakeSocket(internals)
+
+      internals.handleMessage({
+        type: 'auth-response',
+        ok: false,
+        error: 'Invalid password',
+        retryable: false
+      })
+
+      expect(states.at(-1)).toEqual(['auth-rejected', 'Invalid password'])
+      // The token path latches `destroyed`; the password path must not, or the
+      // re-prompt could never revive this instance.
+      expect(internals.destroyed).toBe(false)
+      conn.destroy()
+    })
+
+    it('suppresses the reconnect backoff after a rejection, and revives on connect()', () => {
+      FakeWebSocket.instances = []
+      const conn = new RemoteConnection('http://host:1/remote', { pwProof: 'ab'.repeat(32) })
+      const internals = conn as unknown as Internals
+      conn.connect()
+      expect(FakeWebSocket.instances).toHaveLength(1)
+
+      internals.handleMessage({ type: 'auth-response', ok: false, retryable: false })
+      internals.scheduleReconnect()
+      expect(internals.reconnectTimer).toBeUndefined()
+      expect(FakeWebSocket.instances).toHaveLength(1)
+
+      // A fresh proof + connect() revives the same instance.
+      conn.setCredential({ pwProof: 'cd'.repeat(32) })
+      conn.connect()
+      expect(FakeWebSocket.instances).toHaveLength(2)
+      conn.destroy()
+    })
+
+    it('a retryable:true failure falls back to the normal backoff instead', () => {
+      const conn = new RemoteConnection('http://host:1/remote', { pwProof: 'ab'.repeat(32) })
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      const internals = conn as unknown as Internals
+      attachFakeSocket(internals)
+
+      internals.handleMessage({ type: 'auth-response', ok: false, error: 'busy', retryable: true })
+      expect(states.at(-1)).toBe('reconnecting')
+      expect(internals.destroyed).toBe(false)
+      conn.destroy()
+    })
+
+    it('the TOKEN path still latches destroyed and reports failed', () => {
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      const internals = conn as unknown as Internals
+      internals.handleMessage({ type: 'auth-response', ok: false, error: 'Invalid token' })
+      expect(states.at(-1)).toBe('failed')
+      expect(internals.destroyed).toBe(true)
+      conn.destroy()
+    })
+
+    it.each([
+      [4008, 'Credentials changed — sign in again'],
+      [4006, 'Too many attempts — wait a few minutes']
+    ])('close code %i reports auth-rejected and stops reconnecting', (code, expectedMessage) => {
+      FakeWebSocket.instances = []
+      const conn = new RemoteConnection('http://host:1/remote', { pwProof: 'ab'.repeat(32) })
+      const states: Array<[string, string | undefined]> = []
+      conn.setStateHandler((s, e) => states.push([s, e]))
+      conn.connect()
+      const ws = FakeWebSocket.instances.at(-1)!
+      ;(ws.onclose as (ev: { code: number }) => void)({ code })
+
+      expect(states.at(-1)).toEqual(['auth-rejected', expectedMessage])
+      expect((conn as unknown as Internals).reconnectTimer).toBeUndefined()
+      expect(FakeWebSocket.instances).toHaveLength(1) // no reconnect attempt
+      conn.destroy()
+    })
+
+    it('an ordinary close still reconnects (non-vacuity for the code check)', () => {
+      FakeWebSocket.instances = []
+      const conn = new RemoteConnection('http://host:1/remote', { pwProof: 'ab'.repeat(32) })
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      conn.connect()
+      const ws = FakeWebSocket.instances.at(-1)!
+      ;(ws.onclose as (ev: { code: number }) => void)({ code: 1006 })
+      expect(states.at(-1)).toBe('reconnecting')
+      conn.destroy()
+    })
+
+    it('drops the E2E key for a password credential (tunnel excludes passwords)', () => {
+      const conn = new RemoteConnection(
+        'http://host:1/remote',
+        { pwProof: 'ab'.repeat(32) },
+        'ff'.repeat(32)
+      )
+      expect((conn as unknown as { e2eKeyHex?: string }).e2eKeyHex).toBeUndefined()
+      conn.destroy()
+    })
+  })
+
   // RN5 — `destroy()` used to latch `destroyed` forever, so React StrictMode's
   // dev double-mount (effect → cleanup/destroy → effect/connect) left the web
   // client permanently unable to open a socket.
@@ -350,7 +472,7 @@ describe('RemoteConnection', () => {
     })
 
     it('constructs a NEW WebSocket when connect() follows destroy()', () => {
-      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
       conn.connect()
       expect(FakeWebSocket.instances).toHaveLength(1)
 
@@ -362,7 +484,7 @@ describe('RemoteConnection', () => {
     })
 
     it('detaches handlers from the discarded socket so its close cannot revive-race', () => {
-      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
       conn.connect()
       const first = FakeWebSocket.instances[0]
       expect(first.onclose).toBeTypeOf('function')
@@ -376,7 +498,7 @@ describe('RemoteConnection', () => {
     })
 
     it('keeps auth failure from *scheduling* a reconnect, yet an explicit connect() revives', () => {
-      const conn = new RemoteConnection('http://host:1/remote', 'tok')
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
       const states: string[] = []
       conn.setStateHandler((s) => states.push(s))
       conn.connect()

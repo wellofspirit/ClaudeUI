@@ -15,11 +15,16 @@ import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
 import { routeHttpMockup, serveMockup } from './mockup-protocol'
+import { dbPasswordAuthProvider, safeHexEqual } from './remote-auth'
+import type { PasswordAuthProvider } from './remote-auth'
 import type {
   WsClientMessage,
   WsServerMessage,
   WsInvokeRequest,
-  RemoteStatus
+  RemoteStatus,
+  RemoteAuthInfo,
+  RemoteAuthMethod,
+  RemoteKdfParams
 } from '../../shared/remote-protocol'
 import type { NetworkInterfaceInfo } from '../../shared/types'
 
@@ -34,6 +39,15 @@ const MAX_CONNECTIONS = 64
  *  connections from that IP are refused for the rest of the window. */
 const MAX_FAILED_AUTH = 10
 const FAILED_AUTH_WINDOW_MS = 60_000
+/**
+ * Separate, stricter budget for PASSWORD failures on the same key. The token
+ * budget above is calibrated for a 256-bit random token, where throttling is
+ * only about resource exhaustion; for a user-chosen password the throttle IS
+ * the primary brute-force defence. The two budgets are tracked independently
+ * and never reset each other — a key over EITHER is refused.
+ */
+const MAX_FAILED_PW_AUTH = 5
+const FAILED_PW_AUTH_WINDOW_MS = 300_000
 /** Pre-auth frames (auth / e2e-activate) are tiny; ws's default 100 MiB
  *  maxPayload is a pre-auth memory-amplification vector. */
 const WS_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 // 4 MiB
@@ -46,27 +60,40 @@ const WS_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 // 4 MiB
  *
  * An empty/absent value on either side is always a mismatch — a stopped server
  * (token '') must not authenticate a client that also sends ''.
+ *
+ * Delegates to {@link safeHexEqual} so the token compare and the password-proof
+ * compare are literally the same code path.
  */
 function safeTokenEqual(serverToken: string, clientToken: string | null | undefined): boolean {
-  if (!serverToken || !clientToken) return false
-  try {
-    const serverBuf = Buffer.from(serverToken, 'hex')
-    const clientBuf = Buffer.from(clientToken, 'hex')
-    if (serverBuf.length === 0 || serverBuf.length !== clientBuf.length) return false
-    return crypto.timingSafeEqual(serverBuf, clientBuf)
-  } catch {
-    return false
-  }
+  return safeHexEqual(serverToken, clientToken)
 }
+
+/** Loopback / wildcard host names accepted verbatim by {@link RemoteServer.isAllowedHost}. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '0.0.0.0', 'localhost'])
 
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
+  /** Which credential this socket authenticated with — a credential change
+   *  disconnects the `'password'` ones only (see disconnectPasswordClients). */
+  authMethod: RemoteAuthMethod
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
   e2e: E2ECrypto | null
   /** Promise chain to preserve message ordering with async encryption. */
   sendQueue: Promise<void>
+}
+
+/**
+ * Per-key failed-auth record. Token and password failures share the key (the
+ * peer IP) but keep INDEPENDENT counters + window starts, so burning the
+ * password budget doesn't hand an attacker a fresh token budget or vice versa.
+ */
+interface FailedAuthRecord {
+  count: number
+  firstAt: number
+  pwCount: number
+  pwFirstAt: number
 }
 
 export class RemoteServer {
@@ -93,17 +120,23 @@ export class RemoteServer {
   private e2eKey: string | null = null
   /** Pre-auth sockets currently open (counted toward {@link MAX_CONNECTIONS}). */
   private pendingConnections = 0
-  /** Per-IP failed-auth tracking for the sliding {@link FAILED_AUTH_WINDOW_MS} window. */
-  private failedAuth = new Map<string, { count: number; firstAt: number }>()
+  /** Per-IP failed-auth tracking for the sliding token/password windows. */
+  private failedAuth = new Map<string, FailedAuthRecord>()
   /** Message from the most recent failed listen attempt (see {@link RemoteStatus.lastError}). */
   private lastStartError: string | null = null
+  /** Owner of password-credential semantics; injectable so tests never hit the real DB. */
+  private passwordAuth: PasswordAuthProvider
 
   /** Callback to notify the desktop renderer of status changes. */
   private statusCallback: ((status: RemoteStatus) => void) | null = null
 
-  constructor(dispatcher: RemoteDispatcher) {
+  constructor(
+    dispatcher: RemoteDispatcher,
+    passwordAuth: PasswordAuthProvider = dbPasswordAuthProvider()
+  ) {
     this.eventLog = new EventLog()
     this.dispatcher = dispatcher
+    this.passwordAuth = passwordAuth
     this.bridge = new RemoteBridge()
     this.tunnel = new TunnelManager()
 
@@ -182,13 +215,23 @@ export class RemoteServer {
     }
     this.httpServer.on('error', handleServerError)
 
-    // Create WebSocket server on the same HTTP server. `verifyClient` rejects
-    // cross-origin browser upgrades and `maxPayload` bounds pre-auth frame size
-    // (M-RM3).
+    // Create WebSocket server on the same HTTP server. `verifyClient` pins the
+    // Host (DNS-rebinding) AND rejects cross-origin browser upgrades — the two
+    // checks catch different attacks, so both run. `maxPayload` bounds pre-auth
+    // frame size (M-RM3).
     this.wss = new WebSocketServer({
       server: this.httpServer,
       maxPayload: WS_MAX_PAYLOAD_BYTES,
-      verifyClient: (info) => this.verifyWsOrigin(info.origin, info.req)
+      verifyClient: (info) => {
+        if (!this.isAllowedHost(info.req.headers.host)) {
+          logger.warn(
+            'remote-server',
+            `Rejected WS upgrade with disallowed Host: ${describeHost(info.req.headers.host)}`
+          )
+          return false
+        }
+        return this.verifyWsOrigin(info.origin, info.req)
+      }
     })
     this.wss.on('error', handleServerError)
     this.wss.on('connection', (ws, req) => this.handleConnection(ws, req))
@@ -332,7 +375,54 @@ export class RemoteServer {
       tunnelError: tunnelStatus.error,
       connectedClients: this.clients.size,
       clientIps: Array.from(this.clients.values()).map((c) => c.ip),
-      lastError: this.lastStartError
+      lastError: this.lastStartError,
+      authMethods: this.authMethods()
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Auth method availability
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Password credential params, or null when password auth is not available on
+   * this server. Read per call so provisioning/clearing applies immediately.
+   *
+   * Tunnel mode (`e2eKey !== null`) refuses password auth outright: an
+   * E2E-encrypted session needs the key from the URL fragment, which a password
+   * client by definition does not have — it would authenticate and then be
+   * closed with 4004 for failing to activate E2E.
+   */
+  private passwordParams(): { saltHex: string; kdf: RemoteKdfParams } | null {
+    if (this.e2eKey !== null) return null
+    return this.passwordAuth.params()
+  }
+
+  /** The single derivation of "what methods do we accept" — used by both
+   *  `getStatus()` and `GET /remote/auth-info`. Empty when not running. */
+  private authMethods(): RemoteAuthMethod[] {
+    if (!this.httpServer) return []
+    const methods: RemoteAuthMethod[] = ['token']
+    if (this.passwordParams()) methods.push('password')
+    return methods
+  }
+
+  /**
+   * Close every socket that authenticated with the PASSWORD (code 4008), leaving
+   * token clients alone. Called after the credential is provisioned/cleared so a
+   * session established with the old password cannot outlive it.
+   *
+   * Cleanup (client map, ping timer, status notify) happens in the socket's own
+   * `close` handler — same as {@link checkIdleClients}.
+   */
+  disconnectPasswordClients(): void {
+    for (const [ws, client] of this.clients) {
+      if (client.authMethod !== 'password') continue
+      logger.info(
+        'remote-server',
+        `Disconnecting password client ${client.ip}: credentials changed`
+      )
+      ws.close(4008, 'Credentials changed')
     }
   }
 
@@ -341,9 +431,30 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
+    // DNS-rebinding gate for EVERY route (the same allowlist also guards the WS
+    // upgrade). Applied before any routing so no handler ever runs for a request
+    // whose Host we don't recognise.
+    if (!this.isAllowedHost(req.headers.host)) {
+      logger.warn(
+        'remote-server',
+        `Rejected HTTP request with disallowed Host: ${describeHost(req.headers.host)}`
+      )
+      res.writeHead(403, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        ...this.securityHeaders(false)
+      })
+      res.end('Forbidden')
+      return
+    }
+
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
 
-    if (url.pathname === '/remote' || url.pathname === '/') {
+    if (url.pathname === '/remote/auth-info') {
+      // Unauthenticated pre-handshake discovery. Deliberately routed BEFORE the
+      // static-asset branch, whose `endsWith('.js')` catch-all would otherwise
+      // hijack any future `/remote/*.js` route.
+      this.serveAuthInfo(req, res)
+    } else if (url.pathname === '/remote' || url.pathname === '/') {
       // Serve the web client
       this.serveWebClient(url, res)
     } else if (url.pathname.startsWith(`/${MOCKUP_HTTP_PREFIX}/`)) {
@@ -359,6 +470,165 @@ export class RemoteServer {
     } else {
       res.writeHead(404)
       res.end('Not found')
+    }
+  }
+
+  /**
+   * `GET /remote/auth-info` — unauthenticated pre-handshake discovery.
+   *
+   * The client needs the salt + KDF params BEFORE it can open a WS (they are
+   * inputs to the proof, and the UI must know which credential to prompt for),
+   * so this endpoint cannot be authenticated. It therefore discloses only what
+   * is already implied by being able to reach the port: the method list (probe-
+   * able anyway) and the salt (public by construction). It must NEVER carry the
+   * password hash, the WS token, the mockup token, the E2E key, `os.hostname()`,
+   * version strings, or `lastError` (fingerprinting gifts / filesystem paths).
+   *
+   * Throttled on the same per-key budget as WS auth so it can't be used as a
+   * free oracle by a key that is already locked out.
+   */
+  private serveAuthInfo(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (req.method !== 'GET') {
+      res.writeHead(405, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        Allow: 'GET',
+        ...this.securityHeaders(false)
+      })
+      res.end('Method Not Allowed')
+      return
+    }
+
+    const ip = req.socket.remoteAddress || 'unknown'
+    if (this.isAuthThrottled(ip)) {
+      logger.warn('remote-server', `Refusing auth-info for ${ip}: too many failed auth attempts`)
+      res.writeHead(429, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...this.securityHeaders(false)
+      })
+      res.end('Too Many Requests')
+      return
+    }
+
+    const methods = this.authMethods()
+    const info: RemoteAuthInfo = { version: 1, methods }
+    if (methods.includes('password')) {
+      // Non-null by construction: 'password' is in `methods` only when
+      // passwordParams() returned a value.
+      const pw = this.passwordParams()
+      if (pw) info.password = { saltHex: pw.saltHex, kdf: pw.kdf }
+    }
+
+    const body = JSON.stringify(info)
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...this.securityHeaders(false)
+    })
+    res.end(body)
+  }
+
+  /**
+   * Host allowlist — the DNS-rebinding mitigation, applied to every HTTP route
+   * and to the WS upgrade (alongside, not instead of, {@link verifyWsOrigin}).
+   *
+   * `verifyWsOrigin` compares two attacker-influenced values (`Origin` vs
+   * `Host`) to each other, so it only stops a cross-origin page. With Phase 1's
+   * fixed port + autostart + user-chosen password the server is a stable,
+   * predictably-addressed endpoint, so an attacker page that re-resolves its own
+   * hostname to this LAN IP satisfies `Origin.host === Host` — both are the
+   * attacker's domain. Pinning `Host` to names/addresses we actually serve is
+   * the standard fix.
+   *
+   * Rules: a missing/empty Host is rejected (HTTP/1.1 requires it and every ws
+   * client sends it). A port component, when present, must be the port we bound.
+   * The hostname must match one of the ordered predicates below — IP literals
+   * are compared as exact strings after lowercasing, and DNS is NEVER resolved.
+   * Phase 3 appends the `tailscale serve` entries (dnsName, MagicDNS suffix) and
+   * widens the port rule to the serve HTTPS port.
+   */
+  private isAllowedHost(hostHeader: string | undefined): boolean {
+    const raw = (hostHeader ?? '').trim().toLowerCase()
+    if (!raw) return false
+
+    let hostname: string
+    let portPart: string | undefined
+    if (raw.startsWith('[')) {
+      // Bracketed IPv6 literal, e.g. `[::1]:8322`.
+      const end = raw.indexOf(']')
+      if (end < 0) return false
+      hostname = raw.slice(1, end)
+      const rest = raw.slice(end + 1)
+      if (rest) {
+        if (!rest.startsWith(':')) return false
+        portPart = rest.slice(1)
+      }
+    } else if (raw.indexOf(':') !== raw.lastIndexOf(':')) {
+      // More than one colon and no brackets — a bare IPv6 literal. Malformed per
+      // RFC 7230, but unambiguous: no port component.
+      hostname = raw
+    } else {
+      const colon = raw.lastIndexOf(':')
+      if (colon >= 0) {
+        hostname = raw.slice(0, colon)
+        portPart = raw.slice(colon + 1)
+      } else {
+        hostname = raw
+      }
+    }
+
+    // The tunnel hostname is checked BEFORE the port rule: cloudflared serves
+    // the browser on 443, so the pass-through Host carries no port and would
+    // otherwise be fine — but a future proxy port must not be measured against
+    // our local listen port.
+    if (hostname && this.isTunnelHost(hostname)) return true
+
+    if (portPart !== undefined) {
+      if (!/^\d+$/.test(portPart)) return false
+      if (Number(portPart) !== this.port) return false
+    }
+    if (!hostname) return false
+
+    const osHostname = os.hostname().toLowerCase()
+    const osHostnameBare = osHostname.split('.')[0]
+    // Ordered so Phase 3 can append the ts.net predicates cleanly.
+    const predicates: Array<(h: string) => boolean> = [
+      // (a)/(b) loopback + wildcard + `localhost`.
+      (h) => LOOPBACK_HOSTS.has(h),
+      // (c) any non-internal IPv4 of this machine — computed fresh per call
+      //     because DHCP moves addresses under a long-lived autostarted server.
+      (h) => getNetworkInterfaces().some((i) => i.address.toLowerCase() === h),
+      // (d) the address the user pinned as the bind host, which may not appear
+      //     in (c) at match time.
+      (h) => this.boundHost !== '' && h === this.boundHost.toLowerCase(),
+      // (e) mDNS/NetBIOS names. `os.hostname()` may be uppercase and may or may
+      //     not carry a domain suffix; it is unrelated to any tailnet DNS label.
+      (h) => h === osHostname || h === osHostnameBare || h === `${osHostnameBare}.local`
+    ]
+    return predicates.some((p) => p(hostname))
+  }
+
+  /**
+   * True when `hostname` is the live tunnel's own hostname.
+   *
+   * MANDATORY for tunnel mode, not a nicety: `cloudflared tunnel --url
+   * http://localhost:<port>` forwards the browser's ORIGINAL `Host` verbatim to
+   * this origin (verified against a live quick tunnel: the origin sees
+   * `<name>.trycloudflare.com`, and no `X-Forwarded-Host` is added). Without this
+   * predicate every tunnelled request would 403. It is also why `verifyWsOrigin`
+   * has always worked over the tunnel — `Origin.host === Host` holds precisely
+   * because Host is pass-through.
+   *
+   * Narrow by construction: only the exact hostname of the tunnel WE started, so
+   * it grants nothing while no tunnel is running.
+   */
+  private isTunnelHost(hostname: string): boolean {
+    const tunnelUrl = this.tunnel.getStatus().url
+    if (!tunnelUrl) return false
+    try {
+      return new URL(tunnelUrl).hostname.toLowerCase() === hostname
+    } catch {
+      return false
     }
   }
 
@@ -587,42 +857,77 @@ export class RemoteServer {
       }
 
       if (!authenticated) {
-        if (msg.type === 'auth') {
-          clearTimeout(authTimeout)
-          if (this.verifyToken(msg.token)) {
-            authenticated = true
-            clearPending()
-            this.failedAuth.delete(ip)
-            const newClient: AuthenticatedClient = {
-              ws,
-              ip,
-              lastActivity: Date.now(),
-              pingTimer: setInterval(() => {
-                this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
-              }, PING_INTERVAL_MS),
-              e2e: null,
-              sendQueue: Promise.resolve()
-            }
-            this.clients.set(ws, newClient)
-            // Send auth response plaintext
-            ws.send(JSON.stringify({ type: 'auth-response', ok: true }))
-            logger.info(
-              'remote-server',
-              `Client authenticated from ${ip} (${this.clients.size} total)`
-            )
-            this.notifyStatus()
-            // If server has an E2E key, expect e2e-activate as the next message
-            if (this.e2eKey) {
-              awaitingE2E = true
-            }
-          } else {
-            this.recordFailedAuth(ip)
-            ws.send(JSON.stringify({ type: 'auth-response', ok: false, error: 'Invalid token' }))
-            ws.close(4001, 'Invalid token')
-          }
-        } else {
+        if (msg.type !== 'auth') {
           ws.close(4000, 'Not authenticated')
+          return
         }
+        clearTimeout(authTimeout)
+
+        // Shared success path for both methods.
+        const accept = (method: RemoteAuthMethod): void => {
+          authenticated = true
+          clearPending()
+          // Clears BOTH failure budgets for this key.
+          this.failedAuth.delete(ip)
+          const newClient: AuthenticatedClient = {
+            ws,
+            ip,
+            authMethod: method,
+            lastActivity: Date.now(),
+            pingTimer: setInterval(() => {
+              this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
+            }, PING_INTERVAL_MS),
+            e2e: null,
+            sendQueue: Promise.resolve()
+          }
+          this.clients.set(ws, newClient)
+          // Send auth response plaintext
+          ws.send(JSON.stringify({ type: 'auth-response', ok: true, method }))
+          logger.info(
+            'remote-server',
+            `Client authenticated from ${ip} via ${method} (${this.clients.size} total)`
+          )
+          this.notifyStatus()
+          // If server has an E2E key, expect e2e-activate as the next message
+          if (this.e2eKey) {
+            awaitingE2E = true
+          }
+        }
+        const reject = (error: string, closeReason: string): void => {
+          ws.send(JSON.stringify({ type: 'auth-response', ok: false, error, retryable: false }))
+          ws.close(4001, closeReason)
+        }
+
+        // Fixed order, no cross-method fallthrough: a presented password is
+        // never retried as a token (and vice versa), so a client cannot probe
+        // its way in with whichever credential the server happens to accept.
+        if (typeof msg.pwProof === 'string') {
+          if (!this.passwordParams()) {
+            // Not provisioned, or tunnel mode (E2E needs the fragment key).
+            reject('Password auth not available', 'Password auth not available')
+            return
+          }
+          if (this.passwordAuth.verify(msg.pwProof)) {
+            accept('password')
+          } else {
+            this.recordFailedAuth(ip, 'password')
+            reject('Invalid password', 'Invalid password')
+          }
+          return
+        }
+
+        if (typeof msg.token === 'string') {
+          if (this.verifyToken(msg.token)) {
+            accept('token')
+          } else {
+            this.recordFailedAuth(ip, 'token')
+            reject('Invalid token', 'Invalid token')
+          }
+          return
+        }
+
+        // `{type:'auth'}` with no credential must never reach a comparator.
+        reject('Missing credential', 'Missing credential')
         return
       }
 
@@ -774,25 +1079,50 @@ export class RemoteServer {
     return false
   }
 
-  /** True if `ip` has exceeded the failed-auth budget within the current window. */
+  /**
+   * True if `ip` has exceeded EITHER failed-auth budget within its own window
+   * (10 token failures / 60s, or 5 password failures / 5min). The record is
+   * dropped only once both windows have lapsed, so an expired token window never
+   * clears a live password lockout.
+   */
   private isAuthThrottled(ip: string): boolean {
     const rec = this.failedAuth.get(ip)
     if (!rec) return false
-    if (Date.now() - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
+    const now = Date.now()
+    const tokenLive = rec.count > 0 && now - rec.firstAt <= FAILED_AUTH_WINDOW_MS
+    const pwLive = rec.pwCount > 0 && now - rec.pwFirstAt <= FAILED_PW_AUTH_WINDOW_MS
+    if (!tokenLive && !pwLive) {
       this.failedAuth.delete(ip)
       return false
     }
-    return rec.count >= MAX_FAILED_AUTH
+    if (tokenLive && rec.count >= MAX_FAILED_AUTH) return true
+    if (pwLive && rec.pwCount >= MAX_FAILED_PW_AUTH) return true
+    return false
   }
 
-  private recordFailedAuth(ip: string): void {
+  /** Record one failed attempt against the budget for `method` only. */
+  private recordFailedAuth(ip: string, method: RemoteAuthMethod): void {
     const now = Date.now()
-    const rec = this.failedAuth.get(ip)
-    if (!rec || now - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
-      this.failedAuth.set(ip, { count: 1, firstAt: now })
+    let rec = this.failedAuth.get(ip)
+    if (!rec) {
+      rec = { count: 0, firstAt: now, pwCount: 0, pwFirstAt: now }
+      this.failedAuth.set(ip, rec)
+    }
+    if (method === 'password') {
+      if (rec.pwCount === 0 || now - rec.pwFirstAt > FAILED_PW_AUTH_WINDOW_MS) {
+        rec.pwCount = 1
+        rec.pwFirstAt = now
+      } else {
+        rec.pwCount++
+      }
       return
     }
-    rec.count++
+    if (rec.count === 0 || now - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
+      rec.count = 1
+      rec.firstAt = now
+    } else {
+      rec.count++
+    }
   }
 
   /** Send a message to a specific client (encrypts if E2E is active). */
@@ -877,6 +1207,15 @@ export class RemoteServer {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+/**
+ * Render an attacker-controlled `Host` header for a log line: never undefined,
+ * and length-bounded so a pathological value can't flood the log file.
+ */
+function describeHost(hostHeader: string | undefined): string {
+  if (!hostHeader) return '(missing)'
+  return hostHeader.length > 128 ? `${hostHeader.slice(0, 128)}…` : hostHeader
+}
 
 /** Enumerate all non-internal IPv4 interfaces, sorted by LAN priority. */
 export function getNetworkInterfaces(): NetworkInterfaceInfo[] {

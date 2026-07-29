@@ -10,15 +10,45 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { computeStoredCredential, provisionPassword, MIN_PASSWORD_LENGTH } from '../remote-auth'
+import * as crypto from 'node:crypto'
+import {
+  computeStoredCredential,
+  provisionPassword,
+  dbPasswordAuthProvider,
+  safeHexEqual,
+  MIN_PASSWORD_LENGTH
+} from '../remote-auth'
+import type { RemoteConfigRow } from '../db'
 
-// provisionPassword writes through to the DB — stub db.ts's setRemotePassword
-// so this stays a pure unit test of remote-auth's own logic (salt generation,
-// validation, delegation), not a DB integration test (that's db.test.ts's job).
-const { dbSetRemotePassword } = vi.hoisted(() => ({ dbSetRemotePassword: vi.fn() }))
-vi.mock('../db', () => ({
-  setRemotePassword: dbSetRemotePassword
+// provisionPassword writes through to the DB and the auth provider reads from
+// it — stub both db.ts entry points so this stays a pure unit test of
+// remote-auth's own logic (salt generation, validation, delegation, credential
+// verification), not a DB integration test (that's db.test.ts's job).
+const { dbSetRemotePassword, configRef } = vi.hoisted(() => ({
+  dbSetRemotePassword: vi.fn(),
+  configRef: { current: null as RemoteConfigRow | null }
 }))
+vi.mock('../db', () => ({
+  setRemotePassword: dbSetRemotePassword,
+  getRemoteConfig: () => configRef.current
+}))
+
+const KDF_JSON = JSON.stringify({ algo: 'scrypt', N: 32768, r: 8, p: 1, dkLen: 32 })
+
+function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
+  return {
+    port: 0,
+    bindHost: null,
+    autostart: false,
+    tlsMode: 0,
+    passwordSalt: 'aa'.repeat(16),
+    passwordHash: 'bb'.repeat(32),
+    kdfParams: KDF_JSON,
+    passwordUpdatedAt: 1,
+    updatedAt: 1,
+    ...over
+  }
+}
 
 describe('computeStoredCredential', () => {
   it('matches a fixed known vector (pins the wire-format contract for Phase 2)', () => {
@@ -95,5 +125,123 @@ describe('provisionPassword', () => {
     expect(decomposed.length).toBe(MIN_PASSWORD_LENGTH)
     expect(decomposed.normalize('NFC').length).toBe(MIN_PASSWORD_LENGTH - 1)
     expect(() => provisionPassword(decomposed)).toThrow(/at least 12 characters/)
+  })
+})
+
+describe('safeHexEqual', () => {
+  it('matches identical hex and rejects a same-length difference', () => {
+    expect(safeHexEqual('ab'.repeat(32), 'ab'.repeat(32))).toBe(true)
+    expect(safeHexEqual('ab'.repeat(32), 'ac'.repeat(32))).toBe(false)
+  })
+
+  it('rejects on length mismatch without throwing (timingSafeEqual would throw)', () => {
+    expect(() => safeHexEqual('ab'.repeat(32), 'abcd')).not.toThrow()
+    expect(safeHexEqual('ab'.repeat(32), 'abcd')).toBe(false)
+  })
+
+  it('never matches when either side is empty/absent', () => {
+    expect(safeHexEqual('', '')).toBe(false)
+    expect(safeHexEqual('ab', undefined)).toBe(false)
+    expect(safeHexEqual('ab', null)).toBe(false)
+  })
+})
+
+describe('dbPasswordAuthProvider', () => {
+  beforeEach(() => {
+    configRef.current = null
+  })
+
+  describe('params()', () => {
+    it('returns null when no config row exists at all', () => {
+      expect(dbPasswordAuthProvider().params()).toBeNull()
+    })
+
+    it('returns null when the credential columns are NULL (password cleared)', () => {
+      configRef.current = makeRow({ passwordSalt: null, passwordHash: null, kdfParams: null })
+      expect(dbPasswordAuthProvider().params()).toBeNull()
+    })
+
+    it('returns the salt + parsed kdf params when provisioned', () => {
+      configRef.current = makeRow()
+      expect(dbPasswordAuthProvider().params()).toEqual({
+        saltHex: 'aa'.repeat(16),
+        kdf: { algo: 'scrypt', N: 32768, r: 8, p: 1, dkLen: 32 }
+      })
+    })
+
+    it('fails closed on a structurally invalid kdf_params row', () => {
+      const provider = dbPasswordAuthProvider()
+      for (const kdfParams of [
+        'not json',
+        JSON.stringify({ algo: 'argon2id', N: 1, r: 1, p: 1, dkLen: 32 }),
+        JSON.stringify({ algo: 'scrypt', N: 0, r: 8, p: 1, dkLen: 32 }),
+        JSON.stringify({ algo: 'scrypt', N: 32768, r: 8, p: 1 }),
+        JSON.stringify({ algo: 'scrypt', N: 32768.5, r: 8, p: 1, dkLen: 32 })
+      ]) {
+        configRef.current = makeRow({ kdfParams })
+        expect(provider.params()).toBeNull()
+      }
+    })
+
+    // A password change/clear must apply to the NEXT attempt without a server
+    // restart, so the provider may not cache the row.
+    it('re-reads the DB on every call', () => {
+      const provider = dbPasswordAuthProvider()
+      expect(provider.params()).toBeNull()
+      configRef.current = makeRow()
+      expect(provider.params()).not.toBeNull()
+      configRef.current = null
+      expect(provider.params()).toBeNull()
+    })
+  })
+
+  describe('verify()', () => {
+    const salt = Buffer.from('cd'.repeat(16), 'hex')
+    const password = 'a-perfectly-fine-password'
+    let proofHex: string
+
+    beforeEach(() => {
+      // Derive H with the SERVER's own scrypt (this file's unit under test is
+      // the comparison, not the KDF — cross-library agreement is pinned by
+      // remote-auth-kdf.test.ts).
+      const { hash, kdfParams } = computeStoredCredential(password, salt)
+      configRef.current = makeRow({
+        passwordSalt: salt.toString('hex'),
+        passwordHash: hash,
+        kdfParams
+      })
+      // H itself: recompute via node scrypt with the pinned params.
+      proofHex = crypto
+        .scryptSync(Buffer.from(password.normalize('NFC'), 'utf-8'), salt, 32, {
+          N: 32768,
+          r: 8,
+          p: 1,
+          maxmem: 64 * 1024 * 1024
+        })
+        .toString('hex')
+    })
+
+    it('accepts the correct proof', () => {
+      expect(dbPasswordAuthProvider().verify(proofHex)).toBe(true)
+    })
+
+    it('rejects a wrong proof of the correct shape', () => {
+      expect(dbPasswordAuthProvider().verify('f'.repeat(64))).toBe(false)
+    })
+
+    it.each([
+      ['empty', ''],
+      ['63 hex chars', 'a'.repeat(63)],
+      ['65 hex chars', 'a'.repeat(65)],
+      ['non-hex', 'z'.repeat(64)],
+      ['hex with whitespace', ` ${'a'.repeat(63)}`]
+    ])('rejects a malformed proof (%s) on the cheap shape check', (_label, proof) => {
+      expect(dbPasswordAuthProvider().verify(proof)).toBe(false)
+    })
+
+    it('rejects everything once the credential is cleared', () => {
+      configRef.current = makeRow({ passwordSalt: null, passwordHash: null, kdfParams: null })
+      expect(dbPasswordAuthProvider().verify(proofHex)).toBe(false)
+    })
   })
 })

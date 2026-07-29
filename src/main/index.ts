@@ -469,11 +469,16 @@ function createWindow(): void {
       return sanitizedRemoteConfig()
     }
   )
+  // Provisioning/clearing rotates the credential, so any live session that
+  // authenticated with the OLD password must not outlive it. Token clients are
+  // untouched (their credential didn't change).
   ipcMain.handle('remote:set-password', (_e, password: string) => {
     provisionPassword(password)
+    remoteServer.disconnectPasswordClients()
   })
   ipcMain.handle('remote:clear-password', () => {
     clearRemotePassword()
+    remoteServer.disconnectPasswordClients()
   })
 
   // Autostart: fire-and-forget so a listen failure (e.g. EADDRINUSE from a

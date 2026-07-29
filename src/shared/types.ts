@@ -1203,6 +1203,13 @@ export type TunnelState =
   | 'error'
   | 'restarting'
 
+/**
+ * Auth methods the remote server accepts on a connection. `'token'` is the
+ * per-start random bearer token from the URL fragment; `'password'` is the
+ * scrypt proof derived from the user's persisted credential.
+ */
+export type RemoteAuthMethod = 'token' | 'password'
+
 export interface RemoteStatus {
   running: boolean
   port: number | null
@@ -1218,6 +1225,11 @@ export interface RemoteStatus {
    *  since the last stop(). Surfaces autostart failures, which are otherwise
    *  invisible (no modal open to report them to). */
   lastError: string | null
+  /** Methods this running server will accept: always `'token'`, plus
+   *  `'password'` when a credential is provisioned AND the server is not in
+   *  tunnel (E2E) mode. Empty when not running. Derived exactly the same way as
+   *  `/remote/auth-info`'s `methods`. */
+  authMethods: RemoteAuthMethod[]
 }
 
 // ---------------------------------------------------------------------------

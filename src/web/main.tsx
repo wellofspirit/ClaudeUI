@@ -1,114 +1,228 @@
 import './main.css'
 
-import { StrictMode, useState, useEffect, useCallback } from 'react'
+import { StrictMode, useState, useEffect, useCallback, useRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RemoteConnection, type ConnectionState } from './connection'
 import { createWebSocketApi } from './api-adapter'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
-import type { FullStateSnapshot } from '../shared/remote-protocol'
+import { PasswordLogin } from './components/PasswordLogin'
+import { MissingCredential } from './components/MissingCredential'
+import { readCachedProof, writeCachedProof, clearCachedProof } from './password-proof'
+import type { FullStateSnapshot, RemoteAuthInfo, RemoteKdfParams } from '../shared/remote-protocol'
 
 // The access token AND the optional E2E key both ride the URL fragment.
 // Browsers never send the fragment to the server, so neither ever appears in
 // the HTTP request line — keeping the token out of tunnel/CDN access logs (H2).
 // They reach the client only by scanning the QR code / opening the copied link.
 const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''))
-const token = fragment.get('t') || ''
+const fragmentToken = fragment.get('t') || ''
 const e2eKeyHex = fragment.get('k') || undefined
 
-if (!token) {
-  document.body.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#d1d5db;font-family:system-ui">
-      <div style="text-align:center">
-        <h1 style="font-size:1.5rem;margin-bottom:0.5rem">Missing Token</h1>
-        <p style="color:#8b929e">Scan the QR code from the desktop app to connect.</p>
-      </div>
-    </div>
-  `
-} else {
-  // Initialize connection
-  const connection = new RemoteConnection(window.location.href, token, e2eKeyHex)
-  const api = createWebSocketApi(connection)
+// ONE connection instance for the page lifetime. `window.api` is bound to it
+// before React mounts, so the password re-prompt path must revive this instance
+// (setCredential + connect) rather than construct a replacement the adapter
+// would never see.
+const connection = new RemoteConnection(
+  window.location.href,
+  fragmentToken ? { token: fragmentToken } : {},
+  e2eKeyHex
+)
+const api = createWebSocketApi(connection)
+;(window as unknown as { api: typeof api }).api = api
 
-  // Install as window.api (same as Electron's contextBridge)
-  ;(window as unknown as { api: typeof api }).api = api
+/** Discovery endpoint. Absolute path — the server matches `/remote/auth-info`
+ *  exactly, and `/remote` (no trailing slash) would resolve a relative
+ *  `auth-info` to `/auth-info`. */
+const AUTH_INFO_URL = new URL('/remote/auth-info', window.location.origin).toString()
 
-  // Root app component that manages connection lifecycle
-  function RemoteApp(): React.JSX.Element {
-    const [connState, setConnState] = useState<ConnectionState>('connecting')
-    const [error, setError] = useState<string>()
-    const [ready, setReady] = useState(false)
+type PasswordParams = { saltHex: string; kdf: RemoteKdfParams }
 
-    const handleStateChange = useCallback((state: ConnectionState, err?: string) => {
-      setConnState(state)
-      setError(err)
-    }, [])
+/** What the pre-connection auth flow is currently doing. */
+type AuthPhase =
+  /** Fetching /remote/auth-info (no fragment token to go on). */
+  | { kind: 'probing' }
+  /** A credential is in hand; the connection drives the UI from here. */
+  | { kind: 'connecting' }
+  /** Waiting on the user's password. */
+  | { kind: 'password'; params: PasswordParams; error?: string }
+  /** No usable way in from this browser. */
+  | { kind: 'unavailable'; detail?: string }
 
-    const handleFullState = useCallback((snapshot: FullStateSnapshot) => {
-      // The mockup-scoped token arrives with the full snapshot over the
-      // authenticated WS (it is no longer injected into the served HTML — R3).
-      // The api-adapter reads it lazily via window.__MOCKUP_TOKEN__ when building
-      // iframe URLs, and AppContent only renders after `ready`, so it's set in
-      // time for the first mockup open.
-      const mockupToken = connection.getMockupToken()
-      if (mockupToken) {
-        ;(window as unknown as { __MOCKUP_TOKEN__?: string }).__MOCKUP_TOKEN__ = mockupToken
+// Root app component that manages the auth flow + connection lifecycle
+function RemoteApp(): React.JSX.Element {
+  const [phase, setPhase] = useState<AuthPhase>(
+    fragmentToken ? { kind: 'connecting' } : { kind: 'probing' }
+  )
+  const [connState, setConnState] = useState<ConnectionState>('connecting')
+  const [error, setError] = useState<string>()
+  const [ready, setReady] = useState(false)
+  /** Latest advertised password params, so a rejection can re-show the form
+   *  (and know which cache entry to drop) without re-fetching auth-info. */
+  const pwParams = useRef<PasswordParams | null>(null)
+
+  const handleStateChange = useCallback((state: ConnectionState, err?: string) => {
+    setConnState(state)
+    setError(err)
+    if (state === 'auth-rejected') {
+      const params = pwParams.current
+      // The proof we hold is dead — wrong password, a rotated credential
+      // (close 4008), or a throttled key. Drop the cache and re-prompt rather
+      // than showing the dead-end "Connection Failed" overlay.
+      if (params) {
+        clearCachedProof(params.saltHex)
+        setPhase({ kind: 'password', params, error: err })
       }
-      // Apply the full snapshot to the Zustand store (settings, sessions, config)
-      import('@renderer/stores/session-store').then(({ useSessionStore }) => {
-        useSessionStore.getState().applyRemoteSnapshot(snapshot)
-        setReady(true)
-      })
-    }, [])
+    }
+  }, [])
 
-    // Catchup events are replayed through the connection's live onEvent handler
-    // (see connection.ts sync-catchup), so main.tsx needs no event knowledge.
+  const handleFullState = useCallback((snapshot: FullStateSnapshot) => {
+    // The mockup-scoped token arrives with the full snapshot over the
+    // authenticated WS (it is no longer injected into the served HTML — R3).
+    // The api-adapter reads it lazily via window.__MOCKUP_TOKEN__ when building
+    // iframe URLs, and AppContent only renders after `ready`, so it's set in
+    // time for the first mockup open.
+    const mockupToken = connection.getMockupToken()
+    if (mockupToken) {
+      ;(window as unknown as { __MOCKUP_TOKEN__?: string }).__MOCKUP_TOKEN__ = mockupToken
+    }
+    // Apply the full snapshot to the Zustand store (settings, sessions, config)
+    import('@renderer/stores/session-store').then(({ useSessionStore }) => {
+      useSessionStore.getState().applyRemoteSnapshot(snapshot)
+      setReady(true)
+    })
+  }, [])
 
-    useEffect(() => {
-      connection.setStateHandler(handleStateChange)
-      connection.setFullStateHandler(handleFullState)
+  // Catchup events are replayed through the connection's live onEvent handler
+  // (see connection.ts sync-catchup), so main.tsx needs no event knowledge.
+
+  const connectWithProof = useCallback((proofHex: string) => {
+    connection.setCredential({ pwProof: proofHex })
+    setConnState('connecting')
+    setError(undefined)
+    setPhase({ kind: 'connecting' })
+    connection.connect()
+  }, [])
+
+  /** Derivation finished in PasswordLogin — cache the proof and connect. */
+  const handleProof = useCallback(
+    (proofHex: string) => {
+      const params = pwParams.current
+      if (params) writeCachedProof(params.saltHex, proofHex)
+      connectWithProof(proofHex)
+    },
+    [connectWithProof]
+  )
+
+  useEffect(() => {
+    connection.setStateHandler(handleStateChange)
+    connection.setFullStateHandler(handleFullState)
+    return () => {
+      connection.destroy()
+    }
+  }, [handleStateChange, handleFullState])
+
+  // Bootstrap: fragment token → connect straight away (unchanged path).
+  // Otherwise ask the server which methods it offers.
+  useEffect(() => {
+    if (fragmentToken) {
       connection.connect()
-
-      return () => {
-        connection.destroy()
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(AUTH_INFO_URL, { cache: 'no-store' })
+        if (!res.ok) throw new Error(`auth-info returned HTTP ${res.status}`)
+        const info = (await res.json()) as RemoteAuthInfo
+        if (cancelled) return
+        if (info.version !== 1) {
+          setPhase({
+            kind: 'unavailable',
+            detail: 'This server speaks a newer remote protocol — update the desktop app.'
+          })
+          return
+        }
+        if (!info.methods?.includes('password') || !info.password) {
+          setPhase({ kind: 'unavailable' })
+          return
+        }
+        const params: PasswordParams = {
+          saltHex: info.password.saltHex,
+          kdf: info.password.kdf
+        }
+        pwParams.current = params
+        // Same tab, already signed in this session: skip the form entirely.
+        const cached = readCachedProof(params.saltHex)
+        if (cached) {
+          connectWithProof(cached)
+          return
+        }
+        setPhase({ kind: 'password', params })
+      } catch (err) {
+        if (cancelled) return
+        setPhase({
+          kind: 'unavailable',
+          detail: err instanceof Error ? err.message : String(err)
+        })
       }
-    }, [handleStateChange, handleFullState])
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [connectWithProof])
 
+  if (phase.kind === 'password') {
     return (
-      <>
-        <ConnectionOverlay state={connState} error={error} />
-        {ready && <AppContent />}
-      </>
+      <PasswordLogin
+        saltHex={phase.params.saltHex}
+        kdf={phase.params.kdf}
+        error={phase.error}
+        onProof={handleProof}
+      />
+    )
+  }
+  if (phase.kind === 'unavailable') {
+    return <MissingCredential detail={phase.detail} />
+  }
+  if (phase.kind === 'probing') {
+    return <ConnectionOverlay state="connecting" />
+  }
+
+  return (
+    <>
+      <ConnectionOverlay state={connState} error={error} />
+      {ready && <AppContent />}
+    </>
+  )
+}
+
+// Lazy-load the actual app content (same components as Electron renderer)
+function AppContent(): React.JSX.Element {
+  const [App, setApp] = useState<React.ComponentType | null>(null)
+
+  useEffect(() => {
+    // Dynamic import of the renderer's App to reuse components
+    // This works because vite.web.config.ts sets up the @renderer alias
+    import('@renderer/App').then((mod) => {
+      setApp(() => mod.default)
+    })
+  }, [])
+
+  if (!App) {
+    return (
+      <div className="flex items-center justify-center h-screen text-text-secondary">
+        Loading...
+      </div>
     )
   }
 
-  // Lazy-load the actual app content (same components as Electron renderer)
-  function AppContent(): React.JSX.Element {
-    const [App, setApp] = useState<React.ComponentType | null>(null)
-
-    useEffect(() => {
-      // Dynamic import of the renderer's App to reuse components
-      // This works because vite.web.config.ts sets up the @renderer alias
-      import('@renderer/App').then((mod) => {
-        setApp(() => mod.default)
-      })
-    }, [])
-
-    if (!App) {
-      return (
-        <div className="flex items-center justify-center h-screen text-text-secondary">
-          Loading...
-        </div>
-      )
-    }
-
-    return <App />
-  }
-
-  // Render immediately — config hydration happens via the full state snapshot
-  // when the WebSocket connection completes (see handleFullState above)
-  createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <RemoteApp />
-    </StrictMode>
-  )
+  return <App />
 }
+
+// Render immediately — config hydration happens via the full state snapshot
+// when the WebSocket connection completes (see handleFullState above)
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <RemoteApp />
+  </StrictMode>
+)

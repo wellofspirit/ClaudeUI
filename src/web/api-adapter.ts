@@ -548,7 +548,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       tunnelError: null,
       connectedClients: 0,
       clientIps: [],
-      lastError: null
+      lastError: null,
+      authMethods: []
     }),
     onRemoteStatus: () => () => {},
     // Persisted remote-server config (Phase 1) is main-only IPC on the

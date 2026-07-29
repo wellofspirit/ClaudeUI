@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import WebSocket from 'ws'
 import * as http from 'node:http'
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -49,6 +50,20 @@ vi.mock('node:crypto', async (importOriginal) => {
     return actual.timingSafeEqual(a, b)
   }
   return { ...actual, default: { ...actual, timingSafeEqual }, timingSafeEqual }
+})
+
+// The default PasswordAuthProvider reads `remote_config` from the REAL
+// operational DB (~/.claude/ui/operational.db) on every call — including from
+// getStatus(), which nearly every test here touches. Override just the one
+// accessor with a mutable fake row so no test ever opens the user's DB, while
+// still exercising the real provider logic (shape checks, sha256 + constant-time
+// compare) rather than a hand-written stub.
+const { remoteConfigRef } = vi.hoisted(() => ({
+  remoteConfigRef: { current: null as unknown }
+}))
+vi.mock('../db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../db')>()
+  return { ...actual, getRemoteConfig: () => remoteConfigRef.current }
 })
 
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
@@ -95,8 +110,17 @@ vi.mock('../tunnel-manager', () => {
 })
 
 // Imported after the mocks are registered.
-import { RemoteServer } from '../remote-server'
+import { RemoteServer, getNetworkInterfaces } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
+import { computeStoredCredential } from '../remote-auth'
+import type { RemoteConfigRow } from '../db'
+import type { PasswordAuthProvider } from '../remote-auth'
+
+// Default for EVERY test in this file: no password provisioned. Suites that
+// need one call `provisionPassword()` below.
+beforeEach(() => {
+  remoteConfigRef.current = null
+})
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -120,6 +144,128 @@ async function httpGet(
       })
       .on('error', reject)
   })
+}
+
+/** Issue an arbitrary-method request (auth-info is GET-only → 405 otherwise). */
+async function httpRequest(
+  method: string,
+  url: string
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () =>
+        resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf-8'),
+          headers: res.headers
+        })
+      )
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+/**
+ * Raw HTTP/1.1 GET over a plain socket so the `Host` header can be set to an
+ * arbitrary value — or omitted entirely, which `http.request` will not do.
+ */
+async function rawHttpGet(
+  port: number,
+  path: string,
+  hostHeader: string | null
+): Promise<{ status: number; raw: string }> {
+  const net = await import('node:net')
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      const lines = [`GET ${path} HTTP/1.1`]
+      if (hostHeader !== null) lines.push(`Host: ${hostHeader}`)
+      lines.push('Connection: close', '', '')
+      socket.write(lines.join('\r\n'))
+    })
+    let raw = ''
+    socket.setTimeout(5000, () => {
+      socket.destroy()
+      reject(new Error('rawHttpGet timed out'))
+    })
+    socket.on('data', (d) => {
+      raw += d.toString('utf-8')
+    })
+    socket.on('end', () => {
+      const m = /^HTTP\/1\.1 (\d{3})/.exec(raw)
+      resolve({ status: m ? Number(m[1]) : 0, raw })
+    })
+    socket.on('error', reject)
+  })
+}
+
+/**
+ * Provision a fake credential in the mocked `remote_config` row and return the
+ * `pwProof` a compliant client would send (`hex(H)`). scrypt at N=32768 costs
+ * ~80ms, so results are memoized across tests.
+ */
+const proofCache = new Map<string, string>()
+function provisionPassword(password: string, saltHex: string): string {
+  const salt = Buffer.from(saltHex, 'hex')
+  const { hash, kdfParams } = computeStoredCredential(password, salt)
+  remoteConfigRef.current = {
+    port: 0,
+    bindHost: null,
+    autostart: false,
+    tlsMode: 0,
+    passwordSalt: saltHex,
+    passwordHash: hash,
+    kdfParams,
+    passwordUpdatedAt: 1,
+    updatedAt: 1
+  } satisfies RemoteConfigRow
+  const key = `${saltHex}:${password}`
+  let proof = proofCache.get(key)
+  if (!proof) {
+    proof = crypto
+      .scryptSync(Buffer.from(password.normalize('NFC'), 'utf-8'), salt, 32, {
+        N: 32768,
+        r: 8,
+        p: 1,
+        maxmem: 64 * 1024 * 1024
+      })
+      .toString('hex')
+    proofCache.set(key, proof)
+  }
+  return proof
+}
+
+/** Open a raw ws and resolve the first plaintext frame + eventual close code. */
+async function wsAuthAttempt(
+  port: number,
+  authFrame: Record<string, unknown>,
+  opts?: { headers?: Record<string, string>; origin?: string }
+): Promise<{ response?: Record<string, unknown>; closeCode?: number }> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/`, opts)
+  let response: Record<string, unknown> | undefined
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve())
+    ws.once('error', reject)
+    ws.once('unexpected-response', (_req, res) =>
+      reject(new Error(`upgrade rejected: ${res.statusCode}`))
+    )
+  })
+  ws.on('message', (raw) => {
+    try {
+      response = JSON.parse(raw.toString())
+    } catch {
+      /* encrypted / non-JSON — not used by these tests */
+    }
+  })
+  const closed = new Promise<number | undefined>((resolve) => {
+    ws.once('close', (code) => resolve(code))
+    ws.once('error', () => resolve(undefined))
+  })
+  ws.send(JSON.stringify(authFrame))
+  const closeCode = await closed
+  return { response, closeCode }
 }
 
 /** Resolve once the WebSocket fires any terminal event (close / error). */
@@ -876,5 +1022,582 @@ describe('RemoteServer — WS origin + limits (M-RM3)', () => {
     // The next connection is refused up front with the throttle close code.
     const throttled = await failOnce()
     expect(throttled).toBe(4006)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 2 — password auth on the WS handshake.
+// ---------------------------------------------------------------------------
+
+const PW = 'unit-test-password-1'
+const PW_SALT = 'ab'.repeat(16)
+
+describe('RemoteServer — password auth (Phase 2)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('authenticates a client with a valid pwProof and reports method:"password"', async () => {
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    const resp = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', pwProof: proof })))
+      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+      ws.once('error', reject)
+    })
+
+    expect(resp).toMatchObject({ type: 'auth-response', ok: true, method: 'password' })
+    expect(server.getStatus().connectedClients).toBe(1)
+    ws.close()
+  })
+
+  // Token and password COEXIST (spec decision 2): provisioning a password must
+  // not turn the still-valid per-start token into a rejected credential.
+  it('reports method:"token" on a token success while a password is provisioned', async () => {
+    provisionPassword(PW, PW_SALT)
+    const res = await server.start(port, '127.0.0.1')
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    const resp = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: res.token })))
+      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+      ws.once('error', reject)
+    })
+    expect(resp).toMatchObject({ type: 'auth-response', ok: true, method: 'token' })
+    expect(server.getStatus().authMethods).toEqual(['token', 'password'])
+    ws.close()
+  })
+
+  it('rejects a wrong pwProof with retryable:false and close 4001', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+
+    const { response, closeCode } = await wsAuthAttempt(port, {
+      type: 'auth',
+      pwProof: 'f'.repeat(64)
+    })
+    expect(response).toMatchObject({
+      type: 'auth-response',
+      ok: false,
+      error: 'Invalid password',
+      retryable: false
+    })
+    expect(closeCode).toBe(4001)
+  })
+
+  it.each([
+    ['empty', ''],
+    ['63 hex chars', 'a'.repeat(63)],
+    ['non-hex', 'z'.repeat(64)]
+  ])(
+    'rejects a malformed pwProof (%s) as a password failure, never as a token',
+    async (_label, pwProof) => {
+      const res = await (async () => {
+        provisionPassword(PW, PW_SALT)
+        return server.start(port, '127.0.0.1')
+      })()
+
+      const { response, closeCode } = await wsAuthAttempt(port, { type: 'auth', pwProof })
+      expect(response).toMatchObject({ ok: false, error: 'Invalid password', retryable: false })
+      expect(closeCode).toBe(4001)
+      // GUARD: no cross-method fallthrough — the server token is untouched, so
+      // presenting a malformed proof must never be retried as a token.
+      expect(response?.method).toBeUndefined()
+      expect(res.token).toMatch(/^[a-f0-9]{64}$/)
+    }
+  )
+
+  it('refuses pwProof when no credential is provisioned', async () => {
+    await server.start(port, '127.0.0.1')
+    const { response, closeCode } = await wsAuthAttempt(port, {
+      type: 'auth',
+      pwProof: 'a'.repeat(64)
+    })
+    expect(response).toMatchObject({
+      ok: false,
+      error: 'Password auth not available',
+      retryable: false
+    })
+    expect(closeCode).toBe(4001)
+  })
+
+  // Tunnel mode is E2E-encrypted from the fragment key, which a password client
+  // by definition does not have — so password auth must be refused outright
+  // rather than authenticating a socket that then dies with 4004.
+  it('refuses pwProof in tunnel mode EVEN when a credential is provisioned (GUARD)', async () => {
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+
+    const { response, closeCode } = await wsAuthAttempt(port, { type: 'auth', pwProof: proof })
+    expect(response).toMatchObject({
+      ok: false,
+      error: 'Password auth not available',
+      retryable: false
+    })
+    expect(closeCode).toBe(4001)
+    expect(server.getStatus().authMethods).toEqual(['token'])
+  })
+
+  // `{type:'auth'}` used to fall into the token path with `msg.token ===
+  // undefined`, which only failed by luck (safeTokenEqual's falsy guard).
+  it('closes 4001 on an auth frame with NO credential and never reaches the comparator (GUARD)', async () => {
+    await server.start(port, '127.0.0.1')
+    timingSafeEqualSpy.mockClear()
+
+    const { response, closeCode } = await wsAuthAttempt(port, { type: 'auth' })
+    expect(response).toMatchObject({ ok: false, error: 'Missing credential', retryable: false })
+    expect(closeCode).toBe(4001)
+    expect(timingSafeEqualSpy).not.toHaveBeenCalled()
+  })
+
+  it('a re-provisioned password applies to the next attempt with no restart', async () => {
+    const oldProof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+
+    // Rotate the credential under the running server.
+    const newProof = provisionPassword('a-totally-different-pw', 'cd'.repeat(16))
+
+    const stale = await wsAuthAttempt(port, { type: 'auth', pwProof: oldProof })
+    expect(stale.response).toMatchObject({ ok: false, error: 'Invalid password' })
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    const fresh = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', pwProof: newProof })))
+      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+      ws.once('error', reject)
+    })
+    expect(fresh).toMatchObject({ ok: true, method: 'password' })
+    ws.close()
+  })
+
+  it('disconnectPasswordClients closes password clients with 4008 and leaves token clients alone', async () => {
+    const proof = provisionPassword(PW, PW_SALT)
+    const res = await server.start(port, '127.0.0.1')
+
+    // One password client…
+    const pwWs = new WebSocket(`ws://127.0.0.1:${port}/`)
+    await new Promise<void>((resolve, reject) => {
+      pwWs.once('open', () => pwWs.send(JSON.stringify({ type: 'auth', pwProof: proof })))
+      pwWs.once('message', () => resolve())
+      pwWs.once('error', reject)
+    })
+    // …and one token client.
+    const tokenClient = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      token: res.token
+    })
+    await tokenClient.ready
+    expect(server.getStatus().connectedClients).toBe(2)
+
+    const pwClosed = new Promise<{ code?: number; reason?: string }>((resolve) =>
+      pwWs.once('close', (code, reason) => resolve({ code, reason: reason.toString('utf-8') }))
+    )
+    server.disconnectPasswordClients()
+    const closed = await pwClosed
+    expect(closed.code).toBe(4008)
+    expect(closed.reason).toBe('Credentials changed')
+
+    // The token client is untouched.
+    expect(tokenClient.ws.readyState).toBe(WebSocket.OPEN)
+    tokenClient.close()
+  })
+
+  it('getStatus().authMethods advertises password only while provisioned and running', async () => {
+    expect(server.getStatus().authMethods).toEqual([])
+    await server.start(port, '127.0.0.1')
+    expect(server.getStatus().authMethods).toEqual(['token'])
+    provisionPassword(PW, PW_SALT)
+    expect(server.getStatus().authMethods).toEqual(['token', 'password'])
+    server.stop()
+    expect(server.getStatus().authMethods).toEqual([])
+  })
+
+  it('takes an injected PasswordAuthProvider (tests never touch the real DB)', async () => {
+    const fake: PasswordAuthProvider = {
+      params: () => ({
+        saltHex: '00'.repeat(16),
+        kdf: { algo: 'scrypt', N: 2, r: 1, p: 1, dkLen: 32 }
+      }),
+      verify: (proof) => proof === 'e'.repeat(64)
+    }
+    const injected = new RemoteServer(new RemoteDispatcher(), fake)
+    const injectedPort = await ephemeralPort()
+    try {
+      await injected.start(injectedPort, '127.0.0.1')
+      const ws = new WebSocket(`ws://127.0.0.1:${injectedPort}/`)
+      const resp = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', pwProof: 'e'.repeat(64) })))
+        ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+        ws.once('error', reject)
+      })
+      expect(resp).toMatchObject({ ok: true, method: 'password' })
+      ws.close()
+    } finally {
+      injected.stop()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 2 — separate, stricter password throttle budget (5 / 5min) that must
+// not reset or be reset by the token budget (10 / 60s).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — password throttle budget (Phase 2)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** One failed attempt; resolves the close code. */
+  function failOnce(frame: Record<string, unknown>): Promise<number | undefined> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+      ws.once('open', () => ws.send(JSON.stringify(frame)))
+      ws.once('close', (code) => resolve(code))
+      ws.once('error', () => resolve(undefined))
+    })
+  }
+
+  it('throttles the key after 5 password failures (stricter than the 10-attempt token budget)', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+
+    for (let i = 0; i < 5; i++) {
+      expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
+    }
+    // The 6th connection is refused up front.
+    expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4006)
+  })
+
+  // GUARD: a single shared counter would have locked this key at the 10th
+  // combined failure. Independent budgets mean 9 token + 4 password failures
+  // (13 total) still leaves the key usable.
+  it('keeps the token and password budgets independent (GUARD)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    provisionPassword(PW, PW_SALT)
+
+    for (let i = 0; i < 9; i++) {
+      expect(await failOnce({ type: 'auth', token: 'f'.repeat(64) })).toBe(4001)
+    }
+    for (let i = 0; i < 4; i++) {
+      expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
+    }
+
+    // 13 failures in — still under BOTH budgets, so a valid token gets in.
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await client.ready
+    expect(client.authenticated).toBe(true)
+    client.close()
+    // …and a successful auth clears both budgets, so the counters restart.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
+  })
+
+  it('the 5th password failure locks the key even with the token budget unspent', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+    for (let i = 0; i < 5; i++) {
+      expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
+    }
+    // Even a VALID token is refused now — the gate is at connection time.
+    expect(await failOnce({ type: 'auth', token: 'a'.repeat(64) })).toBe(4006)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 2 — GET /remote/auth-info (unauthenticated pre-handshake discovery).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('advertises token-only when no password is provisioned', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+    expect(got.status).toBe(200)
+    expect(JSON.parse(got.body)).toEqual({ version: 1, methods: ['token'] })
+  })
+
+  it('advertises the salt + KDF params when a password is provisioned', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+    expect(JSON.parse(got.body)).toEqual({
+      version: 1,
+      methods: ['token', 'password'],
+      password: {
+        saltHex: PW_SALT,
+        kdf: { algo: 'scrypt', N: 32768, r: 8, p: 1, dkLen: 32 }
+      }
+    })
+  })
+
+  it('omits the password section in tunnel mode even when provisioned', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+    const info = JSON.parse(got.body)
+    expect(info.methods).toEqual(['token'])
+    expect(info.password).toBeUndefined()
+  })
+
+  it('sends no-store + JSON content type + the hardening headers (and no CSP)', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+    expect(got.headers['content-type']).toBe('application/json; charset=utf-8')
+    expect(got.headers['cache-control']).toBe('no-store')
+    expect(got.headers['x-content-type-options']).toBe('nosniff')
+    expect(got.headers['referrer-policy']).toBe('no-referrer')
+    expect(got.headers['content-security-policy']).toBeUndefined()
+  })
+
+  it('is GET-only (405 on POST)', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpRequest('POST', `http://127.0.0.1:${port}/remote/auth-info`)
+    expect(got.status).toBe(405)
+    expect(got.headers['allow']).toBe('GET')
+  })
+
+  // The endpoint is unauthenticated, so a leak here is a leak to anyone who can
+  // reach the port. The salt IS allowed (public by construction); the hash, both
+  // tokens, the E2E key, the hostname and version strings are NOT.
+  it('leaks no credential material (denylist)', async () => {
+    const proof = provisionPassword(PW, PW_SALT)
+    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    const internals = server as unknown as { mockupToken: string; e2eKey: string }
+    const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+
+    const forbidden: Array<[string, string]> = [
+      ['ws token', res.token],
+      ['mockup token', internals.mockupToken],
+      ['e2e key', internals.e2eKey],
+      ['stored hash', (remoteConfigRef.current as RemoteConfigRow).passwordHash!],
+      ['proof', proof],
+      ['os hostname', os.hostname()]
+    ]
+    for (const [label, value] of forbidden) {
+      expect(got.body, `auth-info must not contain the ${label}`).not.toContain(value)
+    }
+    // …and the whole payload is exactly the two/three allowed keys.
+    expect(Object.keys(JSON.parse(got.body)).sort()).toEqual(['methods', 'version'])
+  })
+
+  it('includes the salt (which is public) when provisioned — non-vacuity for the denylist', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+    expect(got.body).toContain(PW_SALT)
+  })
+
+  it('returns 429 to a throttled key', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
+
+    const failOnce = (): Promise<number | undefined> =>
+      new Promise((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+        ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', pwProof: 'f'.repeat(64) })))
+        ws.once('close', (code) => resolve(code))
+        ws.once('error', () => resolve(undefined))
+      })
+
+    expect((await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)).status).toBe(200)
+    for (let i = 0; i < 5; i++) await failOnce()
+    const throttled = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
+    expect(throttled.status).toBe(429)
+    expect(throttled.headers['cache-control']).toBe('no-store')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Host allowlist (DNS-rebinding mitigation) on every HTTP route and
+// on the WS upgrade.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — Host allowlist (Phase 2)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('accepts the hosts we actually serve and rejects everything else (HTTP)', async () => {
+    await server.start(port, '127.0.0.1')
+    const lanIp = getNetworkInterfaces()[0]?.address
+    const hostname = os.hostname()
+
+    const allowed: string[] = [
+      `127.0.0.1:${port}`,
+      `localhost:${port}`,
+      `[::1]:${port}`,
+      // bound host, and a name with no port at all (rule 1 only checks a port
+      // component when one is present)
+      '127.0.0.1',
+      `${hostname}:${port}`,
+      `${hostname.toUpperCase()}:${port}`,
+      `${hostname.toLowerCase().split('.')[0]}.local:${port}`
+    ]
+    if (lanIp) allowed.push(`${lanIp}:${port}`)
+
+    for (const host of allowed) {
+      const got = await rawHttpGet(port, '/remote/auth-info', host)
+      expect(got.status, `Host ${host} should be allowed`).toBe(200)
+    }
+
+    const rejected: Array<[string, string | null]> = [
+      ['empty Host', ''],
+      ['attacker domain', `evil.com:${port}`],
+      ['right hostname, wrong port', `127.0.0.1:${port + 1}`],
+      ['localhost, wrong port', `localhost:${port + 1}`],
+      ['bracketed v6, wrong port', `[::1]:${port + 1}`],
+      ['non-numeric port', '127.0.0.1:abc']
+    ]
+    for (const [label, host] of rejected) {
+      const got = await rawHttpGet(port, '/remote/auth-info', host)
+      expect(got.status, `${label} should be refused`).toBe(403)
+    }
+
+    // An HTTP/1.1 request with NO Host at all never reaches our handler: node's
+    // own parser rejects it with 400. Either way it is refused — assert the
+    // outcome, not which layer produced it.
+    const noHost = await rawHttpGet(port, '/remote/auth-info', null)
+    expect(noHost.status).toBe(400)
+  })
+
+  it('applies to every route, not just auth-info', async () => {
+    await server.start(port, '127.0.0.1')
+    for (const path of ['/', '/remote', '/remote/auth-info', '/assets/app.js', '/nope']) {
+      const got = await rawHttpGet(port, path, `evil.com:${port}`)
+      expect(got.status, `${path} with a bad Host`).toBe(403)
+    }
+  })
+
+  it('rejects a WS upgrade with a disallowed Host', async () => {
+    await server.start(port, '127.0.0.1')
+    const result = await new Promise<{ opened: boolean; rejected: boolean }>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, {
+        headers: { Host: `evil.com:${port}` }
+      })
+      let opened = false
+      ws.once('open', () => {
+        opened = true
+        ws.close()
+      })
+      ws.once('unexpected-response', () => resolve({ opened, rejected: true }))
+      ws.once('error', () => resolve({ opened, rejected: true }))
+      ws.once('close', () => resolve({ opened, rejected: false }))
+    })
+    expect(result.opened).toBe(false)
+    expect(result.rejected).toBe(true)
+    expect(server.getStatus().connectedClients).toBe(0)
+  })
+
+  // GUARD — cloudflared forwards the browser's ORIGINAL Host verbatim to this
+  // origin (verified against a live quick tunnel: the origin sees
+  // `<name>.trycloudflare.com`, with no X-Forwarded-Host). A Host allowlist that
+  // doesn't know the tunnel hostname 403s every tunnelled request, i.e. breaks
+  // tunnel mode outright.
+  it('accepts the live tunnel hostname and only that one (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    // The stub TunnelManager reports 'stopped'; pretend a quick tunnel came up.
+    const tunnel = (server as unknown as { tunnel: { getStatus: () => unknown } }).tunnel
+    tunnel.getStatus = () => ({
+      state: 'connected',
+      url: 'https://edgar-places-iowa-reasoning.trycloudflare.com',
+      error: null
+    })
+
+    // Port-less, exactly as a browser on 443 sends it.
+    expect(
+      (await rawHttpGet(port, '/remote/auth-info', 'edgar-places-iowa-reasoning.trycloudflare.com'))
+        .status
+    ).toBe(200)
+    // Any OTHER trycloudflare host is somebody else's tunnel — still refused.
+    expect(
+      (await rawHttpGet(port, '/remote/auth-info', 'someone-elses.trycloudflare.com')).status
+    ).toBe(403)
+
+    // …and once the tunnel is gone, the hostname stops being allowed.
+    tunnel.getStatus = () => ({ state: 'stopped', url: null, error: null })
+    expect(
+      (await rawHttpGet(port, '/remote/auth-info', 'edgar-places-iowa-reasoning.trycloudflare.com'))
+        .status
+    ).toBe(403)
+  })
+
+  // Regression: the Host allowlist must not break the same-origin check for a
+  // NAME-based Host — the shape a reverse proxy that passes Host through
+  // produces (Origin host === Host, neither being 127.0.0.1).
+  //
+  // NOTE the host is lowercase on purpose. `verifyWsOrigin` compares
+  // `new URL(origin).host` (which the URL parser lowercases) to the RAW
+  // `Host` header, so an uppercase Host + matching Origin would fail that
+  // pre-existing exact-string compare. Browsers always send both lowercased, and
+  // a `tailscale serve` dnsName is lowercase too, so this is the realistic shape.
+  it('still authenticates when Origin host === a name-based Host (verifyWsOrigin preserved)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const hostHeader = `${os.hostname().toLowerCase()}:${port}`
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`, {
+      headers: { Host: hostHeader },
+      origin: `http://${hostHeader}`
+    })
+    const authResp = await new Promise<{ ok: boolean }>((resolve, reject) => {
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: res.token })))
+      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+      ws.once('error', reject)
+      ws.once('unexpected-response', () => reject(new Error('upgrade rejected')))
+    })
+    expect(authResp.ok).toBe(true)
+    ws.close()
   })
 })

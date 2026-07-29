@@ -13,6 +13,7 @@ const STATE_LABELS: Record<ConnectionState, string> = {
   syncing: 'Syncing state...',
   connected: 'Connected',
   reconnecting: 'Reconnecting...',
+  'auth-rejected': 'Sign-in Required',
   failed: 'Connection Failed'
 }
 
@@ -34,7 +35,11 @@ export function ConnectionOverlay({
 
   if (!visible) return null
 
-  const isFailed = state === 'failed'
+  // 'auth-rejected' gets the failed treatment (error icon + Retry) here. The
+  // password flow intercepts it in main.tsx and re-shows its own form instead,
+  // so this branch only renders for a rejected/throttled token client, where a
+  // reload really is the only recovery.
+  const isFailed = state === 'failed' || state === 'auth-rejected'
   const isConnected = state === 'connected'
 
   return (
