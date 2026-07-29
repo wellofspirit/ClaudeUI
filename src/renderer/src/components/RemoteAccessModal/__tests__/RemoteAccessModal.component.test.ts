@@ -205,6 +205,40 @@ describe('RemoteAccessModal FC', () => {
     expect(viewProps.copied).toBe(true)
   })
 
+  // Phase 3 — the ts.net URL wins: in TLS mode the server binds loopback, so
+  // lanUrl is null and the tunnel is off; and this URL carries no fragment
+  // (Tailscale identity authenticates the browser), so it is bookmark-able.
+  it('prefers tls.url over the tunnel and LAN URLs for the QR/copy target', async () => {
+    statusQueue = [
+      makeStatus({
+        running: true,
+        port: 5123,
+        lanUrl: null,
+        tunnelUrl: 'https://tunnel.example/remote#t=abc',
+        tls: {
+          mode: 1,
+          httpsPort: 443,
+          url: 'https://cg-mac.tail3140f8.ts.net',
+          detection: 'ok',
+          detectionMessage: null
+        }
+      })
+    ]
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    act(() => {
+      viewProps.onCopy()
+    })
+    expect(writeTextCalls).toEqual(['https://cg-mac.tail3140f8.ts.net'])
+    // The QR encodes the same bare URL (no fragment to strip).
+    expect(viewProps.qrDataUrl).toBe('data:image/png;base64,STUB')
+  })
+
   it('pushed status event updates the view', async () => {
     statusQueue = [makeStatus()]
     await act(async () => {

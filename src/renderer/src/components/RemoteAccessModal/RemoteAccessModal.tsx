@@ -16,7 +16,10 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
   const [selectedHost, setSelectedHost] = useState<string>('')
   const [tunnelMode, setTunnelMode] = useState(false)
 
-  const shareUrl = status?.tunnelUrl ?? status?.lanUrl ?? null
+  // TLS mode first: it is the only URL that works when the server is bound to
+  // loopback, it needs no fragment (Tailscale identity authenticates the
+  // browser), and it is stable enough to bookmark.
+  const shareUrl = status?.tls?.url ?? status?.tunnelUrl ?? status?.lanUrl ?? null
 
   useEffect(() => {
     window.api.getRemoteStatus().then(setStatus)

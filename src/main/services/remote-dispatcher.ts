@@ -54,7 +54,11 @@ export class RemoteDispatcher {
     'remote:get-config',
     'remote:set-config',
     'remote:set-password',
-    'remote:clear-password'
+    'remote:clear-password',
+    // Tailscale probe (Phase 3): discloses this node's tailnet DNS name and the
+    // owner's login — local-configuration detail a remote client has no business
+    // reading, and useless to it anyway (it cannot flip tls_mode either).
+    'remote:tailscale-detect'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

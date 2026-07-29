@@ -59,6 +59,14 @@ export interface WsAuthResponse {
   /** Which method the server accepted. Present on success. */
   method?: RemoteAuthMethod
   /**
+   * Present only for `method: 'tailnet-identity'`. This frame is UNSOLICITED —
+   * the server sends it on `connection`, before (and instead of waiting for) any
+   * client `auth` frame, because identity lives entirely in the upgrade request
+   * headers and there is nothing for the client to send. `login` is the
+   * `Tailscale-User-Login` value the server accepted.
+   */
+  identity?: { login: string }
+  /**
    * Failure only. `false` = the presented credential is definitively rejected;
    * the client must stop retrying with it (and drop any cached copy) rather
    * than spinning the reconnect backoff. Absent = unspecified, treat as
@@ -96,6 +104,20 @@ export interface RemoteAuthInfo {
   methods: RemoteAuthMethod[]
   /** Present iff `methods` includes `'password'`. */
   password?: { saltHex: string; kdf: RemoteKdfParams }
+  /**
+   * Present iff `methods` includes `'tailnet-identity'`. Purely informational:
+   * the server decides from the request headers, never from anything the client
+   * sends.
+   *
+   * `login` is non-null ONLY when THIS request would be authenticated as the
+   * node owner — i.e. it echoes back the caller's own trusted header value, so
+   * it discloses nothing the caller did not already prove. It is null when the
+   * request did not arrive through `tailscale serve`, AND when it did but
+   * carried a login other than the owner's: a non-owner must fall through to
+   * the password form rather than be told to connect credential-less (they
+   * would just be refused). See `evaluateIdentity` in `remote-server.ts`.
+   */
+  identity?: { login: string | null }
 }
 
 /** Client → Server: state sync request */

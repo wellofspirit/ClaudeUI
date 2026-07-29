@@ -110,11 +110,13 @@ vi.mock('../tunnel-manager', () => {
 })
 
 // Imported after the mocks are registered.
-import { RemoteServer, getNetworkInterfaces } from '../remote-server'
+import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import { computeStoredCredential } from '../remote-auth'
+import { TailscaleServeError } from '../tailscale-manager'
 import type { RemoteConfigRow } from '../db'
 import type { PasswordAuthProvider } from '../remote-auth'
+import type { TailscaleDetection } from '../../../shared/types'
 
 // Default for EVERY test in this file: no password provisioned. Suites that
 // need one call `provisionPassword()` below.
@@ -171,17 +173,21 @@ async function httpRequest(
 /**
  * Raw HTTP/1.1 GET over a plain socket so the `Host` header can be set to an
  * arbitrary value — or omitted entirely, which `http.request` will not do.
+ * `extra` adds verbatim header lines (used for the Tailscale identity/funnel
+ * headers, which must be settable independently of Host).
  */
 async function rawHttpGet(
   port: number,
   path: string,
-  hostHeader: string | null
+  hostHeader: string | null,
+  extra: Record<string, string> = {}
 ): Promise<{ status: number; raw: string }> {
   const net = await import('node:net')
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1', () => {
       const lines = [`GET ${path} HTTP/1.1`]
       if (hostHeader !== null) lines.push(`Host: ${hostHeader}`)
+      for (const [k, v] of Object.entries(extra)) lines.push(`${k}: ${v}`)
       lines.push('Connection: close', '', '')
       socket.write(lines.join('\r\n'))
     })
@@ -1599,5 +1605,781 @@ describe('RemoteServer — Host allowlist (Phase 2)', () => {
     })
     expect(authResp.ok).toBe(true)
     ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — TLS mode (`tailscale serve`) + tailnet identity.
+//
+// Every serve mutation goes through an INJECTED fake: the real CLI is never
+// exec'd, so these run on a machine with no tailscale (and never touch the
+// developer's tailnet).
+// ---------------------------------------------------------------------------
+
+const TS_DNS = 'cg-mac.tail3140f8.ts.net'
+const TS_OWNER = 'owner@example.com'
+const TS_MARKER = 'https://tailscale.com/s/serve-headers'
+
+/** Headers `tailscale serve` attaches for a given tailnet user. */
+function identityHeaders(login: string, xff = '100.64.0.9'): Record<string, string> {
+  return {
+    'Tailscale-User-Login': login,
+    'Tailscale-Headers-Info': TS_MARKER,
+    'X-Forwarded-For': xff,
+    'X-Forwarded-Proto': 'https'
+  }
+}
+
+function okDetection(over: Partial<Extract<TailscaleDetection, { state: 'ok' }>> = {}) {
+  return {
+    state: 'ok' as const,
+    binaryPath: 'tailscale',
+    version: '1.98.5',
+    dnsName: TS_DNS,
+    certDomains: [TS_DNS],
+    ownerLogin: TS_OWNER,
+    ...over
+  }
+}
+
+interface FakeTailscale {
+  detect: () => Promise<TailscaleDetection>
+  enableServe: (localPort: number) => Promise<{ httpsPort: number; url: string }>
+  disableServe: (httpsPort: number) => Promise<void>
+  /** Mutable so a test can make a retry succeed. */
+  detection: TailscaleDetection
+  enableFailure: unknown
+  detectCalls: number
+  enableCalls: number[]
+  disableCalls: number[]
+}
+
+function makeFakeTailscale(
+  opts: { detection?: TailscaleDetection; httpsPort?: number; enableFailure?: unknown } = {}
+): FakeTailscale {
+  const httpsPort = opts.httpsPort ?? 443
+  const fake: FakeTailscale = {
+    detection: opts.detection ?? okDetection(),
+    enableFailure: opts.enableFailure,
+    detectCalls: 0,
+    enableCalls: [],
+    disableCalls: [],
+    detect: async () => {
+      fake.detectCalls++
+      return fake.detection
+    },
+    enableServe: async (localPort: number) => {
+      fake.enableCalls.push(localPort)
+      if (fake.enableFailure !== undefined) throw fake.enableFailure
+      return {
+        httpsPort,
+        url: httpsPort === 443 ? `https://${TS_DNS}` : `https://${TS_DNS}:${httpsPort}`
+      }
+    },
+    disableServe: async (port: number) => {
+      fake.disableCalls.push(port)
+    }
+  }
+  return fake
+}
+
+interface RawWs {
+  ws: WebSocket
+  /** Frames received but not yet consumed by {@link RawWs.next}. */
+  pending: string[]
+  /** Next frame (buffered or awaited), parsed as JSON. */
+  next: (timeoutMs?: number) => Promise<Record<string, unknown>>
+  /** Assert nothing arrived within `ms` — the identity fall-through paths. */
+  expectSilence: (ms?: number) => Promise<void>
+}
+
+/**
+ * Open a ws with arbitrary headers and start BUFFERING frames immediately.
+ *
+ * Buffering matters here specifically: the identity `auth-response` is
+ * unsolicited, so it can be emitted in the same tick the handshake completes —
+ * before an `await`-ed listener could attach. A `ws.once('message')` after
+ * `await open` loses that race.
+ */
+async function rawWs(port: number, headers: Record<string, string> = {}): Promise<RawWs> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { headers })
+  const pending: string[] = []
+  let notify: (() => void) | null = null
+  ws.on('message', (raw) => {
+    pending.push(raw.toString())
+    notify?.()
+  })
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve())
+    ws.once('error', reject)
+    ws.once('unexpected-response', (_req, res) =>
+      reject(new Error(`upgrade rejected: ${res.statusCode}`))
+    )
+  })
+  const next = (timeoutMs = 2000): Promise<Record<string, unknown>> =>
+    new Promise((resolve, reject) => {
+      const take = (): boolean => {
+        const frame = pending.shift()
+        if (frame === undefined) return false
+        resolve(JSON.parse(frame))
+        return true
+      }
+      if (take()) return
+      const timer = setTimeout(() => {
+        notify = null
+        reject(new Error('no frame arrived'))
+      }, timeoutMs)
+      notify = () => {
+        if (take()) {
+          clearTimeout(timer)
+          notify = null
+        }
+      }
+    })
+  const expectSilence = async (ms = 150): Promise<void> => {
+    await new Promise((r) => setTimeout(r, ms))
+    expect(pending).toEqual([])
+  }
+  return { ws, pending, next, expectSilence }
+}
+
+/** GET with arbitrary headers, returning the parsed JSON body. */
+async function httpGetJson(
+  port: number,
+  path: string,
+  headers: Record<string, string> = {}
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf-8')
+        let body: unknown = text
+        try {
+          body = JSON.parse(text)
+        } catch {
+          /* non-JSON (403/429 bodies) */
+        }
+        resolve({ status: res.statusCode ?? 0, body })
+      })
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
+  let server: RemoteServer
+  let port: number
+  let ts: FakeTailscale
+
+  beforeEach(async () => {
+    ts = makeFakeTailscale()
+    server = new RemoteServer(new RemoteDispatcher(), undefined, ts)
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+    vi.useRealTimers()
+  })
+
+  it('binds loopback (ignoring the requested host) and points serve at the bound port', async () => {
+    // '0.0.0.0' is deliberately requested: TLS mode must override it, or the
+    // port would be reachable in plaintext on every LAN interface.
+    await server.start(port, '0.0.0.0', { tls: true })
+
+    const addr = (server as unknown as { httpServer: http.Server }).httpServer.address()
+    expect(typeof addr === 'object' && addr && addr.address).toBe('127.0.0.1')
+    expect(ts.enableCalls).toEqual([port])
+
+    const status = server.getStatus()
+    expect(status.tls).toEqual({
+      mode: 1,
+      httpsPort: 443,
+      url: `https://${TS_DNS}`,
+      detection: 'ok',
+      detectionMessage: null
+    })
+    // No LAN URL in TLS mode — the loopback one is a dead end for a phone.
+    expect(status.lanUrl).toBeNull()
+    expect(status.authMethods).toEqual(['token', 'tailnet-identity'])
+  })
+
+  it('start() hands back the ts.net URL rather than the loopback one', async () => {
+    const res = await server.start(port, undefined, { tls: true })
+    expect(res.lanUrl).toBe(`https://${TS_DNS}`)
+  })
+
+  it('a MANUAL start fails fast on a serve failure: listener down, lastError set', async () => {
+    ts.enableFailure = new TailscaleServeError(
+      'all-ports-occupied',
+      'All Tailscale HTTPS ports are already used by another serve configuration.'
+    )
+    await expect(server.start(port, '127.0.0.1', { tls: true })).rejects.toThrow(
+      /already used by another serve configuration/
+    )
+
+    const status = server.getStatus()
+    expect(status.running).toBe(false)
+    expect(status.port).toBeNull()
+    expect(status.tls).toBeNull()
+    expect(status.lastError).toMatch(/already used by another serve configuration/)
+    // The half-started listener must really be gone.
+    await expect(httpGet(`http://127.0.0.1:${port}/remote`)).rejects.toThrow()
+  })
+
+  it('AUTOSTART keeps the (loopback-only) listener up and retries a transient failure', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ts.detection = {
+      state: 'daemon-down',
+      message: 'The Tailscale daemon is not running.',
+      binaryPath: 'tailscale'
+    }
+    await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+
+    // Still serving (on loopback), and honest about why TLS isn't up.
+    expect(server.getStatus().running).toBe(true)
+    expect(server.getStatus().tls).toEqual({
+      mode: 1,
+      httpsPort: null,
+      url: null,
+      detection: 'daemon-down',
+      detectionMessage: 'The Tailscale daemon is not running.'
+    })
+    expect(ts.detectCalls).toBe(1)
+
+    // 5 retries at 15s, then it gives up.
+    for (let i = 1; i <= 5; i++) {
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(ts.detectCalls).toBe(1 + i)
+    }
+    await vi.advanceTimersByTimeAsync(15_000 * 3)
+    expect(ts.detectCalls).toBe(6)
+  })
+
+  it('a retry that succeeds brings serve up and stops retrying', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ts.detection = { state: 'daemon-down', message: 'daemon down' }
+    await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+    expect(server.getStatus().tls?.url).toBeNull()
+
+    ts.detection = okDetection()
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(server.getStatus().tls).toMatchObject({
+      httpsPort: 443,
+      url: `https://${TS_DNS}`,
+      detection: 'ok',
+      detectionMessage: null
+    })
+    const detectsSoFar = ts.detectCalls
+    await vi.advanceTimersByTimeAsync(15_000 * 5)
+    expect(ts.detectCalls).toBe(detectsSoFar)
+  })
+
+  // GUARD: retrying a state only a human can fix (certs disabled in the admin
+  // console, tailscale not installed, logged out) would just spam the CLI.
+  it.each([
+    ['https-disabled', 'HTTPS certificates are not enabled for this tailnet.'],
+    ['not-installed', 'Tailscale was not found.'],
+    ['logged-out', 'You are logged out of Tailscale.'],
+    ['no-operator', 'Tailscale refused access to its local API.']
+  ] as const)('does NOT retry the non-transient state %s (GUARD)', async (state, message) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ts.detection = { state, message } as TailscaleDetection
+    // Autostart never fails the start — the listener stays up and the reason
+    // travels in the status, whether or not a retry is scheduled.
+    await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+    expect(server.getStatus().running).toBe(true)
+    expect(ts.detectCalls).toBe(1)
+    await vi.advanceTimersByTimeAsync(15_000 * 6)
+    expect(ts.detectCalls).toBe(1)
+    expect(server.getStatus().tls).toMatchObject({ detection: state, detectionMessage: message })
+  })
+
+  it('stop() turns off OUR serve port and clears the retry timer', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    server.stop()
+    // Fire-and-forget: let the microtask run.
+    await new Promise((r) => setImmediate(r))
+    expect(ts.disableCalls).toEqual([443])
+    expect(server.getStatus().tls).toBeNull()
+    expect((server as unknown as { tlsRetryTimer?: unknown }).tlsRetryTimer).toBeUndefined()
+  })
+
+  it('stop() cancels a pending retry (no serve call after the server is gone)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ts.detection = { state: 'daemon-down', message: 'daemon down' }
+    await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+    expect(ts.detectCalls).toBe(1)
+    server.stop()
+    await vi.advanceTimersByTimeAsync(15_000 * 6)
+    expect(ts.detectCalls).toBe(1)
+  })
+
+  // Decision 4 — the two transports are mutually exclusive per run.
+  it('TUNNEL WINS: serve is never configured when both modes are requested (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tunnel: true, tls: true })
+    expect(ts.enableCalls).toEqual([])
+    expect(ts.detectCalls).toBe(0)
+    const status = server.getStatus()
+    expect(status.tls).toBeNull()
+    // …and the status is honest: no identity method is advertised.
+    expect(status.authMethods).toEqual(['token'])
+  })
+
+  it('a serve failure with an unknown owner login still comes up, with identity OFF', async () => {
+    ts.detection = okDetection({ ownerLogin: null })
+    await server.start(port, '127.0.0.1', { tls: true })
+    expect(server.getStatus().tls?.url).toBe(`https://${TS_DNS}`)
+    // Fail closed: no owner login ⇒ no identity method at all.
+    expect(server.getStatus().authMethods).toEqual(['token'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — `evaluateIdentity`, the whole trust predicate as a pure function.
+// ---------------------------------------------------------------------------
+
+describe('evaluateIdentity (Phase 3)', () => {
+  const ctx = { tlsActive: true, ownerLogin: TS_OWNER }
+  const owner = { 'tailscale-user-login': TS_OWNER, 'tailscale-headers-info': TS_MARKER }
+
+  it('accepts the owner over a loopback peer behind serve', () => {
+    expect(evaluateIdentity(owner, '127.0.0.1', ctx)).toEqual({ kind: 'owner', login: TS_OWNER })
+  })
+
+  it.each([
+    ['::1', '::1'],
+    ['IPv4-mapped loopback', '::ffff:127.0.0.1'],
+    ['127.x', '127.0.0.53']
+  ])('treats %s as loopback', (_label, addr) => {
+    expect(evaluateIdentity(owner, addr, ctx).kind).toBe('owner')
+  })
+
+  it('compares case-insensitively', () => {
+    const headers = { ...owner, 'tailscale-user-login': 'OWNER@Example.COM' }
+    expect(evaluateIdentity(headers, '127.0.0.1', ctx)).toEqual({
+      kind: 'owner',
+      login: TS_OWNER
+    })
+  })
+
+  it('reports a mismatch for another tailnet user (no identity, but not a refusal)', () => {
+    const headers = { ...owner, 'tailscale-user-login': 'colleague@example.com' }
+    expect(evaluateIdentity(headers, '127.0.0.1', ctx)).toEqual({
+      kind: 'mismatch',
+      login: 'colleague@example.com',
+      ownerLogin: TS_OWNER
+    })
+  })
+
+  it.each([
+    ['TLS mode is off', owner, '127.0.0.1', { tlsActive: false, ownerLogin: TS_OWNER }],
+    ['the peer is not loopback', owner, '100.64.0.9', ctx],
+    ['the peer is unknown', owner, undefined, ctx],
+    [
+      'the owner login is unknown (tagged node)',
+      owner,
+      '127.0.0.1',
+      {
+        tlsActive: true,
+        ownerLogin: null
+      }
+    ],
+    ['the serve marker header is missing', { 'tailscale-user-login': TS_OWNER }, '127.0.0.1', ctx],
+    ['the login header is missing', { 'tailscale-headers-info': TS_MARKER }, '127.0.0.1', ctx],
+    ['the login header is blank', { ...owner, 'tailscale-user-login': '  ' }, '127.0.0.1', ctx],
+    [
+      'the request came over Funnel',
+      { ...owner, 'tailscale-funnel-request': '?1' },
+      '127.0.0.1',
+      ctx
+    ]
+  ] as const)('fails closed when %s', (_label, headers, addr, context) => {
+    expect(evaluateIdentity(headers, addr, context)).toEqual({ kind: 'absent' })
+  })
+
+  // Q-encoded values (serve encodes non-ASCII) must never be decoded into a
+  // match — failing closed is the only safe outcome.
+  it('does not match an RFC-2047 encoded header value', () => {
+    const headers = { ...owner, 'tailscale-user-login': '=?utf-8?q?owner=40example=2Ecom?=' }
+    expect(evaluateIdentity(headers, '127.0.0.1', ctx).kind).toBe('mismatch')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — tailnet identity over a real WebSocket upgrade.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — tailnet identity auth (Phase 3)', () => {
+  let server: RemoteServer
+  let port: number
+  let ts: FakeTailscale
+
+  beforeEach(async () => {
+    ts = makeFakeTailscale()
+    server = new RemoteServer(new RemoteDispatcher(), undefined, ts)
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('authenticates the node owner from the upgrade headers with an UNSOLICITED auth-response', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, identityHeaders(TS_OWNER))
+
+    // Nothing is sent by the client — the frame arrives on its own.
+    const frame = await conn.next()
+    expect(frame).toEqual({
+      type: 'auth-response',
+      ok: true,
+      method: 'tailnet-identity',
+      identity: { login: TS_OWNER }
+    })
+
+    const status = server.getStatus()
+    expect(status.connectedClients).toBe(1)
+    expect(status.clientLogins).toEqual([TS_OWNER])
+    // Attribution comes from X-Forwarded-For, not the (always-loopback) peer.
+    expect(status.clientIps).toEqual(['100.64.0.9'])
+    conn.ws.close()
+  })
+
+  // GUARD: the web client still sends a bare `{type:'auth'}` after the
+  // unsolicited response. It must be ignored by the post-auth switch, not
+  // treated as a credential-less auth attempt (which would close the socket).
+  it('ignores the bare auth frame that follows identity auth (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, identityHeaders(TS_OWNER))
+    expect(await conn.next()).toMatchObject({ ok: true, method: 'tailnet-identity' })
+
+    // This is exactly what the web client sends after the unsolicited response.
+    conn.ws.send(JSON.stringify({ type: 'auth' }))
+    // No second auth-response, no close: the post-auth switch ignores it.
+    await conn.expectSilence()
+
+    expect(conn.ws.readyState).toBe(WebSocket.OPEN)
+    expect(server.getStatus().connectedClients).toBe(1)
+    conn.ws.close()
+  })
+
+  // The fall-through nuance: identity is a convenience layer, NOT a gate. A
+  // colleague on the tailnet who knows the password must still get in on the
+  // same socket.
+  it('a non-owner login gets no unsolicited response and can still sign in with the password', async () => {
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, identityHeaders('colleague@example.com'))
+
+    // No unsolicited response for a login that isn't the owner's…
+    await conn.expectSilence()
+
+    // …and the normal password handshake still works on this very socket.
+    conn.ws.send(JSON.stringify({ type: 'auth', pwProof: proof }))
+    expect(await conn.next()).toMatchObject({
+      type: 'auth-response',
+      ok: true,
+      method: 'password'
+    })
+    expect(server.getStatus().clientLogins).toEqual([null])
+    conn.ws.close()
+  })
+
+  it('a non-owner with NO credential gets the actionable identity error', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, identityHeaders('colleague@example.com'))
+    const closed = waitForTerminal(conn.ws)
+    conn.ws.send(JSON.stringify({ type: 'auth' }))
+    const resp = await conn.next()
+    expect(resp).toMatchObject({
+      ok: false,
+      error: `Signed in to Tailscale as colleague@example.com, but this ClaudeUI only accepts ${TS_OWNER}`,
+      retryable: false
+    })
+    expect((await closed).code).toBe(4001)
+  })
+
+  it('does not authenticate identity headers without the serve marker (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, { 'Tailscale-User-Login': TS_OWNER })
+    await conn.expectSilence()
+    expect(server.getStatus().connectedClients).toBe(0)
+    conn.ws.close()
+  })
+
+  it('does not authenticate identity headers when the server is NOT in TLS mode (GUARD)', async () => {
+    await server.start(port, '127.0.0.1')
+    const conn = await rawWs(port, identityHeaders(TS_OWNER))
+    await conn.expectSilence()
+    expect(server.getStatus().connectedClients).toBe(0)
+    conn.ws.close()
+  })
+
+  it('does not authenticate anyone when the owner login is unknown (tagged node)', async () => {
+    ts.detection = okDetection({ ownerLogin: null })
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, identityHeaders(TS_OWNER))
+    await conn.expectSilence()
+
+    conn.ws.send(JSON.stringify({ type: 'auth' }))
+    expect(await conn.next()).toMatchObject({ ok: false, error: 'Missing credential' })
+  })
+
+  it('token auth still works over the TLS-mode socket, with a null login', async () => {
+    const res = await server.start(port, '127.0.0.1', { tls: true })
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await client.ready
+    expect(server.getStatus().clientLogins).toEqual([null])
+    client.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Funnel is rejected unconditionally. We never enable it, so the
+// header can only mean unexpected PUBLIC exposure (and it carries no identity).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — Funnel hard reject (Phase 3)', () => {
+  let server: RemoteServer
+  let port: number
+  let ts: FakeTailscale
+
+  beforeEach(async () => {
+    ts = makeFakeTailscale()
+    server = new RemoteServer(new RemoteDispatcher(), undefined, ts)
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it.each([
+    ['TLS mode', true],
+    ['plain mode', false]
+  ])('403s every HTTP route carrying Tailscale-Funnel-Request in %s', async (_label, tls) => {
+    await server.start(port, '127.0.0.1', tls ? { tls: true } : undefined)
+    for (const path of ['/', '/remote', '/remote/auth-info', '/assets/app.js']) {
+      const got = await rawHttpGet(port, path, `127.0.0.1:${port}`, {
+        'Tailscale-Funnel-Request': '?1'
+      })
+      expect(got.status, `${path} over Funnel`).toBe(403)
+    }
+    // Non-vacuity: the same request without the header is served.
+    expect((await rawHttpGet(port, '/remote/auth-info', `127.0.0.1:${port}`)).status).toBe(200)
+  })
+
+  it('refuses a WS upgrade carrying Tailscale-Funnel-Request', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    await expect(
+      rawWs(port, { ...identityHeaders(TS_OWNER), 'Tailscale-Funnel-Request': '?1' })
+    ).rejects.toThrow(/upgrade rejected/)
+    expect(server.getStatus().connectedClients).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Host allowlist gains the serve entries. Without them, TLS mode 403s
+// every request: serve forwards the browser's ORIGINAL Host, not 127.0.0.1.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — Host allowlist in TLS mode (Phase 3)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server?.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('accepts the portless ts.net Host that a browser on 443 sends', async () => {
+    server = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
+    await server.start(port, '127.0.0.1', { tls: true })
+    expect((await rawHttpGet(port, '/remote/auth-info', TS_DNS)).status).toBe(200)
+    // Somebody else's tailnet name is still refused.
+    expect((await rawHttpGet(port, '/remote/auth-info', 'other.tailXXXX.ts.net')).status).toBe(403)
+    // …and so is our name with a port we are not serving.
+    expect((await rawHttpGet(port, '/remote/auth-info', `${TS_DNS}:8443`)).status).toBe(403)
+  })
+
+  it('accepts the ts.net Host with the serve HTTPS port when serve is on 8443', async () => {
+    server = new RemoteServer(
+      new RemoteDispatcher(),
+      undefined,
+      makeFakeTailscale({ httpsPort: 8443 })
+    )
+    await server.start(port, '127.0.0.1', { tls: true })
+    expect((await rawHttpGet(port, '/remote/auth-info', `${TS_DNS}:8443`)).status).toBe(200)
+    // Portless still works (rule 1 only fires when a port is present).
+    expect((await rawHttpGet(port, '/remote/auth-info', TS_DNS)).status).toBe(200)
+    // The loopback port we actually bound stays valid too (local browser).
+    expect((await rawHttpGet(port, '/remote/auth-info', `127.0.0.1:${port}`)).status).toBe(200)
+  })
+
+  // GUARD: the ts.net name must be allowed ONLY while serve is up for it.
+  it('rejects the ts.net Host when the server is not in TLS mode (GUARD)', async () => {
+    server = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
+    await server.start(port, '127.0.0.1')
+    expect((await rawHttpGet(port, '/remote/auth-info', TS_DNS)).status).toBe(403)
+  })
+
+  it('accepts a serve-shaped WS upgrade (Origin === pass-through Host)', async () => {
+    server = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, {
+      Host: TS_DNS,
+      Origin: `https://${TS_DNS}`,
+      ...identityHeaders(TS_OWNER)
+    })
+    expect(await conn.next()).toMatchObject({ ok: true, method: 'tailnet-identity' })
+    conn.ws.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — throttle keying. Behind serve every peer is 127.0.0.1, so the
+// per-source budget has to come from X-Forwarded-For — but ONLY there.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — throttle keying on X-Forwarded-For (Phase 3)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server?.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  function failOnce(headers: Record<string, string>): Promise<number | undefined> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { headers })
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', pwProof: 'f'.repeat(64) })))
+      ws.once('close', (code) => resolve(code))
+      ws.once('error', () => resolve(undefined))
+    })
+  }
+
+  it('keys the password budget per tailnet address behind serve', async () => {
+    provisionPassword(PW, PW_SALT)
+    server = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
+    await server.start(port, '127.0.0.1', { tls: true })
+
+    const a = { 'X-Forwarded-For': '100.64.0.1', 'Tailscale-Headers-Info': TS_MARKER }
+    const b = { 'X-Forwarded-For': '100.64.0.2', 'Tailscale-Headers-Info': TS_MARKER }
+    for (let i = 0; i < 5; i++) expect(await failOnce(a)).toBe(4001)
+    // A is locked out…
+    expect(await failOnce(a)).toBe(4006)
+    // …and B, a different tailnet user, is not. Pre-fix (peer-keyed) one user
+    // could lock out the whole tailnet.
+    expect(await failOnce(b)).toBe(4001)
+
+    // auth-info answers on the same budget, keyed the same way.
+    expect((await httpGetJson(port, '/remote/auth-info', a)).status).toBe(429)
+    expect((await httpGetJson(port, '/remote/auth-info', b)).status).toBe(200)
+  })
+
+  // GUARD: outside TLS mode X-Forwarded-For is attacker-chosen. Honouring it
+  // would hand out an unlimited supply of fresh throttle keys.
+  it('ignores X-Forwarded-For when the server is not in TLS mode (GUARD)', async () => {
+    provisionPassword(PW, PW_SALT)
+    server = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
+    await server.start(port, '127.0.0.1')
+
+    for (let i = 0; i < 5; i++) {
+      const spoofed = { 'X-Forwarded-For': `10.0.0.${i}`, 'Tailscale-Headers-Info': TS_MARKER }
+      expect(await failOnce(spoofed)).toBe(4001)
+    }
+    // All five were keyed on the socket address, so the key is now locked out
+    // no matter what XFF the 6th attempt claims.
+    expect(await failOnce({ 'X-Forwarded-For': '10.0.0.99' })).toBe(4006)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 — /remote/auth-info identity section.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — auth-info identity section (Phase 3)', () => {
+  let server: RemoteServer
+  let port: number
+  let ts: FakeTailscale
+
+  beforeEach(async () => {
+    ts = makeFakeTailscale()
+    server = new RemoteServer(new RemoteDispatcher(), undefined, ts)
+    port = await ephemeralPort()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it('advertises tailnet-identity and echoes the caller own login', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
+    expect(got.body).toEqual({
+      version: 1,
+      methods: ['token', 'tailnet-identity'],
+      identity: { login: TS_OWNER }
+    })
+  })
+
+  it('echoes null for a caller who is not the owner (they must use the password form)', async () => {
+    provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tls: true })
+    const got = await httpGetJson(port, '/remote/auth-info', identityHeaders('colleague@x.com'))
+    expect(got.body).toMatchObject({
+      methods: ['token', 'password', 'tailnet-identity'],
+      identity: { login: null }
+    })
+    // GUARD: the owner's login is never disclosed to a non-owner.
+    expect(JSON.stringify(got.body)).not.toContain(TS_OWNER)
+  })
+
+  it('echoes null when the request did not come through serve', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    const got = await httpGetJson(port, '/remote/auth-info')
+    expect(got.body).toMatchObject({ identity: { login: null } })
+  })
+
+  it('omits the identity section entirely outside TLS mode', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
+    expect(got.body).toEqual({ version: 1, methods: ['token'] })
   })
 })

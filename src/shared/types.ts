@@ -1193,7 +1193,60 @@ interface RemoteAPI {
   setRemotePassword(password: string): Promise<void>
   /** Clear the remote-access password credential. */
   clearRemotePassword(): Promise<void>
+  /**
+   * Probe the local Tailscale installation (Phase 3 TLS mode). The result is
+   * designed to be user-facing: the failure variants carry an actionable
+   * `message` the Settings UI renders verbatim. Main-only — in
+   * `RemoteDispatcher.BLOCKED`, because it discloses the node's DNS name and
+   * the owner's login.
+   */
+  detectTailscale(): Promise<TailscaleDetection>
 }
+
+/**
+ * States {@link TailscaleDetection} can report, and the value carried by
+ * `RemoteStatus.tls.detection`. Declared here (not in the main-only
+ * `tailscale-manager.ts`) because both the renderer and the web client need it;
+ * `tailscale-manager.ts` imports it, so the two can never drift.
+ */
+export type RemoteTlsDetection =
+  | 'ok'
+  | 'not-installed'
+  | 'daemon-down'
+  | 'logged-out'
+  | 'https-disabled'
+  | 'no-operator'
+  | 'error'
+
+/** Outcome of probing the local `tailscale` CLI (`TailscaleManager.detect()`). */
+export type TailscaleDetection =
+  | {
+      state: 'ok'
+      binaryPath: string
+      version: string
+      /** `Self.DNSName` with the trailing dot stripped, e.g. `box.tailXXXX.ts.net`. */
+      dnsName: string
+      /** `CertDomains` from `status --json`; may legitimately be `[]` when the
+       *  tailnet has the `https` node capability but no cert issued yet. */
+      certDomains: string[]
+      /**
+       * Lowercased `LoginName` of the user who owns this node
+       * (`User[Self.UserID].LoginName`), or null when it cannot be determined —
+       * a tagged node, or a status payload with no matching `User` entry. Null
+       * disables tailnet-identity auth entirely (fail closed): it is the ONLY
+       * login the remote server will accept from a `Tailscale-User-Login`
+       * header.
+       */
+      ownerLogin: string | null
+    }
+  | {
+      state: Exclude<RemoteTlsDetection, 'ok'>
+      /** Actionable, user-facing. Safe to render verbatim in the UI. */
+      message: string
+      binaryPath?: string
+      /** Raw diagnostic (stderr tail / BackendState / parse error). Not for the UI. */
+      detail?: string
+    }
 
 export type TunnelState =
   | 'stopped'
@@ -1206,9 +1259,33 @@ export type TunnelState =
 /**
  * Auth methods the remote server accepts on a connection. `'token'` is the
  * per-start random bearer token from the URL fragment; `'password'` is the
- * scrypt proof derived from the user's persisted credential.
+ * scrypt proof derived from the user's persisted credential;
+ * `'tailnet-identity'` is the spoof-stripped `Tailscale-User-Login` header a
+ * `tailscale serve` proxy attaches, accepted for the node owner's login only.
  */
-export type RemoteAuthMethod = 'token' | 'password'
+export type RemoteAuthMethod = 'token' | 'password' | 'tailnet-identity'
+
+/**
+ * `tailscale serve` state for the running server (Phase 3). All-null fields
+ * with a non-null object mean "TLS mode is on but serve is not up yet" — read
+ * `detectionMessage` for why.
+ */
+export interface RemoteTlsStatus {
+  /** Mirrors the `tls_mode` the server was STARTED with: 1 = tailscale-serve. */
+  mode: number
+  /** The HTTPS port serve is listening on (443 | 8443 | 10000), null until up. */
+  httpsPort: number | null
+  /** `https://<dnsName>[:port]` — the URL to hand the user. Replaces `lanUrl`. */
+  url: string | null
+  /** Last `detect()` state, so the UI can distinguish "not installed" from "certs off". */
+  detection: RemoteTlsDetection | null
+  /**
+   * Most recent actionable TLS failure message — either the detection message
+   * or the `tailscale serve` failure — renderable verbatim. Null while serve is
+   * healthy.
+   */
+  detectionMessage: string | null
+}
 
 export interface RemoteStatus {
   running: boolean
@@ -1220,6 +1297,13 @@ export interface RemoteStatus {
   tunnelError: string | null
   connectedClients: number
   clientIps: string[]
+  /**
+   * Tailnet logins of the connected clients, parallel to `clientIps`. A `null`
+   * entry means that client authenticated with the token or the password.
+   */
+  clientLogins: (string | null)[]
+  /** `tailscale serve` state, or null when the running server is not in TLS mode. */
+  tls: RemoteTlsStatus | null
   /** Message from the most recent failed `start()` listen attempt (e.g.
    *  EADDRINUSE), or null if the last start succeeded / no start has failed
    *  since the last stop(). Surfaces autostart failures, which are otherwise
@@ -1227,8 +1311,9 @@ export interface RemoteStatus {
   lastError: string | null
   /** Methods this running server will accept: always `'token'`, plus
    *  `'password'` when a credential is provisioned AND the server is not in
-   *  tunnel (E2E) mode. Empty when not running. Derived exactly the same way as
-   *  `/remote/auth-info`'s `methods`. */
+   *  tunnel (E2E) mode, plus `'tailnet-identity'` when `tailscale serve` is up
+   *  and the node owner's login is known. Empty when not running. Derived
+   *  exactly the same way as `/remote/auth-info`'s `methods`. */
   authMethods: RemoteAuthMethod[]
 }
 

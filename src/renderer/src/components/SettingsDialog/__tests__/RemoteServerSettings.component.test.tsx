@@ -22,7 +22,8 @@ const api = {
   setRemoteConfig: vi.fn(),
   setRemotePassword: vi.fn(),
   clearRemotePassword: vi.fn(),
-  getNetworkInterfaces: vi.fn()
+  getNetworkInterfaces: vi.fn(),
+  detectTailscale: vi.fn()
 }
 
 describe('RemoteServerSettings', () => {
@@ -148,6 +149,85 @@ describe('RemoteServerSettings', () => {
     )
     expect(screen.getByTestId('RemoteServerSettings.passwordInput')).toHaveValue('')
     expect(screen.getByTestId('RemoteServerSettings.passwordConfirm')).toHaveValue('')
+  })
+
+  // Phase 3 — the TLS toggle is gated on a LIVE probe. `tailscale serve` on a
+  // certs-disabled tailnet silently no-ops (or blocks), so flipping tls_mode
+  // optimistically would produce a loopback-bound server reachable from nowhere.
+  describe('Tailscale HTTPS toggle', () => {
+    it('keeps the toggle OFF and shows the actionable message when detection is not ok', async () => {
+      api.detectTailscale.mockResolvedValue({
+        state: 'https-disabled',
+        message: 'HTTPS certificates are not enabled for this tailnet.'
+      })
+      render(<RemoteServerSettings />)
+      const toggle = await screen.findByTestId('RemoteServerSettings.tls')
+      fireEvent.click(toggle)
+
+      await screen.findByTestId('RemoteServerSettings.tlsDetection')
+      expect(screen.getByTestId('RemoteServerSettings.tlsDetection')).toHaveTextContent(
+        'HTTPS certificates are not enabled for this tailnet.'
+      )
+      // GUARD: nothing persisted, so the next start does not bind loopback-only.
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+      expect(screen.queryByTestId('RemoteServerSettings.tlsConfirm')).not.toBeInTheDocument()
+    })
+
+    it('asks for one confirm click after a passing probe, then persists tlsMode:1', async () => {
+      api.detectTailscale.mockResolvedValue({
+        state: 'ok',
+        binaryPath: 'tailscale',
+        version: '1.98.5',
+        dnsName: 'cg-mac.tail3140f8.ts.net',
+        certDomains: ['cg-mac.tail3140f8.ts.net'],
+        ownerLogin: 'owner@example.com'
+      })
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
+      render(<RemoteServerSettings />)
+      const toggle = await screen.findByTestId('RemoteServerSettings.tls')
+
+      fireEvent.click(toggle)
+      await screen.findByTestId('RemoteServerSettings.tlsConfirm')
+      expect(screen.getByTestId('RemoteServerSettings.tlsConfirm')).toHaveTextContent(
+        'persists until turned off'
+      )
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+
+      fireEvent.click(toggle)
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 1 }))
+      // The bind-interface picker is meaningless in TLS mode.
+      await waitFor(() =>
+        expect(screen.getByTestId('RemoteServerSettings.bindHost')).toBeDisabled()
+      )
+      expect(screen.getByTestId('RemoteServerSettings.bindHostTlsHint')).toBeInTheDocument()
+    })
+
+    it('turning it OFF needs no probe and no confirm', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 0 })
+      render(<RemoteServerSettings />)
+      const toggle = await screen.findByTestId('RemoteServerSettings.tls')
+      fireEvent.click(toggle)
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 0 }))
+      expect(api.detectTailscale).not.toHaveBeenCalled()
+    })
+
+    it('surfaces a throwing probe inline instead of enabling the mode', async () => {
+      api.detectTailscale.mockRejectedValue(new Error('tailscale detect blew up'))
+      render(<RemoteServerSettings />)
+      fireEvent.click(await screen.findByTestId('RemoteServerSettings.tls'))
+      await screen.findByTestId('RemoteServerSettings.tlsDetection')
+      expect(screen.getByTestId('RemoteServerSettings.tlsDetection')).toHaveTextContent(
+        'tailscale detect blew up'
+      )
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+    })
+  })
+
+  it('always shows the transport-honesty note under the password block', async () => {
+    render(<RemoteServerSettings />)
+    const note = await screen.findByTestId('RemoteServerSettings.passwordTransportNote')
+    expect(note).toHaveTextContent('only as private as the network')
   })
 
   it('clear password requires a confirm click before calling the IPC', async () => {

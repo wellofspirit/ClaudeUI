@@ -77,7 +77,10 @@ describe('RemoteDispatcher', () => {
       'remote:get-config',
       'remote:set-config',
       'remote:set-password',
-      'remote:clear-password'
+      'remote:clear-password',
+      // Phase 3: the Tailscale probe discloses the tailnet DNS name and the node
+      // owner's login — desktop-only, like the rest of the remote:* config surface.
+      'remote:tailscale-detect'
     ] as const
 
     it.each(BLOCKED_CHANNELS)(

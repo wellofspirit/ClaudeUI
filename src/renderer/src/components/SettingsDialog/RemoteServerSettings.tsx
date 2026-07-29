@@ -29,6 +29,10 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** Actionable message from the last failed `detectTailscale()` probe. */
+  const [tlsDetection, setTlsDetection] = useState<string | null>(null)
+  /** True once detection passed and we're waiting for the confirm click. */
+  const [confirmTls, setConfirmTls] = useState(false)
 
   const reload = useCallback(async (): Promise<void> => {
     const [nextConfig, ifaces] = await Promise.all([
@@ -67,6 +71,45 @@ export function RemoteServerSettings(): React.JSX.Element {
     const updated = await window.api.setRemoteConfig({ autostart: !config.autostart })
     setConfig(updated)
   }, [config])
+
+  /**
+   * TLS mode is gated on a LIVE probe, not on optimism: `tailscale serve` on a
+   * tailnet without HTTPS certificates either silently no-ops or blocks, so
+   * enabling the toggle when detection is not `ok` would produce a server that
+   * binds loopback and is reachable from nowhere. Detection failure therefore
+   * leaves the toggle OFF and renders the actionable message instead.
+   *
+   * A passing probe still needs one confirm click (the Clear-password pattern),
+   * because turning this on mutates machine state that outlives the app.
+   */
+  const handleTlsToggle = useCallback(async (): Promise<void> => {
+    if (!config) return
+    if (config.tlsMode === 1) {
+      setConfirmTls(false)
+      setTlsDetection(null)
+      setConfig(await window.api.setRemoteConfig({ tlsMode: 0 }))
+      return
+    }
+    if (confirmTls) {
+      setConfirmTls(false)
+      setConfig(await window.api.setRemoteConfig({ tlsMode: 1 }))
+      return
+    }
+    setBusy(true)
+    try {
+      const detection = await window.api.detectTailscale()
+      if (detection.state !== 'ok') {
+        setTlsDetection(detection.message)
+        return
+      }
+      setTlsDetection(null)
+      setConfirmTls(true)
+    } catch (err) {
+      setTlsDetection(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [config, confirmTls])
 
   const handleSetPassword = useCallback(async (): Promise<void> => {
     setPasswordError(null)
@@ -116,6 +159,7 @@ export function RemoteServerSettings(): React.JSX.Element {
 
   const bindHostKnown =
     config.bindHost == null || interfaces.some((iface) => iface.address === config.bindHost)
+  const tlsEnabled = config.tlsMode === 1
 
   return (
     <div
@@ -154,8 +198,9 @@ export function RemoteServerSettings(): React.JSX.Element {
         <select
           data-testid="RemoteServerSettings.bindHost"
           value={config.bindHost ?? ''}
+          disabled={tlsEnabled}
           onChange={(e) => void handleBindHostChange(e.target.value)}
-          className={`${inputClass} w-full`}
+          className={`${inputClass} w-full ${tlsEnabled ? 'opacity-40' : ''}`}
         >
           <option value="">All interfaces (0.0.0.0)</option>
           {interfaces.map((iface) => (
@@ -167,6 +212,14 @@ export function RemoteServerSettings(): React.JSX.Element {
             <option value={config.bindHost}>{config.bindHost} (unavailable)</option>
           )}
         </select>
+        {tlsEnabled && (
+          <div
+            data-testid="RemoteServerSettings.bindHostTlsHint"
+            className="text-[10px] text-text-muted/60 mt-1"
+          >
+            TLS mode binds 127.0.0.1 — reached via your tailnet name.
+          </div>
+        )}
       </div>
 
       {/* Autostart */}
@@ -184,6 +237,45 @@ export function RemoteServerSettings(): React.JSX.Element {
           />
         </span>
       </button>
+
+      {/* Tailscale HTTPS (TLS mode) */}
+      <div>
+        <button
+          data-testid="RemoteServerSettings.tls"
+          disabled={busy}
+          onClick={() => void handleTlsToggle()}
+          className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default disabled:opacity-50"
+        >
+          <span>Tailscale HTTPS (tailnet identity)</span>
+          <span
+            className={`w-7 h-4 rounded-full relative transition-colors ${tlsEnabled ? 'bg-accent' : 'bg-text-muted/30'}`}
+          >
+            <span
+              className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${tlsEnabled ? 'left-3.5' : 'left-0.5'}`}
+            />
+          </span>
+        </button>
+        {confirmTls && (
+          <div
+            data-testid="RemoteServerSettings.tlsConfirm"
+            className="text-[10px] text-warning mt-0.5"
+          >
+            Configures `tailscale serve` on this machine (persists until turned off) and restricts
+            the server to Tailscale-only access. Click the toggle again to confirm.
+          </div>
+        )}
+        {tlsDetection && (
+          <div
+            data-testid="RemoteServerSettings.tlsDetection"
+            className="text-[10px] text-red-400 mt-0.5"
+          >
+            {tlsDetection}
+          </div>
+        )}
+        <div className="text-[10px] text-text-muted/60 mt-1">
+          Applies the next time the server starts.
+        </div>
+      </div>
 
       {/* Password */}
       <div>
@@ -241,6 +333,15 @@ export function RemoteServerSettings(): React.JSX.Element {
               {confirmClear ? 'Confirm clear?' : 'Clear'}
             </button>
           )}
+        </div>
+        {/* Transport honesty (ADR-030 spirit): the password proof is a bearer
+            secret, so it is only as private as the network it crosses. */}
+        <div
+          data-testid="RemoteServerSettings.passwordTransportNote"
+          className="text-[10px] text-text-muted/60 mt-1.5 leading-snug"
+        >
+          Password sign-in is only as private as the network between your browser and this machine.
+          Use it over Tailscale or a trusted LAN — not open Wi-Fi.
         </div>
       </div>
     </div>

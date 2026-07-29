@@ -452,6 +452,41 @@ describe('RemoteConnection', () => {
       conn.destroy()
     })
 
+    // Phase 3 — tailnet identity. The server authenticates the socket from the
+    // upgrade headers and pushes an UNSOLICITED auth-response, so the client must
+    // handle an ok response that is not a reply to its own auth frame, with an
+    // EMPTY credential in hand.
+    it('accepts an unsolicited identity auth-response and proceeds to sync', () => {
+      const conn = new RemoteConnection('http://host:1/remote', {})
+      const internals = conn as unknown as Internals
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      const { sent } = attachFakeSocket(internals)
+
+      internals.handleMessage({
+        type: 'auth-response',
+        ok: true,
+        method: 'tailnet-identity',
+        identity: { login: 'owner@example.com' }
+      })
+
+      expect(states.at(-1)).toBe('syncing')
+      expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 0, epoch: undefined })
+      expect(internals.destroyed).toBe(false)
+      conn.destroy()
+    })
+
+    it('sends a bare auth frame for an empty credential (identity lives in the headers)', () => {
+      const conn = new RemoteConnection('http://host:1/remote', {})
+      const internals = conn as unknown as Internals
+      conn.connect()
+      const ws = FakeWebSocket.instances.at(-1)!
+      const { sent } = attachFakeSocket(internals)
+      ;(ws.onopen as () => void)()
+      expect(JSON.parse(sent[0])).toEqual({ type: 'auth' })
+      conn.destroy()
+    })
+
     it('drops the E2E key for a password credential (tunnel excludes passwords)', () => {
       const conn = new RemoteConnection(
         'http://host:1/remote',

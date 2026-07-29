@@ -249,6 +249,13 @@ export class RemoteConnection {
       this.setState('authenticating')
       // Send exactly one credential field — the server refuses to fall through
       // from one method to another, so sending both would be meaningless.
+      //
+      // With an EMPTY credential (tailnet-identity mode) this sends a bare
+      // `{type:'auth'}`: the server has already authenticated the socket from the
+      // upgrade headers and pushed an unsolicited `auth-response`, and its
+      // post-auth handler ignores this frame. If identity did NOT apply, the same
+      // frame is answered with a definitive "Missing credential" failure, which
+      // the token branch of `handleMessage` surfaces as `failed`.
       if (this.credential.pwProof !== undefined) {
         this.sendRaw({ type: 'auth', pwProof: this.credential.pwProof })
       } else {

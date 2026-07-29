@@ -37,6 +37,8 @@ import { registerAutomationIpc } from './ipc/automation.ipc'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-handlers'
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
+import { TailscaleManager } from './services/tailscale-manager'
+import type { TailscaleDetection } from '../shared/types'
 import {
   getRemoteConfig,
   setRemoteConfig as dbSetRemoteConfig,
@@ -376,7 +378,11 @@ function createWindow(): void {
   // doesn't keep listening on its old port with its stale token / RemoteBridge.
   currentRemoteServer?.stop()
   const remoteDispatcher = new RemoteDispatcher()
-  const remoteServer = new RemoteServer(remoteDispatcher)
+  // ONE TailscaleManager shared between the server and the detect IPC, so the
+  // binary/version cache is coherent (and Settings' pre-flight probe sees exactly
+  // what a TLS-mode start will see).
+  const tailscaleManager = new TailscaleManager()
+  const remoteServer = new RemoteServer(remoteDispatcher, undefined, tailscaleManager)
   currentRemoteServer = remoteServer
   remoteServer.setWindow(mainWindow)
   registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
@@ -419,7 +425,8 @@ function createWindow(): void {
     'remote:get-config',
     'remote:set-config',
     'remote:set-password',
-    'remote:clear-password'
+    'remote:clear-password',
+    'remote:tailscale-detect'
   ]) {
     ipcMain.removeHandler(ch)
   }
@@ -438,7 +445,13 @@ function createWindow(): void {
       const config = getRemoteConfig()
       const port = config?.port ?? 0
       const host = opts?.host ?? config?.bindHost ?? undefined
-      return await remoteServer.start(port, host, { tunnel: opts?.tunnel })
+      // TLS mode is a persisted setting, not a per-start option — but the tunnel
+      // still wins (RemoteServer enforces the mutual exclusion). A manual start
+      // fails fast on a serve problem so the modal can show it.
+      return await remoteServer.start(port, host, {
+        tunnel: opts?.tunnel,
+        tls: (config?.tlsMode ?? 0) === 1
+      })
     }
   )
   ipcMain.handle('remote:stop', () => {
@@ -480,6 +493,14 @@ function createWindow(): void {
     clearRemotePassword()
     remoteServer.disconnectPasswordClients()
   })
+  // Pre-flight probe for the Settings TLS toggle. Returned verbatim — the failure
+  // variants carry an actionable, user-facing `message`. Desktop-only (in
+  // RemoteDispatcher.BLOCKED): it discloses the node's DNS name and the owner's
+  // login. The explicit return type is the compile-time link between the manager's
+  // union and the shared one the renderer consumes.
+  ipcMain.handle('remote:tailscale-detect', async (): Promise<TailscaleDetection> => {
+    return await tailscaleManager.detect()
+  })
 
   // Autostart: fire-and-forget so a listen failure (e.g. EADDRINUSE from a
   // stale previous instance) never blocks or crashes app startup. The error
@@ -490,7 +511,13 @@ function createWindow(): void {
     try {
       const config = getRemoteConfig()
       if (config?.autostart) {
-        await remoteServer.start(config.port, config.bindHost ?? undefined)
+        // autostartRetry: at login the Tailscale daemon may not be up yet, and a
+        // failed `tailscale serve` here has no modal to report to — so keep the
+        // (loopback-only) listener and retry in the background instead of failing.
+        await remoteServer.start(config.port, config.bindHost ?? undefined, {
+          tls: config.tlsMode === 1,
+          autostartRetry: true
+        })
       }
     } catch (err) {
       logger.error(

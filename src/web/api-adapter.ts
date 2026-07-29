@@ -548,6 +548,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       tunnelError: null,
       connectedClients: 0,
       clientIps: [],
+      clientLogins: [],
+      tls: null,
       lastError: null,
       authMethods: []
     }),
@@ -566,6 +568,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       throw new Error('Not available in remote mode')
     },
     clearRemotePassword: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    detectTailscale: async () => {
       throw new Error('Not available in remote mode')
     },
 

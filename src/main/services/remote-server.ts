@@ -17,6 +17,7 @@ import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
 import { routeHttpMockup, serveMockup } from './mockup-protocol'
 import { dbPasswordAuthProvider, safeHexEqual } from './remote-auth'
 import type { PasswordAuthProvider } from './remote-auth'
+import { TailscaleManager, TailscaleServeError } from './tailscale-manager'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -26,7 +27,12 @@ import type {
   RemoteAuthMethod,
   RemoteKdfParams
 } from '../../shared/remote-protocol'
-import type { NetworkInterfaceInfo } from '../../shared/types'
+import type {
+  NetworkInterfaceInfo,
+  RemoteTlsDetection,
+  RemoteTlsStatus,
+  TailscaleDetection
+} from '../../shared/types'
 
 const PING_INTERVAL_MS = 15_000
 const IDLE_TIMEOUT_MS = 30 * 60_000 // 30 minutes
@@ -71,12 +77,145 @@ function safeTokenEqual(serverToken: string, clientToken: string | null | undefi
 /** Loopback / wildcard host names accepted verbatim by {@link RemoteServer.isAllowedHost}. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '0.0.0.0', 'localhost'])
 
+// ---------------------------------------------------------------------------
+// Tailnet identity (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Headers `tailscale serve` attaches to every proxied request, WS upgrades
+ * included (`addTailscaleIdentityHeaders`, `ipn/ipnlocal/serve.go`). All five
+ * are `Del`'d before being (re)set, so a client cannot smuggle a forged value
+ * THROUGH serve — but a process on this machine can still hit our loopback port
+ * directly, which is why every use is additionally gated on the peer being our
+ * own serve proxy.
+ */
+const H_USER_LOGIN = 'tailscale-user-login'
+/** Set iff the identity trio was set — the "this came through serve" marker. */
+const H_HEADERS_INFO = 'tailscale-headers-info'
+/**
+ * Set (and the identity trio deliberately NOT set) when the request arrived
+ * over Funnel, i.e. from the public internet. We never enable Funnel, so its
+ * presence means unexpected public exposure → hard reject.
+ */
+const H_FUNNEL = 'tailscale-funnel-request'
+
+/** Autostart-only: retry budget for a transient `tailscale serve` failure. */
+const TLS_RETRY_MAX = 5
+const TLS_RETRY_DELAY_MS = 15_000
+
+/** First value of a possibly-repeated header, trimmed. */
+function headerValue(headers: http.IncomingHttpHeaders, name: string): string {
+  const raw = headers[name]
+  const first = Array.isArray(raw) ? raw[0] : raw
+  return (first ?? '').trim()
+}
+
+/**
+ * True for `127.0.0.0/8`, `::1` and IPv4-mapped loopback. Only a loopback peer
+ * can be the `tailscale serve` proxy running on this machine.
+ */
+export function isLoopbackAddress(addr: string | undefined): boolean {
+  if (!addr) return false
+  const a = addr.toLowerCase().replace(/^::ffff:/, '')
+  if (a === '::1') return true
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(a)) return false
+  return a.startsWith('127.')
+}
+
+/**
+ * True when this request demonstrably came through the `tailscale serve` proxy
+ * WE configured: TLS mode is on for this run, the socket peer is loopback, and
+ * it is not a Funnel request. Only then may `X-Forwarded-For` be believed —
+ * outside TLS mode a client-supplied XFF would be a free throttle-key rotation.
+ */
+export function isServeProxied(
+  headers: http.IncomingHttpHeaders,
+  socketAddr: string | undefined,
+  tlsActive: boolean
+): boolean {
+  if (!tlsActive) return false
+  if (!isLoopbackAddress(socketAddr)) return false
+  if (headerValue(headers, H_FUNNEL) !== '') return false
+  return true
+}
+
+/** What the identity headers on one request amount to. */
+export type IdentityOutcome =
+  /** Trusted headers naming the node owner — authenticate this socket. */
+  | { kind: 'owner'; login: string }
+  /** Trusted headers naming SOMEBODY ELSE — no identity, fall through to token/password. */
+  | { kind: 'mismatch'; login: string; ownerLogin: string }
+  /** No usable identity (not behind serve, no header, tagged node, owner unknown, Funnel). */
+  | { kind: 'absent' }
+
+/**
+ * Pure evaluation of the tailnet-identity trust predicate. ALL of these must
+ * hold before a login is even considered:
+ *
+ * 1. TLS mode is active on this running server (so the loopback peer really is
+ *    a serve proxy we asked for);
+ * 2. the socket peer is loopback;
+ * 3. `Tailscale-Funnel-Request` is absent (Funnel is public and carries no
+ *    identity — it must never be mistaken for tailnet-local);
+ * 4. `Tailscale-Headers-Info` is present — serve sets it exactly when it set the
+ *    identity trio, and strips any inbound copy;
+ * 5. `Tailscale-User-Login` is present and non-empty.
+ *
+ * Then the login must equal the node OWNER's login, case-insensitively. This is
+ * a multi-user corporate tailnet: "any tailnet member" would grant every
+ * colleague access, and a shared-in external user arrives with a perfectly valid
+ * login from their own tailnet — so the allowlist is exactly one string. An
+ * unknown owner login (tagged node, odd status payload) disables identity auth
+ * entirely.
+ *
+ * Non-ASCII header values are RFC-2047 Q-encoded by serve
+ * (`encTailscaleHeaderValue`); we never decode, so such a value simply fails the
+ * comparison. Login names are ASCII in practice, and failing closed is correct.
+ */
+export function evaluateIdentity(
+  headers: http.IncomingHttpHeaders,
+  socketAddr: string | undefined,
+  ctx: { tlsActive: boolean; ownerLogin: string | null }
+): IdentityOutcome {
+  if (!isServeProxied(headers, socketAddr, ctx.tlsActive)) return { kind: 'absent' }
+  if (headerValue(headers, H_HEADERS_INFO) === '') return { kind: 'absent' }
+  const login = headerValue(headers, H_USER_LOGIN).toLowerCase()
+  if (!login) return { kind: 'absent' }
+  const owner = ctx.ownerLogin?.trim().toLowerCase() ?? ''
+  if (!owner) return { kind: 'absent' }
+  if (login !== owner) return { kind: 'mismatch', login, ownerLogin: owner }
+  return { kind: 'owner', login }
+}
+
+/**
+ * The slice of {@link TailscaleManager} the server actually uses. Injecting this
+ * (rather than the concrete class) is what lets every TLS-mode test run on a
+ * machine with no tailscale, and keeps the serve mutations out of unit tests —
+ * they are only ever exercised against a fake.
+ */
+export type TailscaleServeController = Pick<
+  TailscaleManager,
+  'detect' | 'enableServe' | 'disableServe'
+>
+
+/** Live `tailscale serve` proxy state for the current run. */
+interface TlsServeState {
+  httpsPort: number
+  url: string
+  /** `Self.DNSName` (no trailing dot) — the Host a serve-proxied browser sends. */
+  dnsName: string
+  /** Node owner's login, or null when identity auth must stay off. */
+  ownerLogin: string | null
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
   /** Which credential this socket authenticated with — a credential change
    *  disconnects the `'password'` ones only (see disconnectPasswordClients). */
   authMethod: RemoteAuthMethod
+  /** Tailnet login for `'tailnet-identity'` clients; null for token/password. */
+  login: string | null
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
   e2e: E2ECrypto | null
@@ -126,17 +265,31 @@ export class RemoteServer {
   private lastStartError: string | null = null
   /** Owner of password-credential semantics; injectable so tests never hit the real DB. */
   private passwordAuth: PasswordAuthProvider
+  /** `tailscale` CLI wrapper; injectable so tests never exec the real binary. */
+  private tailscale: TailscaleServeController
+  /** True while this run was started with `tls: true` (and not `tunnel`). */
+  private tlsRequested = false
+  /** Non-null once `tailscale serve` is confirmed up for this run. */
+  private tlsServe: TlsServeState | null = null
+  /** Last `detect()` state / most recent actionable TLS failure message. */
+  private tlsDetection: RemoteTlsDetection | null = null
+  private tlsDetectionMessage: string | null = null
+  /** Autostart retry bookkeeping (cleared by {@link stop}). */
+  private tlsRetryTimer?: ReturnType<typeof setTimeout>
+  private tlsRetryAttempt = 0
 
   /** Callback to notify the desktop renderer of status changes. */
   private statusCallback: ((status: RemoteStatus) => void) | null = null
 
   constructor(
     dispatcher: RemoteDispatcher,
-    passwordAuth: PasswordAuthProvider = dbPasswordAuthProvider()
+    passwordAuth: PasswordAuthProvider = dbPasswordAuthProvider(),
+    tailscale: TailscaleServeController = new TailscaleManager()
   ) {
     this.eventLog = new EventLog()
     this.dispatcher = dispatcher
     this.passwordAuth = passwordAuth
+    this.tailscale = tailscale
     this.bridge = new RemoteBridge()
     this.tunnel = new TunnelManager()
 
@@ -171,11 +324,22 @@ export class RemoteServer {
     return this.dispatcher
   }
 
-  /** Start the HTTP + WebSocket server. */
+  /**
+   * Start the HTTP + WebSocket server.
+   *
+   * `opts.tls` selects Phase-3 TLS mode: bind loopback ONLY and let a
+   * `tailscale serve` proxy terminate TLS in front of us. **Tunnel wins** — the
+   * two are mutually exclusive per run, so when both are requested the tunnel
+   * runs and TLS/identity are off for that run (and the status says so).
+   *
+   * `opts.autostartRetry` marks the caller as autostart: a transient serve
+   * failure then keeps the listener up and retries in the background instead of
+   * failing the start, because there is no modal open to report it to.
+   */
   async start(
     requestedPort = 0,
     host?: string,
-    opts?: { tunnel?: boolean }
+    opts?: { tunnel?: boolean; tls?: boolean; autostartRetry?: boolean }
   ): Promise<{ port: number; token: string; lanUrl: string }> {
     if (this.httpServer) {
       throw new Error('Remote server already running')
@@ -189,11 +353,17 @@ export class RemoteServer {
       this.e2eKey = crypto.randomBytes(32).toString('hex')
     }
 
+    const tlsMode = opts?.tls === true && opts?.tunnel !== true
+    this.tlsRequested = tlsMode
+
     // Determine bind address: if a specific host IP is given, bind to that;
-    // otherwise bind to 0.0.0.0 (all interfaces)
-    const bindAddr = host || '0.0.0.0'
+    // otherwise bind to 0.0.0.0 (all interfaces). TLS mode ignores `host`
+    // entirely and binds loopback: the ONLY reachable path is the serve proxy,
+    // which connects to 127.0.0.1, so exposing the port on a LAN interface would
+    // be a plaintext side door around the TLS the mode exists to provide.
+    const bindAddr = tlsMode ? '127.0.0.1' : host || '0.0.0.0'
     // For the URL, use the specific host if given, otherwise auto-detect the best LAN IP
-    this.boundHost = host || getDefaultIp()
+    this.boundHost = tlsMode ? '127.0.0.1' : host || getDefaultIp()
 
     // Create HTTP server
     this.httpServer = http.createServer((req, res) => this.handleHttp(req, res))
@@ -223,6 +393,12 @@ export class RemoteServer {
       server: this.httpServer,
       maxPayload: WS_MAX_PAYLOAD_BYTES,
       verifyClient: (info) => {
+        // Funnel upgrades are refused for the same reason HTTP ones are: we never
+        // enable Funnel, so its header means unexpected public exposure.
+        if (headerValue(info.req.headers, H_FUNNEL) !== '') {
+          logger.warn('remote-server', 'Rejected WS upgrade carrying Tailscale-Funnel-Request')
+          return false
+        }
         if (!this.isAllowedHost(info.req.headers.host)) {
           logger.warn(
             'remote-server',
@@ -271,6 +447,7 @@ export class RemoteServer {
       this.e2eKey = null
       this.port = 0
       this.boundHost = ''
+      this.tlsRequested = false
       this.lastStartError = err instanceof Error ? err.message : String(err)
       this.notifyStatus()
       throw err
@@ -292,6 +469,38 @@ export class RemoteServer {
     )
     this.notifyStatus()
 
+    // TLS mode: put the serve proxy in front of the port we just bound. Done
+    // AFTER listen so the target port is the real one (requestedPort may be 0).
+    if (tlsMode) {
+      try {
+        await this.enableTlsServe()
+      } catch (err) {
+        const message = tlsFailureMessage(err)
+        if (opts?.autostartRetry) {
+          // Autostart has no modal to throw to, so it never fails the start: the
+          // listener stays up (loopback-only) and the reason travels in
+          // `RemoteStatus.tls.detectionMessage`. Only a plausibly-transient
+          // failure is retried — the rest need a human.
+          const willRetry = isTransientTlsFailure(err)
+          logger.warn(
+            'remote-server',
+            `tailscale serve failed on autostart${willRetry ? ' (will retry)' : ''}: ${message}`
+          )
+          if (willRetry) this.scheduleTlsRetry()
+        } else {
+          // Manual start (or a failure no retry can fix): fail loudly. stop()
+          // performs the same teardown a listen failure does — it also clears
+          // lastError, so set it after.
+          logger.error('remote-server', `tailscale serve failed: ${message}`)
+          this.stop()
+          this.lastStartError = message
+          this.notifyStatus()
+          throw err instanceof Error ? err : new Error(message)
+        }
+      }
+      this.notifyStatus()
+    }
+
     // Start tunnel if requested (async — URL arrives via status callback)
     if (opts?.tunnel) {
       this.tunnel.start(this.port).catch((err) => {
@@ -303,7 +512,10 @@ export class RemoteServer {
       })
     }
 
-    return { port: this.port, token: this.token, lanUrl }
+    // In TLS mode the loopback `lanUrl` is not the URL anyone should use — hand
+    // back the ts.net one when serve is already up. `getStatus().lanUrl` is null
+    // in TLS mode for the same reason.
+    return { port: this.port, token: this.token, lanUrl: this.tlsServe?.url ?? lanUrl }
   }
 
   /** Stop the server and disconnect all clients. */
@@ -311,6 +523,29 @@ export class RemoteServer {
     // Stop tunnel first
     this.tunnel.stop()
     this.e2eKey = null
+
+    // Best-effort teardown of OUR serve handler (never `serve reset` — that
+    // would wipe the user's unrelated serve config). Fire-and-forget: a stop()
+    // must not block on a CLI call, and app-quit may not even wait for it. The
+    // config is persisted per-profile and outlives us, so a leftover entry is
+    // reconciled on the next start (enableServe treats a handler pointing at our
+    // own port as ours and overwrites it).
+    const ownedHttpsPort = this.tlsServe?.httpsPort
+    if (ownedHttpsPort !== undefined) {
+      void this.tailscale.disableServe(ownedHttpsPort).catch((err: unknown) => {
+        logger.warn(
+          'remote-server',
+          `Could not turn off tailscale serve on ${ownedHttpsPort}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
+      })
+    }
+    this.clearTlsRetry()
+    this.tlsServe = null
+    this.tlsRequested = false
+    this.tlsDetection = null
+    this.tlsDetectionMessage = null
 
     if (this.idleTimer) {
       clearInterval(this.idleTimer)
@@ -349,6 +584,90 @@ export class RemoteServer {
     this.notifyStatus()
   }
 
+  // ---------------------------------------------------------------------------
+  // TLS mode (`tailscale serve`)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Bring up the serve proxy for the port we are bound to and capture everything
+   * the rest of the server needs from it: the HTTPS port (widens the Host
+   * allowlist's port rule), the ts.net URL (what the UI hands the user), the
+   * dnsName (the Host a serve-proxied browser actually sends — serve passes Host
+   * through verbatim) and the owner login (the entire identity allowlist).
+   *
+   * `detect()` runs here as well as inside `enableServe` because only the
+   * detection result carries `dnsName`/`ownerLogin`; the duplicate localapi read
+   * costs one cheap exec per start and keeps `enableServe`'s own precondition
+   * self-contained.
+   */
+  private async enableTlsServe(): Promise<void> {
+    const detection: TailscaleDetection = await this.tailscale.detect()
+    this.tlsDetection = detection.state
+    if (detection.state !== 'ok') {
+      this.tlsDetectionMessage = detection.message
+      throw new TailscaleServeError('not-ready', detection.message, {
+        detail: detection.detail,
+        detection
+      })
+    }
+    const { httpsPort, url } = await this.tailscale.enableServe(this.port)
+    this.tlsServe = {
+      httpsPort,
+      url,
+      dnsName: detection.dnsName.toLowerCase(),
+      ownerLogin: detection.ownerLogin
+    }
+    this.tlsDetectionMessage = null
+    this.tlsRetryAttempt = 0
+    if (!detection.ownerLogin) {
+      logger.warn(
+        'remote-server',
+        'tailscale serve is up but the node owner login is unknown (tagged node?) — tailnet-identity auth stays disabled'
+      )
+    }
+    logger.info('remote-server', `TLS mode active: ${url} → 127.0.0.1:${this.port}`)
+  }
+
+  /** Schedule one more autostart retry, if the budget allows. */
+  private scheduleTlsRetry(): void {
+    if (this.tlsRetryTimer) return
+    if (this.tlsRetryAttempt >= TLS_RETRY_MAX) {
+      logger.warn(
+        'remote-server',
+        `Giving up on tailscale serve after ${TLS_RETRY_MAX} attempts; the server stays loopback-only`
+      )
+      return
+    }
+    this.tlsRetryAttempt++
+    this.tlsRetryTimer = setTimeout(() => {
+      this.tlsRetryTimer = undefined
+      void this.retryTlsServe()
+    }, TLS_RETRY_DELAY_MS)
+  }
+
+  private async retryTlsServe(): Promise<void> {
+    // The server may have been stopped (or serve may have come up another way)
+    // while the timer was pending.
+    if (!this.httpServer || !this.tlsRequested || this.tlsServe) return
+    try {
+      await this.enableTlsServe()
+      logger.info('remote-server', 'tailscale serve came up on retry')
+    } catch (err) {
+      const message = tlsFailureMessage(err)
+      logger.warn('remote-server', `tailscale serve retry failed: ${message}`)
+      if (isTransientTlsFailure(err)) this.scheduleTlsRetry()
+    }
+    this.notifyStatus()
+  }
+
+  private clearTlsRetry(): void {
+    if (this.tlsRetryTimer) {
+      clearTimeout(this.tlsRetryTimer)
+      this.tlsRetryTimer = undefined
+    }
+    this.tlsRetryAttempt = 0
+  }
+
   /** Get current server status. */
   getStatus(): RemoteStatus {
     const tunnelStatus = this.tunnel.getStatus()
@@ -369,14 +688,33 @@ export class RemoteServer {
       running: this.httpServer !== null,
       port: this.port || null,
       token: this.token || null,
-      lanUrl: this.port ? `http://${this.boundHost}:${this.port}/remote#t=${this.token}` : null,
+      // TLS mode binds loopback only, so there IS no LAN URL — advertising the
+      // 127.0.0.1 one would send the user (and the QR code) to a dead end.
+      lanUrl:
+        this.port && !this.tlsRequested
+          ? `http://${this.boundHost}:${this.port}/remote#t=${this.token}`
+          : null,
       tunnelUrl,
       tunnelState: this.e2eKey !== null ? tunnelStatus.state : null,
       tunnelError: tunnelStatus.error,
       connectedClients: this.clients.size,
       clientIps: Array.from(this.clients.values()).map((c) => c.ip),
+      clientLogins: Array.from(this.clients.values()).map((c) => c.login),
+      tls: this.tlsStatus(),
       lastError: this.lastStartError,
       authMethods: this.authMethods()
+    }
+  }
+
+  /** `RemoteStatus.tls` — null unless this run was started in TLS mode. */
+  private tlsStatus(): RemoteTlsStatus | null {
+    if (!this.tlsRequested) return null
+    return {
+      mode: 1,
+      httpsPort: this.tlsServe?.httpsPort ?? null,
+      url: this.tlsServe?.url ?? null,
+      detection: this.tlsDetection,
+      detectionMessage: this.tlsDetectionMessage
     }
   }
 
@@ -404,7 +742,39 @@ export class RemoteServer {
     if (!this.httpServer) return []
     const methods: RemoteAuthMethod[] = ['token']
     if (this.passwordParams()) methods.push('password')
+    // Identity is available only once serve is actually up AND we know which
+    // login to accept — an unknown owner (tagged node) means fail closed.
+    if (this.identityContext().ownerLogin) methods.push('tailnet-identity')
     return methods
+  }
+
+  /**
+   * Inputs to {@link evaluateIdentity} for this server right now. `tlsActive` is
+   * deliberately "serve is CONFIRMED up", not "TLS mode was requested": until the
+   * proxy exists, a loopback peer is not evidence of anything.
+   */
+  private identityContext(): { tlsActive: boolean; ownerLogin: string | null } {
+    return {
+      tlsActive: this.tlsServe !== null,
+      ownerLogin: this.tlsServe?.ownerLogin ?? null
+    }
+  }
+
+  /**
+   * Throttle / attribution key for a request. Behind our own serve proxy every
+   * peer is `127.0.0.1`, which would collapse the per-IP budget into ONE global
+   * bucket — 10 bad passwords from any tailnet user would lock out everybody for
+   * a minute. Serve `Set`s (never appends) `X-Forwarded-For` to the peer's
+   * tailnet address and Go's ReverseProxy deletes any client-supplied copy first,
+   * so behind serve that value is authoritative; anywhere else it is
+   * attacker-chosen and must be ignored. Exactly one hop is supported, so only
+   * the first element is read — a comma list means an unsupported proxy in front.
+   */
+  private throttleKey(req: http.IncomingMessage): string {
+    const peer = req.socket.remoteAddress || 'unknown'
+    if (!isServeProxied(req.headers, peer, this.tlsServe !== null)) return peer
+    const first = headerValue(req.headers, 'x-forwarded-for').split(',')[0]?.trim()
+    return first || peer
   }
 
   /**
@@ -431,6 +801,21 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
+    // Funnel gate, before everything else: `Tailscale-Funnel-Request` means the
+    // request came off the PUBLIC internet through Tailscale Funnel. We never
+    // enable Funnel, so seeing it at all means unexpected public exposure —
+    // refuse unconditionally rather than reason about it (it also carries no
+    // identity headers, so it must never be mistaken for tailnet-local).
+    if (headerValue(req.headers, H_FUNNEL) !== '') {
+      logger.warn('remote-server', 'Rejected HTTP request carrying Tailscale-Funnel-Request')
+      res.writeHead(403, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        ...this.securityHeaders(false)
+      })
+      res.end('Forbidden')
+      return
+    }
+
     // DNS-rebinding gate for EVERY route (the same allowlist also guards the WS
     // upgrade). Applied before any routing so no handler ever runs for a request
     // whose Host we don't recognise.
@@ -498,7 +883,7 @@ export class RemoteServer {
       return
     }
 
-    const ip = req.socket.remoteAddress || 'unknown'
+    const ip = this.throttleKey(req)
     if (this.isAuthThrottled(ip)) {
       logger.warn('remote-server', `Refusing auth-info for ${ip}: too many failed auth attempts`)
       res.writeHead(429, {
@@ -517,6 +902,19 @@ export class RemoteServer {
       // passwordParams() returned a value.
       const pw = this.passwordParams()
       if (pw) info.password = { saltHex: pw.saltHex, kdf: pw.kdf }
+    }
+    if (methods.includes('tailnet-identity')) {
+      // Echo back only a login that would ACTUALLY authenticate this caller, so
+      // the value reveals nothing they did not already prove. A non-owner sees
+      // `null` and falls through to the password form — telling them to connect
+      // credential-less would just dead-end them (and hand over the owner's
+      // login).
+      const outcome = evaluateIdentity(
+        req.headers,
+        req.socket.remoteAddress,
+        this.identityContext()
+      )
+      info.identity = { login: outcome.kind === 'owner' ? outcome.login : null }
     }
 
     const body = JSON.stringify(info)
@@ -585,7 +983,12 @@ export class RemoteServer {
 
     if (portPart !== undefined) {
       if (!/^\d+$/.test(portPart)) return false
-      if (Number(portPart) !== this.port) return false
+      // In TLS mode the browser talks to the serve proxy's HTTPS port, and serve
+      // forwards the ORIGINAL Host verbatim — so the Host we see carries 8443 /
+      // 10000, never the loopback port we bound. (On 443 there is no port
+      // component at all, which this branch never runs for.)
+      const port = Number(portPart)
+      if (port !== this.port && port !== this.tlsServe?.httpsPort) return false
     }
     if (!hostname) return false
 
@@ -603,7 +1006,17 @@ export class RemoteServer {
       (h) => this.boundHost !== '' && h === this.boundHost.toLowerCase(),
       // (e) mDNS/NetBIOS names. `os.hostname()` may be uppercase and may or may
       //     not carry a domain suffix; it is unrelated to any tailnet DNS label.
-      (h) => h === osHostname || h === osHostnameBare || h === `${osHostnameBare}.local`
+      (h) => h === osHostname || h === osHostnameBare || h === `${osHostnameBare}.local`,
+      // (f) MANDATORY for TLS mode: `tailscale serve` forwards the browser's
+      //     original Host (`ipn/ipnlocal/serve.go`: `r.Out.Host = r.In.Host`),
+      //     so a request through the proxy arrives with our ts.net name, not
+      //     127.0.0.1. Without this every TLS-mode request would 403.
+      //
+      //     Deliberately EXACT, not a `*.<magicDNSSuffix>` suffix match: serve
+      //     only ever presents our own FQDN (SNI-routed), so a suffix match adds
+      //     no reachable host — it would just widen the allowlist to every node
+      //     name in the tailnet, which any tailnet member can choose.
+      (h) => this.tlsServe !== null && h === this.tlsServe.dnsName
     ]
     return predicates.some((p) => p(hostname))
   }
@@ -784,7 +1197,9 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   private handleConnection(ws: WebSocket, req: http.IncomingMessage): void {
-    const ip = req.socket.remoteAddress || 'unknown'
+    // Behind our own serve proxy the socket address is always 127.0.0.1; the
+    // per-source key comes from the (then trustworthy) X-Forwarded-For instead.
+    const ip = this.throttleKey(req)
     let authenticated = false
     let awaitingE2E = false
 
@@ -819,6 +1234,75 @@ export class RemoteServer {
         ws.close(4000, 'Authentication timeout')
       }
     }, 10_000)
+
+    /**
+     * Shared success path for every method. Hoisted out of `handleFrame` because
+     * tailnet identity authenticates on `connection`, before any client frame.
+     */
+    const accept = (method: RemoteAuthMethod, login: string | null = null): void => {
+      authenticated = true
+      clearTimeout(authTimeout)
+      clearPending()
+      // Clears BOTH failure budgets for this key.
+      this.failedAuth.delete(ip)
+      const newClient: AuthenticatedClient = {
+        ws,
+        ip,
+        authMethod: method,
+        login,
+        lastActivity: Date.now(),
+        pingTimer: setInterval(() => {
+          this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
+        }, PING_INTERVAL_MS),
+        e2e: null,
+        sendQueue: Promise.resolve()
+      }
+      this.clients.set(ws, newClient)
+      // Send auth response plaintext
+      ws.send(
+        JSON.stringify({
+          type: 'auth-response',
+          ok: true,
+          method,
+          ...(login ? { identity: { login } } : {})
+        })
+      )
+      logger.info(
+        'remote-server',
+        `Client authenticated from ${ip} via ${method}${login ? ` (${login})` : ''} (${this.clients.size} total)`
+      )
+      this.notifyStatus()
+      // If server has an E2E key, expect e2e-activate as the next message
+      if (this.e2eKey) {
+        awaitingE2E = true
+      }
+    }
+    const reject = (error: string, closeReason: string): void => {
+      ws.send(JSON.stringify({ type: 'auth-response', ok: false, error, retryable: false }))
+      ws.close(4001, closeReason)
+    }
+
+    // Tailnet identity (Phase 3). Everything it depends on is already in the
+    // upgrade request, so there is nothing for the client to send: on a match we
+    // authenticate immediately and push an UNSOLICITED auth-response. The bare
+    // `{type:'auth'}` the web client sends afterwards lands in the post-auth
+    // switch and is ignored.
+    const identity = evaluateIdentity(req.headers, req.socket.remoteAddress, this.identityContext())
+    // A login that is not the owner's does NOT refuse the socket: identity is a
+    // convenience layer on top of the existing methods, not a gate, so a
+    // colleague who knows the password must still be able to sign in on this very
+    // socket. We just send nothing and let the normal auth frame flow run — with
+    // one improvement: if they turn out to have no credential at all, the
+    // "missing credential" rejection is replaced by an actionable message.
+    const identityMismatch = identity.kind === 'mismatch' ? identity : null
+    if (identity.kind === 'owner') {
+      accept('tailnet-identity', identity.login)
+    } else if (identityMismatch) {
+      logger.warn(
+        'remote-server',
+        `Tailnet identity ${identityMismatch.login.slice(0, 128)} is not the node owner — falling through to token/password auth`
+      )
+    }
 
     // Serializes inbound decrypt+dispatch per connection so frames are
     // processed in arrival order. `decrypt()` completion is not guaranteed
@@ -863,41 +1347,6 @@ export class RemoteServer {
         }
         clearTimeout(authTimeout)
 
-        // Shared success path for both methods.
-        const accept = (method: RemoteAuthMethod): void => {
-          authenticated = true
-          clearPending()
-          // Clears BOTH failure budgets for this key.
-          this.failedAuth.delete(ip)
-          const newClient: AuthenticatedClient = {
-            ws,
-            ip,
-            authMethod: method,
-            lastActivity: Date.now(),
-            pingTimer: setInterval(() => {
-              this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
-            }, PING_INTERVAL_MS),
-            e2e: null,
-            sendQueue: Promise.resolve()
-          }
-          this.clients.set(ws, newClient)
-          // Send auth response plaintext
-          ws.send(JSON.stringify({ type: 'auth-response', ok: true, method }))
-          logger.info(
-            'remote-server',
-            `Client authenticated from ${ip} via ${method} (${this.clients.size} total)`
-          )
-          this.notifyStatus()
-          // If server has an E2E key, expect e2e-activate as the next message
-          if (this.e2eKey) {
-            awaitingE2E = true
-          }
-        }
-        const reject = (error: string, closeReason: string): void => {
-          ws.send(JSON.stringify({ type: 'auth-response', ok: false, error, retryable: false }))
-          ws.close(4001, closeReason)
-        }
-
         // Fixed order, no cross-method fallthrough: a presented password is
         // never retried as a token (and vice versa), so a client cannot probe
         // its way in with whichever credential the server happens to accept.
@@ -927,6 +1376,16 @@ export class RemoteServer {
         }
 
         // `{type:'auth'}` with no credential must never reach a comparator.
+        // A tailnet user whose login is not the owner's lands here (identity did
+        // not authenticate them and they presented nothing else) — give them the
+        // actionable reason instead of a bare "Missing credential".
+        if (identityMismatch) {
+          reject(
+            `Signed in to Tailscale as ${identityMismatch.login.slice(0, 128)}, but this ClaudeUI only accepts ${identityMismatch.ownerLogin.slice(0, 128)}`,
+            'Identity not allowed'
+          )
+          return
+        }
         reject('Missing credential', 'Missing credential')
         return
       }
@@ -1207,6 +1666,32 @@ export class RemoteServer {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+/** User-facing message for a failed TLS-mode bring-up. */
+function tlsFailureMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Is this TLS-mode failure worth retrying on autostart?
+ *
+ * Retry only states a bit of waiting can genuinely fix — the Tailscale app not
+ * up yet at login (`daemon-down`), a transient/unknown status read (`error`), or
+ * a CLI exec that failed/timed out. Everything else needs a human: `not-installed`,
+ * `logged-out`, `https-disabled` and `no-operator` all require an action in the
+ * app or the admin console, and `all-ports-occupied` / `verify-failed` will
+ * repeat identically. Retrying those would just spam the CLI for 75 seconds.
+ */
+function isTransientTlsFailure(err: unknown): boolean {
+  if (err instanceof TailscaleServeError) {
+    if (err.reason === 'exec-failed') return true
+    const state = err.detection?.state
+    return state === 'daemon-down' || state === 'error'
+  }
+  // An unexpected throw (not one of our typed failures) is treated as transient:
+  // it is more likely a hiccup than a permanent misconfiguration.
+  return true
+}
 
 /**
  * Render an attacker-controlled `Host` header for a log line: never undefined,

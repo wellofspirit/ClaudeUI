@@ -142,6 +142,19 @@ function RemoteApp(): React.JSX.Element {
           })
           return
         }
+        // Tailnet identity (Phase 3). A non-null `login` means the server already
+        // recognises THIS browser as the node owner from the `tailscale serve`
+        // identity headers, so there is no credential to collect: connect with an
+        // empty credential and let the server's unsolicited auth-response drive
+        // the rest. A null `login` (advertised but not us — tagged device, a
+        // colleague, or a request that didn't come through serve) falls through to
+        // the password flow, which is exactly what such a caller needs.
+        if (info.methods?.includes('tailnet-identity') && info.identity?.login) {
+          connection.setCredential({})
+          setPhase({ kind: 'connecting' })
+          connection.connect()
+          return
+        }
         if (!info.methods?.includes('password') || !info.password) {
           setPhase({ kind: 'unavailable' })
           return

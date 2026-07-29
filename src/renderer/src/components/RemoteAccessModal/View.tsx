@@ -34,7 +34,9 @@ export function RemoteAccessModalView({
 }: RemoteAccessModalViewProps): React.JSX.Element {
   const overlayRef = useRef<HTMLDivElement>(null)
 
-  const shareUrl = status?.tunnelUrl ?? status?.lanUrl ?? null
+  // Same precedence as the container's QR source — see RemoteAccessModal.tsx.
+  const tlsUrl = status?.tls?.url ?? null
+  const shareUrl = tlsUrl ?? status?.tunnelUrl ?? status?.lanUrl ?? null
   const displayUrl = shareUrl ? shareUrl.replace(/#.*$/, '') : null
 
   const handleOverlayClick = useCallback(
@@ -292,6 +294,28 @@ export function RemoteAccessModalView({
                 </div>
               )}
 
+              {/* TLS mode: why there is no token in the URL, and who can use it. */}
+              {tlsUrl && (
+                <div
+                  data-testid="RemoteAccessModal.tlsIdentity"
+                  className="w-full text-[11px] text-success px-1"
+                >
+                  Authenticated by Tailscale identity — only this machine&apos;s Tailscale owner can
+                  sign in. No token in the link.
+                </div>
+              )}
+
+              {/* TLS mode asked for but `tailscale serve` is not up (autostart
+                  keeps retrying) — this is the only place the reason surfaces. */}
+              {status.tls?.detectionMessage && (
+                <div
+                  data-testid="RemoteAccessModal.tlsDetection"
+                  className="w-full text-danger text-[11px] text-center px-2"
+                >
+                  {status.tls.detectionMessage}
+                </div>
+              )}
+
               {/* URL */}
               <div className="w-full">
                 <div className="flex items-center gap-2 bg-bg-primary rounded-lg px-3 py-2 border border-border">
@@ -351,12 +375,14 @@ export function RemoteAccessModalView({
                 <span className="text-text-muted">Port {status.port}</span>
               </div>
 
-              {/* Client IPs */}
+              {/* Connected clients — the tailnet login when we know it (every row
+                  reads 127.0.0.1 behind the serve proxy, which tells the user
+                  nothing), otherwise the address. */}
               {status.clientIps && status.clientIps.length > 0 && (
                 <div className="w-full text-[11px] text-text-muted px-1">
                   {status.clientIps.map((ip, i) => (
                     <span key={i} className="mr-2">
-                      {ip}
+                      {status.clientLogins?.[i] ?? ip}
                     </span>
                   ))}
                 </div>
