@@ -1,5 +1,6 @@
-import { memo, useMemo } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { ChatMessage, ContentBlock } from '../../../../shared/types'
+import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 
@@ -8,16 +9,29 @@ interface Props {
   maxHeight?: string
 }
 
+// Seeded once from settings.expandThinking (same semantics as
+// chat/ThinkingBlock.tsx) — the user can still toggle this individual block
+// afterwards; it just no longer ignores the global default.
 function ThinkingBlock({ text }: { text: string }): React.JSX.Element {
+  const expandThinking = useSessionStore((s) => s.settings.expandThinking)
+  const [expanded, setExpanded] = useState(expandThinking)
+
   return (
-    <details className="group">
-      <summary className="text-[11px] text-text-muted italic cursor-pointer hover:text-text-secondary select-none">
+    <div>
+      <button
+        type="button"
+        data-testid="SubagentMessages.thinkingToggle"
+        onClick={() => setExpanded(!expanded)}
+        className="text-[11px] text-text-muted italic cursor-pointer hover:text-text-secondary select-none"
+      >
         Thinking...
-      </summary>
-      <div className="mt-1 text-[12px] text-text-secondary/60 italic max-h-40 overflow-y-auto">
-        {text}
-      </div>
-    </details>
+      </button>
+      {expanded && (
+        <div className="mt-1 text-[12px] text-text-secondary/60 italic max-h-40 overflow-y-auto whitespace-pre-wrap">
+          {text}
+        </div>
+      )}
+    </div>
   )
 }
 

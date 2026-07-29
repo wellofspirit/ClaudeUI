@@ -3,7 +3,7 @@ import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { SubagentMessages } from './SubagentMessages'
+import { SubagentOutputBody } from './SubagentOutputBody'
 import { ApprovalButtons } from './ApprovalButtons'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -380,27 +380,15 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
           <div className="border-t border-border">
             {hasSubagentOutput ? (
               <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
-                {isRunning && isBackground && (
-                  <div className="flex items-center gap-2 text-[12px] text-text-muted mb-2">
-                    <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
-                    <span>Running in background...</span>
-                    {elapsed != null && (
-                      <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
-                    )}
-                  </div>
-                )}
-                {streamThinking && (
-                  <div className="text-[12px] text-text-secondary/60 italic mb-1.5">
-                    {streamThinking.slice(-200)}
-                  </div>
-                )}
-                {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
-                {streamText && (
-                  <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
-                    <MarkdownRenderer content={streamText} />
-                    <span className="inline-block w-[2px] h-[14px] bg-accent ml-0.5 align-middle animate-cursor-blink" />
-                  </div>
-                )}
+                <SubagentOutputBody
+                  msgs={msgs}
+                  streamThinking={streamThinking}
+                  streamText={streamText}
+                  isRunning={isRunning}
+                  isBackground={isBackground}
+                  elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}
+                  size="sm"
+                />
               </div>
             ) : resultBody && !isBackground ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
-import { SubagentMessages } from '../chat/SubagentMessages'
+import { SubagentOutputBody } from '../chat/SubagentOutputBody'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { findTaskBlocks, formatElapsed } from './utils'
@@ -227,27 +227,15 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           >
             {hasSubagentOutput ? (
               <div>
-                {isRunning && isBackground && (
-                  <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
-                    <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
-                    <span>Running in background...</span>
-                    {elapsed != null && (
-                      <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
-                    )}
-                  </div>
-                )}
-                {streamThinking && (
-                  <div className="text-[12px] text-text-secondary/60 italic mb-1.5">
-                    {streamThinking.slice(-200)}
-                  </div>
-                )}
-                {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
-                {streamText && (
-                  <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
-                    <MarkdownRenderer content={streamText} />
-                    <span className="inline-block w-[2px] h-[14px] bg-accent ml-0.5 align-middle animate-cursor-blink" />
-                  </div>
-                )}
+                <SubagentOutputBody
+                  msgs={msgs}
+                  streamThinking={streamThinking}
+                  streamText={streamText}
+                  isRunning={isRunning}
+                  isBackground={isBackground}
+                  elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}
+                  size="md"
+                />
               </div>
             ) : isBash && bashOutput ? (
               <BashOutputPanel

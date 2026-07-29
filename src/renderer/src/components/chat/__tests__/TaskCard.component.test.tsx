@@ -277,3 +277,111 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(stopCalls).toEqual([{ toolUseId: 'call_task_1', isDispatch: false }])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Thinking placement + expand-toggle regression (thinking-order-bug)
+// ---------------------------------------------------------------------------
+//
+// Pre-fix: the live streamThinking buffer rendered ABOVE the accumulated
+// message list instead of below it, and both the persisted thinking blocks
+// and the live buffer ignored settings.expandThinking entirely. These pin
+// the fixed ordering (messages, then live thinking, then live text — mirrors
+// ChatPanel's main-view order) and the toggle honoring.
+
+describe('TaskCard — subagent output ordering + thinking toggle', () => {
+  let app: TestApp
+  const defaultSettings = useSessionStore.getState().settings
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {}, settings: defaultSettings })
+  })
+
+  it('renders the message list, then live thinking, then live streamed text, in that DOM order', () => {
+    useSessionStore.getState().addSubagentMessage(ROUTE, 'call_task_1', {
+      id: 'm1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'partial result' }],
+      timestamp: Date.now()
+    })
+    // Set both live buffers directly (bypassing the append* actions): in real
+    // usage appendSubagentStreamingText clears the thinking buffer for the
+    // same toolUseId (thinking ends before text starts), so calling both
+    // actions in sequence can never produce a state with both non-empty.
+    // This test only needs the render-time DOM order for that combined
+    // state, not a realistic action sequence.
+    useSessionStore.setState((state) => {
+      const session = state.sessions[ROUTE]
+      return {
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...session,
+            subagentStreamingThinking: {
+              ...session.subagentStreamingThinking,
+              call_task_1: 'pondering'
+            },
+            subagentStreamingText: { ...session.subagentStreamingText, call_task_1: 'final answer' }
+          }
+        }
+      }
+    })
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+    const msgsEl = screen.getByTestId('subagent-msgs')
+    const thinkingEl = screen.getByTestId('SubagentOutputBody.liveThinking')
+    const textEl = screen.getByTestId('md')
+
+    // Pre-fix, thinkingEl preceded msgsEl in the DOM.
+    expect(
+      msgsEl.compareDocumentPosition(thinkingEl) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      thinkingEl.compareDocumentPosition(textEl) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
+  it('expandThinking=false: live thinking starts collapsed (tail preview only)', () => {
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
+    const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
+    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+    // The full buffer (with the far-back 'x' run) should NOT be visible collapsed.
+    expect(screen.queryByText(longText, { exact: false })).not.toBeInTheDocument()
+    expect(screen.getByTestId('SubagentOutputBody.liveThinking')).toBeInTheDocument()
+  })
+
+  it('expandThinking=false: clicking the live-thinking toggle reveals the full buffer', () => {
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
+    const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
+    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    fireEvent.click(screen.getByTestId('SubagentOutputBody.liveThinking.toggle'))
+
+    expect(screen.getByText(longText)).toBeInTheDocument()
+  })
+
+  it('expandThinking=true: live thinking starts expanded (full buffer visible immediately)', () => {
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: true } }))
+    const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
+    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+    expect(screen.getByText(longText)).toBeInTheDocument()
+  })
+})
