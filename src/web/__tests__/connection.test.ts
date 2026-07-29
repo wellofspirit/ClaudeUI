@@ -6,7 +6,16 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { webcrypto } from 'node:crypto'
 import { RemoteConnection } from '../connection'
+import { E2ECrypto } from '../../shared/e2e-crypto'
+
+// jsdom (this file's environment) has `crypto.getRandomValues` but no
+// `crypto.subtle` — polyfill from Node's WebCrypto so E2ECrypto (used below to
+// drive real handshake bytes, not a fake) can actually derive keys/encrypt.
+if (!globalThis.crypto?.subtle) {
+  Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
+}
 
 // connection.ts references WebSocket.OPEN inside send(); jsdom has no WebSocket.
 // Instances are recorded so the reconnect/revive tests can count constructions.
@@ -167,6 +176,68 @@ describe('RemoteConnection', () => {
         type: 'pong',
         timestamp: 9
       })
+    })
+  })
+
+  // Regression f707979 — the server used to send the e2e-ack in PLAINTEXT,
+  // but this client's decoder (above) never falls back to JSON.parse once
+  // e2e is ready, so the ack was silently dropped and every tunnel connection
+  // hung forever in 'e2e-activating'. Drives a REAL E2ECrypto (not the fake
+  // used above) through the actual init()/decodeIncoming()/handleMessage()
+  // path to prove the fix end-to-end.
+  describe('e2e-ack handshake (regression f707979)', () => {
+    const TEST_KEY_HEX = 'ab'.repeat(32) // 64 hex chars = 32-byte key
+
+    async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
+      const deadline = Date.now() + 1000
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for: ${label}`)
+        await new Promise((r) => setTimeout(r, 5))
+      }
+    }
+
+    it('drops a plaintext ack once ready, but decodes+handles an encrypted one and sends an encrypted sync', async () => {
+      const conn = new RemoteConnection('http://host:1/remote', 'tok', TEST_KEY_HEX)
+      const states: string[] = []
+      conn.setStateHandler((s) => states.push(s))
+      const internals = conn as unknown as Internals
+      const { sent } = attachFakeSocket(internals)
+
+      // auth-response ok → client kicks off initE2E() (fire-and-forget).
+      internals.handleMessage({ type: 'auth-response', ok: true })
+      await waitUntil(
+        () => (internals.e2e as { isReady?: boolean } | null)?.isReady === true,
+        'client E2E init to finish'
+      )
+      expect(states.at(-1)).toBe('e2e-activating')
+
+      // GUARD: documents the strictness that caused the deadlock — a
+      // plaintext ack (the pre-fix server behavior) is silently dropped once
+      // the client's crypto is ready, so the client never leaves
+      // 'e2e-activating'.
+      expect(await internals.decodeIncoming('{"type":"e2e-ack"}')).toBeNull()
+      expect(states.at(-1)).toBe('e2e-activating') // unchanged — still stuck
+
+      // A second real E2ECrypto with the SAME key stands in for the server.
+      const peer = new E2ECrypto()
+      await peer.init(TEST_KEY_HEX)
+      const rawAck = await peer.encrypt({ type: 'e2e-ack' })
+
+      const decoded = await internals.decodeIncoming(rawAck)
+      expect(decoded).toEqual({ type: 'e2e-ack' })
+
+      internals.handleMessage(decoded as { type: 'e2e-ack' })
+      expect(states.at(-1)).toBe('syncing')
+
+      // handleMessage('e2e-ack') calls sendSync(), which encrypts+enqueues
+      // through sendQueue asynchronously. sent[0] is the earlier plaintext
+      // `e2e-activate` (sent via sendRaw during initE2E); the sync frame
+      // arrives after it, and must be encrypted.
+      await waitUntil(() => sent.length > 1, 'sync frame to be sent')
+      expect(sent[0]).toBe(JSON.stringify({ type: 'e2e-activate' }))
+      expect(sent[1].startsWith('{')).toBe(false) // encrypted, not plaintext JSON
+
+      conn.destroy()
     })
   })
 

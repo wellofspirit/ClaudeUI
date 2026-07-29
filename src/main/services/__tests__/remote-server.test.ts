@@ -16,6 +16,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
+import { E2ECrypto } from '../../../shared/e2e-crypto'
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before importing remote-server.
@@ -486,8 +487,19 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
   function nextJson(ws: WebSocket): Promise<Record<string, unknown>> {
     return new Promise((resolve) => ws.once('message', (raw) => resolve(JSON.parse(raw.toString()))))
   }
+  function nextRaw(ws: WebSocket): Promise<string> {
+    return new Promise((resolve) => ws.once('message', (raw) => resolve(raw.toString())))
+  }
   function onClose(ws: WebSocket): Promise<number | undefined> {
     return new Promise((resolve) => ws.once('close', (code) => resolve(code)))
+  }
+  /** Build an E2ECrypto initialized from the running server's own key, so a
+   *  raw test can decrypt frames the server encrypted (the ack, now that it's
+   *  no longer plaintext — see the "encrypt the e2e-ack" fix). */
+  async function serverKeyedCrypto(): Promise<E2ECrypto> {
+    const e2e = new E2ECrypto()
+    await e2e.init((server as unknown as { e2eKey: string }).e2eKey)
+    return e2e
   }
 
   it('closes a client that authenticates but never activates E2E (GUARD)', async () => {
@@ -509,8 +521,16 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     ws.send(JSON.stringify({ type: 'auth', token: res.token }))
     await nextJson(ws) // auth-response
     ws.send(JSON.stringify({ type: 'e2e-activate' }))
-    const ack = await nextJson(ws)
-    expect(ack).toMatchObject({ type: 'e2e-ack' })
+
+    // The ack is now the FIRST encrypted frame, not the last plaintext one
+    // (regression f707979 fix — a plaintext ack here is silently dropped by
+    // the real client's strict post-activation decoder and deadlocks the
+    // handshake forever).
+    const rawAck = await nextRaw(ws)
+    // GUARD: the ack frame is encrypted, not plaintext.
+    expect(rawAck.startsWith('{')).toBe(false)
+    const keyed = await serverKeyedCrypto()
+    await expect(keyed.decrypt(rawAck)).resolves.toEqual({ type: 'e2e-ack' })
 
     const closed = onClose(ws)
     // A spliced plaintext frame post-activation fails GCM decrypt → closed.
@@ -524,8 +544,11 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     ws.send(JSON.stringify({ type: 'auth', token: res.token }))
     await nextJson(ws)
     ws.send(JSON.stringify({ type: 'e2e-activate' }))
-    const ack = await nextJson(ws)
-    expect(ack).toMatchObject({ type: 'e2e-ack' })
+    const rawAck = await nextRaw(ws)
+    const keyed = await serverKeyedCrypto()
+    // GUARD: the ack frame is encrypted, not plaintext.
+    expect(rawAck.startsWith('{')).toBe(false)
+    expect(await keyed.decrypt(rawAck)).toEqual({ type: 'e2e-ack' })
     // The connection stays open (server counts it as a live client).
     expect(server.getStatus().connectedClients).toBe(1)
     ws.close()

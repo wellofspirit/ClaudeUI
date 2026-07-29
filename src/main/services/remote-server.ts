@@ -621,8 +621,12 @@ export class RemoteServer {
             const e2e = new E2ECrypto()
             await e2e.init(this.e2eKey)
             c.e2e = e2e
-            // Send ack plaintext (last plaintext message)
-            ws.send(JSON.stringify({ type: 'e2e-ack' }))
+            // Ack is the FIRST encrypted server frame — `auth-response` was the
+            // last plaintext one. The client only sends `e2e-activate` after
+            // its own init() has completed, so it is guaranteed ready to
+            // decrypt this (a plaintext ack here would be silently dropped by
+            // the client's strict post-activation decoder — see R2 client).
+            this.sendTo(ws, { type: 'e2e-ack' })
             logger.info('remote-server', `E2E encryption activated for client ${ip}`)
           }
           awaitingE2E = false
