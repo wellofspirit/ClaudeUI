@@ -16,7 +16,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture.
 
 For any **non-trivial change**, follow the loop in `docs/adr/adr-026_development-workflow.md` (full step-by-step + standing constraints live there):
 
-- **The main model (Opus) orchestrates, reviews, and commits; a Sonnet sub-agent implements** (`Agent` tool, `subagent_type: general-purpose`, `model: sonnet`, against a written kickoff spec). The implementing agent never self-certifies and never commits / `git add`s / branches / runs `bun install`.
+- **The main model (Fable) orchestrates, reviews, and commits; an Opus sub-agent implements** (`Agent` tool, `subagent_type: general-purpose`, `model: opus`, against a written kickoff spec). The implementing agent never self-certifies and never commits / `git add`s / branches / runs `bun install`.
 - **Review every single line** of the agent's diff — read the code, not the summary; re-run gates independently; verify guard tests fail pre-fix.
 - **Verify against the real dev build** before committing: all gates below, then drive the real Electron app (`verifier-electron` skill / `scripts/app-shot.mjs`) — assert the live DOM by `data-testid` (ADR-027) before reading the screenshot.
 - **Commit precisely** (never blind `git add -A`), one commit per item, no AI attribution.
