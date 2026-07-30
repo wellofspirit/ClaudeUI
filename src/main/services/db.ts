@@ -97,7 +97,12 @@ export interface Migration {
   up: (db: Db) => void
 }
 
-const MIGRATIONS: Migration[] = [
+/**
+ * The production migration list. Exported so tests can replay a PREFIX of it and
+ * assert the upgrade path (e.g. that v8's ALTER TABLEs preserve a v7 row) rather
+ * than only the end state of a fresh DB.
+ */
+export const MIGRATIONS: Migration[] = [
   {
     version: 1,
     up(db) {
@@ -285,6 +290,29 @@ const MIGRATIONS: Migration[] = [
           password_updated_at INTEGER,
           updated_at          INTEGER NOT NULL
         );
+      `)
+    }
+  },
+  {
+    // v8 — ADR-042: the Tailscale HTTPS port is PINNED config, not a candidate
+    // walk, plus the persisted cleanup record the startup reconciliation reads.
+    //
+    // `tls_https_port` defaults to 443 (bare `https://<node>.ts.net`, the whole
+    // point of the mode: a bookmarkable URL). Any uint16 is legal — `tailscale
+    // serve` accepts any port; 443/8443/10000 is only the Funnel-compatible
+    // triple.
+    //
+    // `last_serve_https_port` / `last_serve_local_port` record the serve entry
+    // we last confirmed: `{httpsPort, localPort}`. On the next startup an entry
+    // on that HTTPS port proxying to `http://127.0.0.1:<localPort>` is PROVABLY
+    // ours (the loopback port is random per run), so it can be removed even
+    // after a force-kill. Nullable: no record means nothing to reconcile.
+    version: 8,
+    up(db) {
+      db.exec(`
+        ALTER TABLE remote_config ADD COLUMN tls_https_port INTEGER NOT NULL DEFAULT 443;
+        ALTER TABLE remote_config ADD COLUMN last_serve_https_port INTEGER;
+        ALTER TABLE remote_config ADD COLUMN last_serve_local_port INTEGER;
       `)
     }
   }
@@ -1271,12 +1299,21 @@ export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string
 // by the OTHER accessor (read-modify-write against the current row).
 // ---------------------------------------------------------------------------
 
+/**
+ * Default pinned `tailscale serve` HTTPS port (ADR-042) — mirrors the v8 column
+ * default. 443 is what makes the URL a bare `https://<node>.ts.net`.
+ */
+export const DEFAULT_TLS_HTTPS_PORT = 443
+
 interface RemoteConfigDbRow {
   id: number
   port: number
   bind_host: string | null
   autostart: number
   tls_mode: number
+  tls_https_port: number
+  last_serve_https_port: number | null
+  last_serve_local_port: number | null
   password_salt: string | null
   password_hash: string | null
   kdf_params: string | null
@@ -1289,6 +1326,12 @@ export interface RemoteConfigRow {
   bindHost: string | null
   autostart: boolean
   tlsMode: number
+  /** Pinned `tailscale serve` HTTPS port (ADR-042). Default 443. */
+  tlsHttpsPort: number
+  /** HTTPS port of the last CONFIRMED serve entry we created, or null. */
+  lastServeHttpsPort: number | null
+  /** Loopback port that entry proxied to — the proof it is ours. */
+  lastServeLocalPort: number | null
   passwordSalt: string | null
   passwordHash: string | null
   kdfParams: string | null
@@ -1302,6 +1345,11 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
     bindHost: row.bind_host,
     autostart: row.autostart === 1,
     tlsMode: row.tls_mode,
+    // COALESCE in code rather than SQL: a DB written by a build that predates
+    // v8 and re-opened by an even newer build still reads through this mapper.
+    tlsHttpsPort: row.tls_https_port ?? DEFAULT_TLS_HTTPS_PORT,
+    lastServeHttpsPort: row.last_serve_https_port ?? null,
+    lastServeLocalPort: row.last_serve_local_port ?? null,
     passwordSalt: row.password_salt,
     passwordHash: row.password_hash,
     kdfParams: row.kdf_params,
@@ -1325,17 +1373,19 @@ export function getRemoteConfig(): RemoteConfigRow | null {
 
 /**
  * Upsert the singleton remote-server config row. Only touches
- * port/bind_host/autostart/tls_mode — password columns are left untouched on
- * an existing row (SQLite `INSERT ... ON CONFLICT DO UPDATE` only reassigns
- * the columns named in the SET clause) and default to NULL on first insert.
- * Fields omitted from `partial` keep their current value (or the column
- * default if the row doesn't exist yet).
+ * port/bind_host/autostart/tls_mode/tls_https_port — password columns AND the
+ * last-serve record are left untouched on an existing row (SQLite
+ * `INSERT ... ON CONFLICT DO UPDATE` only reassigns the columns named in the
+ * SET clause) and take their column default on first insert. Fields omitted
+ * from `partial` keep their current value (or the column default if the row
+ * doesn't exist yet).
  */
 export function setRemoteConfig(partial: {
   port?: number
   bindHost?: string | null
   autostart?: boolean
   tlsMode?: number
+  tlsHttpsPort?: number
 }): void {
   const db = getDb()
   const existing = getRemoteConfigDbRow(db)
@@ -1344,17 +1394,56 @@ export function setRemoteConfig(partial: {
   const autostart =
     partial.autostart !== undefined ? (partial.autostart ? 1 : 0) : (existing?.autostart ?? 0)
   const tlsMode = partial.tlsMode ?? existing?.tls_mode ?? 0
+  const tlsHttpsPort = partial.tlsHttpsPort ?? existing?.tls_https_port ?? DEFAULT_TLS_HTTPS_PORT
 
   db.prepare(
-    `INSERT INTO remote_config (id, port, bind_host, autostart, tls_mode, updated_at)
-     VALUES (1, ?, ?, ?, ?, ?)
+    `INSERT INTO remote_config (id, port, bind_host, autostart, tls_mode, tls_https_port, updated_at)
+     VALUES (1, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       port       = excluded.port,
-       bind_host  = excluded.bind_host,
-       autostart  = excluded.autostart,
-       tls_mode   = excluded.tls_mode,
-       updated_at = excluded.updated_at`
-  ).run(port, bindHost, autostart, tlsMode, Date.now())
+       port           = excluded.port,
+       bind_host      = excluded.bind_host,
+       autostart      = excluded.autostart,
+       tls_mode       = excluded.tls_mode,
+       tls_https_port = excluded.tls_https_port,
+       updated_at     = excluded.updated_at`
+  ).run(port, bindHost, autostart, tlsMode, tlsHttpsPort, Date.now())
+}
+
+/**
+ * Record the serve entry we just confirmed (ADR-042 decision 3): the HTTPS port
+ * and the loopback port it proxies to. Deliberately narrow — it names ONLY the
+ * two last-serve columns in both the INSERT and the SET clause, so it can never
+ * clobber the config or password columns (a serve success can land at any time,
+ * including concurrently with a Settings write).
+ */
+export function setLastServeRecord(httpsPort: number, localPort: number): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO remote_config (id, last_serve_https_port, last_serve_local_port, updated_at)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_serve_https_port = excluded.last_serve_https_port,
+       last_serve_local_port = excluded.last_serve_local_port,
+       updated_at            = excluded.updated_at`
+  ).run(httpsPort, localPort, Date.now())
+}
+
+/**
+ * NULL out the last-serve record — called after a CONFIRMED `disableServe`, or
+ * when reconciliation finds the live config no longer matches the record.
+ * No-op when no row exists (nothing to clear).
+ */
+export function clearLastServeRecord(): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  if (!existing) return
+  db.prepare(
+    `UPDATE remote_config SET
+       last_serve_https_port = NULL,
+       last_serve_local_port = NULL,
+       updated_at = ?
+     WHERE id = 1`
+  ).run(Date.now())
 }
 
 /**

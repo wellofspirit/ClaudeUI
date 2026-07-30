@@ -38,8 +38,9 @@ import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
 import { TailscaleManager } from './services/tailscale-manager'
-import type { TailscaleDetection } from '../shared/types'
+import type { RemoteConfig, TailscaleDetection } from '../shared/types'
 import {
+  DEFAULT_TLS_HTTPS_PORT,
   getRemoteConfig,
   setRemoteConfig as dbSetRemoteConfig,
   clearRemotePassword
@@ -194,20 +195,17 @@ contextMenu({
  * whether a hash is stored). Defaults mirror the DB column defaults so the
  * shape is stable even before any row has been written.
  */
-function sanitizedRemoteConfig(): {
-  port: number
-  bindHost: string | null
-  autostart: boolean
-  tlsMode: number
-  passwordSet: boolean
-  passwordUpdatedAt: number | null
-} {
+function sanitizedRemoteConfig(): RemoteConfig {
   const config = getRemoteConfig()
   return {
     port: config?.port ?? 0,
     bindHost: config?.bindHost ?? null,
     autostart: config?.autostart ?? false,
     tlsMode: config?.tlsMode ?? 0,
+    tlsHttpsPort: config?.tlsHttpsPort ?? DEFAULT_TLS_HTTPS_PORT,
+    // NOT exposed: last_serve_https_port / last_serve_local_port. They are
+    // internal bookkeeping for the startup serve reconciliation (ADR-042), not
+    // user-facing configuration.
     passwordSet: config?.passwordHash != null,
     passwordUpdatedAt: config?.passwordUpdatedAt ?? null
   }
@@ -426,7 +424,8 @@ function createWindow(): void {
     'remote:set-config',
     'remote:set-password',
     'remote:clear-password',
-    'remote:tailscale-detect'
+    'remote:tailscale-detect',
+    'remote:force-reserve'
   ]) {
     ipcMain.removeHandler(ch)
   }
@@ -446,8 +445,11 @@ function createWindow(): void {
       const port = config?.port ?? 0
       const host = opts?.host ?? config?.bindHost ?? undefined
       // TLS mode is a persisted setting, not a per-start option — but the tunnel
-      // still wins (RemoteServer enforces the mutual exclusion). A manual start
-      // fails fast on a serve problem so the modal can show it.
+      // still wins (RemoteServer enforces the mutual exclusion). A serve failure
+      // does NOT fail this call (ADR-042): the loopback listener stays up and the
+      // reason travels in `RemoteStatus.tls.serveError`, which the modal shows and
+      // the app-level banner offers a one-click Force re-serve for. Only a listen
+      // failure (e.g. EADDRINUSE) rejects here.
       return await remoteServer.start(port, host, {
         tunnel: opts?.tunnel,
         tls: (config?.tlsMode ?? 0) === 1
@@ -471,11 +473,30 @@ function createWindow(): void {
     'remote:set-config',
     (
       _e,
-      partial: { port?: number; bindHost?: string | null; autostart?: boolean; tlsMode?: number }
+      partial: {
+        port?: number
+        bindHost?: string | null
+        autostart?: boolean
+        tlsMode?: number
+        tlsHttpsPort?: number
+      }
     ) => {
       if (partial.port !== undefined && partial.port !== 0) {
         if (partial.port < 1024 || partial.port > 65535) {
           throw new Error('Port must be 0 (random) or between 1024 and 65535')
+        }
+      }
+      // Unlike the local listen port, 0 is NOT allowed: `tailscale serve` binds
+      // one concrete HTTPS port and the whole point of pinning it (ADR-042) is a
+      // stable bookmark. Any other uint16 is accepted — the CLI takes any port;
+      // 443/8443/10000 is only the Funnel-compatible triple.
+      if (partial.tlsHttpsPort !== undefined) {
+        if (
+          !Number.isInteger(partial.tlsHttpsPort) ||
+          partial.tlsHttpsPort < 1 ||
+          partial.tlsHttpsPort > 65535
+        ) {
+          throw new Error('Tailscale HTTPS port must be between 1 and 65535')
         }
       }
       dbSetRemoteConfig(partial)
@@ -501,6 +522,14 @@ function createWindow(): void {
   ipcMain.handle('remote:tailscale-detect', async (): Promise<TailscaleDetection> => {
     return await tailscaleManager.detect()
   })
+  // Force re-serve (ADR-042): claim the pinned HTTPS port, overwriting whatever
+  // serve handler holds it. Desktop-only (in RemoteDispatcher.BLOCKED) — a
+  // remote client must never mutate the serve config of the very server it is
+  // connected through. Throws propagate to the renderer so the banner can show
+  // why the takeover failed.
+  ipcMain.handle('remote:force-reserve', async (): Promise<void> => {
+    await remoteServer.forceReserve()
+  })
 
   // Autostart: fire-and-forget so a listen failure (e.g. EADDRINUSE from a
   // stale previous instance) never blocks or crashes app startup. The error
@@ -509,6 +538,12 @@ function createWindow(): void {
   // logger so an unexpected throw (not a listen failure) doesn't go silent.
   void (async () => {
     try {
+      // Serve-config reconciliation (ADR-042 decision 3) runs FIRST and
+      // unconditionally — even with autostart/TLS off, because the leaked entry
+      // it removes was created by a previous run and nothing else can clean it
+      // up. It swallows its own failures (a down daemon just means the record
+      // survives for the next launch), so it can never block autostart.
+      await remoteServer.reconcileServeRecord()
       const config = getRemoteConfig()
       if (config?.autostart) {
         // autostartRetry: at login the Tailscale daemon may not be up yet, and a

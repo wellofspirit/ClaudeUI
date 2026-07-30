@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { logger } from './logger'
-import type { TailscaleDetection } from '../../shared/types'
+import type { RemoteServeFailureReason, TailscaleDetection } from '../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,7 +55,7 @@ export type { TailscaleDetection }
 
 /** One HTTPS port already claimed in the node's serve config. */
 export interface ServeOccupancy {
-  httpsPort: TailscaleHttpsPort
+  httpsPort: number
   /** The handler target, e.g. `http://127.0.0.1:5173`, `<text>`, `<path>`, or
    *  `tcp-forward:127.0.0.1:1234` for a raw/TLS-terminated TCP forwarder. */
   target: string
@@ -63,15 +63,12 @@ export interface ServeOccupancy {
   ours: boolean
 }
 
-export type ServeFailureReason =
-  /** `detect()` did not return `ok` — see {@link TailscaleServeError.detection}. */
-  | 'not-ready'
-  /** Every candidate HTTPS port is held by a config that is not ours. */
-  | 'all-ports-occupied'
-  /** The CLI exited non-zero (or timed out). */
-  | 'exec-failed'
-  /** The CLI exited 0 but the config did not actually land — see NOTE in `enableServe`. */
-  | 'verify-failed'
+/**
+ * Declared in `src/shared/types.ts` (and re-exported here) because it travels
+ * to the renderer inside `RemoteStatus.tls.serveError` — one declaration means
+ * the IPC boundary cannot drift from what this file throws.
+ */
+export type ServeFailureReason = RemoteServeFailureReason
 
 /** Typed failure for the serve mutations. */
 export class TailscaleServeError extends Error {
@@ -97,19 +94,14 @@ export class TailscaleServeError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * HTTPS ports we are willing to bind, in preference order.
- *
- * NOTE this is a *policy* choice, not a platform limit. `tailscale serve`
- * itself accepts any uint16 for `--https` (`srvTypeAndPortFromFlags` in
- * `cmd/tailscale/cli/serve_v2.go`); the well-known 443/8443/10000 triple is the
- * set Tailscale *Funnel* is restricted to (`ipn/serve.go` `CheckFunnelPort`,
- * driven by the `https://tailscale.com/cap/funnel-ports` node attr). Sticking
- * to it keeps a future Funnel option viable and matches what users expect from
- * the docs. Widening it is a one-line change here.
+ * HTTPS ports Tailscale *Funnel* is restricted to (`ipn/serve.go`
+ * `CheckFunnelPort`, driven by the `https://tailscale.com/cap/funnel-ports`
+ * node attr). Informational only — `tailscale serve` itself accepts ANY uint16
+ * for `--https` (`srvTypeAndPortFromFlags` in `cmd/tailscale/cli/serve_v2.go`),
+ * and since ADR-042 the port we bind is pinned config, not a search. Kept
+ * exported so the Settings hint can name the Funnel-compatible triple.
  */
-export const HTTPS_PORT_CANDIDATES = [443, 8443, 10000] as const
-
-export type TailscaleHttpsPort = (typeof HTTPS_PORT_CANDIDATES)[number]
+export const FUNNEL_COMPATIBLE_HTTPS_PORTS = [443, 8443, 10000] as const
 
 /** Read-only queries (`version`, `status`, `serve status`) are fast. */
 const QUERY_TIMEOUT_MS = 10_000
@@ -329,8 +321,13 @@ function ownerLoginFrom(status: RawStatus): string | null {
   return login ? login.toLowerCase() : null
 }
 
-/** Our canonical serve target for a local port. */
-function ourTarget(localPort: number): string {
+/**
+ * Our canonical serve target for a local port. Exported because the persisted
+ * cleanup record (ADR-042) is `{httpsPort, localPort}` and whoever reconciles it
+ * must build the SAME string this file writes — deriving it twice is how the two
+ * would drift.
+ */
+export function serveTargetForPort(localPort: number): string {
   return `http://127.0.0.1:${localPort}`
 }
 
@@ -372,6 +369,27 @@ function hostPortPort(key: string): number | null {
   if (idx < 0) return null
   const n = Number(key.slice(idx + 1))
   return Number.isInteger(n) ? n : null
+}
+
+/**
+ * Every port that appears anywhere in the (flattened) serve config, ascending.
+ * Replaces the retired candidate list as the default scan set for
+ * {@link TailscaleManager.getServeStatus}: enumerating what is actually there
+ * cannot under-report occupancy the way a fixed triple could.
+ */
+function portsInConfig(root: RawServeConfig): number[] {
+  const ports = new Set<number>()
+  for (const cfg of flattenServeConfigs(root)) {
+    for (const key of Object.keys(cfg.Web ?? {})) {
+      const port = hostPortPort(key)
+      if (port !== null) ports.add(port)
+    }
+    for (const key of Object.keys(cfg.TCP ?? {})) {
+      const port = Number(key)
+      if (Number.isInteger(port)) ports.add(port)
+    }
+  }
+  return [...ports].sort((a, b) => a - b)
 }
 
 // ---------------------------------------------------------------------------
@@ -590,14 +608,23 @@ export class TailscaleManager {
   // -------------------------------------------------------------------------
 
   /**
-   * Which of {@link HTTPS_PORT_CANDIDATES} are already claimed, and by what.
+   * Which HTTPS ports are already claimed in the node's serve config, and by
+   * what.
+   *
+   * `httpsPorts` narrows the scan (`enableServe` asks about exactly the pinned
+   * port; the startup reconciliation asks about exactly the recorded one).
+   * Omitting it reports EVERY port present in the live config — there is no
+   * candidate list to enumerate any more (ADR-042).
    *
    * `ours` is decided by target when `localPort` is supplied (the reliable test,
    * and the only one that survives an app restart — a `--bg` serve config is
    * persisted per-profile and outlives our process). Without `localPort` it
    * falls back to "did *this* process enable it".
    */
-  async getServeStatus(localPort?: number): Promise<{ occupied: ServeOccupancy[] }> {
+  async getServeStatus(
+    localPort?: number,
+    httpsPorts?: readonly number[]
+  ): Promise<{ occupied: ServeOccupancy[] }> {
     const { binaryPath } = await this.resolveBinary()
     let stdout: string
     try {
@@ -621,10 +648,10 @@ export class TailscaleManager {
       )
     }
 
-    const wanted = ourTarget(localPort ?? -1)
+    const wanted = serveTargetForPort(localPort ?? -1)
     const occupied: ServeOccupancy[] = []
 
-    for (const httpsPort of HTTPS_PORT_CANDIDATES) {
+    for (const httpsPort of httpsPorts ?? portsInConfig(config)) {
       const target = this.findTargetForPort(config, httpsPort)
       if (target === null) continue
       const ours = localPort !== undefined ? target === wanted : this.ownedHttpsPorts.has(httpsPort)
@@ -666,10 +693,24 @@ export class TailscaleManager {
   // -------------------------------------------------------------------------
 
   /**
-   * Point a `tailscale serve` HTTPS listener at `localPort`, trying
-   * {@link HTTPS_PORT_CANDIDATES} in order and skipping any port held by a
-   * FOREIGN config. A port whose target is already ours is reused (the CLI call
-   * is idempotent — `SetWebHandler` overwrites the `/` mount).
+   * Point a `tailscale serve` HTTPS listener on the PINNED `httpsPort` at
+   * `localPort`. There is no fallback walk (ADR-042): a stable bookmarkable URL
+   * is the entire point of the mode, so a port held by a FOREIGN config is a
+   * loud `port-occupied` failure, never a silent drift to another port.
+   *
+   * Ownership of the pinned port — any of these makes the occupant OURS, and an
+   * "ours" entry is simply overwritten (the CLI call is idempotent:
+   * `SetWebHandler` replaces the `/` mount):
+   *
+   * - its target is `http://127.0.0.1:<localPort>` (this run's listener);
+   * - *this process* enabled that port earlier (`ownedHttpsPorts`);
+   * - its target is in `opts.reclaimTargets` — the caller's persisted
+   *   last-serve record, i.e. an entry a PREVIOUS run of this app provably
+   *   created and leaked (unclean quit). Without this, a random loopback port
+   *   per run makes our own stale entry indistinguishable from a stranger's.
+   *
+   * `opts.force` skips the occupancy check entirely: the user's deliberate
+   * "claim this port for my bookmark" action, destructive to the occupant.
    *
    * Two non-obvious safeguards, both required by observed CLI behaviour:
    *
@@ -682,7 +723,11 @@ export class TailscaleManager {
    * 2. **Exit 0 is not proof.** Because of (1), success is confirmed by
    *    re-reading `serve status --json` and checking our target actually landed.
    */
-  async enableServe(localPort: number): Promise<{ httpsPort: number; url: string }> {
+  async enableServe(
+    localPort: number,
+    httpsPort: number,
+    opts?: { force?: boolean; reclaimTargets?: readonly string[] }
+  ): Promise<{ httpsPort: number; url: string }> {
     const detection = await this.detect()
     if (detection.state !== 'ok') {
       throw new TailscaleServeError('not-ready', detection.message, {
@@ -691,27 +736,23 @@ export class TailscaleManager {
       })
     }
 
-    const { occupied } = await this.getServeStatus(localPort)
-    const byPort = new Map(occupied.map((o) => [o.httpsPort, o]))
-
-    let chosen: TailscaleHttpsPort | null = null
-    for (const candidate of HTTPS_PORT_CANDIDATES) {
-      const entry = byPort.get(candidate)
-      if (!entry || entry.ours) {
-        chosen = candidate
-        break
+    const chosen = httpsPort
+    if (opts?.force !== true) {
+      const { occupied } = await this.getServeStatus(localPort, [chosen])
+      const entry = occupied.find((o) => o.httpsPort === chosen)
+      const reclaimable = entry !== undefined && (opts?.reclaimTargets ?? []).includes(entry.target)
+      const ours =
+        entry !== undefined && (entry.ours || this.ownedHttpsPorts.has(chosen) || reclaimable)
+      if (entry !== undefined && !ours) {
+        throw new TailscaleServeError(
+          'port-occupied',
+          `Tailscale HTTPS port ${chosen} is already used by another serve configuration (${entry.target}). Use “Force re-serve” to take the port over, free it with \`tailscale serve --https=${chosen} off\`, or pick a different port in Settings › Remote.`,
+          { detail: `${entry.httpsPort} → ${entry.target}` }
+        )
       }
     }
-    if (chosen === null) {
-      const summary = occupied.map((o) => `${o.httpsPort} → ${o.target}`).join(', ')
-      throw new TailscaleServeError(
-        'all-ports-occupied',
-        `All Tailscale HTTPS ports (${HTTPS_PORT_CANDIDATES.join(', ')}) are already used by another serve configuration. Free one with \`tailscale serve --https=<port> off\` and try again.`,
-        { detail: summary }
-      )
-    }
 
-    const target = ourTarget(localPort)
+    const target = serveTargetForPort(localPort)
     // Syntax pinned to tailscale 1.98.5 (`cmd/tailscale/cli/serve_v2.go`):
     //   tailscale serve --bg --https=<port> <target>
     // `--https` is a value flag so `--https=443` and `--https 443` both parse;
@@ -735,7 +776,7 @@ export class TailscaleManager {
     }
 
     // Post-exec verification — see safeguard (2) above.
-    const after = await this.getServeStatus(localPort)
+    const after = await this.getServeStatus(localPort, [chosen])
     const landed = after.occupied.find((o) => o.httpsPort === chosen && o.ours)
     if (!landed) {
       throw new TailscaleServeError(

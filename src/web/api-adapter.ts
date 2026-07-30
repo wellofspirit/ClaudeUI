@@ -574,6 +574,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     detectTailscale: async () => {
       throw new Error('Not available in remote mode')
     },
+    // Mutating this machine's `tailscale serve` config is desktop-only
+    // (`remote:force-reserve` is in RemoteDispatcher.BLOCKED) — a remote client
+    // must never take over the transport it is talking through (ADR-042).
+    forceReserve: async () => {
+      throw new Error('Not available in remote mode')
+    },
 
     // Voice input — not available on web (audio hardware is on the server)
     voiceStartServer: async () => {},

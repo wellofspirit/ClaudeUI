@@ -58,7 +58,12 @@ export class RemoteDispatcher {
     // Tailscale probe (Phase 3): discloses this node's tailnet DNS name and the
     // owner's login — local-configuration detail a remote client has no business
     // reading, and useless to it anyway (it cannot flip tls_mode either).
-    'remote:tailscale-detect'
+    'remote:tailscale-detect',
+    // Force re-serve (ADR-042) MUTATES this machine's `tailscale serve` config,
+    // taking over the pinned HTTPS port from whatever holds it — i.e. it can
+    // change (or break) the very transport the caller is connected through.
+    // Desktop-only, like the rest of the remote:* config surface.
+    'remote:force-reserve'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

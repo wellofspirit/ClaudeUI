@@ -422,6 +422,7 @@ const api: ClaudeAPI = {
   setRemotePassword: (password: string) => ipcRenderer.invoke('remote:set-password', password),
   clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
   detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
+  forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
   // Voice input
   voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),

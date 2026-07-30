@@ -36,8 +36,9 @@ describe('DB migration — v6 dispatched_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v7 (remote_config).
-      expect(userVersion(db)).toBe(7)
+      // Bump alongside MIGRATIONS in db.ts — currently v8 (remote_config pinned
+      // HTTPS port + serve cleanup record, ADR-042).
+      expect(userVersion(db)).toBe(8)
     } finally {
       db.close()
     }

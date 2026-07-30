@@ -347,6 +347,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setRemotePassword: (password) => ipcRenderer.invoke('remote:set-password', password),
     clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
     detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
+    forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
     voiceStartServer: (routingId) => unwrap('voice:start-server', routingId),
     voiceStopServer: (routingId) => unwrap('voice:stop-server', routingId),

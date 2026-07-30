@@ -8,6 +8,7 @@ const baseConfig: RemoteConfig = {
   bindHost: null,
   autostart: false,
   tlsMode: 0,
+  tlsHttpsPort: 443,
   passwordSet: false,
   passwordUpdatedAt: null
 }
@@ -72,6 +73,64 @@ describe('RemoteServerSettings', () => {
     fireEvent.change(portInput, { target: { value: '5000' } })
     fireEvent.blur(portInput)
     await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ port: 5000 }))
+  })
+
+  // ADR-042 — the pinned Tailscale HTTPS port.
+  describe('HTTPS port (Tailscale)', () => {
+    it('renders the persisted pinned port and is disabled while TLS mode is off', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsHttpsPort: 8443 })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
+      expect(input).toHaveValue('8443')
+      expect(input).toBeDisabled()
+      // The hint has to state the two facts that surprise people: no fallback,
+      // and which ports Funnel would accept.
+      expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortHint')).toHaveTextContent(
+        /no fallback/i
+      )
+      expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortHint')).toHaveTextContent('10000')
+    })
+
+    it('commits a valid port on blur when TLS mode is on', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1, tlsHttpsPort: 9443 })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
+      expect(input).not.toBeDisabled()
+      fireEvent.change(input, { target: { value: '9443' } })
+      fireEvent.blur(input)
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsHttpsPort: 9443 }))
+      await waitFor(() => expect(input).toHaveValue('9443'))
+    })
+
+    // 0 is legal for the LISTEN port ("pick a random one") but meaningless here:
+    // serve binds one concrete port, and pinning it is the whole point.
+    it.each(['0', '70000', 'abc', '-1'])(
+      'rejects %s without calling setRemoteConfig',
+      async (value) => {
+        api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
+        render(<RemoteServerSettings />)
+        const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
+        fireEvent.change(input, { target: { value } })
+        fireEvent.blur(input)
+        await screen.findByTestId('RemoteServerSettings.tlsHttpsPortError')
+        expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortError')).toHaveTextContent(
+          'Tailscale HTTPS port must be between 1 and 65535'
+        )
+        expect(api.setRemoteConfig).not.toHaveBeenCalled()
+      }
+    )
+
+    it('an empty field commits the 443 default rather than erroring', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1, tlsHttpsPort: 9443 })
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1, tlsHttpsPort: 443 })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
+      fireEvent.change(input, { target: { value: '  ' } })
+      fireEvent.blur(input)
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsHttpsPort: 443 }))
+      await waitFor(() => expect(input).toHaveValue('443'))
+    })
   })
 
   it('renders network interfaces in the bind-host select and keeps a stale persisted value visible', async () => {

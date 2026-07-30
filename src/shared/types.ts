@@ -1184,6 +1184,13 @@ export interface RemoteConfig {
   bindHost: string | null
   autostart: boolean
   tlsMode: number
+  /**
+   * Pinned `tailscale serve` HTTPS port (ADR-042), 1–65535, default 443. The
+   * ONLY port TLS mode will bind — there is no fallback walk. The last-serve
+   * cleanup record (`last_serve_*`) is deliberately NOT exposed: it is internal
+   * bookkeeping for the startup reconciliation.
+   */
+  tlsHttpsPort: number
   passwordSet: boolean
   passwordUpdatedAt: number | null
 }
@@ -1208,7 +1215,17 @@ interface RemoteAPI {
     bindHost?: string | null
     autostart?: boolean
     tlsMode?: number
+    tlsHttpsPort?: number
   }): Promise<RemoteConfig>
+  /**
+   * Re-run `tailscale serve` enablement for the running server with
+   * `force: true` — it CLAIMS the pinned HTTPS port, overwriting whatever
+   * handler currently holds it (ADR-042). The user's deliberate "my bookmark
+   * wins" action, surfaced by the serve-failure banner. Main-only (in
+   * `RemoteDispatcher.BLOCKED`): a remote client must never mutate the serve
+   * config of the server it is connected through.
+   */
+  forceReserve(): Promise<void>
   /** Provision a new remote-access password. Throws (min length 12) on validation failure. */
   setRemotePassword(password: string): Promise<void>
   /** Clear the remote-access password credential. */
@@ -1286,15 +1303,48 @@ export type TunnelState =
 export type RemoteAuthMethod = 'token' | 'password' | 'tailnet-identity'
 
 /**
+ * Why a `tailscale serve` mutation failed. Declared here (not in the main-only
+ * `tailscale-manager.ts`) because it travels to the renderer inside
+ * {@link RemoteTlsStatus.serveError}; `tailscale-manager.ts` imports it as its
+ * `ServeFailureReason`, so the two can never drift.
+ */
+export type RemoteServeFailureReason =
+  /** `detect()` did not return `ok` (Tailscale missing / logged out / certs off / …). */
+  | 'not-ready'
+  /** The PINNED HTTPS port is held by a serve config that is not ours (ADR-042). */
+  | 'port-occupied'
+  /** The CLI exited non-zero (or timed out). */
+  | 'exec-failed'
+  /** The CLI exited 0 but the config did not actually land. */
+  | 'verify-failed'
+
+/**
  * `tailscale serve` state for the running server (Phase 3). All-null fields
  * with a non-null object mean "TLS mode is on but serve is not up yet" — read
- * `detectionMessage` for why.
+ * `serveError` / `detectionMessage` for why.
  */
 export interface RemoteTlsStatus {
   /** Mirrors the `tls_mode` the server was STARTED with: 1 = tailscale-serve. */
   mode: number
-  /** The HTTPS port serve is listening on (443 | 8443 | 10000), null until up. */
+  /**
+   * The HTTPS port serve is CONFIRMED listening on, null until up. Since
+   * ADR-042 this is always {@link RemoteTlsStatus.pinnedHttpsPort} when
+   * non-null — there is no candidate walk any more.
+   */
   httpsPort: number | null
+  /**
+   * The pinned HTTPS port this run will bind (`remote_config.tls_https_port`,
+   * default 443). Known even while serve is down, which is exactly when the UI
+   * needs to name the port that failed.
+   */
+  pinnedHttpsPort: number
+  /**
+   * The most recent `tailscale serve` failure while TLS mode was requested, or
+   * null when serve is healthy. Rendered by the app-level serve banner; the
+   * `reason` decides whether "Force re-serve" can plausibly fix it
+   * (`port-occupied` → yes, by overwriting the occupant).
+   */
+  serveError: { reason: RemoteServeFailureReason; message: string } | null
   /** `https://<dnsName>[:port]` — the URL to hand the user. Replaces `lanUrl`. */
   url: string | null
   /** Last `detect()` state, so the UI can distinguish "not installed" from "certs off". */

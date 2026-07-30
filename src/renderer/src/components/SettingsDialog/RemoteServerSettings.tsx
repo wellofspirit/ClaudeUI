@@ -24,6 +24,8 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [interfaces, setInterfaces] = useState<NetworkInterfaceInfo[]>([])
   const [portInput, setPortInput] = useState('')
   const [portError, setPortError] = useState<string | null>(null)
+  const [tlsPortInput, setTlsPortInput] = useState('')
+  const [tlsPortError, setTlsPortError] = useState<string | null>(null)
   const [passwordDraft, setPasswordDraft] = useState('')
   const [passwordConfirm, setPasswordConfirm] = useState('')
   const [passwordError, setPasswordError] = useState<string | null>(null)
@@ -41,6 +43,7 @@ export function RemoteServerSettings(): React.JSX.Element {
     ])
     setConfig(nextConfig)
     setPortInput(nextConfig.port ? String(nextConfig.port) : '')
+    setTlsPortInput(String(nextConfig.tlsHttpsPort))
     setInterfaces(ifaces)
   }, [])
 
@@ -60,6 +63,25 @@ export function RemoteServerSettings(): React.JSX.Element {
     setConfig(updated)
     setPortInput(updated.port ? String(updated.port) : '')
   }, [portInput])
+
+  /**
+   * The pinned `tailscale serve` HTTPS port (ADR-042). Unlike the listen port, 0
+   * is not a legal value — serve binds one concrete port and the pin exists so
+   * the user's bookmark never moves. An empty field means "back to the 443
+   * default" rather than an error, so the field can't be left in a broken state.
+   */
+  const commitTlsPort = useCallback(async (): Promise<void> => {
+    const trimmed = tlsPortInput.trim()
+    const value = trimmed === '' ? 443 : Number(trimmed)
+    if (!Number.isInteger(value) || value < 1 || value > 65535) {
+      setTlsPortError('Tailscale HTTPS port must be between 1 and 65535')
+      return
+    }
+    setTlsPortError(null)
+    const updated = await window.api.setRemoteConfig({ tlsHttpsPort: value })
+    setConfig(updated)
+    setTlsPortInput(String(updated.tlsHttpsPort))
+  }, [tlsPortInput])
 
   const handleBindHostChange = useCallback(async (value: string): Promise<void> => {
     const updated = await window.api.setRemoteConfig({ bindHost: value === '' ? null : value })
@@ -274,6 +296,37 @@ export function RemoteServerSettings(): React.JSX.Element {
         )}
         <div className="text-[10px] text-text-muted/60 mt-1">
           Applies the next time the server starts.
+        </div>
+
+        {/* Pinned HTTPS port (ADR-042) — only meaningful while TLS mode is on. */}
+        <div className="mt-2">
+          <div className="mb-1 text-[12px] text-text-secondary">HTTPS port (Tailscale)</div>
+          <input
+            data-testid="RemoteServerSettings.tlsHttpsPort"
+            type="text"
+            inputMode="numeric"
+            value={tlsPortInput}
+            placeholder="443"
+            disabled={!tlsEnabled}
+            onChange={(e) => setTlsPortInput(e.target.value)}
+            onBlur={() => void commitTlsPort()}
+            className={`${inputClass} w-full ${tlsEnabled ? '' : 'opacity-40'}`}
+          />
+          {tlsPortError && (
+            <div
+              data-testid="RemoteServerSettings.tlsHttpsPortError"
+              className="text-[10px] text-red-400 mt-0.5"
+            >
+              {tlsPortError}
+            </div>
+          )}
+          <div
+            data-testid="RemoteServerSettings.tlsHttpsPortHint"
+            className="text-[10px] text-text-muted/60 mt-1 leading-snug"
+          >
+            The only port used — no fallback. 443 gives a bare https://&lt;your-node&gt;.ts.net URL;
+            443, 8443 and 10000 are the ports Tailscale Funnel would accept.
+          </div>
         </div>
       </div>
 

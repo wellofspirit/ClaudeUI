@@ -23,6 +23,9 @@ import {
   setRemoteConfig,
   setRemotePassword,
   clearRemotePassword,
+  setLastServeRecord,
+  clearLastServeRecord,
+  MIGRATIONS,
   type Migration,
   type Db
 } from '../db'
@@ -131,14 +134,15 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v7)', () => {
+  it('applies the real production migration set (v1–v8)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
       runMigrations(db)
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
-      // v5: daily_usage, v6: dispatched_usage, v7: remote_config
-      expect(userVersion(db)).toBe(7)
+      // v5: daily_usage, v6: dispatched_usage, v7: remote_config,
+      // v8: remote_config pinned HTTPS port + serve cleanup record
+      expect(userVersion(db)).toBe(8)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -160,6 +164,74 @@ describe('migration framework — user_version guard', () => {
       // remote_config must exist (Phase 1 remote-auth v7 migration).
       const remoteRows = db.prepare('SELECT * FROM remote_config').all()
       expect(remoteRows).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  // ADR-042 v8: the pinned HTTPS port + the serve cleanup record columns.
+  it('v8 adds tls_https_port (default 443) and the nullable last-serve columns', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      const columns = (
+        db
+          .prepare('SELECT name, "notnull", dflt_value FROM pragma_table_info(?)')
+          .all('remote_config') as Array<{
+          name: string
+          notnull: number
+          dflt_value: string | null
+        }>
+      ).filter((c) => c.name.startsWith('tls_https') || c.name.startsWith('last_serve'))
+
+      expect(columns.map((c) => c.name).sort()).toEqual([
+        'last_serve_https_port',
+        'last_serve_local_port',
+        'tls_https_port'
+      ])
+      const pinned = columns.find((c) => c.name === 'tls_https_port')!
+      expect(pinned.notnull).toBe(1)
+      expect(Number(pinned.dflt_value)).toBe(443)
+      // A row written without naming the new columns takes the defaults.
+      db.prepare('INSERT INTO remote_config (id, updated_at) VALUES (1, 1)').run()
+      expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
+        tls_https_port: 443,
+        last_serve_https_port: null,
+        last_serve_local_port: null
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  // The v7→v8 upgrade path specifically: an existing row must survive the ALTERs
+  // with its configuration intact and the new column at its default.
+  it('v8 preserves an existing v7 row and backfills the default port', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 7)
+      )
+      expect(userVersion(db)).toBe(7)
+      db.prepare(
+        `INSERT INTO remote_config (id, port, bind_host, autostart, tls_mode, password_hash, updated_at)
+         VALUES (1, 4568, '10.0.0.5', 1, 1, 'deadbeef', 1)`
+      ).run()
+
+      runMigrations(db)
+
+      expect(userVersion(db)).toBe(8)
+      expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
+        port: 4568,
+        bind_host: '10.0.0.5',
+        autostart: 1,
+        tls_mode: 1,
+        password_hash: 'deadbeef',
+        tls_https_port: 443,
+        last_serve_https_port: null,
+        last_serve_local_port: null
+      })
     } finally {
       db.close()
     }
@@ -569,6 +641,84 @@ describe('remote_config repository', () => {
     expect(config?.port).toBe(0)
     expect(config?.bindHost).toBeNull()
     expect(config?.autostart).toBe(false)
+    expect(config?.tlsHttpsPort).toBe(443)
     expect(config?.passwordHash).toBe('dd'.repeat(32))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// remote_config — pinned HTTPS port + serve cleanup record (ADR-042)
+// ---------------------------------------------------------------------------
+
+describe('remote_config — pinned HTTPS port and serve cleanup record', () => {
+  it('defaults tlsHttpsPort to 443 and round-trips any uint16', () => {
+    setRemoteConfig({ port: 4568 })
+    expect(getRemoteConfig()?.tlsHttpsPort).toBe(443)
+
+    setRemoteConfig({ tlsHttpsPort: 9443 })
+    const config = getRemoteConfig()
+    expect(config?.tlsHttpsPort).toBe(9443)
+    // …without disturbing the rest of the config.
+    expect(config?.port).toBe(4568)
+  })
+
+  it('setLastServeRecord works on a fresh db and getRemoteConfig reads it back', () => {
+    setLastServeRecord(443, 64032)
+    const config = getRemoteConfig()
+    expect(config?.lastServeHttpsPort).toBe(443)
+    expect(config?.lastServeLocalPort).toBe(64032)
+    // Config columns fall back to their defaults, not to garbage.
+    expect(config?.port).toBe(0)
+    expect(config?.tlsHttpsPort).toBe(443)
+  })
+
+  it('clearLastServeRecord nulls only the record columns', () => {
+    setRemoteConfig({ port: 4568, tlsHttpsPort: 8443 })
+    setLastServeRecord(8443, 51000)
+    clearLastServeRecord()
+
+    const config = getRemoteConfig()
+    expect(config?.lastServeHttpsPort).toBeNull()
+    expect(config?.lastServeLocalPort).toBeNull()
+    expect(config?.port).toBe(4568)
+    expect(config?.tlsHttpsPort).toBe(8443)
+  })
+
+  it('clearLastServeRecord is a no-op when no row exists yet', () => {
+    expect(() => clearLastServeRecord()).not.toThrow()
+    expect(getRemoteConfig()).toBeNull()
+  })
+
+  // GUARD: a serve success can land at any time, including while the user is in
+  // Settings. The two writers must not clobber each other's columns.
+  it('setRemoteConfig preserves the last-serve record AND the password columns', () => {
+    setLastServeRecord(443, 64032)
+    setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
+
+    setRemoteConfig({ port: 5000, autostart: true, tlsMode: 1, tlsHttpsPort: 10000 })
+
+    const config = getRemoteConfig()
+    expect(config?.lastServeHttpsPort).toBe(443)
+    expect(config?.lastServeLocalPort).toBe(64032)
+    expect(config?.passwordSalt).toBe('aa'.repeat(16))
+    expect(config?.passwordHash).toBe('bb'.repeat(32))
+    expect(config?.port).toBe(5000)
+    expect(config?.tlsHttpsPort).toBe(10000)
+  })
+
+  it('setLastServeRecord preserves the config AND password columns', () => {
+    setRemoteConfig({ port: 4568, bindHost: '10.0.0.5', tlsMode: 1, tlsHttpsPort: 8443 })
+    setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
+
+    setLastServeRecord(8443, 51000)
+
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(4568)
+    expect(config?.bindHost).toBe('10.0.0.5')
+    expect(config?.tlsMode).toBe(1)
+    expect(config?.tlsHttpsPort).toBe(8443)
+    expect(config?.passwordHash).toBe('bb'.repeat(32))
+    expect(config?.lastServeHttpsPort).toBe(8443)
+    expect(config?.lastServeLocalPort).toBe(51000)
   })
 })

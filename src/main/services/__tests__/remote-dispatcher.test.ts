@@ -80,7 +80,12 @@ describe('RemoteDispatcher', () => {
       'remote:clear-password',
       // Phase 3: the Tailscale probe discloses the tailnet DNS name and the node
       // owner's login — desktop-only, like the rest of the remote:* config surface.
-      'remote:tailscale-detect'
+      'remote:tailscale-detect',
+      // ADR-042: force re-serve MUTATES this machine's `tailscale serve` config
+      // (it takes the pinned HTTPS port over from whatever holds it), i.e. it can
+      // change or break the very transport the remote caller is connected
+      // through. Desktop-only.
+      'remote:force-reserve'
     ] as const
 
     it.each(BLOCKED_CHANNELS)(

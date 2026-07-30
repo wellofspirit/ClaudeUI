@@ -17,7 +17,13 @@ import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
 import { routeHttpMockup, serveMockup } from './mockup-protocol'
 import { dbPasswordAuthProvider, safeHexEqual } from './remote-auth'
 import type { PasswordAuthProvider } from './remote-auth'
-import { TailscaleManager, TailscaleServeError } from './tailscale-manager'
+import { TailscaleManager, TailscaleServeError, serveTargetForPort } from './tailscale-manager'
+import {
+  DEFAULT_TLS_HTTPS_PORT,
+  clearLastServeRecord,
+  getRemoteConfig,
+  setLastServeRecord
+} from './db'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -29,6 +35,7 @@ import type {
 } from '../../shared/remote-protocol'
 import type {
   NetworkInterfaceInfo,
+  RemoteServeFailureReason,
   RemoteTlsDetection,
   RemoteTlsStatus,
   TailscaleDetection
@@ -195,7 +202,7 @@ export function evaluateIdentity(
  */
 export type TailscaleServeController = Pick<
   TailscaleManager,
-  'detect' | 'enableServe' | 'disableServe'
+  'detect' | 'enableServe' | 'disableServe' | 'getServeStatus'
 >
 
 /** Live `tailscale serve` proxy state for the current run. */
@@ -274,6 +281,14 @@ export class RemoteServer {
   /** Last `detect()` state / most recent actionable TLS failure message. */
   private tlsDetection: RemoteTlsDetection | null = null
   private tlsDetectionMessage: string | null = null
+  /**
+   * Pinned HTTPS port for this run (`remote_config.tls_https_port`, ADR-042).
+   * Captured at start / refreshed on every enablement attempt so the status can
+   * name the port even while serve is down.
+   */
+  private tlsPinnedPort = DEFAULT_TLS_HTTPS_PORT
+  /** Most recent `tailscale serve` failure while TLS mode was requested. */
+  private tlsServeError: { reason: RemoteServeFailureReason; message: string } | null = null
   /** Autostart retry bookkeeping (cleared by {@link stop}). */
   private tlsRetryTimer?: ReturnType<typeof setTimeout>
   private tlsRetryAttempt = 0
@@ -355,6 +370,10 @@ export class RemoteServer {
 
     const tlsMode = opts?.tls === true && opts?.tunnel !== true
     this.tlsRequested = tlsMode
+    this.tlsServeError = null
+    // Read the pinned port up front so the FIRST status push (which happens
+    // before serve is configured) already names the port we are going to bind.
+    if (tlsMode) this.tlsPinnedPort = readPinnedHttpsPort()
 
     // Determine bind address: if a specific host IP is given, bind to that;
     // otherwise bind to 0.0.0.0 (all interfaces). TLS mode ignores `host`
@@ -476,11 +495,18 @@ export class RemoteServer {
         await this.enableTlsServe()
       } catch (err) {
         const message = tlsFailureMessage(err)
+        // NEITHER path fails the start (ADR-042): the listener stays up
+        // (loopback-only) and the reason travels in `RemoteStatus.tls.serveError`
+        // / `detectionMessage`, which is what the app-level banner — and its
+        // Force re-serve action — render. Tearing the server down here would
+        // clear `running` AND `serveError`, making the one-click recovery
+        // unreachable exactly when a human is watching. A listen failure still
+        // fails the start (see the catch around `listen` above); this is only
+        // about the proxy in front of a listener that IS up.
+        //
+        // Retrying stays autostart-only: a manual start has someone present who
+        // can fix the cause or press Force re-serve.
         if (opts?.autostartRetry) {
-          // Autostart has no modal to throw to, so it never fails the start: the
-          // listener stays up (loopback-only) and the reason travels in
-          // `RemoteStatus.tls.detectionMessage`. Only a plausibly-transient
-          // failure is retried — the rest need a human.
           const willRetry = isTransientTlsFailure(err)
           logger.warn(
             'remote-server',
@@ -488,14 +514,7 @@ export class RemoteServer {
           )
           if (willRetry) this.scheduleTlsRetry()
         } else {
-          // Manual start (or a failure no retry can fix): fail loudly. stop()
-          // performs the same teardown a listen failure does — it also clears
-          // lastError, so set it after.
           logger.error('remote-server', `tailscale serve failed: ${message}`)
-          this.stop()
-          this.lastStartError = message
-          this.notifyStatus()
-          throw err instanceof Error ? err : new Error(message)
         }
       }
       this.notifyStatus()
@@ -528,24 +547,61 @@ export class RemoteServer {
     // would wipe the user's unrelated serve config). Fire-and-forget: a stop()
     // must not block on a CLI call, and app-quit may not even wait for it. The
     // config is persisted per-profile and outlives us, so a leftover entry is
-    // reconciled on the next start (enableServe treats a handler pointing at our
-    // own port as ours and overwrites it).
+    // cleaned up by {@link reconcileServeRecord} on the next start (ADR-042):
+    // this attempt is an optimization that usually lands, the persisted record
+    // is the guarantee — it also covers crashes and force-kills, which no
+    // teardown here can.
     const ownedHttpsPort = this.tlsServe?.httpsPort
+    // Snapshot the pair this teardown is responsible for, synchronously — the
+    // fields below are reset immediately and a start() may run (and write a NEW
+    // record) long before the CLI call resolves.
+    const teardownRecord =
+      ownedHttpsPort !== undefined ? { httpsPort: ownedHttpsPort, localPort: this.port } : null
     if (ownedHttpsPort !== undefined) {
-      void this.tailscale.disableServe(ownedHttpsPort).catch((err: unknown) => {
-        logger.warn(
-          'remote-server',
-          `Could not turn off tailscale serve on ${ownedHttpsPort}: ${
-            err instanceof Error ? err.message : String(err)
-          }`
-        )
-      })
+      void this.tailscale
+        .disableServe(ownedHttpsPort)
+        .then(() => {
+          // CONFIRMED off ⇒ there is nothing left for the next startup to
+          // reconcile. Clear ONLY if the persisted record is still the one this
+          // teardown owns: a stop→start cycle can persist a newer record while
+          // this promise is in flight, and wiping THAT would silently drop the
+          // new run's cleanup guarantee. The DB access is guarded because this
+          // resolves during/after teardown (possibly at app quit, when the DB may
+          // already be closed).
+          try {
+            const current = readLastServeRecord()
+            if (
+              current !== null &&
+              teardownRecord !== null &&
+              current.httpsPort === teardownRecord.httpsPort &&
+              current.localPort === teardownRecord.localPort
+            ) {
+              clearLastServeRecord()
+            }
+          } catch (err: unknown) {
+            logger.warn(
+              'remote-server',
+              `Could not clear the serve cleanup record: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            )
+          }
+        })
+        .catch((err: unknown) => {
+          logger.warn(
+            'remote-server',
+            `Could not turn off tailscale serve on ${ownedHttpsPort}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          )
+        })
     }
     this.clearTlsRetry()
     this.tlsServe = null
     this.tlsRequested = false
     this.tlsDetection = null
     this.tlsDetectionMessage = null
+    this.tlsServeError = null
 
     if (this.idleTimer) {
       clearInterval(this.idleTimer)
@@ -600,32 +656,156 @@ export class RemoteServer {
    * costs one cheap exec per start and keeps `enableServe`'s own precondition
    * self-contained.
    */
-  private async enableTlsServe(): Promise<void> {
-    const detection: TailscaleDetection = await this.tailscale.detect()
-    this.tlsDetection = detection.state
-    if (detection.state !== 'ok') {
-      this.tlsDetectionMessage = detection.message
-      throw new TailscaleServeError('not-ready', detection.message, {
-        detail: detection.detail,
-        detection
+  private async enableTlsServe(opts?: { force?: boolean }): Promise<void> {
+    // Re-read the pinned port on every attempt: the user may have changed it in
+    // Settings between an autostart failure and a Force re-serve.
+    this.tlsPinnedPort = readPinnedHttpsPort()
+    const pinnedPort = this.tlsPinnedPort
+    try {
+      const detection: TailscaleDetection = await this.tailscale.detect()
+      this.tlsDetection = detection.state
+      if (detection.state !== 'ok') {
+        this.tlsDetectionMessage = detection.message
+        throw new TailscaleServeError('not-ready', detection.message, {
+          detail: detection.detail,
+          detection
+        })
+      }
+
+      // Clean up a leaked entry from a previous run BEFORE claiming the port —
+      // except on the pinned port itself, which we are about to overwrite anyway
+      // (and whose stale target is handed to enableServe as a reclaim target, so
+      // it classifies as ours rather than foreign).
+      await this.reconcileServeRecord({ skipHttpsPort: pinnedPort })
+
+      const record = readLastServeRecord()
+      const reclaimTargets =
+        record !== null && record.httpsPort === pinnedPort
+          ? [serveTargetForPort(record.localPort)]
+          : []
+      const previousHttpsPort = this.tlsServe?.httpsPort ?? null
+      const { httpsPort, url } = await this.tailscale.enableServe(this.port, pinnedPort, {
+        force: opts?.force,
+        reclaimTargets
       })
+      // The pinned port changed while serve was already up (Settings edit, then a
+      // re-enable / Force re-serve): the entry on the OLD port is still live and
+      // nothing else would ever remove it — `stop()` only knows the new port, and
+      // the cleanup record now points at the new one too. Fire-and-forget, same
+      // best-effort contract as the teardown in stop().
+      if (previousHttpsPort !== null && previousHttpsPort !== httpsPort) {
+        void this.tailscale.disableServe(previousHttpsPort).catch((err: unknown) => {
+          logger.warn(
+            'remote-server',
+            `Could not turn off the previous tailscale serve port ${previousHttpsPort}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          )
+        })
+      }
+      this.tlsServe = {
+        httpsPort,
+        url,
+        dnsName: detection.dnsName.toLowerCase(),
+        ownerLogin: detection.ownerLogin
+      }
+      this.tlsDetectionMessage = null
+      this.tlsServeError = null
+      this.tlsRetryAttempt = 0
+      // Persisted cleanup contract (ADR-042): this pair is what makes the entry
+      // provably ours on the next startup, even after a force-kill.
+      try {
+        setLastServeRecord(httpsPort, this.port)
+      } catch (err) {
+        logger.warn(
+          'remote-server',
+          `Could not persist the serve cleanup record: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
+      }
+      if (!detection.ownerLogin) {
+        logger.warn(
+          'remote-server',
+          'tailscale serve is up but the node owner login is unknown (tagged node?) — tailnet-identity auth stays disabled'
+        )
+      }
+      logger.info('remote-server', `TLS mode active: ${url} → 127.0.0.1:${this.port}`)
+    } catch (err) {
+      // One place records the failure for the app-level banner, so every caller
+      // (manual start, autostart retry, force re-serve) surfaces it identically.
+      this.tlsServeError = describeServeFailure(err)
+      throw err
     }
-    const { httpsPort, url } = await this.tailscale.enableServe(this.port)
-    this.tlsServe = {
-      httpsPort,
-      url,
-      dnsName: detection.dnsName.toLowerCase(),
-      ownerLogin: detection.ownerLogin
-    }
-    this.tlsDetectionMessage = null
-    this.tlsRetryAttempt = 0
-    if (!detection.ownerLogin) {
+  }
+
+  /**
+   * Reconcile the persisted last-serve record against the LIVE serve config
+   * (ADR-042 decision 3). Runs at app startup (before autostart) and at the
+   * start of every serve enablement.
+   *
+   * - record + live entry on that HTTPS port proxying to the recorded loopback
+   *   port ⇒ **provably ours** (the loopback port is random per run) ⇒ remove it
+   *   with a targeted `serve --https=<port> off` and clear the record;
+   * - record + live entry that does NOT match ⇒ someone else owns that port now
+   *   (or it is already free); the record is meaningless ⇒ just clear it;
+   * - `skipHttpsPort` ⇒ we are about to overwrite that port anyway, so leave the
+   *   record alone (it is what lets `enableServe` classify the stale entry as
+   *   ours instead of foreign).
+   *
+   * Failures are swallowed and logged: the daemon may simply be down, in which
+   * case the record must survive for the next attempt.
+   */
+  async reconcileServeRecord(opts?: { skipHttpsPort?: number }): Promise<void> {
+    const record = readLastServeRecord()
+    if (record === null) return
+    if (opts?.skipHttpsPort === record.httpsPort) return
+    try {
+      const { occupied } = await this.tailscale.getServeStatus(record.localPort, [record.httpsPort])
+      const entry = occupied.find((o) => o.httpsPort === record.httpsPort)
+      if (entry?.ours) {
+        await this.tailscale.disableServe(record.httpsPort)
+        logger.info(
+          'remote-server',
+          `Reconciled a leaked tailscale serve entry on ${record.httpsPort} → 127.0.0.1:${record.localPort}`
+        )
+      } else {
+        logger.info(
+          'remote-server',
+          `Serve cleanup record (${record.httpsPort} → 127.0.0.1:${record.localPort}) no longer matches the live config; dropping it`
+        )
+      }
+      clearLastServeRecord()
+    } catch (err) {
       logger.warn(
         'remote-server',
-        'tailscale serve is up but the node owner login is unknown (tagged node?) — tailnet-identity auth stays disabled'
+        `Could not reconcile the tailscale serve config: ${
+          err instanceof Error ? err.message : String(err)
+        }`
       )
     }
-    logger.info('remote-server', `TLS mode active: ${url} → 127.0.0.1:${this.port}`)
+  }
+
+  /**
+   * Re-run serve enablement with `force: true` — claim the pinned HTTPS port,
+   * overwriting whatever handler holds it. Destructive to the occupant by
+   * design: it is the user's explicit "my bookmark wins" action, reachable only
+   * from the desktop serve-failure banner (`remote:force-reserve`, which is in
+   * `RemoteDispatcher.BLOCKED`).
+   */
+  async forceReserve(): Promise<void> {
+    if (!this.httpServer || !this.tlsRequested) {
+      throw new Error('Tailscale HTTPS mode is not active on the running remote server')
+    }
+    // A pending autostart retry would race the force attempt (and its budget is
+    // irrelevant now that a human is driving).
+    this.clearTlsRetry()
+    try {
+      await this.enableTlsServe({ force: true })
+      logger.info('remote-server', `tailscale serve force-claimed port ${this.tlsPinnedPort}`)
+    } finally {
+      this.notifyStatus()
+    }
   }
 
   /** Schedule one more autostart retry, if the budget allows. */
@@ -712,6 +892,8 @@ export class RemoteServer {
     return {
       mode: 1,
       httpsPort: this.tlsServe?.httpsPort ?? null,
+      pinnedHttpsPort: this.tlsPinnedPort,
+      serveError: this.tlsServeError,
       url: this.tlsServe?.url ?? null,
       detection: this.tlsDetection,
       detectionMessage: this.tlsDetectionMessage
@@ -1673,14 +1855,67 @@ function tlsFailureMessage(err: unknown): string {
 }
 
 /**
+ * `RemoteStatus.tls.serveError` for a failed bring-up. An unexpected throw (not
+ * one of our typed failures) is reported as `exec-failed`: it is the reason that
+ * means "the attempt itself broke", and it keeps the union closed for the
+ * renderer.
+ */
+function describeServeFailure(err: unknown): {
+  reason: RemoteServeFailureReason
+  message: string
+} {
+  return {
+    reason: err instanceof TailscaleServeError ? err.reason : 'exec-failed',
+    message: tlsFailureMessage(err)
+  }
+}
+
+/**
+ * Pinned HTTPS port from the persisted config (ADR-042), falling back to the
+ * default when there is no row yet or the DB is unavailable. Never throws — a
+ * config read must not be able to fail a server start.
+ */
+function readPinnedHttpsPort(): number {
+  try {
+    return getRemoteConfig()?.tlsHttpsPort ?? DEFAULT_TLS_HTTPS_PORT
+  } catch (err) {
+    logger.warn(
+      'remote-server',
+      `Could not read the pinned Tailscale HTTPS port: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+    return DEFAULT_TLS_HTTPS_PORT
+  }
+}
+
+/** The persisted last-serve record, or null when there is nothing to reconcile. */
+function readLastServeRecord(): { httpsPort: number; localPort: number } | null {
+  try {
+    const config = getRemoteConfig()
+    const httpsPort = config?.lastServeHttpsPort
+    const localPort = config?.lastServeLocalPort
+    if (typeof httpsPort !== 'number' || typeof localPort !== 'number') return null
+    return { httpsPort, localPort }
+  } catch (err) {
+    logger.warn(
+      'remote-server',
+      `Could not read the serve cleanup record: ${err instanceof Error ? err.message : String(err)}`
+    )
+    return null
+  }
+}
+
+/**
  * Is this TLS-mode failure worth retrying on autostart?
  *
  * Retry only states a bit of waiting can genuinely fix — the Tailscale app not
  * up yet at login (`daemon-down`), a transient/unknown status read (`error`), or
  * a CLI exec that failed/timed out. Everything else needs a human: `not-installed`,
  * `logged-out`, `https-disabled` and `no-operator` all require an action in the
- * app or the admin console, and `all-ports-occupied` / `verify-failed` will
- * repeat identically. Retrying those would just spam the CLI for 75 seconds.
+ * app or the admin console, and `port-occupied` / `verify-failed` will repeat
+ * identically (a foreign occupant needs a Force re-serve or a different pinned
+ * port). Retrying those would just spam the CLI for 75 seconds.
  */
 function isTransientTlsFailure(err: unknown): boolean {
   if (err instanceof TailscaleServeError) {

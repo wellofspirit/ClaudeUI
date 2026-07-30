@@ -58,12 +58,37 @@ vi.mock('node:crypto', async (importOriginal) => {
 // accessor with a mutable fake row so no test ever opens the user's DB, while
 // still exercising the real provider logic (shape checks, sha256 + constant-time
 // compare) rather than a hand-written stub.
-const { remoteConfigRef } = vi.hoisted(() => ({
-  remoteConfigRef: { current: null as unknown }
+//
+// The serve cleanup record (ADR-042) is written through the SAME row, so its two
+// accessors are faked here too — never let a unit test's `tailscale serve`
+// success write to the user's real DB. `serveRecordWrites` records the calls so
+// the persistence contract can be asserted directly.
+const { remoteConfigRef, serveRecordWrites } = vi.hoisted(() => ({
+  remoteConfigRef: { current: null as unknown },
+  serveRecordWrites: [] as Array<{ httpsPort: number; localPort: number } | 'clear'>
 }))
 vi.mock('../db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../db')>()
-  return { ...actual, getRemoteConfig: () => remoteConfigRef.current }
+  return {
+    ...actual,
+    getRemoteConfig: () => remoteConfigRef.current,
+    setLastServeRecord: (httpsPort: number, localPort: number) => {
+      serveRecordWrites.push({ httpsPort, localPort })
+      const row = remoteConfigRef.current as Record<string, unknown> | null
+      if (row) {
+        row.lastServeHttpsPort = httpsPort
+        row.lastServeLocalPort = localPort
+      }
+    },
+    clearLastServeRecord: () => {
+      serveRecordWrites.push('clear')
+      const row = remoteConfigRef.current as Record<string, unknown> | null
+      if (row) {
+        row.lastServeHttpsPort = null
+        row.lastServeLocalPort = null
+      }
+    }
+  }
 })
 
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
@@ -113,7 +138,8 @@ vi.mock('../tunnel-manager', () => {
 import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import { computeStoredCredential } from '../remote-auth'
-import { TailscaleServeError } from '../tailscale-manager'
+import { TailscaleServeError, serveTargetForPort } from '../tailscale-manager'
+import type { ServeOccupancy } from '../tailscale-manager'
 import type { RemoteConfigRow } from '../db'
 import type { PasswordAuthProvider } from '../remote-auth'
 import type { TailscaleDetection } from '../../../shared/types'
@@ -221,6 +247,9 @@ function provisionPassword(password: string, saltHex: string): string {
     bindHost: null,
     autostart: false,
     tlsMode: 0,
+    tlsHttpsPort: 443,
+    lastServeHttpsPort: null,
+    lastServeLocalPort: null,
     passwordSalt: saltHex,
     passwordHash: hash,
     kdfParams,
@@ -1642,42 +1671,101 @@ function okDetection(over: Partial<Extract<TailscaleDetection, { state: 'ok' }>>
   }
 }
 
+interface EnableCall {
+  localPort: number
+  httpsPort: number
+  force?: boolean
+  reclaimTargets?: readonly string[]
+}
+
 interface FakeTailscale {
   detect: () => Promise<TailscaleDetection>
-  enableServe: (localPort: number) => Promise<{ httpsPort: number; url: string }>
+  enableServe: (
+    localPort: number,
+    httpsPort: number,
+    opts?: { force?: boolean; reclaimTargets?: readonly string[] }
+  ) => Promise<{ httpsPort: number; url: string }>
   disableServe: (httpsPort: number) => Promise<void>
+  getServeStatus: (
+    localPort?: number,
+    httpsPorts?: readonly number[]
+  ) => Promise<{ occupied: ServeOccupancy[] }>
   /** Mutable so a test can make a retry succeed. */
   detection: TailscaleDetection
   enableFailure: unknown
   detectCalls: number
+  /** Local ports enableServe was called with (kept for the pre-ADR-042 asserts). */
   enableCalls: number[]
+  /** Full argument record per enableServe call (pinned port / force / reclaim). */
+  enableArgs: EnableCall[]
   disableCalls: number[]
+  /** What `serve status --json` reports; keyed by HTTPS port. */
+  serveConfig: Map<number, string>
+  serveStatusCalls: Array<{ localPort?: number; httpsPorts?: readonly number[] }>
+  disableFailure: unknown
+  /** While true, `disableServe` parks until {@link FakeTailscale.releaseDisables}
+   *  — models the real CLI exec still being in flight after a stop(). */
+  holdDisable: boolean
+  releaseDisables: () => void
 }
 
 function makeFakeTailscale(
   opts: { detection?: TailscaleDetection; httpsPort?: number; enableFailure?: unknown } = {}
 ): FakeTailscale {
   const httpsPort = opts.httpsPort ?? 443
+  const parked: Array<() => void> = []
   const fake: FakeTailscale = {
     detection: opts.detection ?? okDetection(),
     enableFailure: opts.enableFailure,
+    disableFailure: undefined,
+    holdDisable: false,
+    releaseDisables: () => {
+      for (const release of parked.splice(0)) release()
+    },
     detectCalls: 0,
     enableCalls: [],
+    enableArgs: [],
     disableCalls: [],
+    serveConfig: new Map<number, string>(),
+    serveStatusCalls: [],
     detect: async () => {
       fake.detectCalls++
       return fake.detection
     },
-    enableServe: async (localPort: number) => {
+    enableServe: async (localPort, pinnedPort, enableOpts) => {
       fake.enableCalls.push(localPort)
+      fake.enableArgs.push({
+        localPort,
+        httpsPort: pinnedPort,
+        force: enableOpts?.force,
+        reclaimTargets: enableOpts?.reclaimTargets
+      })
       if (fake.enableFailure !== undefined) throw fake.enableFailure
+      const port = opts.httpsPort ?? pinnedPort ?? httpsPort
       return {
-        httpsPort,
-        url: httpsPort === 443 ? `https://${TS_DNS}` : `https://${TS_DNS}:${httpsPort}`
+        httpsPort: port,
+        url: port === 443 ? `https://${TS_DNS}` : `https://${TS_DNS}:${port}`
       }
     },
     disableServe: async (port: number) => {
       fake.disableCalls.push(port)
+      if (fake.holdDisable) {
+        await new Promise<void>((resolve) => parked.push(resolve))
+      }
+      if (fake.disableFailure !== undefined) throw fake.disableFailure
+      fake.serveConfig.delete(port)
+    },
+    getServeStatus: async (localPort, httpsPorts) => {
+      fake.serveStatusCalls.push({ localPort, httpsPorts })
+      const wanted = `http://127.0.0.1:${localPort ?? -1}`
+      const ports = httpsPorts ?? [...fake.serveConfig.keys()]
+      const occupied: ServeOccupancy[] = []
+      for (const port of ports) {
+        const target = fake.serveConfig.get(port)
+        if (target === undefined) continue
+        occupied.push({ httpsPort: port, target, ours: target === wanted })
+      }
+      return { occupied }
     }
   }
   return fake
@@ -1802,6 +1890,8 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     expect(status.tls).toEqual({
       mode: 1,
       httpsPort: 443,
+      pinnedHttpsPort: 443,
+      serveError: null,
       url: `https://${TS_DNS}`,
       detection: 'ok',
       detectionMessage: null
@@ -1816,22 +1906,48 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     expect(res.lanUrl).toBe(`https://${TS_DNS}`)
   })
 
-  it('a MANUAL start fails fast on a serve failure: listener down, lastError set', async () => {
+  // ADR-042: a MANUAL start must NOT fail on a serve failure. Tearing the server
+  // down here would clear `running` and `serveError`, so the app-level banner and
+  // its Force re-serve button — the whole recovery UX — would be unreachable
+  // exactly when a human is watching. A listen failure still fails the start
+  // (covered separately); this is only the proxy in front of a live listener.
+  it('a MANUAL start SURVIVES a serve failure: listener up, serveError set, no retry (GUARD)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     ts.enableFailure = new TailscaleServeError(
-      'all-ports-occupied',
-      'All Tailscale HTTPS ports are already used by another serve configuration.'
+      'port-occupied',
+      'Tailscale HTTPS port 443 is already used by another serve configuration.'
     )
-    await expect(server.start(port, '127.0.0.1', { tls: true })).rejects.toThrow(
-      /already used by another serve configuration/
-    )
+    await expect(server.start(port, '127.0.0.1', { tls: true })).resolves.toMatchObject({ port })
 
     const status = server.getStatus()
-    expect(status.running).toBe(false)
-    expect(status.port).toBeNull()
-    expect(status.tls).toBeNull()
-    expect(status.lastError).toMatch(/already used by another serve configuration/)
-    // The half-started listener must really be gone.
-    await expect(httpGet(`http://127.0.0.1:${port}/remote`)).rejects.toThrow()
+    expect(status.running).toBe(true)
+    expect(status.port).toBe(port)
+    expect(status.tls).toMatchObject({
+      httpsPort: null,
+      pinnedHttpsPort: 443,
+      serveError: {
+        reason: 'port-occupied',
+        message: 'Tailscale HTTPS port 443 is already used by another serve configuration.'
+      }
+    })
+    // A manual start has a human present: no background retry is armed.
+    expect(status.lastError).toBeNull()
+    const enablesSoFar = ts.enableCalls.length
+    await vi.advanceTimersByTimeAsync(15_000 * 6)
+    expect(ts.enableCalls).toHaveLength(enablesSoFar)
+
+    // …and the recovery path the banner offers actually works from this state.
+    ts.enableFailure = undefined
+    await server.forceReserve()
+    expect(server.getStatus().tls).toMatchObject({
+      httpsPort: 443,
+      url: `https://${TS_DNS}`,
+      serveError: null
+    })
+
+    vi.useRealTimers()
+    // The listener was up the whole time.
+    expect((await httpGet(`http://127.0.0.1:${port}/remote`)).status).toBe(200)
   })
 
   it('AUTOSTART keeps the (loopback-only) listener up and retries a transient failure', async () => {
@@ -1848,6 +1964,9 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     expect(server.getStatus().tls).toEqual({
       mode: 1,
       httpsPort: null,
+      pinnedHttpsPort: 443,
+      // The banner surface: an autostart TLS failure is otherwise invisible.
+      serveError: { reason: 'not-ready', message: 'The Tailscale daemon is not running.' },
       url: null,
       detection: 'daemon-down',
       detectionMessage: 'The Tailscale daemon is not running.'
@@ -1876,7 +1995,9 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
       httpsPort: 443,
       url: `https://${TS_DNS}`,
       detection: 'ok',
-      detectionMessage: null
+      detectionMessage: null,
+      // Recovery clears the banner, not just the modal's message.
+      serveError: null
     })
     const detectsSoFar = ts.detectCalls
     await vi.advanceTimersByTimeAsync(15_000 * 5)
@@ -1940,6 +2061,322 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     expect(server.getStatus().tls?.url).toBe(`https://${TS_DNS}`)
     // Fail closed: no owner login ⇒ no identity method at all.
     expect(server.getStatus().authMethods).toEqual(['token'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-042 — pinned HTTPS port, persisted cleanup record, force re-serve.
+// ---------------------------------------------------------------------------
+
+/** A `remote_config` row with no password and the given ADR-042 fields. */
+function remoteConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
+  return {
+    port: 0,
+    bindHost: null,
+    autostart: false,
+    tlsMode: 1,
+    tlsHttpsPort: 443,
+    lastServeHttpsPort: null,
+    lastServeLocalPort: null,
+    passwordSalt: null,
+    passwordHash: null,
+    kdfParams: null,
+    passwordUpdatedAt: null,
+    updatedAt: 1,
+    ...over
+  }
+}
+
+describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', () => {
+  let server: RemoteServer
+  let port: number
+  let ts: FakeTailscale
+
+  beforeEach(async () => {
+    ts = makeFakeTailscale()
+    server = new RemoteServer(new RemoteDispatcher(), undefined, ts)
+    port = await ephemeralPort()
+    serveRecordWrites.length = 0
+    remoteConfigRef.current = remoteConfigRow()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+    vi.useRealTimers()
+    remoteConfigRef.current = null
+  })
+
+  it('passes the PINNED port from the persisted config to enableServe', async () => {
+    remoteConfigRef.current = remoteConfigRow({ tlsHttpsPort: 9443 })
+    ts.serveConfig.clear()
+    await server.start(port, '127.0.0.1', { tls: true })
+
+    expect(ts.enableArgs).toEqual([
+      { localPort: port, httpsPort: 9443, force: undefined, reclaimTargets: [] }
+    ])
+    expect(server.getStatus().tls).toMatchObject({ pinnedHttpsPort: 9443, httpsPort: 9443 })
+  })
+
+  it('persists the {httpsPort, localPort} cleanup record on serve success', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    expect(serveRecordWrites).toEqual([{ httpsPort: 443, localPort: port }])
+  })
+
+  it('clears the record after a CONFIRMED disable on stop()', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    serveRecordWrites.length = 0
+    server.stop()
+    await new Promise((r) => setImmediate(r))
+    expect(ts.disableCalls).toEqual([443])
+    expect(serveRecordWrites).toEqual(['clear'])
+  })
+
+  // GUARD: the teardown's disable resolves asynchronously. A stop→start cycle can
+  // persist a NEW record while the old CLI call is still in flight; the stale
+  // `.then` must not wipe it, or the new run loses its cleanup guarantee.
+  it('a slow teardown disable never clears a NEWER run’s record (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    expect(serveRecordWrites).toEqual([{ httpsPort: 443, localPort: port }])
+
+    // The disable exec parks: stop() returns with the CLI call still pending.
+    ts.holdDisable = true
+    server.stop()
+    await new Promise((r) => setImmediate(r))
+    expect(ts.disableCalls).toEqual([443])
+
+    // A second run starts and records ITS pair before the old disable resolves.
+    const port2 = await ephemeralPort()
+    await server.start(port2, '127.0.0.1', { tls: true })
+    expect(serveRecordWrites.at(-1)).toEqual({ httpsPort: 443, localPort: port2 })
+
+    ts.releaseDisables()
+    await new Promise((r) => setImmediate(r))
+
+    // The newer record survived — no 'clear' after it.
+    expect(serveRecordWrites.at(-1)).toEqual({ httpsPort: 443, localPort: port2 })
+    expect(remoteConfigRef.current).toMatchObject({
+      lastServeHttpsPort: 443,
+      lastServeLocalPort: port2
+    })
+  })
+
+  // GUARD: the entry on the OLD port is live in tailscaled and nothing else would
+  // ever remove it — stop() only knows the new port, and the record now points at
+  // the new port too, so reconciliation can never find it.
+  it('a re-enable on a CHANGED pinned port turns off the previous port (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    expect(server.getStatus().tls).toMatchObject({ httpsPort: 443 })
+
+    // The user edits Settings while the server is running, then forces a re-serve.
+    remoteConfigRef.current = remoteConfigRow({
+      tlsHttpsPort: 8443,
+      lastServeHttpsPort: 443,
+      lastServeLocalPort: port
+    })
+    await server.forceReserve()
+    await new Promise((r) => setImmediate(r))
+
+    expect(server.getStatus().tls).toMatchObject({ httpsPort: 8443, pinnedHttpsPort: 8443 })
+    expect(ts.disableCalls).toContain(443)
+    expect(remoteConfigRef.current).toMatchObject({
+      lastServeHttpsPort: 8443,
+      lastServeLocalPort: port
+    })
+  })
+
+  it('does NOT clear the record when the teardown disable fails (it must survive to be reconciled)', async () => {
+    await server.start(port, '127.0.0.1', { tls: true })
+    serveRecordWrites.length = 0
+    ts.disableFailure = new TailscaleServeError('exec-failed', 'daemon went away')
+    server.stop()
+    await new Promise((r) => setImmediate(r))
+    expect(ts.disableCalls).toEqual([443])
+    expect(serveRecordWrites).toEqual([])
+  })
+
+  it('hands enableServe the recorded target as a reclaim target for the pinned port', async () => {
+    // Exactly the production leak: a stale 443 entry pointing at a DEAD loopback
+    // port from a previous run.
+    remoteConfigRef.current = remoteConfigRow({
+      lastServeHttpsPort: 443,
+      lastServeLocalPort: 64032
+    })
+    ts.serveConfig.set(443, serveTargetForPort(64032))
+
+    await server.start(port, '127.0.0.1', { tls: true })
+
+    // Not removed first — the pinned port is overwritten in place…
+    expect(ts.disableCalls).toEqual([])
+    // …and the stale target travels as proof the occupant is ours.
+    expect(ts.enableArgs).toEqual([
+      {
+        localPort: port,
+        httpsPort: 443,
+        force: undefined,
+        reclaimTargets: [serveTargetForPort(64032)]
+      }
+    ])
+  })
+
+  describe('reconcileServeRecord', () => {
+    it('removes a provably-ours stale entry and clears the record', async () => {
+      remoteConfigRef.current = remoteConfigRow({
+        lastServeHttpsPort: 8443,
+        lastServeLocalPort: 64032
+      })
+      ts.serveConfig.set(8443, serveTargetForPort(64032))
+
+      await server.reconcileServeRecord()
+
+      expect(ts.serveStatusCalls).toEqual([{ localPort: 64032, httpsPorts: [8443] }])
+      expect(ts.disableCalls).toEqual([8443])
+      expect(serveRecordWrites).toEqual(['clear'])
+    })
+
+    // GUARD: the record must never be used as licence to delete somebody else's
+    // serve entry that happens to sit on the same port.
+    it('leaves a FOREIGN entry on the recorded port alone, and drops the stale record', async () => {
+      remoteConfigRef.current = remoteConfigRow({
+        lastServeHttpsPort: 443,
+        lastServeLocalPort: 64032
+      })
+      ts.serveConfig.set(443, 'http://127.0.0.1:3000')
+
+      await server.reconcileServeRecord()
+
+      expect(ts.disableCalls).toEqual([])
+      expect(serveRecordWrites).toEqual(['clear'])
+    })
+
+    it('drops the record when the recorded port is now free', async () => {
+      remoteConfigRef.current = remoteConfigRow({
+        lastServeHttpsPort: 443,
+        lastServeLocalPort: 64032
+      })
+      await server.reconcileServeRecord()
+
+      expect(ts.disableCalls).toEqual([])
+      expect(serveRecordWrites).toEqual(['clear'])
+    })
+
+    it('is a no-op (and reads nothing) with no record', async () => {
+      await server.reconcileServeRecord()
+      expect(ts.serveStatusCalls).toEqual([])
+      expect(serveRecordWrites).toEqual([])
+    })
+
+    it('KEEPS the record when the CLI read fails (daemon down ⇒ try again next launch)', async () => {
+      remoteConfigRef.current = remoteConfigRow({
+        lastServeHttpsPort: 443,
+        lastServeLocalPort: 64032
+      })
+      ts.getServeStatus = async () => {
+        throw new TailscaleServeError('exec-failed', 'daemon is not running')
+      }
+      await expect(server.reconcileServeRecord()).resolves.toBeUndefined()
+      expect(serveRecordWrites).toEqual([])
+    })
+
+    it('skips the port we are about to overwrite', async () => {
+      remoteConfigRef.current = remoteConfigRow({
+        lastServeHttpsPort: 443,
+        lastServeLocalPort: 64032
+      })
+      ts.serveConfig.set(443, serveTargetForPort(64032))
+
+      await server.reconcileServeRecord({ skipHttpsPort: 443 })
+
+      expect(ts.serveStatusCalls).toEqual([])
+      expect(ts.disableCalls).toEqual([])
+      expect(serveRecordWrites).toEqual([])
+    })
+
+    it('a serve enablement reconciles a record on a DIFFERENT port (pinned port changed)', async () => {
+      // The user moved the pinned port from 8443 to 443; the old entry is ours
+      // and nothing else will ever clean it up.
+      remoteConfigRef.current = remoteConfigRow({
+        tlsHttpsPort: 443,
+        lastServeHttpsPort: 8443,
+        lastServeLocalPort: 64032
+      })
+      ts.serveConfig.set(8443, serveTargetForPort(64032))
+
+      await server.start(port, '127.0.0.1', { tls: true })
+
+      expect(ts.disableCalls).toEqual([8443])
+      // The stale target is NOT offered as a reclaim target for the new port.
+      expect(ts.enableArgs).toEqual([
+        { localPort: port, httpsPort: 443, force: undefined, reclaimTargets: [] }
+      ])
+    })
+  })
+
+  describe('forceReserve', () => {
+    it('re-runs enablement with force and reports success in the status', async () => {
+      ts.enableFailure = new TailscaleServeError(
+        'port-occupied',
+        'Tailscale HTTPS port 443 is already used by another serve configuration (http://127.0.0.1:3000).'
+      )
+      await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+      expect(server.getStatus().tls).toMatchObject({
+        httpsPort: null,
+        pinnedHttpsPort: 443,
+        serveError: { reason: 'port-occupied' }
+      })
+
+      const pushes: number[] = []
+      server.onStatusChange(() => pushes.push(1))
+      ts.enableFailure = undefined
+      await server.forceReserve()
+
+      expect(ts.enableArgs.at(-1)).toMatchObject({ httpsPort: 443, force: true })
+      expect(server.getStatus().tls).toMatchObject({
+        httpsPort: 443,
+        url: `https://${TS_DNS}`,
+        serveError: null
+      })
+      expect(pushes.length).toBeGreaterThan(0)
+    })
+
+    it('keeps serveError (and still notifies) when the forced attempt also fails', async () => {
+      ts.enableFailure = new TailscaleServeError('port-occupied', 'occupied by someone else')
+      await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+
+      const pushes: number[] = []
+      server.onStatusChange(() => pushes.push(1))
+      await expect(server.forceReserve()).rejects.toThrow(/occupied by someone else/)
+
+      expect(server.getStatus().tls).toMatchObject({
+        httpsPort: null,
+        serveError: { reason: 'port-occupied', message: 'occupied by someone else' }
+      })
+      expect(pushes.length).toBeGreaterThan(0)
+    })
+
+    it('cancels a pending autostart retry so the two cannot race', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      ts.detection = { state: 'daemon-down', message: 'daemon down' }
+      await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
+      expect(ts.detectCalls).toBe(1)
+
+      ts.detection = okDetection()
+      await server.forceReserve()
+      const detectsAfterForce = ts.detectCalls
+
+      await vi.advanceTimersByTimeAsync(15_000 * 6)
+      expect(ts.detectCalls).toBe(detectsAfterForce)
+    })
+
+    it('refuses when the server is not running in TLS mode (GUARD)', async () => {
+      await expect(server.forceReserve()).rejects.toThrow(/not active/)
+      await server.start(port, '127.0.0.1')
+      await expect(server.forceReserve()).rejects.toThrow(/not active/)
+      expect(ts.enableArgs).toEqual([])
+    })
   })
 })
 

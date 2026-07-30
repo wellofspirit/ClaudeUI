@@ -218,6 +218,8 @@ describe('RemoteAccessModal FC', () => {
         tls: {
           mode: 1,
           httpsPort: 443,
+          pinnedHttpsPort: 443,
+          serveError: null,
           url: 'https://cg-mac.tail3140f8.ts.net',
           detection: 'ok',
           detectionMessage: null

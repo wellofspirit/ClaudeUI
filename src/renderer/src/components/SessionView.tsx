@@ -21,6 +21,7 @@ import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
+import { RemoteServeBanner } from './RemoteServeBanner'
 import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
 export const SidebarContext = createContext<{
@@ -363,6 +364,10 @@ export function SessionView(): React.JSX.Element {
         </div>
       </div>
       <QuitWorktreeModal />
+      {/* App-level (not per-session) notice: `tailscale serve` failed while TLS
+          mode is on, so the remote bookmark is dead. Fixed overlay, desktop-only
+          — renders null on web and while serve is healthy. */}
+      <RemoteServeBanner />
     </SidebarContext.Provider>
   )
 }

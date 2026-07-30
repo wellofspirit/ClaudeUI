@@ -5,7 +5,7 @@ vi.mock('../logger', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.
 import {
   TailscaleManager,
   TailscaleServeError,
-  HTTPS_PORT_CANDIDATES,
+  serveTargetForPort,
   type TailscaleExecFn,
   type TailscaleExecFailure
 } from '../tailscale-manager'
@@ -631,8 +631,38 @@ describe('TailscaleManager.getServeStatus', () => {
     // Nothing enabled by *this process* yet → not ours.
     expect((await mgr.getServeStatus()).occupied[0].ours).toBe(false)
 
-    await mgr.enableServe(5173)
+    await mgr.enableServe(5173, 443)
     expect((await mgr.getServeStatus()).occupied[0].ours).toBe(true)
+  })
+
+  // ADR-042: the candidate list is gone, so the default scan set is "every port
+  // the live config mentions" — including ports outside the old 443/8443/10000
+  // triple, which the old implementation was structurally blind to.
+  it('reports ports outside the retired candidate triple', async () => {
+    const { exec } = makeStub({
+      serveStatus: serveJson([
+        { httpsPort: 9443, proxy: 'http://127.0.0.1:3000' },
+        { httpsPort: 443, proxy: 'http://127.0.0.1:5173' }
+      ])
+    })
+    const { occupied } = await new TailscaleManager(exec).getServeStatus(5173)
+
+    expect(occupied).toEqual([
+      { httpsPort: 443, target: 'http://127.0.0.1:5173', ours: true },
+      { httpsPort: 9443, target: 'http://127.0.0.1:3000', ours: false }
+    ])
+  })
+
+  it('scans only the requested ports when a list is supplied', async () => {
+    const { exec } = makeStub({
+      serveStatus: serveJson([
+        { httpsPort: 443, proxy: 'http://127.0.0.1:3000' },
+        { httpsPort: 8443, proxy: 'http://127.0.0.1:5173' }
+      ])
+    })
+    const { occupied } = await new TailscaleManager(exec).getServeStatus(5173, [8443])
+
+    expect(occupied).toEqual([{ httpsPort: 8443, target: 'http://127.0.0.1:5173', ours: true }])
   })
 })
 
@@ -641,69 +671,118 @@ describe('TailscaleManager.getServeStatus', () => {
 // ---------------------------------------------------------------------------
 
 describe('TailscaleManager.enableServe', () => {
-  it('takes 443 when everything is free and emits the pinned 1.98.5 argv', async () => {
+  it('binds the PINNED port when it is free and emits the pinned 1.98.5 argv', async () => {
     const { exec, calls } = makeStub({
       serveStatus: ['{}', serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:5173' }])]
     })
-    const res = await new TailscaleManager(exec).enableServe(5173)
+    const res = await new TailscaleManager(exec).enableServe(5173, 443)
 
     expect(res).toEqual({ httpsPort: 443, url: `https://${DNS_NAME}` })
     const mutate = calls.find((c) => c.args[0] === 'serve' && c.args[1] === '--bg')
     expect(mutate?.args).toEqual(['serve', '--bg', '--https=443', 'http://127.0.0.1:5173'])
   })
 
-  it('skips a foreign 443 and lands on 8443, appending the port to the URL', async () => {
-    const foreign443 = { httpsPort: 443, proxy: 'http://127.0.0.1:3000' }
+  // ADR-042: `tailscale serve` accepts any uint16; 443/8443/10000 was only ever
+  // the Funnel-compatible triple, never a platform limit.
+  it('accepts an arbitrary uint16 pinned port and puts it in the URL', async () => {
     const { exec, calls } = makeStub({
-      serveStatus: [
-        serveJson([foreign443]),
-        serveJson([foreign443, { httpsPort: 8443, proxy: 'http://127.0.0.1:5173' }])
-      ]
+      serveStatus: ['{}', serveJson([{ httpsPort: 9443, proxy: 'http://127.0.0.1:5173' }])]
     })
-    const res = await new TailscaleManager(exec).enableServe(5173)
+    const res = await new TailscaleManager(exec).enableServe(5173, 9443)
 
-    expect(res).toEqual({ httpsPort: 8443, url: `https://${DNS_NAME}:8443` })
-    expect(calls.find((c) => c.args[1] === '--bg')?.args[2]).toBe('--https=8443')
+    expect(res).toEqual({ httpsPort: 9443, url: `https://${DNS_NAME}:9443` })
+    expect(calls.find((c) => c.args[1] === '--bg')?.args[2]).toBe('--https=9443')
   })
 
-  it('skips foreign 443 + 8443 and lands on 10000', async () => {
-    const foreign = [
-      { httpsPort: 443, proxy: 'http://127.0.0.1:3000' },
-      { httpsPort: 8443, proxy: 'path:/srv/www' }
-    ]
+  // GUARD (the ADR-042 regression): the OLD implementation silently fell back to
+  // 8443 here, breaking the user's `https://<node>.ts.net` bookmark. There is no
+  // fallback any more — a foreign occupant is a loud failure that mutates
+  // nothing.
+  it('throws port-occupied for a FOREIGN occupant of the pinned port and never falls back (GUARD)', async () => {
     const { exec, calls } = makeStub({
-      serveStatus: [
-        serveJson(foreign),
-        serveJson([...foreign, { httpsPort: 10000, proxy: 'http://127.0.0.1:5173' }])
-      ]
+      serveStatus: serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:3000' }])
     })
-    const res = await new TailscaleManager(exec).enableServe(5173)
+    const err = await new TailscaleManager(exec).enableServe(5173, 443).catch((e) => e)
 
-    expect(res).toEqual({ httpsPort: 10000, url: `https://${DNS_NAME}:10000` })
-    expect(calls.find((c) => c.args[1] === '--bg')?.args[2]).toBe('--https=10000')
-  })
-
-  it('throws all-ports-occupied when every candidate is foreign, and mutates nothing', async () => {
-    const { exec, calls } = makeStub({
-      serveStatus: serveJson(
-        HTTPS_PORT_CANDIDATES.map((p) => ({ httpsPort: p, proxy: `http://127.0.0.1:${p + 1}` }))
-      )
-    })
-    await expect(new TailscaleManager(exec).enableServe(5173)).rejects.toMatchObject({
-      name: 'TailscaleServeError',
-      reason: 'all-ports-occupied'
-    })
+    expect(err).toBeInstanceOf(TailscaleServeError)
+    expect((err as TailscaleServeError).reason).toBe('port-occupied')
+    // The occupant is named, so the banner/log says what to free.
+    expect((err as Error).message).toContain('443')
+    expect((err as TailscaleServeError).detail).toContain('http://127.0.0.1:3000')
     expect(calls.some((c) => c.args[0] === 'serve' && c.args[1] === '--bg')).toBe(false)
+    // …and specifically NOT a serve call on any other port.
+    expect(calls.some((c) => c.args.some((a) => a.startsWith('--https=')))).toBe(false)
+  })
+
+  it('force: true overwrites a foreign occupant of the pinned port', async () => {
+    const { exec, calls } = makeStub({
+      serveStatus: [
+        // Only ONE serve-status read happens with force (the post-exec verify) —
+        // the occupancy check is skipped entirely.
+        serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:5173' }])
+      ]
+    })
+    const res = await new TailscaleManager(exec).enableServe(5173, 443, { force: true })
+
+    expect(res).toEqual({ httpsPort: 443, url: `https://${DNS_NAME}` })
+    expect(calls.find((c) => c.args[1] === '--bg')?.args).toEqual([
+      'serve',
+      '--bg',
+      '--https=443',
+      'http://127.0.0.1:5173'
+    ])
+  })
+
+  // The production bug: a leaked entry from a previous run points at that run's
+  // (now dead) random loopback port, so target-equality says "foreign". The
+  // persisted record's target proves it was ours.
+  it('reclaimTargets classifies a STALE OWN entry as ours (no force needed)', async () => {
+    const stale = { httpsPort: 443, proxy: 'http://127.0.0.1:64032' }
+    const { exec, calls } = makeStub({
+      serveStatus: [
+        serveJson([stale]),
+        serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:5173' }])
+      ]
+    })
+    const res = await new TailscaleManager(exec).enableServe(5173, 443, {
+      reclaimTargets: [serveTargetForPort(64032)]
+    })
+
+    expect(res.httpsPort).toBe(443)
+    expect(calls.filter((c) => c.args[1] === '--bg')).toHaveLength(1)
+  })
+
+  it('a reclaim target that does NOT match the occupant still fails (GUARD)', async () => {
+    const { exec } = makeStub({
+      serveStatus: serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:3000' }])
+    })
+    await expect(
+      new TailscaleManager(exec).enableServe(5173, 443, {
+        reclaimTargets: [serveTargetForPort(64032)]
+      })
+    ).rejects.toMatchObject({ name: 'TailscaleServeError', reason: 'port-occupied' })
   })
 
   it('reuses a port whose target is already ours', async () => {
     const already = serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:5173' }])
     const { exec, calls } = makeStub({ serveStatus: [already, already] })
-    const res = await new TailscaleManager(exec).enableServe(5173)
+    const res = await new TailscaleManager(exec).enableServe(5173, 443)
 
     expect(res.httpsPort).toBe(443)
     // Still re-issues the (idempotent) CLI call rather than assuming state.
     expect(calls.filter((c) => c.args[1] === '--bg')).toHaveLength(1)
+  })
+
+  it('treats a port THIS process enabled as ours even after the local port moves', async () => {
+    const first = serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:5173' }])
+    const second = serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:6000' }])
+    const { exec } = makeStub({ serveStatus: [first, first, first, second] })
+    const mgr = new TailscaleManager(exec)
+
+    await mgr.enableServe(5173, 443)
+    // Same process, new listener port: the occupant's target is the old port, so
+    // only `ownedHttpsPorts` can classify it — and it must.
+    await expect(mgr.enableServe(6000, 443)).resolves.toMatchObject({ httpsPort: 443 })
   })
 
   it('refuses to run when detect() is not ok (https-disabled would hang or no-op the CLI)', async () => {
@@ -721,7 +800,7 @@ describe('TailscaleManager.enableServe', () => {
         }
       })
     })
-    await expect(new TailscaleManager(exec).enableServe(5173)).rejects.toMatchObject({
+    await expect(new TailscaleManager(exec).enableServe(5173, 443)).rejects.toMatchObject({
       name: 'TailscaleServeError',
       reason: 'not-ready'
     })
@@ -736,7 +815,7 @@ describe('TailscaleManager.enableServe', () => {
       serveMutate:
         '\nHTTPS must be enabled for your tailnet before you can use Tailscale Serve.\n\n         https://login.tailscale.com/admin/dns\n\n'
     })
-    await expect(new TailscaleManager(exec).enableServe(5173)).rejects.toMatchObject({
+    await expect(new TailscaleManager(exec).enableServe(5173, 443)).rejects.toMatchObject({
       name: 'TailscaleServeError',
       reason: 'verify-failed'
     })
@@ -749,7 +828,7 @@ describe('TailscaleManager.enableServe', () => {
         throw execFailure({ killed: true, signal: 'SIGTERM' })
       }
     })
-    const err = await new TailscaleManager(exec).enableServe(5173).catch((e) => e)
+    const err = await new TailscaleManager(exec).enableServe(5173, 443).catch((e) => e)
     expect(err).toBeInstanceOf(TailscaleServeError)
     expect((err as TailscaleServeError).reason).toBe('exec-failed')
     expect((err as Error).message).toMatch(/did not finish configuring serve within/)
@@ -803,7 +882,7 @@ describe('TailscaleManager.disableServe', () => {
     const { exec } = makeStub({ serveStatus: [enabled, enabled, enabled] })
     const mgr = new TailscaleManager(exec)
 
-    await mgr.enableServe(5173)
+    await mgr.enableServe(5173, 443)
     expect((await mgr.getServeStatus()).occupied[0].ours).toBe(true)
 
     await mgr.disableServe(443)
@@ -820,7 +899,7 @@ describe('TailscaleManager exec timeouts', () => {
     const { exec, calls } = makeStub({
       serveStatus: ['{}', serveJson([{ httpsPort: 443, proxy: 'http://127.0.0.1:5173' }])]
     })
-    await new TailscaleManager(exec).enableServe(5173)
+    await new TailscaleManager(exec).enableServe(5173, 443)
 
     expect(calls.length).toBeGreaterThan(0)
     for (const c of calls) expect(c.timeoutMs).toBeGreaterThan(0)
