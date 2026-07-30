@@ -1,5 +1,10 @@
 import { useEffect } from 'react'
-import { useSessionStore, buildTodosFromMessages, resolveRoutingId } from '../stores/session-store'
+import {
+  useSessionStore,
+  buildTodosFromMessages,
+  buildSentFilesFromMessages,
+  resolveRoutingId
+} from '../stores/session-store'
 
 /** Send a system notification if the session is not currently focused */
 function notifyIfNeeded(routingId: string, title: string, body: string): void {
@@ -15,6 +20,9 @@ function notifyIfNeeded(routingId: string, title: string, body: string): void {
 }
 
 const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
+
+/** Claude Code's file-delivery tool — drives the floating Files widget. */
+const SEND_USER_FILE_TOOL = 'SendUserFile'
 
 /**
  * Built-in tool names whose result text is trusted to declare an entered
@@ -46,6 +54,21 @@ function rebuildTodos(routingId: string): void {
   if (!session) return
   const todos = buildTodosFromMessages(session.messages)
   if (todos) setTodos(routingId, todos)
+}
+
+/**
+ * Rebuild the SendUserFile list from all messages.
+ *
+ * Same derive-from-transcript contract as {@link rebuildTodos} — which is what
+ * makes the widget survive session resumption for free — but the result is
+ * never cleared on turn end (see the `onResult` handler below).
+ */
+function rebuildSentFiles(routingId: string): void {
+  const { sessions, setSentFiles } = useSessionStore.getState()
+  const session = sessions[routingId]
+  if (!session) return
+  const sentFiles = buildSentFilesFromMessages(session.messages)
+  if (sentFiles) setSentFiles(routingId, sentFiles)
 }
 
 export function useClaudeEvents(): void {
@@ -171,6 +194,12 @@ export function useClaudeEvents(): void {
           (b) => b.type === 'tool_use' && TASK_TOOLS.has(b.toolName)
         )
         if (hasTaskTool) rebuildTodos(routingId)
+
+        // Rebuild the Files widget when a SendUserFile call arrives
+        const hasSendUserFile = msg.content.some(
+          (b) => b.type === 'tool_use' && b.toolName === SEND_USER_FILE_TOOL
+        )
+        if (hasSendUserFile) rebuildSentFiles(routingId)
       }),
       window.api.onStreamEvent((routingId, data) => {
         routingId = resolveRoutingId(routingId)
@@ -290,6 +319,20 @@ export function useClaudeEvents(): void {
         if (toolUseId) removePendingApprovalByToolUse(routingId, toolUseId)
         // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
         if (!isError) rebuildTodos(routingId)
+
+        // The paired result for an in-flight SendUserFile: rebuild so the row
+        // picks up its error text. Gated on the toolUseId already being known
+        // to the widget (the tool_use lands via onMessage first), so an
+        // unrelated tool result never triggers a full transcript re-scan.
+        // Unlike todos this runs for error results too — that IS the payload.
+        if (
+          toolUseId &&
+          useSessionStore
+            .getState()
+            .sessions[routingId]?.sentFiles.some((f) => f.toolUseId === toolUseId)
+        ) {
+          rebuildSentFiles(routingId)
+        }
 
         // Detect worktree enter from EnterWorktree tool result
         if (!isError && result) {
@@ -414,6 +457,7 @@ export function useClaudeEvents(): void {
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
         if (statusLine) setStatusLine(routingId, statusLine)
         rebuildTodos(routingId)
+        rebuildSentFiles(routingId)
         // Dismiss completed task list for watched sessions (no result event)
         const session = useSessionStore.getState().sessions[routingId]
         if (session && session.todos.length > 0) {

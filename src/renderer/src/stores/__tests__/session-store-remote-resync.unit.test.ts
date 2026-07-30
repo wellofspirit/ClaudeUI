@@ -184,3 +184,21 @@ describe('applyRemoteSnapshot — re-sync (isResync=true)', () => {
     expect(store().activeSessionId).toBe('desktop-active')
   })
 })
+
+describe('applyRemoteSnapshot — sentFiles (Files widget) round-trip', () => {
+  it('hydrates sentFiles from the snapshot', () => {
+    const snap = {
+      ...baseSnapshotSession('S'),
+      sentFiles: [{ path: 'out/report.html', toolUseId: 'tu-1', caption: 'the report' }]
+    }
+    store().applyRemoteSnapshot(makeSnapshot({ S: snap }, 'S'))
+    expect(store().sessions['S'].sentFiles).toEqual([
+      { path: 'out/report.html', toolUseId: 'tu-1', caption: 'the report' }
+    ])
+  })
+
+  it('falls back to [] when an older remote server omits sentFiles', () => {
+    store().applyRemoteSnapshot(makeSnapshot({ S: baseSnapshotSession('S') }, 'S'))
+    expect(store().sessions['S'].sentFiles).toEqual([])
+  })
+})

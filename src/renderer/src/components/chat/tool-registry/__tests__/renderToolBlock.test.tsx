@@ -74,6 +74,7 @@ beforeEach(() => {
         errors: [],
         warnings: [],
         todos: [],
+        sentFiles: [],
         taskProgressMap: {},
         taskNotifications: [],
         activeTasks: {},

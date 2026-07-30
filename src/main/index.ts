@@ -66,6 +66,7 @@ import {
   isInAppNavigation,
   isAllowedWebviewNavigation,
   buildVscodeUrl,
+  validateLocalFilePath,
   type AppOrigin
 } from './shell-security'
 import icon from '../../resources/icon.png?asset'
@@ -612,7 +613,14 @@ function createWindow(): void {
   })
 
   // Window control IPC handlers (for frameless windows on Windows/Linux)
-  for (const ch of ['window:minimize', 'window:maximize', 'window:close', 'app:open-in-vscode']) {
+  for (const ch of [
+    'window:minimize',
+    'window:maximize',
+    'window:close',
+    'app:open-in-vscode',
+    'shell:open-path',
+    'shell:show-in-folder'
+  ]) {
     ipcMain.removeHandler(ch)
   }
   ipcMain.handle('window:minimize', () => mainWindow.minimize())
@@ -634,6 +642,34 @@ function createWindow(): void {
       return
     }
     void shell.openExternal(url)
+  })
+
+  // Open / reveal a local file handed to the user by the SendUserFile tool.
+  // The path is model-controlled, so validateLocalFilePath narrows it to an
+  // existing, non-UNC, absolute regular file before it reaches the OS shell.
+  // Deliberately NOT registered on the remote dispatcher: opening a file
+  // happens on the DESKTOP host, which a remote client cannot see.
+  ipcMain.handle('shell:open-path', async (_e, filePath: string) => {
+    const check = validateLocalFilePath(filePath)
+    if (!check.ok) {
+      logger.warn('main', `Refused shell:open-path (${check.error}): ${JSON.stringify(filePath)}`)
+      return { error: check.error }
+    }
+    // openPath resolves with '' on success and an error STRING on failure.
+    const error = await shell.openPath(check.path)
+    return error ? { error } : {}
+  })
+  ipcMain.handle('shell:show-in-folder', (_e, filePath: string) => {
+    const check = validateLocalFilePath(filePath)
+    if (!check.ok) {
+      logger.warn(
+        'main',
+        `Refused shell:show-in-folder (${check.error}): ${JSON.stringify(filePath)}`
+      )
+      return { error: check.error }
+    }
+    shell.showItemInFolder(check.path)
+    return {}
   })
 
   // Send maximize/unmaximize state changes to renderer

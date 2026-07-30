@@ -9,6 +9,7 @@ import { StreamingText } from '../StreamingText'
 import { ThinkingBlock } from '../ThinkingBlock'
 import { InputBox } from '../InputBox'
 import { TodoWidget } from '../../TodoWidget'
+import { SentFilesWidget } from '../../SentFilesWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
@@ -305,7 +306,13 @@ export function ChatPanel(): React.JSX.Element {
         </div>
       </div>
 
-      <TodoWidget />
+      {/* Floating widget stack — each child renders null when it has nothing to
+          show, so the gap only appears when both are live. Positioning lives
+          here (not in the widgets) so the stack stays a single decision. */}
+      <div className="absolute top-14 right-4 z-10 flex flex-col items-end gap-2">
+        <TodoWidget />
+        <SentFilesWidget />
+      </div>
       <FloatingApproval />
       <VendorAuthRequiredCard />
       <FloatingError />

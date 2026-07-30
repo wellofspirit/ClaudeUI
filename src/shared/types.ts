@@ -570,6 +570,27 @@ export interface TodoItem {
   activeForm: string
 }
 
+/**
+ * A file the agent handed to the user via Claude Code's `SendUserFile` tool.
+ *
+ * Derived from the transcript (see `buildSentFilesFromMessages`), never stored
+ * on its own — so it rebuilds for free on session resumption, exactly like
+ * todos. Unlike todos it is never cleared when the turn ends.
+ *
+ * `path` is the raw path as it appeared in the tool input: cli.js accepts both
+ * absolute and cwd-relative paths, so the renderer resolves it against the
+ * session cwd before handing it to the shell IPC. The display name (basename)
+ * is derived in the UI, not stored.
+ */
+export interface SentFile {
+  path: string
+  caption?: string
+  display?: 'render' | 'attach'
+  toolUseId: string
+  /** Present when the paired tool_result was an error (missing file, UNC, URL, …). */
+  error?: string
+}
+
 export interface TaskProgress {
   toolUseId: string
   toolName: string
@@ -1083,6 +1104,15 @@ interface AutomationAPI {
 interface FileAPI {
   listDir(dirPath: string): Promise<{ entries: DirEntry[]; isRoot: boolean; resolvedPath: string }>
   openInVSCode(cwd: string): Promise<void>
+  /**
+   * Open a local file with the OS default handler. Optional: only the desktop
+   * preload provides it — the remote web client has no local filesystem, so
+   * callers must guard with `window.api?.openPath?.(…)` and hide the
+   * affordance when it is absent. Resolves with `{ error }` on failure.
+   */
+  openPath?(filePath: string): Promise<{ error?: string }>
+  /** Reveal a local file in the OS file manager. Optional — see {@link FileAPI.openPath}. */
+  showInFolder?(filePath: string): Promise<{ error?: string }>
   createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
   getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
   removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>

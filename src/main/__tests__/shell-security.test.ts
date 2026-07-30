@@ -4,12 +4,16 @@
  * Non-vacuity: every allow-case has a matching block-case that would flip the
  * assertion if the guard were a constant `true`/`false`.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   isAllowedExternalUrl,
   isInAppNavigation,
   isAllowedWebviewNavigation,
   buildVscodeUrl,
+  validateLocalFilePath,
   type AppOrigin
 } from '../shell-security'
 
@@ -97,5 +101,64 @@ describe('buildVscodeUrl (R2 vscode cwd hardening)', () => {
     expect(buildVscodeUrl('/tmp/a\tb')).toBeNull()
     expect(buildVscodeUrl(`/tmp/a${String.fromCharCode(0)}b`)).toBeNull()
     expect(buildVscodeUrl(`/tmp/a${String.fromCharCode(0x7f)}b`)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateLocalFilePath — the guard behind shell:open-path / shell:show-in-folder
+// ---------------------------------------------------------------------------
+
+describe('validateLocalFilePath (SendUserFile → shell.openPath guard)', () => {
+  let dir: string
+  let file: string
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'sent-files-'))
+    file = join(dir, 'report.html')
+    writeFileSync(file, '<h1>ok</h1>')
+  })
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('accepts an existing absolute regular file', () => {
+    const res = validateLocalFilePath(file)
+    expect(res).toEqual({ ok: true, path: file })
+  })
+
+  it('rejects a relative path (would resolve against the main-process cwd)', () => {
+    const res = validateLocalFilePath('report.html')
+    expect(res).toEqual({ ok: false, error: 'File path must be absolute' })
+  })
+
+  it('rejects UNC paths in both separator flavours', () => {
+    expect(validateLocalFilePath('\\\\evil\\share\\x.txt')).toEqual({
+      ok: false,
+      error: 'Network (UNC) paths are not allowed'
+    })
+    expect(validateLocalFilePath('//evil/share/x.txt')).toEqual({
+      ok: false,
+      error: 'Network (UNC) paths are not allowed'
+    })
+  })
+
+  it('rejects a non-existent file', () => {
+    const res = validateLocalFilePath(join(dir, 'nope.txt'))
+    expect(res).toEqual({ ok: false, error: 'File does not exist' })
+  })
+
+  it('rejects a directory', () => {
+    const res = validateLocalFilePath(dir)
+    expect(res).toEqual({ ok: false, error: 'Path is not a regular file' })
+  })
+
+  it('rejects empty input and control characters (non-vacuity)', () => {
+    expect(validateLocalFilePath('')).toEqual({ ok: false, error: 'No file path provided' })
+    expect(validateLocalFilePath(`${file}\n`).ok).toBe(false)
+    expect(validateLocalFilePath(`${file}${String.fromCharCode(0)}`)).toEqual({
+      ok: false,
+      error: 'File path contains control characters'
+    })
   })
 })

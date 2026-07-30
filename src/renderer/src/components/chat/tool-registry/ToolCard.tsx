@@ -124,7 +124,7 @@ export function ToolCard({
     if ((bashOutput || bgOutput) && !expanded) setExpanded(true)
   }, [bashOutput, bgOutput]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const summary = summarizeTool(kind, view)
+  const summary = summarizeTool(kind, view, block.toolName)
   const headerName = displayName ?? block.toolName
   const hasResult = !!result
   const isPendingApproval = !isHistorical && !!approval

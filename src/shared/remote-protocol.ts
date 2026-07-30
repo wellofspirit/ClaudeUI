@@ -215,6 +215,7 @@ import type {
   SessionStatus,
   PendingApproval,
   TodoItem,
+  SentFile,
   TaskNotification,
   TaskProgress,
   StatusLineData,
@@ -235,6 +236,9 @@ export interface PerSessionSnapshot {
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   todos: TodoItem[]
+  /** Files delivered via SendUserFile. Optional so an older remote server that
+   *  predates the widget still hydrates (falls back to []). */
+  sentFiles?: SentFile[]
   taskNotifications: TaskNotification[]
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task

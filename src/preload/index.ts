@@ -259,6 +259,8 @@ const api: ClaudeAPI = {
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
+  openPath: (filePath: string) => ipcRenderer.invoke('shell:open-path', filePath),
+  showInFolder: (filePath: string) => ipcRenderer.invoke('shell:show-in-folder', filePath),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),

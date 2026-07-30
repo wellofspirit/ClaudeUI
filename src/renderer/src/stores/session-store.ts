@@ -17,6 +17,7 @@ import type {
   PendingApproval,
   ContentBlock,
   TodoItem,
+  SentFile,
   TaskProgress,
   TaskNotification,
   TaskStartedData,
@@ -194,6 +195,70 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
 
   if (!hasTaskCalls) return null
   return Array.from(tasks.values())
+}
+
+/** Max chars of a SendUserFile error result kept for display. */
+const SENT_FILE_ERROR_MAX = 500
+
+/**
+ * Scan messages for Claude Code `SendUserFile` tool calls and build the list of
+ * files the agent has handed to the user. Returns null if there are none —
+ * mirroring {@link buildTodosFromMessages}'s contract, so a rebuild never
+ * clobbers existing state when the transcript has nothing to say.
+ *
+ * Semantics that differ from todos:
+ *  - the list is cumulative for the whole session and is NEVER cleared;
+ *  - a re-send of the same path replaces the earlier entry and moves it to the
+ *    end (latest send wins — its caption/display/error are the current truth);
+ *  - a call whose tool_result hasn't landed yet is still included (in-flight),
+ *    and the rebuild triggered by the result later fills in `error`.
+ */
+export function buildSentFilesFromMessages(messages: ChatMessage[]): SentFile[] | null {
+  const byPath = new Map<string, SentFile>()
+  let hasSendCalls = false
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    for (const block of msg.content) {
+      if (block.type !== 'tool_use' || block.toolName !== 'SendUserFile') continue
+      hasSendCalls = true
+      const input = block.toolInput || {}
+
+      // cli.js coerces a bare string to [string]; accept both shapes.
+      const raw = input.files
+      const paths = (Array.isArray(raw) ? raw : [raw]).filter(
+        (p): p is string => typeof p === 'string' && p.trim().length > 0
+      )
+      if (paths.length === 0) continue
+
+      const resultBlock = msg.content.find(
+        (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
+      )
+      const error =
+        resultBlock?.type === 'tool_result' && resultBlock.isError
+          ? resultBlock.toolResult.trim().slice(0, SENT_FILE_ERROR_MAX)
+          : undefined
+
+      const caption = typeof input.caption === 'string' ? input.caption : undefined
+      const display =
+        input.display === 'render' || input.display === 'attach' ? input.display : undefined
+
+      for (const p of paths) {
+        // Delete first so a re-sent path moves to the end of the insertion order.
+        byPath.delete(p)
+        byPath.set(p, {
+          path: p,
+          ...(caption ? { caption } : {}),
+          ...(display ? { display } : {}),
+          toolUseId: block.toolUseId,
+          ...(error ? { error } : {})
+        })
+      }
+    }
+  }
+
+  if (!hasSendCalls) return null
+  return Array.from(byPath.values())
 }
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
@@ -470,6 +535,9 @@ export interface PerSessionState {
   errors: string[]
   warnings: string[]
   todos: TodoItem[]
+  /** Files delivered via SendUserFile. Derived from `messages` (so it survives
+   *  resumption) and, unlike `todos`, never cleared when the turn ends. */
+  sentFiles: SentFile[]
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
   /**
@@ -578,6 +646,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   errors: [],
   warnings: [],
   todos: [],
+  sentFiles: [],
   taskProgressMap: {},
   taskNotifications: [],
   activeTasks: {},
@@ -957,6 +1026,7 @@ interface SessionState {
     fileDiffs?: FileDiff[]
   ) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
+  setSentFiles: (routingId: string, sentFiles: SentFile[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
   /** Record a task_started event — see PerSessionState.activeTasks doc comment. */
   setTaskStarted: (routingId: string, data: TaskStartedData) => void
@@ -2095,6 +2165,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ todos }))
     })),
 
+  setSentFiles: (routingId, sentFiles) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ sentFiles }))
+    })),
+
   updateTaskProgress: (routingId, progress) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
@@ -2485,6 +2560,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           status: snap.status,
           pendingApprovals: snap.pendingApprovals,
           todos: snap.todos,
+          sentFiles: snap.sentFiles ?? [],
           taskNotifications: snap.taskNotifications,
           activeTasks: snap.activeTasks ?? {},
           taskProgressMap: snap.taskProgressMap,
@@ -3425,6 +3501,7 @@ export function getRemoteStateSnapshot(): {
       status: SessionStatus
       pendingApprovals: PendingApproval[]
       todos: TodoItem[]
+      sentFiles: SentFile[]
       taskNotifications: TaskNotification[]
       activeTasks: Record<string, { taskId: string; taskType: string }>
       taskProgressMap: Record<string, TaskProgress>
@@ -3468,6 +3545,7 @@ export function getRemoteStateSnapshot(): {
       status: s.status,
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
+      sentFiles: s.sentFiles,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,

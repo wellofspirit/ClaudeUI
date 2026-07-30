@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
-import { useSessionStore, buildTodosFromMessages } from '../../stores/session-store'
+import {
+  useSessionStore,
+  buildTodosFromMessages,
+  buildSentFilesFromMessages
+} from '../../stores/session-store'
 import type {
   ChatMessage,
   DirectoryGroup,
@@ -532,6 +536,10 @@ export function Sidebar({
     // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
     const todos = buildTodosFromMessages(messages)
     if (todos) useSessionStore.getState().setTodos(routingId, todos)
+    // …and the Files widget from SendUserFile calls — this is what makes it
+    // survive session resumption (nothing about it is persisted separately).
+    const sentFiles = buildSentFilesFromMessages(messages)
+    if (sentFiles) useSessionStore.getState().setSentFiles(routingId, sentFiles)
     switchSession(routingId)
     // Close drawer on mobile after selecting a session
     if (isMobile && onToggleCollapse) onToggleCollapse()

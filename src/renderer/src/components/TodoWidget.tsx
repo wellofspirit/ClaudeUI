@@ -88,7 +88,7 @@ export function TodoWidget(): React.JSX.Element | null {
   return (
     <div
       data-testid="TodoWidget"
-      className="absolute top-14 right-4 z-10 bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
+      className="bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
       style={{
         width: expanded ? 'min(400px, 45%)' : 155,
         borderRadius: expanded ? 12 : 8

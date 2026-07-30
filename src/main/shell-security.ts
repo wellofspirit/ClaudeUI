@@ -3,8 +3,12 @@
  *
  * These functions carry no Electron dependency so they can be unit-tested in
  * isolation. `src/main/index.ts` wires them into `will-navigate`,
- * `setWindowOpenHandler`, the webview navigation guard, and `app:open-in-vscode`.
+ * `setWindowOpenHandler`, the webview navigation guard, `app:open-in-vscode`,
+ * and the `shell:open-path` / `shell:show-in-folder` file handlers.
  */
+
+import { statSync } from 'node:fs'
+import path from 'node:path'
 
 /** The app's own document — the only target a top-level/sub-frame navigation may reach. */
 export type AppOrigin =
@@ -98,4 +102,50 @@ export function buildVscodeUrl(cwd: string): string | null {
   const normalized = cwd.replace(/\\/g, '/')
   const encoded = encodeURI(normalized).replace(/[?#]/g, (c) => encodeURIComponent(c))
   return `vscode://file/${encoded}`
+}
+
+/**
+ * Whether `shell.openPath` / `shell.showItemInFolder` may target `rawPath`.
+ *
+ * The caller is the renderer, and the path originates from a `SendUserFile`
+ * tool input — i.e. model-controlled text. `shell.openPath` launches the OS
+ * default handler, so the target must be narrowed to a *local, existing,
+ * regular file*:
+ *   - non-empty and free of control characters (no argument/URL injection),
+ *   - not a UNC path (`\\host\share` / `//host/share`) — that would make the
+ *     OS reach out to an attacker-named SMB/WebDAV host on open (and on
+ *     Windows, leak NTLM credentials to it),
+ *   - absolute (a relative path would resolve against the *main process* cwd,
+ *     which is not the session cwd — the renderer resolves before calling),
+ *   - `stat`-able and a regular file (directories, devices, FIFOs, and
+ *     dangling symlinks are refused; `statSync` follows symlinks, so a symlink
+ *     to a real file passes and one to a directory does not).
+ *
+ * Returns the path to hand to Electron on success, or a human-readable reason.
+ */
+export function validateLocalFilePath(
+  rawPath: string
+): { ok: true; path: string } | { ok: false; error: string } {
+  if (typeof rawPath !== 'string' || rawPath.length === 0) {
+    return { ok: false, error: 'No file path provided' }
+  }
+  if (hasControlChars(rawPath)) {
+    return { ok: false, error: 'File path contains control characters' }
+  }
+  if (/^(\\\\|\/\/)/.test(rawPath)) {
+    return { ok: false, error: 'Network (UNC) paths are not allowed' }
+  }
+  if (!path.isAbsolute(rawPath)) {
+    return { ok: false, error: 'File path must be absolute' }
+  }
+  let stat: ReturnType<typeof statSync>
+  try {
+    stat = statSync(rawPath)
+  } catch {
+    return { ok: false, error: 'File does not exist' }
+  }
+  if (!stat.isFile()) {
+    return { ok: false, error: 'Path is not a regular file' }
+  }
+  return { ok: true, path: rawPath }
 }
