@@ -261,6 +261,10 @@ const api: ClaudeAPI = {
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   openPath: (filePath: string) => ipcRenderer.invoke('shell:open-path', filePath),
   showInFolder: (filePath: string) => ipcRenderer.invoke('shell:show-in-folder', filePath),
+  // `sessionKey` is ignored on the desktop transport (see FileAPI docs) — the
+  // absolute path is all main needs, and main re-validates it.
+  getSentFilePreview: (_sessionKey: string, filePath: string) =>
+    ipcRenderer.invoke('file:sent-file-preview', filePath),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),

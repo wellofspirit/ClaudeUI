@@ -90,6 +90,12 @@ function RemoteApp(): React.JSX.Element {
     if (mockupToken) {
       ;(window as unknown as { __MOCKUP_TOKEN__?: string }).__MOCKUP_TOKEN__ = mockupToken
     }
+    // Same deal for the file-scoped token: SentFilesWidget reads it to build
+    // `/sent-file` download/preview URLs (ADR-043 §5).
+    const fileToken = connection.getFileToken()
+    if (fileToken) {
+      ;(window as unknown as { __FILE_TOKEN__?: string }).__FILE_TOKEN__ = fileToken
+    }
     // Apply the full snapshot to the Zustand store (settings, sessions, config).
     // isResync=true from the second sync-full onward — see hasHydratedRef.
     const isResync = hasHydratedRef.current

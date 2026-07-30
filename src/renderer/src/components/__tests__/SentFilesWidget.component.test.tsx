@@ -25,6 +25,7 @@ describe('SentFilesWidget', () => {
   let app: TestApp
 
   beforeEach(async () => {
+    window.localStorage.clear()
     app = await bootTestApp()
     useSessionStore.getState().createNewSession(ROUTE, CWD)
     useSessionStore.setState({ activeSessionId: ROUTE })
@@ -36,7 +37,11 @@ describe('SentFilesWidget', () => {
     if (window.api) {
       delete (window.api as unknown as Record<string, unknown>).openPath
       delete (window.api as unknown as Record<string, unknown>).showInFolder
+      delete (window.api as unknown as Record<string, unknown>).getSentFilePreview
+      ;(window.api as unknown as Record<string, unknown>).platform = process.platform
     }
+    delete (window as unknown as Record<string, unknown>).__FILE_TOKEN__
+    window.localStorage.clear()
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
   })
@@ -146,6 +151,147 @@ describe('SentFilesWidget', () => {
     fireEvent.click(getByTestId('SentFilesWidget.row'))
     expect(queryByTestId('SentFilesWidget.open')).toBeNull()
     expect(queryByTestId('SentFilesWidget.reveal')).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Image preview (ADR-043 §4)
+  // -------------------------------------------------------------------------
+
+  const setPreview = (fn: unknown): void => {
+    ;(window.api as unknown as Record<string, unknown>).getSentFilePreview = fn
+  }
+
+  it('fetches a thumbnail lazily when an image row is first expanded', async () => {
+    const getSentFilePreview = vi.fn().mockResolvedValue({ src: 'data:image/png;base64,AAAA' })
+    setPreview(getSentFilePreview)
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/shot.png' })])
+
+    const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
+    // Nothing is fetched until the row is opened.
+    expect(getSentFilePreview).not.toHaveBeenCalled()
+    expect(queryByTestId('SentFilesWidget.thumb')).toBeNull()
+
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    // (sessionKey, absolute path) — the web transport needs the routingId.
+    expect(getSentFilePreview).toHaveBeenCalledWith(ROUTE, '/d/repo/out/shot.png')
+
+    const thumb = (await waitFor(() => getByTestId('SentFilesWidget.thumb'))) as HTMLImageElement
+    expect(thumb.src).toBe('data:image/png;base64,AAAA')
+
+    // Collapsing and re-expanding must not re-fetch.
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    expect(getSentFilePreview).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not request a preview for non-image files', () => {
+    const getSentFilePreview = vi.fn().mockResolvedValue({ src: 'data:x' })
+    setPreview(getSentFilePreview)
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/report.html' })])
+
+    const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    expect(getSentFilePreview).not.toHaveBeenCalled()
+    expect(queryByTestId('SentFilesWidget.thumb')).toBeNull()
+  })
+
+  it('shows a preview error inline and keeps the plain path row', async () => {
+    setPreview(vi.fn().mockResolvedValue({ error: 'Image is too large to preview (max 10 MB)' }))
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'big.png' })])
+
+    const { getByTestId, queryByTestId, container } = render(<SentFilesWidget />)
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    await waitFor(() => expect(container.textContent).toContain('too large to preview'))
+    expect(queryByTestId('SentFilesWidget.thumb')).toBeNull()
+    expect(container.textContent).toContain('/d/repo/big.png')
+  })
+
+  it('opens and closes the lightbox from the thumbnail', async () => {
+    setPreview(vi.fn().mockResolvedValue({ src: 'data:image/png;base64,BBBB' }))
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'shot.png' })])
+
+    const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    fireEvent.click(await waitFor(() => getByTestId('SentFilesWidget.thumb')))
+
+    const lightbox = getByTestId('SentFilesWidget.lightbox')
+    expect(lightbox).toBeInTheDocument()
+    // Clicking the image itself must not dismiss it.
+    fireEvent.click(lightbox.querySelector('img') as HTMLImageElement)
+    expect(queryByTestId('SentFilesWidget.lightbox')).not.toBeNull()
+    // Backdrop click closes.
+    fireEvent.click(lightbox)
+    expect(queryByTestId('SentFilesWidget.lightbox')).toBeNull()
+
+    // Escape closes too.
+    fireEvent.click(getByTestId('SentFilesWidget.thumb'))
+    expect(queryByTestId('SentFilesWidget.lightbox')).not.toBeNull()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(queryByTestId('SentFilesWidget.lightbox')).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Remote download affordance (ADR-043 §5)
+  // -------------------------------------------------------------------------
+
+  it('shows a Download anchor on the web client once the file token arrives', () => {
+    ;(window.api as unknown as Record<string, unknown>).platform = 'web'
+    ;(window as unknown as Record<string, unknown>).__FILE_TOKEN__ = 'f'.repeat(64)
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/report.html' })])
+
+    const { getByTestId } = render(<SentFilesWidget />)
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    const anchor = getByTestId('SentFilesWidget.download') as HTMLAnchorElement
+    const url = new URL(anchor.href)
+    expect(url.pathname).toBe('/sent-file')
+    expect(url.searchParams.get('session')).toBe(ROUTE)
+    expect(url.searchParams.get('token')).toBe('f'.repeat(64))
+    expect(url.searchParams.get('inline')).toBeNull()
+    expect(anchor.getAttribute('download')).toBe('report.html')
+  })
+
+  it('hides Download on the web client while the token is missing', () => {
+    ;(window.api as unknown as Record<string, unknown>).platform = 'web'
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile()])
+    const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    expect(queryByTestId('SentFilesWidget.download')).toBeNull()
+  })
+
+  it('hides Download on the desktop even if a token somehow exists', () => {
+    ;(window as unknown as Record<string, unknown>).__FILE_TOKEN__ = 'f'.repeat(64)
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile()])
+    const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
+    fireEvent.click(getByTestId('SentFilesWidget.row'))
+    expect(queryByTestId('SentFilesWidget.download')).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Draggability (ADR-043 §2) — the header is both the toggle and the handle.
+  // -------------------------------------------------------------------------
+
+  it('keeps header click-to-expand working and detaches only on a real drag', () => {
+    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ caption: 'cap' })])
+    const { getByTestId, container } = render(<SentFilesWidget />)
+    const header = getByTestId('SentFilesWidget.toggle')
+
+    fireEvent.pointerDown(header, { pointerId: 1, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(header, { pointerId: 1, clientX: 10, clientY: 10 })
+    fireEvent.click(header)
+    expect(getByTestId('SentFilesWidget').hasAttribute('data-dragged')).toBe(false)
+    // Expanded: the body's max-height opened up.
+    expect(container.innerHTML).toContain('max-height: 300px')
+
+    fireEvent.pointerDown(header, { pointerId: 1, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(header, { pointerId: 1, clientX: 10, clientY: 60 })
+    fireEvent.pointerUp(header, { pointerId: 1, clientX: 10, clientY: 60 })
+    fireEvent.click(header)
+
+    const root = getByTestId('SentFilesWidget') as HTMLElement
+    expect(root.getAttribute('data-dragged')).toBe('true')
+    expect(root.style.position).toBe('fixed')
+    // Still expanded — the drag must not have toggled it shut.
+    expect(container.innerHTML).toContain('max-height: 300px')
   })
 })
 

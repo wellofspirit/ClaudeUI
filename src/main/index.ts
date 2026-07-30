@@ -69,6 +69,7 @@ import {
   validateLocalFilePath,
   type AppOrigin
 } from './shell-security'
+import { readImagePreview } from './sent-file-security'
 import icon from '../../resources/icon.png?asset'
 
 // Single-instance lock (M-BT1). A second launch must NOT run a full second
@@ -619,7 +620,8 @@ function createWindow(): void {
     'window:close',
     'app:open-in-vscode',
     'shell:open-path',
-    'shell:show-in-folder'
+    'shell:show-in-folder',
+    'file:sent-file-preview'
   ]) {
     ipcMain.removeHandler(ch)
   }
@@ -670,6 +672,23 @@ function createWindow(): void {
     }
     shell.showItemInFolder(check.path)
     return {}
+  })
+
+  // Inline image preview for a delivered file. Same threat model as the shell
+  // handlers (model-controlled path), plus two extra narrowings enforced in
+  // sent-file-security: an image-extension allowlist (HTML/PDF are never
+  // rendered) and a size cap checked by stat BEFORE the read. Like the shell
+  // handlers this is desktop-only — the remote client builds an authenticated
+  // `/sent-file?...&inline=1` URL instead of round-tripping bytes over the WS.
+  ipcMain.handle('file:sent-file-preview', (_e, filePath: string) => {
+    const result = readImagePreview(filePath)
+    if ('error' in result) {
+      logger.warn(
+        'main',
+        `Refused file:sent-file-preview (${result.error}): ${JSON.stringify(filePath)}`
+      )
+    }
+    return result
   })
 
   // Send maximize/unmaximize state changes to renderer

@@ -90,6 +90,8 @@ export class RemoteConnection {
   private authRejected = false
   /** Mockup-scoped token delivered over the authenticated WS (see sync-full). */
   private mockupTokenValue?: string
+  /** File-scoped token delivered over the authenticated WS (see sync-full). */
+  private fileTokenValue?: string
   /**
    * Serializes E2E encrypt+send so frames go out in the order they were
    * enqueued. Without this, two concurrent `encrypt()` calls could resolve out
@@ -155,6 +157,15 @@ export class RemoteConnection {
    */
   getMockupToken(): string | undefined {
     return this.mockupTokenValue
+  }
+
+  /**
+   * File-scoped token handed to the client over the authenticated WS. Read by
+   * the web api-adapter / SentFilesWidget (via `window.__FILE_TOKEN__`) to build
+   * `/sent-file` URLs. Undefined until the first full snapshot arrives.
+   */
+  getFileToken(): string | undefined {
+    return this.fileTokenValue
   }
 
   /**
@@ -366,6 +377,7 @@ export class RemoteConnection {
           const full = msg as WsSyncFull
           this.epoch = full.epoch
           if (full.mockupToken) this.mockupTokenValue = full.mockupToken
+          if (full.fileToken) this.fileTokenValue = full.fileToken
           this.lastSeq = full.state.seq
           this.onFullState?.(full.state)
           this.setState('connected')

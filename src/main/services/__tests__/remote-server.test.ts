@@ -18,6 +18,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 import { E2ECrypto } from '../../../shared/e2e-crypto'
+import { buildSentFileUrl } from '../../../shared/sent-file-url'
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before importing remote-server.
@@ -618,7 +619,8 @@ describe('RemoteServer — mockup HTTP route', () => {
     ;(server as unknown as { mockupToken: string }).mockupToken = ''
     expect((await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=`)).status).toBe(403)
     expect(
-      (await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`)).status
+      (await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`))
+        .status
     ).toBe(403)
   })
 
@@ -631,6 +633,215 @@ describe('RemoteServer — mockup HTTP route', () => {
     expect(got.body).toContain('remote mockup')
     // The serve-time bridge must be injected.
     expect(got.body).toContain('data-omelette="1"')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-043 §5 — `GET /sent-file`. Authenticated by a THIRD scoped token and
+// allowlisted against the renderer's own `sentFiles` snapshot, so the route can
+// never read a host path the model didn't explicitly deliver.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — /sent-file route', () => {
+  let server: RemoteServer
+  let port: number
+  let cwd: string
+  const SESSION = 'route-files'
+
+  /** Point the server's EventLog at a fake renderer returning `snapshot`. */
+  function stubRendererState(snapshot: Record<string, unknown>): void {
+    server.setWindow({
+      isDestroyed: () => false,
+      // `send` is used by notifyStatus on every connect/disconnect — without it
+      // the status push throws asynchronously and fails the run.
+      webContents: { executeJavaScript: async () => snapshot, send: () => {} }
+    } as unknown as Parameters<RemoteServer['setWindow']>[0])
+  }
+
+  function snapshotWith(files: Array<{ path: string }>): Record<string, unknown> {
+    return {
+      seq: 0,
+      sessions: { [SESSION]: { routingId: SESSION, cwd, sentFiles: files } },
+      directories: [],
+      activeSessionId: SESSION,
+      settings: {},
+      recentSessionIds: [],
+      pinnedSessionIds: [],
+      customTitles: {},
+      worktreeInfoMap: {}
+    }
+  }
+
+  /** Pull the file token from a WS full-sync (its only authenticated home). */
+  async function fetchFileTokenViaWs(wsToken: string): Promise<string | null> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: wsToken })
+    await client.ready
+    const token = await new Promise<string | null>((resolve) => {
+      const off = client.onMessage((msg) => {
+        if (msg.type === 'sync-full') {
+          off()
+          resolve((msg as { fileToken?: string }).fileToken ?? null)
+        }
+      })
+      void client.send({ type: 'sync', lastSeq: 0 })
+    })
+    client.close()
+    return token
+  }
+
+  function urlFor(
+    token: string,
+    filePath: string,
+    opts?: { inline?: boolean; session?: string }
+  ): string {
+    return buildSentFileUrl(`http://127.0.0.1:${port}`, opts?.session ?? SESSION, filePath, {
+      token,
+      inline: opts?.inline
+    })
+  }
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sent-file-rs-'))
+    fs.mkdirSync(path.join(cwd, 'out'))
+    fs.writeFileSync(path.join(cwd, 'out', 'report.html'), '<h1>delivered</h1>')
+    fs.writeFileSync(path.join(cwd, 'out', 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    fs.writeFileSync(path.join(cwd, 'secret.txt'), 'never delivered')
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+    fs.rmSync(cwd, { recursive: true, force: true })
+  })
+
+  it('delivers a file token over the authenticated WS, distinct from the others', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = await fetchFileTokenViaWs(res.token)
+    expect(fileToken).toMatch(/^[a-f0-9]{64}$/)
+    expect(fileToken).not.toBe(res.token)
+  })
+
+  it('rejects a missing or wrong token with 403 (constant-time compare)', async () => {
+    await server.start(port, '127.0.0.1')
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+
+    const noToken = await httpGet(
+      `http://127.0.0.1:${port}/sent-file?session=${SESSION}&path=${Buffer.from(
+        path.join(cwd, 'out', 'report.html')
+      ).toString('base64url')}`
+    )
+    expect(noToken.status).toBe(403)
+
+    timingSafeEqualSpy.mockClear()
+    const wrong = await httpGet(urlFor('a'.repeat(64), path.join(cwd, 'out', 'report.html')))
+    expect(wrong.status).toBe(403)
+    expect(timingSafeEqualSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('404s an unknown session', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+
+    const got = await httpGet(
+      urlFor(fileToken, path.join(cwd, 'out', 'report.html'), { session: 'nope' })
+    )
+    expect(got.status).toBe(404)
+  })
+
+  it('404s a path that was never delivered (not an existence oracle)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+
+    // Exists on disk, inside the cwd — but not on the renderer's list.
+    const got = await httpGet(urlFor(fileToken, path.join(cwd, 'secret.txt')))
+    expect(got.status).toBe(404)
+    expect(got.body).not.toContain('never delivered')
+
+    // Traversal out of the cwd is likewise a plain 404.
+    const escaped = await httpGet(urlFor(fileToken, path.join(cwd, 'out', '..', 'secret.txt')))
+    expect(escaped.status).toBe(404)
+  })
+
+  it('404s when the session delivered nothing at all', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([]))
+    const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
+    expect(got.status).toBe(404)
+  })
+
+  it('serves an allowlisted file as an attachment with nosniff', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+
+    const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
+    expect(got.status).toBe(200)
+    expect(got.body).toBe('<h1>delivered</h1>')
+    expect(got.headers['content-type']).toBe('text/html; charset=utf-8')
+    expect(got.headers['content-length']).toBe('18')
+    expect(got.headers['content-disposition']).toContain('attachment; filename="report.html"')
+    expect(got.headers['x-content-type-options']).toBe('nosniff')
+    expect(got.headers['content-security-policy']).toContain('sandbox')
+  })
+
+  it('honours inline=1 for images', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/shot.png' }]))
+
+    const got = await httpGet(
+      urlFor(fileToken, path.join(cwd, 'out', 'shot.png'), { inline: true })
+    )
+    expect(got.status).toBe(200)
+    expect(got.headers['content-type']).toBe('image/png')
+    expect(got.headers['content-disposition']).toContain('inline;')
+  })
+
+  it('FORCES attachment for a non-image even when inline=1 is requested', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+
+    const got = await httpGet(
+      urlFor(fileToken, path.join(cwd, 'out', 'report.html'), { inline: true })
+    )
+    expect(got.status).toBe(200)
+    // Model-authored HTML must never render same-origin next to the WS token.
+    expect(got.headers['content-disposition']).toContain('attachment;')
+  })
+
+  it('404s an allowlisted entry whose file has since disappeared', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/gone.txt' }]))
+    const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'gone.txt')))
+    expect(got.status).toBe(404)
+  })
+
+  it('405s a non-GET method', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    const got = await httpRequest('POST', urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
+    expect(got.status).toBe(405)
+  })
+
+  it('404s a structurally broken path parameter', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs(res.token))!
+    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    const got = await httpGet(
+      `http://127.0.0.1:${port}/sent-file?session=${SESSION}&path=!!!&token=${fileToken}`
+    )
+    expect(got.status).toBe(404)
   })
 })
 
@@ -666,7 +877,9 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     return ws
   }
   function nextJson(ws: WebSocket): Promise<Record<string, unknown>> {
-    return new Promise((resolve) => ws.once('message', (raw) => resolve(JSON.parse(raw.toString()))))
+    return new Promise((resolve) =>
+      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
+    )
   }
   function nextRaw(ws: WebSocket): Promise<string> {
     return new Promise((resolve) => ws.once('message', (raw) => resolve(raw.toString())))
@@ -822,7 +1035,9 @@ describe('RemoteServer — sync epoch (R7)', () => {
     }
   })
 
-  function nextSync(client: Awaited<ReturnType<typeof connectRemoteClient>>): Promise<Record<string, unknown>> {
+  function nextSync(
+    client: Awaited<ReturnType<typeof connectRemoteClient>>
+  ): Promise<Record<string, unknown>> {
     return new Promise((resolve) => {
       const off = client.onMessage((msg) => {
         if (msg.type === 'sync-full' || msg.type === 'sync-catchup') {

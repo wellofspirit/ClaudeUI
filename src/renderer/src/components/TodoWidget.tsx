@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useActiveSession } from '../stores/session-store'
+import { useDraggableWidget } from '../hooks/useDraggableWidget'
 import type { TodoItem } from '../../../shared/types'
 
 function StatusIndicator({ status }: { status: TodoItem['status'] }): React.JSX.Element {
@@ -74,6 +75,7 @@ function CircularProgress({ pct }: { pct: number }): React.JSX.Element {
 export function TodoWidget(): React.JSX.Element | null {
   const todos = useActiveSession((s) => s.todos)
   const [expanded, setExpanded] = useState(false)
+  const drag = useDraggableWidget('claudeui.widgetPos.todo')
 
   if (todos.length === 0) return null
   // Hide when all items are done (completed or cancelled)
@@ -88,16 +90,24 @@ export function TodoWidget(): React.JSX.Element | null {
   return (
     <div
       data-testid="TodoWidget"
+      ref={drag.ref}
+      data-dragged={drag.dragged || undefined}
       className="bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
       style={{
         width: expanded ? 'min(400px, 45%)' : 155,
-        borderRadius: expanded ? 12 : 8
+        borderRadius: expanded ? 12 : 8,
+        ...drag.style
       }}
     >
-      {/* Header — always visible */}
+      {/* Header — always visible. Doubles as the drag handle: a movement below
+          the threshold falls through to this onClick (expand/collapse). */}
       <button
         data-testid="TodoWidget.toggle"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          if (drag.didDrag()) return
+          setExpanded(!expanded)
+        }}
+        {...drag.headerHandlers}
         className="w-full flex items-center px-3 h-9 hover:bg-bg-hover transition-colors cursor-pointer"
       >
         <span className="text-[12px] text-text-secondary font-medium whitespace-nowrap">To Do</span>

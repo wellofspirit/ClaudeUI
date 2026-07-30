@@ -331,6 +331,25 @@ describe('RemoteConnection', () => {
       expect(snapshots).toEqual([{ seq: 42 }])
     })
 
+    // ADR-043 §5 — the file-scoped token rides the same authenticated frame.
+    it('stores the file token from sync-full, independently of the mockup token', () => {
+      const { conn, internals } = created
+      expect(conn.getFileToken()).toBeUndefined()
+
+      internals.handleMessage({
+        type: 'sync-full',
+        epoch: 'epoch-Z',
+        mockupToken: 'mock-123',
+        fileToken: 'file-456',
+        state: { seq: 1 }
+      })
+      expect(conn.getFileToken()).toBe('file-456')
+
+      // A later snapshot without the field must not wipe the stored token.
+      internals.handleMessage({ type: 'sync-full', epoch: 'epoch-Z', state: { seq: 2 } })
+      expect(conn.getFileToken()).toBe('file-456')
+    })
+
     it('sendSync echoes the stored epoch (R7)', () => {
       const { internals } = created
       const { sent } = attachFakeSocket(internals)

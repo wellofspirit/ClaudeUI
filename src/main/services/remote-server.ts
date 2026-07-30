@@ -14,6 +14,9 @@ import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
+import { SENT_FILE_ROUTE, parseSentFileQuery } from '../../shared/sent-file-url'
+import { matchSentFilePath, sentFileDisposition } from '../sent-file-security'
+import { validateLocalFilePath } from '../shell-security'
 import { routeHttpMockup, serveMockup } from './mockup-protocol'
 import { dbPasswordAuthProvider, safeHexEqual } from './remote-auth'
 import type { PasswordAuthProvider } from './remote-auth'
@@ -254,6 +257,14 @@ export class RemoteServer {
    * it grants nothing on the WS / Claude control plane.
    */
   private mockupToken = ''
+  /**
+   * Third scoped token, for the `/sent-file` route (ADR-043 §5). Like
+   * {@link mockupToken} it travels in a URL — an `<a download>` href and an
+   * `<img src>` — so it must never be the WS `token`. Its only power is reading
+   * files the RENDERER has listed in some session's `sentFiles`; it grants
+   * nothing on the WS / Claude control plane and dies with the server process.
+   */
+  private fileToken = ''
   private port = 0
   private boundHost = '' // the IP the server is bound to (for URL generation)
   private clients = new Map<WebSocket, AuthenticatedClient>()
@@ -362,6 +373,7 @@ export class RemoteServer {
 
     this.token = crypto.randomBytes(32).toString('hex')
     this.mockupToken = crypto.randomBytes(32).toString('hex')
+    this.fileToken = crypto.randomBytes(32).toString('hex')
 
     // Generate E2E key when tunnel mode is requested
     if (opts?.tunnel) {
@@ -463,6 +475,7 @@ export class RemoteServer {
       this.httpServer = null
       this.token = ''
       this.mockupToken = ''
+      this.fileToken = ''
       this.e2eKey = null
       this.port = 0
       this.boundHost = ''
@@ -632,6 +645,7 @@ export class RemoteServer {
     this.port = 0
     this.token = ''
     this.mockupToken = ''
+    this.fileToken = ''
     this.boundHost = ''
     this.pendingConnections = 0
     this.failedAuth.clear()
@@ -1027,6 +1041,9 @@ export class RemoteServer {
     } else if (url.pathname.startsWith(`/${MOCKUP_HTTP_PREFIX}/`)) {
       // Serve mockup HTML + sibling assets (web client preview iframe)
       void this.serveMockupHttp(url, req, res)
+    } else if (url.pathname === SENT_FILE_ROUTE) {
+      // Download / inline-preview a file delivered by SendUserFile (ADR-043)
+      void this.serveSentFile(url, req, res)
     } else if (
       url.pathname.startsWith('/assets/') ||
       url.pathname.endsWith('.js') ||
@@ -1256,6 +1273,127 @@ export class RemoteServer {
     const served = await serveMockup(routeHttpMockup(url.pathname, url.searchParams), selfSource)
     res.writeHead(served.status, served.headers)
     res.end(served.body)
+  }
+
+  /**
+   * `GET /sent-file?session=<routingId>&path=<b64url>&token=<t>[&inline=1]`
+   *
+   * Serves a file the model delivered through `SendUserFile` to a remote client
+   * (mobile download + `<img>` preview). Gated by the dedicated
+   * {@link fileToken}, then by a RENDERER-authoritative allowlist: the path must
+   * resolve to an entry in that session's `sentFiles` snapshot. Main keeps no
+   * ledger of its own, so there is nothing to drift out of sync — the cost is
+   * one `executeJavaScript` round-trip per request, which is fine at
+   * user-click frequency.
+   *
+   * Everything that is not "authenticated AND allowlisted AND readable" answers
+   * 404, so the route is not an existence oracle for arbitrary host paths. Only
+   * a token mismatch answers 403.
+   */
+  private async serveSentFile(
+    url: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    const refuse = (status: number, body: string): void => {
+      res.writeHead(status, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...this.securityHeaders(false)
+      })
+      res.end(body)
+    }
+
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        Allow: 'GET, HEAD',
+        ...this.securityHeaders(false)
+      })
+      res.end('Method Not Allowed')
+      return
+    }
+
+    // Same cheap reuse as serveAuthInfo: a key already locked out by failed WS
+    // auth gets nothing here either. Failures are NOT recorded against that
+    // budget — the token is 256-bit random (brute force is a non-threat) and
+    // recording would let an unauthenticated LAN peer lock the owner out.
+    const throttleKey = this.throttleKey(req)
+    if (this.isAuthThrottled(throttleKey)) {
+      refuse(429, 'Too Many Requests')
+      return
+    }
+
+    // Constant-time compare — see the LOW-RW9 note on the mockup route.
+    if (!safeTokenEqual(this.fileToken, url.searchParams.get('token'))) {
+      logger.warn('remote-server', `Rejected /sent-file from ${throttleKey}: bad token`)
+      refuse(403, 'Forbidden')
+      return
+    }
+
+    const query = parseSentFileQuery(url.searchParams)
+    if (!query) {
+      refuse(404, 'Not found')
+      return
+    }
+
+    const state = await this.eventLog.getFullState()
+    const session = state.sessions?.[query.session]
+    if (!session) {
+      refuse(404, 'Not found')
+      return
+    }
+
+    // `matchSentFilePath` returns the path derived from the SNAPSHOT (session
+    // cwd + stored entry), never the requester's string, so an equivalent-but-
+    // exotic spelling can still only open a file the renderer listed.
+    const allowed = matchSentFilePath(session.cwd ?? '', session.sentFiles ?? [], query.path)
+    if (!allowed) {
+      logger.warn(
+        'remote-server',
+        `Rejected /sent-file: path not in session ${query.session}'s delivered files`
+      )
+      refuse(404, 'Not found')
+      return
+    }
+
+    // Same local-file guard as the desktop shell handlers (absolute, non-UNC,
+    // existing regular file).
+    const check = validateLocalFilePath(allowed)
+    if (!check.ok) {
+      logger.warn('remote-server', `Rejected /sent-file (${check.error})`)
+      refuse(404, 'Not found')
+      return
+    }
+
+    let size: number
+    try {
+      size = fs.statSync(check.path).size
+    } catch {
+      refuse(404, 'Not found')
+      return
+    }
+
+    const { contentType, contentDisposition } = sentFileDisposition(check.path, query.inline)
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': String(size),
+      'Content-Disposition': contentDisposition,
+      'Cache-Control': 'no-store',
+      // Defence in depth for the one inline type that can carry script (SVG):
+      // `sandbox` puts a directly-navigated response in an opaque origin, so it
+      // can never script the web client's origin. Harmless for <img> loads and
+      // for downloads.
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      ...this.securityHeaders(false)
+    })
+    if (req.method === 'HEAD') {
+      res.end()
+      return
+    }
+    const stream = fs.createReadStream(check.path)
+    stream.on('error', () => res.destroy())
+    stream.pipe(res)
   }
 
   /**
@@ -1668,6 +1806,7 @@ export class RemoteServer {
   private async handleSync(ws: WebSocket, lastSeq: number, epoch?: string): Promise<void> {
     const currentEpoch = this.eventLog.epoch()
     const mockupToken = this.mockupToken || undefined
+    const fileToken = this.fileToken || undefined
 
     // Fresh connection (lastSeq 0), OR a reconnect carrying a lastSeq from a
     // DIFFERENT process epoch (the desktop app restarted, so our seq counter is
@@ -1675,7 +1814,7 @@ export class RemoteServer {
     // rather than a catchup that would falsely report "caught up" (M-DB4).
     if (lastSeq === 0 || epoch !== currentEpoch) {
       const state = await this.eventLog.getFullState()
-      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken })
+      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
       return
     }
 
@@ -1684,7 +1823,7 @@ export class RemoteServer {
     if (events === null) {
       // Too far behind — send full state
       const state = await this.eventLog.getFullState()
-      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken })
+      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
     } else {
       this.sendTo(ws, { type: 'sync-catchup', events, epoch: currentEpoch })
     }

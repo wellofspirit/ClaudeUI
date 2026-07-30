@@ -9,6 +9,7 @@
 
 import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
+import { buildSentFileUrl } from '../shared/sent-file-url'
 import type { RemoteConnection } from './connection'
 
 declare global {
@@ -16,6 +17,11 @@ declare global {
     /** Mockup-scoped auth token injected by the remote server into the served
      *  web-client HTML (only when the WS token in the URL is valid). */
     __MOCKUP_TOKEN__?: string
+    /** File-scoped auth token for `/sent-file` URLs, delivered over the
+     *  authenticated WS in `sync-full` (ADR-043 §5). Undefined on desktop —
+     *  SentFilesWidget uses its presence as the "remote download is available"
+     *  probe. */
+    __FILE_TOKEN__?: string
   }
 }
 
@@ -151,7 +157,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     listDirectories: () =>
       connection.invoke('session:list-directories') as ReturnType<ClaudeAPI['listDirectories']>,
     listOpencodeSessionsGlobal: () =>
-      connection.invoke('session:list-opencode') as ReturnType<ClaudeAPI['listOpencodeSessionsGlobal']>,
+      connection.invoke('session:list-opencode') as ReturnType<
+        ClaudeAPI['listOpencodeSessionsGlobal']
+      >,
     loadOpencodeHistory: (sessionId: string) =>
       connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
         ClaudeAPI['loadOpencodeHistory']
@@ -161,7 +169,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     listPiSessionsGlobal: () =>
       connection.invoke('session:list-pi') as ReturnType<ClaudeAPI['listPiSessionsGlobal']>,
     loadPiHistory: (sessionId: string) =>
-      connection.invoke('session:load-pi-history', sessionId) as ReturnType<ClaudeAPI['loadPiHistory']>,
+      connection.invoke('session:load-pi-history', sessionId) as ReturnType<
+        ClaudeAPI['loadPiHistory']
+      >,
 
     loadSessionHistory: (sessionId, projectKey) =>
       connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<
@@ -412,6 +422,20 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('file:list-dir', dirPath) as ReturnType<ClaudeAPI['listDir']>,
     openInVSCode: async () => {}, // No-op on web
 
+    // Sent-file preview: no RPC — the src IS an authenticated same-origin URL
+    // to the server's /sent-file route, so the browser streams the bytes
+    // instead of tunnelling a data: URL through the WS.
+    getSentFilePreview: async (sessionKey, filePath) => {
+      const token = window.__FILE_TOKEN__
+      if (!token) return { error: 'Preview is not available yet' }
+      return {
+        src: buildSentFileUrl(window.location.origin, sessionKey, filePath, {
+          token,
+          inline: true
+        })
+      }
+    },
+
     // Mockup preview — HTML is read from the server's filesystem and rendered client-side
     readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
     watchMockup: (cwd, directory) =>
@@ -457,9 +481,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['setUsageAccountFilter']
       >,
     fetchDispatchedUsage: () =>
-      connection.invoke('usage:fetch-dispatched') as ReturnType<
-        ClaudeAPI['fetchDispatchedUsage']
-      >,
+      connection.invoke('usage:fetch-dispatched') as ReturnType<ClaudeAPI['fetchDispatchedUsage']>,
 
     // Native OAuth (ADR-014) — desktop-only (opens a local browser + loopback).
     // sign-in/submit/cancel are blocklisted on the remote dispatcher; only the
@@ -623,7 +645,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveOpencodeAgent: async () => {},
     deleteOpencodeAgent: async () => {},
     setOpencodeAgentDisabled: async () => {},
-    generateOpencodeAgent: async () => { throw new Error('Not available in remote mode') },
+    generateOpencodeAgent: async () => {
+      throw new Error('Not available in remote mode')
+    },
 
     // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
     vendorAuthProbe: async () => ({}),

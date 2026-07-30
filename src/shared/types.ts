@@ -1113,6 +1113,21 @@ interface FileAPI {
   openPath?(filePath: string): Promise<{ error?: string }>
   /** Reveal a local file in the OS file manager. Optional — see {@link FileAPI.openPath}. */
   showInFolder?(filePath: string): Promise<{ error?: string }>
+  /**
+   * Resolve an image `src` for a file delivered by `SendUserFile` (ADR-043 §4).
+   * One member, two transports:
+   *  - desktop preload → IPC that reads the file and returns a `data:` URL;
+   *  - web adapter → an authenticated same-origin `/sent-file?...&inline=1` URL.
+   *
+   * `sessionKey` is the session's routingId: the remote transport needs it to
+   * look up that session's allowlisted files server-side. The desktop transport
+   * ignores it — `filePath` is already the cwd-resolved absolute path and main
+   * re-validates it. Optional, like the shell members: callers must probe.
+   */
+  getSentFilePreview?(
+    sessionKey: string,
+    filePath: string
+  ): Promise<{ src: string } | { error: string }>
   createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
   getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
   removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>

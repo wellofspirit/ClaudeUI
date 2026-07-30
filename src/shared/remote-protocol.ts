@@ -156,6 +156,14 @@ export interface WsSyncFull {
    * rides the URL fragment and is invisible to the HTTP GET — R3/H2).
    */
   mockupToken?: string
+  /**
+   * File-scoped, low-privilege token for the `/sent-file` route (ADR-043 §5).
+   * Same reasoning as {@link WsSyncFull.mockupToken}: it rides an `<a download>`
+   * href / `<img src>` and is therefore URL-visible, so it must be separate
+   * from the WS token and is only ever delivered over the authenticated (and,
+   * on a tunnel, E2E-encrypted) channel.
+   */
+  fileToken?: string
 }
 
 /** Bidirectional keepalive */
