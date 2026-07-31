@@ -150,6 +150,70 @@ describe('slimTranscript', () => {
     const line = out.split('\n').find((l) => l.startsWith('Assistant: '))!
     expect(line.length).toBeLessThan(MAX_ASSISTANT_PROSE_CHARS + 60)
   })
+
+  // ── Phase 3: {"outcome":…} annotations (ref §5) ───────────────────────────
+
+  it('renders an outcome line IMMEDIATELY after the call it belongs to', () => {
+    // The correlation is positional (cli.js correlates by id), so nothing may
+    // come between the call and its annotation.
+    const messages: ChatMessage[] = [
+      msg('user', [{ type: 'text', text: 'push it' }]),
+      msg('assistant', [
+        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'git push' } },
+        { type: 'tool_use', toolUseId: 't2', toolName: 'read', toolInput: { filePath: 'a.ts' } }
+      ])
+    ]
+    expect(slimTranscript(messages, { t1: 'rejected-by-user', t2: 'ok' })).toBe(
+      'User: push it\n' +
+        'bash {"command":"git push"}\n{"outcome":"rejected-by-user"}\n' +
+        'read {"filePath":"a.ts"}\n{"outcome":"ok"}'
+    )
+  })
+
+  it('annotates ONLY the calls that have an outcome — absence is not success', () => {
+    const messages: ChatMessage[] = [
+      msg('assistant', [
+        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'a' } },
+        { type: 'tool_use', toolUseId: 't2', toolName: 'bash', toolInput: { command: 'b' } }
+      ])
+    ]
+    const out = slimTranscript(messages, { t2: 'automode-blocked' })
+    expect(out).toBe('bash {"command":"a"}\nbash {"command":"b"}\n{"outcome":"automode-blocked"}')
+    expect(out.match(/outcome/g)).toHaveLength(1)
+  })
+
+  it('emits nothing extra when no outcomes are supplied (phase-1/2 behaviour)', () => {
+    const messages: ChatMessage[] = [
+      msg('assistant', [
+        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'a' } }
+      ])
+    ]
+    expect(slimTranscript(messages)).toBe('bash {"command":"a"}')
+    expect(slimTranscript(messages, {})).toBe('bash {"command":"a"}')
+  })
+
+  it('an outcome for an unknown toolUseId is inert (no orphan line)', () => {
+    const messages: ChatMessage[] = [
+      msg('assistant', [
+        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'a' } }
+      ])
+    ]
+    expect(slimTranscript(messages, { nope: 'error' })).toBe('bash {"command":"a"}')
+  })
+
+  it('does not disturb the Path B prose flush', () => {
+    const messages: ChatMessage[] = [
+      msg('assistant', [
+        { type: 'text', text: 'I will force-push to main. OK?' },
+        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'git status' } }
+      ]),
+      msg('user', [{ type: 'text', text: 'yes' }])
+    ]
+    expect(slimTranscript(messages, { t1: 'ok' })).toBe(
+      'bash {"command":"git status"}\n{"outcome":"ok"}\n' +
+        'Assistant: I will force-push to main. OK?\nUser: yes'
+    )
+  })
 })
 
 describe('truncateProseTail', () => {
@@ -190,6 +254,54 @@ describe('renderAction + buildUserPrompt', () => {
     expect(p).toContain('Proposed next action:\nbash {"command":"ls"}')
     expect(p).toContain('INSTRUCT')
   })
+  // ── Phase 3: the {"meta":…} ground-truth line (ref §5) ────────────────────
+
+  it('renders the meta line DIRECTLY above the action block, with no gap', () => {
+    // Adjacency is the binding: ref §5 places meta lines "directly above the
+    // tool call they describe". A blank line (or the transcript in between)
+    // would leave the judge guessing what was measured.
+    const input: ClassifyInput = {
+      messages: [msg('user', [{ type: 'text', text: 'commit and push' }])],
+      action: { toolName: 'bash', input: { command: 'git add -A && git push' } },
+      environment: { cwd: '/repo' },
+      actionMeta: { gitStatus: { clean: false, modified: 2, untracked: ['.env'] } }
+    }
+    const p = buildUserPrompt(input, 'INSTRUCT')
+    expect(p).toContain(
+      '{"meta":{"gitStatus":{"clean":false,"modified":2,"untracked":[".env"]}}}\n' +
+        'Proposed next action:\nbash {"command":"git add -A && git push"}'
+    )
+    // …and it sits below the transcript, not inside it.
+    expect(p.indexOf('</transcript>')).toBeLessThan(p.indexOf('{"meta"'))
+  })
+
+  it('emits NO meta line when actionMeta is absent or empty', () => {
+    // An empty {"meta":{}} would read as "we measured and found nothing".
+    const base: ClassifyInput = {
+      messages: [msg('user', [{ type: 'text', text: 'hi' }])],
+      action: { toolName: 'bash', input: { command: 'ls' } },
+      environment: { cwd: '/repo' }
+    }
+    expect(buildUserPrompt(base, 'I')).not.toContain('{"meta"')
+    expect(buildUserPrompt({ ...base, actionMeta: {} }, 'I')).not.toContain('{"meta"')
+  })
+
+  it('passes outcomes through to the transcript', () => {
+    const input: ClassifyInput = {
+      messages: [
+        msg('assistant', [
+          { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'git push' } }
+        ])
+      ],
+      action: { toolName: 'bash', input: { command: 'git push' } },
+      environment: { cwd: '/repo' },
+      outcomes: { t1: 'rejected-by-user' }
+    }
+    expect(buildUserPrompt(input, 'I')).toContain(
+      'bash {"command":"git push"}\n{"outcome":"rejected-by-user"}'
+    )
+  })
+
   it('the system prompt carries the environment ground truth (phase 2)', () => {
     // The old inline POLICY constant took a free-text `environment` string; the
     // policy document now renders a structured Environment section instead.

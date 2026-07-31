@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../../shared/types'
+import type { ToolOutcome } from './ground-truth'
 import { deriveCategorySet } from './rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
 
@@ -55,6 +56,7 @@ import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
 
 /** Re-exported so engine wiring imports the whole policy surface from here. */
 export type { EnvironmentInfo }
+export type { ToolOutcome }
 
 export interface ClassifierAction {
   /** Engine permission category / tool name being judged (e.g. `bash`). */
@@ -75,6 +77,21 @@ export interface ClassifyInput {
    * empty slots render.
    */
   environment: EnvironmentInfo
+  /**
+   * How prior tool calls ended, keyed by `toolUseId` (phase 3, ref §5). The
+   * slimmer renders each entry as a `{"outcome":…}` line under its call, which
+   * is the ONLY way a denial reaches the judge — tool results are dropped. A
+   * call with no entry gets no line: per ref §5 absence is explicitly not
+   * success, and the policy says so too.
+   */
+  outcomes?: Record<string, ToolOutcome>
+  /**
+   * Harness-measured facts about the PROPOSED action (`gitStatus`,
+   * `repoVisibility`), rendered as one `{"meta":{…}}` line directly above it.
+   * Only ever populated from a capture that actually succeeded — an absent key
+   * means "not measured", never "measured as fine".
+   */
+  actionMeta?: Record<string, unknown>
   twoStageMode?: 'both' | 'fast' | 'thinking'
 }
 
@@ -155,7 +172,8 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
  * Render the transcript to compact text for the judge:
  *
  * - user text → `User: …`
- * - assistant tool CALLS → `toolName <input>`
+ * - assistant tool CALLS → `toolName <input>`, followed by `{"outcome":"…"}`
+ *   when `outcomes` has an entry for that call's `toolUseId` (phase 3, ref §5)
  * - the prose of the last assistant MESSAGE immediately preceding each user text
  *   message → `Assistant: …` (tail-truncated at {@link MAX_ASSISTANT_PROSE_CHARS})
  *
@@ -178,7 +196,10 @@ export function truncateProseTail(text: string, max = MAX_ASSISTANT_PROSE_CHARS)
  * (ref §5). We ship it always-on — Path B consent is a design goal, our
  * transcripts are smaller, and the 2000-char tail cap bounds the cost.
  */
-export function slimTranscript(messages: ChatMessage[]): string {
+export function slimTranscript(
+  messages: ChatMessage[],
+  outcomes?: Record<string, ToolOutcome>
+): string {
   const lines: string[] = []
   /** Prose of the most recent assistant message, awaiting a user reply to flush against. */
   let pendingProse: string | null = null
@@ -191,6 +212,11 @@ export function slimTranscript(messages: ChatMessage[]): string {
           if (b.text.trim()) prose.push(b.text)
         } else if (b.type === 'tool_use') {
           lines.push(`${b.toolName} ${JSON.stringify(b.toolInput ?? {})}`)
+          // The outcome rides IMMEDIATELY under its call — the correlation is
+          // positional here (cli.js correlates by `id`), so nothing may be
+          // emitted between the two lines.
+          const outcome = outcomes?.[b.toolUseId]
+          if (outcome) lines.push(JSON.stringify({ outcome }))
         }
         // thinking / tool_result / images / everything else: dropped
       }
@@ -277,13 +303,26 @@ export const STAGE1_STOP_SEQUENCES = ['</block>']
  */
 export { buildPolicyPrompt }
 
+/**
+ * Assemble the user turn: transcript → optional `{"meta":…}` ground truth →
+ * the proposed action → the stage instruction.
+ *
+ * The meta line sits DIRECTLY above the action block, with no blank line
+ * between them, because that adjacency is what binds the measurement to the
+ * call it describes (ref §5: meta lines are "placed directly above the tool
+ * call they describe"). An empty/absent `actionMeta` renders nothing at all —
+ * an empty `{"meta":{}}` would read as "we measured and found nothing".
+ */
 export function buildUserPrompt(input: ClassifyInput, instruction: string): string {
-  const transcript = slimTranscript(input.messages)
+  const transcript = slimTranscript(input.messages, input.outcomes)
+  const meta = input.actionMeta
+  const hasMeta = !!meta && Object.keys(meta).length > 0
   return [
     '<transcript>',
     transcript,
     '</transcript>',
     '',
+    ...(hasMeta ? [JSON.stringify({ meta })] : []),
     `Proposed next action:\n${renderAction(input.action)}`,
     '',
     instruction

@@ -29,6 +29,7 @@ import {
   type JudgeTransport
 } from '../../src/main/automode/classifier'
 import type { EnvironmentInfo } from '../../src/main/automode/rules/policy'
+import type { ToolOutcome } from '../../src/main/automode/ground-truth'
 import { BENCH_CASES, type BenchCase } from './scenarios'
 import type { ChatMessage } from '../../src/shared/types'
 
@@ -124,8 +125,14 @@ function makeTransport(baseUrl: string, auth: string, model: string): JudgeTrans
 // ── Scenario → ClassifyInput ──────────────────────────────────────────────────
 
 let idc = 0
-function toMessages(c: BenchCase): ChatMessage[] {
-  return c.transcript.map((e) => {
+/**
+ * Render a case's transcript, resolving `outcomes` (keyed by tool INDEX) onto
+ * the synthesized toolUseIds the classifier correlates by.
+ */
+function toMessages(c: BenchCase): { messages: ChatMessage[]; outcomes?: Record<string, ToolOutcome> } {
+  let toolIndex = 0
+  const outcomes: Record<string, ToolOutcome> = {}
+  const messages = c.transcript.map((e) => {
     if (e.kind === 'user')
       return { id: `b${idc++}`, role: 'user' as const, content: [{ type: 'text' as const, text: e.text }], timestamp: 0 }
     if (e.kind === 'assistant')
@@ -135,13 +142,17 @@ function toMessages(c: BenchCase): ChatMessage[] {
         content: [{ type: 'text' as const, text: e.text }],
         timestamp: 0
       }
+    const toolUseId = `t${idc}`
+    const outcome = c.outcomes?.[toolIndex++]
+    if (outcome) outcomes[toolUseId] = outcome
     return {
       id: `b${idc++}`,
       role: 'assistant' as const,
-      content: [{ type: 'tool_use' as const, toolUseId: `t${idc}`, toolName: e.name, toolInput: e.input }],
+      content: [{ type: 'tool_use' as const, toolUseId, toolName: e.name, toolInput: e.input }],
       timestamp: 0
     }
   })
+  return { messages, ...(Object.keys(outcomes).length ? { outcomes } : {}) }
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -172,10 +183,13 @@ async function runModel(
     for (;;) {
       const c = queue.shift()
       if (!c) return
+      const { messages, outcomes } = toMessages(c)
       const input: ClassifyInput = {
-        messages: toMessages(c),
+        messages,
         action: c.action,
         environment: BENCH_ENV,
+        ...(outcomes ? { outcomes } : {}),
+        ...(c.actionMeta ? { actionMeta: c.actionMeta } : {}),
         twoStageMode: mode
       }
       const t0 = performance.now()

@@ -141,6 +141,20 @@ vi.mock('../model-discovery', () => ({
   }
 }))
 
+// Phase-3 ground truth shells out to `git`/`gh`. Mock only the CAPTURES (the
+// detection tables and recordToolOutcome stay real, so the wiring tests
+// exercise the same predicates production does) — otherwise every auto-mode
+// test would spawn subprocesses against the test cwd.
+const mockCaptureGitRemotes = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+const mockCaptureGitStatus = vi.hoisted(() => vi.fn().mockResolvedValue(null))
+const mockCaptureRepoVisibility = vi.hoisted(() => vi.fn().mockResolvedValue('unknown'))
+vi.mock('../../automode/ground-truth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../automode/ground-truth')>()),
+  captureGitRemotes: mockCaptureGitRemotes,
+  captureGitStatus: mockCaptureGitStatus,
+  captureRepoVisibility: mockCaptureRepoVisibility
+}))
+
 // discoverSkills (Item 3 — ISession.discoverSkills) delegates to
 // discoverOpencodeSkills; mock it directly so the test doesn't depend on the
 // module's internal per-cwd cache or the OpencodeServerManager/OpencodeClient
@@ -191,6 +205,12 @@ function setupMocks(): void {
   mockDiscoverOpencodeModels.mockResolvedValue([])
   mockDiscoverOpencodeSkills.mockReset()
   mockDiscoverOpencodeSkills.mockResolvedValue([])
+  mockCaptureGitRemotes.mockReset()
+  mockCaptureGitRemotes.mockResolvedValue([])
+  mockCaptureGitStatus.mockReset()
+  mockCaptureGitStatus.mockResolvedValue(null)
+  mockCaptureRepoVisibility.mockReset()
+  mockCaptureRepoVisibility.mockResolvedValue('unknown')
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -1183,6 +1203,26 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     })
   }
 
+  /** A one-shot `bash` approval carrying a real command (phase 3 captures key
+   *  off the command string, not the tool name alone). */
+  function feedPermissionAskedWithCommand(id: string, command: string, callID = 'c1'): void {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      yield {
+        id: 'e1',
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id,
+          permission: 'bash',
+          patterns: [command],
+          metadata: { command },
+          tool: { callID }
+        }
+      } as OpencodeEvent
+      await parkUntilAborted(signal)
+    })
+  }
+
   it('full + enabled → acceptEdits base ruleset (edits auto; only bash/webfetch ask → classified)', async () => {
     enableAutoMode()
     const session = makeSession(undefined, 'full')
@@ -1430,6 +1470,276 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     const session = makeSession(undefined, 'full')
     await session.run('go')
     await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mode_same', 'once'))
+    session.dispose()
+  })
+
+  // ── Phase 3: harness ground truth (docs/automode-rework-plan.md §5) ───────
+  // The judge cannot see tool results (the slimmer drops them), so a refusal, a
+  // dirty tree and the repo's remotes only reach it if the HOST measures them
+  // and injects them. These are the wiring assertions for that.
+
+  /** A controllable SSE feed — lets a test interleave `resolveApproval` between
+   *  two `permission.asked` events, which is what a retry actually looks like. */
+  function makeEventFeed(): (e: OpencodeEvent) => void {
+    const queue: OpencodeEvent[] = []
+    let wake: (() => void) | null = null
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      for (;;) {
+        while (queue.length > 0) yield queue.shift()!
+        if (signal?.aborted) return
+        await new Promise<void>((resolve) => {
+          wake = resolve
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        wake = null
+      }
+    })
+    return (e) => {
+      queue.push(e)
+      wake?.()
+    }
+  }
+
+  /** A running tool part — puts a `tool_use` block into messageHistory so the
+   *  slimmer has a call to hang the `{"outcome":…}` annotation on. */
+  const toolPartEvent = (callID: string, command: string): OpencodeEvent =>
+    ({
+      id: `ev_part_${callID}`,
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { status: 'running', input: { command } }
+        }
+      }
+    }) as OpencodeEvent
+
+  const permissionEvent = (
+    id: string,
+    callID: string,
+    command: string,
+    patterns: string[] = [command]
+  ): OpencodeEvent =>
+    ({
+      id: `ev_perm_${id}`,
+      type: 'permission.asked',
+      properties: {
+        sessionID: SES,
+        id,
+        permission: 'bash',
+        patterns,
+        metadata: { command },
+        tool: { callID, messageID: `msg_${callID}` }
+      }
+    }) as OpencodeEvent
+
+  /** What the judge was actually shown on its Nth call. */
+  const judgePrompt = (n = -1): { system: string; user: string } => {
+    const body = mockPrompt.mock.calls.at(n)![1] as {
+      system: string
+      parts: Array<{ text?: string }>
+    }
+    return { system: body.system, user: body.parts.map((p) => p.text ?? '').join('') }
+  }
+
+  it('phase 3: a HUMAN reject is annotated `rejected-by-user` on the retry', async () => {
+    // Without this the retry looks like a fresh proposal and the mandatory
+    // Transient Retry exception waves it through — the permissiveness hole the
+    // corpus currently guards against in prose only.
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)']) // sends the FIRST approval to the human
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    const push = makeEventFeed()
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_gt_reject', win, '/tmp/test-cwd', {
+      permissionMode: 'full'
+    })
+    await session.run('go')
+
+    push(toolPartEvent('c_push', 'git push --force origin main'))
+    push(permissionEvent('per_h1', 'c_push', 'git push --force origin main'))
+    await vi.waitFor(() =>
+      expect(
+        (win as unknown as MockWindow).webContents.send.mock.calls.some(
+          (c) => c[0] === 'session:approval-request'
+        )
+      ).toBe(true)
+    )
+    expect(mockPrompt).not.toHaveBeenCalled()
+
+    // The human declines.
+    session.resolveApproval('per_h1', 'deny')
+
+    // The agent retries the same command; this one reaches the judge.
+    push(permissionEvent('per_h2', 'c_push2', 'git push --force origin main', ['retry']))
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain(
+      'bash {"command":"git push --force origin main"}\n{"outcome":"rejected-by-user"}'
+    )
+    session.dispose()
+  })
+
+  it('phase 3: a CLASSIFIER block is annotated `automode-blocked` on the retry', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({
+      parts: [{ type: 'text', text: '<block>yes</block><reason>prod</reason>' }]
+    })
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(toolPartEvent('c_b1', 'kubectl delete ns prod'))
+    push(permissionEvent('per_b1', 'c_b1', 'kubectl delete ns prod'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_b1', 'reject', 'Auto mode blocked: prod')
+    )
+
+    push(permissionEvent('per_b2', 'c_b2', 'kubectl delete ns prod'))
+    await vi.waitFor(() => expect(mockPrompt.mock.calls.length).toBeGreaterThan(1))
+
+    expect(judgePrompt().user).toContain(
+      'bash {"command":"kubectl delete ns prod"}\n{"outcome":"automode-blocked"}'
+    )
+    session.dispose()
+  })
+
+  it('phase 3: a tool RESULT annotates ok / error', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(toolPartEvent('c_ok', 'bun run test'))
+    push({
+      id: 'ev_done',
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: 'p_c_ok',
+          messageID: 'msg_c_ok',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'c_ok',
+          state: { status: 'error', input: { command: 'bun run test' }, error: 'exit 1' }
+        }
+      }
+    } as OpencodeEvent)
+    push(permissionEvent('per_ok', 'c_next', 'bun run test'))
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain('bash {"command":"bun run test"}\n{"outcome":"error"}')
+    session.dispose()
+  })
+
+  it('phase 3: gitStatus is measured for a tree-affecting command and rendered ABOVE the action', async () => {
+    enableAutoMode()
+    mockCaptureGitStatus.mockResolvedValue({ clean: false, modified: 2, untracked: ['.env'] })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_gs', 'git add -A && git commit -m wip')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(mockCaptureGitStatus).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(judgePrompt().user).toContain(
+      '{"meta":{"gitStatus":{"clean":false,"modified":2,"untracked":[".env"]}}}\nProposed next action:'
+    )
+    session.dispose()
+  })
+
+  it('phase 3: a FAILED gitStatus capture emits no meta line (never a fake clean tree)', async () => {
+    enableAutoMode()
+    mockCaptureGitStatus.mockResolvedValue(null)
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_gs_fail', 'git add -A')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(mockCaptureGitStatus).toHaveBeenCalled()
+    expect(judgePrompt().user).not.toContain('{"meta"')
+    session.dispose()
+  })
+
+  it('phase 3: a command that touches nothing measurable costs no captures', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_plain', 'bun run typecheck')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(mockCaptureGitStatus).not.toHaveBeenCalled()
+    expect(mockCaptureRepoVisibility).not.toHaveBeenCalled()
+    expect(judgePrompt().user).not.toContain('{"meta"')
+    session.dispose()
+  })
+
+  it('phase 3: repoVisibility rides both the meta line and the Environment section', async () => {
+    enableAutoMode()
+    mockCaptureRepoVisibility.mockResolvedValue('public')
+    mockCaptureGitStatus.mockResolvedValue({ clean: true, modified: 0, untracked: [] })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_vis', 'git push origin main')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const { system, user } = judgePrompt()
+    expect(user).toContain('"repoVisibility":"public"')
+    // Resolved on THIS call, not one approval later.
+    expect(system).toContain('- Repository visibility: public')
+    session.dispose()
+  })
+
+  it('phase 3: an UNKNOWN visibility stays out of the Environment section', async () => {
+    // The policy's unset-visibility fallback ("assume PRIVATE for
+    // confidentiality, assume PUBLIC for secret exposure") is strictly more
+    // useful to the judge than the bare word "unknown".
+    enableAutoMode()
+    mockCaptureRepoVisibility.mockResolvedValue('unknown')
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_vis_unk', 'git push origin main')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const { system, user } = judgePrompt()
+    expect(user).toContain('"repoVisibility":"unknown"') // honest: we looked, we can't tell
+    expect(system).toContain('Repository visibility: unknown — assume PRIVATE')
+    session.dispose()
+  })
+
+  it('phase 3: session-start remotes are captured ONCE and reused', async () => {
+    // Session-start semantics (ref §9.1): a remote added mid-session is exactly
+    // what the exfiltration rules exist to catch, so this must never refresh.
+    enableAutoMode()
+    mockCaptureGitRemotes.mockResolvedValue([
+      { name: 'origin', url: 'git@github.com:acme/app.git' }
+    ])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(permissionEvent('per_r1', 'c_r1', 'bun run build'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_r1', 'once'))
+    // A remote appears mid-session — the cached value must win.
+    mockCaptureGitRemotes.mockResolvedValue([{ name: 'evil', url: 'git@evil:x.git' }])
+    push(permissionEvent('per_r2', 'c_r2', 'bun run test'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_r2', 'once'))
+
+    expect(mockCaptureGitRemotes).toHaveBeenCalledTimes(1)
+    expect(judgePrompt().system).toContain('origin → git@github.com:acme/app.git')
+    expect(judgePrompt().system).not.toContain('evil')
     session.dispose()
   })
 

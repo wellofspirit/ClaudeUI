@@ -56,6 +56,18 @@ import {
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
+import {
+  captureGitRemotes,
+  captureGitStatus,
+  captureRepoVisibility,
+  needsGitStatus,
+  needsRepoVisibility,
+  recordToolOutcome,
+  shellCommandOf,
+  type GitRemote,
+  type RepoVisibility,
+  type ToolOutcome
+} from '../automode/ground-truth'
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
@@ -160,7 +172,11 @@ export class OpencodeSession extends BaseSession {
   private permissionMode: string
   private reasoningVariant: string | null = null
   private agent: string | null = null
-  private pendingApprovals = new Map<string, unknown>()
+  // Pending permission approvals, requestId → the approval's toolUseId (the
+  // tool part's callID, `undefined` if the engine didn't carry one). The value
+  // is what lets resolveApproval annotate the RIGHT tool call when the human
+  // rejects (phase 3 outcome annotations).
+  private pendingApprovals = new Map<string, string | undefined>()
   // Pending model-elicitation questions (question.asked) keyed by requestId.
   // Stored so resolveApproval can map the ordered answers Record→string[][].
   private pendingQuestions = new Map<string, AskUserQuestion[]>()
@@ -203,6 +219,23 @@ export class OpencodeSession extends BaseSession {
   // `null` = not compiled yet. The SSE consumer starts BEFORE the first
   // applyPermissionMode, so an approval can race it — see userOriginRules().
   private lastCompiledUserRules: OpencodePermissionRule[] | null = null
+  // ── Phase 3 ground truth (docs/automode-rework-plan.md §5) ────────────────
+  // How prior tool calls ended, keyed by toolUseId. Fed to the classifier as
+  // `{"outcome":…}` annotations — the ONLY channel by which a refusal reaches
+  // the judge, since the slimmer drops tool results. Bounded by
+  // recordToolOutcome (MAX_TOOL_OUTCOMES) so a long session can't grow it
+  // unboundedly.
+  private toolOutcomes = new Map<string, ToolOutcome>()
+  // SESSION-START git remotes — resolved once, lazily, at the first classifier
+  // use and then frozen for the session's lifetime. Never refreshed: a remote
+  // added mid-session is exactly what the exfiltration rules exist to catch, so
+  // re-reading would let the agent whitelist its own destination (ref §9.1).
+  private sessionRemotes: GitRemote[] | null = null
+  private sessionRemotesPromise: Promise<GitRemote[]> | null = null
+  // Repo visibility — also resolved at most once per session (a `gh` round trip
+  // on the approval hot path), including the 'unknown' answer.
+  private sessionRepoVisibility: RepoVisibility | null = null
+  private sessionRepoVisibilityPromise: Promise<RepoVisibility> | null = null
   // Discovered command names (populated in run(null) eager connect). Used by
   // run(prompt) to route /command tokens to runCommand instead of promptAsync.
   private knownCommandNames = new Set<string>()
@@ -635,6 +668,7 @@ export class OpencodeSession extends BaseSession {
         // can display tool output blocks. Mirrors dispatchMapperOutput 'message' case.
         for (const block of msg.content) {
           if (block.type === 'tool_result') {
+            this.recordToolOutcome(block.toolUseId, block.isError ? 'error' : 'ok')
             this.send('session:tool-result', {
               toolUseId: block.toolUseId,
               result: block.toolResult,
@@ -906,6 +940,14 @@ export class OpencodeSession extends BaseSession {
               const toolRes = extractToolResult(partId, snap)
               if (toolRes) {
                 this.emittedToolResults.add(cacheKey)
+                // Phase 3: the classifier's `{"outcome":…}` annotation for this
+                // call. Recorded HERE rather than derived from messageHistory at
+                // classify time because live assistant messages carry no
+                // tool_result blocks at all (buildChatMessage emits tool_use
+                // only — results are a separate channel); deriving would work
+                // only for replayed history and miss the in-turn retry, which is
+                // precisely what Transient Retry needs to see.
+                this.recordToolOutcome(toolRes.toolUseId, toolRes.isError ? 'error' : 'ok')
                 this.send('session:tool-result', toolRes)
               }
             }
@@ -939,7 +981,7 @@ export class OpencodeSession extends BaseSession {
 
       case 'approval': {
         const approval = output.approval
-        this.pendingApprovals.set(approval.requestId, true)
+        this.pendingApprovals.set(approval.requestId, approval.toolUseId)
 
         if (approval.toolName === 'AskUserQuestion') {
           // Model-elicitation questions (question.asked) must ALWAYS go to the
@@ -1137,6 +1179,7 @@ export class OpencodeSession extends BaseSession {
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): void {
+    const approvalToolUseId = this.pendingApprovals.get(requestId)
     this.pendingApprovals.delete(requestId)
     if (!this.client) return
 
@@ -1188,6 +1231,14 @@ export class OpencodeSession extends BaseSession {
     // reject-with-message → CorrectedError → the tool call fails but the turn
     // continues, so the model can adjust and retry instead of dying.
     const message = reply === 'reject' ? answers?.feedback || 'User denied' : undefined
+
+    // Phase 3 — a HUMAN refusal is the strongest signal the judge can get: it
+    // makes the Transient Retry exception inapplicable to a re-attempt and
+    // turns the retry into a consent question. Only a reject maps here; an
+    // allow leaves the call to report its own ok/error outcome.
+    if (reply === 'reject' && approvalToolUseId) {
+      this.recordToolOutcome(approvalToolUseId, 'rejected-by-user')
+    }
 
     const replied = message
       ? this.client.replyPermission(requestId, reply, message)
@@ -1369,22 +1420,79 @@ export class OpencodeSession extends BaseSession {
     return this.lastCompiledUserRules
   }
 
+  /** Record how a tool call ended, for the classifier's `{"outcome":…}`
+   *  annotations. Bounded + decision-sticky — see recordToolOutcome. */
+  private recordToolOutcome(toolUseId: string, outcome: ToolOutcome): void {
+    recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
+  }
+
+  /** Session-start git remotes, captured ONCE and frozen (ref §9.1). The
+   *  promise is memoized too, so two approvals racing the first classifier call
+   *  share a single `git remote -v`. Never throws — an empty list is the
+   *  policy's restrictive fallback. */
+  private async sessionGitRemotes(): Promise<GitRemote[]> {
+    if (this.sessionRemotes) return this.sessionRemotes
+    this.sessionRemotesPromise ??= captureGitRemotes(this.cwd)
+    this.sessionRemotes = await this.sessionRemotesPromise
+    return this.sessionRemotes
+  }
+
+  /** Repo visibility, resolved at most once per session ('unknown' included —
+   *  it is a real answer meaning "we looked and could not tell"). */
+  private async sessionVisibility(): Promise<RepoVisibility> {
+    if (this.sessionRepoVisibility) return this.sessionRepoVisibility
+    this.sessionRepoVisibilityPromise ??= captureRepoVisibility(this.cwd)
+    this.sessionRepoVisibility = await this.sessionRepoVisibilityPromise
+    return this.sessionRepoVisibility
+  }
+
   /** Host-supplied ground truth for the classifier's Environment section
-   *  (plan phase 2). Trust slots come from the user's engine config and default
-   *  to EMPTY — the policy renders "nothing is trusted" for an empty slot, so
-   *  omitting a list is the restrictive choice, not the permissive one.
-   *  Session-start git remotes and repo visibility land in phase 3. */
-  private classifierEnvironment(): EnvironmentInfo {
+   *  (plan phase 2 + 3). Trust slots come from the user's engine config and
+   *  default to EMPTY — the policy renders "nothing is trusted" for an empty
+   *  slot, so omitting a list is the restrictive choice, not the permissive one.
+   *
+   *  `repoVisibility` is only filled with a DEFINITE answer: leaving it unset
+   *  renders the policy's "unknown — assume PRIVATE for confidentiality, assume
+   *  PUBLIC for secret exposure" guidance, which is strictly more useful than
+   *  the bare word "unknown". */
+  private async classifierEnvironment(): Promise<EnvironmentInfo> {
     const cfg = this.autoModeConfig()
     const additionalDirectories = [...new Set(this.mergedUserPermissions().additionalDirectories)]
+    const remotes = await this.sessionGitRemotes()
+    const visibility = this.sessionRepoVisibility
     return {
       cwd: this.cwd,
       platform: process.platform,
+      ...(remotes.length ? { remotes } : {}),
+      ...(visibility && visibility !== 'unknown' ? { repoVisibility: visibility } : {}),
       ...(additionalDirectories.length ? { additionalDirectories } : {}),
       ...(cfg.trustedDomains?.length ? { trustedDomains: cfg.trustedDomains } : {}),
       ...(cfg.trustedRegistries?.length ? { trustedRegistries: cfg.trustedRegistries } : {}),
       ...(cfg.protectedPatterns?.length ? { protectedPatterns: cfg.protectedPatterns } : {})
     }
+  }
+
+  /** Per-ACTION measured ground truth → the classifier's `{"meta":{…}}` line
+   *  (ref §5). Only shell-like actions qualify, only the command shapes the
+   *  reference names trigger a capture, and a capture that fails contributes
+   *  NOTHING — a fabricated `{"clean":true}` would clear the policy's dirty-tree
+   *  presumption on no evidence. The 1.5 s/2 s capture timeouts are the budget
+   *  for the await this adds to the approval path. */
+  private async captureActionMeta(
+    toolName: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown> | undefined> {
+    const command = shellCommandOf(toolName, input)
+    if (!command) return undefined
+    const meta: Record<string, unknown> = {}
+    if (needsGitStatus(command)) {
+      const gitStatus = await captureGitStatus(this.cwd)
+      if (gitStatus) meta.gitStatus = gitStatus
+    }
+    if (needsRepoVisibility(command)) {
+      meta.repoVisibility = await this.sessionVisibility()
+    }
+    return Object.keys(meta).length > 0 ? meta : undefined
   }
 
   /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */
@@ -1461,11 +1569,18 @@ export class OpencodeSession extends BaseSession {
       return
     }
     try {
+      // Phase 3 ground truth. actionMeta FIRST: it is what resolves repo
+      // visibility, and classifierEnvironment picks the resolved value up on
+      // this same call rather than one approval later.
+      const actionMeta = await this.captureActionMeta(category, approval.input)
+      const environment = await this.classifierEnvironment()
       const result = await classify(
         {
           messages: this.messageHistory,
           action: { toolName: category, input: approval.input },
-          environment: this.classifierEnvironment(),
+          environment,
+          ...(actionMeta ? { actionMeta } : {}),
+          ...(this.toolOutcomes.size ? { outcomes: Object.fromEntries(this.toolOutcomes) } : {}),
           twoStageMode: this.autoModeConfig().twoStageMode ?? 'both'
         },
         judge
@@ -1501,6 +1616,10 @@ export class OpencodeSession extends BaseSession {
           this.fallbackToHuman(approval)
           return
         }
+        // Phase 3 — annotate the blocked call so a re-attempt is judged as a
+        // retry of something THIS monitor denied (post-block consent
+        // inheritance), not as a fresh proposal.
+        if (approval.toolUseId) this.recordToolOutcome(approval.toolUseId, 'automode-blocked')
         this.autoReply(
           approval.requestId,
           'reject',
