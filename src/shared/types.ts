@@ -187,6 +187,13 @@ export interface PendingApproval {
   toolUseId?: string
   toolName: string
   input: Record<string, unknown>
+  /**
+   * opencode only: the matched argument(s) the engine evaluated its permission
+   * ruleset against (`permission.asked`'s `patterns` — the command, path, or
+   * subagent type). Needed host-side to re-match the ask against the
+   * user-authored rules, which outrank the auto-mode classifier (ADR-023 G9).
+   */
+  patterns?: string[]
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string

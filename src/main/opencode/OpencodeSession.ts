@@ -48,7 +48,9 @@ import {
   suggestionDestinationToScope,
   suggestionRuleToClaudeString
 } from './permission-compiler'
-import { classify, isAutoModeFastPathAllowed, type JudgeFn } from './auto-mode-classifier'
+import type { OpencodePermissionRule } from './permission-compiler'
+import { matchesUserAskRule } from './wildcard'
+import { classify, isAutoModeFastPathAllowed, type JudgeTransport } from '../automode/classifier'
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
@@ -188,6 +190,14 @@ export class OpencodeSession extends BaseSession {
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
   private autoDenials = { consecutive: 0, total: 0 }
+  // The USER-authored half of the last ruleset we patched onto the session
+  // (compiled allow/ask/deny). Kept so the auto-mode gatekeeper can re-match a
+  // pending approval against the user's own `ask` rules, which outrank the
+  // classifier (ADR-023 G9). opencode discards the matched rule before it
+  // publishes `permission.asked`, so this is the only way to recover provenance.
+  // `null` = not compiled yet. The SSE consumer starts BEFORE the first
+  // applyPermissionMode, so an approval can race it — see userOriginRules().
+  private lastCompiledUserRules: OpencodePermissionRule[] | null = null
   // Discovered command names (populated in run(null) eager connect). Used by
   // run(prompt) to route /command tokens to runCommand instead of promptAsync.
   private knownCommandNames = new Set<string>()
@@ -1263,7 +1273,11 @@ export class OpencodeSession extends BaseSession {
     // (Claude's allow/ask/deny + additionalDirectories) compiled to opencode and
     // appended AFTER the base so they override it (last-match-wins). This makes
     // the SAME configured rules apply to opencode as to Claude. See ADR-022.
-    const ruleset = [...buildRuleset(baseMode), ...this.compiledUserRules(), DISPATCH_AGENT_ASK_RULE]
+    const userRules = this.compiledUserRules()
+    // Remember the user-origin half for the auto-mode ask-rule precedence check
+    // (G9) — see `lastCompiledUserRules`.
+    this.lastCompiledUserRules = userRules
+    const ruleset = [...buildRuleset(baseMode), ...userRules, DISPATCH_AGENT_ASK_RULE]
     try {
       await this.client.patchSession(this.openSessionId, { permission: ruleset })
     } catch (err) {
@@ -1325,12 +1339,23 @@ export class OpencodeSession extends BaseSession {
     return this._autoModeConfig
   }
 
+  /** The user-authored (compiled) rules the last patched ruleset carried. Falls
+   *  back to compiling them on demand: the SSE consumer is started before the
+   *  first `applyPermissionMode`, so a `permission.asked` can arrive before the
+   *  cache is warm, and G9 must not silently degrade to "no user rules". */
+  private userOriginRules(): OpencodePermissionRule[] {
+    if (this.lastCompiledUserRules === null) {
+      this.lastCompiledUserRules = this.compiledUserRules()
+    }
+    return this.lastCompiledUserRules
+  }
+
   /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */
   private isAutoMode(mode: string): boolean {
     return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
   }
 
-  /** A JudgeFn backed by a fresh, stateless opencode judge session per call
+  /** A JudgeTransport backed by a fresh, stateless opencode judge session per call
    *  (so the judge never accumulates prior Q&As; we trade cache for correctness).
    *  Judge model defaults to the session's own model (ADR-023), override via config.
    *
@@ -1344,12 +1369,17 @@ export class OpencodeSession extends BaseSession {
    *  A patch FAILURE propagates rather than being swallowed — the caller
    *  (`handleAutoModeApproval`) catches it and falls back to asking the human,
    *  which is the correct fail-closed outcome. Proceeding to prompt an
-   *  un-denied session would reinstate exactly the hazard above. */
-  private makeJudgeFn(): JudgeFn | null {
+   *  un-denied session would reinstate exactly the hazard above.
+   *
+   *  `maxTokens` / `stopSequences` on the request are ignored: opencode's prompt
+   *  API exposes neither (the ADR-023 deviation). They stay on the interface
+   *  because the classifier populates them for a future direct-API transport
+   *  (plan phase 5), and ignoring an advisory field is the documented contract. */
+  private makeJudgeFn(): JudgeTransport | null {
     const client = this.client
     if (!client) return null
     const parsed = parseModelString(this.autoModeConfig().judgeModel ?? this._model)
-    return async (system, user) => {
+    return async ({ system, user }) => {
       const js = await client.createSession({ title: 'auto-mode-judge' })
       try {
         await client.patchSession(js.id, { permission: DENY_ALL_TOOLS_RULESET })
@@ -1370,6 +1400,19 @@ export class OpencodeSession extends BaseSession {
 
   private async handleAutoModeApproval(approval: PendingApproval): Promise<void> {
     const category = approval.toolName
+    // G9 — an explicit USER-authored `ask` rule outranks the classifier
+    // (ref §3 step 1 / porting note #1). Letting the judge auto-approve exactly
+    // the actions the user singled out would make auto mode a permission
+    // DOWNGRADE. Checked before both fast paths: an ask the user wrote on
+    // `read` must still reach them. Zero judge calls on a match.
+    if (matchesUserAskRule(this.userOriginRules(), category, approval.patterns)) {
+      logger.info(
+        'OpencodeSession',
+        `auto-mode → human: user ask rule matches ${category} (${(approval.patterns ?? ['*']).join(', ')})`
+      )
+      this.fallbackToHuman(approval)
+      return
+    }
     // Fast-path: read-only/safe tools never need the judge.
     if (isAutoModeFastPathAllowed(category)) {
       this.autoReply(approval.requestId, 'once')
@@ -1390,6 +1433,18 @@ export class OpencodeSession extends BaseSession {
         },
         judge
       )
+      // G10 — the judge call is async and the user can switch autonomy mode
+      // while it is in flight (ref §3 step 5 / cli.js's
+      // `mode_changed_while_queued`). Re-read the CURRENT mode: if auto mode is
+      // no longer active the verdict is stale authority, so discard it and ask.
+      if (!this.isAutoMode(this.permissionMode)) {
+        logger.info(
+          'OpencodeSession',
+          `auto-mode verdict discarded — permission mode changed to "${this.permissionMode}" while the judge ran`
+        )
+        this.fallbackToHuman(approval)
+        return
+      }
       logger.info(
         'OpencodeSession',
         `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}) ${category}` +

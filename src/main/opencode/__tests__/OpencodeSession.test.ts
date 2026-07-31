@@ -1167,12 +1167,17 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockCreateSession.mockResolvedValue({ id: SES })
   }
 
-  function feedPermissionAsked(permission: string, id = 'per_a', callID = 'c1'): void {
+  function feedPermissionAsked(
+    permission: string,
+    id = 'per_a',
+    callID = 'c1',
+    patterns: string[] = ['x']
+  ): void {
     mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'e1',
         type: 'permission.asked',
-        properties: { sessionID: SES, id, permission, patterns: ['x'], tool: { callID } }
+        properties: { sessionID: SES, id, permission, patterns, tool: { callID } }
       } as OpencodeEvent
       await parkUntilAborted(signal)
     })
@@ -1317,6 +1322,114 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     // The judge was never prompted, so nothing auto-replied on its behalf.
     expect(mockPrompt).not.toHaveBeenCalled()
     expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // ── G9: a user-authored `ask` rule outranks the classifier ────────────────
+  // Otherwise auto mode is a permission DOWNGRADE for exactly the actions the
+  // user singled out. opencode discards the matched rule before publishing
+  // `permission.asked`, so we re-match host-side against our own compiled
+  // user rules (docs/automode-rework-plan.md §4.5).
+
+  function withUserAskRule(ask: string[], allow: string[] = []): void {
+    mockLoadClaudePermissions.mockReturnValue({
+      allow,
+      deny: [],
+      ask,
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+  }
+
+  it('G9: an approval matching a user ask rule goes to the human with ZERO judge calls', async () => {
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)'])
+    feedPermissionAsked('bash', 'per_user_ask', 'c1', ['git push --force origin main'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_user_ask', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    // The judge is never consulted, and nothing is auto-replied on its behalf.
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('G9: an approval NOT covered by a user ask rule still reaches the judge', async () => {
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)'])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_not_user_ask', 'c1', ['ls -la'])
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_not_user_ask', 'once'))
+    expect(mockPrompt).toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('G9: the guard runs BEFORE the read-only fast path', async () => {
+    // A user who wrote `Read(secrets/**)` as an ask must still be asked, even
+    // though `read` is on the zero-token allowlist.
+    enableAutoMode()
+    withUserAskRule(['Read(secrets/**)'])
+    feedPermissionAsked('read', 'per_read_user_ask', 'c1', ['secrets/prod.env'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_read_user_ask', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // ── G10: re-check the mode after the judge returns ────────────────────────
+
+  it('G10: mode switched away while the judge was in flight → human, verdict discarded', async () => {
+    enableAutoMode()
+    let releaseJudge: (v: unknown) => void = () => {}
+    mockPrompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseJudge = resolve
+        })
+    )
+    feedPermissionAsked('bash', 'per_mode_switch')
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_mode_switch', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    // The user leaves auto mode mid-flight, then the judge answers ALLOW.
+    await session.setPermissionMode('default')
+    releaseJudge({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    // The stale ALLOW must NOT auto-approve anything.
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('G10: mode unchanged → the verdict is applied as usual', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_mode_same')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mode_same', 'once'))
     session.dispose()
   })
 

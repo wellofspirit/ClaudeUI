@@ -307,6 +307,9 @@ function handleOwnEvent(
         toolUseId: tool?.callID,
         toolName: permission,
         input,
+        // Carried through for the auto-mode ask-rule precedence check (G9) —
+        // the classifier must never auto-approve what a user rule says to ask.
+        ...(patterns && patterns.length > 0 ? { patterns } : {}),
         ...(suggestion ? { suggestions: [suggestion] } : {})
       }
       return { kind: 'approval', approval }
@@ -640,12 +643,16 @@ function handleChildEvent(
       const tool = props.tool as { messageID?: string; callID?: string } | undefined
       if (!id || !permission) return { kind: 'ignore' }
 
+      const childPatterns = props.patterns as string[] | undefined
       const approval: import('../../shared/types').PendingApproval = {
         requestId: id,
         // Child tool's own callID — see note 1 above.
         toolUseId: tool?.callID,
         toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {}
+        input: (props.metadata as Record<string, unknown>) ?? {},
+        // Carried for the auto-mode ask-rule precedence check (G9); a child ask
+        // reaches handleAutoModeApproval on the same path as an own-session one.
+        ...(childPatterns && childPatterns.length > 0 ? { patterns: childPatterns } : {})
         // No `suggestions` — see note 2 above.
       }
       return { kind: 'approval', approval }
