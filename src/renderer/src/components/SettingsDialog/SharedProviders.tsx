@@ -5,8 +5,27 @@ import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
   SharedProviderModel,
+  SharedProviderRouteDiagnosis,
   SharedProviderStatus
 } from '../../../../shared/shared-provider'
+
+/**
+ * Explain an enabled-but-empty route, and say where to fix it. Each string names
+ * the cause first so the reason is legible even when truncated.
+ */
+function routeDiagnosisText(
+  harness: ConfigurableHarnessId,
+  diagnosis: SharedProviderRouteDiagnosis
+): string {
+  switch (diagnosis) {
+    case 'provider-disabled':
+      return `— disabled in ${harness}; enable it under ${harness} · Providers`
+    case 'models-restricted':
+      return `— every model is filtered out; adjust the allowlist under ${harness} · Providers`
+    case 'no-models-discovered':
+      return `— ${harness} reported no models; check it is installed and reachable`
+  }
+}
 
 const harnesses: ConfigurableHarnessId[] = ['pi', 'opencode']
 const blank = (): SharedProviderDefinition => ({
@@ -336,6 +355,19 @@ function ProviderCard({
                 {routeStatus?.error ??
                   `${routeStatus?.delivered ? 'delivered' : 'not delivered'} · ${routeStatus?.modelCount ?? 0} models`}
               </span>
+              {/* A bare "0 models" is what made a real failure opaque: the
+                  credential was delivered fine, but the engine's own provider veto
+                  hid it. Name the cause AND the fix. */}
+              {routeStatus?.diagnosis && !routeStatus.error && (
+                <span
+                  data-testid="SharedProviderCard.routeDiagnosis"
+                  data-harness={h}
+                  data-diagnosis={routeStatus.diagnosis}
+                  className="text-[10px] text-yellow-400/90"
+                >
+                  {routeDiagnosisText(h, routeStatus.diagnosis)}
+                </span>
+              )}
             </label>
             {route.enabled && (
               <div className="mt-1">

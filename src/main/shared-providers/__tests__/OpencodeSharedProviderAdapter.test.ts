@@ -41,7 +41,10 @@ function compiledProvider() {
   }
 }
 
-function setup(current: NativeOpencodeFields = {}) {
+function setup(
+  current: NativeOpencodeFields = {},
+  modelAllowlist: Record<string, string[]> = {}
+) {
   const writeConfig = vi.fn<(settings: NativeOpencodeFields) => void>()
   const invalidateModelCache = vi.fn()
   const authTarget: OpencodeSharedProviderAuthTarget = {
@@ -54,7 +57,8 @@ function setup(current: NativeOpencodeFields = {}) {
       readConfig: () => current,
       writeConfig,
       authTarget,
-      invalidateModelCache
+      invalidateModelCache,
+      readModelAllowlist: () => modelAllowlist
     }),
     writeConfig,
     authTarget,
@@ -259,5 +263,62 @@ describe('OpencodeSharedProviderAdapter', () => {
     expect(authTarget.setVendorApiKey).toHaveBeenCalledWith('local-api', 'secret')
     expect(authTarget.removeVendorAuth).toHaveBeenCalledWith('local-api')
     expect(invalidateModelCache).toHaveBeenCalledTimes(2)
+  })
+
+  describe('diagnoseZeroModels', () => {
+    // Both causes collapse to the same observable upstream — the provider simply
+    // has no group in opencode's reported catalog — so only opencode's own config
+    // can tell them apart. Getting the WRONG cause here is worse than none: it
+    // would point the user at a setting that is already correct.
+
+    it("names opencode's disabled_providers veto, keyed by the route provider id", () => {
+      // chatgpt routes to opencode as 'openai', not as 'chatgpt'.
+      const { adapter } = setup({ disabledProviders: ['openai'] })
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('provider-disabled')
+    })
+
+    it('names an emptied model allowlist', () => {
+      const { adapter } = setup({}, { openai: [] })
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('models-restricted')
+    })
+
+    it('prefers the veto when the provider is BOTH disabled and fully filtered', () => {
+      // Reporting the allowlist first would send the user to fix a setting that
+      // changes nothing while the veto still hides the provider.
+      const { adapter } = setup({ disabledProviders: ['openai'] }, { openai: [] })
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('provider-disabled')
+    })
+
+    it('does not treat a NON-empty allowlist as the cause', () => {
+      const { adapter } = setup({}, { openai: ['gpt-5.5'] })
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('no-models-discovered')
+    })
+
+    it('falls back to no-models-discovered with nothing configured', () => {
+      const { adapter } = setup()
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('no-models-discovered')
+    })
+
+    it('ignores a veto on a DIFFERENT provider id', () => {
+      const { adapter } = setup({ disabledProviders: ['anthropic', 'openrouter'] })
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('no-models-discovered')
+    })
+
+    it('falls back rather than throwing when the config is unreadable', () => {
+      const adapter = new OpencodeSharedProviderAdapter({
+        readConfig: () => {
+          throw new Error('unparseable jsonc')
+        },
+        writeConfig: vi.fn(),
+        authTarget: {
+          setVendorApiKey: vi.fn(async () => {}),
+          feedOauthCredential: vi.fn(async () => {}),
+          removeVendorAuth: vi.fn(async () => {})
+        },
+        invalidateModelCache: vi.fn(),
+        readModelAllowlist: () => ({})
+      })
+      expect(adapter.diagnoseZeroModels(chatgpt)).toBe('no-models-discovered')
+    })
   })
 })

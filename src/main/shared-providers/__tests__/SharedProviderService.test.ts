@@ -61,6 +61,7 @@ function setup(
     removeCredential: vi.fn(async () => events.push('opencode:remove-cred')),
     hasCredential: vi.fn(async () => false),
     hasDefinition: vi.fn(() => true),
+    diagnoseZeroModels: vi.fn(() => 'provider-disabled' as const),
     resolveDefaultModel: vi.fn((definition) =>
       definition.routes.opencode.enabled && definition.routes.opencode.defaultModel
         ? { providerId: 'local-api', modelId: definition.routes.opencode.defaultModel }
@@ -474,4 +475,81 @@ describe('SharedProviderService', () => {
     })
   })
 
+  describe('zero-model diagnosis', () => {
+    // A bare "delivered · 0 models" is what made the ChatGPT/opencode failure
+    // opaque: the credential was vended correctly, opencode's disabled_providers
+    // hid the provider, and the status had nothing to say about it.
+
+    it('asks the opencode adapter why an enabled route is empty', async () => {
+      const { service, opencode } = setup([chatgpt()])
+
+      const status = await service.getStatus('chatgpt')
+
+      expect(status.routes.opencode.modelCount).toBe(0)
+      expect(status.routes.opencode.diagnosis).toBe('provider-disabled')
+      expect(opencode.diagnoseZeroModels).toHaveBeenCalled()
+    })
+
+    it('reports no-models-discovered for pi, which has no veto or allowlist', async () => {
+      const { service } = setup([chatgpt()])
+      const status = await service.getStatus('chatgpt')
+      expect(status.routes.pi.diagnosis).toBe('no-models-discovered')
+    })
+
+    it('does not diagnose a route that actually has models', async () => {
+      const catalog = [
+        {
+          id: 'gpt-test',
+          harnessOverrides: { pi: { available: true }, opencode: { available: true } }
+        }
+      ]
+      const { service } = setup([chatgpt()], catalog)
+
+      const status = await service.getStatus('chatgpt')
+
+      expect(status.routes.opencode.modelCount).toBe(1)
+      expect(status.routes.opencode.diagnosis).toBeUndefined()
+      expect(status.routes.pi.diagnosis).toBeUndefined()
+    })
+
+    it('does not diagnose a route that is switched off', async () => {
+      const definition = chatgpt()
+      definition.routes.opencode.enabled = false
+      const { service } = setup([definition])
+
+      const status = await service.getStatus('chatgpt')
+
+      // Empty by intent — a cause would imply something is wrong.
+      expect(status.routes.opencode.diagnosis).toBeUndefined()
+    })
+
+    it('lets a real error win over a diagnosis on the same route', async () => {
+      // An operation that FAILED must not have its message competing with a
+      // configuration cause. Drive a genuine delivery failure: feedAll reports
+      // opencode false, which syncChatgpt records as a route error.
+      const { service, credentials, credentialSync } = setup([chatgpt()])
+      credentials.set('chatgpt', { type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+      credentialSync.feedAll.mockResolvedValueOnce({ pi: true, opencode: false })
+
+      await service.syncProvider('chatgpt')
+      const status = await service.getStatus('chatgpt')
+
+      expect(status.routes.opencode.error).toBe('Credential delivery failed')
+      expect(status.routes.opencode.diagnosis).toBeUndefined()
+      // pi delivered fine, so it still gets its (empty-catalog) diagnosis.
+      expect(status.routes.pi.error).toBeUndefined()
+      expect(status.routes.pi.diagnosis).toBe('no-models-discovered')
+    })
+
+    it('falls back to no-models-discovered when the adapter throws', async () => {
+      const { service, opencode } = setup([chatgpt()])
+      opencode.diagnoseZeroModels = vi.fn(() => {
+        throw new Error('config unreadable')
+      })
+
+      const status = await service.getStatus('chatgpt')
+
+      expect(status.routes.opencode.diagnosis).toBe('no-models-discovered')
+    })
+  })
 })

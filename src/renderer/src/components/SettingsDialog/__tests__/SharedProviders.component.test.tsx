@@ -172,4 +172,69 @@ describe('SharedProviders', () => {
     fireEvent.click(deleteButton)
     await waitFor(() => expect(api.removeSharedProvider).toHaveBeenCalledWith('local'))
   })
+
+  describe('zero-model diagnosis', () => {
+    /**
+     * The failure this exists for: ChatGPT's credential was delivered to opencode
+     * correctly, opencode's own disabled_providers hid the provider, and the card
+     * said only "delivered · 0 models" — true, and useless.
+     */
+    const withDiagnosis = (
+      diagnosis: 'provider-disabled' | 'models-restricted' | 'no-models-discovered'
+    ): SharedProviderStatus => ({
+      id: 'chatgpt',
+      connected: true,
+      routes: {
+        pi: { enabled: true, delivered: true, modelCount: 7 },
+        opencode: { enabled: true, delivered: true, modelCount: 0, diagnosis }
+      }
+    })
+
+    const diagnosisNode = (): HTMLElement | null =>
+      document.querySelector(
+        '[data-testid="SharedProviderCard.routeDiagnosis"][data-harness="opencode"]'
+      )
+
+    it("explains a provider disabled in opencode, and says where to fix it", async () => {
+      api.getSharedProviderStatuses.mockResolvedValue([withDiagnosis('provider-disabled')])
+      render(<SharedProviders />)
+      await waitFor(() => expect(diagnosisNode()).not.toBeNull())
+
+      const node = diagnosisNode()!
+      expect(node.getAttribute('data-diagnosis')).toBe('provider-disabled')
+      expect(node.textContent).toMatch(/disabled in opencode/i)
+      // Naming the cause without the remedy still leaves the user stuck.
+      expect(node.textContent).toMatch(/Providers/)
+    })
+
+    it('explains a fully-filtered model allowlist', async () => {
+      api.getSharedProviderStatuses.mockResolvedValue([withDiagnosis('models-restricted')])
+      render(<SharedProviders />)
+      await waitFor(() => expect(diagnosisNode()).not.toBeNull())
+      expect(diagnosisNode()!.textContent).toMatch(/filtered out/i)
+    })
+
+    it('explains an engine that reported nothing', async () => {
+      api.getSharedProviderStatuses.mockResolvedValue([withDiagnosis('no-models-discovered')])
+      render(<SharedProviders />)
+      await waitFor(() => expect(diagnosisNode()).not.toBeNull())
+      expect(diagnosisNode()!.textContent).toMatch(/reported no models/i)
+    })
+
+    it('shows nothing extra for a healthy route', async () => {
+      api.getSharedProviderStatuses.mockResolvedValue([
+        {
+          id: 'chatgpt',
+          connected: true,
+          routes: {
+            pi: { enabled: true, delivered: true, modelCount: 7 },
+            opencode: { enabled: true, delivered: true, modelCount: 13 }
+          }
+        } as SharedProviderStatus
+      ])
+      render(<SharedProviders />)
+      await waitFor(() => expect(screen.getByTestId('SharedProviderCard')).toBeInTheDocument())
+      expect(diagnosisNode()).toBeNull()
+    })
+  })
 })

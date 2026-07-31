@@ -6,8 +6,13 @@ import {
   type NativeOpencodeFields
 } from '../opencode/opencode-config'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
+import { loadEngineConfig } from '../services/ui-config'
 import type { OpencodeProviderSettings } from '../../shared/types'
-import type { SharedProviderDefinition, SharedProviderModel } from '../../shared/shared-provider'
+import type {
+  SharedProviderDefinition,
+  SharedProviderModel,
+  SharedProviderRouteDiagnosis
+} from '../../shared/shared-provider'
 
 export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
@@ -21,6 +26,8 @@ export interface OpencodeSharedProviderAdapterDeps {
   writeConfig?: (settings: NativeOpencodeFields) => void
   authTarget?: OpencodeSharedProviderAuthTarget
   invalidateModelCache?: () => void
+  /** ClaudeUI's per-provider model allowlist, for zero-model diagnosis. */
+  readModelAllowlist?: () => Record<string, string[]>
 }
 
 export interface ApplyOpencodeSharedProviderInput {
@@ -40,12 +47,39 @@ export class OpencodeSharedProviderAdapter {
   private readonly writeConfig: (settings: NativeOpencodeFields) => void
   private readonly authTarget: OpencodeSharedProviderAuthTarget
   private readonly invalidateModelCache: () => void
+  private readonly readModelAllowlist: () => Record<string, string[]>
 
   constructor(deps: OpencodeSharedProviderAdapterDeps = {}) {
     this.readConfig = deps.readConfig ?? readOpencodeNativeConfig
     this.writeConfig = deps.writeConfig ?? writeOpencodeNativeConfig
     this.authTarget = deps.authTarget ?? opencodeAuthProvider
     this.invalidateModelCache = deps.invalidateModelCache ?? invalidateOpencodeModelCache
+    this.readModelAllowlist =
+      deps.readModelAllowlist ??
+      (() => loadEngineConfig('opencode').opencodeConfig?.modelAllowlist ?? {})
+  }
+
+  /**
+   * Why this route surfaces zero models despite being enabled and credentialed.
+   *
+   * Both causes collapse to the same observable at the aggregate layer — the
+   * provider simply has no group in opencode's reported catalog — so they can
+   * only be told apart from opencode's own config. `disabled_providers` is
+   * reported first: it is the more fundamental veto (fixing the allowlist alone
+   * would change nothing) and the easier one to leave set by accident.
+   */
+  diagnoseZeroModels(definition: SharedProviderDefinition): SharedProviderRouteDiagnosis {
+    const providerId = opencodeProviderId(definition)
+    try {
+      if ((this.readConfig().disabledProviders ?? []).includes(providerId)) {
+        return 'provider-disabled'
+      }
+      const allowed = this.readModelAllowlist()[providerId]
+      if (allowed !== undefined && allowed.length === 0) return 'models-restricted'
+    } catch {
+      // opencode's config is optional — fall through to the generic cause.
+    }
+    return 'no-models-discovered'
   }
 
   inspectCollision(definition: SharedProviderDefinition): boolean {
