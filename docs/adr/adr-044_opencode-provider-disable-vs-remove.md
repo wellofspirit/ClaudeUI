@@ -122,6 +122,24 @@ The claim is decorated at the IPC boundary, not in discovery — `shared-provide
 → `OpencodeSharedProviderAdapter` → `model-discovery` means a shared-provider
 import inside discovery would be a cycle.
 
+### 6. An enabled-but-empty route explains itself
+
+`SharedProviderStatus.routes[route]` gained a `diagnosis`, set only when a route is
+enabled, un-errored, and reports zero models: `provider-disabled` (the engine's
+native veto), `models-restricted` (an allowlist filters everything out), or
+`no-models-discovered`. A bare `delivered · 0 models` is what made this failure
+opaque — the credential was vended correctly and the status had nothing to say
+about the cause.
+
+`diagnosis` is deliberately NOT folded into `error`: an error means an operation
+failed, a diagnosis is a healthy route with a configuration reason for being
+empty. Both opencode causes collapse to the same observable upstream (no group in
+the reported catalog), so only opencode's own config distinguishes them, and the
+veto is reported first — fixing an allowlist while the veto still hides the
+provider changes nothing, and pointing the user at an already-correct setting is
+worse than saying nothing. pi has neither concept, so its empty routes can only
+report `no-models-discovered`. The card renders cause AND remedy.
+
 ## Consequences
 
 - Removal is honest and narrowly scoped; the veto can no longer outlive its
