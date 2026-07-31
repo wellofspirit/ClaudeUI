@@ -195,6 +195,10 @@ const api: ClaudeAPI = {
   getModels: () => ipcRenderer.invoke('session:get-models'),
   getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
+  setOpencodeProviderDisabled: (providerId: string, disabled: boolean) =>
+    ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
+  removeOpencodeProvider: (providerId, kind) =>
+    ipcRenderer.invoke('session:remove-opencode-provider', providerId, kind),
   getOpencodeProviderModels: (providerId: string) =>
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
   getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),

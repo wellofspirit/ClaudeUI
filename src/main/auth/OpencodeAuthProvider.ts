@@ -14,9 +14,11 @@
  * Degrades to {} on any failure — opencode is optional.
  */
 
-import os from 'os'
-import path from 'path'
 import fs from 'fs'
+import {
+  resolveOpencodeAuthJsonPath,
+  readOpencodeCredentialTypes
+} from '../opencode/auth-store'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
@@ -28,17 +30,9 @@ import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
 
-/**
- * opencode's auth store: `<dataDir>/auth.json`, where the data dir mirrors
- * opencode's own resolution — `$XDG_DATA_HOME/opencode`, falling back to
- * `~/.local/share/opencode` (opencode uses XDG paths even on Windows; same
- * resolution as resolveOpencodeDbPath in services/opencode-session-list.ts).
- * Env is read at call time so tests can point it at a temp dir.
- */
-function resolveOpencodeAuthJsonPath(): string {
-  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
-  return path.join(dataHome, 'opencode', 'auth.json')
-}
+// Path resolution + the credential-type read live in opencode/auth-store.ts so
+// model-discovery can consult them for row-action availability without importing
+// this module (which would cycle: this file imports invalidateOpencodeModelCache).
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -201,21 +195,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    * Missing or unparseable file → {} (opencode optional).
    */
   async listVendorCredentialIds(): Promise<Record<string, 'api' | 'oauth'>> {
-    try {
-      const raw = await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
-      const parsed: unknown = JSON.parse(raw)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-      const out: Record<string, 'api' | 'oauth'> = {}
-      for (const [vendorId, entry] of Object.entries(parsed)) {
-        if (typeof entry !== 'object' || entry === null) continue
-        // opencode auth entry types: 'api' | 'oauth' | 'wellknown'. Anything
-        // non-oauth is reported as 'api' (a stored secret of some kind).
-        out[vendorId] = (entry as { type?: unknown }).type === 'oauth' ? 'oauth' : 'api'
-      }
-      return out
-    } catch {
-      return {}
-    }
+    return readOpencodeCredentialTypes()
   }
 
   async oauthAuthorize(

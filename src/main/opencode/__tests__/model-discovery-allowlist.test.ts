@@ -32,7 +32,15 @@ vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineCon
 // ~/.config/opencode/opencode.json(c).
 vi.mock('../opencode-config', () => ({
   readOpencodeNativeConfig: () => ({}),
-  readDeclaredProviderIds: () => []
+  readDeclaredProviderIds: () => [],
+  resolveOpencodeConfigFile: () => ({ path: '/cfg/opencode.jsonc', existed: true })
+}))
+// Hermetic for the same reason: row-action availability reads opencode's auth.json
+// to decide whether Remove is offered, which would otherwise be the developer's
+// real credential store.
+vi.mock('../auth-store', () => ({
+  readOpencodeCredentialTypes: async () => ({}),
+  resolveOpencodeAuthJsonPath: () => '/data/opencode/auth.json'
 }))
 
 import {

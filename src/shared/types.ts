@@ -427,6 +427,32 @@ export interface OpencodeNativeRaw {
  * (getOpencodeProviderModels) so this list stays cheap even with hundreds of
  * models per provider.
  */
+/** opencode's own provenance label for a configured provider (`/config/providers`). */
+export type OpencodeProviderSource = 'env' | 'config' | 'custom' | 'api'
+
+/** What Remove would actually destroy. `null` when Remove is unavailable. */
+export type ProviderRemoveKind = 'credential' | 'declaration' | 'both'
+
+/**
+ * Which actions the opencode provider row may offer for one provider. Computed
+ * in main by `resolveProviderActions` (see main/opencode/provider-actions.ts for
+ * the full rationale) and carried to the renderer so the row never re-derives it.
+ *
+ * Note the absence of a `canDisable`: Disable is ALWAYS available, because
+ * `disabled_providers` is the one veto that works against every way opencode can
+ * derive a provider into existence.
+ */
+export interface ProviderActions {
+  /** Every non-free provider — the generic /auth path accepts a plain key. */
+  canSetCredential: boolean
+  /** Only a declaration in the single global config file ClaudeUI writes. */
+  canEditDeclaration: boolean
+  canRemove: boolean
+  removeKind: ProviderRemoveKind | null
+  /** Present iff `!canRemove` — tooltip for the greyed trash icon. */
+  blockedReason?: string
+}
+
 export interface OpencodeProviderCatalogEntry {
   id: string
   name: string
@@ -444,6 +470,33 @@ export interface OpencodeProviderCatalogEntry {
   authMethods: ('api' | 'oauth')[]
   /** Number of models the provider exposes in the catalog (for the picker hint). */
   modelCount: number
+  /**
+   * True when the id sits in opencode's `disabled_providers`. Disabled providers
+   * still belong in the "Added providers" list (rendered in a disabled state);
+   * they are NOT addable rows. opencode omits them from GET /provider entirely,
+   * so these entries are re-synthesized — see discoverOpencodeProviderCatalog.
+   */
+  disabled: boolean
+  /**
+   * opencode's own provenance label from /config/providers ('env' | 'config' |
+   * 'custom' | 'api'), absent for providers that aren't currently configured.
+   *
+   * Used for MESSAGE WORDING ONLY — never to decide which actions are offered
+   * (see provider-actions.ts). Read from /config/providers and never from
+   * /provider, whose `all` hardcodes source:'custom' for unconnected entries.
+   */
+  source?: OpencodeProviderSource
+  /** Env var names opencode reads a key from, for the blocked-removal tooltip. */
+  envVarNames?: string[]
+  /** Which row actions are legitimately available. See provider-actions.ts. */
+  actions: ProviderActions
+  /**
+   * Set when an ENABLED shared-provider route vends this vendor id (today
+   * `chatgpt` → `openai`). Removing such a credential is undone by the vault's
+   * next feed, so the row must warn and offer to disable the route instead.
+   * Decorated at the IPC boundary, not in discovery (import-cycle avoidance).
+   */
+  sharedProviderClaim?: { id: string; name: string }
 }
 
 /** A single catalog model for the per-provider model-allowlist dialog. */
@@ -912,6 +965,14 @@ interface SessionAPI {
   /** Full opencode provider catalog (~146 providers) for the settings provider manager.
    *  Returns [] when opencode isn't installed or discovery fails. */
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
+  /** Toggle opencode's `disabled_providers` veto. Reversible; destroys nothing. */
+  setOpencodeProviderDisabled(providerId: string, disabled: boolean): Promise<void>
+  /**
+   * Destructive: deletes the credential and/or provider declaration ClaudeUI owns,
+   * then clears the id from `disabled_providers` and the model allowlist. Pass the
+   * `removeKind` from the entry's resolved `actions` — never a widened value.
+   */
+  removeOpencodeProvider(providerId: string, kind: ProviderRemoveKind): Promise<void>
   /** All catalog models for a single opencode provider (for the model-allowlist dialog). */
   getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]>
   /** Unfiltered authenticated pi catalog for the model-allowlist dialog. */

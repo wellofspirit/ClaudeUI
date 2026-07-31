@@ -11,9 +11,14 @@
  * id from disabledProviders) became unreachable because the row never showed up
  * to click "Add" on again.
  *
- * The fix re-synthesizes a minimal addable catalog entry for every disabled id
- * that's missing from `all` and not a user-declared custom provider (those
- * belong to the Custom providers editor, not this catalog).
+ * The fix re-synthesizes a catalog entry for every disabled id missing from
+ * `all`, flagged `disabled: true`, so the merged provider list can render it with
+ * an Enable action.
+ *
+ * Declared providers are now INCLUDED in that synthesis (they were excluded when
+ * declarations lived in a separate "Custom providers" section — see the reversed
+ * contract test below). Each entry also carries its resolved row actions, so the
+ * Disable/Remove split is asserted here at the discovery boundary.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -26,13 +31,15 @@ const {
   mockRelease,
   MockOpencodeClient,
   mockReadOpencodeNativeConfig,
-  mockReadDeclaredProviderIds
+  mockReadDeclaredProviderIds,
+  mockCredentialTypes
 } = vi.hoisted(() => ({
   mockAcquire: vi.fn(),
   mockRelease: vi.fn(),
   MockOpencodeClient: vi.fn(),
   mockReadOpencodeNativeConfig: vi.fn(),
-  mockReadDeclaredProviderIds: vi.fn()
+  mockReadDeclaredProviderIds: vi.fn(),
+  mockCredentialTypes: vi.fn<() => Record<string, 'api' | 'oauth'>>(() => ({}))
 }))
 
 vi.mock('../OpencodeServerManager', () => ({
@@ -62,7 +69,18 @@ vi.mock('../../services/ui-config', () => ({
 // readOpencodeNativeConfig().providers (single resolved file only).
 vi.mock('../opencode-config', () => ({
   readOpencodeNativeConfig: mockReadOpencodeNativeConfig,
-  readDeclaredProviderIds: mockReadDeclaredProviderIds
+  readDeclaredProviderIds: mockReadDeclaredProviderIds,
+  // Row-action availability names the OTHER global config file in its
+  // blocked-removal message; stubbed so the message is deterministic.
+  resolveOpencodeConfigFile: () => ({ path: '/cfg/opencode.jsonc', existed: true })
+}))
+
+// Hermetic: readProviderOwnership consults opencode's auth.json to decide whether
+// Remove is available. Unmocked, this would read the DEVELOPER's real credential
+// store and make action assertions machine-dependent.
+vi.mock('../auth-store', () => ({
+  readOpencodeCredentialTypes: async () => mockCredentialTypes(),
+  resolveOpencodeAuthJsonPath: () => '/data/opencode/auth.json'
 }))
 
 // ---------------------------------------------------------------------------
@@ -142,6 +160,8 @@ function setupMocks(disabledProviders: string[], declaredProviderIds: string[] =
   MockOpencodeClient.mockReset()
   mockReadOpencodeNativeConfig.mockReset()
   mockReadDeclaredProviderIds.mockReset()
+  mockCredentialTypes.mockReset()
+  mockCredentialTypes.mockReturnValue({})
 
   mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
   mockRelease.mockReturnValue(undefined)
@@ -187,32 +207,71 @@ describe('model-discovery — disabled provider re-add (Add provider list)', () 
     expect(zen!.modelCount).toBe(0)
   })
 
-  it('does NOT synthesize an entry for a disabled id declared as a custom provider', async () => {
-    // Declared ids come from readDeclaredProviderIds (the both-files union) —
-    // config-declared custom providers (e.g. a local llamacpp) belong to the
-    // Custom providers editor, never the vendor Add list.
+  it('DOES synthesize an entry for a disabled id declared as a custom provider', async () => {
+    // CONTRACT REVERSED, deliberately. This previously asserted the opposite:
+    // declared providers were excluded because they lived in a separate "Custom
+    // providers" settings section, so a synthetic entry here would have been a
+    // duplicate row.
+    //
+    // The two surfaces are now ONE merged provider list, which makes exclusion
+    // the bug: a declared+disabled provider would render NOWHERE, silently
+    // ignored by opencode with nothing in the UI saying so. Live repro that
+    // motivated the merge — 'qwen-sandbox', declared in opencode.jsonc AND in
+    // disabled_providers, invisible in both old sections.
     setupMocks(['openai', 'llamacpp'], ['llamacpp'])
     const catalog = await discoverOpencodeProviderCatalog()
-    expect(catalog.find((p) => p.id === 'llamacpp')).toBeUndefined()
-    // openai (not declared) is still synthesized.
+
+    const llamacpp = catalog.find((p) => p.id === 'llamacpp')
+    expect(llamacpp).toBeDefined()
+    expect(llamacpp!.disabled).toBe(true)
     expect(catalog.find((p) => p.id === 'openai')).toBeDefined()
   })
 
-  it('split-layout regression: honours declarations from the OTHER global config file', async () => {
-    // Real-world layout that broke the guard: opencode.jsonc holds
-    // disabled_providers (ClaudeUI's resolved write target), while opencode.json
-    // holds the custom `provider` map. readOpencodeNativeConfig() therefore
-    // reports NO providers — only the readDeclaredProviderIds union sees
-    // llamacpp. It must still be excluded from synthesis; openai must not be.
-    setupMocks(['llamacpp', 'openai'], ['llamacpp'])
-    // Explicitly assert the single-file read carries no provider declarations
-    // (that's what makes this the split-layout case).
-    expect(mockReadOpencodeNativeConfig()).toEqual({
-      disabledProviders: ['llamacpp', 'openai']
+  it('carries a declared provider\'s display name onto its disabled entry', async () => {
+    // GET /provider omits disabled ids, so the catalog cannot supply a name. The
+    // declaration can — falling back to the bare id only when it has none.
+    setupMocks(['mine'], ['mine'])
+    mockReadOpencodeNativeConfig.mockReturnValue({
+      disabledProviders: ['mine'],
+      providers: { mine: { name: 'My Local Endpoint', baseURL: 'http://localhost:11434/v1' } }
     })
     const catalog = await discoverOpencodeProviderCatalog()
-    expect(catalog.find((p) => p.id === 'llamacpp')).toBeUndefined()
-    expect(catalog.find((p) => p.id === 'openai')).toBeDefined()
+    expect(catalog.find((p) => p.id === 'mine')!.name).toBe('My Local Endpoint')
+  })
+
+  it('split-layout: a declaration in the OTHER global file is synthesized but not removable', async () => {
+    // Real-world layout: opencode.jsonc holds disabled_providers (ClaudeUI's
+    // resolved write target) while opencode.json holds the `provider` map, so
+    // readOpencodeNativeConfig() reports NO providers and only the both-files
+    // union sees llamacpp.
+    //
+    // It must still appear (the merged list shows every disabled provider), but
+    // Remove must be BLOCKED — ClaudeUI's writer only touches the resolved file,
+    // so deleting that declaration is not ours to do. This is the case the
+    // writer itself fails safe on (opencode-config.ts's diff-base note).
+    setupMocks(['llamacpp', 'openai'], ['llamacpp'])
+    const catalog = await discoverOpencodeProviderCatalog()
+
+    const llamacpp = catalog.find((p) => p.id === 'llamacpp')
+    expect(llamacpp).toBeDefined()
+    expect(llamacpp!.actions.canRemove).toBe(false)
+    expect(llamacpp!.actions.canEditDeclaration).toBe(false)
+    expect(llamacpp!.actions.blockedReason).toContain('opencode.json')
+  })
+
+  it('offers credential removal for a disabled provider that still holds a credential', async () => {
+    // The ChatGPT shape exactly: credential in auth.json, id vetoed in
+    // disabled_providers. Remove must be available and must target the
+    // credential — the old UI concluded "nothing to remove" and disabled instead,
+    // which is what stranded the route at 0 models.
+    setupMocks(['openai'])
+    mockCredentialTypes.mockReturnValue({ openai: 'oauth' })
+    const catalog = await discoverOpencodeProviderCatalog()
+
+    const openai = catalog.find((p) => p.id === 'openai')!
+    expect(openai.disabled).toBe(true)
+    expect(openai.actions.canRemove).toBe(true)
+    expect(openai.actions.removeKind).toBe('credential')
   })
 
   it('does not duplicate an entry when the disabled id is still present in `all`', async () => {

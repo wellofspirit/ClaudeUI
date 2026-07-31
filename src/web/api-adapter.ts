@@ -313,6 +313,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:get-opencode-providers') as ReturnType<
         ClaudeAPI['getOpencodeProviders']
       >,
+    setOpencodeProviderDisabled: (providerId, disabled) =>
+      connection.invoke(
+        'session:set-opencode-provider-disabled',
+        providerId,
+        disabled
+      ) as ReturnType<ClaudeAPI['setOpencodeProviderDisabled']>,
+    removeOpencodeProvider: (providerId, kind) =>
+      connection.invoke('session:remove-opencode-provider', providerId, kind) as ReturnType<
+        ClaudeAPI['removeOpencodeProvider']
+      >,
     getOpencodeProviderModels: (providerId) =>
       connection.invoke('session:get-opencode-provider-models', providerId) as ReturnType<
         ClaudeAPI['getOpencodeProviderModels']

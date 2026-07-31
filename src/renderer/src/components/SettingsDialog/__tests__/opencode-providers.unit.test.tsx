@@ -1,25 +1,35 @@
 /**
- * Unit tests for the opencode Providers section render/save behaviour.
+ * Unit tests for the opencode provider configuration dialog
+ * (OpencodeProviderConfigModal) — declaration render/save behaviour.
  *
- * Guards the _key / _id decoupling fix:
+ * SURFACE MOVED, CONTRACT KEPT. These behaviours were previously guarded against
+ * the "Custom providers" settings section, which no longer exists: custom
+ * declarations now live in the single Providers list and are edited through this
+ * dialog. Every guard below is carried over deliberately —
+ *
  *  - Typing a multi-character provider id keeps focus (the id <input> stays the
  *    SAME DOM node across keystrokes — no remount from a changing React key).
- *  - A row with an empty provider id is skipped on save (providers → undefined).
- *  - Editing a provider's id does not drop its model-text (model text is keyed
- *    by the stable _key, not the editable id).
+ *  - A blank provider id is skipped on save (providers → undefined).
+ *  - Renaming a provider id moves its models to the new key and drops the old.
+ *  - An unmodelled field (npm) survives editing a modelled one (ADR-031 leaf
+ *    merge — the projection is lossy, so a round-trip must not clobber).
+ *  - API keys go to opencode's own auth.json via vendor-auth:set-key and NEVER
+ *    into the opencode.json settings payload (ADR-028).
+ *  - A shared-provider-managed declaration is read-only, because the shared
+ *    provider compiles it and would overwrite edits on its next sync.
  *
- * Also covers the per-row API key affordance (custom providers can now have an
- * API key attached, ADR-028: the key is written to opencode's own auth.json via
- * vendor-auth:set-key, NEVER into the opencode.json settings payload).
- *
- * Updated: now mocks loadOpencodeSettings/saveOpencodeSettings (not engine-config).
+ * New here: the dialog splices into the FULL providers record, so a declaration
+ * it never loaded is not dropped — the old editor rebuilt the whole record from
+ * its own row list.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
-import { SECTIONS } from '../settings-sections'
-import type { OpencodeConfigSettings, EngineModelGroup } from '../../../../../shared/types'
+import { OpencodeProviderConfigModal } from '../settings-sections'
+import type { OpencodeConfigSettings } from '../../../../../shared/types'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
+
+const URL_PLACEHOLDER = 'http://localhost:11434/v1'
 
 // ── window.api stub ──────────────────────────────────────────────────
 let savedConfigs: OpencodeConfigSettings[] = []
@@ -29,8 +39,7 @@ const saveOpencodeSettings = vi.fn(async (cfg: OpencodeConfigSettings) => {
 
 // Mutable "auth.json" stand-in — vendorAuthSetKey/vendorAuthRemove mutate it,
 // vendorAuthListKeys reads it back (ids + credential kind only, never keys).
-// Mirrors the real read path: OpencodeAuthProvider.listVendorCredentialIds
-// peeks at opencode's own auth.json file directly.
+// Mirrors the real read path: opencode/auth-store peeks at auth.json directly.
 let credIdState: Record<string, 'api' | 'oauth'> = {}
 const vendorAuthListKeys = vi.fn(async () => structuredClone(credIdState))
 const vendorAuthSetKey = vi.fn(async (_engineId: string, vendorId: string, _key: string) => {
@@ -42,18 +51,9 @@ const vendorAuthRemove = vi.fn(async (_engineId: string, vendorId: string) => {
   credIdState = next
 })
 
-const OPENCODE_GROUP: EngineModelGroup = {
-  engineId: 'opencode',
-  vendorId: 'anthropic',
-  vendorName: 'Anthropic',
-  // Minimal model so `available = oc.length > 0` and known-provider derivation works.
-  models: [{ value: 'anthropic/claude-sonnet-4-6', displayName: 'Sonnet', description: '' }]
-}
-
 function installApiStub(
   initial: OpencodeConfigSettings,
   opts?: {
-    models?: EngineModelGroup[]
     credIds?: Record<string, 'api' | 'oauth'>
     sharedProviders?: SharedProviderDefinition[]
   }
@@ -62,11 +62,6 @@ function installApiStub(
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     loadOpencodeSettings: vi.fn(async () => structuredClone(initial)),
-    getEngineModels: vi.fn(async () => opts?.models ?? [OPENCODE_GROUP]),
-    // Availability is gated on a deterministic binary-on-disk check, NOT the
-    // model count or the auth probe — so the section stays reachable even with
-    // zero models and never flips on a transient server-spawn failure.
-    engineIsInstalled: vi.fn(async () => true),
     saveOpencodeSettings,
     vendorAuthListKeys,
     vendorAuthSetKey,
@@ -75,23 +70,17 @@ function installApiStub(
   }
 }
 
-function renderProvidersSection(): void {
-  const section = SECTIONS.find((s) => s.id === 'opencode-providers')!
-  const item = section.items[0]
-  const noop = (): void => {}
-  render(
-    item.render(
-      {} as never,
-      noop,
-      {} as never,
-      noop as never,
-      {} as never,
-      noop as never
-    )
-  )
+/** Render the dialog: `null` for the create flow, an id to edit that declaration. */
+async function renderModal(providerId: string | null): Promise<void> {
+  await act(async () => {
+    render(<OpencodeProviderConfigModal providerId={providerId} onClose={() => {}} />)
+  })
 }
 
-describe('opencode Providers section', () => {
+const idInput = (): HTMLInputElement =>
+  screen.getByTestId('OpencodeProviderConfigModal.id') as HTMLInputElement
+
+describe('opencode provider configuration dialog', () => {
   beforeEach(() => {
     savedConfigs = []
     credIdState = {}
@@ -107,93 +96,52 @@ describe('opencode Providers section', () => {
 
   it('typing a multi-character provider id keeps the same input node (no remount → focus retained)', async () => {
     installApiStub({})
-    await act(async () => {
-      renderProvidersSection()
-    })
+    await renderModal(null)
 
-    // Add a provider row.
-    await act(async () => {
-      fireEvent.click(screen.getByText('+ Add provider'))
-    })
+    const input = idInput()
+    input.focus()
+    expect(document.activeElement).toBe(input)
 
-    const idInput = (await screen.findByPlaceholderText(
-      'Provider id (e.g. my-ollama)'
-    )) as HTMLInputElement
-    idInput.focus()
-    expect(document.activeElement).toBe(idInput)
-
-    // Type characters one at a time; the node must remain identical and focused.
     for (const ch of 'ollama') {
-      const prev = idInput.value
+      const prev = input.value
       await act(async () => {
-        fireEvent.change(idInput, { target: { value: prev + ch } })
+        fireEvent.change(input, { target: { value: prev + ch } })
       })
-      // Same DOM node still in the document and still focused.
-      const again = screen.getByPlaceholderText(
-        'Provider id (e.g. my-ollama)'
-      ) as HTMLInputElement
-      expect(again).toBe(idInput)
-      expect(document.activeElement).toBe(idInput)
+      expect(idInput()).toBe(input)
+      expect(document.activeElement).toBe(input)
     }
-    expect(idInput.value).toBe('ollama')
+    expect(input.value).toBe('ollama')
   })
 
-  it('a freshly-added provider shows a blank id field (no UUID leak)', async () => {
+  it('the create flow shows a blank id field (no UUID leak)', async () => {
     installApiStub({})
-    await act(async () => {
-      renderProvidersSection()
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByText('+ Add provider'))
-    })
-    const idInput = (await screen.findByPlaceholderText(
-      'Provider id (e.g. my-ollama)'
-    )) as HTMLInputElement
-    expect(idInput.value).toBe('')
+    await renderModal(null)
+    expect(idInput().value).toBe('')
   })
 
-  it('skips a row with an empty provider id on save (providers stays undefined)', async () => {
+  it('skips a blank provider id on save (providers stays undefined)', async () => {
     installApiStub({})
+    await renderModal(null)
+
     await act(async () => {
-      renderProvidersSection()
-    })
-    // Add a row but leave its id empty; set a base URL so the row has content.
-    await act(async () => {
-      fireEvent.click(screen.getByText('+ Add provider'))
-    })
-    const urlInput = await screen.findByPlaceholderText(
-      'Base URL (e.g. http://localhost:11434/v1)'
-    )
-    await act(async () => {
-      fireEvent.change(urlInput, { target: { value: 'http://localhost:11434/v1' } })
+      fireEvent.change(screen.getByPlaceholderText(URL_PLACEHOLDER), {
+        target: { value: 'http://localhost:11434/v1' }
+      })
     })
 
-    // The most recent save must carry providers: undefined (empty-id row skipped).
     await waitFor(() => expect(saveOpencodeSettings).toHaveBeenCalled())
-    const last = savedConfigs[savedConfigs.length - 1]
-    expect(last.providers).toBeUndefined()
+    expect(savedConfigs[savedConfigs.length - 1].providers).toBeUndefined()
   })
 
-  it('keeps model-text when the provider id is edited (model text keyed by stable _key)', async () => {
-    // Pre-seed a saved provider with one model id.
-    installApiStub({
-      providers: { 'old-id': { models: [{ id: 'llama3.2' }] } }
-    })
+  it('renaming a provider id moves its models to the new key and drops the old', async () => {
+    installApiStub({ providers: { 'old-id': { models: [{ id: 'llama3.2' }] } } })
+    await renderModal('old-id')
+
+    expect(idInput().value).toBe('old-id')
     await act(async () => {
-      renderProvidersSection()
+      fireEvent.change(idInput(), { target: { value: 'new-id' } })
     })
 
-    const idInput = (await screen.findByPlaceholderText(
-      'Provider id (e.g. my-ollama)'
-    )) as HTMLInputElement
-    expect(idInput.value).toBe('old-id')
-
-    // Rename the provider id.
-    await act(async () => {
-      fireEvent.change(idInput, { target: { value: 'new-id' } })
-    })
-
-    // The saved config must key the provider by the new id AND retain its model.
     await waitFor(() => {
       const last = savedConfigs[savedConfigs.length - 1]
       expect(last.providers?.['new-id']?.models).toEqual([{ id: 'llama3.2' }])
@@ -211,25 +159,51 @@ describe('opencode Providers section', () => {
         }
       }
     })
-    await act(async () => {
-      renderProvidersSection()
-    })
+    await renderModal('managed')
 
-    const urlInput = await screen.findByDisplayValue('https://old.example/v1')
     await act(async () => {
-      fireEvent.change(urlInput, { target: { value: 'https://new.example/v1' } })
+      fireEvent.change(await screen.findByDisplayValue('https://old.example/v1'), {
+        target: { value: 'https://new.example/v1' }
+      })
     })
 
     await waitFor(() => {
-      const saved = savedConfigs[savedConfigs.length - 1]
-      expect(saved.providers?.managed).toMatchObject({
+      expect(savedConfigs[savedConfigs.length - 1].providers?.managed).toMatchObject({
         npm: '@ai-sdk/openai-compatible',
         baseURL: 'https://new.example/v1'
       })
     })
   })
 
-  it('renders a shared provider as read-only and keeps native auth controls unavailable', async () => {
+  it('leaves OTHER declarations untouched when saving this one', async () => {
+    // The old editor rebuilt the entire providers record from its own row list, so
+    // anything it had not loaded was dropped. This dialog owns ONE declaration and
+    // must splice into the record it reads.
+    installApiStub({
+      providers: {
+        mine: { baseURL: 'http://a/v1' },
+        untouched: { baseURL: 'http://b/v1', models: [{ id: 'keep-me' }] }
+      }
+    })
+    await renderModal('mine')
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.name'), {
+        target: { value: 'Renamed' }
+      })
+    })
+
+    await waitFor(() => {
+      const last = savedConfigs[savedConfigs.length - 1]
+      expect(last.providers?.mine?.name).toBe('Renamed')
+      expect(last.providers?.untouched).toEqual({
+        baseURL: 'http://b/v1',
+        models: [{ id: 'keep-me' }]
+      })
+    })
+  })
+
+  it('renders a shared-managed declaration as read-only with a pointer to its owner', async () => {
     installApiStub(
       {
         providers: {
@@ -256,88 +230,60 @@ describe('opencode Providers section', () => {
         ]
       }
     )
-    await act(async () => {
-      renderProvidersSection()
-    })
+    await renderModal('shared')
 
-    expect(await screen.findByTestId('OpencodeProvidersSection.managedProvider')).toHaveAttribute(
-      'data-id',
-      'shared'
-    )
-    expect(screen.queryByTestId('OpencodeProvidersSection.removeKey')).not.toBeInTheDocument()
-    expect(screen.queryByPlaceholderText('Provider id (e.g. my-ollama)')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('OpencodeProviderConfigModal.managed')).toBeInTheDocument()
+    expect(screen.getByTestId('OpencodeProviderConfigModal.openShared')).toBeInTheDocument()
+    // No editable form, and no credential controls — the shared provider owns both.
+    expect(screen.queryByTestId('OpencodeProviderConfigModal.id')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('OpencodeProviderConfigModal.removeKey')).not.toBeInTheDocument()
   })
 
-  describe('per-row API key', () => {
-    it('typing a key and clicking Save key calls vendorAuthSetKey with the provider id and key', async () => {
+  describe('API key', () => {
+    /** Create flow with an id typed, which is what enables the key controls. */
+    async function createWithId(id = 'my-ollama'): Promise<void> {
       installApiStub({})
+      await renderModal(null)
       await act(async () => {
-        renderProvidersSection()
+        fireEvent.change(idInput(), { target: { value: id } })
+      })
+    }
+
+    it('typing a key and saving calls vendorAuthSetKey with the provider id and key', async () => {
+      await createWithId()
+      await act(async () => {
+        fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
+          target: { value: 'sk-test-123' }
+        })
       })
       await act(async () => {
-        fireEvent.click(screen.getByText('+ Add provider'))
-      })
-      const idInput = await screen.findByPlaceholderText('Provider id (e.g. my-ollama)')
-      await act(async () => {
-        fireEvent.change(idInput, { target: { value: 'my-ollama' } })
-      })
-      const keyInput = screen.getByTestId('OpencodeProvidersSection.apiKey')
-      await act(async () => {
-        fireEvent.change(keyInput, { target: { value: 'sk-test-123' } })
-      })
-      await act(async () => {
-        fireEvent.click(screen.getByText('Save key'))
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
       })
 
-      await waitFor(() => {
+      await waitFor(() =>
         expect(vendorAuthSetKey).toHaveBeenCalledWith('opencode', 'my-ollama', 'sk-test-123')
-      })
+      )
     })
 
-    it('does not call vendorAuthSetKey when no key is entered, and disables the Save key button', async () => {
-      installApiStub({})
+    it('does not call vendorAuthSetKey with no key entered, and disables the save button', async () => {
+      await createWithId()
+      const saveKey = screen.getByTestId('OpencodeProviderConfigModal.saveKey')
+      expect(saveKey).toBeDisabled()
       await act(async () => {
-        renderProvidersSection()
-      })
-      await act(async () => {
-        fireEvent.click(screen.getByText('+ Add provider'))
-      })
-      const idInput = await screen.findByPlaceholderText('Provider id (e.g. my-ollama)')
-      await act(async () => {
-        fireEvent.change(idInput, { target: { value: 'my-ollama' } })
-      })
-      const urlInput = screen.getByPlaceholderText('Base URL (e.g. http://localhost:11434/v1)')
-      await act(async () => {
-        fireEvent.change(urlInput, { target: { value: 'http://localhost:11434/v1' } })
-      })
-
-      const saveKeyButton = screen.getByText('Save key')
-      expect(saveKeyButton).toBeDisabled()
-
-      await act(async () => {
-        fireEvent.click(saveKeyButton)
+        fireEvent.click(saveKey)
       })
       expect(vendorAuthSetKey).not.toHaveBeenCalled()
     })
 
     it('never includes API key material in the saved opencode settings payload', async () => {
-      installApiStub({})
+      await createWithId()
       await act(async () => {
-        renderProvidersSection()
+        fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
+          target: { value: 'sk-super-secret' }
+        })
       })
       await act(async () => {
-        fireEvent.click(screen.getByText('+ Add provider'))
-      })
-      const idInput = await screen.findByPlaceholderText('Provider id (e.g. my-ollama)')
-      await act(async () => {
-        fireEvent.change(idInput, { target: { value: 'my-ollama' } })
-      })
-      const keyInput = screen.getByTestId('OpencodeProvidersSection.apiKey')
-      await act(async () => {
-        fireEvent.change(keyInput, { target: { value: 'sk-super-secret' } })
-      })
-      await act(async () => {
-        fireEvent.click(screen.getByText('Save key'))
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
       })
       await waitFor(() => expect(vendorAuthSetKey).toHaveBeenCalled())
 
@@ -350,108 +296,84 @@ describe('opencode Providers section', () => {
     })
 
     it('clears the API key input after a successful save', async () => {
-      installApiStub({})
+      await createWithId()
       await act(async () => {
-        renderProvidersSection()
+        fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
+          target: { value: 'sk-test-123' }
+        })
       })
       await act(async () => {
-        fireEvent.click(screen.getByText('+ Add provider'))
-      })
-      const idInput = await screen.findByPlaceholderText('Provider id (e.g. my-ollama)')
-      await act(async () => {
-        fireEvent.change(idInput, { target: { value: 'my-ollama' } })
-      })
-      const keyInput = screen.getByTestId('OpencodeProvidersSection.apiKey')
-      await act(async () => {
-        fireEvent.change(keyInput, { target: { value: 'sk-test-123' } })
-      })
-      await act(async () => {
-        fireEvent.click(screen.getByText('Save key'))
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
       })
 
-      // Once saved, the probe reports authenticated → the field is replaced by
-      // the "Key set" indicator (proves the row re-read a fresh, key-cleared state).
-      await waitFor(() => {
-        expect(screen.getByTestId('OpencodeProvidersSection.keyStatus')).toBeInTheDocument()
-      })
+      // The credential read now reports a key → the field is replaced by the
+      // "Key set" indicator (proving a fresh, key-cleared read).
+      await waitFor(() =>
+        expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+      )
 
-      // Reopen the input via Remove key and confirm it comes back blank — the
-      // transient _apiKey state was cleared on successful save, not retained.
+      // Reopening via Remove key must show a blank field — the transient input
+      // state was cleared on save, not retained.
       await act(async () => {
-        fireEvent.click(screen.getByTestId('OpencodeProvidersSection.removeKey'))
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.removeKey'))
       })
       await waitFor(() => {
-        const reopened = screen.getByTestId('OpencodeProvidersSection.apiKey') as HTMLInputElement
+        const reopened = screen.getByTestId(
+          'OpencodeProviderConfigModal.apiKey'
+        ) as HTMLInputElement
         expect(reopened.value).toBe('')
       })
     })
 
-    it('remove-key flow calls vendorAuthRemove and returns to the API key input', async () => {
-      installApiStub({})
+    it('remove-key calls vendorAuthRemove and returns to the API key input', async () => {
+      await createWithId()
       await act(async () => {
-        renderProvidersSection()
-      })
-      await act(async () => {
-        fireEvent.click(screen.getByText('+ Add provider'))
-      })
-      const idInput = await screen.findByPlaceholderText('Provider id (e.g. my-ollama)')
-      await act(async () => {
-        fireEvent.change(idInput, { target: { value: 'my-ollama' } })
-      })
-      const keyInput = screen.getByTestId('OpencodeProvidersSection.apiKey')
-      await act(async () => {
-        fireEvent.change(keyInput, { target: { value: 'sk-test-123' } })
+        fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
+          target: { value: 'sk-test-123' }
+        })
       })
       await act(async () => {
-        fireEvent.click(screen.getByText('Save key'))
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
       })
-      await waitFor(() => {
-        expect(screen.getByTestId('OpencodeProvidersSection.keyStatus')).toBeInTheDocument()
-      })
+      await waitFor(() =>
+        expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+      )
 
       await act(async () => {
-        fireEvent.click(screen.getByTestId('OpencodeProvidersSection.removeKey'))
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.removeKey'))
       })
 
-      await waitFor(() => {
-        expect(vendorAuthRemove).toHaveBeenCalledWith('opencode', 'my-ollama')
-      })
-      await waitFor(() => {
-        expect(screen.getByTestId('OpencodeProvidersSection.apiKey')).toBeInTheDocument()
-      })
+      await waitFor(() => expect(vendorAuthRemove).toHaveBeenCalledWith('opencode', 'my-ollama'))
+      await waitFor(() =>
+        expect(screen.getByTestId('OpencodeProviderConfigModal.apiKey')).toBeInTheDocument()
+      )
     })
 
-    it('shows a "Key set" indicator on load for a provider id that already has credentials', async () => {
+    it('shows a "Key set" indicator on load for a provider that already has credentials', async () => {
       installApiStub(
         { providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } },
         { credIds: { 'my-ollama': 'api' } }
       )
-      await act(async () => {
-        renderProvidersSection()
-      })
+      await renderModal('my-ollama')
 
-      await waitFor(() => {
-        expect(screen.getByTestId('OpencodeProvidersSection.keyStatus')).toBeInTheDocument()
-      })
-      expect(screen.queryByTestId('OpencodeProvidersSection.apiKey')).not.toBeInTheDocument()
+      await waitFor(() =>
+        expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+      )
+      expect(screen.queryByTestId('OpencodeProviderConfigModal.apiKey')).not.toBeInTheDocument()
     })
 
-    it('a saved custom provider WITHOUT stored credentials still shows the password input (declared ≠ has key)', async () => {
+    it('a declared provider WITHOUT stored credentials still shows the password input (declared ≠ has key)', async () => {
       // Regression guard: opencode's GET /config/providers reports a custom
-      // provider as "configured" the moment it's declared in opencode.json —
-      // an authState-based indicator would flip to "Key set" here and hide the
-      // input, making it impossible to ever enter a key. The credential-id
-      // read path (auth.json peek) must keep the input visible.
-      installApiStub(
-        { providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } }
-        // No credIds — auth.json has no entry for my-ollama.
-      )
-      await act(async () => {
-        renderProvidersSection()
-      })
+      // provider as "configured" the moment it is declared, so an authState-based
+      // indicator would flip to "Key set" here and hide the input, making it
+      // impossible to ever enter a key. The auth.json peek must keep it visible.
+      installApiStub({ providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } })
+      await renderModal('my-ollama')
 
-      expect(screen.getByTestId('OpencodeProvidersSection.apiKey')).toBeInTheDocument()
-      expect(screen.queryByTestId('OpencodeProvidersSection.keyStatus')).not.toBeInTheDocument()
+      expect(screen.getByTestId('OpencodeProviderConfigModal.apiKey')).toBeInTheDocument()
+      expect(
+        screen.queryByTestId('OpencodeProviderConfigModal.keyStatus')
+      ).not.toBeInTheDocument()
     })
   })
 })

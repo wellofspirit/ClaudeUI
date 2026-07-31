@@ -74,7 +74,9 @@ import type {
   EngineConfig,
   VendorConfig,
   VendorAuthMap,
-  VendorAuthOption
+  VendorAuthOption,
+  OpencodeProviderCatalogEntry,
+  ProviderRemoveKind
 } from '../../shared/types'
 import type {
   ConfigurableHarnessId,
@@ -86,6 +88,10 @@ import {
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
+import {
+  removeOpencodeProvider,
+  setOpencodeProviderDisabled
+} from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import {
   discoverPiModels,
@@ -354,6 +360,8 @@ const SESSION_IPC_CHANNELS = [
   'session:get-models',
   'session:get-engine-models',
   'session:get-opencode-providers',
+  'session:set-opencode-provider-disabled',
+  'session:remove-opencode-provider',
   'session:get-opencode-provider-models',
   'session:get-pi-model-catalog',
   'session:generate-title',
@@ -881,8 +889,31 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // when opencode isn't installed or discovery fails (opencode is optional).
   ipcMain.handle('session:get-opencode-providers', async () => {
     if (!opencodeServerManager.isBinaryAvailable()) return []
-    return await discoverOpencodeProviderCatalog()
+    const catalog = await discoverOpencodeProviderCatalog()
+    // Decorate with shared-provider ownership HERE rather than inside discovery:
+    // shared-providers/index → OpencodeSharedProviderAdapter → model-discovery,
+    // so a shared-provider import inside model-discovery would be a cycle.
+    return decorateSharedProviderClaims(catalog)
   })
+
+  // Enable/disable is a reversible veto (opencode's disabled_providers) and is
+  // deliberately NOT the same operation as removal — see provider-management.ts.
+  ipcMain.handle(
+    'session:set-opencode-provider-disabled',
+    async (_e, providerId: string, disabled: boolean) => {
+      setOpencodeProviderDisabled(providerId, disabled)
+    }
+  )
+
+  // Destructive: deletes the credential and/or the provider declaration ClaudeUI
+  // owns. `kind` must come from the entry's resolved actions — widening it here
+  // would delete something the UI never warned about.
+  ipcMain.handle(
+    'session:remove-opencode-provider',
+    async (_e, providerId: string, kind: ProviderRemoveKind) => {
+      await removeOpencodeProvider(providerId, kind)
+    }
+  )
 
   // All catalog models for one provider (drives the model-allowlist dialog).
   ipcMain.handle(
@@ -1914,4 +1945,39 @@ function startProjectsWatcher(win: BrowserWindow): void {
   } catch (err) {
     logger.warn('ProjectsWatcher', 'Failed to watch projects directory', err)
   }
+}
+
+/**
+ * Mark catalog entries whose vendor id is claimed by an ENABLED shared-provider
+ * route (today: `chatgpt` → opencode vendor `openai`).
+ *
+ * Why the row needs to know: CredentialSync re-feeds a shared credential on
+ * every refresh, so removing that credential in the opencode provider manager is
+ * silently undone — "Remove" would appear to do nothing. The row warns and
+ * offers to turn the shared route off instead of losing the race.
+ */
+function decorateSharedProviderClaims(
+  catalog: OpencodeProviderCatalogEntry[]
+): OpencodeProviderCatalogEntry[] {
+  let claims: Map<string, { id: string; name: string }>
+  try {
+    claims = new Map(
+      sharedProviderService
+        .listDefinitions()
+        .filter((definition) => definition.routes.opencode.enabled)
+        .map((definition) => [
+          definition.routes.opencode.providerId ?? definition.id,
+          { id: definition.id, name: definition.name }
+        ])
+    )
+  } catch (err) {
+    // Shared-provider config is optional; an unreadable definition must not take
+    // down the provider list.
+    logger.warn('opencode', `Shared-provider claim lookup failed: ${String(err)}`)
+    return catalog
+  }
+  return catalog.map((entry) => {
+    const claim = claims.get(entry.id)
+    return claim ? { ...entry, sharedProviderClaim: claim } : entry
+  })
 }

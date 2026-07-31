@@ -25,11 +25,15 @@ import {
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
+import {
+  removeOpencodeProvider,
+  setOpencodeProviderDisabled
+} from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
 import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
-import type { EngineModelGroup, ModelInfo } from '../../shared/types'
+import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
 import { deleteProjectFiles } from '../services/delete-session-files'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
@@ -407,6 +411,22 @@ export function registerRemoteHandlers(
     if (!opencodeServerManager.isBinaryAvailable()) return []
     return await getOpencodeProviderModels(providerId)
   })
+  // Provider enable/disable + removal reach the remote surface too (full parity,
+  // token-gated). Removal is destructive, so `kind` is passed through verbatim
+  // from the caller's resolved actions — the main-process owner re-derives
+  // nothing and widens nothing.
+  dispatcher.register(
+    'session:set-opencode-provider-disabled',
+    async (providerId: string, disabled: boolean) => {
+      setOpencodeProviderDisabled(providerId, disabled)
+    }
+  )
+  dispatcher.register(
+    'session:remove-opencode-provider',
+    async (providerId: string, kind: ProviderRemoveKind) => {
+      await removeOpencodeProvider(providerId, kind)
+    }
+  )
   dispatcher.register('session:get-pi-model-catalog', async () => getPiModelCatalogGroups())
 
   dispatcher.register('session:set-reasoning-variant', async (routingId: string, variant: string | null) => {
