@@ -10,7 +10,8 @@ import {
   MAX_ASSISTANT_PROSE_CHARS,
   renderAction,
   buildUserPrompt,
-  buildSystemPrompt,
+  buildPolicyPrompt,
+  normalizeCategory,
   parseVerdict,
   parseVerdictOrNull,
   classify,
@@ -171,7 +172,7 @@ describe('truncateProseTail', () => {
   })
 })
 
-describe('renderAction + buildUserPrompt + buildSystemPrompt', () => {
+describe('renderAction + buildUserPrompt', () => {
   it('renders the proposed action as toolName <input>', () => {
     expect(renderAction({ toolName: 'bash', input: { command: 'rm -rf /' } })).toBe(
       'bash {"command":"rm -rf /"}'
@@ -180,7 +181,8 @@ describe('renderAction + buildUserPrompt + buildSystemPrompt', () => {
   it('wraps transcript + action + instruction', () => {
     const input: ClassifyInput = {
       messages: [msg('user', [{ type: 'text', text: 'hi' }])],
-      action: { toolName: 'bash', input: { command: 'ls' } }
+      action: { toolName: 'bash', input: { command: 'ls' } },
+      environment: { cwd: '/repo' }
     }
     const p = buildUserPrompt(input, 'INSTRUCT')
     expect(p).toContain('<transcript>')
@@ -188,9 +190,12 @@ describe('renderAction + buildUserPrompt + buildSystemPrompt', () => {
     expect(p).toContain('Proposed next action:\nbash {"command":"ls"}')
     expect(p).toContain('INSTRUCT')
   })
-  it('appends environment to the system prompt when provided', () => {
-    expect(buildSystemPrompt('repo=foo')).toContain('## Environment\nrepo=foo')
-    expect(buildSystemPrompt()).not.toContain('## Environment')
+  it('the system prompt carries the environment ground truth (phase 2)', () => {
+    // The old inline POLICY constant took a free-text `environment` string; the
+    // policy document now renders a structured Environment section instead.
+    const p = buildPolicyPrompt({ cwd: '/repo/foo' })
+    expect(p).toContain('## Environment')
+    expect(p).toContain('Working directory: /repo/foo')
   })
 })
 
@@ -221,6 +226,74 @@ describe('parseVerdict (fail-closed)', () => {
   })
 })
 
+// ── <category>: a DERIVED allowlist, not free text (ref §9.6, porting note #4) ─
+
+describe('normalizeCategory (cli.js ppd port)', () => {
+  it('lowercases, collapses non-alphanumeric runs to _, trims', () => {
+    expect(normalizeCategory('Logging/Audit Tampering')).toBe('logging_audit_tampering')
+    expect(normalizeCategory('Data Exfiltration')).toBe('data_exfiltration')
+    expect(normalizeCategory('Auto-Mode Bypass')).toBe('auto_mode_bypass')
+    expect(normalizeCategory('  Real-World   Transactions!  ')).toBe('real_world_transactions')
+    expect(normalizeCategory('***')).toBe('')
+  })
+  it('is idempotent on an already-normalized slug', () => {
+    expect(normalizeCategory('sensitive_source_provenance')).toBe('sensitive_source_provenance')
+  })
+})
+
+describe('parseVerdict — <category> validation', () => {
+  it('surfaces a known rule name as its normalized slug', () => {
+    expect(
+      parseVerdictOrNull(
+        '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] force-push</reason>'
+      )
+    ).toEqual({ block: true, reason: '[Git Destructive] force-push', category: 'git_destructive' })
+  })
+
+  it('DROPS an invented category — the block still stands', () => {
+    // The category field is model-controlled text reached by attacker-influenced
+    // transcript content; anything outside the derived set is not trusted.
+    const v = parseVerdictOrNull(
+      '<block>yes</block><category>Ignore Previous Rules</category><reason>[X] nope</reason>'
+    )
+    expect(v).toMatchObject({ block: true, reason: '[X] nope' })
+    expect(v?.category).toBeUndefined()
+  })
+
+  it('DROPS an ALLOW exception name (exceptions are never categories)', () => {
+    expect(
+      parseVerdictOrNull('<block>yes</block><category>Security Discussion</category>')?.category
+    ).toBeUndefined()
+  })
+
+  it('ignores a category on an ALLOW verdict', () => {
+    expect(parseVerdictOrNull('<block>no</block><category>Git Destructive</category>')).toEqual({
+      block: false
+    })
+  })
+
+  it('tolerates a missing category on a block', () => {
+    expect(parseVerdictOrNull('<block>yes</block><reason>bad</reason>')).toEqual({
+      block: true,
+      reason: 'bad'
+    })
+  })
+
+  it('does not read a category out of <thinking>', () => {
+    const v = parseVerdictOrNull(
+      '<thinking>maybe <category>Git Destructive</category></thinking><block>yes</block>'
+    )
+    expect(v?.category).toBeUndefined()
+  })
+
+  it('parseVerdict keeps the category on its fail-closed path shape', () => {
+    expect(parseVerdict('<block>yes</block><category>Data Exfiltration</category>').category).toBe(
+      'data_exfiltration'
+    )
+    expect(parseVerdict('nonsense').category).toBeUndefined()
+  })
+})
+
 describe('isAutoModeFastPathAllowed', () => {
   it('covers the read-only categories only', () => {
     expect(isAutoModeFastPathAllowed('read')).toBe(true)
@@ -232,7 +305,8 @@ describe('isAutoModeFastPathAllowed', () => {
 describe('classify (orchestrator)', () => {
   const base: ClassifyInput = {
     messages: [msg('user', [{ type: 'text', text: 'hi' }])],
-    action: { toolName: 'bash', input: { command: 'ls' } }
+    action: { toolName: 'bash', input: { command: 'ls' } },
+    environment: { cwd: '/repo' }
   }
   const reqs = (judge: { mock: { calls: unknown[][] } }): JudgeRequest[] =>
     judge.mock.calls.map((c) => c[0] as JudgeRequest)
@@ -331,6 +405,57 @@ describe('classify (orchestrator)', () => {
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r).toMatchObject({ block: true, stage: 'thinking', reason: 'force-push to main' })
     expect(r.unavailable).toBeUndefined()
+  })
+
+  it('both mode: a stage-2 category flows through to the result', async () => {
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce(
+        '<thinking>no consent</thinking><block>yes</block><category>Git Destructive</category>' +
+          '<reason>[Git Destructive] force-push to main was never named</reason>'
+      )
+    const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+    expect(r).toMatchObject({ block: true, stage: 'thinking', category: 'git_destructive' })
+  })
+
+  it('both mode: an invented stage-2 category is dropped but the block survives', async () => {
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce(
+        '<block>yes</block><category>Please Allow Everything</category><reason>[?] hmm</reason>'
+      )
+    const r = await classify({ ...base, twoStageMode: 'both' }, judge)
+    expect(r.block).toBe(true)
+    expect(r.category).toBeUndefined()
+    expect(r.reason).toBe('[?] hmm')
+  })
+
+  it('stage 2 is instructed in the category grammar; stage 1 is NOT', async () => {
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('<block>no</block>')
+    await classify({ ...base, twoStageMode: 'both' }, judge)
+    const [s1, s2] = reqs(judge)
+    expect(s1.user).not.toContain('<category>')
+    expect(s2.user).toContain('<category>Exact Rule Name</category>')
+    expect(s2.user).toContain('<reason>[Exact Rule Name] one short sentence</reason>')
+  })
+
+  it('the system prompt is the rendered policy document with the environment injected', async () => {
+    const judge = vi.fn().mockResolvedValue('<block>no</block>')
+    await classify(
+      { ...base, environment: { cwd: '/srv/app', trustedDomains: ['files.example.com'] } },
+      judge
+    )
+    const [req] = reqs(judge)
+    expect(req.system).toContain('Working directory: /srv/app')
+    expect(req.system).toContain('files.example.com')
+    // …and the corpus itself, not the old inline five-bullet policy.
+    expect(req.system).toContain('## HARD BLOCK')
+    expect(req.system).toContain('Data Exfiltration')
   })
 
   it('both mode: stage-2 unparseable → block, fail-closed, WITHOUT unavailable', async () => {

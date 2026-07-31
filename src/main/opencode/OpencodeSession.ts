@@ -50,7 +50,12 @@ import {
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
 import { matchesUserAskRule } from './wildcard'
-import { classify, isAutoModeFastPathAllowed, type JudgeTransport } from '../automode/classifier'
+import {
+  classify,
+  isAutoModeFastPathAllowed,
+  type EnvironmentInfo,
+  type JudgeTransport
+} from '../automode/classifier'
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
@@ -1296,19 +1301,19 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** Merge the user/project/local permission scopes and compile them to opencode
-   *  rules (allow→ask→deny). Best-effort: a load/parse failure yields no rules
-   *  rather than breaking the turn. */
-  private compiledUserRules(): ReturnType<typeof compileClaudeRulesToOpencode> {
+  /** Merge the user/project/local permission scopes. Best-effort: a load/parse
+   *  failure yields empty permissions rather than breaking the turn. Read fresh
+   *  each time so a settings.json edit mid-session takes effect. */
+  private mergedUserPermissions(): ClaudePermissions {
+    const merged: ClaudePermissions = {
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }
     try {
       const scopes: PermissionScope[] = ['user', 'project', 'local']
-      const merged: ClaudePermissions = {
-        allow: [],
-        deny: [],
-        ask: [],
-        additionalDirectories: [],
-        defaultMode: undefined
-      }
       for (const scope of scopes) {
         const p = loadClaudePermissions(scope, this.cwd)
         merged.allow.push(...p.allow)
@@ -1316,7 +1321,21 @@ export class OpencodeSession extends BaseSession {
         merged.deny.push(...p.deny)
         merged.additionalDirectories.push(...p.additionalDirectories)
       }
-      return compileClaudeRulesToOpencode(merged)
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `loading user permission rules failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    return merged
+  }
+
+  /** Merge the user/project/local permission scopes and compile them to opencode
+   *  rules (allow→ask→deny). Best-effort: a load/parse failure yields no rules
+   *  rather than breaking the turn. */
+  private compiledUserRules(): ReturnType<typeof compileClaudeRulesToOpencode> {
+    try {
+      return compileClaudeRulesToOpencode(this.mergedUserPermissions())
     } catch (err) {
       logger.warn(
         'OpencodeSession',
@@ -1348,6 +1367,24 @@ export class OpencodeSession extends BaseSession {
       this.lastCompiledUserRules = this.compiledUserRules()
     }
     return this.lastCompiledUserRules
+  }
+
+  /** Host-supplied ground truth for the classifier's Environment section
+   *  (plan phase 2). Trust slots come from the user's engine config and default
+   *  to EMPTY — the policy renders "nothing is trusted" for an empty slot, so
+   *  omitting a list is the restrictive choice, not the permissive one.
+   *  Session-start git remotes and repo visibility land in phase 3. */
+  private classifierEnvironment(): EnvironmentInfo {
+    const cfg = this.autoModeConfig()
+    const additionalDirectories = [...new Set(this.mergedUserPermissions().additionalDirectories)]
+    return {
+      cwd: this.cwd,
+      platform: process.platform,
+      ...(additionalDirectories.length ? { additionalDirectories } : {}),
+      ...(cfg.trustedDomains?.length ? { trustedDomains: cfg.trustedDomains } : {}),
+      ...(cfg.trustedRegistries?.length ? { trustedRegistries: cfg.trustedRegistries } : {}),
+      ...(cfg.protectedPatterns?.length ? { protectedPatterns: cfg.protectedPatterns } : {})
+    }
   }
 
   /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */
@@ -1428,7 +1465,7 @@ export class OpencodeSession extends BaseSession {
         {
           messages: this.messageHistory,
           action: { toolName: category, input: approval.input },
-          environment: `cwd: ${this.cwd}`,
+          environment: this.classifierEnvironment(),
           twoStageMode: this.autoModeConfig().twoStageMode ?? 'both'
         },
         judge
@@ -1447,7 +1484,8 @@ export class OpencodeSession extends BaseSession {
       }
       logger.info(
         'OpencodeSession',
-        `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}) ${category}` +
+        `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}` +
+          `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
           (result.reason ? ` — ${result.reason}` : '')
       )
       if (result.unavailable) {

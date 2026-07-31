@@ -422,6 +422,18 @@ git/gh commands, and `{"outcome":…}` annotations on prior calls with cli.js's
 semantics (`rejected-by-user` ⇒ retry should block; `automode-unavailable` ⇒ retry is
 appropriate; `ok` is not a safety verdict). We already own the git service.
 
+*Priority order, fixed by the phase-2 review (2026-08-01):* (1) **outcome
+annotations first** — until they exist, post-block consent inheritance is
+unreachable (denials surface as tool results, which the slimmer drops) and the
+mandatory Transient Retry exception is a permissiveness hole (nothing marks a
+prior attempt `rejected-by-user`; the corpus carries an interim prose guard).
+(2) **session-start remotes** into `EnvironmentInfo.remotes` — the corpus's
+empty-remotes fallback was softened as an interim fix, but the real trust anchor
+is the recorded remote. (3) `gitStatus` (the dirty-tree presumption currently
+can't be cleared — safe but noisy). (4) `repoVisibility`. Also follow up:
+`ClassifyResult.category` has no consumer beyond logging — natural key for
+per-rule denial caps and block surfacing.
+
 **Phase 4 — pi wiring.** `gateToolCall`'s ask branch → the shared classifier. Needs a
 judge transport decision for pi (see §2). Verify G8's fast-path assumption for pi
 rather than inheriting opencode's argument.
@@ -449,10 +461,14 @@ Also new and uncommitted this session: `docs/protocol/14-auto-mode-classifier.md
 
 ## 7 Open questions
 
-1. **pi's judge transport.** pi has no equivalent of opencode's hidden-session trick.
-   Options: a dedicated classifier key (phase 5), reuse the user's pi model via an RPC
-   prompt if pi exposes one, or make the direct transport mandatory for pi. Needs a
-   look at pi's RPC surface.
+1. **pi's judge transport — DECIDED (2026-07-31, autonomous).** A dedicated warm
+   `pi --mode rpc` judge process per session (spawned lazily on first judge call),
+   `--system-prompt` for the policy, RPC `new_session` before each call for
+   statelessness, judge model from `AutoModeConfig.judgeModel` (default: session's
+   model). Tool denial is enforced **host-side**: pi routes every tool call through
+   our `/tool-call` gate (PiBridgeHost), so the judge's gate handler denies
+   unconditionally — structurally stronger than opencode's ruleset patch, with no
+   `approved`-list piercing analogue (§7 Q5). No vault changes, no new auth surface.
 2. **Does opencode's base ruleset really cover fast-path A?** ADR-023 asserts it;
    unverified for pi.
 3. **Denial caps vs. post-block consent inheritance.** Our 3-consecutive cap is a crude

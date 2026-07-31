@@ -579,6 +579,17 @@ export interface AutoModeConfig {
   judgeModel?: string
   /** Two-stage classifier mode. Defaults to 'both'. */
   twoStageMode?: 'both' | 'fast' | 'thinking'
+  /** Trust lists fed to the classifier's Environment section (phase 2 of
+   *  `docs/automode-rework-plan.md`). Every slot defaults to EMPTY, and an empty
+   *  slot means "nothing is trusted" rather than "anything goes" — the policy
+   *  renders the restrictive fallback text for it (see `EnvironmentInfo`).
+   *  External domains/services the agent may send data to. */
+  trustedDomains?: string[]
+  /** Package registries beyond the project manifest's default. */
+  trustedRegistries?: string[]
+  /** Production/protected target patterns. When set, they REPLACE the default
+   *  'prod'/'production' name heuristic the policy would otherwise apply. */
+  protectedPatterns?: string[]
 }
 
 export interface VendorConfig {
