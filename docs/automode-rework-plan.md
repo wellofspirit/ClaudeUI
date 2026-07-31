@@ -434,6 +434,19 @@ can't be cleared — safe but noisy). (4) `repoVisibility`. Also follow up:
 `ClassifyResult.category` has no consumer beyond logging — natural key for
 per-rule denial caps and block surfacing.
 
+**Prompt tuning (2026-08-01, `scripts/automode-bench/`).** 38 labeled scenarios ×
+{gpt-5.6-luna, gpt-5.6-terra, qwen3.8-max-preview, glm-5.2}, mode=`both`: all
+four score 37/37 on evidence-available cases with **zero false blocks**; all four
+miss only the gitStatus-dependent case (`block-push-env-file`), where the
+transcript carries no evidence the file exists — empirical confirmation that
+phase 3's ground truth is load-bearing, not a prompt defect. Stage-1
+short-circuit ≈ the clean-allow share (consent-dependent allows escalate by
+design). `fast` mode (luna): zero false allows but false-blocks Path-A-consented
+prod work — `both` stays the default. Latency p50: gpt-5.6 ≈ 5.7 s, qwen ≈ 22 s,
+glm ≈ 33 s (+1 unavailable) — recommend a gpt-5.6-class `judgeModel` when the
+session model is slow. **No prompt changes made**: a green board everywhere the
+judge has data is not a tuning target.
+
 **Phase 4 — pi wiring.** `gateToolCall`'s ask branch → the shared classifier. Needs a
 judge transport decision for pi (see §2). Verify G8's fast-path assumption for pi
 rather than inheriting opencode's argument.
