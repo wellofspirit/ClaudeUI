@@ -18,6 +18,9 @@
  *  3. pi plan mode never AUTO-allows a mutating shell command.
  *  4. pi honors absolute / home-dir / Windows-absolute rule specifiers —
  *     those deny rules used to be inert in every mode.
+ *  5. Under auto mode a user ALLOW rule reaches the classifier (rather than
+ *     bypassing it) identically on both engines — a user allow used to be a
+ *     hole straight through the security monitor.
  *
  * Everything here is pure-function level: no processes, no fs, no network.
  */
@@ -34,8 +37,11 @@ vi.mock('../services/logger', () => ({
 }))
 
 import { buildRuleset } from '../opencode/permission-ruleset'
-import { compileClaudeRulesToOpencode } from '../opencode/permission-compiler'
-import { decide } from '../pi/permission-engine'
+import {
+  compileClaudeRulesToOpencode,
+  withoutAllowRules as withoutOpencodeAllowRules
+} from '../opencode/permission-compiler'
+import { decide, withoutAllowRules } from '../pi/permission-engine'
 import type { MergedClaudeRules } from '../pi/permission-engine'
 import type { ClaudePermissions } from '../../shared/types'
 
@@ -387,5 +393,72 @@ describe('conformance: pi honors absolute / home / Windows-absolute deny-rule sp
     expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('deny')
     // Outside cwd → relativises to ../… → still does NOT match a relative glob.
     expect(decide('edit', { path: '/elsewhere/src/foo.ts' }, ctx)).toBe('ask')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5. AUTO MODE: a user ALLOW rule must not bypass the classifier — on EITHER
+//    engine (cli.js §3 step 2, "classifier-bypassing allow rules filtered out").
+//
+//    This is the cross-engine half of the fix. Both engines compose the same
+//    thing out of different parts — opencode patches a ruleset its SERVER
+//    evaluates, pi evaluates ours in-process — so "the same settings.json
+//    produces the same gate" is only true if both filters agree. The opencode
+//    side here runs the real vendor evaluator port above, which the mocked
+//    session tests cannot.
+// ---------------------------------------------------------------------------
+
+describe('conformance: auto mode routes user-ALLOWED actions to the classifier on both engines', () => {
+  const USER = perms({
+    allow: ['Bash(git:*)'],
+    ask: ['Bash(npm publish:*)'],
+    deny: ['Bash(rm:*)']
+  })
+  /** What applyPermissionMode patches under auto mode: acceptEdits base + the
+   *  user's ask/deny half + the dispatch guard. */
+  const autoRuleset = (): Rule[] => [
+    ...buildRuleset('acceptEdits'),
+    ...withoutOpencodeAllowRules(compileClaudeRulesToOpencode(USER)),
+    { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
+  ]
+  const piAuto = (command: string): Action =>
+    decide('bash', { command }, {
+      mode: 'acceptEdits',
+      rules: withoutAllowRules(piRules({ allow: USER.allow, ask: USER.ask, deny: USER.deny })),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }) as Action
+
+  /** [label, command, the decision BOTH engines must reach]. */
+  const CASES: Array<[string, string, Action]> = [
+    // The live evasion: allowed by `Bash(git:*)`, evades the static
+    // `git push --force` deny by argument order — must reach the judge.
+    ['allow-covered git command', 'git push origin main --force', 'ask'],
+    ['plain allow-covered command', 'git status', 'ask'],
+    // Tightening rules are untouched by the filter.
+    ['user ask rule', 'npm publish --access public', 'ask'],
+    ['user deny rule', 'rm -rf /tmp/x', 'deny']
+  ]
+
+  it.each(CASES)('%s → %s on opencode and pi alike', (_label, command, expected) => {
+    expect(evaluate('bash', command, autoRuleset())).toBe(expected)
+    expect(piAuto(command)).toBe(expected)
+  })
+
+  it('NON-auto modes keep the allow rule effective on both engines', () => {
+    const fullRuleset: Rule[] = [
+      ...buildRuleset('default'),
+      ...compileClaudeRulesToOpencode(USER),
+      { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
+    ]
+    expect(evaluate('bash', 'git status', fullRuleset)).toBe('allow')
+    expect(
+      decide('bash', { command: 'git status' }, {
+        mode: 'default',
+        rules: piRules({ allow: USER.allow, ask: USER.ask, deny: USER.deny }),
+        sessionAllows: NO_SESSION_ALLOWS,
+        cwd: '/repo'
+      })
+    ).toBe('allow')
   })
 })
