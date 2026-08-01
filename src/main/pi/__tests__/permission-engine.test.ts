@@ -22,8 +22,8 @@ vi.mock('../../services/logger', () => ({
 
 import {
   decide,
+  decideWithSource,
   piToolKind,
-  firstMatchingRule,
   sessionAllowKey,
   normalizeWhitespace,
   mergedClaudeRulesFor,
@@ -368,8 +368,10 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
     // source ordering directly instead (mirrors pi-bridge-source.test.ts's
     // skillEnvIdx/earlyReturnIdx technique for the identical "can't observe
     // through the public API yet" situation).
-    const src = decide.toString()
-    const denyIdx = src.indexOf('rules.deny.some')
+    // The ladder itself lives in decideWithSource now (decide() is its
+    // provenance-free projection) — read the source that actually orders it.
+    const src = decideWithSource.toString()
+    const denyIdx = src.indexOf('ctx.rules.deny')
     const autoAllowIdx = src.indexOf('PI_AUTO_ALLOW_HOSTED_TOOLS')
     expect(denyIdx).toBeGreaterThan(-1)
     expect(autoAllowIdx).toBeGreaterThan(-1)
@@ -779,16 +781,6 @@ describe('decide — unknown Claude tool names never match a pi tool', () => {
   })
 })
 
-describe('firstMatchingRule', () => {
-  it('returns the first rule string that matches the tool_call', () => {
-    expect(firstMatchingRule(['Read', 'Bash(npm:*)'], 'bash', { command: 'npm install' })).toBe('Bash(npm:*)')
-  })
-
-  it('returns undefined when nothing matches', () => {
-    expect(firstMatchingRule(['Read', 'Write'], 'bash', { command: 'x' })).toBeUndefined()
-  })
-})
-
 describe('sessionAllowKey', () => {
   it('scopes bash by normalized command', () => {
     expect(sessionAllowKey('bash', { command: '  npm   test  ' })).toBe('bash:npm test')
@@ -874,6 +866,93 @@ describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
     )
     for (const name of PI_AUTO_ALLOW_HOSTED_TOOLS) {
       expect(PI_HOSTED_TOOL_NAMES.has(name)).toBe(true)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// decideWithSource — provenance. Auto mode (phase 4) needs to tell a user-
+// authored ask from a mode-base ask (G9): the former goes straight to the
+// human, the latter to the classifier. Getting this wrong in either direction
+// is a real permission bug, so the ladder's provenance is pinned rung by rung.
+// ---------------------------------------------------------------------------
+
+describe('decideWithSource — provenance for every rung of the ladder', () => {
+  it('reports ask-rule (with the matched rule) for a USER ask, and mode-base for the same tool without one', () => {
+    const withRule = decideWithSource('bash', { command: 'git push origin main' }, {
+      mode: 'acceptEdits',
+      rules: rules({ ask: ['Bash(git push:*)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    })
+    expect(withRule).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(git push:*)' })
+
+    // Same decision, entirely different provenance — this is the distinction
+    // opencode cannot make natively and pi can.
+    const withoutRule = decideWithSource('bash', { command: 'git push origin main' }, {
+      mode: 'acceptEdits',
+      rules: rules(),
+      sessionAllows: NO_SESSION_ALLOWS
+    })
+    expect(withoutRule).toEqual({ decision: 'ask', source: 'mode-base' })
+  })
+
+  it('a NON-matching ask rule does not claim provenance', () => {
+    expect(
+      decideWithSource('bash', { command: 'npm test' }, {
+        mode: 'acceptEdits',
+        rules: rules({ ask: ['Bash(git push:*)'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'ask', source: 'mode-base' })
+  })
+
+  it('reports deny-rule / allow-rule / session-allow / hosted-auto-allow at their own rungs', () => {
+    expect(
+      decideWithSource('bash', { command: 'rm -rf x' }, {
+        mode: 'full',
+        rules: rules({ deny: ['Bash(rm:*)'], ask: ['Bash'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'deny', source: 'deny-rule', rule: 'Bash(rm:*)' })
+
+    expect(
+      decideWithSource('edit', { path: 'src/x.ts' }, {
+        mode: 'default',
+        rules: rules({ allow: ['Edit(src/**)'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'allow', source: 'allow-rule', rule: 'Edit(src/**)' })
+
+    expect(
+      decideWithSource('bash', { command: 'npm test' }, {
+        mode: 'default',
+        rules: rules(),
+        sessionAllows: new Set(['bash:npm test'])
+      })
+    ).toEqual({ decision: 'allow', source: 'session-allow' })
+
+    expect(
+      decideWithSource('render_mermaid', {}, {
+        mode: 'default',
+        rules: rules(),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'allow', source: 'hosted-auto-allow' })
+  })
+
+  it('decide() is exactly decideWithSource().decision across the whole ladder', () => {
+    const cases: Array<[string, Record<string, unknown>, Partial<MergedClaudeRules>, string]> = [
+      ['bash', { command: 'rm -rf x' }, { deny: ['Bash(rm:*)'] }, 'full'],
+      ['render_mermaid', {}, {}, 'default'],
+      ['bash', { command: 'git push' }, { ask: ['Bash(git push:*)'] }, 'full'],
+      ['edit', { path: 'src/x.ts' }, { allow: ['Edit(src/**)'] }, 'default'],
+      ['read', { path: 'x' }, {}, 'default'],
+      ['bash', { command: 'anything' }, {}, 'acceptEdits'],
+      ['write', { path: 'x' }, {}, 'plan']
+    ]
+    for (const [tool, input, partial, mode] of cases) {
+      const ctx = { mode, rules: rules(partial), sessionAllows: NO_SESSION_ALLOWS }
+      expect(decide(tool, input, ctx)).toBe(decideWithSource(tool, input, ctx).decision)
     }
   })
 })

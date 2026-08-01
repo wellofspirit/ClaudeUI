@@ -474,14 +474,18 @@ Also new and uncommitted this session: `docs/protocol/14-auto-mode-classifier.md
 
 ## 7 Open questions
 
-1. **pi's judge transport — DECIDED (2026-07-31, autonomous).** A dedicated warm
-   `pi --mode rpc` judge process per session (spawned lazily on first judge call),
-   `--system-prompt` for the policy, RPC `new_session` before each call for
-   statelessness, judge model from `AutoModeConfig.judgeModel` (default: session's
-   model). Tool denial is enforced **host-side**: pi routes every tool call through
-   our `/tool-call` gate (PiBridgeHost), so the judge's gate handler denies
-   unconditionally — structurally stronger than opencode's ruleset patch, with no
-   `approved`-list piercing analogue (§7 Q5). No vault changes, no new auth surface.
+1. **pi's judge transport — DECIDED (2026-07-31, autonomous; refined 2026-08-01).**
+   A dedicated `pi --mode rpc --no-session --no-tools` judge process per session,
+   spawned lazily on first judge call with `--system-prompt` carrying the policy —
+   the exact spawn shape `askSideQuestion` already uses (PiSession.ts ~1377), which
+   probed `--no-tools` as accepted in rpc mode. `--no-tools` disables tools at the
+   PROCESS level (never registered), which is categorically stronger than both
+   opencode's ruleset patch and host-side gating — no bridge extension is loaded at
+   all, so there is nothing to pierce (§7 Q5 has no pi analogue). Statelessness via
+   RPC `new_session` before each call (probe it under `--no-session`; if
+   unsupported, respawn per call — the askSideQuestion cost model). Judge model
+   from `AutoModeConfig.judgeModel` via `set_model`, default the session's model.
+   System-prompt changes (environment updates) → respawn. No vault changes.
 2. **Does opencode's base ruleset really cover fast-path A?** ADR-023 asserts it;
    unverified for pi.
 3. **Denial caps vs. post-block consent inheritance.** Our 3-consecutive cap is a crude

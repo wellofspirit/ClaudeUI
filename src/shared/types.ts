@@ -521,7 +521,7 @@ export interface OpencodeCatalogModel {
 export interface EngineConfig {
   sandbox?: SandboxSettings
   proxy?: ProxySettings
-  /** opencode auto-mode (LLM permission gatekeeper) settings. See ADR-023. */
+  /** Auto-mode (LLM permission gatekeeper) settings — opencode and pi. See ADR-023. */
   autoMode?: AutoModeConfig
   /** opencode native config passthrough (injected at spawn via OPENCODE_CONFIG_CONTENT). */
   opencodeConfig?: OpencodeConfigSettings
@@ -568,8 +568,14 @@ export interface DispatchConfig {
 }
 
 /**
- * opencode auto-mode (`full` autonomy) LLM permission-gatekeeper config (ADR-023).
- * Only consumed by the opencode engine; Claude uses cli.js's own classifier.
+ * Auto-mode (`auto`/`full` autonomy) LLM permission-gatekeeper config
+ * (ADR-023, amended by `docs/automode-rework-plan.md`).
+ *
+ * Engine-neutral as of phase 4: read per engine from `engines/<engineId>.json`
+ * by BOTH opencode and pi, which share the whole policy core
+ * (`src/main/automode/`) and differ only in their permission intercept and
+ * judge transport. Claude is the exception — cli.js ships its own classifier,
+ * so none of this reaches it.
  */
 export interface AutoModeConfig {
   /** Master switch. When false, `full` falls back to human approval prompts

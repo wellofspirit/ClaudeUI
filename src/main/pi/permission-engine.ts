@@ -23,6 +23,34 @@ import { logger } from '../services/logger'
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny'
 
+/**
+ * WHICH rung of `decide()`'s ladder produced the verdict. Provenance, not a
+ * second decision: `decide()` collapses this away and is unchanged.
+ *
+ * The load-bearing case is `'ask-rule'` — auto mode (phase 4 of
+ * `docs/automode-rework-plan.md`) must send an ask the USER authored straight
+ * to the human rather than letting the classifier auto-approve it (G9 / ref §3
+ * step 1), and an `'ask'` decision alone cannot tell a user rule from the mode
+ * base. pi is the engine that CAN answer this natively — opencode discards the
+ * matched rule before publishing `permission.asked`, so its wiring has to
+ * re-match host-side (`opencode/wildcard.ts`); here the evaluator IS ours, so
+ * we simply report what it matched.
+ */
+export type PermissionDecisionSource =
+  | 'deny-rule'
+  | 'hosted-auto-allow'
+  | 'ask-rule'
+  | 'session-allow'
+  | 'allow-rule'
+  | 'mode-base'
+
+export interface PermissionVerdict {
+  decision: PermissionDecision
+  source: PermissionDecisionSource
+  /** The user-authored Claude rule string that matched, for the rule-sourced verdicts. */
+  rule?: string
+}
+
 /** The merged (user + project + local scope) Claude permission rule set. Same shape as ClaudePermissions — merging three scopes together yields no new fields. */
 export type MergedClaudeRules = ClaudePermissions
 
@@ -450,17 +478,6 @@ function ruleMatchesTool(
   return false
 }
 
-/** First rule in `rules` that matches this tool_call, or undefined. Used to build a human-readable deny reason. */
-export function firstMatchingRule(
-  rules: readonly string[],
-  toolName: string,
-  input: Record<string, unknown>,
-  cwd?: string
-): string | undefined {
-  const kind = piToolKind(toolName)
-  return rules.find((r) => ruleMatchesTool(r, kind, input, cwd))
-}
-
 /** The "allow for this session" dedup key for a tool_call — bash is scoped by its (normalized) command, everything else by bare tool name. */
 export function sessionAllowKey(toolName: string, input: Record<string, unknown>): string {
   if (toolName === 'bash') return `bash:${normalizeWhitespace(String(input.command ?? ''))}`
@@ -777,7 +794,9 @@ function planModeBaseDecision(kind: ToolKind, input: Record<string, unknown>): '
 // ---------------------------------------------------------------------------
 
 /**
- * Decide allow/ask/deny for one pi tool_call.
+ * Decide allow/ask/deny for one pi tool_call. The ladder itself lives in
+ * {@link decideWithSource}; this is the provenance-free projection of it that
+ * every pre-auto-mode caller wants.
  *
  * Precedence — severity wins, deny(3) > hosted-auto-allow > ask(2) >
  * allow(1): any matching deny rule -> 'deny'; else a hosted LLM tool
@@ -831,15 +850,43 @@ export function decide(
   input: Record<string, unknown>,
   ctx: PermissionEngineContext
 ): PermissionDecision {
+  return decideWithSource(toolName, input, ctx).decision
+}
+
+/**
+ * {@link decide} plus provenance — WHICH rung of the ladder answered, and the
+ * user rule that matched when a rule did. Identical ladder, identical
+ * precedence: `decide()` is a one-line projection of this, so the two can never
+ * drift.
+ *
+ * `find` rather than `some` is the only mechanical change — it costs nothing
+ * and hands the caller the matched rule string, which
+ * `PiSession.gateToolCallInner` already needed for its deny reason (it used to
+ * re-scan with `firstMatchingRule`) and which auto mode needs for G9.
+ */
+export function decideWithSource(
+  toolName: string,
+  input: Record<string, unknown>,
+  ctx: PermissionEngineContext
+): PermissionVerdict {
   const kind = piToolKind(toolName)
+  const match = (rules: readonly string[]): string | undefined =>
+    rules.find((r) => ruleMatchesTool(r, kind, input, ctx.cwd))
 
-  if (ctx.rules.deny.some((r) => ruleMatchesTool(r, kind, input, ctx.cwd))) return 'deny'
-  if (PI_AUTO_ALLOW_HOSTED_TOOLS.has(toolName)) return 'allow'
-  if (ctx.rules.ask.some((r) => ruleMatchesTool(r, kind, input, ctx.cwd))) return 'ask'
-  if (ctx.sessionAllows.has(sessionAllowKey(toolName, input))) return 'allow'
-  if (ctx.rules.allow.some((r) => ruleMatchesTool(r, kind, input, ctx.cwd))) return 'allow'
+  const denyRule = match(ctx.rules.deny)
+  if (denyRule !== undefined) return { decision: 'deny', source: 'deny-rule', rule: denyRule }
+  if (PI_AUTO_ALLOW_HOSTED_TOOLS.has(toolName)) {
+    return { decision: 'allow', source: 'hosted-auto-allow' }
+  }
+  const askRule = match(ctx.rules.ask)
+  if (askRule !== undefined) return { decision: 'ask', source: 'ask-rule', rule: askRule }
+  if (ctx.sessionAllows.has(sessionAllowKey(toolName, input))) {
+    return { decision: 'allow', source: 'session-allow' }
+  }
+  const allowRule = match(ctx.rules.allow)
+  if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
-  return modeBaseDecision(ctx.mode, kind, input)
+  return { decision: modeBaseDecision(ctx.mode, kind, input), source: 'mode-base' }
 }
 
 // ---------------------------------------------------------------------------
