@@ -1297,6 +1297,136 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
+  /** Two approvals, the second released only once the test says so — the
+   *  denial caps are sequential state, so overlapping classify() calls would
+   *  make "which block was the 2nd" a race. */
+  function feedTwoPermissionAsked(ids: [string, string], gate: Promise<void>): void {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      yield {
+        id: 'e1',
+        type: 'permission.asked',
+        properties: { sessionID: SES, id: ids[0], permission: 'bash', patterns: ['x'], tool: { callID: 'c1' } }
+      } as OpencodeEvent
+      await gate
+      yield {
+        id: 'e2',
+        type: 'permission.asked',
+        properties: { sessionID: SES, id: ids[1], permission: 'bash', patterns: ['y'], tool: { callID: 'c2' } }
+      } as OpencodeEvent
+      await parkUntilAborted(signal)
+    })
+  }
+
+  it('denial caps: the SECOND block on the SAME rule hands over, naming the rule on the approval card', async () => {
+    // An agent blocked twice on one rule is grinding one intent; rewording will
+    // not produce the consent it lacks, so the human gets it a block early
+    // (shared AutoModeDenialTracker, keyed on ClassifyResult.category).
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({
+      parts: [
+        {
+          type: 'text',
+          text: '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] would drop pushed commits</reason>'
+        }
+      ]
+    })
+    let release = (): void => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    feedTwoPermissionAsked(['per_cat_1', 'per_cat_2'], gate)
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cat_cap', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+
+    // 1st block: denied as usual.
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_cat_1',
+        'reject',
+        'Auto mode blocked: [Git Destructive] would drop pushed commits'
+      )
+    )
+    release()
+
+    // 2nd block on the same rule: the human decides, and the card says why.
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.find(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBeDefined()
+    })
+    // send(channel, routingId, payload) — the approval is arg 2.
+    const approval = (win as unknown as MockWindow).webContents.send.mock.calls.find(
+      (c) => c[0] === 'session:approval-request'
+    )![2] as { requestId: string; decisionReason?: string }
+    expect(approval.requestId).toBe('per_cat_2')
+    expect(approval.decisionReason).toContain('Git Destructive')
+    expect(approval.decisionReason).toContain('2 times')
+    // Handing over is not denying — nothing was auto-rejected for per_cat_2.
+    expect(mockReplyPermission).not.toHaveBeenCalledWith('per_cat_2', 'reject', expect.anything())
+    session.dispose()
+  })
+
+  it('denial caps: two blocks on DIFFERENT rules still only deny (the category cap is not a 2-consecutive cap)', async () => {
+    enableAutoMode()
+    mockPrompt
+      .mockResolvedValueOnce({
+        parts: [{ type: 'text', text: '<block>yes</block><category>Git Destructive</category><reason>a</reason>' }]
+      })
+      .mockResolvedValue({
+        parts: [{ type: 'text', text: '<block>yes</block><category>Network Exposure</category><reason>b</reason>' }]
+      })
+    let release = (): void => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    feedTwoPermissionAsked(['per_mix_1', 'per_mix_2'], gate)
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_mix_cap', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_mix_1', 'reject', expect.stringContaining('Git Destructive'))
+    )
+    release()
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_mix_2', 'reject', expect.stringContaining('Network Exposure'))
+    )
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+      (c) => c[0] === 'session:approval-request'
+    )
+    expect(sent).toBe(false)
+    session.dispose()
+  })
+
+  it('a block whose reason omits the rule name gets it prefixed from the corpus', async () => {
+    // Without the rule name the agent cannot tell WHICH bar it hit, and so
+    // cannot ask the user for the consent that would clear it.
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({
+      parts: [
+        {
+          type: 'text',
+          text: '<block>yes</block><category>Network Exposure</category><reason>exposes the dev server</reason>'
+        }
+      ]
+    })
+    feedPermissionAsked('bash', 'per_rule_named')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_rule_named',
+        'reject',
+        'Auto mode blocked: [Network Exposure] exposes the dev server'
+      )
+    )
+    session.dispose()
+  })
+
   it('read-only fast-path → allow WITHOUT calling the judge', async () => {
     enableAutoMode()
     feedPermissionAsked('read', 'per_read')

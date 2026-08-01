@@ -1898,6 +1898,60 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
+  it('denial caps — the SECOND block on the SAME rule hands over, naming the rule on the approval card', async () => {
+    // An agent blocked twice on one rule is grinding one intent; rewording will
+    // not produce consent it does not have, so the human gets it a block early
+    // (shared AutoModeDenialTracker, keyed on ClassifyResult.category).
+    enableAutoMode()
+    judgeScript.replies = [
+      '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] would drop pushed commits</reason>',
+      '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] still would drop pushed commits</reason>'
+    ]
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-caps-category', win)
+
+    expect((await gate('call_b4', 'bash', { command: 'git push --force' })).behavior).toBe('deny')
+    void gate('call_b5', 'bash', { command: 'git push -f origin main' })
+
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { decisionReason?: string }
+    ]
+    expect(approval.decisionReason).toContain('Git Destructive')
+    expect(approval.decisionReason).toContain('2 times')
+    session.dispose()
+  })
+
+  it('two blocks on DIFFERENT rules still only deny — the category cap is not a 2-consecutive cap', async () => {
+    enableAutoMode()
+    judgeScript.replies = [
+      '<block>yes</block><category>Git Destructive</category><reason>a</reason>',
+      '<block>yes</block><category>Network Exposure</category><reason>b</reason>'
+    ]
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-caps-category-neg', win)
+
+    expect((await gate('call_b6', 'bash', { command: 'git push --force' })).behavior).toBe('deny')
+    expect((await gate('call_b7', 'bash', { command: 'ngrok http 3000' })).behavior).toBe('deny')
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('the deny sent to pi names the matched rule even when the judge reason omits it', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><category>Git Destructive</category><reason>would drop pushed commits</reason>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-deny-rule-name', win)
+
+    // Without the rule name the agent cannot tell WHICH bar it hit, and so
+    // cannot ask the user for the consent that would clear it.
+    expect(await gate('call_b8', 'bash', { command: 'git push --force' })).toEqual({
+      behavior: 'deny',
+      reason: 'Auto mode blocked: [Git Destructive] would drop pushed commits'
+    })
+    session.dispose()
+  })
+
   it('an ALLOW between blocks resets the consecutive counter', async () => {
     enableAutoMode()
     judgeScript.replies = ['<block>yes</block>', '<block>no</block>', '<block>yes</block>', '<block>yes</block>']
@@ -3527,8 +3581,28 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     // model-discovery.ts's ephemeral pattern, PLUS --no-tools). --no-tools is
     // the enforced safety guarantee: bash/edit/write are never registered, so
     // the ephemeral can't mutate the live session's cwd regardless of framing.
-    expect(eph.opts).toEqual({ cwd: '/cwd', args: ['--mode', 'rpc', '--no-session', '--no-tools'] })
+    expect(eph.opts).toEqual({
+      cwd: '/cwd',
+      args: [
+        '--mode',
+        'rpc',
+        '--no-session',
+        '--no-tools',
+        '--no-extensions',
+        '--no-skills',
+        '--no-context-files',
+        '--no-prompt-templates'
+      ]
+    })
     expect(eph.opts.args).toContain('--no-tools')
+    // Discovery is off too: the repo's own AGENTS.md/CLAUDE.md, .pi/skills and
+    // .pi/extensions are all writable by the very agent this ephemeral is being
+    // asked ABOUT, so loading them would let it steer (or run code in) the
+    // observer answering the user's question. The transcript context the
+    // feature needs is passed explicitly in the prompt.
+    expect(eph.opts.args).toContain('--no-context-files')
+    expect(eph.opts.args).toContain('--no-skills')
+    expect(eph.opts.args).toContain('--no-extensions')
     expect(eph.opts.args).not.toContain('-e')
     expect(eph.opts.env).toBeUndefined()
 

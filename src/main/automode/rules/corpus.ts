@@ -302,6 +302,21 @@ export const ALLOW_RULES: AllowDef[] = [
 
 // ── Derived category allowlist (ref §9.6 — derived, never hand-maintained) ────
 
+/** slug → human-readable rule name, for both derivations below. */
+const RULE_NAME_BY_SLUG = new Map<string, string>(
+  [...HARD_RULES, ...SOFT_RULES].map((r) => [r.slug, r.name])
+)
+
 export function deriveCategorySet(): Set<string> {
-  return new Set([...HARD_RULES, ...SOFT_RULES].map((r) => r.slug))
+  return new Set(RULE_NAME_BY_SLUG.keys())
+}
+
+/**
+ * The rule name behind a validated `<category>` slug — what a human (approval
+ * card) or the agent (deny reason) should see instead of `git_destructive`.
+ * `undefined` for anything not in the corpus; callers that reach here with an
+ * unvalidated slug should fall back to the slug rather than inventing a name.
+ */
+export function ruleNameForCategory(slug: string): string | undefined {
+  return RULE_NAME_BY_SLUG.get(slug)
 }

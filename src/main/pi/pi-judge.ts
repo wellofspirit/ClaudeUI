@@ -30,14 +30,17 @@
  * can outrank that patch — plan §7 Q5). No bridge extension is loaded at all,
  * so §7 Q5 has no pi analogue.
  *
- * The discovery flags matter just as much and are NOT cargo-culted from
- * askSideQuestion: pi's `--system-prompt` "replaces the default prompt;
- * **context files and skills are still appended**" (usage.md:240). Without
- * `--no-context-files` the repository's own `AGENTS.md`/`CLAUDE.md` — content
- * the agent under judgement can write — would be appended to the SECURITY
- * JUDGE'S SYSTEM PROMPT. `--no-skills` / `--no-extensions` /
- * `--no-prompt-templates` close the same class of channel for the other
- * discovery paths.
+ * The discovery flags matter just as much: pi's `--system-prompt` "replaces the
+ * default prompt; **context files and skills are still appended**"
+ * (usage.md:240). Without `--no-context-files` the repository's own
+ * `AGENTS.md`/`CLAUDE.md` — content the agent under judgement can write — would
+ * be appended to the SECURITY JUDGE'S SYSTEM PROMPT. `--no-skills` /
+ * `--no-extensions` / `--no-prompt-templates` close the same class of channel
+ * for the other discovery paths. `PiSession.askSideQuestion`'s ephemeral now
+ * carries the same set for the same reason — it was the other ClaudeUI-spawned
+ * pi that runs a model turn ON THE USER'S BEHALF (rather than the agent's) and
+ * so must not read repo-writable instructions. The two arg lists are
+ * deliberately separate literals, each pinned by its own test.
  *
  * ## Statelessness — probed, not assumed
  *

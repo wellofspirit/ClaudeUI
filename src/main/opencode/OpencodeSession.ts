@@ -58,6 +58,7 @@ import {
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
+import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
 import {
   captureGitRemotes,
   captureGitStatus,
@@ -234,7 +235,8 @@ export class OpencodeSession extends BaseSession {
   private childSessions = new Map<string, string>()
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
-  private autoDenials = { consecutive: 0, total: 0 }
+  // Consecutive / same-rule / total denial caps, shared with pi (denial-tracker.ts).
+  private autoDenials = new AutoModeDenialTracker()
   // Whether THIS session's opencode server exposes the patched tool-less
   // `POST /judge/completion` (ADR-037 P1). Probed once, lazily, on the first
   // judge call; the object identity is the cache, so every judge transport
@@ -1669,25 +1671,21 @@ export class OpencodeSession extends BaseSession {
         return
       }
       if (result.block) {
-        this.autoDenials.consecutive++
-        this.autoDenials.total++
-        // Denial caps (parity 3/20): too many blocks → hand control to the human.
-        if (this.autoDenials.consecutive >= 3 || this.autoDenials.total >= 20) {
-          this.autoDenials.consecutive = 0
-          this.fallbackToHuman(approval)
+        // Denial caps (3 consecutive / 2 on the same rule / 20 total) — too many
+        // blocks → hand control to the human, with the cap's own sentence as the
+        // approval card's `decisionReason` so they see WHY they were asked.
+        const capped = this.autoDenials.recordBlock(result.category)
+        if (capped) {
+          this.fallbackToHuman(approval, capped)
           return
         }
         // Phase 3 — annotate the blocked call so a re-attempt is judged as a
         // retry of something THIS monitor denied (post-block consent
         // inheritance), not as a fresh proposal.
         if (approval.toolUseId) this.recordToolOutcome(approval.toolUseId, 'automode-blocked')
-        this.autoReply(
-          approval.requestId,
-          'reject',
-          `Auto mode blocked: ${result.reason ?? 'flagged as potentially unsafe'}`
-        )
+        this.autoReply(approval.requestId, 'reject', formatAutoModeDenyReason(result))
       } else {
-        this.autoDenials.consecutive = 0
+        this.autoDenials.recordAllow()
         this.autoReply(approval.requestId, 'once')
       }
     } catch (err) {
@@ -1714,9 +1712,16 @@ export class OpencodeSession extends BaseSession {
     })
   }
 
-  /** Classifier couldn't decide (unavailable / cap / error) → ask the human. */
-  private fallbackToHuman(approval: PendingApproval): void {
-    this.send('session:approval-request', approval)
+  /** Classifier couldn't decide (unavailable / cap / error) → ask the human.
+   *
+   *  `decisionReason` is the one-line explanation the approval card renders
+   *  above the buttons (ApprovalButtons / FloatingApproval read
+   *  `PendingApproval.decisionReason`) — set on the denial-cap handoffs, where
+   *  "auto mode gave up on this" is not otherwise visible. Spread rather than
+   *  mutated: the caller's approval object is also the one the SSE consumer
+   *  keeps, and this is a presentation detail of THIS send. */
+  private fallbackToHuman(approval: PendingApproval, decisionReason?: string): void {
+    this.send('session:approval-request', decisionReason ? { ...approval, decisionReason } : approval)
   }
 
   /**

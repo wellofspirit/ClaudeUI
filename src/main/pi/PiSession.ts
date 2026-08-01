@@ -73,6 +73,7 @@ import {
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
+import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
 import {
   captureGitRemotes,
   captureGitStatus,
@@ -99,6 +100,25 @@ import { BashStreamGate } from '../opencode/bash-stream-gate'
 function unknownHostedTool(toolName: string): PiHostedToolResult {
   return { content: [{ type: 'text', text: `Unknown hosted tool "${toolName}"` }], isError: true }
 }
+
+// ---------------------------------------------------------------------------
+// Auto mode — what one classification round can conclude.
+// ---------------------------------------------------------------------------
+
+/**
+ * `classifyAutoMode`'s result: either a decision to hand pi, or "ask the human"
+ * with an optional one-line reason for the approval card. A plain `null` used
+ * to mean the latter, which left nowhere to carry the reason — and an untyped
+ * null is easy to conflate with "no verdict yet".
+ */
+type AutoModeOutcome =
+  | { kind: 'decided'; decision: GateDecision }
+  | { kind: 'human'; reason?: string }
+
+/** The reasonless handoff — no cap fired, the card just asks as usual. */
+const ASK_HUMAN: AutoModeOutcome = { kind: 'human' }
+
+const decided = (decision: GateDecision): AutoModeOutcome => ({ kind: 'decided', decision })
 
 // ---------------------------------------------------------------------------
 // Side question (/btw) — see PiSession.askSideQuestion's doc comment for the
@@ -292,8 +312,9 @@ export class PiSession extends BaseSession {
   // ── Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 ───────────────────────
   /** Memoized `engines/pi.json#autoMode` (see autoModeConfig()). */
   private _autoModeConfig: AutoModeConfig | undefined
-  /** Denial caps — 3 consecutive / 20 total blocks hand control back to the human. */
-  private autoDenials = { consecutive: 0, total: 0 }
+  /** Denial caps — 3 consecutive / 2 same-rule / 20 total blocks hand control
+   *  back to the human. Shared with opencode (automode/denial-tracker.ts). */
+  private autoDenials = new AutoModeDenialTracker()
   /** The warm judge process (pi-judge.ts). Created on the first classified
    *  approval, disposed with the session. */
   private piJudge: PiJudge | null = null
@@ -1394,9 +1415,11 @@ export class PiSession extends BaseSession {
    *      history (`buildTranscriptContext` above) — what makes the answer
    *      grounded in the running session instead of blank.
    *   3. Spawn a brand-new, fully isolated `pi --mode rpc --no-session
-   *      --no-tools` process — the EXACT spawn shape model-discovery.ts's
+   *      --no-tools --no-extensions --no-skills --no-context-files
+   *      --no-prompt-templates` process — the spawn shape model-discovery.ts's
    *      `fetchPiModelCatalog` uses (locatePiBinary, no `-e` bridge/subagent
-   *      extension, no CLAUDEUI_PI_* hosted/dispatch env), PLUS `--no-tools`.
+   *      extension, no CLAUDEUI_PI_* hosted/dispatch env), PLUS the isolation
+   *      flags below.
    *      TOOL EXECUTION DISABLED AT THE PROCESS LEVEL: `--no-tools` (pi
    *      usage.md:211 — "Disable all tools") means bash/edit/write are never
    *      registered for this process, so the ephemeral CANNOT mutate the live
@@ -1406,8 +1429,21 @@ export class PiSession extends BaseSession {
    *      provides the live session (and is simpler + strictly safer than
    *      opencode's deny-all-permission-patch approach — no bridge extension
    *      at all). A side QUESTION answers from the transcript context in
-   *      text and needs no tools regardless. Best-effort `set_model` to this
-   *      session's OWN model so
+   *      text and needs no tools regardless.
+   *      DISCOVERY DISABLED: pi otherwise loads the repository's own
+   *      `AGENTS.md`/`CLAUDE.md` into the system prompt (usage.md:106),
+   *      advertises project skills from `.pi/skills` (skills.md), and executes
+   *      project extensions from `.pi/extensions` (extensions.md) — all content
+   *      the very agent this ephemeral is being asked ABOUT can write. That
+   *      turns "answer a question about the session" into an injection channel
+   *      steering the observer's answer (or, for extensions, running code).
+   *      `--no-context-files`, `--no-skills`, `--no-extensions` and
+   *      `--no-prompt-templates` close them; the transcript context this
+   *      feature needs is passed explicitly in the prompt, so nothing is lost.
+   *      (Residual: a repo-local `.pi/SYSTEM.md`/`APPEND_SYSTEM.md` still
+   *      applies — pi has no flag for it; only passing our own
+   *      `--system-prompt`, as pi-judge.ts does, would displace it.)
+   *      Best-effort `set_model` to this session's OWN model so
    *      the observer answers from a comparable vantage point; failure is
    *      swallowed (the ephemeral just runs with pi's own default instead).
    *      Runs fully independent of (and safely alongside) the live session's
@@ -1449,9 +1485,24 @@ export class PiSession extends BaseSession {
     // registered, bash/edit/write simply don't exist for this process, so the
     // ephemeral cannot mutate the live session's cwd regardless of whether
     // the model heeds the observe-only framing.
+    //
+    // The `--no-*` discovery flags close the repo-writable input paths (see the
+    // doc comment's "DISCOVERY DISABLED" note) — the same set pi-judge.ts's
+    // PI_JUDGE_BASE_ARGS carries, kept as its own literal here because the two
+    // spawns are separate features with separate tests pinning their args.
+    // All probed accepted together in `--mode rpc` against the vendored pi.
     const client = new PiRpcClient(bin, {
       cwd: this.cwd,
-      args: ['--mode', 'rpc', '--no-session', '--no-tools']
+      args: [
+        '--mode',
+        'rpc',
+        '--no-session',
+        '--no-tools',
+        '--no-extensions',
+        '--no-skills',
+        '--no-context-files',
+        '--no-prompt-templates'
+      ]
     })
 
     return new Promise<string | null>((resolve) => {
@@ -1572,10 +1623,12 @@ export class PiSession extends BaseSession {
     }
 
     // 'ask' — in auto mode the classifier gets first refusal; anything it
-    // cannot decide falls through to the human below.
+    // cannot decide falls through to the human below, optionally explaining why
+    // (the denial caps do).
     if (autoMode) {
       const auto = await this.classifyAutoMode(payload, verdict)
-      if (auto) return auto
+      if (auto.kind === 'decided') return auto.decision
+      return this.askHuman(payload, auto.reason)
     }
 
     return this.askHuman(payload)
@@ -1586,8 +1639,13 @@ export class PiSession extends BaseSession {
    * answers it. Extracted from gateToolCallInner so auto mode's several
    * "fall back to the human" exits all land on the SAME path (ADR-023's
    * `fallbackToHuman`).
+   *
+   * `decisionReason` is the one-line explanation the approval card renders
+   * above the buttons (ApprovalButtons / FloatingApproval read
+   * `PendingApproval.decisionReason`) — set on the denial-cap handoffs, where
+   * "auto mode gave up on this" is not otherwise visible.
    */
-  private askHuman(payload: PiToolCallPayload): Promise<GateDecision> {
+  private askHuman(payload: PiToolCallPayload, decisionReason?: string): Promise<GateDecision> {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
       const requestId = uuid()
@@ -1598,7 +1656,8 @@ export class PiSession extends BaseSession {
         toolUseId: toolCallId,
         toolName,
         input,
-        ...(suggestions ? { suggestions } : {})
+        ...(suggestions ? { suggestions } : {}),
+        ...(decisionReason ? { decisionReason } : {})
       }
       this.send('session:approval-request', approval)
     })
@@ -1917,9 +1976,11 @@ export class PiSession extends BaseSession {
 
   /**
    * Classify one would-be-`ask` tool call. Returns the decision to send pi, or
-   * **null** meaning "hand this to the human" — every uncertain path
-   * (user ask rule, judge unavailable, denial cap, mode changed, thrown error)
-   * funnels through that single null.
+   * an `ask-human` outcome — every uncertain path (user ask rule, judge
+   * unavailable, denial cap, mode changed, thrown error) funnels through that
+   * one shape. Its optional `decisionReason` rides the approval card (see
+   * {@link askHuman}); only the denial caps set it, because "auto mode gave up
+   * on this action" is not otherwise visible to the user.
    *
    * Mirrors OpencodeSession.handleAutoModeApproval step for step; the one place
    * pi does better is G9.
@@ -1927,7 +1988,7 @@ export class PiSession extends BaseSession {
   private async classifyAutoMode(
     payload: PiToolCallPayload,
     verdict: PermissionVerdict
-  ): Promise<GateDecision | null> {
+  ): Promise<AutoModeOutcome> {
     const { toolCallId, toolName, input } = payload
 
     // G9 — an explicit USER-authored `ask` rule outranks the classifier (ref §3
@@ -1939,7 +2000,7 @@ export class PiSession extends BaseSession {
     // reach them. Zero judge calls on a match.
     if (verdict.source === 'ask-rule') {
       logger.info('PiSession', `auto-mode → human: user ask rule matches ${toolName} (${verdict.rule})`)
-      return null
+      return ASK_HUMAN
     }
 
     // Fast path — read-only/safe categories never need the judge.
@@ -1955,7 +2016,7 @@ export class PiSession extends BaseSession {
     // (`glob`/`list`), so pi's `find`/`ls` would not match it anyway — left
     // alone deliberately: widening a SHARED allow set to cover a path that
     // cannot be reached would be risk with no benefit.
-    if (isAutoModeFastPathAllowed(toolName)) return { behavior: 'allow' }
+    if (isAutoModeFastPathAllowed(toolName)) return decided({ behavior: 'allow' })
 
     try {
       // Ground truth. actionMeta FIRST: it is what resolves repo visibility,
@@ -1984,7 +2045,7 @@ export class PiSession extends BaseSession {
           'PiSession',
           `auto-mode verdict discarded — permission mode changed to "${this.permissionMode}" while the judge ran`
         )
-        return null
+        return ASK_HUMAN
       }
 
       logger.info(
@@ -1994,34 +2055,29 @@ export class PiSession extends BaseSession {
           (result.reason ? ` — ${result.reason}` : '')
       )
 
-      if (result.unavailable) return null
+      if (result.unavailable) return ASK_HUMAN
 
       if (result.block) {
-        this.autoDenials.consecutive++
-        this.autoDenials.total++
-        // Denial caps (parity 3/20): too many blocks → hand control to the human.
-        if (this.autoDenials.consecutive >= 3 || this.autoDenials.total >= 20) {
-          this.autoDenials.consecutive = 0
-          return null
-        }
+        // Denial caps (3 consecutive / 2 on the same rule / 20 total) — too many
+        // blocks → hand control to the human, carrying the cap's own sentence as
+        // the approval card's decisionReason.
+        const capped = this.autoDenials.recordBlock(result.category)
+        if (capped) return { kind: 'human', reason: capped }
         // Annotate the blocked call so a re-attempt is judged as a retry of
         // something THIS monitor denied (post-block consent inheritance), not
         // as a fresh proposal.
         this.recordToolOutcome(toolCallId, 'automode-blocked')
-        return {
-          behavior: 'deny',
-          reason: `Auto mode blocked: ${result.reason ?? 'flagged as potentially unsafe'}`
-        }
+        return decided({ behavior: 'deny', reason: formatAutoModeDenyReason(result) })
       }
 
-      this.autoDenials.consecutive = 0
-      return { behavior: 'allow' }
+      this.autoDenials.recordAllow()
+      return decided({ behavior: 'allow' })
     } catch (err) {
       logger.warn(
         'PiSession',
         `auto-mode classify failed: ${err instanceof Error ? err.message : String(err)}`
       )
-      return null
+      return ASK_HUMAN
     }
   }
 

@@ -116,7 +116,7 @@ Two facts drove the design, both **probed against the real binary before any pro
   pollute the live branch) and no equivalent of Claude's `side_question` control request, so
   `PiSession.askSideQuestion` drives a **transcript-fed ephemeral**: it builds a bounded context
   from the session's own retained `messageHistory` (last ~20 msgs, 8k-char cap) and spawns an
-  isolated `pi --mode rpc --no-session --no-tools` observer — `--no-tools` disables bash/edit/write
+  isolated `pi --mode rpc --no-session --no-tools --no-extensions --no-skills --no-context-files --no-prompt-templates` (discovery surfaces disabled 2026-08-01 — repo-writable content must not reach the ephemeral) observer — `--no-tools` disables bash/edit/write
   at the process level so it can't mutate the live cwd even if it ignores the observe-only framing
   (enforcement, not soft instruction). The answer renders in the BtwCard, never in the transcript.
   Fidelity limit: sees the visible transcript, not pi's in-flight internal state.

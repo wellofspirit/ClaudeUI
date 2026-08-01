@@ -75,7 +75,7 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
 2. **Transcript slimming** (user text + tool *calls* only) — the dominant per-call token saver — plus
    1h prefix caching across same-turn classifier calls.
 3. **Single-stage `fast` mode** available for cheaper runs (default `both`).
-4. **Consecutive/total denial caps** (3/20, parity) → fall back to human.
+4. **Denial caps** (2-consecutive-same-rule / 3-consecutive / 20-total; category-keyed since 2026-08-01, shared tracker in src/main/automode/denial-tracker.ts) → fall back to human with the rule named in decisionReason.
 5. **Transcript-too-long** → human approval (reactive fallback; no proactive windowing).
 6. **No `(tool,input)` verdict memoization.** Deliberately omitted: a memoized verdict would override
    the user's later choice to personally approve/deny that same call. Each evaluation is fresh.
