@@ -87,6 +87,7 @@
     "@types/uuid": "^11.0.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.1",
+    "@vitest/ui": "4.1.10",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ansi_up": "^6.0.6",
@@ -113,7 +114,7 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "vite": "^7.2.6",
-    "vitest": "^4.1.2",
+    "vitest": "4.1.10",
     "zustand": "^5.0.12"
   }
 }
