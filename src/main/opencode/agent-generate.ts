@@ -122,8 +122,12 @@ export async function generateAgent(
     // tool-less and hang-proof. Mirrors OpencodeSession.askSideQuestion. NOT
     // swallowed: if the deny ruleset can't be applied we must fail loudly rather
     // than risk the hang it exists to prevent.
+    // `permissionHermetic` seals the session so an instance-global "always"
+    // approval cannot outrank the deny-all above (ADR-037 P2). Unknown to an
+    // unpatched opencode, which ignores it — see SEALED_THROWAWAY_PATCH.
     await client.patchSession(js.id, {
       permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      permissionHermetic: true,
     })
 
     const resp = await client.prompt(js.id, {

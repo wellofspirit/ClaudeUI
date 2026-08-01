@@ -273,6 +273,9 @@ describe('generateAgent', () => {
 
     expect(mockPatchSession).toHaveBeenCalledWith('session-abc-123', {
       permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      // Sealed too: the deny-all alone loses to instance-global "always"
+      // approvals under last-match-wins (ADR-037 P2).
+      permissionHermetic: true,
     })
     // Ordering matters: a tool-call permission.asked between patch and prompt is
     // exactly the hang we prevent — the deny ruleset must land first.

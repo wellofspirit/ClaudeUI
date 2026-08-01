@@ -10,6 +10,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 
+// The fetch stub in setupMocks must never leak into other files sharing this
+// worker fork — vitest.config sets no unstubGlobals, so clean up explicitly.
+afterEach(() => vi.unstubAllGlobals())
+
 // ---------------------------------------------------------------------------
 // Stub BrowserWindow (Electron is unavailable in vitest node env)
 // ---------------------------------------------------------------------------
@@ -233,6 +237,16 @@ function setupMocks(): void {
 
   // Set default implementations
   mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
+  // The judge transport probes `GET /doc` to decide whether this server has the
+  // patched /judge/completion route (ADR-037 P1). Stub it: unit tests must never
+  // touch the network, and an UNSTUBBED probe would really connect to
+  // 127.0.0.1:9999 — usually refused, but nondeterministic if anything happens
+  // to be listening, and its late rejection surfaced as a flaky unhandled error.
+  // "No such route" keeps these tests on the session-judge transport they assert.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response('{"paths":{}}', { headers: { 'Content-Type': 'application/json' } }))
+  )
   mockCreateSession.mockResolvedValue({ id: 'ses_opencode_1' })
   mockPromptAsync.mockResolvedValue(undefined)
   mockAbortSession.mockResolvedValue(undefined)
@@ -1328,7 +1342,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_gated', 'once'))
 
     expect(mockPatchSession).toHaveBeenCalledWith(JUDGE_SES, {
-      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      // Sealed as well — see the permissionHermetic tests below.
+      permissionHermetic: true
     })
     // …and BEFORE the judge prompt (order matters — the ruleset must be in
     // place before the model can call a tool).
@@ -1362,6 +1378,62 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     // The judge was never prompted, so nothing auto-replied on its behalf.
     expect(mockPrompt).not.toHaveBeenCalled()
     expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // ── P2: throwaway sessions are SEALED, not merely deny-all (ADR-037) ──────
+  // The deny-all ruleset alone loses: opencode keeps "always" approvals in
+  // instance-global state and appends them AFTER the session ruleset with
+  // last-match-wins, so a pattern the user once always-approved in ANY session
+  // on this server outranks the judge's deny-all (plan §7 Q5, confirmed live).
+  // `permissionHermetic` makes the judge session evaluate against its own
+  // ruleset alone.
+
+  it('P2: the judge session is sealed with permissionHermetic in the SAME patch as the deny-all', async () => {
+    const JUDGE_SES = 'ses_judge_sealed'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_judge_sealed')
+
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_sealed', 'once'))
+
+    const judgePatch = mockPatchSession.mock.calls.find((c) => c[0] === JUDGE_SES)
+    expect(judgePatch).toBeDefined()
+    // One atomic patch: a session that is deny-all but not yet sealed is still
+    // pierceable, so the two must never be split across two round-trips.
+    expect(judgePatch![1]).toEqual({
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      permissionHermetic: true
+    })
+    session.dispose()
+  })
+
+  it('P2: the flag is sent unconditionally — the MAIN session is never sealed', async () => {
+    // No fork detection gates the flag: the stock PATCH schema ignores unknown
+    // keys (measured against the unpatched 1.18.9 release build), so an
+    // unpatched server drops it. But it must only ever be sent for throwaway
+    // sessions — sealing the user's real session would silently discard their
+    // "always" approvals.
+    const JUDGE_SES = 'ses_judge_main_unsealed'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_main_unsealed')
+
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_main_unsealed', 'once'))
+
+    const mainPatches = mockPatchSession.mock.calls.filter((c) => c[0] === SES)
+    expect(mainPatches.length).toBeGreaterThan(0)
+    for (const [, body] of mainPatches) {
+      expect(body).not.toHaveProperty('permissionHermetic')
+    }
     session.dispose()
   })
 
@@ -1882,9 +1954,12 @@ describe('OpencodeSession — askSideQuestion', () => {
     await session.askSideQuestion('aside?')
 
     // The throwaway session got a deny-all ruleset (no tool can raise an
-    // unanswerable permission.asked that would hang the synchronous prompt).
+    // unanswerable permission.asked that would hang the synchronous prompt),
+    // AND permissionHermetic so an instance-global "always" approval cannot
+    // outrank that deny (ADR-037 P2 / plan §7 Q5).
     expect(mockPatchSession).toHaveBeenCalledWith(SIDE_SES.id, {
-      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      permissionHermetic: true
     })
 
     // And the deny-all patch happened BEFORE the prompt (order matters — the

@@ -250,9 +250,24 @@ export class OpencodeClient {
   }
 
   /** PATCH /session/{id} — update per-session settings (permission ruleset, title, agent) */
+  /**
+   * PATCH /session/{id}.
+   *
+   * `permissionHermetic` is a ClaudeUI fork field (ADR-037 P2): it seals the
+   * session so opencode evaluates it against this ruleset ALONE, ignoring the
+   * instance-global "always" approvals that would otherwise outrank a deny-all.
+   * Safe to send unconditionally — the stock payload schema ignores unknown
+   * keys (verified against the unpatched 1.18.9 release build), so an
+   * unpatched server simply drops it. See patch/opencode-fork/README.md.
+   */
   patchSession(
     sessionId: string,
-    patch: { permission?: Array<{ permission: string; pattern: string; action: string }>; title?: string; agent?: string }
+    patch: {
+      permission?: Array<{ permission: string; pattern: string; action: string }>
+      permissionHermetic?: boolean
+      title?: string
+      agent?: string
+    }
   ): Promise<unknown> {
     return this.patch(`/session/${encodeURIComponent(sessionId)}`, patch)
   }

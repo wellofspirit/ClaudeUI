@@ -470,10 +470,14 @@ function syncFork(fork) {
   } else {
     console.log(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
     gitRun(['fetch', 'origin', fork.branch], FORK_DIR)
-    gitRun(['checkout', '-B', fork.branch, `origin/${fork.branch}`], FORK_DIR)
+    // `-f` is load-bearing: a previous run's `bun install` rewrites bun.lock in
+    // this clone, and a plain checkout refuses to switch over a dirty file.
+    gitRun(['checkout', '-f', '-B', fork.branch, `origin/${fork.branch}`], FORK_DIR)
   }
-  // Any local edit (our install workaround below, a stray build artifact) must
-  // not leak into the vendored binary.
+  // Any local edit (a rewritten lockfile, the install workaround below, a stray
+  // build artifact) must not leak into the vendored binary. NOT `git clean` —
+  // that would delete the cached node_modules and turn every run into a cold
+  // install.
   gitRun(['reset', '--hard', `origin/${fork.branch}`], FORK_DIR)
   return gitOut(['rev-parse', 'HEAD'], FORK_DIR)
 }

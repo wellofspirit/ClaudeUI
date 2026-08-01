@@ -124,6 +124,28 @@ const DISPATCH_AGENT_ASK_RULE: PermissionRule = {
  */
 const DENY_ALL_TOOLS_RULESET: PermissionRule[] = [{ permission: '*', pattern: '*', action: 'deny' }]
 
+/**
+ * The patch body for a throwaway session: deny-all AND sealed.
+ *
+ * The ruleset alone is not sufficient. opencode stores "always" approvals in
+ * INSTANCE-GLOBAL state (not keyed by session) and `evaluate()` appends that
+ * list AFTER the session ruleset, with last-match-wins — so any pattern the
+ * user ever always-approved anywhere on this server outranks the deny-all
+ * above (auto-mode rework plan §7 Q5, confirmed live). `permissionHermetic`
+ * is the fork's fix (ADR-037 P2): a sealed session is evaluated against its
+ * own ruleset only, and never contributes to the global list either.
+ *
+ * Sent unconditionally, with no fork detection: the stock PATCH payload
+ * schema ignores unknown keys (measured against the unpatched 1.18.9 release
+ * build — Effect Schema's default is to strip excess properties), so an
+ * unpatched server drops the field and behaves exactly as it does today. A
+ * capability probe here would buy nothing and add a failure mode.
+ */
+const SEALED_THROWAWAY_PATCH = {
+  permission: DENY_ALL_TOOLS_RULESET,
+  permissionHermetic: true,
+} as const
+
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
 
@@ -1538,7 +1560,7 @@ export class OpencodeSession extends BaseSession {
     return async ({ system, user }) => {
       const js = await client.createSession({ title: 'auto-mode-judge' })
       try {
-        await client.patchSession(js.id, { permission: DENY_ALL_TOOLS_RULESET })
+        await client.patchSession(js.id, SEALED_THROWAWAY_PATCH)
         const resp = (await client.prompt(js.id, {
           model: { providerID: parsed.providerID, modelID: parsed.modelID },
           system,
@@ -1726,12 +1748,11 @@ export class OpencodeSession extends BaseSession {
       const parsed = parseModelString(this._model)
       const js = await this.client.createSession({ title: 'side-question' })
       try {
-        // Deny every tool so a synchronous prompt can never block on an
-        // unanswerable permission.asked (see method doc). Best-effort; the
-        // system prompt still discourages tools if the patch were to fail.
-        await this.client.patchSession(js.id, {
-          permission: [{ permission: '*', pattern: '*', action: 'deny' }]
-        })
+        // Deny every tool AND seal the session so an instance-global "always"
+        // approval cannot outrank that deny (see SEALED_THROWAWAY_PATCH).
+        // Best-effort; the system prompt still discourages tools if the patch
+        // were to fail.
+        await this.client.patchSession(js.id, SEALED_THROWAWAY_PATCH)
         const resp = (await this.client.prompt(js.id, {
           model: { providerID: parsed.providerID, modelID: parsed.modelID },
           system: 'Answer the following question concisely and directly. Do not use tools.',

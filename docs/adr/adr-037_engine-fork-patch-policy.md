@@ -74,3 +74,18 @@ to the tool-denied session transport. `ensure-opencode` builds from the fork
 by default (release download behind --from-release). Q5 is mooted for judge
 calls on the endpoint path; the ADR-023 advisory-fields deviation is resolved
 there.
+
+## Bump to v1.18.10 + P2 status — SHIPPED 2026-08-01
+
+First bump under the §3 protocol: license still MIT (gate passed), permission
+v1 path intact, zero upstream drift in our patched files; 29 conflicts, all
+mechanical version strings. Fork @ `27a23b8cc`.
+
+P2 reshaped per user decision (global "always" matches Claude semantics and
+stays): a `permissionHermetic` PATCH flag SEALS a throwaway session — its
+evaluate skips the instance `approved` list, and its own "always" replies are
+never added to it (sink, not source). Unpatched binaries strip unknown PATCH
+fields (measured: Effect Schema is non-strict), so ClaudeUI sends the flag
+unconditionally for its three sealed-session sites (judge fallback, /btw,
+agent-generate). Piercing reproduction lives in the fork's own test suite
+(needs a real Permission.ask). Re-derivation guide: `patch/opencode-fork/README.md`.
