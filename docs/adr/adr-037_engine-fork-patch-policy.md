@@ -37,7 +37,11 @@ patches must be narrow and re-verified per bump.
      tested `wildcard.ts` port stands meanwhile.
 2. **pi: extend, don't patch.** pi was chosen for flexibility; new
    capabilities ride its extension API (the `-e` bridge precedent), vendored
-   and pinned like the binary itself. The auto-mode judge spawn keeps
+   and pinned like the binary itself. pi's source is public
+   (github.com/earendil-works/pi), so this is a policy choice with fork held
+   in reserve as a last resort — the escalation ladder is extension hooks →
+   spawn flags / ephemeral processes → upstream feature request → fork, and
+   nothing in phases 1–4 got past the second rung. The auto-mode judge spawn keeps
    `--no-tools --no-extensions --no-context-files` — our own extensions must
    never load into the security judge.
 3. **Maintenance protocol per version bump** (mirrors the cli.js discipline):
