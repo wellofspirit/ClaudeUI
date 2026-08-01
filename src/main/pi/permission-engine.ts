@@ -889,6 +889,51 @@ export function decideWithSource(
   return { decision: modeBaseDecision(ctx.mode, kind, input), source: 'mode-base' }
 }
 
+/**
+ * The merged user rules with the ALLOW tier emptied — what auto mode feeds
+ * {@link decideWithSource} in place of the full set (applied at PiSession's
+ * composition seam, `gateToolCallInner`, NOT inside the ladder: the ladder is a
+ * pure function of the rules it is given, and teaching it a second notion of
+ * "auto mode" on top of `ctx.mode` would put the same policy in two places).
+ *
+ * Same fix, same reasoning as opencode's `withoutAllowRules`
+ * (`../opencode/permission-compiler.ts`) — read that one for the full argument
+ * and the live evasion that motivated it. In short: cli.js's auto-mode fast path
+ * re-runs the permission check "with classifier-bypassing allow rules filtered
+ * out" (`docs/protocol/14-auto-mode-classifier.md` §3 step 2). A user allow rule
+ * says "don't interrupt me for this"; in auto mode it must not also mean "skip
+ * the security monitor", or every allow rule is a hole straight through the gate
+ * (live: `Bash(git:*)` made every git command invisible to the judge, and an
+ * agent then evaded a static `git push --force` deny by reordering arguments).
+ *
+ * Precedence is untouched, which is what keeps G9 native and exact:
+ *
+ *  - DENY and ASK rules are kept, and both are evaluated BEFORE the allow tier —
+ *    so a user ask rule still yields `source: 'ask-rule'` and still routes
+ *    straight to the human with zero judge calls.
+ *  - A formerly-allowed action now falls through to the mode base
+ *    (`acceptEdits` under auto mode) → 'ask' with `source: 'mode-base'` →
+ *    classifyAutoMode → the JUDGE. That is the intended destination: the human
+ *    is not re-interrupted for something they explicitly allowed.
+ *  - `ctx.sessionAllows` is deliberately NOT filtered. Those are this session's
+ *    "allow for this session" clicks — a live human consent act inside the
+ *    current turn's context, not a stored config rule written months ago.
+ *  - ALL allow rules go, not just `Bash(…)` ones: under auto mode the base is
+ *    already `acceptEdits`, so reads/edits/search are auto-allowed by the base
+ *    regardless, and the only allow rules with any remaining effect are exactly
+ *    the classifier-bypassing ones cli.js filters.
+ *
+ * Non-auto modes keep the full set (the caller only applies this under auto
+ * mode): with no judge in the loop, an allow rule is the user's only way to say
+ * "stop asking me".
+ *
+ * `additionalDirectories`/`defaultMode` ride through untouched — `decide()`
+ * doesn't consult them (see its doc comment).
+ */
+export function withoutAllowRules(rules: MergedClaudeRules): MergedClaudeRules {
+  return { ...rules, allow: [] }
+}
+
 // ---------------------------------------------------------------------------
 // Rule loading
 // ---------------------------------------------------------------------------

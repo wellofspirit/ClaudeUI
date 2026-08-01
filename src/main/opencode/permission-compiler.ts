@@ -164,6 +164,50 @@ export function compileClaudeRulesToOpencode(perms: ClaudePermissions): Opencode
   return rules
 }
 
+/**
+ * The compiled user ruleset with every ALLOW rule removed — what auto mode
+ * patches onto the opencode session instead of the full set.
+ *
+ * ## Why (cli.js parity, `docs/protocol/14-auto-mode-classifier.md` §3 step 2)
+ *
+ * cli.js's auto-mode fast path re-runs the permission check "with
+ * classifier-bypassing allow rules **filtered out**". We had no equivalent, and
+ * the consequence was live-observed: with a user allow rule `Bash(git:*)`, NO
+ * git command ever raised `permission.asked`, so the judge never saw one — an
+ * agent then evaded the static deny `Bash(git push --force:*)` by reordering
+ * arguments (`git push origin main --force`) and the force-pushes landed
+ * completely unclassified. A user allow rule is a statement about the *ask*
+ * tier ("don't interrupt me for this"), not a waiver of the security monitor;
+ * in auto mode, where the monitor IS the reviewer, treating it as one turns
+ * every allow rule into a hole straight through the gate.
+ *
+ * ## Why ALL allow rules, not just `bash`
+ *
+ * Auto mode's base is already `acceptEdits` (`buildRuleset('acceptEdits')` =
+ * `{*:allow}` + guards, with only `bash`/`webfetch` asking). So reads, edits,
+ * globs, greps, tasks and `external_directory` (the compiled form of
+ * `additionalDirectories`) are auto-allowed by the BASE regardless of what the
+ * user's allow rules say — dropping them changes nothing. The only allow rules
+ * that can have any effect here are precisely the ones that override a base
+ * `ask`, i.e. exactly the "classifier-bypassing" set cli.js filters. Scoping the
+ * filter to `bash` would therefore be a narrower rule with identical behavior
+ * today and a silent hole the next time the base gates another category.
+ *
+ * ASK and DENY rules are kept: they only ever tighten, and the ask tier is what
+ * the G9 precedence guard (`wildcard.ts` `matchesUserAskRule`) reads back.
+ * Session-scoped "always allow" answers are NOT affected — those are opencode's
+ * own per-session state from a live human click, not a stored config rule.
+ *
+ * Non-auto modes keep the full compiled ruleset: with no judge in the loop, an
+ * allow rule is the user's only way to say "stop asking me", and removing it
+ * there would be a pure regression.
+ */
+export function withoutAllowRules(
+  rules: readonly OpencodePermissionRule[]
+): OpencodePermissionRule[] {
+  return rules.filter((r) => r.action !== 'allow')
+}
+
 // ── Reverse direction: opencode approval → Claude "always allow" suggestion ────
 
 /** Inverse of TOOL_TO_CATEGORY (first/canonical Claude tool per opencode category). */

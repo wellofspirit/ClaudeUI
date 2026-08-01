@@ -57,6 +57,7 @@ import {
   decideWithSource,
   piToolKind,
   mergedClaudeRulesFor,
+  withoutAllowRules,
   sessionAllowKey,
   normalizeWhitespace,
   PI_TOOL_TO_CLAUDE_TOOL,
@@ -1585,6 +1586,16 @@ export class PiSession extends BaseSession {
    * (cli.js's fast-path-A equivalence). With auto mode DISABLED, `auto` keeps
    * its historical allow-everything base — there would be no classifier to
    * compensate for a tightening.
+   *
+   * AUTO MODE'S RULES (cli.js §3 step 2 parity): the user's ALLOW rules are
+   * filtered out of what the engine decides on, so the actions they would have
+   * silently auto-allowed fall through to the `acceptEdits` base's 'ask' and
+   * reach the classifier instead of bypassing it. Applied HERE, at the
+   * composition seam, rather than inside the pure ladder — see
+   * `withoutAllowRules` for the full reasoning, the live evasion that motivated
+   * it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny and
+   * ask are both evaluated before the allow tier, so filtering the allow tier
+   * cannot change which of them answers).
    */
   private gateToolCallInner = async (payload: PiToolCallPayload): Promise<GateDecision> => {
     const { toolName, input } = payload
@@ -1592,7 +1603,7 @@ export class PiSession extends BaseSession {
     const autoMode = this.isAutoMode(this.permissionMode)
     const verdict = decideWithSource(toolName, input, {
       mode: autoMode ? 'acceptEdits' : this.permissionMode,
-      rules,
+      rules: autoMode ? withoutAllowRules(rules) : rules,
       sessionAllows: this.sessionAllows,
       cwd: this.cwd
     })

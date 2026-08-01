@@ -1583,6 +1583,101 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     })
   }
 
+  // ── User ALLOW rules must not bypass the classifier (cli.js §3 step 2) ─────
+  // Live evidence: with `Bash(git:*)` allowed, NO git command raised
+  // permission.asked, so the judge never saw one — an agent then evaded the
+  // static deny `Bash(git push --force:*)` by reordering arguments and the
+  // force-pushes landed unclassified. In auto mode the ALLOW half of the user's
+  // ruleset is patched OUT (`withoutAllowRules`) so those actions ask, and the
+  // classifier decides them. The provenance set the G9 guard reads keeps the
+  // FULL rules, so this is a route to the JUDGE, not to the human.
+
+  /** The compiled user-rule tail of the last patched ruleset (base + user + dispatch). */
+  function lastPatchedRules(): { permission: string; pattern: string; action: string }[] {
+    return (mockPatchSession.mock.calls.at(-1)?.[1] as {
+      permission: { permission: string; pattern: string; action: string }[]
+    }).permission
+  }
+
+  it('auto mode: a user ALLOW rule is patched OUT of the session ruleset', async () => {
+    enableAutoMode()
+    withUserAskRule([], ['Bash(git:*)'])
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    const rs = lastPatchedRules()
+    // The classifier-bypassing rule is gone…
+    expect(rs.some((r) => r.action === 'allow' && r.pattern === 'git*')).toBe(false)
+    // …and the base still gates bash, so `git …` now raises permission.asked.
+    expect(rs.some((r) => r.permission === 'bash' && r.pattern === '*' && r.action === 'ask')).toBe(
+      true
+    )
+    session.dispose()
+  })
+
+  // NOTE on coverage split: the REAL opencode server is what turns the patched
+  // ruleset into a `permission.asked`, and these tests feed that event
+  // synthetically — so the test above (the ruleset no longer carries the allow)
+  // is the one that actually guards the fix; the test below guards the second
+  // half of the claim, that such an ask lands on the judge rather than the human.
+  it('auto mode: a user-ALLOWED bash action reaches the JUDGE (not the human, not auto-allowed)', async () => {
+    enableAutoMode()
+    withUserAskRule([], ['Bash(git:*)'])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_user_allow', 'c1', ['git push origin main --force'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_user_allow', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_user_allow', 'once'))
+    // The judge decided it — the user's allow rule did not make it invisible…
+    expect(mockPrompt).toHaveBeenCalled()
+    // …and it did NOT degrade into an interruption either: an allow rule still
+    // means "don't ask me", it just no longer means "skip the monitor".
+    expect(
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+    ).toBe(false)
+    session.dispose()
+  })
+
+  it('auto mode: a user ASK rule still goes to the human with ZERO judge calls, even alongside an allow', async () => {
+    // The allow filter must not disturb G9: the provenance set keeps the full
+    // compiled rules, so an ask the user wrote still outranks the classifier.
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)'], ['Bash(git:*)'])
+    feedPermissionAsked('bash', 'per_ask_and_allow', 'c1', ['git push --force origin main'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_ask_and_allow', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('NON-auto modes keep the user allow rules — the filter is auto-mode-only', async () => {
+    // With no judge in the loop an allow rule is the user's only way to stop
+    // being asked; dropping it there would be a pure regression.
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    withUserAskRule([], ['Bash(git:*)'])
+    for (const mode of ['default', 'acceptEdits', 'full'] as const) {
+      mockPatchSession.mockClear()
+      const session = makeSession(undefined, mode)
+      await session.run('go')
+      expect(lastPatchedRules()).toContainEqual({
+        permission: 'bash',
+        pattern: 'git*',
+        action: 'allow'
+      })
+      session.dispose()
+    }
+  })
+
   it('G9: an approval matching a user ask rule goes to the human with ZERO judge calls', async () => {
     enableAutoMode()
     withUserAskRule(['Bash(git push:*)'])

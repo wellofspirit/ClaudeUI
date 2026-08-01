@@ -46,7 +46,8 @@ import { loadClaudePermissions, saveClaudePermissions } from '../services/claude
 import {
   compileClaudeRulesToOpencode,
   suggestionDestinationToScope,
-  suggestionRuleToClaudeString
+  suggestionRuleToClaudeString,
+  withoutAllowRules
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
 import { matchesUserAskRule } from './wildcard'
@@ -1355,16 +1356,31 @@ export class OpencodeSession extends BaseSession {
     // `permission.asked` → the classifier judges just those (the acceptEdits-
     // equivalence fast-path, parity with cli.js). Classifier-disabled `full`
     // falls through to buildRuleset('full') = the gated `default` (ADR-023).
-    const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode
+    const autoMode = this.isAutoMode(mode)
+    const baseMode = autoMode ? 'acceptEdits' : mode
     // Compose: autonomy-mode base ruleset + the user's neutral permission rules
     // (Claude's allow/ask/deny + additionalDirectories) compiled to opencode and
     // appended AFTER the base so they override it (last-match-wins). This makes
     // the SAME configured rules apply to opencode as to Claude. See ADR-022.
     const userRules = this.compiledUserRules()
     // Remember the user-origin half for the auto-mode ask-rule precedence check
-    // (G9) — see `lastCompiledUserRules`.
+    // (G9) — see `lastCompiledUserRules`. This keeps the FULL set including the
+    // allow rules the patched ruleset drops below: G9's re-match honours
+    // opencode's last-match-wins over the user half, so feeding it a filtered
+    // view would be lying to the provenance check about what the user wrote.
+    // A formerly-allowed action re-matches as `allow` there → not an ask rule →
+    // it goes to the JUDGE, which is the whole point of the filter. (Only the
+    // ask tier is read back, and the compiler emits allow→ask→deny, so an ask
+    // already outranks an allow under last-match-wins either way.)
     this.lastCompiledUserRules = userRules
-    const ruleset = [...buildRuleset(baseMode), ...userRules, DISPATCH_AGENT_ASK_RULE]
+    // AUTO MODE: patch the user's ALLOW rules OUT of the session ruleset, so the
+    // actions they would have silently auto-allowed raise `permission.asked` and
+    // reach the classifier instead of bypassing it (cli.js §3 step 2 parity —
+    // see `withoutAllowRules` for the full reasoning and the live evasion that
+    // motivated it). Ask + deny + the base + DISPATCH_AGENT_ASK_RULE are
+    // unchanged; every other mode keeps the full compiled set.
+    const effectiveUserRules = autoMode ? withoutAllowRules(userRules) : userRules
+    const ruleset = [...buildRuleset(baseMode), ...effectiveUserRules, DISPATCH_AGENT_ASK_RULE]
     try {
       await this.client.patchSession(this.openSessionId, { permission: ruleset })
     } catch (err) {

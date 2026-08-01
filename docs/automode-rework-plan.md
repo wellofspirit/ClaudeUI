@@ -514,3 +514,19 @@ Also new and uncommitted this session: `docs/protocol/14-auto-mode-classifier.md
    in parallel, `OpencodeSession.ts:1189-1196`); (c) accepted risk, documented.
    **Interim status: (c), pending a user decision; phase 1 ships with this
    documented.**
+6. **GLM-5.2 is unusable as a judge — DO NOT RECOMMEND (2026-08-01, live).**
+   Two independent disqualifiers, both observed driving the real app rather than
+   the bench harness: (a) **non-compliant output format** — it does not reliably
+   emit the `<block>yes|no</block>` grammar the stage prompts demand (prose
+   preamble, missing/renamed tags), so verdicts land on the fail-closed
+   unparseable path; (b) **hangs of >5 minutes** on a single classification,
+   which with no bound wedges the gated tool call behind a spinner with no
+   approval card and no way for the user to tell what is happening. Fail-closed
+   handled (a) correctly — an unreadable verdict blocks (stage 2) or escalates
+   (stage 1), never allows — and the stage-bounded timeouts added alongside this
+   entry (`STAGE1_TIMEOUT_MS`/`STAGE2_TIMEOUT_MS`, 60 s/120 s, cli.js `ain`/`lin`)
+   now convert (b) into `unavailable` → ask the human. Both behaviours are
+   therefore *contained*, not fixed: the model is still a bad judge, it just can
+   no longer hang or silently pass anything. Keep it off any recommended
+   judge-model list; the bench's format-compliance column is the cheap
+   pre-screen for the next candidate.

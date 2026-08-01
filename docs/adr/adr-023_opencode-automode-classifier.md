@@ -170,6 +170,17 @@ block stands.
 (opencode: host-side re-match via `wildcard.ts`, since `permission.asked`
 carries no provenance; pi: native engine provenance). The permission mode is
 re-read after the judge returns (`mode_changed_while_queued` parity).
+In the ALLOW direction the precedence inverts: under auto mode the user's allow
+rules are filtered out of the effective ruleset on both engines
+(`withoutAllowRules` in `opencode/permission-compiler.ts` and
+`pi/permission-engine.ts`), so an action they would have silently auto-allowed
+reaches the judge instead of bypassing it — cli.js §3 step 2 parity
+("classifier-bypassing allow rules filtered out"); the G9 provenance set keeps
+the full rules, so ask-rule routing is unchanged.
+Each judge call is stage-bounded — 60 s stage 1 / 120 s stage 2, cli.js's
+`ain`/`lin` — and a timeout is treated exactly as a transport error
+(`unavailable` → ask the human), so a wedged judge can never park a tool call
+behind a spinner.
 
 **Ground truth.** `src/main/automode/ground-truth.ts`: `{"outcome":…}`
 annotations (ok / error / rejected-by-user / automode-blocked only — sticky

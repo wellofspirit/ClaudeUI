@@ -10,7 +10,8 @@ import {
   compileClaudeRulesToOpencode,
   suggestOpencodeAllowRule,
   suggestionRuleToClaudeString,
-  suggestionDestinationToScope
+  suggestionDestinationToScope,
+  withoutAllowRules
 } from '../permission-compiler'
 import type { ClaudePermissions } from '../../../shared/types'
 
@@ -181,5 +182,47 @@ describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {
     expect(suggestionDestinationToScope('localSettings')).toBe('local')
     expect(suggestionDestinationToScope('session')).toBeNull()
     expect(suggestionDestinationToScope('cliArg')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// withoutAllowRules — auto mode's classifier-bypass filter (cli.js §3 step 2).
+// ---------------------------------------------------------------------------
+
+describe('withoutAllowRules', () => {
+  const compiled = (): ReturnType<typeof compileClaudeRulesToOpencode> =>
+    compileClaudeRulesToOpencode(
+      perms({
+        allow: ['Bash(git:*)', 'WebFetch(domain:example.com)'],
+        ask: ['Bash(git push:*)'],
+        deny: ['Bash(rm:*)'],
+        additionalDirectories: ['/extra']
+      })
+    )
+
+  it('drops every allow rule and keeps ask + deny intact', () => {
+    const filtered = withoutAllowRules(compiled())
+    expect(filtered.every((r) => r.action !== 'allow')).toBe(true)
+    // The tightening tiers survive verbatim — the filter only ever removes
+    // permission, never grants it.
+    expect(filtered).toEqual(compiled().filter((r) => r.action !== 'allow'))
+    expect(filtered).toContainEqual({ permission: 'bash', pattern: 'git push*', action: 'ask' })
+    expect(filtered).toContainEqual({ permission: 'bash', pattern: 'rm*', action: 'deny' })
+  })
+
+  it('drops the external_directory allows compiled from additionalDirectories', () => {
+    // Harmless: auto mode's base is buildRuleset('acceptEdits'), whose `{*:allow}`
+    // baseline already covers external_directory (ADR-022 leaves that category
+    // ungated in every mode) — so this removes nothing that was load-bearing.
+    expect(withoutAllowRules(compiled()).some((r) => r.permission === 'external_directory')).toBe(
+      false
+    )
+  })
+
+  it('does NOT mutate its input — the provenance set (G9) shares this array', () => {
+    const original = compiled()
+    const snapshot = structuredClone(original)
+    withoutAllowRules(original)
+    expect(original).toEqual(snapshot)
   })
 })

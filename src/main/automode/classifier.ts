@@ -297,6 +297,56 @@ export const STAGE2_MAX_TOKENS = 8192
 export const STAGE1_STOP_SEQUENCES = ['</block>']
 
 /**
+ * Per-stage wall-clock budget, cli.js parity (ref §2 "Request parameters":
+ * `ain` = 60 s for stage 1, `lin` = 120 s for stage 2).
+ *
+ * These are NOT a nicety. A judge that never answers is indistinguishable from
+ * one that answered "allow" as far as the agent is concerned: without a bound,
+ * the tool call parks forever, the turn hangs with no approval card, and the
+ * user's only signal is a spinner. A judge whose transport wedges (a model that
+ * emits a stream and never stops — observed live with GLM-5.2, plan §7 Q6) must
+ * degrade into the SAME state as a judge that threw: `unavailable`, which the
+ * engine wiring maps to "ask the human".
+ *
+ * The budget is per stage, not per `classify()`, exactly as in cli.js — an
+ * escalation to stage 2 gets its own full clock rather than the remainder of
+ * stage 1's.
+ */
+export const STAGE1_TIMEOUT_MS = 60_000
+export const STAGE2_TIMEOUT_MS = 120_000
+
+/**
+ * Reject with a timeout error if `promise` has not settled within `ms`.
+ *
+ * Deliberately plain (`setTimeout` + `Promise.race`-by-hand, no injected clock):
+ * a fake-timer test drives it exactly as the real thing runs, and an injected
+ * clock would be a second thing to keep in sync for no test power.
+ *
+ * The two callbacks below are also what keeps a LATE settlement from becoming an
+ * `unhandledRejection`: we always attach BOTH handlers to `promise`, so once the
+ * timeout has already rejected the outer promise, the transport's eventual
+ * throw still lands on a handled path (the `reject` call is then a no-op) rather
+ * than escaping to the process. Losing an Electron main process to an
+ * unhandled rejection because a judge died 3 minutes late is not an acceptable
+ * failure mode for a security gate.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+/**
  * The judge's system prompt: our rule corpus rendered around the host's
  * environment facts. Re-exported here so engine wiring has one import site for
  * the whole policy surface.
@@ -422,8 +472,10 @@ export function parseVerdict(text: string): { block: boolean; reason?: string; c
  * - `fast`: stage 1 alone decides, and *may* block; unparseable → block.
  * - `thinking`: stage 2 alone.
  *
- * A transport throw at either stage → `{ block: true, unavailable: true }`,
- * which the wiring maps to "ask the human".
+ * A transport throw at either stage — or a stage that blows its
+ * {@link STAGE1_TIMEOUT_MS}/{@link STAGE2_TIMEOUT_MS} budget — →
+ * `{ block: true, unavailable: true }`, which the wiring maps to "ask the
+ * human".
  */
 export async function classify(
   input: ClassifyInput,
@@ -434,18 +486,35 @@ export async function classify(
 
   const errored = (): ClassifyResult => ({ block: true, stage: 'error', unavailable: true })
 
-  /** Returns the raw completion, or `null` if the transport threw. */
-  const call = async (req: Omit<JudgeRequest, 'system' | 'user'> & { instruction: string }) => {
-    const { instruction, ...rest } = req
+  /**
+   * Returns the raw completion, or `null` if the transport threw OR blew its
+   * stage budget. A timeout is deliberately collapsed into the same `null` as a
+   * throw: both mean "no verdict was obtained", which is the definition of
+   * `unavailable` → ask the human. (Nothing here retries — a stage that already
+   * burned its full minute is not made more likely to answer by asking again,
+   * and the human is one card away.)
+   */
+  const call = async (
+    req: Omit<JudgeRequest, 'system' | 'user'> & { instruction: string; timeoutMs: number }
+  ) => {
+    const { instruction, timeoutMs, ...rest } = req
     try {
-      return await judge({ system, user: buildUserPrompt(input, instruction), ...rest })
+      return await withTimeout(
+        judge({ system, user: buildUserPrompt(input, instruction), ...rest }),
+        timeoutMs,
+        'auto-mode judge'
+      )
     } catch {
       return null
     }
   }
 
   const runStage2 = async (): Promise<ClassifyResult> => {
-    const raw = await call({ instruction: STAGE2_INSTRUCTION, maxTokens: STAGE2_MAX_TOKENS })
+    const raw = await call({
+      instruction: STAGE2_INSTRUCTION,
+      maxTokens: STAGE2_MAX_TOKENS,
+      timeoutMs: STAGE2_TIMEOUT_MS
+    })
     if (raw === null) return errored()
     const v = parseVerdictOrNull(raw)
     // Fail-closed, but NOT `unavailable`: we did get an answer, we just can't
@@ -466,7 +535,8 @@ export async function classify(
     // survives), a larger budget, and an unparseable reply blocks.
     const raw = await call({
       instruction: STAGE1_FAST_INSTRUCTION,
-      maxTokens: STAGE1_FAST_MAX_TOKENS
+      maxTokens: STAGE1_FAST_MAX_TOKENS,
+      timeoutMs: STAGE1_TIMEOUT_MS
     })
     if (raw === null) return errored()
     const v = parseVerdictOrNull(raw)
@@ -485,6 +555,7 @@ export async function classify(
   const raw1 = await call({
     instruction: STAGE1_BOTH_INSTRUCTION,
     maxTokens: STAGE1_BOTH_MAX_TOKENS,
+    timeoutMs: STAGE1_TIMEOUT_MS,
     // Copy — the exported constant must not be mutable by a transport.
     stopSequences: [...STAGE1_STOP_SEQUENCES]
   })

@@ -1874,6 +1874,95 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
+  // ── User ALLOW rules must not bypass the classifier (cli.js §3 step 2) ─────
+  // Live evidence: with `Bash(git:*)` allowed, no git command ever reached the
+  // judge, and an agent evaded the static `git push --force` deny by reordering
+  // arguments. Under auto mode the allow tier is filtered out of what the engine
+  // decides on (`withoutAllowRules`), so those actions fall through to the
+  // acceptEdits base's 'ask' → the judge. Deny/ask precedence is untouched.
+
+  /** Only `project` scope carries rules; user/local are empty (merge is 3-scope). */
+  function withUserRules(rules: Partial<{ allow: string[]; ask: string[]; deny: string[] }>): void {
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? {
+            allow: rules.allow ?? [],
+            deny: rules.deny ?? [],
+            ask: rules.ask ?? [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+  }
+
+  it('auto mode: a user-ALLOWED bash action goes to the JUDGE, not straight through', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>rewrites pushed history</reason>']
+    withUserRules({ allow: ['Bash(git:*)'] })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow-filtered', win)
+
+    // The exact evasion seen live: the static deny is written `git push --force`,
+    // the agent reorders the flag, and `Bash(git:*)` used to wave it through.
+    expect(await gate('call_al1', 'bash', { command: 'git push origin main --force' })).toEqual({
+      behavior: 'deny',
+      reason: 'Auto mode blocked: rewrites pushed history'
+    })
+    expect(judgeInstances).toHaveLength(1)
+    // Not a downgrade to a human interruption either — the allow rule still
+    // means "don't ask me", it just no longer means "skip the monitor".
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('auto mode: a user ASK rule still reaches the human with ZERO judge calls alongside an allow', async () => {
+    // G9 must survive the allow filter: deny and ask are both evaluated before
+    // the allow tier, so removing allows cannot change which rung answers.
+    enableAutoMode()
+    withUserRules({ allow: ['Bash(git:*)'], ask: ['Bash(git push:*)'] })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow-vs-ask', win)
+
+    void gate('call_al2', 'bash', { command: 'git push origin main' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('auto mode: a user DENY rule still short-circuits ahead of the judge alongside an allow', async () => {
+    enableAutoMode()
+    withUserRules({ allow: ['Bash(git:*)'], deny: ['Bash(git push --force:*)'] })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow-vs-deny', win)
+
+    expect(await gate('call_al3', 'bash', { command: 'git push --force origin main' })).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Bash(git push --force:*)'
+    })
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('NON-auto modes: the same allow rule still hard-allows with no judge and no prompt', async () => {
+    // With no judge in the loop an allow rule is the user's only way to stop
+    // being asked; the filter is auto-mode-only for exactly that reason.
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    withUserRules({ allow: ['Bash(git:*)'] })
+    const win = new MockWindow()
+    const session = new PiSession('rid-nonauto-allow', win as never, '/cwd', {})
+    // `default` would otherwise ASK for bash — the allow rule is what silences it.
+    await session.setPermissionMode('default')
+    await session.run('hi')
+
+    expect(await gate('call_al4', 'bash', { command: 'git push origin main --force' })).toEqual({
+      behavior: 'allow'
+    })
+    expect(judgeInstances).toHaveLength(0)
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
   it('an unusable judge → the human decides (unavailable is never a silent allow)', async () => {
     enableAutoMode()
     judgeScript.rejectPrompt = true

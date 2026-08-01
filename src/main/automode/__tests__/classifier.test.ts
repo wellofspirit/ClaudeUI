@@ -20,6 +20,8 @@ import {
   STAGE1_FAST_MAX_TOKENS,
   STAGE2_MAX_TOKENS,
   STAGE1_STOP_SEQUENCES,
+  STAGE1_TIMEOUT_MS,
+  STAGE2_TIMEOUT_MS,
   type ClassifyInput,
   type JudgeRequest
 } from '../classifier'
@@ -609,5 +611,122 @@ describe('classify (orchestrator)', () => {
     const judge = vi.fn().mockResolvedValue('<block>no</block>')
     await classify(base, judge)
     expect(reqs(judge)[0].maxTokens).toBe(STAGE1_BOTH_MAX_TOKENS)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Stage-bounded judge timeouts (cli.js parity, ref §2 `ain`/`lin`). A judge that
+// never answers must degrade into the SAME `unavailable` state as one that
+// threw — otherwise the gated tool call parks forever behind a spinner with no
+// approval card. Observed live with GLM-5.2 (plan §7 Q6): >5 minute hangs.
+// ---------------------------------------------------------------------------
+
+describe('classify — stage timeouts', () => {
+  const base: ClassifyInput = {
+    messages: [msg('user', [{ type: 'text', text: 'hi' }])],
+    action: { toolName: 'bash', input: { command: 'ls' } },
+    environment: { cwd: '/repo' }
+  }
+  /** A transport that never settles — the wedged-judge shape. */
+  const hang = (): Promise<string> => new Promise<string>(() => {})
+
+  it('cli.js parity: 60 s stage 1, 120 s stage 2', () => {
+    expect(STAGE1_TIMEOUT_MS).toBe(60_000)
+    expect(STAGE2_TIMEOUT_MS).toBe(120_000)
+  })
+
+  it('stage 1 exceeds its budget → unavailable, and stage 2 is never attempted', async () => {
+    vi.useFakeTimers()
+    try {
+      const judge = vi.fn(hang)
+      const p = classify({ ...base, twoStageMode: 'both' }, judge)
+      // One tick short of the budget the judge is still considered in flight.
+      await vi.advanceTimersByTimeAsync(STAGE1_TIMEOUT_MS - 1)
+      let settled = false
+      void p.then(() => {
+        settled = true
+      })
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await p).toEqual({ block: true, stage: 'error', unavailable: true })
+      // A timeout is a transport failure, not a stage-1 verdict: escalating a
+      // wedged stage 1 to stage 2 would double the wait before the human is asked.
+      expect(judge).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stage 2 gets its OWN 120 s clock after a stage-1 escalation', async () => {
+    vi.useFakeTimers()
+    try {
+      const judge = vi.fn().mockResolvedValueOnce('<block>yes</block>').mockImplementation(hang)
+      const p = classify({ ...base, twoStageMode: 'both' }, judge)
+      // Stage 1 answered instantly; stage 2 is now hanging. Stage 1's budget
+      // must NOT be what bounds it.
+      await vi.advanceTimersByTimeAsync(STAGE1_TIMEOUT_MS)
+      let settled = false
+      void p.then(() => {
+        settled = true
+      })
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(STAGE2_TIMEOUT_MS - STAGE1_TIMEOUT_MS)
+      expect(await p).toEqual({ block: true, stage: 'error', unavailable: true })
+      expect(judge).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a judge that answers promptly is untouched by the timeout wrapper', async () => {
+    vi.useFakeTimers()
+    try {
+      const judge = vi.fn().mockResolvedValue('<block>no</block>')
+      // No timer advance at all — a fast reply must not need one.
+      expect(await classify({ ...base, twoStageMode: 'fast' }, judge)).toMatchObject({
+        block: false,
+        stage: 'fast'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a LATE transport rejection after a timeout is not an unhandled rejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (err: unknown): void => {
+      unhandled.push(err)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    let rejectLate: (err: unknown) => void = () => {}
+    try {
+      vi.useFakeTimers()
+      const judge = vi.fn(
+        () =>
+          new Promise<string>((_resolve, reject) => {
+            rejectLate = reject
+          })
+      )
+      const p = classify({ ...base, twoStageMode: 'fast' }, judge)
+      await vi.advanceTimersByTimeAsync(STAGE1_TIMEOUT_MS)
+      expect(await p).toMatchObject({ unavailable: true })
+      vi.useRealTimers()
+
+      // The wedged transport finally dies, long after classify() gave up. The
+      // rejection must land on the handler withTimeout attached, not on the
+      // process (which in Electron main is a crash risk, not a log line).
+      rejectLate(new Error('transport died late'))
+      // Node reports unhandled rejections on a later macrotask turn.
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      vi.useRealTimers()
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 })

@@ -27,6 +27,7 @@ import {
   sessionAllowKey,
   normalizeWhitespace,
   mergedClaudeRulesFor,
+  withoutAllowRules,
   claudeGlobMatches,
   PI_AUTO_ALLOW_HOSTED_TOOLS,
   PI_HOSTED_TOOL_NAMES,
@@ -954,5 +955,79 @@ describe('decideWithSource — provenance for every rung of the ladder', () => {
       const ctx = { mode, rules: rules(partial), sessionAllows: NO_SESSION_ALLOWS }
       expect(decide(tool, input, ctx)).toBe(decideWithSource(tool, input, ctx).decision)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// withoutAllowRules — auto mode's classifier-bypass filter (cli.js §3 step 2).
+// Applied at PiSession's composition seam; asserted here against the pure
+// ladder, since the property that matters is "precedence is unchanged".
+// ---------------------------------------------------------------------------
+
+describe('withoutAllowRules — the auto-mode allow filter', () => {
+  const full = (): MergedClaudeRules =>
+    rules({
+      allow: ['Bash(git:*)', 'Edit(src/**)'],
+      ask: ['Bash(git push:*)'],
+      deny: ['Bash(rm:*)'],
+      additionalDirectories: ['/extra']
+    })
+
+  it('empties the allow tier and leaves everything else identical', () => {
+    expect(withoutAllowRules(full())).toEqual({ ...full(), allow: [] })
+  })
+
+  it('does NOT mutate its input — PiSession caches the merged rules per session', () => {
+    // A mutating filter would strip the allow tier permanently, so switching out
+    // of auto mode later would silently keep asking about allowed actions.
+    const original = full()
+    withoutAllowRules(original)
+    expect(original.allow).toEqual(['Bash(git:*)', 'Edit(src/**)'])
+  })
+
+  it('a formerly-allowed bash call falls through to the acceptEdits base ask (→ the judge)', () => {
+    const ctx = { mode: 'acceptEdits', sessionAllows: NO_SESSION_ALLOWS, cwd: '/repo' }
+    // Covered by the allow rule but NOT by the ask rule, so this isolates the
+    // allow tier's contribution.
+    const input = { command: 'git reset --hard HEAD~5' }
+    expect(decideWithSource('bash', input, { ...ctx, rules: full() })).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Bash(git:*)'
+    })
+    expect(decideWithSource('bash', input, { ...ctx, rules: withoutAllowRules(full()) })).toEqual({
+      decision: 'ask',
+      source: 'mode-base'
+    })
+  })
+
+  it('deny and ask still answer first — G9 provenance is untouched by the filter', () => {
+    const ctx = {
+      mode: 'acceptEdits',
+      rules: withoutAllowRules(full()),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }
+    expect(decideWithSource('bash', { command: 'rm -rf x' }, ctx)).toEqual({
+      decision: 'deny',
+      source: 'deny-rule',
+      rule: 'Bash(rm:*)'
+    })
+    expect(decideWithSource('bash', { command: 'git push origin main' }, ctx)).toEqual({
+      decision: 'ask',
+      source: 'ask-rule',
+      rule: 'Bash(git push:*)'
+    })
+  })
+
+  it('a session "allow for this session" click still allows — only stored rules are filtered', () => {
+    expect(
+      decideWithSource('bash', { command: 'npm publish' }, {
+        mode: 'acceptEdits',
+        rules: withoutAllowRules(full()),
+        sessionAllows: new Set(['bash:npm publish']),
+        cwd: '/repo'
+      })
+    ).toEqual({ decision: 'allow', source: 'session-allow' })
   })
 })
