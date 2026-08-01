@@ -57,3 +57,20 @@ new auth surface and no vendor-ToS question for opencode-routed providers);
 the dedicated-classifier-key direct transport becomes unnecessary for opencode
 and remains an option only if ever needed elsewhere. ADR-036's
 Anthropic-tokens-vend-to-Claude-Code-only constraint is unaffected.
+
+## P1 status — SHIPPED 2026-08-01
+
+Fork: `wellofspirit/opencode`, branch `claudeui` off `v1.18.9` (MIT at tag),
+commits `98a12dd` + `1d58883` (Codex fix: the backend rejects non-streaming
+calls — route uses `streamText`; `max_output_tokens` stripped and codex
+headers replicated from the built-in plugins WITHOUT running user plugins on
+the judge path). Live-verified against gpt-5.6-luna and qwen3.8-max-preview;
+`maxTokens` genuinely enforced where the provider accepts it (openai's
+Responses API drops both knobs — recorded in the route's /doc). ClaudeUI:
+`judge-transport.ts` prefers the endpoint with a GET /doc probe — NEVER a
+speculative POST: an unpatched opencode proxies unknown routes to
+app.opencode.ai, which would exfiltrate the judge transcript — and falls back
+to the tool-denied session transport. `ensure-opencode` builds from the fork
+by default (release download behind --from-release). Q5 is mooted for judge
+calls on the endpoint path; the ADR-023 advisory-fields deviation is resolved
+there.

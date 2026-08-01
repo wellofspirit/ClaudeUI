@@ -8,6 +8,11 @@
   "homepage": "https://github.com/wellofspirit/ClaudeUI",
   "claudeCliVersion": "2.1.220",
   "opencodeCliVersion": "1.18.9",
+  "opencodeFork": {
+    "repo": "https://github.com/wellofspirit/opencode.git",
+    "branch": "claudeui",
+    "tag": "v1.18.9"
+  },
   "piCliVersion": "0.82.1",
   "ripgrepVersion": "14.1.1",
   "scripts": {

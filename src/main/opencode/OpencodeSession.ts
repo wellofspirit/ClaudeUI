@@ -50,6 +50,8 @@ import {
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
 import { matchesUserAskRule } from './wildcard'
+import { makeJudgeTransportWithFallback } from './judge-transport'
+import type { JudgeEndpointProbe } from './judge-transport'
 import {
   classify,
   isAutoModeFastPathAllowed,
@@ -211,6 +213,11 @@ export class OpencodeSession extends BaseSession {
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
   private autoDenials = { consecutive: 0, total: 0 }
+  // Whether THIS session's opencode server exposes the patched tool-less
+  // `POST /judge/completion` (ADR-037 P1). Probed once, lazily, on the first
+  // judge call; the object identity is the cache, so every judge transport
+  // built for this session shares one probe.
+  private judgeEndpointProbe: JudgeEndpointProbe = {}
   // The USER-authored half of the last ruleset we patched onto the session
   // (compiled allow/ask/deny). Kept so the auto-mode gatekeeper can re-match a
   // pending approval against the user's own `ask` rules, which outrank the
@@ -1504,6 +1511,10 @@ export class OpencodeSession extends BaseSession {
    *  (so the judge never accumulates prior Q&As; we trade cache for correctness).
    *  Judge model defaults to the session's own model (ADR-023), override via config.
    *
+   *  This is now the FALLBACK path — {@link makeJudgeFn} prefers the patched
+   *  server's tool-less `POST /judge/completion` (ADR-037 P1) and only lands
+   *  here on a server that does not expose it.
+   *
    *  The judge session is patched TOOL-DENIED before it is prompted — see
    *  DENY_ALL_TOOLS_RULESET for why (a security judge reasoning over
    *  attacker-influenced transcript text must not be able to execute anything,
@@ -1520,7 +1531,7 @@ export class OpencodeSession extends BaseSession {
    *  API exposes neither (the ADR-023 deviation). They stay on the interface
    *  because the classifier populates them for a future direct-API transport
    *  (plan phase 5), and ignoring an advisory field is the documented contract. */
-  private makeJudgeFn(): JudgeTransport | null {
+  private makeSessionJudgeFn(): JudgeTransport | null {
     const client = this.client
     if (!client) return null
     const parsed = parseModelString(this.autoModeConfig().judgeModel ?? this._model)
@@ -1541,6 +1552,34 @@ export class OpencodeSession extends BaseSession {
         client.deleteSession(js.id).catch(() => {})
       }
     }
+  }
+
+  /**
+   * The judge transport actually used: the patched server's tool-less
+   * `POST /judge/completion` (ADR-037 P1) when this opencode has it, otherwise
+   * the tool-denied judge session above.
+   *
+   * The endpoint version is strictly better — no session, no tool registry, no
+   * permission evaluation (so plan §7 Q5's instance-global `approved` list has
+   * nothing to pierce), and it enforces `maxTokens`/`stopSequences` for real,
+   * closing the ADR-023 advisory-fields deviation on this path.
+   *
+   * Availability is probed once per session and cached in
+   * {@link judgeEndpointProbe}; see judge-transport.ts for why the probe reads
+   * `/doc` rather than POSTing the prompt speculatively.
+   */
+  private makeJudgeFn(): JudgeTransport | null {
+    const fallback = this.makeSessionJudgeFn()
+    if (!fallback) return null
+    const conn = this.conn
+    if (!conn) return fallback
+    const parsed = parseModelString(this.autoModeConfig().judgeModel ?? this._model)
+    return makeJudgeTransportWithFallback({
+      target: { baseUrl: conn.baseUrl, authHeader: conn.authHeader },
+      model: { providerID: parsed.providerID, modelID: parsed.modelID },
+      fallback,
+      probe: this.judgeEndpointProbe,
+    })
   }
 
   private async handleAutoModeApproval(approval: PendingApproval): Promise<void> {
