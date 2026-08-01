@@ -89,3 +89,23 @@ fields (measured: Effect Schema is non-strict), so ClaudeUI sends the flag
 unconditionally for its three sealed-session sites (judge fallback, /btw,
 agent-generate). Piercing reproduction lives in the fork's own test suite
 (needs a real Permission.ask). Re-derivation guide: `patch/opencode-fork/README.md`.
+
+## P3 status (judge prompt caching) — SHIPPED 2026-08-01
+
+Fork @ `163b5762`. The judge's ~24 KB system prompt is now cached: an explicit
+`cache_control` breakpoint on the system message for providers that take one
+(gate + marker set extracted from `ProviderTransform.applyCaching` and shared,
+not copied), and for automatic-prefix-cache providers nothing but the
+guarantee that nothing varying is sent ahead of the user turn — which cost one
+fix, the per-call random `session-id` header, now a hash of the system prompt
+(also used as `promptCacheKey`). Only the system part is marked; the user turn
+is a different transcript every call. Request payload unchanged (capability-
+and content-driven, so nothing for a caller to opt into); the response gains an
+optional `usage` carrying `cacheReadInputTokens`, the only in-band proof it
+works. Measured: 3840/4958 input tokens cached from call 2 on gpt-5.6-luna,
+4224/5131 on qwen3.8-max-preview, zero under the varying-system control
+(`patch/opencode-fork/live-judge-cache.py`). ClaudeUI needed no code change —
+`buildPolicyPrompt` was already deterministic — but the byte-stability it now
+depends on is pinned by tests rather than assumed. The one known in-session
+prefix break is deliberate: `repoVisibility` is absent until a command triggers
+its capture, so the document has two forms per session, not one.

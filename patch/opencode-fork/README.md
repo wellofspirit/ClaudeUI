@@ -51,7 +51,7 @@ as every other instance route (it reuses `Authorization` +
 ```
 POST /judge/completion
   { model: {providerID, modelID}, system, user, maxTokens?, stopSequences? }
-  → 200 { text }
+  → 200 { text, usage? }        (usage added by P3)
   → 400 BadRequest        (payload)
   → 404 ModelNotFoundError
   → 502 UpstreamError     (carries the provider's response body + status)
@@ -112,6 +112,83 @@ keys** (Effect Schema strips excess properties; measured against the unpatched
 `permissionHermetic` unconditionally with **no fork detection** — an unpatched
 server simply drops it.
 
+### P3 — prompt caching on the judge system prompt
+
+**Files:** `packages/opencode/src/provider/transform.ts` (+2 exports, one
+behaviour-preserving extraction), `.../httpapi/groups/judge.ts` (+optional
+`usage` on the response), `.../httpapi/handlers/judge.ts`.
+
+**Why.** A judge call is ~24 KB of policy that is identical for the whole
+session plus a small transcript that is different every time — the textbook
+prompt-cache shape, and P1 was getting none of it. Every classification paid
+full input price on the same document.
+
+**Anchor points.** The session path's cache machinery is
+`ProviderTransform.applyCaching`, reached from `ProviderTransform.message` —
+*message middleware*, which the judge route deliberately does not run. It holds
+two things worth reusing: the marker set (which provider slug reads
+`cacheControl` / `cachePoint` / `cache_control` / `copilot_cache_control`) and
+the gate deciding who takes explicit markers at all. Both are now exported as
+`cacheMarkers()` and `usesCacheMarkers(model, options)`, with `message()`
+calling the latter — a pure extraction, upstream behaviour unchanged, verified
+by the 397 tests in `test/provider/transform.test.ts`. On a bump, expect the
+conflict here to be upstream adding a provider to the marker set; take both.
+
+*(An earlier read of this ground pointed at a `cacheControlFormat` capability
+flag. That field is **pi's** — `vendor/pi-cli/docs/models.md` — not opencode's.
+opencode has no capability bit for this; the decision is the provider heuristic
+above.)*
+
+**System-only markers.** `applyCaching` marks up to four breakpoints: two system
+messages and the last two non-system messages. The tail markers exist because a
+session replays a growing conversation whose *prefix* keeps extending. A judge
+call has no tail worth marking — the user turn is a fresh transcript every call,
+so a breakpoint there can never hit, and Alibaba caps breakpoints at four. So
+the judge marks the system message and nothing else. Attaching a marker means
+the route now passes `messages` rather than `system` + `prompt`: the string form
+has nowhere to hang `providerOptions`.
+
+**Byte-stability — the requirement automatic caching imposes.** OpenAI
+Responses (and its Codex/ChatGPT OAuth cousin) caches by hashing the leading
+bytes of the request; there is nothing to mark and nothing to opt into. The only
+thing the route can do is not defeat it, and that is a real constraint:
+**everything ahead of the user turn must be byte-identical between calls.** It
+holds because the judge uses `ProviderTransform.smallOptions` (a pure function
+of the model), *not* `ProviderTransform.options` (which injects `sessionID` as
+a cache key), and because `instructions` is `payload.system` verbatim. One thing
+did violate it — the `session-id` header, which was a per-call random string and
+is a routing/affinity key — and is now a hash of the system prompt. The same
+hash is passed as `promptCacheKey` / `prompt_cache_key` to the providers whose
+`setCacheKey` block in `ProviderTransform.options` expects one.
+
+The corollary lands on **the caller**: a system prompt that is not byte-stable
+costs full price on every call and reports no error anywhere. ClaudeUI's
+`buildPolicyPrompt` is deterministic given its `EnvironmentInfo`, pinned by
+`buildPolicyPrompt — byte-stability` in
+`src/main/automode/__tests__/rules.test.ts`.
+
+**Contract.** The request payload is **unchanged** — caching is capability- and
+content-driven, so there is no `cache?: boolean` to pass and nothing for an
+older client to set. The response gains an optional `usage`
+(`inputTokens`, `outputTokens`, `totalTokens`, `reasoningTokens`,
+`cacheReadInputTokens`, `cacheWriteInputTokens`; same vocabulary as
+`session/llm/ai-sdk.ts`, every field absent when the provider does not report
+it). Purely additive: `judge-transport.ts` reads `text` and ignores the rest.
+`cacheReadInputTokens` is the only in-band evidence that any of this works.
+
+**Measured** (`live-judge-cache.py`, 5 calls, identical 23,957-byte system
+prompt, different user turn each call, fork `163b5762`):
+
+| model | call 1 | calls 2–5 | input tokens |
+| ----- | ------ | --------- | ------------ |
+| `openai/gpt-5.6-luna` | `cacheRead 0` | `cacheRead 3840` (77 %) | 4958 |
+| `alicloud/qwen3.8-max-preview` | `cacheRead 0` | `cacheRead 4224` (82 %) | 5131 |
+
+Latency (1.0–3.8 s) is noise at this size and proves nothing on its own — which
+is exactly why `usage` was added. The `--vary-system` negative control drives
+both back to `cacheRead 0`, confirming the metric is prefix-keyed and not a
+constant the provider echoes.
+
 ## ClaudeUI side
 
 | File | Role |
@@ -147,8 +224,9 @@ git tag -l "v1.*" --sort=-v:refname | head    # newest release tag
    bumps them all. Resolve with `--theirs`.
 4. **Watch for real drift** in: `Provider.Service` (`getModel` / `getLanguage`
    signatures), `ProviderTransform` (`smallOptions`, `maxOutputTokens`,
-   `providerOptions`), the `chat.params` / `chat.headers` hooks (a new
-   drop-the-cap provider means a new line in `rejectsOutputCap`), and
+   `providerOptions`, `applyCaching`'s marker set and provider gate, the
+   `setCacheKey` block in `options()`), the `chat.params` / `chat.headers` hooks
+   (a new drop-the-cap provider means a new line in `rejectsOutputCap`), and
    `Permission.ask`'s `evaluate(...)` call.
 5. **Re-verify behaviourally — apply-success is not correctness:**
    ```bash
@@ -156,9 +234,12 @@ git tag -l "v1.*" --sort=-v:refname | head    # newest release tag
    bun run ensure-opencode -- --force               # rebuild + re-vendor
    OPENCODE_INTEGRATION_TESTS=1 bunx vitest run --project integration
    python patch/opencode-fork/live-judge.py vendor/opencode-cli/opencode.exe
+   python patch/opencode-fork/live-judge-cache.py vendor/opencode-cli/opencode.exe
    ```
    The live-fire step is not optional: it is the only thing that exercises the
-   provider transports, and it is where both P1 regressions were caught.
+   provider transports, and it is where both P1 regressions were caught. The
+   cache run is the only thing that catches a *silent* P3 regression — a lost
+   marker or a newly injected per-call value costs money and breaks nothing.
 6. Bump `package.json#opencodeCliVersion` and `opencodeFork.tag`, then confirm
    `vendor/opencode-cli/version.json` records the new `fork.commit`.
 
@@ -185,12 +266,25 @@ recorded because they are non-obvious if the pipeline is ever rebuilt.
   refresh path uses `git checkout -f` before `reset --hard`. It never runs `git
   clean` — that would delete the cached `node_modules` and make every run a cold
   install.
+- **Pushing to the fork.** The fork's husky `pre-push` hook runs `bun typecheck`
+  over all 30 packages and refuses a bun older than the pinned
+  `packageManager` — so push with `.cache/bun-<version>` first on `PATH`, from
+  a clone whose `node_modules` actually has `tsgo.exe` (a scratch clone built
+  with the wrong bun can be missing it, and the failure reads as a bare
+  `spawnSync … ENOENT`). The hook also fails for a reason that has nothing to do
+  with your change: `core.symlinks=false` on Windows checks out
+  `packages/{app,enterprise}/src/custom-elements.d.ts` as *text files
+  containing a path*, which `tsgo` rejects with `TS1128`. Copy
+  `packages/ui/src/custom-elements.d.ts` over both and the hook passes; the next
+  `ensure-opencode` resets them. Do not reach for `--no-verify` — the hook is
+  the only typecheck the fork gets.
 
 ## Verification assets
 
 | Script | What it answers |
 | ------ | --------------- |
 | `live-judge.py <binary> [provider/model ...]` | does the judge endpoint return real text on an API-key provider AND a Codex-OAuth model? |
+| `live-judge-cache.py <binary> [--calls N] [--vary-system] [model ...]` | is the ~24 KB system prompt actually served from the provider's prompt cache from call 2 on? Renders ClaudeUI's real policy through `buildPolicyPrompt` and asserts its byte-stability before spending a token; `--vary-system` is the negative control |
 | `probe-patch-schema.py <binary>` | does this build's session PATCH schema reject unknown fields? (run against a `--from-release` binary to re-confirm the no-gating assumption) |
 
 Automated coverage: `packages/opencode/test/permission/hermetic.test.ts` in the

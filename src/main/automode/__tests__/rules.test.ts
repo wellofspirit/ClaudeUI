@@ -250,3 +250,75 @@ describe('buildPolicyPrompt — the Environment slots', () => {
     expect(p).not.toContain('heuristic applies')
   })
 })
+
+describe('buildPolicyPrompt — byte-stability (the prompt-cache prerequisite, ADR-037 P3)', () => {
+  // The judge's system prompt is ~24 KB and is re-sent on every classification.
+  // The patched opencode judge route caches it — an explicit `cache_control`
+  // breakpoint where the provider takes one, automatic prefix caching where it
+  // does not. BOTH require the rendered document to be byte-identical between
+  // calls for the same environment: one drifting character (a timestamp, a
+  // counter, a re-ordered Set) invalidates the prefix and silently restores
+  // full price on every call, with no error anywhere to notice it by.
+  //
+  // Determinism is asserted, never a golden hash: a hash pin would fail on
+  // every legitimate policy edit while catching nothing this does not.
+  const full: EnvironmentInfo = {
+    cwd: '/repo',
+    platform: 'win32',
+    remotes: [
+      { name: 'origin', url: 'git@github.com:acme/app.git' },
+      { name: 'upstream', url: 'git@github.com:vendor/app.git' }
+    ],
+    repoVisibility: 'private',
+    additionalDirectories: ['/srv/shared', '/srv/other'],
+    trustedDomains: ['files.acme.com', 'api.acme.com'],
+    trustedRegistries: ['https://npm.acme.internal'],
+    protectedPatterns: ['acme-live-*']
+  }
+
+  it('renders byte-identically when called repeatedly with the SAME env object', () => {
+    const first = buildPolicyPrompt(full)
+    for (let i = 0; i < 5; i++) expect(buildPolicyPrompt(full)).toBe(first)
+  })
+
+  it('renders byte-identically for a structurally equal but freshly built env', () => {
+    // The host rebuilds EnvironmentInfo per call (OpencodeSession /
+    // PiSession `classifierEnvironment`), so equality of VALUE, not identity,
+    // is what has to produce an identical prefix.
+    expect(buildPolicyPrompt(structuredClone(full))).toBe(buildPolicyPrompt(full))
+  })
+
+  it('does not depend on the insertion order of the env object keys', () => {
+    const reordered: EnvironmentInfo = {
+      protectedPatterns: full.protectedPatterns,
+      trustedRegistries: full.trustedRegistries,
+      trustedDomains: full.trustedDomains,
+      additionalDirectories: full.additionalDirectories,
+      repoVisibility: full.repoVisibility,
+      remotes: full.remotes,
+      platform: full.platform,
+      cwd: full.cwd
+    }
+    expect(buildPolicyPrompt(reordered)).toBe(buildPolicyPrompt(full))
+  })
+
+  it('is stable for the minimal env too — the all-fallbacks rendering', () => {
+    expect(buildPolicyPrompt({ cwd: '/repo' })).toBe(buildPolicyPrompt({ cwd: '/repo' }))
+  })
+
+  it('carries no clock, no counter, no random token', () => {
+    const p = buildPolicyPrompt(full)
+    // A rendered Date leaves a year; a counter or nonce leaves a long digit or
+    // hex run. Neither has any business in a policy document.
+    expect(p).not.toMatch(/\b20\d{2}-\d{2}-\d{2}\b/)
+    expect(p).not.toMatch(/\b\d{10,}\b/)
+    expect(p).not.toMatch(/\b[0-9a-f]{16,}\b/)
+  })
+
+  it('changes — and only changes — when the environment actually changes', () => {
+    // The other half of the contract: a stable prefix must not be stable by
+    // being blind. A different cwd is a different policy and must not be
+    // served from the previous one's cache entry.
+    expect(buildPolicyPrompt({ ...full, cwd: '/other' })).not.toBe(buildPolicyPrompt(full))
+  })
+})

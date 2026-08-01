@@ -482,6 +482,12 @@ export async function classify(
   judge: JudgeTransport
 ): Promise<ClassifyResult> {
   const mode = input.twoStageMode ?? 'both'
+  // ~24 KB, rendered once and shared by both stages — so in `both` mode stage 2
+  // reads the cache entry stage 1 just wrote. The patched opencode judge route
+  // caches this prompt (ADR-037 P3), which makes its BYTE-STABILITY across
+  // calls load-bearing: any per-call drift here (a clock, a nonce, a reordered
+  // list) costs a full uncached prefix every time and reports no error. Pinned
+  // by `buildPolicyPrompt — byte-stability` in `__tests__/rules.test.ts`.
   const system = buildPolicyPrompt(input.environment)
 
   const errored = (): ClassifyResult => ({ block: true, stage: 'error', unavailable: true })
