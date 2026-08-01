@@ -198,8 +198,11 @@ only when the user supplies a **dedicated classifier API key**, which is what bu
 `max_tokens`, `stop_sequences` and prompt caching — resolving the ADR-023 deviation for
 those who opt in. The G1 fix does not depend on it.
 
-**Do not fork opencode; do not vendor a pi plugin.** Both engines already expose the
-interception point we need:
+**~~Do not fork opencode; do not vendor a pi plugin.~~ SUPERSEDED 2026-08-01 by
+[ADR-037](adr/adr-037_engine-fork-patch-policy.md)**: fork+patch opencode (no
+upstreaming; tool-less judge endpoint as P1, reshaping phase 5), extend pi via its
+extension API. The original interception-point analysis below remains true and is
+why phases 1–4 needed no fork:
 
 - opencode — the `permission.asked` event → `handleAutoModeApproval` → reply.
 - pi — `PiSession.gateToolCall`, which runs the pure `PiPermissionEngine`
