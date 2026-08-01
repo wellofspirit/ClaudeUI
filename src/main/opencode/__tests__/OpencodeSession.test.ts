@@ -1980,6 +1980,54 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
+  it('redirects: an in-scope `cmd > file 2>&1` is MEASURED into the meta line (no subprocess)', async () => {
+    // The hot path this exists for: without the measurement a redirect is an
+    // unanalysable overwrite and every log-and-grep loop escalates to stage 2.
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_rd', 'bun run test > build.log 2>&1')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain(
+      '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
+        '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
+    )
+    // Pure analysis — it must not have cost a capture subprocess.
+    expect(mockCaptureGitStatus).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('redirects: a protected target rides the meta line as a protectedHit', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_rd_p', 'echo malicious > ~/.bashrc')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const user = judgePrompt().user
+    expect(user).toContain('"protectedHits":[".bashrc"]')
+    expect(user).toContain('"allInScope":false')
+    session.dispose()
+  })
+
+  it('redirects: a command with NO redirect adds no redirects key', async () => {
+    enableAutoMode()
+    mockCaptureGitStatus.mockResolvedValue({ clean: true, modified: 0, untracked: [] })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_rd_none', 'git add -A')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const user = judgePrompt().user
+    expect(user).toContain('{"meta":{"gitStatus"') // the meta line itself is present…
+    expect(user).not.toContain('redirects') // …and carries no redirect claim
+    session.dispose()
+  })
+
   it('phase 3: repoVisibility rides both the meta line and the Environment section', async () => {
     enableAutoMode()
     mockCaptureRepoVisibility.mockResolvedValue('public')

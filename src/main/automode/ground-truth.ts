@@ -3,8 +3,10 @@
  * `docs/automode-rework-plan.md` §5, behavioural reference
  * `docs/protocol/14-auto-mode-classifier.md` §5.
  *
- * Three kinds of fact the judge cannot get from the transcript, because the
- * slimmer deliberately drops tool RESULTS:
+ * Four kinds of fact the judge cannot get from the transcript. The first three
+ * are missing because the slimmer deliberately drops tool RESULTS; the fourth
+ * is missing because it is not in the transcript at all — it is a property of
+ * the HOST (where a path resolves to), not of the conversation:
  *
  * 1. **`{"outcome":…}` annotations** — how a prior tool call ended. Without
  *    them post-block consent inheritance is unreachable (a denial is a tool
@@ -14,6 +16,10 @@
  *    state before commands that can destroy uncommitted work or ship it.
  * 3. **`{"meta":{"repoVisibility":…}}` / `EnvironmentInfo.remotes`** — the
  *    trust anchors for the exfiltration rules.
+ * 4. **`{"meta":{"redirects":…}}`** — where a shell redirect would actually
+ *    write. `cmd > build.log 2>&1` is an unanalysable file overwrite from the
+ *    string alone, so it escalates every time; resolving the target against the
+ *    session's own scope makes the safe case decidable in stage 1.
  *
  * This module is engine-neutral and dependency-injected: every capture takes an
  * optional {@link CaptureExec}, so the detection tables and the parsers are unit
@@ -27,6 +33,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
 
 // ── Outcome annotations ───────────────────────────────────────────────────────
 
@@ -276,6 +283,298 @@ export function shellCommandOf(
   if (!SHELL_CATEGORIES.has(toolName.toLowerCase())) return null
   const command = input?.command
   return typeof command === 'string' && command.trim().length > 0 ? command : null
+}
+
+// ── Redirect analysis (pure) ──────────────────────────────────────────────────
+
+/**
+ * The roots a redirect target may legitimately land in. `cwd` is the session's
+ * working tree; `tempDirs` comes from {@link tempDirRoots}; `additionalDirectories`
+ * is the user's own permission grant (the same list `classifierEnvironment`
+ * publishes to the judge).
+ */
+export interface RedirectScope {
+  cwd: string
+  tempDirs?: readonly string[]
+  additionalDirectories?: readonly string[]
+}
+
+/**
+ * What the harness MEASURED about a command's shell redirects.
+ *
+ * Field semantics differ on purpose:
+ * - `targets` / `unresolvable` carry the target **as written**, so the judge can
+ *   match them against the command text it was shown;
+ * - `outOfScope` carries the **resolved** absolute path, because `> ../../x` is
+ *   only alarming once you can see where it lands;
+ * - `protectedHits` carries the offending path COMPONENT (`.git`, `.bashrc`),
+ *   which is the fact, not the path.
+ *
+ * Unlike the whole-analysis contract (a `null` return means "emit nothing"),
+ * the empty arrays here are load-bearing: `"outOfScope":[]` says we looked.
+ */
+export interface RedirectAnalysis {
+  /** Every file target, as written. Excludes fd-duplications and null sinks. */
+  targets: string[]
+  /** True only when every target resolved INSIDE a scope root and none is protected. */
+  allInScope: boolean
+  /** Resolved absolute paths that landed outside every scope root. */
+  outOfScope: string[]
+  /** Targets carrying `$`, a backtick, `~` or a glob char — not measurable from the string. */
+  unresolvable: string[]
+  /** Protected path components hit by any target (`.git`, `.env*`, shell rc files). */
+  protectedHits: string[]
+}
+
+/**
+ * Path components that make a target off-limits no matter where it resolves —
+ * repo/agent internals, credential stores, and the shell rc files that are the
+ * classic persistence vehicle (Unauthorized Persistence). Compared
+ * case-insensitively: over-matching costs an escalation, under-matching costs a
+ * silent write to `~/.BASHRC` on a case-insensitive filesystem.
+ */
+const PROTECTED_COMPONENTS: ReadonlySet<string> = new Set([
+  '.git',
+  '.claude',
+  '.pi',
+  '.ssh',
+  '.bashrc',
+  '.zshrc',
+  '.profile',
+  '.bash_profile'
+])
+
+/** Anything the shell would expand or match at run time: we cannot know the
+ *  target from the string, so it is reported as unresolvable rather than guessed. */
+const UNRESOLVABLE_CHARS = /[$`~*?[\]{}]/
+
+/** Sinks that discard their input — writing to them is not a file overwrite, so
+ *  they are dropped from `targets` entirely (reporting `/dev/null` as
+ *  out-of-scope would turn the single commonest redirect idiom into a
+ *  danger signal). A command whose ONLY targets are sinks yields `null`, i.e.
+ *  the pre-existing behaviour, never a fabricated all-clear. */
+const NULL_SINKS: ReadonlySet<string> = new Set(['/dev/null', 'nul'])
+
+/** A command with more redirects than this cannot be summarised honestly in one
+ *  meta line, so it emits nothing and escalates as before. */
+export const MAX_REDIRECT_TARGETS = 20
+
+/** Characters that terminate an unquoted redirect target token. */
+const TARGET_END = new Set([' ', '\t', '\n', '\r', ';', '|', '&', '<', '>', '(', ')'])
+
+/**
+ * Pull the FILE targets out of a command's redirect operators.
+ *
+ * Handles `>`, `>>`, `N>`, `N>>`, `&>`, `&>>`, `>&file`, `>>&file`, with or
+ * without whitespace before the target, and a quoted target (`> "build out.log"`).
+ * fd-duplications (`2>&1`, `>&2`, `2>&-`) target no file and are dropped.
+ * Input redirects and heredocs (`<`, `<<`) are reads — the scanner never
+ * triggers on them.
+ *
+ * Deliberately QUOTE-BLIND outside a target token, matching {@link parseSegment}'s
+ * convention and for the same reason inverted: a `>` inside a quoted string
+ * yields a spurious target (an extra escalation), while honouring quotes would
+ * let `bash -c "cmd > ~/.bashrc"` report zero redirects and so claim, wrongly,
+ * that this command redirects nothing dangerous. Over-reporting is the safe
+ * error here. It also means segment splitting is unnecessary: a redirect
+ * operator binds to the token after it regardless of which segment it sits in
+ * (and {@link splitCommandSegments} would tear `2>&1` in half at the `&`).
+ */
+function extractRedirectTargets(command: string): string[] {
+  const out: string[] = []
+  let i = 0
+  while (i < command.length) {
+    const ch = command[i]
+    if (ch !== '>' && !(ch === '&' && command[i + 1] === '>')) {
+      i++
+      continue
+    }
+    if (ch === '&') i++ // `&>` / `&>>` — both streams to one file
+    i++ // the first `>`
+    if (command[i] === '>') i++ // append; identical for our purposes
+    let sawAmpersand = false
+    if (command[i] === '&') {
+      sawAmpersand = true
+      i++
+    }
+    while (command[i] === ' ' || command[i] === '\t') i++
+    let raw: string
+    const quote = command[i]
+    if (quote === '"' || quote === "'") {
+      const end = command.indexOf(quote, i + 1)
+      if (end === -1) {
+        raw = command.slice(i + 1)
+        i = command.length
+      } else {
+        raw = command.slice(i + 1, end)
+        i = end + 1
+      }
+    } else {
+      const start = i
+      while (i < command.length && !TARGET_END.has(command[i])) i++
+      raw = command.slice(start, i)
+    }
+    // `>&1`, `2>&-` — a duplication of a file descriptor, not a file.
+    if (sawAmpersand && /^\d*-?$/.test(raw)) continue
+    if (raw.length > 0) out.push(raw)
+  }
+  return out
+}
+
+/** `\` → `/`, collapsed slashes, and (win32 only) the Git-Bash `/d/x` spelling
+ *  folded onto `d:/x`. Gated on platform because `/e/tc` is a real directory on
+ *  Linux; `platform` is injectable so both branches are testable anywhere. */
+function toPosixish(raw: string, platform: NodeJS.Platform): string {
+  let s = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  if (platform === 'win32') {
+    const msys = /^\/([A-Za-z])(\/|$)/.exec(s)
+    if (msys) s = `${msys[1]}:${s.slice(2) || '/'}`
+  }
+  return s
+}
+
+function isAbsolutePosixish(s: string, platform: NodeJS.Platform): boolean {
+  if (s.startsWith('/')) return true
+  return platform === 'win32' && /^[A-Za-z]:\//.test(s)
+}
+
+interface NormalizedPath {
+  /** Canonical comparison form, e.g. `d:/repo/build.log` or `/repo/build.log`. */
+  full: string
+  /** Path components, drive prefix excluded — what the protected-name check reads. */
+  components: string[]
+}
+
+/**
+ * Resolve+normalize without `node:path`, so a test's verdict does not depend on
+ * the OS running it (the whole point of the injectable `platform`). `.` and `..`
+ * are collapsed textually — there are no symlinks to consult, and a `..` that
+ * climbs past the root simply stops there.
+ */
+function normalizePath(raw: string, platform: NodeJS.Platform): NormalizedPath {
+  const s = toPosixish(raw, platform)
+  let drive = ''
+  let rest = s
+  if (platform === 'win32') {
+    const m = /^([A-Za-z]:)(\/|$)/.exec(s)
+    if (m) {
+      drive = m[1].toLowerCase()
+      rest = s.slice(m[1].length)
+    }
+  }
+  const absolute = rest.startsWith('/')
+  const components: string[] = []
+  for (const part of rest.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      components.pop()
+      continue
+    }
+    components.push(part)
+  }
+  return { full: drive + (absolute || drive ? '/' : '') + components.join('/'), components }
+}
+
+/** Resolve a possibly-relative target against `cwd`, both in posix-ish form. */
+function resolveTarget(cwd: string, target: string, platform: NodeJS.Platform): NormalizedPath {
+  const t = toPosixish(target, platform)
+  if (isAbsolutePosixish(t, platform)) return normalizePath(t, platform)
+  return normalizePath(`${toPosixish(cwd, platform).replace(/\/+$/, '')}/${t}`, platform)
+}
+
+/** True iff `target` is a PROPER descendant of `root` (root-equal is not inside,
+ *  mirroring {@link isPathInside} in services/path-containment.ts). */
+function isDescendant(root: string, target: string, platform: NodeJS.Platform): boolean {
+  const fold = (s: string): string => (platform === 'win32' ? s.toLowerCase() : s)
+  const r = fold(root).replace(/\/+$/, '')
+  return fold(target).startsWith(`${r}/`)
+}
+
+function protectedComponentsOf(components: readonly string[]): string[] {
+  const hits: string[] = []
+  for (const c of components) {
+    const lower = c.toLowerCase()
+    if (PROTECTED_COMPONENTS.has(lower) || lower.startsWith('.env')) hits.push(c)
+  }
+  return hits
+}
+
+/**
+ * The temp roots a redirect may legitimately write to. Read from the env rather
+ * than hard-coded so a session running under a sandboxed `TMPDIR` is judged
+ * against the temp dir it actually has.
+ */
+export function tempDirRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  let osTemp: string | undefined
+  try {
+    osTemp = tmpdir()
+  } catch {
+    // Never throw out of the approval path for a missing temp dir; one fewer
+    // scope root only ever costs an escalation.
+  }
+  const candidates = [osTemp, env.TMPDIR, env.TEMP, env.TMP]
+  return [...new Set(candidates.filter((v): v is string => !!v && v.trim().length > 0))]
+}
+
+/**
+ * Measure where a command's shell redirects would write.
+ *
+ * This exists because a redirect is an un-analysable file overwrite from the
+ * command string alone, so `cmd > build.log 2>&1` — a log-and-grep loop, the
+ * hottest safe path there is — otherwise escalates to the slow judge every
+ * single time. Resolving the target against the session's own scope turns that
+ * into a measured fact the fast stage can act on (rule corpus: Local Operations).
+ *
+ * Returns `null` — meaning emit NO meta line — when the command has no file
+ * redirect at all, or has more than {@link MAX_REDIRECT_TARGETS} of them. As
+ * everywhere in this file, saying nothing is the fallback; the one thing that
+ * must never happen is a fabricated `allInScope: true`.
+ */
+export function analyzeRedirects(
+  command: string,
+  scope: RedirectScope,
+  platform: NodeJS.Platform = process.platform
+): RedirectAnalysis | null {
+  const raws = extractRedirectTargets(command)
+  if (raws.length === 0 || raws.length > MAX_REDIRECT_TARGETS) return null
+
+  const roots = [scope.cwd, ...(scope.tempDirs ?? []), ...(scope.additionalDirectories ?? [])]
+    .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+    .map((r) => normalizePath(r, platform).full)
+
+  const targets: string[] = []
+  const outOfScope: string[] = []
+  const unresolvable: string[] = []
+  const protectedHits = new Set<string>()
+
+  for (const raw of raws) {
+    if (NULL_SINKS.has(toPosixish(raw, platform).toLowerCase())) continue
+    targets.push(raw)
+    // The protected-name check runs on the RAW spelling too, so `~/.bashrc`
+    // is still reported as an rc-file write even though `~` makes it
+    // unresolvable — the two facts are independent.
+    for (const hit of protectedComponentsOf(toPosixish(raw, platform).split('/'))) {
+      protectedHits.add(hit)
+    }
+    if (UNRESOLVABLE_CHARS.test(raw)) {
+      unresolvable.push(raw)
+      continue
+    }
+    const resolved = resolveTarget(scope.cwd, raw, platform)
+    for (const hit of protectedComponentsOf(resolved.components)) protectedHits.add(hit)
+    if (!roots.some((root) => isDescendant(root, resolved.full, platform))) {
+      outOfScope.push(resolved.full)
+    }
+  }
+
+  if (targets.length === 0) return null
+  return {
+    targets,
+    allInScope: outOfScope.length === 0 && unresolvable.length === 0 && protectedHits.size === 0,
+    outOfScope,
+    unresolvable,
+    protectedHits: [...protectedHits]
+  }
 }
 
 // ── Capture primitives ────────────────────────────────────────────────────────

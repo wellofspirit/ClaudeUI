@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import {
+  analyzeRedirects,
   captureGitRemotes,
   captureGitStatus,
   captureRepoVisibility,
@@ -23,8 +24,10 @@ import {
   recordToolOutcome,
   shellCommandOf,
   splitCommandSegments,
+  tempDirRoots,
   GIT_CAPTURE_TIMEOUT_MS,
   GH_CAPTURE_TIMEOUT_MS,
+  MAX_REDIRECT_TARGETS,
   MAX_UNTRACKED_NAMES,
   type CaptureExec,
   type ToolOutcome
@@ -161,6 +164,258 @@ describe('shellCommandOf', () => {
     expect(shellCommandOf('bash', { command: 42 })).toBeNull()
     expect(shellCommandOf('bash', { command: '   ' })).toBeNull()
     expect(shellCommandOf('bash', undefined)).toBeNull()
+  })
+})
+
+describe('analyzeRedirects', () => {
+  // `platform` is injected everywhere below so a case's verdict does not depend
+  // on the OS running the suite — the POSIX and win32 branches both run
+  // everywhere.
+  const posix = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: '/repo', ...extra }, 'linux')
+  const win = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: 'D:/WorkPlace/ClaudeUI', ...extra }, 'win32')
+
+  const IN_SCOPE = { outOfScope: [], unresolvable: [], protectedHits: [], allInScope: true }
+
+  describe('extraction', () => {
+    it('reads the hot path — `cmd > file 2>&1` is ONE target, the fd-dup is not a file', () => {
+      expect(posix('bun run test > build.log 2>&1')).toEqual({
+        targets: ['build.log'],
+        ...IN_SCOPE
+      })
+    })
+
+    const forms: Array<[string, string[]]> = [
+      ['bun test > build.log', ['build.log']],
+      // Append vs truncate: both overwrite policy-wise, both are measured the same.
+      ['bun test >> build.log', ['build.log']],
+      ['bun test 2> err.log', ['err.log']],
+      ['bun test 2>> err.log', ['err.log']],
+      ['bun test 9> fd.log', ['fd.log']],
+      ['bun test &> all.log', ['all.log']],
+      ['bun test &>> all.log', ['all.log']],
+      // csh-style redirect-both-to-a-FILE (the `&` is followed by a name, not an fd).
+      ['bun test >& all.log', ['all.log']],
+      ['bun test >>& all.log', ['all.log']],
+      // No whitespace before the target.
+      ['bun test >build.log', ['build.log']],
+      ['bun test 2>err.log', ['err.log']],
+      // A quoted target keeps its spaces.
+      ['bun test > "build out.log"', ['build out.log']],
+      ["bun test > 'build out.log'", ['build out.log']],
+      // Two redirects, one command.
+      ['bun test > out.log 2> err.log', ['out.log', 'err.log']],
+      // Per-segment: every segment's redirect is collected.
+      ['bun build > a.log && bun test >> b.log', ['a.log', 'b.log']]
+    ]
+    for (const [command, targets] of forms) {
+      it(`extracts ${JSON.stringify(targets)} from: ${command}`, () => {
+        expect(posix(command)?.targets).toEqual(targets)
+      })
+    }
+
+    const noTargets = [
+      // fd duplications target no file.
+      'bun test 2>&1',
+      'bun test >&2',
+      'bun test 1>&2',
+      'bun test 2>&-',
+      // Input redirects and heredocs are READS.
+      'sort < input.txt',
+      'cat << EOF',
+      // No redirect at all — the no-meta case.
+      'bun run test',
+      'git status --porcelain'
+    ]
+    for (const command of noTargets) {
+      it(`returns null (→ NO meta key) for: ${command}`, () => {
+        expect(posix(command)).toBeNull()
+      })
+    }
+
+    it('emits nothing rather than a summary it cannot make honestly (target cap)', () => {
+      const many = Array.from({ length: MAX_REDIRECT_TARGETS + 1 }, (_, i) => `> f${i}.log`).join(' ')
+      expect(posix(`bun test ${many}`)).toBeNull()
+      const atCap = Array.from({ length: MAX_REDIRECT_TARGETS }, (_, i) => `> f${i}.log`).join(' ')
+      expect(posix(`bun test ${atCap}`)?.targets).toHaveLength(MAX_REDIRECT_TARGETS)
+    })
+
+    it('drops null sinks — `> /dev/null` is not a file overwrite', () => {
+      expect(posix('bun test > /dev/null 2>&1')).toBeNull()
+      expect(win('bun test > NUL 2>&1')).toBeNull()
+      // …but a real target alongside one is still measured.
+      expect(posix('bun test > /dev/null 2> err.log')?.targets).toEqual(['err.log'])
+    })
+  })
+
+  describe('unresolvable targets', () => {
+    const cases = ['$LOGFILE', '${TMP}/x.log', '~/out.log', '*.log', 'out-?.log', 'out[12].log']
+    for (const target of cases) {
+      it(`cannot measure: ${target}`, () => {
+        const r = posix(`bun test > ${target}`)
+        expect(r?.unresolvable).toEqual([target])
+        expect(r?.allInScope).toBe(false)
+        // Reported as-written, and NOT claimed to be out of scope: we do not
+        // know where it lands, which is a different fact from knowing it is bad.
+        expect(r?.outOfScope).toEqual([])
+      })
+    }
+
+    it('flags a backticked target', () => {
+      const r = posix('bun test > `date +%s`.log')
+      expect(r?.unresolvable).toEqual(['`date'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('an unresolvable target poisons the whole command, even beside a good one', () => {
+      const r = posix('bun test > build.log 2> $ERRFILE')
+      expect(r?.targets).toEqual(['build.log', '$ERRFILE'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+
+  describe('scope', () => {
+    it('resolves relative targets against cwd, including subdirectories', () => {
+      expect(posix('bun test > logs/build.log')).toEqual({
+        targets: ['logs/build.log'],
+        ...IN_SCOPE
+      })
+    })
+
+    it('reports an absolute target outside every root, RESOLVED', () => {
+      const r = posix('echo x > /etc/cron.d/backdoor')
+      expect(r?.outOfScope).toEqual(['/etc/cron.d/backdoor'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('sees through `..` traversal', () => {
+      const r = posix('echo x > ../../etc/cron.d/backdoor')
+      expect(r?.outOfScope).toEqual(['/etc/cron.d/backdoor'])
+    })
+
+    it('does not fall for a sibling PREFIX (`/repo` does not contain `/repo-evil`)', () => {
+      expect(posix('echo x > /repo-evil/out.log')?.outOfScope).toEqual(['/repo-evil/out.log'])
+    })
+
+    it('root-equal is not inside (a redirect must land UNDER a root)', () => {
+      expect(posix('echo x > /repo')?.outOfScope).toEqual(['/repo'])
+    })
+
+    it('accepts temp dirs and the user\u2019s additionalDirectories as roots', () => {
+      expect(
+        posix('bun test > /tmp/agent/run.log', { tempDirs: ['/tmp/agent'] })?.allInScope
+      ).toBe(true)
+      expect(
+        posix('bun test > /srv/notes/out.log', { additionalDirectories: ['/srv/notes'] })
+          ?.allInScope
+      ).toBe(true)
+      // …and still rejects a path under NEITHER.
+      expect(posix('bun test > /srv/other/out.log', { tempDirs: ['/tmp/agent'] })?.allInScope).toBe(
+        false
+      )
+    })
+  })
+
+  describe('protected components', () => {
+    it('flags .git internals even though they sit INSIDE the working tree', () => {
+      const r = posix('echo evil > .git/hooks/pre-commit')
+      expect(r?.protectedHits).toEqual(['.git'])
+      expect(r?.outOfScope).toEqual([]) // it really is inside the tree…
+      expect(r?.allInScope).toBe(false) // …and still not allowed to be waved through
+    })
+
+    it('flags a shell rc file in HOME — unresolvable and protected are independent facts', () => {
+      const r = posix('echo malicious > ~/.bashrc')
+      expect(r?.unresolvable).toEqual(['~/.bashrc'])
+      expect(r?.protectedHits).toEqual(['.bashrc'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('flags a shell rc file in the CWD too (a tree-local .bashrc is still an rc file)', () => {
+      const r = posix('echo x > .bashrc')
+      expect(r?.protectedHits).toEqual(['.bashrc'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('flags a resolvable rc path outside the tree in BOTH buckets', () => {
+      const r = posix('echo x > /home/u/.zshrc')
+      expect(r?.protectedHits).toEqual(['.zshrc'])
+      expect(r?.outOfScope).toEqual(['/home/u/.zshrc'])
+    })
+
+    const protectedTargets: Array<[string, string]> = [
+      ['.env', '.env'],
+      ['.env.local', '.env.local'],
+      ['config/.claude/settings.json', '.claude'],
+      ['.pi/config.json', '.pi'],
+      ['sub/.ssh/authorized_keys', '.ssh'],
+      ['.profile', '.profile'],
+      ['.bash_profile', '.bash_profile'],
+      // Case-folded: a case-insensitive filesystem would honour this write.
+      ['.BASHRC', '.BASHRC']
+    ]
+    for (const [target, hit] of protectedTargets) {
+      it(`flags ${target}`, () => {
+        expect(posix(`echo x > ${target}`)?.protectedHits).toEqual([hit])
+      })
+    }
+
+    it('deduplicates repeated hits', () => {
+      const r = posix('echo x > .git/a > .git/b')
+      expect(r?.protectedHits).toEqual(['.git'])
+    })
+  })
+
+  describe('windows spellings', () => {
+    const inScope = [
+      'D:/WorkPlace/ClaudeUI/build.log',
+      'D:\\WorkPlace\\ClaudeUI\\build.log',
+      '/d/WorkPlace/ClaudeUI/build.log', // Git Bash MSYS form
+      'd:/workplace/claudeui/build.log', // NTFS is case-insensitive
+      'build.log',
+      'logs\\build.log'
+    ]
+    for (const target of inScope) {
+      it(`treats as in scope: ${target}`, () => {
+        expect(win(`bun test > ${target} 2>&1`)?.allInScope).toBe(true)
+      })
+    }
+
+    it('rejects another drive and another tree on the same drive', () => {
+      expect(win('echo x > C:/Windows/System32/drivers/etc/hosts')?.allInScope).toBe(false)
+      expect(win('echo x > D:/OtherProject/out.log')?.outOfScope).toEqual([
+        'd:/OtherProject/out.log'
+      ])
+    })
+
+    it('does NOT fold `/d/x` on a POSIX host (where /d is a real directory)', () => {
+      // Same string, different platform: on Linux this is an absolute path that
+      // has nothing to do with a drive letter.
+      expect(analyzeRedirects('bun test > /d/x/out.log', { cwd: '/repo' }, 'linux')?.outOfScope)
+        .toEqual(['/d/x/out.log'])
+    })
+
+    it('finds protected components through backslashes', () => {
+      expect(win('echo evil > .git\\hooks\\pre-commit')?.protectedHits).toEqual(['.git'])
+    })
+  })
+
+  it('ignores empty/blank scope roots rather than treating them as "everything"', () => {
+    const r = analyzeRedirects('bun test > out.log', { cwd: '/repo', tempDirs: ['', '   '] }, 'linux')
+    expect(r?.allInScope).toBe(true)
+    expect(analyzeRedirects('echo x > /etc/p', { cwd: '/repo', tempDirs: [''] }, 'linux')?.allInScope).toBe(
+      false
+    )
+  })
+})
+
+describe('tempDirRoots', () => {
+  it('collects os.tmpdir plus the env spellings, deduped and blank-free', () => {
+    const roots = tempDirRoots({ TMPDIR: '/tmp/a', TEMP: '/tmp/a', TMP: '  ' } as NodeJS.ProcessEnv)
+    expect(roots).toContain('/tmp/a')
+    expect(roots.filter((r) => r === '/tmp/a')).toHaveLength(1)
+    expect(roots.every((r) => r.trim().length > 0)).toBe(true)
   })
 })
 

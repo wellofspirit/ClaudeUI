@@ -342,7 +342,10 @@ vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: { probe: mockPiAuthProbe, buildPiAccountRef: mockBuildPiAccountRef }
 }))
 vi.mock('node:fs', () => ({ existsSync: mockExistsSync }))
-vi.mock('node:os', () => ({ homedir: mockHomedir }))
+// `tmpdir` is part of the mock because ground-truth.ts's redirect scope reads
+// it: a factory that omits it makes the real call throw through vitest's
+// missing-export proxy.
+vi.mock('node:os', () => ({ homedir: mockHomedir, tmpdir: () => '/tmp' }))
 // Hermetic gating tests: never touch the dev machine's real ~/.claude/settings.json.
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
@@ -2185,6 +2188,39 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     // rule a failed capture emits NOTHING. An empty `{"meta":{}}` would read to
     // the judge as "we measured and found nothing", which is a lie.
     expect(prompt).not.toContain('"meta"')
+    session.dispose()
+  })
+
+  it('redirects are measured into the meta line, and absent when the command has none', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>', '<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-redirect', win)
+
+    await gate('call_r1', 'bash', { command: 'npm test > build.log 2>&1' })
+    expect(judgeInstances[0].prompts[0]).toContain(
+      '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
+        '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
+    )
+
+    // No redirect → no measurement → no meta line at all (`/cwd` is not a repo,
+    // so the gitStatus capture contributes nothing either).
+    await gate('call_r2', 'bash', { command: 'npm test' })
+    expect(judgeInstances[0].prompts[1]).not.toContain('redirects')
+    session.dispose()
+  })
+
+  it('a protected redirect target (shell rc file) is reported, never waved through', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>rc file</reason>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-redirect-rc', win)
+
+    await gate('call_r3', 'bash', { command: 'echo malicious >> ~/.bashrc' })
+
+    const prompt = judgeInstances[0].prompts[0]
+    expect(prompt).toContain('"protectedHits":[".bashrc"]')
+    expect(prompt).toContain('"allInScope":false')
     session.dispose()
   })
 })

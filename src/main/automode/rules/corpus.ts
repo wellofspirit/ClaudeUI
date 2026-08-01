@@ -256,7 +256,7 @@ export const ALLOW_RULES: AllowDef[] = [
   {
     slug: 'local_operations',
     name: 'Local Operations',
-    text: `Mutations confined to the working tree, build outputs, caches, scratch/temp dirs, and resources this session created (containers, venvs, local branches). Includes deleting node_modules/dist/target and recreating them.`
+    text: `Mutations confined to the working tree, build outputs, caches, scratch/temp dirs, and resources this session created (containers, venvs, local branches). Includes deleting node_modules/dist/target and recreating them. Writes via shell redirection are local operations when the meta line's measured redirect targets are all in scope (\`allInScope\`); an unresolvable, out-of-scope or protected target is not.`
   },
   {
     slug: 'declared_dependencies',

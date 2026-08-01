@@ -206,7 +206,12 @@ vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: { probe: vi.fn().mockResolvedValue({}), buildPiAccountRef: vi.fn().mockReturnValue(null) }
 }))
 vi.mock('node:fs', () => ({ existsSync: vi.fn().mockReturnValue(false) }))
-vi.mock('node:os', () => ({ homedir: vi.fn().mockReturnValue('/fake/home') }))
+vi.mock('node:os', () => ({
+  homedir: vi.fn().mockReturnValue('/fake/home'),
+  // ground-truth.ts's redirect scope calls tmpdir(); omitting it here makes the
+  // call throw through vitest's missing-export proxy.
+  tmpdir: vi.fn().mockReturnValue('/tmp')
+}))
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: vi.fn().mockReturnValue({
     allow: [],

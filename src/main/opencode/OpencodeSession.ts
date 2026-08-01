@@ -61,6 +61,7 @@ import {
 } from '../automode/classifier'
 import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
 import {
+  analyzeRedirects,
   captureGitRemotes,
   captureGitStatus,
   captureRepoVisibility,
@@ -68,6 +69,7 @@ import {
   needsRepoVisibility,
   recordToolOutcome,
   shellCommandOf,
+  tempDirRoots,
   type GitRemote,
   type RepoVisibility,
   type ToolOutcome
@@ -1539,6 +1541,16 @@ export class OpencodeSession extends BaseSession {
     if (needsRepoVisibility(command)) {
       meta.repoVisibility = await this.sessionVisibility()
     }
+    // Pure and synchronous — no subprocess, so unlike the captures above it
+    // costs nothing to attempt on every shell action. Scope mirrors what
+    // `classifierEnvironment` publishes (cwd + the user's additionalDirectories)
+    // plus the process's temp roots.
+    const redirects = analyzeRedirects(command, {
+      cwd: this.cwd,
+      tempDirs: tempDirRoots(),
+      additionalDirectories: this.mergedUserPermissions().additionalDirectories
+    })
+    if (redirects) meta.redirects = redirects
     return Object.keys(meta).length > 0 ? meta : undefined
   }
 
