@@ -47,6 +47,7 @@ import {
   ChatRetentionSetting,
   InfoTooltip
 } from './settings-controls'
+import { ModelPicker, type ModelDisplay } from '../shared/InlinePickers'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { RemoteServerSettings } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
@@ -493,38 +494,74 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
   { value: 'thinking', label: 'Thinking' }
 ]
 
+/** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
+const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
+
 /**
- * Self-contained (loads/saves its own opencode EngineConfig via window.api —
- * SettingsDialog only wires the 'claude' engine config). Configures the auto-mode
- * LLM permission gatekeeper that runs in Full autonomy on opencode. See ADR-023.
+ * Shared render/load/save core for the per-engine auto-mode editor.
+ * `OpencodeAutoModeSection` and `PiAutoModeSection` are thin copy/gating
+ * wrappers around this — both engines read the SAME `EngineConfig.autoMode`
+ * block (`loadEngineConfig(<engine>).autoMode` in OpencodeSession /
+ * PiSession), and the classifier policy behind it is engine-neutral
+ * (src/main/automode/), so the editor is too. Mirrors `DispatchSection`'s
+ * structure for the same DRY reason.
+ *
+ * Self-contained: loads/saves its own EngineConfig via window.api
+ * (SettingsDialog only wires the 'claude' engine config), editing ONLY the
+ * `autoMode` block so sibling blocks (`dispatch`, `piConfig`, …) survive.
+ *
+ * `installed`: null = still probing (Loading), false = gate closed.
+ *
+ * The judge-model picker is fed from `getEngineModels()` filtered to this
+ * engine, so its option values are picker VALUES (`<provider>/<modelId>`) —
+ * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
+ * when resolving `autoMode.judgeModel`.
+ *
+ * Note: `AutoModeConfig`'s trust lists (trustedDomains / trustedRegistries /
+ * protectedPatterns) are deliberately NOT edited here — they have no opencode
+ * UI either, and remain hand-edited in engines/<engine>.json.
  */
-function OpencodeAutoModeSection(): React.JSX.Element {
+function AutoModeSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  toggleTooltip,
+  judgeModelTooltip,
+  footerText
+}: {
+  engineId: EngineId
+  testid: string
+  installed: boolean | null
+  notInstalledMessage: string
+  toggleTooltip: string
+  judgeModelTooltip: string
+  footerText: string
+}): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
-      .loadEngineConfig('opencode')
+      .loadEngineConfig(engineId)
       .then(setEngineCfg)
       .catch(() => setEngineCfg({}))
     window.api
       .getEngineModels()
       .then((groups) => {
-        const oc = groups.filter((g) => g.engineId === 'opencode')
-        setModels(oc.flatMap((g) => g.models))
+        const own = groups.filter((g) => g.engineId === engineId)
+        setModels(own.flatMap((g) => g.models))
       })
       .catch(() => {})
-  }, [])
+  }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid="OpencodeAutoModeSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div data-testid="OpencodeAutoModeSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
-        opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full
-        autonomy.
+      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        {notInstalledMessage}
       </div>
     )
   }
@@ -534,53 +571,116 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   const judgeModel = auto.judgeModel ?? ''
   const twoStageMode = auto.twoStageMode ?? 'both'
 
+  // ModelInfo → ModelDisplay for the shared picker. `value` stays the picker
+  // VALUE (`<provider>/<modelId>`) that `decodeModelValue` consumes.
+  const judgeModelOptions: ModelDisplay[] = models.map((m) => ({
+    ...m,
+    shortName: m.displayName || m.value
+  }))
+  // An unset judgeModel ('') means "inherit the session's model" — represented
+  // by a synthetic selection so the trigger reads the same as the pinned row.
+  // A CONFIGURED-but-undiscovered model (hand-edited, or a provider that has
+  // not been authenticated yet) is shown verbatim rather than silently
+  // collapsing to the default label, which would misreport what is saved.
+  const selectedJudgeModel: ModelDisplay = judgeModelOptions.find(
+    (m) => m.value === judgeModel
+  ) ?? {
+    value: judgeModel,
+    displayName: judgeModel || JUDGE_MODEL_DEFAULT_LABEL,
+    shortName: judgeModel || JUDGE_MODEL_DEFAULT_LABEL
+  }
+
   const update = (patch: Partial<AutoModeConfig>): void => {
     const next: EngineConfig = { ...engineCfg, autoMode: { ...auto, ...patch } }
     setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
 
   return (
-    <div data-testid="OpencodeAutoModeSection" className="space-y-1">
+    <div data-testid={testid} className="space-y-1">
       <SettingsToggle
+        testid={`${testid}.enabled`}
         label="Auto mode (LLM gatekeeper)"
         checked={enabled}
         onChange={(v) => update({ enabled: v })}
-        tooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
+        tooltip={toggleTooltip}
       />
       {enabled && (
         <>
           <div className="px-3 py-1.5 text-[13px] text-text-secondary">
             <div className="mb-1 flex items-center gap-1">
               Judge model
-              <InfoTooltip text="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work." />
+              <InfoTooltip text={judgeModelTooltip} />
             </div>
-            <select
-              value={judgeModel}
-              onChange={(e) => update({ judgeModel: e.target.value || undefined })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-            >
-              <option value="">Same as session model (default)</option>
-              {models.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.displayName || m.value}
-                </option>
-              ))}
-            </select>
+            {/* Themed dropdown, not a native <select>: a native option list is
+                painted by the OS with UA colors, so the inherited light-on-dark
+                text was unreadable under Monokai. ModelPicker (the InputBox /
+                AutomationConfig picker) renders options as real DOM styled from
+                the same theme tokens as everything else. The section-scoped
+                `.judgeModel` testid moves to this wrapper; the picker keeps its
+                own `ModelPicker.trigger` / `ModelPicker.option` ids. */}
+            <div data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
+              <ModelPicker
+                placement="down"
+                emptyOption={{ label: JUDGE_MODEL_DEFAULT_LABEL }}
+                models={judgeModelOptions}
+                selectedModel={selectedJudgeModel}
+                onSelectModel={(v) => update({ judgeModel: v || undefined })}
+              />
+            </div>
           </div>
           <SettingsSelect
+            testid={`${testid}.twoStageMode`}
             label="Two-stage judging"
             value={twoStageMode}
             options={TWO_STAGE_OPTIONS}
             onChange={(v) => update({ twoStageMode: v })}
           />
-          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-            Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No
-            per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters.
-          </div>
+          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * Configures the auto-mode LLM permission gatekeeper that runs in Full
+ * autonomy on opencode. See ADR-023.
+ */
+function OpencodeAutoModeSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <AutoModeSection
+      engineId="opencode"
+      testid="OpencodeAutoModeSection"
+      installed={installed}
+      notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
+      toggleTooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
+      judgeModelTooltip="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
+      footerText="Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters."
+    />
+  )
+}
+
+/**
+ * The pi twin of `OpencodeAutoModeSection`. pi's gatekeeper (PiSession's
+ * phase-4 wiring) reads the very same `engines/pi.json#autoMode` block and runs
+ * the same engine-neutral classifier — the one behavioral difference worth
+ * saying out loud in the copy is that pi's `isAutoMode()` covers BOTH the
+ * `auto` and `full` autonomy modes, where opencode's covers Full only.
+ */
+export function PiAutoModeSection(): React.JSX.Element {
+  const installed = usePiInstalled()
+  return (
+    <AutoModeSection
+      engineId="pi"
+      testid="PiAutoModeSection"
+      installed={installed}
+      notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
+      toggleTooltip="In Auto and Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Auto/Full prompt you like Ask mode. See ADR-023."
+      judgeModelTooltip="The model that decides allow/block. Format: provider/model-id. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
+      footerText="Applies to Auto and Full autonomy on pi. The judge runs in its own short-lived pi process. It sees tool calls, not their output. Config is read once per session — reopen a session to pick up changes."
+    />
   )
 }
 
@@ -2822,6 +2922,7 @@ export const SECTIONS: Section[] = [
         keywords: 'dark light monokai color',
         render: (s, u) => (
           <SettingsSelect
+            testid="SettingsTheme"
             label="Theme"
             value={s.theme}
             options={[
@@ -4442,6 +4543,25 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'pi-automode',
+    label: 'Auto mode',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piAutoMode',
+        label: 'Auto mode',
+        keywords:
+          'pi auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+        render: () => <PiAutoModeSection />
+      }
+    ]
+  },
+  {
     id: 'pi-models',
     label: 'Models',
     icon: (
@@ -4517,13 +4637,16 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
 /** Section ids that belong to Engines > pi (content self-gates on install).
- *  Default model only — no auto-mode (deferred; opencode's ADR-023 gatekeeper
- *  has no pi equivalent yet). No dispatch section: the Claude/opencode dispatch
- *  sections configure dispatches INTO that engine (allowlist/default/cap for
- *  incoming targets), and pi is a dispatch SOURCE only so far — nothing to
- *  configure until pi-as-target ships (crossEngineDispatch is true for the
- *  source direction as of M4b). */
-const ENGINE_PI_SECTION_IDS = new Set(['pi-models'])
+ *  Auto mode + default model. `pi-automode` edits the same
+ *  `EngineConfig.autoMode` block opencode's does — PiSession reads
+ *  `loadEngineConfig('pi').autoMode` since the phase-4 gatekeeper wiring, so
+ *  the setting was live but unreachable from the UI until this section.
+ *  No dispatch section: the Claude/opencode dispatch sections configure
+ *  dispatches INTO that engine (allowlist/default/cap for incoming targets),
+ *  and pi is a dispatch SOURCE only so far — nothing to configure until
+ *  pi-as-target ships (crossEngineDispatch is true for the source direction as
+ *  of M4b). */
+const ENGINE_PI_SECTION_IDS = new Set(['pi-automode', 'pi-models'])
 
 /** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
 const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
@@ -4625,7 +4748,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'pi-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-models'])
+        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode', 'pi-models'])
       },
       {
         id: 'pi-vendor',

@@ -133,9 +133,9 @@ describe('SCOPES structure', () => {
       expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor'])
     })
 
-    it('Engine subgroup contains only pi-models (no auto-mode/dispatch in M3)', () => {
+    it('Engine subgroup contains pi-automode then pi-models (no dispatch — pi is source-only)', () => {
       const engine = pi.subgroups.find((sg) => sg.label === 'Engine')!
-      expect(engine.sections.map((s) => s.id)).toEqual(['pi-models'])
+      expect(engine.sections.map((s) => s.id)).toEqual(['pi-automode', 'pi-models'])
     })
 
     it('Vendor subgroup contains vendor-pi', () => {
@@ -217,6 +217,10 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('pi-models → pi', () => {
     expect(SECTION_SCOPE_MAP.get('pi-models')).toBe('pi')
+  })
+
+  it('pi-automode → pi', () => {
+    expect(SECTION_SCOPE_MAP.get('pi-automode')).toBe('pi')
   })
 
   it('vendor-pi → pi', () => {

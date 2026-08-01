@@ -100,6 +100,10 @@ export function SettingsSelect<T extends string>({
         {options.map((opt) => (
           <button
             key={opt.value}
+            // Repeated instance: stable testid + `data-id` discriminator (ADR-027),
+            // so a specific option is addressable without copy-text selectors.
+            data-testid={`${testid ?? 'SettingsSelect'}.option`}
+            data-id={opt.value}
             onClick={() => onChange(opt.value)}
             className={`flex-1 text-[11px] py-1 rounded transition-colors ${
               value === opt.value

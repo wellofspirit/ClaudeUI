@@ -152,11 +152,23 @@ export function EnginePicker({
 export function ModelPicker({
   models,
   selectedModel,
-  onSelectModel
+  onSelectModel,
+  placement = 'up',
+  emptyOption
 }: {
   models: ModelDisplay[]
   selectedModel: ModelDisplay
   onSelectModel: (value: string) => void
+  /** Which way the menu opens. 'up' (the default, and every pre-existing call
+   *  site) suits the InputBox controls bar pinned to the window bottom; a
+   *  settings panel grows downward and passes 'down' so the menu isn't clipped
+   *  off the top of the scroll container. */
+  placement?: 'up' | 'down'
+  /** Optional pinned first row meaning "no explicit choice" — picking it calls
+   *  `onSelectModel('')`. The settings judge-model pickers use it for "same as
+   *  the session's model", where an empty stored value means inherit. It is NOT
+   *  subject to the Free filter: it is not a model. */
+  emptyOption?: { label: string }
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -205,7 +217,26 @@ export function ModelPicker({
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full mb-1 left-0 w-56 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+        <div
+          className={`absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 w-56 max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20`}
+        >
+          {emptyOption && (
+            <button
+              data-testid="ModelPicker.option"
+              data-value=""
+              onClick={() => {
+                onSelectModel('')
+                setOpen(false)
+              }}
+              className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
+                selectedModel.value === ''
+                  ? 'text-text-primary bg-bg-hover'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <span className="text-[12px]">{emptyOption.label}</span>
+            </button>
+          )}
           {hasFreeModels && (
             <div className="px-2 pt-2 pb-1 flex items-center border-b border-border/50">
               <button
