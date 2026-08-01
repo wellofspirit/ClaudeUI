@@ -293,6 +293,7 @@ export function SandboxListSetting({
   placeholder,
   onUpdate,
   tooltip,
+  description,
   testid
 }: {
   label: string
@@ -301,6 +302,10 @@ export function SandboxListSetting({
   placeholder: string
   onUpdate: (items: string[]) => void
   tooltip?: string
+  /** Always-visible helper line under the control. Use it (rather than
+   *  `tooltip`) when the semantics are load-bearing — e.g. what an EMPTY list
+   *  means to the backend. Mirrors `SettingsTextarea`'s `description`. */
+  description?: string
   testid?: string
 }): React.JSX.Element {
   const [inputVal, setInputVal] = useState('')
@@ -324,10 +329,15 @@ export function SandboxListSetting({
           {items.map((item, i) => (
             <span
               key={i}
+              // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
+              data-testid={testid ? `${testid}.item` : undefined}
+              data-id={item}
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-primary/50 border border-border/50 text-[11px] text-text-secondary"
             >
               {item}
               <button
+                data-testid={testid ? `${testid}.remove` : undefined}
+                data-id={item}
                 onClick={() => onUpdate(items.filter((_, idx) => idx !== i))}
                 className="text-text-muted hover:text-danger transition-colors cursor-default"
               >
@@ -339,6 +349,7 @@ export function SandboxListSetting({
       )}
       <div className="flex items-center gap-1.5">
         <input
+          data-testid={testid ? `${testid}.input` : undefined}
           type="text"
           value={inputVal}
           onChange={(e) => setInputVal(e.target.value)}
@@ -349,6 +360,7 @@ export function SandboxListSetting({
           className="flex-1 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
         />
         <button
+          data-testid={testid ? `${testid}.add` : undefined}
           onClick={handleAdd}
           disabled={!inputVal.trim()}
           className="px-2 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded transition-colors cursor-default disabled:opacity-40"
@@ -356,6 +368,9 @@ export function SandboxListSetting({
           Add
         </button>
       </div>
+      {description && (
+        <div className="text-[10px] text-text-muted/60 mt-1 leading-relaxed">{description}</div>
+      )}
     </div>
   )
 }

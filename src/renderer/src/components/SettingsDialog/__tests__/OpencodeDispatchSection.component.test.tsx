@@ -10,7 +10,7 @@
  *   5. Toggling an allowed model on/off; last-off drops the allowedModels key
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
 
 import { OpencodeDispatchSection } from '../settings-sections'
@@ -73,6 +73,32 @@ async function renderLoaded(): Promise<void> {
   )
 }
 
+/**
+ * Drive the themed default-model picker (a `ModelPicker`, not a native
+ * `<select>` — 8bc26d7's Monokai fix, extended to this section): open the
+ * trigger, then click the option carrying `data-value`.
+ */
+function pickDefaultModel(value: string): void {
+  const field = screen.getByTestId('OpencodeDispatchSection.defaultModel')
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  const option = within(field)
+    .getAllByTestId('ModelPicker.option')
+    .find((o) => o.getAttribute('data-value') === value)
+  expect(option, `ModelPicker option for "${value}"`).toBeTruthy()
+  fireEvent.click(option!)
+}
+
+/** The option values the default-model picker currently offers, in order. */
+function defaultModelOptionValues(): (string | null)[] {
+  const field = screen.getByTestId('OpencodeDispatchSection.defaultModel')
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  const values = within(field)
+    .getAllByTestId('ModelPicker.option')
+    .map((o) => o.getAttribute('data-value'))
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  return values
+}
+
 function allowedRow(modelValue: string): HTMLElement {
   const row = screen
     .getAllByTestId('OpencodeDispatchSection.allowedModel')
@@ -119,15 +145,17 @@ describe('OpencodeDispatchSection — load', () => {
   it('renders the saved dispatch config: default model selected, opencode models only', async () => {
     await renderLoaded()
 
-    const select = screen.getByTestId(
-      'OpencodeDispatchSection.defaultModel'
-    ) as HTMLSelectElement
-    expect(select.value).toBe('openai/gpt-5')
+    const field = screen.getByTestId('OpencodeDispatchSection.defaultModel')
+    expect(field.getAttribute('data-value')).toBe('openai/gpt-5')
+    // The trigger reads the display name, not the raw value.
+    expect(field.textContent).toContain('GPT-5')
+    // Themed picker, never a native select (the Monokai fix from 8bc26d7).
+    expect(field.querySelector('select')).toBeNull()
+    expect(within(field).getByTestId('ModelPicker')).toBeTruthy()
 
     // Only opencode-engine models appear (the Claude group is filtered out),
-    // plus the "(not set)" empty option.
-    const optionValues = [...select.options].map((o) => o.value)
-    expect(optionValues).toEqual(['', 'openai/gpt-5', 'google/gemini-3'])
+    // plus the pinned "(not set)" empty option.
+    expect(defaultModelOptionValues()).toEqual(['', 'openai/gpt-5', 'google/gemini-3'])
 
     // One allowed-model row per opencode model, discriminated by data-id.
     const rows = screen.getAllByTestId('OpencodeDispatchSection.allowedModel')
@@ -142,9 +170,7 @@ describe('OpencodeDispatchSection — saves merge, never clobber', () => {
   it('changing the default model saves the FULL config with autoMode and allowedModels intact', async () => {
     await renderLoaded()
 
-    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.defaultModel'), {
-      target: { value: 'google/gemini-3' }
-    })
+    pickDefaultModel('google/gemini-3')
 
     expect(saveEngineConfig).toHaveBeenCalledTimes(1)
     expect(saveEngineConfig.mock.calls[0][0]).toBe('opencode')
@@ -157,9 +183,7 @@ describe('OpencodeDispatchSection — saves merge, never clobber', () => {
   it('"(not set)" clears defaultModel without touching the rest', async () => {
     await renderLoaded()
 
-    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.defaultModel'), {
-      target: { value: '' }
-    })
+    pickDefaultModel('')
 
     expect(savedConfigs[0].dispatch?.defaultModel).toBeUndefined()
     expect(savedConfigs[0].dispatch?.allowedModels).toEqual(['openai/gpt-5'])
@@ -194,9 +218,7 @@ describe('OpencodeDispatchSection — saves merge, never clobber', () => {
     await renderLoaded()
 
     fireEvent.click(allowedRow('google/gemini-3'))
-    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.defaultModel'), {
-      target: { value: 'google/gemini-3' }
-    })
+    pickDefaultModel('google/gemini-3')
 
     expect(savedConfigs).toHaveLength(2)
     expect(savedConfigs[1].dispatch).toEqual({

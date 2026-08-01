@@ -154,7 +154,8 @@ export function ModelPicker({
   selectedModel,
   onSelectModel,
   placement = 'up',
-  emptyOption
+  emptyOption,
+  trailingOption
 }: {
   models: ModelDisplay[]
   selectedModel: ModelDisplay
@@ -169,6 +170,11 @@ export function ModelPicker({
    *  the session's model", where an empty stored value means inherit. It is NOT
    *  subject to the Free filter: it is not a model. */
   emptyOption?: { label: string }
+  /** Optional pinned LAST row for a non-model escape hatch — pi's settings
+   *  picker uses it for "Custom model ID…", which is a mode switch rather than
+   *  a selectable model. Like `emptyOption` it bypasses the Free filter and the
+   *  group headers; picking it calls `onSelectModel(trailingOption.value)`. */
+  trailingOption?: { value: string; label: string }
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -212,6 +218,7 @@ export function ModelPicker({
           fill="none"
           stroke="currentColor"
           strokeWidth="2.5"
+          className="shrink-0"
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>
@@ -299,6 +306,23 @@ export function ModelPicker({
               ))}
             </div>
           ))}
+          {trailingOption && (
+            <button
+              data-testid="ModelPicker.option"
+              data-value={trailingOption.value}
+              onClick={() => {
+                onSelectModel(trailingOption.value)
+                setOpen(false)
+              }}
+              className={`w-full flex flex-col px-3 py-1.5 border-t border-border/50 transition-colors cursor-pointer text-left ${
+                selectedModel.value === trailingOption.value
+                  ? 'text-text-primary bg-bg-hover'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <span className="text-[12px]">{trailingOption.label}</span>
+            </button>
+          )}
         </div>
       )}
     </div>

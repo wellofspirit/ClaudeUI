@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RemoteServerSettings } from '../RemoteServerSettings'
+import {
+  selectMenuValue,
+  selectMenuOptionLabels
+} from '../../../../../test/helpers/select-menu'
 import type { RemoteConfig, NetworkInterfaceInfo } from '../../../../../shared/types'
 
 const baseConfig: RemoteConfig = {
@@ -49,7 +53,7 @@ describe('RemoteServerSettings', () => {
     const root = await screen.findByTestId('RemoteServerSettings')
     expect(root).toBeInTheDocument()
     expect(screen.getByTestId('RemoteServerSettings.port')).toHaveValue('4568')
-    expect(screen.getByTestId('RemoteServerSettings.bindHost')).toHaveValue('10.0.0.5')
+    expect(selectMenuValue(screen.getByTestId('RemoteServerSettings.bindHost'))).toBe('10.0.0.5')
     expect(screen.getByTestId('RemoteServerSettings.passwordStatus')).toHaveTextContent('Set')
     expect(screen.getByTestId('RemoteServerSettings.setPassword')).toHaveTextContent('Change')
   })
@@ -136,11 +140,19 @@ describe('RemoteServerSettings', () => {
   it('renders network interfaces in the bind-host select and keeps a stale persisted value visible', async () => {
     api.getRemoteConfig.mockResolvedValue({ ...baseConfig, bindHost: '172.16.9.9' })
     render(<RemoteServerSettings />)
-    const select = await screen.findByTestId('RemoteServerSettings.bindHost')
+    const field = await screen.findByTestId('RemoteServerSettings.bindHost')
+    // Themed SelectMenu, never a native <select>.
+    expect(field.querySelector('select')).toBeNull()
     // Stale bindHost not in the current interface list still renders as selected.
-    expect(select).toHaveValue('172.16.9.9')
-    expect(select).toHaveTextContent('172.16.9.9 (unavailable)')
-    expect(select).toHaveTextContent('192.168.1.50 (Wi-Fi)')
+    expect(selectMenuValue(field)).toBe('172.16.9.9')
+    expect(field).toHaveTextContent('172.16.9.9 (unavailable)')
+    expect(selectMenuOptionLabels(field)).toEqual([
+      'All interfaces (0.0.0.0)',
+      '192.168.1.50 (Wi-Fi)',
+      '10.0.0.5 (Ethernet)',
+      // The stale value is appended last so it stays reachable.
+      '172.16.9.9 (unavailable)'
+    ])
   })
 
   it('toggles autostart via setRemoteConfig', async () => {
@@ -256,7 +268,9 @@ describe('RemoteServerSettings', () => {
       await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 1 }))
       // The bind-interface picker is meaningless in TLS mode.
       await waitFor(() =>
-        expect(screen.getByTestId('RemoteServerSettings.bindHost')).toBeDisabled()
+        expect(
+          screen.getByTestId('RemoteServerSettings.bindHost.trigger')
+        ).toBeDisabled()
       )
       expect(screen.getByTestId('RemoteServerSettings.bindHostTlsHint')).toBeInTheDocument()
     })

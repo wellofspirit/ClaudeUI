@@ -10,6 +10,7 @@ import { useState } from 'react'
 import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { OpencodeSchemaForm, detectKind, type SchemaNode, type SchemaDefs } from '../OpencodeSchemaForm'
+import { selectMenuOptionValues } from '../../../../../test/helpers/select-menu'
 
 const miniSchema: SchemaNode = {
   type: 'object',
@@ -54,8 +55,12 @@ describe('OpencodeSchemaForm rendering', () => {
     expect(screen.getByTestId('OpencodeSchemaForm')).toBeInTheDocument()
     expect(screen.getByTestId('OpencodeSchemaForm.bool')).toBeInTheDocument()
     expect(screen.getByTestId('OpencodeSchemaForm.text')).toBeInTheDocument()
-    const enumSelect = screen.getByTestId('OpencodeSchemaForm.enum') as HTMLSelectElement
-    expect([...enumSelect.options].map((o) => o.value)).toEqual(['', 'low', 'high'])
+    const enumField = screen.getByTestId('OpencodeSchemaForm.enum')
+    // Themed SelectMenu, never a native <select>; `data-id` still discriminates
+    // the schema key on the root (ADR-027 repeated-instance convention).
+    expect(enumField.querySelector('select')).toBeNull()
+    expect(enumField).toHaveAttribute('data-id', 'level')
+    expect(selectMenuOptionValues(enumField)).toEqual(['', 'low', 'high'])
     expect(screen.getByTestId('OpencodeSchemaForm.record')).toBeInTheDocument()
     // Union (anyOf) → raw-JSON leaf editor escape hatch.
     expect(screen.getByTestId('OpencodeSchemaForm.rawJson')).toBeInTheDocument()

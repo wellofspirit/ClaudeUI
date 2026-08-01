@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import type { VendorAuthMap, VendorAuthOption } from '../../../../shared/types'
+import { SelectMenu } from '../shared/SelectMenu'
 
 /** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
 const CODEX_VENDOR_ID = 'openai-codex'
@@ -282,19 +283,16 @@ export function PiVendors(): React.JSX.Element {
       <div className="space-y-1.5">
         <div className="text-[11px] text-text-muted uppercase tracking-wide">Add API key</div>
         <div className="flex items-center gap-1.5">
-          <select
-            data-testid="PiVendors.addVendorSelect"
+          <SelectMenu
+            testid="PiVendors.addVendorSelect"
             value={addVendorId}
-            onChange={(e) => setAddVendorId(e.target.value)}
-            className="px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary focus:outline-none focus:border-accent/60"
-          >
-            <option value="">Select a provider…</option>
-            {addableIds.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </select>
+            onChange={setAddVendorId}
+            options={[
+              { value: '', label: 'Select a provider…' },
+              ...addableIds.map((id) => ({ value: id, label: id }))
+            ]}
+            triggerClassName="px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary focus:outline-none focus:border-accent/60"
+          />
           <input
             data-testid="PiVendors.addKeyInput"
             type="password"

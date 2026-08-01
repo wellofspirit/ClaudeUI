@@ -48,6 +48,7 @@ import {
   InfoTooltip
 } from './settings-controls'
 import { ModelPicker, type ModelDisplay } from '../shared/InlinePickers'
+import { SelectMenu } from '../shared/SelectMenu'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { RemoteServerSettings } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
@@ -250,21 +251,15 @@ function ModelEffortRow({
         <span>{modelLabel}</span>
         <span className="text-[10px] text-text-muted/50">{modelId}</span>
       </div>
-      <select
+      <SelectMenu
+        testid="ModelEffortRow.effort"
         value={current ?? ''}
-        onChange={(e) => {
-          const v = e.target.value
-          onChange(v === '' ? undefined : (v as EffortLevel))
-        }}
-        className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors cursor-pointer"
-      >
-        <option value="">{`Default (${EFFORT_LEVEL_LABEL[fallback]})`}</option>
-        {levels.map((lvl) => (
-          <option key={lvl} value={lvl}>
-            {EFFORT_LEVEL_LABEL[lvl]}
-          </option>
-        ))}
-      </select>
+        onChange={(v) => onChange(v === '' ? undefined : (v as EffortLevel))}
+        options={[
+          { value: '', label: `Default (${EFFORT_LEVEL_LABEL[fallback]})` },
+          ...levels.map((lvl) => ({ value: lvl, label: EFFORT_LEVEL_LABEL[lvl] }))
+        ]}
+      />
     </div>
   )
 }
@@ -496,6 +491,84 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
 
 /** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
 const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
+/** Label for the dispatch default-model picker's "no explicit choice" row. */
+const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
+/** Label for the opencode default/small model pickers' "no explicit choice" row. */
+const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
+
+/**
+ * `ModelInfo` → `ModelDisplay` for the shared picker. `value` stays the picker
+ * VALUE (`<provider>/<modelId>`) that `decodeModelValue` consumes.
+ */
+function toModelDisplays(models: ModelInfo[]): ModelDisplay[] {
+  return models.map((m) => ({ ...m, shortName: m.displayName || m.value }))
+}
+
+/**
+ * The `ModelDisplay` a settings ModelPicker should show as selected.
+ *
+ * An unset value ('') means "inherit / not set" and reads as `emptyLabel`,
+ * matching the pinned empty row. A CONFIGURED-but-undiscovered model
+ * (hand-edited, or a provider not authenticated yet) is shown VERBATIM rather
+ * than collapsing to the empty label, which would misreport what is saved.
+ */
+function selectedModelDisplay(
+  models: ModelInfo[],
+  value: string,
+  emptyLabel: string
+): ModelDisplay {
+  const known = models.find((m) => m.value === value)
+  if (known) return { ...known, shortName: known.displayName || known.value }
+  return {
+    value,
+    displayName: value || emptyLabel,
+    shortName: value || emptyLabel
+  }
+}
+
+/** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
+type TrustListKey = 'trustedDomains' | 'trustedRegistries' | 'protectedPatterns'
+
+/**
+ * The three trust lists spliced into the classifier environment
+ * (src/main/automode/rules/policy.ts). Each `description` states what an EMPTY
+ * list means, because for all three that is the load-bearing, non-obvious half
+ * of the semantics — and for `protectedPatterns` a non-empty list REPLACES a
+ * built-in heuristic rather than adding to it.
+ */
+const TRUST_LISTS: ReadonlyArray<{
+  key: TrustListKey
+  label: string
+  placeholder: string
+  tooltip: string
+  description: string
+}> = [
+  {
+    key: 'trustedDomains',
+    label: 'Trusted domains',
+    placeholder: 'files.example.com',
+    tooltip:
+      'External destinations the judge may treat as safe to reach or send data to (web fetch, uploads, curl targets). Host names, not URLs.',
+    description: 'Empty = no external destination is trusted.'
+  },
+  {
+    key: 'trustedRegistries',
+    label: 'Trusted package registries',
+    placeholder: 'https://npm.internal.example',
+    tooltip:
+      'Registries the judge may treat as safe to install from. Anything else is an untrusted supply-chain source.',
+    description: "Empty = only the project manifest's default registry."
+  },
+  {
+    key: 'protectedPatterns',
+    label: 'Production / protected patterns',
+    placeholder: 'acme-live-*',
+    tooltip:
+      'Names, hosts, or resource patterns the judge must treat as production and refuse to mutate without a human. Setting any pattern REPLACES the built-in heuristic entirely.',
+    description:
+      "Empty = built-in heuristic: 'prod'/'production' as a whole word or segment. Setting this REPLACES the heuristic."
+  }
+]
 
 /**
  * Shared render/load/save core for the per-engine auto-mode editor.
@@ -517,9 +590,13 @@ const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
  * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
  * when resolving `autoMode.judgeModel`.
  *
- * Note: `AutoModeConfig`'s trust lists (trustedDomains / trustedRegistries /
- * protectedPatterns) are deliberately NOT edited here — they have no opencode
- * UI either, and remain hand-edited in engines/<engine>.json.
+ * `AutoModeConfig`'s trust lists (trustedDomains / trustedRegistries /
+ * protectedPatterns) are edited here too, and are engine-neutral for the same
+ * reason: both sessions splice them into the classifier environment with the
+ * SAME `?.length` guard, so an EMPTY array and an ABSENT key are
+ * indistinguishable to the backend. `updateList` therefore deletes the key
+ * rather than storing `[]` — one on-disk representation for one meaning, and
+ * `engines/<engine>.json` stays clean for hand-editing.
  */
 function AutoModeSection({
   engineId,
@@ -571,27 +648,23 @@ function AutoModeSection({
   const judgeModel = auto.judgeModel ?? ''
   const twoStageMode = auto.twoStageMode ?? 'both'
 
-  // ModelInfo → ModelDisplay for the shared picker. `value` stays the picker
-  // VALUE (`<provider>/<modelId>`) that `decodeModelValue` consumes.
-  const judgeModelOptions: ModelDisplay[] = models.map((m) => ({
-    ...m,
-    shortName: m.displayName || m.value
-  }))
-  // An unset judgeModel ('') means "inherit the session's model" — represented
-  // by a synthetic selection so the trigger reads the same as the pinned row.
-  // A CONFIGURED-but-undiscovered model (hand-edited, or a provider that has
-  // not been authenticated yet) is shown verbatim rather than silently
-  // collapsing to the default label, which would misreport what is saved.
-  const selectedJudgeModel: ModelDisplay = judgeModelOptions.find(
-    (m) => m.value === judgeModel
-  ) ?? {
-    value: judgeModel,
-    displayName: judgeModel || JUDGE_MODEL_DEFAULT_LABEL,
-    shortName: judgeModel || JUDGE_MODEL_DEFAULT_LABEL
-  }
+  const judgeModelOptions = toModelDisplays(models)
+  const selectedJudgeModel = selectedModelDisplay(models, judgeModel, JUDGE_MODEL_DEFAULT_LABEL)
 
   const update = (patch: Partial<AutoModeConfig>): void => {
     const next: EngineConfig = { ...engineCfg, autoMode: { ...auto, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig(engineId, next).catch(() => {})
+  }
+
+  // Trust lists: an empty list is written as an ABSENT key, never `[]`. The
+  // classifier reads them behind `?.length`, so `[]` is not a distinct state —
+  // storing it would invent a second encoding of "restrictive default".
+  const updateList = (key: TrustListKey, items: string[]): void => {
+    const nextAuto: AutoModeConfig = { ...auto }
+    if (items.length > 0) nextAuto[key] = items
+    else delete nextAuto[key]
+    const next: EngineConfig = { ...engineCfg, autoMode: nextAuto }
     setEngineCfg(next)
     window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
@@ -636,6 +709,19 @@ function AutoModeSection({
             options={TWO_STAGE_OPTIONS}
             onChange={(v) => update({ twoStageMode: v })}
           />
+          {TRUST_LISTS.map((f) => (
+            <SandboxListSetting
+              key={f.key}
+              testid={`${testid}.${f.key}`}
+              label={f.label}
+              labelColor="text-text-secondary"
+              items={auto[f.key] ?? []}
+              placeholder={f.placeholder}
+              onUpdate={(items) => updateList(f.key, items)}
+              tooltip={f.tooltip}
+              description={f.description}
+            />
+          ))}
           <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
         </>
       )}
@@ -770,19 +856,20 @@ function DispatchSection({
           Default model
           <InfoTooltip text={defaultModelTooltip} />
         </div>
-        <select
-          data-testid={`${testid}.defaultModel`}
-          value={defaultModel}
-          onChange={(e) => update({ defaultModel: e.target.value || undefined })}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        >
-          <option value="">(not set)</option>
-          {models.map((m) => (
-            <option key={m.value} value={m.value}>
-              {m.displayName || m.value}
-            </option>
-          ))}
-        </select>
+        {/* Themed ModelPicker, not a native <select> — see the AutoModeSection
+            judge-model note: OS-painted option lists are unreadable in dark
+            themes. The section-scoped `.defaultModel` testid moves to this
+            wrapper and carries `data-value`; the picker keeps its own
+            `ModelPicker.trigger` / `ModelPicker.option` ids. */}
+        <div data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
+          <ModelPicker
+            placement="down"
+            emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
+            models={toModelDisplays(models)}
+            selectedModel={selectedModelDisplay(models, defaultModel, DISPATCH_MODEL_DEFAULT_LABEL)}
+            onSelectModel={(v) => update({ defaultModel: v || undefined })}
+          />
+        </div>
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
@@ -1986,10 +2073,7 @@ function OpencodeModelsSection(): React.JSX.Element {
     useSessionStore.getState().reloadModels()
   }
 
-  const modelOptions = [
-    { value: '', label: 'Default (use opencode default)' },
-    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value }))
-  ]
+  const modelDisplays = toModelDisplays(models)
 
   return (
     <div data-testid="OpencodeModelsSection" className="space-y-1">
@@ -1998,34 +2082,38 @@ function OpencodeModelsSection(): React.JSX.Element {
           Default model
           <InfoTooltip text="The primary model for opencode sessions. Format: provider/model-id, e.g. anthropic/claude-sonnet-4-6. Applies on next cwd spawn." />
         </div>
-        <select
-          value={cfg.model ?? ''}
-          onChange={(e) => update({ model: e.target.value || undefined })}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        >
-          {modelOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <div data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
+          <ModelPicker
+            placement="down"
+            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+            models={modelDisplays}
+            selectedModel={selectedModelDisplay(
+              models,
+              cfg.model ?? '',
+              OPENCODE_MODEL_DEFAULT_LABEL
+            )}
+            onSelectModel={(v) => update({ model: v || undefined })}
+          />
+        </div>
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
           Small model
           <InfoTooltip text="A cheaper/faster model used by opencode for lightweight tasks (titles, summaries). Format: provider/model-id." />
         </div>
-        <select
-          value={cfg.smallModel ?? ''}
-          onChange={(e) => update({ smallModel: e.target.value || undefined })}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        >
-          {modelOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <div data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
+          <ModelPicker
+            placement="down"
+            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+            models={modelDisplays}
+            selectedModel={selectedModelDisplay(
+              models,
+              cfg.smallModel ?? '',
+              OPENCODE_MODEL_DEFAULT_LABEL
+            )}
+            onSelectModel={(v) => update({ smallModel: v || undefined })}
+          />
+        </div>
       </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
         Changes apply on the next opencode server start for each working directory.
@@ -2120,26 +2208,37 @@ function PiDefaultModelSection(): React.JSX.Element {
           <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
         </div>
         {models.length > 0 ? (
-          <select
+          // Themed ModelPicker rather than a native <select> (OS-painted option
+          // lists are unreadable in dark themes). `__custom__` stays a real
+          // selectable VALUE — it is a mode switch, not a model, so it rides
+          // the picker's pinned trailing row instead of the model groups.
+          <div
             data-testid="PiDefaultModelSection.defaultModel"
-            value={customMode || !known ? '__custom__' : current}
-            onChange={(e) => {
-              if (e.target.value === '__custom__') setCustomMode(true)
-              else {
-                setCustomMode(false)
-                update(e.target.value)
-              }
-            }}
-            className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+            data-value={customMode || !known ? '__custom__' : current}
           >
-            <option value="">Default ({PI_DEFAULT_MODEL})</option>
-            {models.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.displayName || m.value}
-              </option>
-            ))}
-            <option value="__custom__">Custom model ID...</option>
-          </select>
+            <ModelPicker
+              placement="down"
+              emptyOption={{ label: `Default (${PI_DEFAULT_MODEL})` }}
+              trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}
+              models={toModelDisplays(models)}
+              selectedModel={
+                customMode || !known
+                  ? {
+                      value: '__custom__',
+                      displayName: 'Custom model ID...',
+                      shortName: 'Custom model ID...'
+                    }
+                  : selectedModelDisplay(models, current, `Default (${PI_DEFAULT_MODEL})`)
+              }
+              onSelectModel={(v) => {
+                if (v === '__custom__') setCustomMode(true)
+                else {
+                  setCustomMode(false)
+                  update(v)
+                }
+              }}
+            />
+          </div>
         ) : (
           <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
             No pi models discovered. Authenticate a provider, then refresh models.
@@ -3553,17 +3652,12 @@ export const SECTIONS: Section[] = [
           <div className={s.voiceEnabled ? '' : 'opacity-40 pointer-events-none'}>
             <div className="px-3 py-1.5 text-[13px] text-text-secondary">
               <div className="mb-1">Language</div>
-              <select
+              <SelectMenu
+                testid="VoiceLanguageSetting.language"
                 value={s.voiceLanguage}
-                onChange={(e) => u({ voiceLanguage: e.target.value as VoiceLanguageCode })}
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors cursor-pointer"
-              >
-                {VOICE_LANGUAGES.map((lang) => (
-                  <option key={lang.code} value={lang.code}>
-                    {lang.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => u({ voiceLanguage: v as VoiceLanguageCode })}
+                options={VOICE_LANGUAGES.map((lang) => ({ value: lang.code, label: lang.label }))}
+              />
             </div>
           </div>
         )

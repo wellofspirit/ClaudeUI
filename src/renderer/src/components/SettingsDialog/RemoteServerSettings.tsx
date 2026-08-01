@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
+import { SelectMenu } from '../shared/SelectMenu'
 
 // Mirrors remote-auth.ts's MIN_PASSWORD_LENGTH — kept as a local literal
 // because that module is main-only (imports node:crypto) and can't be
@@ -217,23 +218,25 @@ export function RemoteServerSettings(): React.JSX.Element {
       {/* Bind interface */}
       <div>
         <div className="mb-1">Bind interface</div>
-        <select
-          data-testid="RemoteServerSettings.bindHost"
+        <SelectMenu
+          testid="RemoteServerSettings.bindHost"
           value={config.bindHost ?? ''}
           disabled={tlsEnabled}
-          onChange={(e) => void handleBindHostChange(e.target.value)}
-          className={`${inputClass} w-full ${tlsEnabled ? 'opacity-40' : ''}`}
-        >
-          <option value="">All interfaces (0.0.0.0)</option>
-          {interfaces.map((iface) => (
-            <option key={iface.address} value={iface.address}>
-              {iface.address} ({iface.name})
-            </option>
-          ))}
-          {!bindHostKnown && config.bindHost && (
-            <option value={config.bindHost}>{config.bindHost} (unavailable)</option>
-          )}
-        </select>
+          onChange={(v) => void handleBindHostChange(v)}
+          options={[
+            { value: '', label: 'All interfaces (0.0.0.0)' },
+            ...interfaces.map((iface) => ({
+              value: iface.address,
+              label: `${iface.address} (${iface.name})`
+            })),
+            // A stale/hand-edited bindHost that no longer matches a live NIC
+            // stays selectable so the control reports what is actually saved.
+            ...(!bindHostKnown && config.bindHost
+              ? [{ value: config.bindHost, label: `${config.bindHost} (unavailable)` }]
+              : [])
+          ]}
+          triggerClassName={`${inputClass} w-full ${tlsEnabled ? 'opacity-40' : ''}`}
+        />
         {tlsEnabled && (
           <div
             data-testid="RemoteServerSettings.bindHostTlsHint"

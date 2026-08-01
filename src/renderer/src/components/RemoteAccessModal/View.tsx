@@ -1,5 +1,6 @@
 import { useRef, useCallback } from 'react'
 import type { RemoteStatus, NetworkInterfaceInfo } from '../../../../shared/types'
+import { SelectMenu } from '../shared/SelectMenu'
 
 export interface RemoteAccessModalViewProps {
   status: RemoteStatus | null
@@ -186,24 +187,21 @@ export function RemoteAccessModalView({
                   <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">
                     Network Interface
                   </label>
-                  <select
+                  <SelectMenu
+                    testid="RemoteAccessModal.interface"
                     value={selectedHost}
-                    onChange={(e) => onSelectHost(e.target.value)}
-                    className="w-full bg-bg-primary border border-border rounded-lg px-3 py-2 text-[12px] text-text-primary outline-none focus:border-accent transition-colors appearance-none cursor-pointer"
-                    style={{
-                      backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
-                      backgroundRepeat: 'no-repeat',
-                      backgroundPosition: 'right 10px center'
-                    }}
-                  >
-                    <option value="">All interfaces (auto-detect)</option>
-                    {interfaces.map((iface) => (
-                      <option key={`${iface.name}-${iface.address}`} value={iface.address}>
-                        {iface.name} — {iface.address}
-                        {iface.priority >= 9 ? ' (VPN)' : iface.priority <= 1 ? ' ★' : ''}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={onSelectHost}
+                    options={[
+                      { value: '', label: 'All interfaces (auto-detect)' },
+                      ...interfaces.map((iface) => ({
+                        value: iface.address,
+                        label: `${iface.name} — ${iface.address}${
+                          iface.priority >= 9 ? ' (VPN)' : iface.priority <= 1 ? ' ★' : ''
+                        }`
+                      }))
+                    ]}
+                    triggerClassName="w-full bg-bg-primary border border-border rounded-lg px-3 py-2 text-[12px] text-text-primary outline-none focus:border-accent transition-colors"
+                  />
                 </div>
               )}
 

@@ -187,3 +187,53 @@ describe('EnginePicker', () => {
     expect(onSelectEngine).not.toHaveBeenCalled()
   })
 })
+
+describe('ModelPicker — pinned non-model rows', () => {
+  it('pins emptyOption FIRST and trailingOption LAST, outside the Free filter', () => {
+    const onSelectModel = vi.fn()
+    render(
+      <ModelPicker
+        models={[zenFreeModel, zenPaidModel]}
+        selectedModel={zenPaidModel}
+        onSelectModel={onSelectModel}
+        emptyOption={{ label: 'Default' }}
+        trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}
+      />
+    )
+    fireEvent.click(screen.getByTestId('ModelPicker.trigger'))
+    expect(screen.getAllByTestId('ModelPicker.option').map((o) => o.dataset.value)).toEqual([
+      '',
+      'opencode/free1',
+      'opencode/paid1',
+      '__custom__'
+    ])
+
+    // Neither pinned row is a model, so the Free filter must not hide them.
+    fireEvent.click(screen.getByTestId('ModelPicker.freeFilter'))
+    expect(screen.getAllByTestId('ModelPicker.option').map((o) => o.dataset.value)).toEqual([
+      '',
+      'opencode/free1',
+      '__custom__'
+    ])
+  })
+
+  it('passes the trailingOption value straight through to onSelectModel', () => {
+    const onSelectModel = vi.fn()
+    render(
+      <ModelPicker
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={onSelectModel}
+        trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}
+      />
+    )
+    fireEvent.click(screen.getByTestId('ModelPicker.trigger'))
+    const custom = screen
+      .getAllByTestId('ModelPicker.option')
+      .find((o) => o.dataset.value === '__custom__')!
+    fireEvent.click(custom)
+    expect(onSelectModel).toHaveBeenCalledWith('__custom__')
+    // …and the menu closes, like any other row.
+    expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+})

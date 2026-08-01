@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SharedProviders } from '../SharedProviders'
+import {
+  chooseSelectMenuOption,
+  selectMenuOptionLabels,
+  selectMenuValue
+} from '../../../../../test/helpers/select-menu'
 import { useSessionStore } from '../../../stores/session-store'
 import type {
   SharedProviderDefinition,
@@ -89,14 +94,38 @@ describe('SharedProviders', () => {
     expect(card).toHaveTextContent(
       'All delivered models remain available unless restricted in pi model settings.'
     )
-    const selects = screen.getAllByTestId('SharedProviderCard.defaultModel')
-    expect(selects[0]).toHaveTextContent('No default from this provider')
-    fireEvent.change(selects[0], { target: { value: 'gpt-5' } })
-    fireEvent.change(selects[1], { target: { value: 'gpt-5' } })
+    // One themed SelectMenu per harness route, discriminated by `data-harness`.
+    const pickers = screen.getAllByTestId('SharedProviderCard.defaultModel')
+    expect(pickers.map((p) => p.getAttribute('data-harness'))).toEqual(['pi', 'opencode'])
+    expect(pickers[0].querySelector('select')).toBeNull()
+    // The trigger reports the SAVED value; the "no default" clear option is
+    // offered inside the menu (a native select leaked every option into the
+    // card's text content, which is what this used to assert).
+    expect(selectMenuValue(pickers[0])).toBe('gpt-5')
+    expect(pickers[0]).toHaveTextContent('GPT-5')
+    expect(selectMenuOptionLabels(pickers[0])).toEqual([
+      'No default from this provider',
+      'GPT-5'
+    ])
+    chooseSelectMenuOption(pickers[0], 'gpt-5')
     await waitFor(() =>
       expect(api.setSharedProviderDefaultModel).toHaveBeenCalledWith('chatgpt', 'pi', 'gpt-5')
     )
-    expect(api.setSharedProviderDefaultModel).toHaveBeenCalledWith('chatgpt', 'opencode', 'gpt-5')
+    // Both pickers are disabled while a save is in flight (`busy`), so the
+    // opencode route is only reachable once the pi save settles — a real
+    // constraint the old native <select> hid, because jsdom's fireEvent.change
+    // fires through a disabled element.
+    await waitFor(() =>
+      expect(screen.getAllByTestId('SharedProviderCard.defaultModel.trigger')[1]).not.toBeDisabled()
+    )
+    chooseSelectMenuOption(screen.getAllByTestId('SharedProviderCard.defaultModel')[1], 'gpt-5')
+    await waitFor(() =>
+      expect(api.setSharedProviderDefaultModel).toHaveBeenCalledWith(
+        'chatgpt',
+        'opencode',
+        'gpt-5'
+      )
+    )
   })
   it('toggles a route and reports sync failure inline', async () => {
     api.syncSharedProvider.mockRejectedValueOnce(new Error('sync failed'))

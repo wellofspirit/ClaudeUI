@@ -18,7 +18,7 @@
  *   6. maxCost input round-trips through the merged save (ADR-033 M4-C)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
 
 import { ClaudeDispatchSection } from '../settings-sections'
@@ -77,6 +77,32 @@ async function renderLoaded(): Promise<void> {
   )
 }
 
+/**
+ * Drive the themed default-model picker (a `ModelPicker`, not a native
+ * `<select>` — 8bc26d7's Monokai fix, extended to this section): open the
+ * trigger, then click the option carrying `data-value`.
+ */
+function pickDefaultModel(value: string): void {
+  const field = screen.getByTestId('ClaudeDispatchSection.defaultModel')
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  const option = within(field)
+    .getAllByTestId('ModelPicker.option')
+    .find((o) => o.getAttribute('data-value') === value)
+  expect(option, `ModelPicker option for "${value}"`).toBeTruthy()
+  fireEvent.click(option!)
+}
+
+/** The option values the default-model picker currently offers, in order. */
+function defaultModelOptionValues(): (string | null)[] {
+  const field = screen.getByTestId('ClaudeDispatchSection.defaultModel')
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  const values = within(field)
+    .getAllByTestId('ModelPicker.option')
+    .map((o) => o.getAttribute('data-value'))
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  return values
+}
+
 function allowedRow(modelValue: string): HTMLElement {
   const row = screen
     .getAllByTestId('ClaudeDispatchSection.allowedModel')
@@ -123,13 +149,17 @@ describe('ClaudeDispatchSection — load', () => {
   it('renders the saved dispatch config: default model selected, Claude models only', async () => {
     await renderLoaded()
 
-    const select = screen.getByTestId('ClaudeDispatchSection.defaultModel') as HTMLSelectElement
-    expect(select.value).toBe('sonnet')
+    const field = screen.getByTestId('ClaudeDispatchSection.defaultModel')
+    expect(field.getAttribute('data-value')).toBe('sonnet')
+    // The trigger reads the display name, not the raw value.
+    expect(field.textContent).toContain('Sonnet')
+    // Themed picker, never a native select (the Monokai fix from 8bc26d7).
+    expect(field.querySelector('select')).toBeNull()
+    expect(within(field).getByTestId('ModelPicker')).toBeTruthy()
 
     // Only Claude-engine models appear (the opencode group is filtered out),
-    // plus the "(not set)" empty option.
-    const optionValues = [...select.options].map((o) => o.value)
-    expect(optionValues).toEqual(['', 'sonnet', 'haiku'])
+    // plus the pinned "(not set)" empty option.
+    expect(defaultModelOptionValues()).toEqual(['', 'sonnet', 'haiku'])
 
     // One allowed-model row per Claude model, discriminated by data-id.
     const rows = screen.getAllByTestId('ClaudeDispatchSection.allowedModel')
@@ -141,9 +171,7 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
   it('changing the default model saves the FULL config with sandbox/proxy and allowedModels intact', async () => {
     await renderLoaded()
 
-    fireEvent.change(screen.getByTestId('ClaudeDispatchSection.defaultModel'), {
-      target: { value: 'haiku' }
-    })
+    pickDefaultModel('haiku')
 
     expect(saveEngineConfig).toHaveBeenCalledTimes(1)
     expect(saveEngineConfig.mock.calls[0][0]).toBe('claude')
@@ -157,9 +185,7 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
   it('"(not set)" clears defaultModel without touching the rest', async () => {
     await renderLoaded()
 
-    fireEvent.change(screen.getByTestId('ClaudeDispatchSection.defaultModel'), {
-      target: { value: '' }
-    })
+    pickDefaultModel('')
 
     expect(savedConfigs[0].dispatch?.defaultModel).toBeUndefined()
     expect(savedConfigs[0].dispatch?.allowedModels).toEqual(['sonnet'])
@@ -194,9 +220,7 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
     await renderLoaded()
 
     fireEvent.click(allowedRow('haiku'))
-    fireEvent.change(screen.getByTestId('ClaudeDispatchSection.defaultModel'), {
-      target: { value: 'haiku' }
-    })
+    pickDefaultModel('haiku')
 
     expect(savedConfigs).toHaveLength(2)
     expect(savedConfigs[1].dispatch).toEqual({
