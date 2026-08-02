@@ -19,9 +19,16 @@ const PROJECT_CWD = '/projects/my-app'
 const PROJECT_CMD_DIR = path.join(PROJECT_CWD, '.claude', 'commands')
 const USER_CMD_DIR = path.join(HOME, '.claude', 'commands')
 
-// Helper: build a mock Dirent
+// Helper: build a mock Dirent. `isSymbolicLink` is part of the contract the
+// scanner reads (symlinked command files / skill dirs are accepted) — a Dirent
+// without it makes the scanner throw, not fall through.
 function dirent(name: string, isFile = true): fs.Dirent {
-  return { name, isFile: () => isFile, isDirectory: () => !isFile } as fs.Dirent
+  return {
+    name,
+    isFile: () => isFile,
+    isDirectory: () => !isFile,
+    isSymbolicLink: () => false
+  } as fs.Dirent
 }
 
 function setupDirs(dirs: Record<string, fs.Dirent[]>) {

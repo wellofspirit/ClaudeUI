@@ -844,7 +844,7 @@ export function InputBox(): React.JSX.Element {
       canPlan={canPlan}
       autoAvailable={autoAvailable}
       slashMenuOpen={slashMenuOpen}
-      slashCommands={slashCommands}
+      slashCommands={mergedSlashCommands}
       slashFilter={slashFilter}
       slashMenuIndex={slashMenuIndex}
       filteredSlashCommands={filteredSlashCommands}

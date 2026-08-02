@@ -110,37 +110,62 @@ export function parseFrontmatter(raw: string): { frontmatter: Frontmatter; body:
 // Skill directory scanner
 // ---------------------------------------------------------------------------
 
-function scanSkillDir(dir: string, source: SkillSource, pluginName?: string): SkillInfo[] {
-  const results: SkillInfo[] = []
-  try {
-    if (!fs.existsSync(dir)) return results
-    const entries = fs.readdirSync(dir, { withFileTypes: true })
+export interface SkillDirEntry {
+  /** Directory name — the skill's id (`/<name>` as a slash command). */
+  name: string
+  /** Absolute path of the entry's SKILL.md. */
+  skillMd: string
+}
 
-    for (const entry of entries) {
+/**
+ * List the entries of a skills root that actually hold a `SKILL.md`.
+ *
+ * A skill is a DIRECTORY, and the entries under `~/.claude/skills/` are often
+ * symlinks/junctions (config repos sync them in) — readdir reports those as
+ * symbolic links, never directories, hence the two-way accept. `existsSync`
+ * follows the link, so a dangling one is skipped rather than throwing.
+ *
+ * Single source of truth for "what counts as a skill directory": the
+ * slash-command fallback scanner (custom-command-scanner) walks the same roots
+ * and must not invent a second convention.
+ */
+export function listSkillDirs(dir: string): SkillDirEntry[] {
+  const found: SkillDirEntry[] = []
+  try {
+    if (!fs.existsSync(dir)) return found
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
       const skillMd = path.join(dir, entry.name, 'SKILL.md')
-      try {
-        if (!fs.existsSync(skillMd)) continue
-        const raw = fs.readFileSync(skillMd, 'utf-8')
-        const { frontmatter, body } = parseFrontmatter(raw)
-
-        results.push({
-          name: entry.name,
-          displayName: frontmatter.name ? String(frontmatter.name) : undefined,
-          description: frontmatter.description
-            ? String(frontmatter.description)
-            : extractFirstLine(body),
-          source,
-          pluginName,
-          path: skillMd,
-          content: body
-        })
-      } catch (err) {
-        logger.warn('SkillScanner', `Failed to read ${skillMd}`, err)
-      }
+      if (fs.existsSync(skillMd)) found.push({ name: entry.name, skillMd })
     }
   } catch (err) {
     logger.warn('SkillScanner', `Failed to scan directory ${dir}`, err)
+  }
+  return found
+}
+
+function scanSkillDir(dir: string, source: SkillSource, pluginName?: string): SkillInfo[] {
+  const results: SkillInfo[] = []
+
+  for (const { name, skillMd } of listSkillDirs(dir)) {
+    try {
+      const raw = fs.readFileSync(skillMd, 'utf-8')
+      const { frontmatter, body } = parseFrontmatter(raw)
+
+      results.push({
+        name,
+        displayName: frontmatter.name ? String(frontmatter.name) : undefined,
+        description: frontmatter.description
+          ? String(frontmatter.description)
+          : extractFirstLine(body),
+        source,
+        pluginName,
+        path: skillMd,
+        content: body
+      })
+    } catch (err) {
+      logger.warn('SkillScanner', `Failed to read ${skillMd}`, err)
+    }
   }
   return results
 }

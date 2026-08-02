@@ -438,9 +438,23 @@ export function useClaudeEvents(): void {
       window.api.onPermissionMode((routingId, mode) => {
         setPermissionMode(mode, resolveRoutingId(routingId))
       }),
-      window.api.onSlashCommands((_routingId, commands) => {
+      window.api.onSlashCommands((routingId, commands) => {
         setSlashCommands(commands)
-        setCustomCommands([]) // SDK list is authoritative — clear filesystem-scanned commands
+        // The filesystem list is NOT cleared here: mergeSlashCommands already
+        // gives the engine list precedence by name, so the scan can only fill
+        // gaps (engines that under-report, skills added after spawn). Clearing
+        // it left the fallback empty for the rest of the app's lifetime, since
+        // the only other scan is keyed on cwd changes. Re-scan instead — the
+        // main-process scanner caches per cwd for 30s, so this is cheap.
+        const cwd = useSessionStore.getState().sessions[resolveRoutingId(routingId)]?.cwd
+        if (cwd) {
+          window.api
+            .scanCustomCommands(cwd)
+            .then((names) => setCustomCommands(names.map((name) => ({ name }))))
+            .catch(() => {
+              /* scanner failed — keep existing commands */
+            })
+        }
         window.api.saveSlashCommands(commands)
       }),
       window.api.onSkills((_routingId, names) => {

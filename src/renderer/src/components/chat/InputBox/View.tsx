@@ -70,6 +70,12 @@ export interface InputBoxViewProps {
 
   // Menus
   slashMenuOpen: boolean
+  /**
+   * The MERGED list (engine ∪ filesystem, capability-gated) — the same array
+   * `filteredSlashCommands` is derived from. Feeding the menu anything else
+   * (e.g. the raw engine list) desynchronises its rows from the keyboard
+   * selection index and hides filesystem-scanned commands entirely.
+   */
   slashCommands: SlashCommandInfo[]
   slashFilter: string
   slashMenuIndex: number
