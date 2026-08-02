@@ -38,12 +38,22 @@ import { deleteProjectFiles } from '../services/delete-session-files'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
-import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
+import {
+  loadClaudePermissions,
+  loadCleanupPeriodDays,
+  isWorkspaceTrusted
+} from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, PermissionSuggestion, EngineId } from '../../shared/types'
+import type {
+  ApprovalDecision,
+  PermissionSuggestion,
+  EngineId,
+  PermissionScope,
+  ClaudePermissions
+} from '../../shared/types'
 import type { BrowserWindow } from 'electron'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -70,6 +80,7 @@ import {
   getSessionLogPath,
   mcpStatus,
   setCleanupPeriod,
+  savePermissionsAndNotify,
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
@@ -552,10 +563,18 @@ export function registerRemoteHandlers(
     loadSkillDetails(manager, cwd)
   )
 
-  // Claude permissions (read-only)
+  // Claude permissions — full parity with the desktop handler (same
+  // save + hot-reload fan-out), consistent with the user decision that the
+  // remote token is the sole gate for mutations (see the git block below).
   dispatcher.register('claude:load-permissions', async (scope: string, cwd?: string) =>
     loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
   )
+  dispatcher.register(
+    'claude:save-permissions',
+    async (scope: string, permissions: ClaudePermissions, cwd?: string) =>
+      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, cwd)
+  )
+  dispatcher.register('claude:workspace-trust', async (cwd: string) => isWorkspaceTrusted(cwd))
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
   dispatcher.register('claude:get-cleanup-period', async () => loadCleanupPeriodDays())

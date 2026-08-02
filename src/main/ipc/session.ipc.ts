@@ -31,8 +31,8 @@ import {
 } from '../services/ui-config'
 import {
   loadClaudePermissions,
-  saveClaudePermissions,
-  loadCleanupPeriodDays
+  loadCleanupPeriodDays,
+  isWorkspaceTrusted
 } from '../services/claude-settings'
 import {
   loadMcpServers,
@@ -76,7 +76,9 @@ import type {
   VendorAuthMap,
   VendorAuthOption,
   OpencodeProviderCatalogEntry,
-  ProviderRemoveKind
+  ProviderRemoveKind,
+  PermissionScope,
+  ClaudePermissions
 } from '../../shared/types'
 import type {
   ConfigurableHarnessId,
@@ -145,6 +147,7 @@ import {
   getSessionLogPath,
   mcpStatus,
   setCleanupPeriod,
+  savePermissionsAndNotify,
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
@@ -1237,24 +1240,24 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>
     loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
   )
+  // Hot-reload is belt-and-braces, not the only propagation path: cli.js DOES
+  // run its chokidar settings watcher in ClaudeUI's child, so a disk write
+  // lands on its own within ~1-1.5s (awaitWriteFinish). notifySettingsChanged
+  // makes it immediate and deterministic, and covers a missed watcher event.
   ipcMain.handle(
     'claude:save-permissions',
-    async (_e, scope: string, permissions: unknown, cwd?: string) => {
-      saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd)
-
-      // Hot-reload: tell running CLI sessions to re-read settings from disk.
-      // The CLI's file watcher is disabled in SDK mode, so writing to disk
-      // alone doesn't propagate.  notifySettingsChanged() sends an empty
-      // apply_flag_settings({}) which triggers the CLI's settings-change
-      // subscriber to invalidate its cache and re-read all sources from disk,
-      // respecting managed policies and the normal priority hierarchy.
-      manager.forEach((session) => {
-        if (!cwd || session.cwd === cwd || scope === 'user') {
-          session.notifySettingsChanged?.().catch(() => {})
-        }
-      })
-    }
+    async (_e, scope: string, permissions: unknown, cwd?: string) =>
+      savePermissionsAndNotify(
+        manager,
+        scope as PermissionScope,
+        permissions as ClaudePermissions,
+        cwd
+      )
   )
+
+  // Whether cli.js will honor this workspace's project/local ALLOW rules —
+  // read-only surfacing of the trust gate (see isWorkspaceTrusted).
+  ipcMain.handle('claude:workspace-trust', (_e, cwd: string) => isWorkspaceTrusted(cwd))
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
   ipcMain.handle('claude:get-cleanup-period', () => loadCleanupPeriodDays())

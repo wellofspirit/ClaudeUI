@@ -306,6 +306,7 @@ const api: ClaudeAPI = {
   loadClaudePermissions: (scope, cwd?) => ipcRenderer.invoke('claude:load-permissions', scope, cwd),
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
+  isWorkspaceTrusted: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
 
   // Transcript retention window (cleanupPeriodDays in ~/.claude/settings.json)
   getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),

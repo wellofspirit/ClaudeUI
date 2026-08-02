@@ -36,6 +36,8 @@ export function PermissionsDialog({
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  /** null until probed / when there is no cwd to probe. */
+  const [workspaceTrusted, setWorkspaceTrusted] = useState<boolean | null>(null)
 
   const loaded = useRef(false)
 
@@ -78,6 +80,28 @@ export function PermissionsDialog({
       }
     }
     load()
+  }, [open, cwd])
+
+  // Workspace trust gates whether cli.js honors project/local ALLOW rules at
+  // all, so it's only meaningful once there's a cwd. A probe failure leaves it
+  // null → no banner, rather than crying wolf on an unknown state.
+  useEffect(() => {
+    if (!open || !cwd) {
+      setWorkspaceTrusted(null)
+      return
+    }
+    let cancelled = false
+    window.api
+      .isWorkspaceTrusted(cwd)
+      .then((trusted) => {
+        if (!cancelled) setWorkspaceTrusted(trusted)
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceTrusted(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [open, cwd])
 
   const saveScope = useCallback(
@@ -167,6 +191,7 @@ export function PermissionsDialog({
       perms={perms}
       dirty={dirty}
       hasDirty={hasDirty}
+      workspaceTrusted={workspaceTrusted}
       onListDir={window.api.listDir}
       onChangeTab={handleChangeTab}
       onUpdateRule={(category, i, v) =>

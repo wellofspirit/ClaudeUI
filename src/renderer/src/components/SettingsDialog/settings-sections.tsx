@@ -39,6 +39,11 @@ import {
 } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import {
+  AUTONOMY_TO_PERMISSION,
+  PERMISSION_TO_AUTONOMY,
+  AUTONOMY_LABELS
+} from '../../../../shared/permission-modes'
+import {
   SettingsToggle,
   SettingsSlider,
   SettingsSelect,
@@ -371,29 +376,9 @@ function AccountsSetting(): React.JSX.Element {
 
 // ── Autonomy mode picker ─────────────────────────────────────────────
 
-const AUTONOMY_TO_PERMISSION: Record<AutonomyMode, string> = {
-  plan: 'plan',
-  ask: 'default',
-  autoEdit: 'acceptEdits',
-  full: 'auto'
-}
-
-const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
-  plan: 'plan',
-  default: 'ask',
-  acceptEdits: 'autoEdit',
-  auto: 'full'
-}
-
-const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
-  plan: 'Read-only (Plan)',
-  ask: 'Ask (default)',
-  autoEdit: 'Auto-edit files',
-  full: 'Full auto'
-}
-
-function AutonomyModePicker(): React.JSX.Element {
+export function AutonomyModePicker(): React.JSX.Element {
   const [perms, setPerms] = useState<ClaudePermissions | null>(null)
+  const setDefaultPermissionMode = useSessionStore((s) => s.setDefaultPermissionMode)
   const availableModes = CLAUDE_ENGINE_CAPABILITIES.autonomyModes
 
   useEffect(() => {
@@ -409,14 +394,22 @@ function AutonomyModePicker(): React.JSX.Element {
 
   const handleChange = async (mode: AutonomyMode): Promise<void> => {
     if (!perms) return
-    const next: ClaudePermissions = { ...perms, defaultMode: AUTONOMY_TO_PERMISSION[mode] }
+    const permissionMode = AUTONOMY_TO_PERMISSION[mode]
+    const next: ClaudePermissions = { ...perms, defaultMode: permissionMode }
     setPerms(next)
+    // `defaultMode` is bootstrap-only for every engine: mirror it into the store
+    // so sessions created later in this run start in it without an app restart.
+    setDefaultPermissionMode(permissionMode)
     await window.api.saveClaudePermissions('user', next)
   }
 
   return (
     <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="mb-1.5">Autonomy mode</div>
+      <div className="mb-0.5">Autonomy mode</div>
+      <div className="mb-1.5 text-[11px] text-text-muted">
+        Applies to new sessions. Running sessions keep their own mode — change it from the mode
+        control next to the chat input.
+      </div>
       <div className="space-y-1">
         {availableModes.map((mode) => (
           <label

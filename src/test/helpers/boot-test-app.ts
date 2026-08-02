@@ -276,6 +276,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('claude:load-permissions', scope, cwd),
     saveClaudePermissions: (scope, permissions, cwd?) =>
       ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
+    isWorkspaceTrusted: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
 
     mcpServerStatus: (routingId) => ipcRenderer.invoke('mcp:status', routingId),
     mcpToggleServer: (routingId, serverName, enabled) =>

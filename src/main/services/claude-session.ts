@@ -1796,17 +1796,26 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * Notify the running CLI session that settings files changed on disk so it
    * re-reads them and rebuilds its internal `toolPermissionContext`.
    *
-   * The CLI's file watcher is disabled in SDK mode (`isRemoteMode`), so
-   * writing to settings.json alone doesn't propagate.  We work around this
-   * by sending an empty `apply_flag_settings({})` control message — the merge
-   * is a no-op (nothing injected into the flag layer) but the CLI still fires
-   * `notifyChange("flagSettings")`, which invalidates its settings cache and
-   * triggers the subscriber to re-read all sources from disk.
+   * cli.js DOES run its chokidar settings watcher in the headless bootstrap
+   * ClaudeUI spawns (only `CLAUDE_CODE_SIMPLE`/`--bare` skip it, and we set
+   * neither), so a disk write propagates on its own — but not for ~1-1.5s
+   * (awaitWriteFinish: stabilityThreshold 1000ms / pollInterval 500ms), and
+   * not at all if the watcher drops the event. This call is the immediate,
+   * deterministic trigger: an empty `apply_flag_settings({})` whose merge is a
+   * no-op (nothing injected into the flag layer) but which still fires
+   * `notifyChange("flagSettings")`, invalidating the settings cache and
+   * re-reading every source from disk. Both paths converge on the same state,
+   * so a duplicate refresh is harmless.
    *
-   * This approach is safe for managed/enterprise policies because we don't
-   * inject any rules into the flag layer — the CLI re-evaluates its own
-   * setting sources, respecting `allowManagedPermissionRulesOnly` and the
-   * normal priority hierarchy.
+   * Safe for managed/enterprise policies: we inject no rules into the flag
+   * layer, so the CLI re-evaluates its own setting sources, respecting
+   * `allowManagedPermissionRulesOnly` and the normal priority hierarchy.
+   *
+   * RULES ONLY. The settings-change subscriber rebuilds allow/deny/ask +
+   * additionalDirectories but never re-derives `toolPermissionContext.mode`:
+   * `permissions.defaultMode` is read once at session bootstrap. A live
+   * session's mode changes only via `setPermissionMode` (the
+   * `set_permission_mode` control request).
    */
   async notifySettingsChanged(): Promise<void> {
     if (!this.activeQuery) {

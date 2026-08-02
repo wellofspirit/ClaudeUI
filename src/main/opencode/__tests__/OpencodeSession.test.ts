@@ -2205,6 +2205,71 @@ describe('OpencodeSession — permission patch failure fails CLOSED', () => {
 })
 
 // ---------------------------------------------------------------------------
+// notifySettingsChanged — mid-session permission-rule hot reload
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — notifySettingsChanged', () => {
+  beforeEach(setupMocks)
+
+  function lastRuleset(): Rule[] {
+    return (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
+  }
+
+  it('recompiles the live ruleset from the CHANGED settings on disk', async () => {
+    const session = makeSession(undefined, 'default')
+    await session.run('hi')
+    expect(lastRuleset().some((r) => r.permission === 'bash' && r.action === 'deny')).toBe(false)
+
+    // The user adds a deny rule in the permissions dialog.
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: [],
+      deny: ['Bash(rm:*)'],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+    mockPatchSession.mockClear()
+    await session.notifySettingsChanged()
+
+    expect(mockPatchSession).toHaveBeenCalledTimes(1)
+    expect(lastRuleset().some((r) => r.permission === 'bash' && r.action === 'deny')).toBe(true)
+    session.dispose()
+  })
+
+  it('keeps the session mode — a rule refresh is not a mode change', async () => {
+    const session = makeSession(undefined, 'plan')
+    await session.run('hi')
+    const before = lastRuleset()
+    await session.notifySettingsChanged()
+    expect(lastRuleset()).toEqual(before)
+    session.dispose()
+  })
+
+  it('is a no-op with no live session (the next establishSession reads fresh)', async () => {
+    const session = makeSession(undefined, 'default')
+    await expect(session.notifySettingsChanged()).resolves.toBeUndefined()
+    expect(mockPatchSession).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('swallows a patch failure: no session:error, the active ruleset stays', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_notify_fail', win, '/tmp', { permissionMode: 'default' })
+    await session.run('hi')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    // applyPermissionMode is fail-closed for TURN gating; a background refresh
+    // must not surface as a session error.
+    mockPatchSession.mockRejectedValue(new Error('server said no'))
+    await expect(session.notifySettingsChanged()).resolves.toBeUndefined()
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(sent.some((c) => c[0] === 'session:error')).toBe(false)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // askSideQuestion (Phase 8b Part A)
 // ---------------------------------------------------------------------------
 

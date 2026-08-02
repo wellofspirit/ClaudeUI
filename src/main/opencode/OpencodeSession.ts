@@ -1417,6 +1417,33 @@ export class OpencodeSession extends BaseSession {
     this.send('session:permission-mode', mode)
   }
 
+  /**
+   * Settings files changed on disk — recompile the user's permission rules into
+   * the live session ruleset (parity with ClaudeSession/PiSession, which both
+   * hot-reload rules mid-session). `mergedUserPermissions` reads user/project/
+   * local fresh on every call, so re-applying the CURRENT mode is enough to
+   * pick up the edit; the mode itself is untouched.
+   */
+  async notifySettingsChanged(): Promise<void> {
+    // Nothing to patch yet — establishSession applies the mode (and reads the
+    // rules) once the session exists.
+    if (!this.client || !this.openSessionId) return
+    try {
+      await this.applyPermissionMode(this.permissionMode)
+    } catch (err) {
+      // applyPermissionMode fails CLOSED to gate a TURN. This is a background
+      // refresh with no turn behind it: the previously-applied ruleset stays in
+      // force and the next run() re-applies (and fails the turn if it still
+      // can't), so surfacing a session:error here would be noise.
+      logger.warn(
+        'OpencodeSession',
+        `notifySettingsChanged: rule refresh failed, keeping the active ruleset: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+    }
+  }
+
   private async applyPermissionMode(mode: string): Promise<void> {
     if (!this.client || !this.openSessionId) return
     // Plan mode additionally switches to opencode's read-only `plan` agent

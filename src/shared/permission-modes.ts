@@ -4,6 +4,7 @@
  * the renderer or a test runner.
  */
 
+import type { AutonomyMode } from './model-capabilities'
 import type { EngineId, ModelInfo, PermissionMode } from './types'
 
 export const PERMISSION_MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'auto'] as const
@@ -14,6 +15,48 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
   acceptEdits: 'Accept Edits',
   plan: 'Plan',
   auto: 'Auto'
+}
+
+// ---------------------------------------------------------------------------
+// AutonomyMode ↔ PermissionMode
+// ---------------------------------------------------------------------------
+//
+// The Settings dialog speaks AutonomyMode (an outcome-shaped vocabulary shared
+// across engines); sessions and `permissions.defaultMode` on disk speak
+// PermissionMode. Single source of truth for both directions — the picker, the
+// session store's defaultMode hydration, and the mapping test all import these.
+
+export const AUTONOMY_TO_PERMISSION: Record<AutonomyMode, PermissionMode> = {
+  plan: 'plan',
+  ask: 'default',
+  autoEdit: 'acceptEdits',
+  full: 'auto'
+}
+
+export const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
+  plan: 'plan',
+  default: 'ask',
+  acceptEdits: 'autoEdit',
+  auto: 'full'
+}
+
+export const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
+  plan: 'Read-only (Plan)',
+  ask: 'Ask (default)',
+  autoEdit: 'Auto-edit files',
+  full: 'Full auto'
+}
+
+/**
+ * Coerce a `permissions.defaultMode` string from settings.json into a renderer
+ * PermissionMode. Anything ClaudeUI has no session-level equivalent for —
+ * absent, `bypassPermissions`, a future upstream mode — reads as 'default',
+ * the only mode that is never gated.
+ */
+export function toPermissionMode(raw: string | undefined | null): PermissionMode {
+  return PERMISSION_MODE_CYCLE.includes(raw as (typeof PERMISSION_MODE_CYCLE)[number])
+    ? (raw as PermissionMode)
+    : 'default'
 }
 
 /**

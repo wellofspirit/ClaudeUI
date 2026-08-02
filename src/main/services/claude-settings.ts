@@ -81,6 +81,60 @@ export function loadClaudePermissions(scope: PermissionScope, cwd?: string): Cla
 }
 
 // ---------------------------------------------------------------------------
+// Workspace trust (~/.claude.json#projects[cwd].hasTrustDialogAccepted)
+// ---------------------------------------------------------------------------
+//
+// cli.js silently DROPS every `allow` rule sourced from projectSettings or
+// localSettings while the workspace is untrusted; deny/ask and user-scope
+// allows survive. The warning it would normally print is suppressed in
+// non-interactive mode, so under ClaudeUI the drop is invisible — hence this
+// read-only probe, used to surface it in the permissions UI. Trust itself is
+// granted by cli.js's own dialog; nothing here writes.
+
+/**
+ * cli.js keys `projects` by the cwd string as IT saw it, which on Windows is
+ * inconsistent: forward slashes from a POSIX-style shell, backslashes from
+ * cmd/PowerShell, and either drive-letter case. Probe the plausible spellings
+ * in a fixed order and take the first entry that exists — matching an entry
+ * with `hasTrustDialogAccepted: false` must NOT fall through to a different
+ * spelling that says true.
+ */
+function trustKeyCandidates(cwd: string): string[] {
+  const trimmed = cwd.replace(/[/\\]+$/, '')
+  if (!trimmed) return []
+  const drives = /^[a-zA-Z]:/.test(trimmed)
+    ? [
+        trimmed,
+        trimmed[0].toUpperCase() + trimmed.slice(1),
+        trimmed[0].toLowerCase() + trimmed.slice(1)
+      ]
+    : [trimmed]
+  const out: string[] = []
+  for (const base of drives) {
+    for (const variant of [base, base.replace(/\\/g, '/'), base.replace(/\//g, '\\')]) {
+      if (!out.includes(variant)) out.push(variant)
+    }
+  }
+  return out
+}
+
+/** Whether cli.js will honor this workspace's project/local allow rules. */
+export function isWorkspaceTrusted(cwd: string): boolean {
+  if (!cwd) return false
+  const data = readJsonSafe(path.join(os.homedir(), '.claude.json'))
+  const projects = data?.projects
+  if (!projects || typeof projects !== 'object') return false
+  const byKey = projects as Record<string, unknown>
+  for (const key of trustKeyCandidates(cwd)) {
+    const entry = byKey[key]
+    if (entry && typeof entry === 'object') {
+      return (entry as Record<string, unknown>).hasTrustDialogAccepted === true
+    }
+  }
+  return false
+}
+
+// ---------------------------------------------------------------------------
 // cleanupPeriodDays — transcript retention window
 // ---------------------------------------------------------------------------
 //

@@ -1145,6 +1145,10 @@ interface McpAPI {
     permissions: ClaudePermissions,
     cwd?: string
   ): Promise<void>
+  /** Whether Claude Code honors this workspace's project/local ALLOW rules
+   *  (~/.claude.json#projects[cwd].hasTrustDialogAccepted). Untrusted → cli.js
+   *  silently drops them; deny/ask and user-scope allows still apply. */
+  isWorkspaceTrusted(cwd: string): Promise<boolean>
   /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
   getCleanupPeriodDays(): Promise<number | undefined>
   setCleanupPeriodDays(days: number): Promise<void>

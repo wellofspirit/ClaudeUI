@@ -3,7 +3,8 @@ import * as path from 'path'
 import type { BrowserWindow } from 'electron'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
-import { saveCleanupPeriodDays } from '../services/claude-settings'
+import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
+import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import {
   saveSessionConfig,
   saveSettings,
@@ -238,6 +239,32 @@ export async function mcpStatus(manager: SessionManager, routingId: string): Pro
 // ---------------------------------------------------------------------------
 // Manager / cross-cutting
 // ---------------------------------------------------------------------------
+
+/**
+ * Persist permission rules to the scope's settings.json and hot-reload every
+ * session they can affect.
+ *
+ * Fan-out rule: a `user`-scope write reaches every session; a project/local
+ * write only reaches sessions on that cwd. A missing `cwd` means the caller
+ * could not scope it, so notify everyone rather than silently notifying no one.
+ *
+ * `notifySettingsChanged` is best-effort per session (a dead child, a session
+ * whose engine has no hot-reload seam): the write already landed on disk, so a
+ * failed refresh only costs immediacy — the next spawn reads the new rules.
+ */
+export function savePermissionsAndNotify(
+  manager: SessionManager,
+  scope: PermissionScope,
+  permissions: ClaudePermissions,
+  cwd?: string
+): void {
+  saveClaudePermissions(scope, permissions, cwd)
+  manager.forEach((session) => {
+    if (!cwd || session.cwd === cwd || scope === 'user') {
+      session.notifySettingsChanged?.().catch(() => {})
+    }
+  })
+}
 
 // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
 export function setCleanupPeriod(manager: SessionManager, days: number): void {

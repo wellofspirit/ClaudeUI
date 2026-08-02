@@ -1,34 +1,19 @@
 /**
  * Tests for AutonomyMode ↔ PermissionMode mapping.
- * The mapping is defined in settings-sections.tsx but we test the logic here
- * as pure functions to keep it environment-agnostic.
+ * The mapping lives in shared/permission-modes.ts — the SAME constants the
+ * Settings picker and the session store's defaultMode hydration import, so
+ * these assertions bind the real thing rather than a copy.
  */
 
 import { describe, it, expect } from 'vitest'
 import type { AutonomyMode } from '../model-capabilities'
 import { CLAUDE_ENGINE_CAPABILITIES } from '../model-capabilities'
-
-// Mirror the exact mapping constants from settings-sections.tsx
-const AUTONOMY_TO_PERMISSION: Record<AutonomyMode, string> = {
-  plan: 'plan',
-  ask: 'default',
-  autoEdit: 'acceptEdits',
-  full: 'auto'
-}
-
-const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
-  plan: 'plan',
-  default: 'ask',
-  acceptEdits: 'autoEdit',
-  auto: 'full'
-}
-
-const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
-  plan: 'Read-only (Plan)',
-  ask: 'Ask (default)',
-  autoEdit: 'Auto-edit files',
-  full: 'Full auto'
-}
+import {
+  AUTONOMY_TO_PERMISSION,
+  PERMISSION_TO_AUTONOMY,
+  AUTONOMY_LABELS,
+  toPermissionMode
+} from '../permission-modes'
 
 describe('AutonomyMode ↔ PermissionMode mapping', () => {
   it('maps plan → "plan" PermissionMode', () => {
@@ -84,6 +69,32 @@ describe('AutonomyMode ↔ PermissionMode mapping', () => {
     for (const mode of expected) {
       expect(CLAUDE_ENGINE_CAPABILITIES.autonomyModes).toContain(mode)
     }
+  })
+
+  // `permissions.defaultMode` is free-form on disk (hand-edited settings.json,
+  // upstream modes ClaudeUI has no session equivalent for). Everything that is
+  // not a renderer PermissionMode must land on 'default' — the never-gated mode.
+  describe('toPermissionMode (settings.json defaultMode → session mode)', () => {
+    it.each(['default', 'acceptEdits', 'plan', 'auto'])('passes through %s', (mode) => {
+      expect(toPermissionMode(mode)).toBe(mode)
+    })
+
+    it('maps bypassPermissions to default (no ClaudeUI session equivalent)', () => {
+      expect(toPermissionMode('bypassPermissions')).toBe('default')
+    })
+
+    it('maps absent/unknown values to default', () => {
+      expect(toPermissionMode(undefined)).toBe('default')
+      expect(toPermissionMode(null)).toBe('default')
+      expect(toPermissionMode('')).toBe('default')
+      expect(toPermissionMode('futureMode')).toBe('default')
+    })
+
+    it('accepts every AUTONOMY_TO_PERMISSION output unchanged', () => {
+      for (const mode of Object.values(AUTONOMY_TO_PERMISSION)) {
+        expect(toPermissionMode(mode)).toBe(mode)
+      }
+    })
   })
 
   describe('AUTONOMY_LABELS content', () => {

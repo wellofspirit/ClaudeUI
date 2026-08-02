@@ -524,12 +524,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       'account:respawn-sessions'
     ) as ClaudeAPI['onAccountRespawnSessions'],
 
-    // Claude permissions (read-only)
+    // Claude permissions — full parity: the remote handler runs the same
+    // save + hot-reload fan-out as the desktop IPC.
     loadClaudePermissions: (scope, cwd?) =>
       connection.invoke('claude:load-permissions', scope, cwd) as ReturnType<
         ClaudeAPI['loadClaudePermissions']
       >,
-    saveClaudePermissions: async () => {}, // Read-only
+    saveClaudePermissions: (scope, permissions, cwd?) =>
+      connection.invoke('claude:save-permissions', scope, permissions, cwd) as Promise<void>,
+    isWorkspaceTrusted: (cwd) =>
+      connection.invoke('claude:workspace-trust', cwd) as Promise<boolean>,
 
     // Transcript retention window (cleanupPeriodDays)
     getCleanupPeriodDays: () =>

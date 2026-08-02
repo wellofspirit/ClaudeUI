@@ -4,6 +4,7 @@ import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
+import { toPermissionMode } from '../../../shared/permission-modes'
 import {
   engineMeta,
   OPENCODE_DEFAULT_MODEL,
@@ -408,7 +409,8 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     slashCommands,
     loadedEngineConfig,
     opencodeSettings,
-    piEngineConfig
+    piEngineConfig,
+    userPermissions
   ] = await Promise.all([
     window.api.loadSettings(),
     window.api.loadSessionConfig(),
@@ -419,7 +421,13 @@ export async function hydrateConfigFromDisk(): Promise<void> {
       .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
     window.api
       .loadEngineConfig('pi')
-      .catch((): import('../../../shared/types').EngineConfig => ({}))
+      .catch((): import('../../../shared/types').EngineConfig => ({})),
+    // `permissions.defaultMode` (user scope) seeds the mode of sessions created
+    // in this app run. Remote-registered channel, so the web client hydrates
+    // identically.
+    window.api
+      .loadClaudePermissions('user')
+      .catch((): import('../../../shared/types').ClaudePermissions | null => null)
   ])
 
   // One-time migration from localStorage → disk
@@ -465,6 +473,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
+    defaultPermissionMode: toPermissionMode(userPermissions?.defaultMode),
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -696,11 +705,21 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   vendorAuthRequired: null
 }
 
-function createEmptySession(cwd: string): PerSessionState {
+/**
+ * `permissionMode` defaults to 'default' rather than reading the store, so the
+ * paths that only need a placeholder entry (event bootstrap, transcript
+ * re-hydration, clearConversation) are unaffected. Genuine session CREATION
+ * passes the store's `defaultPermissionMode` — see createNewSession.
+ */
+function createEmptySession(
+  cwd: string,
+  defaultPermissionMode: PermissionMode = 'default'
+): PerSessionState {
   const cached = cwd ? gitStatusCache.get(cwd) : undefined
   return {
     ...EMPTY_SESSION_STATE,
     cwd,
+    permissionMode: defaultPermissionMode,
     ...(cached ? { isGitRepo: true, gitStatus: cached } : {})
   }
 }
@@ -895,6 +914,12 @@ interface SessionState {
   /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
    *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
   piDefaultModel: string
+  /** `~/.claude/settings.json#permissions.defaultMode`, mapped to a renderer
+   *  PermissionMode. A SESSION-BOOTSTRAP concern only: it seeds the mode of
+   *  sessions created from here on. Running sessions keep the mode they were
+   *  spawned with (cli.js re-derives rules on a settings change but never the
+   *  mode) — changing a live session's mode is `setPermissionMode`'s job. */
+  defaultPermissionMode: PermissionMode
   /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
    *  an opencode provider/default-model change in Settings. */
   modelReloadNonce: number
@@ -949,6 +974,9 @@ interface SessionState {
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
   setPiDefaultModel: (model: string) => void
+  /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
+   *  later in THIS app run pick it up without a restart. */
+  setDefaultPermissionMode: (mode: PermissionMode) => void
   /** Force the model picker to re-fetch the engine model list. */
   reloadModels: () => void
   loadHistoricalSession: (
@@ -1230,6 +1258,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
   piDefaultModel: PI_DEFAULT_MODEL,
+  defaultPermissionMode: 'default' as PermissionMode,
   modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
@@ -1331,7 +1360,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(defaultModel) }
       }
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
-      const newSession = createEmptySession(cwd)
+      // Settings' autonomy-mode pick is a bootstrap default: it applies here,
+      // at creation, and nowhere else.
+      const newSession = createEmptySession(cwd, state.defaultPermissionMode)
       newSession.selectedEngineId = engineId
       newSession.selectedModel = defaultModel
       // Seed status.engineId/capabilities to match so they're correct before spawn
@@ -1402,6 +1433,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
 
   setPiDefaultModel: (model) => set({ piDefaultModel: model || PI_DEFAULT_MODEL }),
+
+  setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
   reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
 

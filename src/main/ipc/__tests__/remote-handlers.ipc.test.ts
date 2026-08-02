@@ -149,10 +149,17 @@ vi.mock('../../services/socks-bridge', () => ({
   })
 }))
 
+const claudeSettingsSpies = vi.hoisted(() => ({
+  saveClaudePermissions: vi.fn(),
+  isWorkspaceTrusted: vi.fn(() => true)
+}))
+
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
-  saveCleanupPeriodDays: vi.fn()
+  saveCleanupPeriodDays: vi.fn(),
+  saveClaudePermissions: claudeSettingsSpies.saveClaudePermissions,
+  isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
@@ -519,6 +526,69 @@ describe('registerRemoteHandlers', () => {
       const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'))
       expect(res).toEqual([])
     })
+  })
+
+  // Guard: `claude:save-permissions` was desktop-only — the channel was never
+  // registered on the dispatcher (the web api-adapter stubbed the call out to a
+  // silent no-op), so editing permissions from the remote client did nothing.
+  describe('claude:save-permissions (remote write parity)', () => {
+    const PERMS = {
+      allow: ['Bash(git:*)'],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }
+
+    it('is registered on the dispatcher', () => {
+      expect(dispatcher.channels()).toContain('claude:save-permissions')
+    })
+
+    it('persists the rules and hot-reloads sessions for a user-scope write', async () => {
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+      expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
+        'user',
+        PERMS,
+        undefined
+      )
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+
+    it('notifies user-scope writes even when a cwd is supplied (rules are global)', async () => {
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'))
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+
+    it('scopes a project-scope write to sessions on that cwd', async () => {
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
+        'project',
+        PERMS,
+        '/repo-a'
+      )
+      // sessionStub has no cwd → not this workspace → left alone.
+      expect(sessionStub.notifySettingsChanged).not.toHaveBeenCalled()
+
+      sessionManagerStub.forEach.mockImplementationOnce((cb: (s: any) => void) =>
+        cb({ ...sessionStub, cwd: '/repo-a' })
+      )
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
+    })
+
+    it('survives a session whose notifySettingsChanged rejects', async () => {
+      sessionStub.notifySettingsChanged.mockRejectedValueOnce(new Error('child is gone'))
+      await expect(
+        dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+      ).resolves.toBeUndefined()
+    })
+  })
+
+  it('claude:workspace-trust reports the trust flag for a cwd', async () => {
+    claudeSettingsSpies.isWorkspaceTrusted.mockReturnValueOnce(false)
+    const res = await dispatcher.handle(makeRequest('claude:workspace-trust', '/repo-a'))
+    expect(claudeSettingsSpies.isWorkspaceTrusted).toHaveBeenCalledWith('/repo-a')
+    expect(res).toBe(false)
   })
 
   it('file:list-dir returns structured result on error (no throw)', async () => {
