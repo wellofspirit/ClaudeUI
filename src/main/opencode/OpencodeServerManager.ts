@@ -27,6 +27,12 @@ export interface ServerHandle extends ServerConnection {
   refCount: number
   process: ChildProcess
   mcpHost: McpHttpHost
+  /**
+   * Callbacks fired when THIS spawn dies unexpectedly (see subscribeExit).
+   * Never fired on a deliberate kill — release()/dispose() drop the handle (and
+   * clear this set) before killing, and the exit handler is identity-gated.
+   */
+  exitListeners: Set<() => void>
 }
 
 /**
@@ -419,7 +425,8 @@ export class OpencodeServerManager {
         authHeader,
         refCount: 0,
         process: child,
-        mcpHost
+        mcpHost,
+        exitListeners: new Set()
       }
 
       // dispose() ran while this spawn was in flight: do NOT register the handle
@@ -440,6 +447,20 @@ export class OpencodeServerManager {
         if (this.handles.get(key) === handle) {
           this.handles.delete(key)
           mcpHost.close().catch(() => {})
+          // Reaching this identity gate means the death was UNEXPECTED: every
+          // deliberate kill path (release() at refCount 0, dispose()) removes
+          // the handle from the map first. Fan out so each attached session can
+          // drop its now-dangling connection instead of holding a green dot on
+          // a dead server. Drain first — a listener must not see itself again.
+          const listeners = [...handle.exitListeners]
+          handle.exitListeners.clear()
+          for (const cb of listeners) {
+            try {
+              cb()
+            } catch {
+              // One bad subscriber must never starve the others.
+            }
+          }
         }
       })
 
@@ -485,12 +506,54 @@ export class OpencodeServerManager {
     const key = resolvePath(cwd)
     const handle = this.handles.get(key)
     if (!handle) return
+    this.releaseHandle(key, handle)
+  }
 
+  /**
+   * Release a ref ONLY if the stored handle is still the very spawn `conn` came
+   * from. `password` is fresh random bytes per spawn, so baseUrl+password is a
+   * unique spawn identity.
+   *
+   * This is the safe release for a connection-loss path: a plain release(cwd)
+   * looks the cwd up by key alone, so if our server died and another session
+   * has since acquired a NEW one for the same cwd, it would decrement the new
+   * handle's refcount and can kill a server other sessions are still using.
+   * No-op when the handle is absent (already dropped on death) or mismatched.
+   */
+  releaseIfCurrent(cwd: string, conn: ServerConnection): void {
+    const key = resolvePath(cwd)
+    const handle = this.handles.get(key)
+    if (!handle) return
+    if (handle.baseUrl !== conn.baseUrl || handle.password !== conn.password) return
+    this.releaseHandle(key, handle)
+  }
+
+  private releaseHandle(key: string, handle: ServerHandle): void {
     handle.refCount--
     if (handle.refCount <= 0) {
+      // Drop the handle BEFORE killing: the child's 'exit' handler is gated on
+      // handle identity, so this is what marks the death as deliberate and
+      // suppresses the subscribeExit fan-out.
       this.handles.delete(key)
+      handle.exitListeners.clear()
       this.killProcess(handle.process)
       handle.mcpHost.close().catch(() => {})
+    }
+  }
+
+  /**
+   * Subscribe to the UNEXPECTED death of the server currently serving `cwd`.
+   * Returns an unsubscribe bound to that exact handle, so a stale unsubscribe
+   * held across a respawn can never remove a listener from the new handle.
+   * A no-op unsubscribe is returned when no server is live for `cwd` — callers
+   * subscribe right after acquire(), where one always is.
+   */
+  subscribeExit(cwd: string, cb: () => void): () => void {
+    const handle = this.handles.get(resolvePath(cwd))
+    if (!handle) return () => {}
+    handle.exitListeners.add(cb)
+    return () => {
+      handle.exitListeners.delete(cb)
     }
   }
 
@@ -500,6 +563,8 @@ export class OpencodeServerManager {
     // pre-insert check instead of registering an orphan (see `disposed`).
     this.disposed = true
     for (const handle of this.handles.values()) {
+      // App shutdown is deliberate — no session needs a disconnect fan-out.
+      handle.exitListeners.clear()
       this.killProcess(handle.process)
       handle.mcpHost.close().catch(() => {})
     }

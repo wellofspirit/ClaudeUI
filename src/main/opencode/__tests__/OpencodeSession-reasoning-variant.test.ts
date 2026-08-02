@@ -74,7 +74,12 @@ const {
 })
 
 vi.mock('../OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
+  opencodeServerManager: {
+    acquire: mockAcquire,
+    release: mockRelease,
+    releaseIfCurrent: vi.fn(),
+    subscribeExit: () => () => {}
+  }
 }))
 
 vi.mock('../OpencodeClient', () => ({
@@ -157,8 +162,16 @@ function setupMocks(): void {
   mockAbortSession.mockResolvedValue(undefined)
   mockPatchSession.mockResolvedValue(undefined)
   mockReplyPermission.mockResolvedValue(undefined)
-  mockSubscribeEvents.mockImplementation(async function* () {
-    // empty SSE stream
+  // Real opencode holds the subscription open for the whole session. Park until
+  // aborted rather than returning immediately — a spontaneous stream end is a
+  // DISCONNECT (client dropped, status 'disconnected'), which would make every
+  // run() below bail before promptAsync.
+  // eslint-disable-next-line require-yield
+  mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) return resolve()
+      signal?.addEventListener('abort', () => resolve())
+    })
   })
 
   MockOpencodeClient.mockReset()

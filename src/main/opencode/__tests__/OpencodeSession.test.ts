@@ -35,6 +35,8 @@ class MockWindow extends EventEmitter {
 const {
   mockAcquire,
   mockRelease,
+  mockReleaseIfCurrent,
+  mockSubscribeExit,
   mockCreateSession,
   mockPromptAsync,
   mockAbortSession,
@@ -55,6 +57,10 @@ const {
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
   const mockRelease = vi.fn()
+  const mockReleaseIfCurrent = vi.fn()
+  // Records every exit subscription so tests can fire a server death, and hands
+  // back a real unsubscribe so the session's bookkeeping is exercised too.
+  const mockSubscribeExit = vi.fn()
   const mockCreateSession = vi.fn()
   const mockPromptAsync = vi.fn()
   const mockAbortSession = vi.fn()
@@ -79,6 +85,8 @@ const {
   return {
     mockAcquire,
     mockRelease,
+    mockReleaseIfCurrent,
+    mockSubscribeExit,
     mockCreateSession,
     mockPromptAsync,
     mockAbortSession,
@@ -102,7 +110,9 @@ const {
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease
+    release: mockRelease,
+    releaseIfCurrent: mockReleaseIfCurrent,
+    subscribeExit: mockSubscribeExit
   }
 }))
 
@@ -181,10 +191,30 @@ import type { BrowserWindow } from 'electron'
 // Setup helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Live unexpected-exit subscribers registered via the mocked
+ * opencodeServerManager.subscribeExit. `killServer()` fires them, standing in
+ * for the manager's fan-out when an `opencode serve` child dies.
+ */
+const serverExitListeners: Array<() => void> = []
+function killServer(): void {
+  for (const cb of [...serverExitListeners]) cb()
+}
+
 function setupMocks(): void {
   // Reset all call histories
   mockAcquire.mockReset()
   mockRelease.mockReset()
+  mockReleaseIfCurrent.mockReset()
+  mockSubscribeExit.mockReset()
+  serverExitListeners.length = 0
+  mockSubscribeExit.mockImplementation((_cwd: string, cb: () => void) => {
+    serverExitListeners.push(cb)
+    return () => {
+      const i = serverExitListeners.indexOf(cb)
+      if (i >= 0) serverExitListeners.splice(i, 1)
+    }
+  })
   mockCreateSession.mockReset()
   mockPromptAsync.mockReset()
   mockAbortSession.mockReset()
@@ -692,7 +722,7 @@ describe('OpencodeSession — cancel()', () => {
     expect(mockAbortSession).toHaveBeenCalledWith('ses_opencode_1')
   })
 
-  it('emits status with state=idle after cancel', async () => {
+  it('emits status with state=disconnected after cancel', async () => {
     const win = new MockWindow() as unknown as BrowserWindow
     mockCreateSession.mockResolvedValue({ id: 'ses_c' })
     const session = new OpencodeSession('rc', win, '/tmp')
@@ -703,7 +733,10 @@ describe('OpencodeSession — cancel()', () => {
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     const statusCall = calls.find((c) => c[0] === 'session:status')
     expect(statusCall).toBeDefined()
-    expect(statusCall![2].state).toBe('idle')
+    // cancel() is deliberate teardown; 'disconnected' is the only status the
+    // renderer acts on to clear sdkActive (the sidebar's green dot). It stores
+    // the session as idle on receipt — see useClaudeEvents' session:status.
+    expect(statusCall![2].state).toBe('disconnected')
   })
 })
 
@@ -4500,8 +4533,10 @@ describe('OpencodeSession — dead SSE recovery (H20)', () => {
       expect(sent).toBe(true)
     })
 
-    // isProcessing unwedged (would be stuck true pre-fix → interrupt() hangs).
-    expect(session.status.state).toBe('idle')
+    // isProcessing unwedged (would be stuck true pre-fix → interrupt() hangs);
+    // the reported state is 'disconnected', not 'idle' — see the disconnect
+    // describe block below.
+    expect(session.status.state).toBe('disconnected')
     // Guard cleared so a later run() can re-establish the consumer.
     expect((session as unknown as { sseAbort: AbortController | null }).sseAbort).toBeNull()
 
@@ -4562,6 +4597,159 @@ describe('OpencodeSession — steer delivery (M-OC9)', () => {
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(true)
 
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Disconnect state — the ONLY status the renderer acts on to clear `sdkActive`
+// (useClaudeEvents' session:status handler), i.e. to turn the sidebar's green
+// activity dot off. Pre-fix OpencodeSession never emitted it on ANY path, so
+// the dot stayed green forever for every opencode session.
+// ---------------------------------------------------------------------------
+
+/** A stream that yields `events`, then ends when `gate` resolves — a NON-aborted
+ *  end, i.e. the server dying / transport breaking (parseSSEStream swallows the
+ *  transport error and just ends the generator). Parks on abort like the real one. */
+function streamUntilGated(
+  events: OpencodeEvent[],
+  gate: Promise<void>
+): (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent> {
+  return async function* (signal?: AbortSignal) {
+    for (const ev of events) yield ev
+    await Promise.race([gate, parkUntilAborted(signal)])
+  }
+}
+
+function statusStates(win: BrowserWindow): string[] {
+  return (win as unknown as MockWindow).webContents.send.mock.calls
+    .filter((c) => c[0] === 'session:status')
+    .map((c) => c[2].state)
+}
+
+describe('OpencodeSession — disconnect status', () => {
+  beforeEach(setupMocks)
+
+  it('an unexpected stream end while IDLE emits status disconnected (guard)', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    let endStream!: () => void
+    const gate = new Promise<void>((r) => {
+      endStream = r
+    })
+    // The turn completes normally (session.idle → isProcessing false), and only
+    // THEN does the stream die. Pre-fix the `!deliberate && this.isProcessing`
+    // guard skipped everything here, so the renderer got no event at all.
+    mockSubscribeEvents.mockImplementation(
+      streamUntilGated(
+        [{ id: 'e1', type: 'session.idle', properties: { sessionID: 'ses_opencode_1' } } as OpencodeEvent],
+        gate
+      )
+    )
+    const session = new OpencodeSession('r_disc_idle', win, '/tmp')
+    await session.run('go')
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    endStream()
+    await vi.waitFor(() => expect(statusStates(win)).toContain('disconnected'))
+
+    expect(session.status.state).toBe('disconnected')
+    // An idle drop is not a turn failure — no error banner.
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(false)
+    // Released by spawn identity, never by cwd key — another same-cwd session
+    // may already hold a replacement server (see releaseIfCurrent).
+    expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp', expect.objectContaining({ baseUrl: 'http://127.0.0.1:9999' }))
+    // Scoped to THIS session's cwd: the unmocked auth provider's warmCache also
+    // acquires/releases the manager, for its own PERSISTED_SESSIONS_DIR.
+    expect(mockRelease).not.toHaveBeenCalledWith('/tmp')
+  })
+
+  it('an unexpected stream end MID-TURN emits session:error and status disconnected (not idle)', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    let endStream!: () => void
+    const gate = new Promise<void>((r) => {
+      endStream = r
+    })
+    mockSubscribeEvents.mockImplementation(streamUntilGated([], gate))
+    const session = new OpencodeSession('r_disc_turn', win, '/tmp')
+    await session.run('go')
+    expect(session.status.state).toBe('running')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    endStream()
+    await vi.waitFor(() => expect(statusStates(win)).toContain('disconnected'))
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    expect(statusStates(win)).not.toContain('idle')
+    expect(session.status.state).toBe('disconnected')
+  })
+
+  it('cancel() leaves disconnected as the LAST emitted status', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_disc_cancel', win, '/tmp')
+    await session.run('go')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    session.cancel()
+    await new Promise<void>((r) => setTimeout(r, 0))
+
+    const states = statusStates(win)
+    expect(states.at(-1)).toBe('disconnected')
+  })
+
+  it('a run() after a disconnect re-acquires the server and returns to running', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    let endStream!: () => void
+    const gate = new Promise<void>((r) => {
+      endStream = r
+    })
+    mockSubscribeEvents.mockImplementation(streamUntilGated([], gate))
+    const session = new OpencodeSession('r_disc_retry', win, '/tmp')
+    await session.run('go')
+    endStream()
+    await vi.waitFor(() => expect(session.status.state).toBe('disconnected'))
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+
+    // The manager already dropped the dead handle, so the reacquire respawns.
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    await session.run('again')
+
+    expect(mockAcquire).toHaveBeenCalledTimes(2)
+    expect(session.status.state).toBe('running')
+    session.dispose()
+  })
+
+  it('a never-prompted (eager-connect only) session reports disconnected when the server dies', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_disc_eager', win, '/tmp')
+    // run(null) warms the connection but starts NO SSE consumer — without the
+    // manager's exit fan-out this session is completely blind to server death.
+    await session.run(null)
+    await vi.waitFor(() => expect(mockSubscribeExit).toHaveBeenCalled())
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    killServer()
+
+    expect(statusStates(win)).toContain('disconnected')
+    expect(session.status.state).toBe('disconnected')
+    session.dispose()
+  })
+
+  it('a run() whose server acquire REJECTS ends disconnected, not idle', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    // No connection is ever established, so there is nothing to fan out an exit
+    // and no SSE consumer to lose — the failing turn itself is the only signal.
+    mockAcquire.mockRejectedValue(new Error('opencode serve did not print port within 15s'))
+    const session = new OpencodeSession('r_disc_acquire_fail', win, '/tmp')
+    await session.run('go')
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    expect(statusStates(win).at(-1)).toBe('disconnected')
+    expect(session.status.state).toBe('disconnected')
     session.dispose()
   })
 })

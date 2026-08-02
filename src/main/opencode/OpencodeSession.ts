@@ -164,6 +164,16 @@ export class OpencodeSession extends BaseSession {
   private sseAbort: AbortController | null = null
   private isProcessing = false
   /**
+   * Set on server death, SSE stream loss, and deliberate teardown (cancel()).
+   * Drives the `'disconnected'` status state, which is the renderer's ONLY
+   * signal to clear `sdkActive` (useClaudeEvents' session:status handler) —
+   * i.e. the only way the sidebar's green activity dot ever turns off. Cleared
+   * on every fresh connect. Mirrors PiSession's `disconnected`.
+   */
+  private disconnected = false
+  /** Unsubscribe from the CURRENT server handle's unexpected-exit fan-out. */
+  private unsubscribeServerExit: (() => void) | null = null
+  /**
    * Cost tracking — base + live overlay (Slice B, durable across reloads,
    * mirrors ClaudeSession's costBaseUsd/liveTotalCostUsd split).
    *
@@ -361,7 +371,7 @@ export class OpencodeSession extends BaseSession {
     const parsed = parseModelString(this._model)
     const account: AccountRef | null = opencodeAuthProvider.buildAccountRef(parsed.providerID)
     return {
-      state: this.isProcessing ? 'running' : 'idle',
+      state: this.disconnected ? 'disconnected' : this.isProcessing ? 'running' : 'idle',
       sessionId: this.openSessionId,
       model: opencodeModel(parsed.providerID, parsed.modelID),
       cwd: this.cwd,
@@ -439,6 +449,9 @@ export class OpencodeSession extends BaseSession {
     // is also fired by the idle timeout; without this reset a session that
     // idle-timed-out would refuse to reconnect on a subsequent prompt.
     this._cancelled = false
+    // Same for the disconnect flag: this run reconnects, so the status it is
+    // about to emit ('running') must not be overridden by a prior loss.
+    this.disconnected = false
 
     // ── Eager connect (parity with Claude's spawn-only path) ─────────────────
     // run(null) is called at session creation to warm the connection + discover
@@ -519,6 +532,10 @@ export class OpencodeSession extends BaseSession {
       // client/session below.
       if (!this.client || this._cancelled || !this.openSessionId) {
         this.isProcessing = false
+        // No connection ever landed → this is a disconnect as far as the
+        // renderer's sdkActive/green-dot contract goes (on the _cancelled path
+        // cancel() already set the flag, so this stays consistent).
+        if (!this.conn) this.disconnected = true
         this.sendStatus()
         this.resetInactivityTimer()
         return
@@ -542,6 +559,10 @@ export class OpencodeSession extends BaseSession {
     } catch (err) {
       logger.error('OpencodeSession', `run() error: ${err instanceof Error ? err.message : String(err)}`)
       this.isProcessing = false
+      // A turn that failed before a connection exists (acquire rejected) is a
+      // disconnect for the renderer's sdkActive/green-dot contract — 'idle'
+      // here would leave the sidebar dot green forever.
+      if (!this.conn) this.disconnected = true
       this.send('session:error', err instanceof Error ? err.message : String(err))
       this.sendStatus()
       this.resetInactivityTimer()
@@ -738,11 +759,51 @@ export class OpencodeSession extends BaseSession {
         }
         this.conn = c
         this.client = new OpencodeClient(c.baseUrl, c.authHeader)
+        this.disconnected = false
+        // Server death is otherwise INVISIBLE to a session with no SSE
+        // consumer: ensureSSEConsumer() only starts at the first prompt, so an
+        // eagerly-connected, never-prompted session would sit on a dead server
+        // showing a green dot forever. The manager fans this out only for
+        // unexpected deaths. Drop any prior subscription first — a leftover
+        // would keep a listener alive on a handle we no longer hold.
+        this.unsubscribeServerExit?.()
+        this.unsubscribeServerExit = opencodeServerManager.subscribeExit(this.cwd, () =>
+          this.markDisconnected('opencode server exited')
+        )
       })().finally(() => {
         this.connectingPromise = null
       })
     }
     await this.connectingPromise
+  }
+
+  /**
+   * Idempotent teardown for every connection-LOSS path (unexpected server
+   * death, SSE stream end). Surfaces `'disconnected'` so the renderer clears
+   * `sdkActive`, and drops our connection so the next run() reacquires — which
+   * respawns the server, since the manager already dropped the dead handle.
+   *
+   * Releases via releaseIfCurrent, never release(): by the time we get here
+   * another same-cwd session may already have spawned a REPLACEMENT server, and
+   * a key-only release would decrement that live handle's refcount (see
+   * OpencodeServerManager.releaseIfCurrent).
+   */
+  private markDisconnected(reason: string): void {
+    if (this.disconnected && !this.conn) return
+    this.disconnected = true
+    if (this.isProcessing) {
+      // A turn was in flight — unwedge it and tell the user why it stopped.
+      this.isProcessing = false
+      this.send('session:error', reason)
+    }
+    this.unsubscribeServerExit?.()
+    this.unsubscribeServerExit = null
+    if (this.conn) {
+      opencodeServerManager.releaseIfCurrent(this.cwd, this.conn)
+      this.conn = null
+      this.client = null
+    }
+    this.sendStatus()
   }
 
   /**
@@ -936,14 +997,18 @@ export class OpencodeSession extends BaseSession {
       // isProcessing stayed stuck true, interrupt() waited on a session.idle that
       // never comes, and every later run() steered into a dead session (H20).
       // Clear the guard so the next run() re-establishes the consumer; on an
-      // unexpected mid-turn end, unwedge isProcessing and surface the drop.
+      // unexpected end, go through the shared disconnect teardown — which
+      // unwedges isProcessing and surfaces the drop when a turn was in flight,
+      // and (crucially) reports 'disconnected' even when the stream dies while
+      // IDLE, the only status the renderer acts on to clear the green dot.
+      // No resetInactivityTimer(): that timer exists solely to release the
+      // server ref on an idle session, and markDisconnected already released
+      // it — arming it would only queue a redundant cancel() against a session
+      // the user may be about to resend on. The next run() re-arms it anyway.
       const deliberate = signal.aborted
       if (this.sseAbort === abort) this.sseAbort = null
-      if (!deliberate && this.isProcessing) {
-        this.isProcessing = false
-        this.send('session:error', 'opencode connection lost — resend to reconnect')
-        this.sendStatus()
-        this.resetInactivityTimer()
+      if (!deliberate) {
+        this.markDisconnected('opencode connection lost — resend to reconnect')
       }
     }
   }
@@ -1174,6 +1239,11 @@ export class OpencodeSession extends BaseSession {
     this.clearInactivityTimer()
     this._cancelled = true
     this.isProcessing = false
+    // Deliberate teardown (window close, idle timeout) is still a disconnect as
+    // far as the renderer is concerned — Claude broadcasts 'disconnected' from
+    // its own cancel() (claude-session.ts). Without it an idle-timed-out
+    // opencode session keeps `sdkActive` set and the sidebar dot stays green.
+    this.disconnected = true
     this.lastContextLength = 0
     this.sseAbort?.abort()
     this.sseAbort = null
@@ -1199,6 +1269,8 @@ export class OpencodeSession extends BaseSession {
       // crash-proof either way.
       void this.client.abortSession(this.openSessionId)?.catch(() => {})
     }
+    this.unsubscribeServerExit?.()
+    this.unsubscribeServerExit = null
     if (this.conn) {
       opencodeServerManager.release(this.cwd)
       this.conn = null

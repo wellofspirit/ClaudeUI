@@ -52,7 +52,12 @@ const {
 }))
 
 vi.mock('../OpencodeServerManager', () => ({
-  opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
+  opencodeServerManager: {
+    acquire: mockAcquire,
+    release: mockRelease,
+    releaseIfCurrent: vi.fn(),
+    subscribeExit: () => () => {}
+  }
 }))
 vi.mock('../OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
 vi.mock('../../services/claude-settings', () => ({
