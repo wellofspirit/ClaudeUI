@@ -6,7 +6,7 @@
 //
 // Usage:
 //   node scripts/app-shot.mjs [--out <path>] [--needle <text>] [--settle <ms>]
-//                             [--click <selector>] [--keep]
+//                             [--click <selector>] [--keep] [--with-remote]
 //                             [--testids] [--assert-testid <id>]...
 //
 // --testids              dump the sorted set of [data-testid] values present in the
@@ -14,6 +14,14 @@
 //                        (ADR-027). Assert structure here BEFORE reading the PNG.
 // --assert-testid <id>   repeatable; exit non-zero (code 3) if any named testid is
 //                        absent from the DOM. Implies --testids output.
+// --with-remote          do NOT suppress remote access in the launched instance
+//                        (see below). Only for verifying remote-listener UI live.
+//
+// Remote access is suppressed by DEFAULT: the app is launched with
+// CLAUDEUI_DISABLE_REMOTE=1, so this instance never reconciles, autostarts, or
+// tears down the remote listener / the machine's `tailscale serve` config. Those
+// are machine-global, not per-instance — without the flag this harness would
+// hijack an already-running app's remote access and disable tailscale on exit.
 //
 // Prereqs: `bun run build` (needs out/main + out/renderer). Reads ~/.claude, so
 // it shows your real sessions/config; it only screenshots and closes.
@@ -57,7 +65,12 @@ const hardTimeout = setTimeout(() => {
 let app
 try {
   // args:[root] → Electron uses package.json "main" (out/main/index.js).
-  app = await electron.launch({ args: [root], cwd: root })
+  // env: inherit, plus the remote kill switch unless --with-remote was passed.
+  app = await electron.launch({
+    args: [root],
+    cwd: root,
+    env: has('with-remote') ? process.env : { ...process.env, CLAUDEUI_DISABLE_REMOTE: '1' }
+  })
   const win = await app.firstWindow()
 
   const consoleErrors = []

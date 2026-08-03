@@ -43,6 +43,7 @@ Run from the project root:
 node scripts/app-shot.mjs [--out <png>] [--needle <text>] [--settle <ms>]
                           [--click <selector>]...   # repeatable, clicked in order
                           [--keep]                   # leave the app open
+                          [--with-remote]            # don't suppress remote access
 ```
 
 It launches the app, waits for the first window + `--settle` ms (default 3000) so
@@ -63,6 +64,18 @@ to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
 - **Read the PNG** (it's a real image — open it) as your primary evidence.
 
 `.cache/` is gitignored, so screenshots don't pollute the tree.
+
+**Remote access is suppressed by default.** The harness launches the app with
+`CLAUDEUI_DISABLE_REMOTE=1`, so the instance it starts never reconciles the
+`tailscale serve` record, never autostarts the remote listener, and never tears
+either down on quit. Those are *machine-global* (a pinned TCP port + the host's
+serve config), not per-instance: without the suppression a second instance
+treats the primary app's live serve record as a leaked leftover and removes it,
+races it for the port, and disables `tailscale serve` on exit — i.e. it kills
+the user's remote access. Pass `--with-remote` to opt out (only when you must
+verify remote-listener UI live, and only with no other instance running). The
+app honours the `--disable-remote` CLI switch as well as the env var; with it
+set, `remote:start` and `remote:force-reserve` reject.
 
 ## Driving the UI
 

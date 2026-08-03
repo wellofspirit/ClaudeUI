@@ -81,8 +81,9 @@ import icon from '../../resources/icon.png?asset'
 // this flag so the doomed instance does effectively nothing.
 //
 // Production default is single-instance. Dev (`bun run dev`) and the verifier
-// (scripts/app-shot.mjs sets CLAUDEUI_ALLOW_MULTIPLE_INSTANCES=1) opt out so a
-// built app and a dev/verifier instance can run side by side. When enforcement
+// (scripts/app-shot.mjs launches an unpackaged Electron, so `is.dev` is true)
+// are exempt so a built app and a dev/verifier instance can run side by side;
+// CLAUDEUI_ALLOW_MULTIPLE_INSTANCES=1 opts a packaged build out. When enforcement
 // is off, gotSingleInstanceLock stays true so all the gating below runs normally
 // — this exempts only dev/verifier, not a real user's accidental double-launch.
 const enforceSingleInstance = !is.dev && process.env.CLAUDEUI_ALLOW_MULTIPLE_INSTANCES !== '1'
@@ -90,6 +91,18 @@ const gotSingleInstanceLock = enforceSingleInstance ? app.requestSingleInstanceL
 if (!gotSingleInstanceLock) {
   app.quit()
 }
+
+// Remote-access kill switch for SECONDARY instances (Playwright verifier via
+// scripts/app-shot.mjs, evals, any harness launched alongside a live app). The
+// remote listener owns machine-global state — a pinned TCP port and, with TLS,
+// the host's `tailscale serve` config — none of which is per-instance. A second
+// instance would reconcile the PRIMARY instance's live serve record as a leaked
+// leftover and tear it down, then autostart and steal the port (or lose an
+// EADDRINUSE race), and finally disable `tailscale serve` on quit. So a harness
+// instance must never reconcile, start, or force-reserve. Off by default:
+// only an explicit env var / CLI switch opts in.
+const remoteAccessDisabled =
+  process.env.CLAUDEUI_DISABLE_REMOTE === '1' || process.argv.includes('--disable-remote')
 
 // Crashpad must be started before app.whenReady resolves, otherwise a hard
 // crash (V8 heap exhaustion, native abort) leaves no artefact at all: those
@@ -437,6 +450,13 @@ function createWindow(): void {
   ipcMain.handle(
     'remote:start',
     async (_e, opts?: { port?: number; host?: string; tunnel?: boolean }) => {
+      // Harness instances never bring the listener up: the port and the
+      // `tailscale serve` config it would claim belong to the primary app.
+      if (remoteAccessDisabled) {
+        throw new Error(
+          'Remote access is disabled in this instance (CLAUDEUI_DISABLE_REMOTE=1 / --disable-remote)'
+        )
+      }
       // Fixed port/bind-host now come from the persisted config so a
       // configured port takes effect on every start, not just autostart.
       // `opts.host` (from the modal's interface picker) still overrides the
@@ -530,6 +550,13 @@ function createWindow(): void {
   // connected through. Throws propagate to the renderer so the banner can show
   // why the takeover failed.
   ipcMain.handle('remote:force-reserve', async (): Promise<void> => {
+    // Machine-global mutation — a harness instance taking over the pinned port
+    // would knock the primary app's remote access offline.
+    if (remoteAccessDisabled) {
+      throw new Error(
+        'Remote access is disabled in this instance (CLAUDEUI_DISABLE_REMOTE=1 / --disable-remote)'
+      )
+    }
     await remoteServer.forceReserve()
   })
 
@@ -538,31 +565,43 @@ function createWindow(): void {
   // reaches the UI through RemoteStatus.lastError (set by RemoteServer.start's
   // catch block), not through this try/catch — this one is just a backstop
   // logger so an unexpected throw (not a listen failure) doesn't go silent.
-  void (async () => {
-    try {
-      // Serve-config reconciliation (ADR-042 decision 3) runs FIRST and
-      // unconditionally — even with autostart/TLS off, because the leaked entry
-      // it removes was created by a previous run and nothing else can clean it
-      // up. It swallows its own failures (a down daemon just means the record
-      // survives for the next launch), so it can never block autostart.
-      await remoteServer.reconcileServeRecord()
-      const config = getRemoteConfig()
-      if (config?.autostart) {
-        // autostartRetry: at login the Tailscale daemon may not be up yet, and a
-        // failed `tailscale serve` here has no modal to report to — so keep the
-        // (loopback-only) listener and retry in the background instead of failing.
-        await remoteServer.start(config.port, config.bindHost ?? undefined, {
-          tls: config.tlsMode === 1,
-          autostartRetry: true
-        })
+  //
+  // A remote-disabled instance skips the WHOLE block, reconciliation included:
+  // reconcileServeRecord() cannot tell "leaked record from a previous run" from
+  // "record owned by the live primary instance", so running it here would tear
+  // down the primary app's serve entry.
+  if (remoteAccessDisabled) {
+    logger.info(
+      'main',
+      'Remote access disabled for this instance (CLAUDEUI_DISABLE_REMOTE) — skipping serve reconciliation and autostart'
+    )
+  } else {
+    void (async () => {
+      try {
+        // Serve-config reconciliation (ADR-042 decision 3) runs FIRST and
+        // unconditionally — even with autostart/TLS off, because the leaked entry
+        // it removes was created by a previous run and nothing else can clean it
+        // up. It swallows its own failures (a down daemon just means the record
+        // survives for the next launch), so it can never block autostart.
+        await remoteServer.reconcileServeRecord()
+        const config = getRemoteConfig()
+        if (config?.autostart) {
+          // autostartRetry: at login the Tailscale daemon may not be up yet, and a
+          // failed `tailscale serve` here has no modal to report to — so keep the
+          // (loopback-only) listener and retry in the background instead of failing.
+          await remoteServer.start(config.port, config.bindHost ?? undefined, {
+            tls: config.tlsMode === 1,
+            autostartRetry: true
+          })
+        }
+      } catch (err) {
+        logger.error(
+          'main',
+          `Remote server autostart failed: ${err instanceof Error ? err.message : String(err)}`
+        )
       }
-    } catch (err) {
-      logger.error(
-        'main',
-        `Remote server autostart failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-  })()
+    })()
+  }
 
   // Before-quit: give the renderer a chance to prompt about active worktrees.
   // The coordinator + its listener are created exactly ONCE (macOS `activate`
