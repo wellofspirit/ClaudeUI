@@ -749,3 +749,104 @@ describe('OpencodeServerManager exit fan-out + releaseIfCurrent', () => {
     expect(mgr.activeCount).toBe(0)
   })
 })
+
+// recycleAll(): the auth-mutation reload signal. opencode builds its provider
+// map once per process, so a credential change is only visible to a server
+// started AFTER the auth.json write — every pooled server must go.
+describe('OpencodeServerManager recycleAll', () => {
+  it('kills every live server, clears all handles, closes all MCP hosts', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    await mgr.acquire('/work/a')
+    await mgr.acquire('/work/b')
+    expect(mgr.activeCount).toBe(2)
+
+    mgr.recycleAll()
+
+    expect(calls[0].child.killed).toBe(true)
+    expect(calls[1].child.killed).toBe(true)
+    expect(mgr.activeCount).toBe(0)
+    await new Promise((r) => setTimeout(r, 10)) // let the async close() run
+    expect(hosts[0].closed).toBe(true)
+    expect(hosts[1].closed).toBe(true)
+  })
+
+  it('fans out exit listeners exactly once per handle (drained set, gated child exit)', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let fired = 0
+    // A re-subscribing listener is the nasty case: subscribeExit inside the
+    // callback would re-add to the set we are iterating a COPY of, and the
+    // handle is already out of the map, so nothing can fire it again.
+    mgr.subscribeExit(cwd, () => {
+      fired++
+      mgr.subscribeExit(cwd, () => fired++)
+    })
+
+    mgr.recycleAll()
+    expect(fired).toBe(1)
+
+    // The fake child's kill() already emitted 'exit'; replay it to prove the
+    // identity gate (handle removed from the map first) does nothing extra.
+    calls[0].child.emit('exit', null, 'SIGTERM')
+    expect(fired).toBe(1)
+    expect(mgr.activeCount).toBe(0)
+  })
+
+  it('next acquire for the same cwd spawns a FRESH server', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    const before = await mgr.acquire(cwd)
+    expect(calls).toHaveLength(1)
+
+    mgr.recycleAll()
+
+    const after = await mgr.acquire(cwd)
+    expect(calls).toHaveLength(2) // a new process, which re-reads auth.json
+    expect(after.baseUrl).not.toBe(before.baseUrl) // a different spawn, not a revived handle
+    expect(mgr.activeCount).toBe(1)
+    mgr.release(cwd)
+  })
+
+  it('a post-recycle releaseIfCurrent from the old connection is a no-op', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    const oldConn = await mgr.acquire(cwd)
+    mgr.recycleAll()
+
+    // A session's markDisconnected lands here after the recycle. Its handle is
+    // already gone, so this must not underflow or touch the replacement below.
+    expect(() => mgr.releaseIfCurrent(cwd, oldConn)).not.toThrow()
+    expect(mgr.activeCount).toBe(0)
+
+    await mgr.acquire(cwd) // the session reconnects (refCount 1)
+    mgr.releaseIfCurrent(cwd, oldConn) // replayed stale release
+    expect(calls[1].child.killed).toBe(false)
+    expect(mgr.activeCount).toBe(1)
+
+    mgr.release(cwd)
+    expect(calls[1].child.killed).toBe(true)
+  })
+
+  it('is a no-op with zero handles', () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    expect(() => mgr.recycleAll()).not.toThrow()
+    expect(calls).toHaveLength(0)
+    expect(mgr.activeCount).toBe(0)
+  })
+})

@@ -28,9 +28,10 @@ export interface ServerHandle extends ServerConnection {
   process: ChildProcess
   mcpHost: McpHttpHost
   /**
-   * Callbacks fired when THIS spawn dies unexpectedly (see subscribeExit).
-   * Never fired on a deliberate kill — release()/dispose() drop the handle (and
-   * clear this set) before killing, and the exit handler is identity-gated.
+   * Callbacks fired when THIS spawn goes away and attached sessions must drop
+   * their connection (see subscribeExit): an unexpected death, or a deliberate
+   * recycleAll(). NOT fired on release()/dispose(), which drop the handle (and
+   * clear this set) before killing — the exit handler is identity-gated.
    */
   exitListeners: Set<() => void>
 }
@@ -542,7 +543,8 @@ export class OpencodeServerManager {
   }
 
   /**
-   * Subscribe to the UNEXPECTED death of the server currently serving `cwd`.
+   * Subscribe to the loss of the server currently serving `cwd` — an unexpected
+   * death, or a deliberate recycleAll() (see that method).
    * Returns an unsubscribe bound to that exact handle, so a stale unsubscribe
    * held across a respawn can never remove a listener from the new handle.
    * A no-op unsubscribe is returned when no server is live for `cwd` — callers
@@ -554,6 +556,47 @@ export class OpencodeServerManager {
     handle.exitListeners.add(cb)
     return () => {
       handle.exitListeners.delete(cb)
+    }
+  }
+
+  /**
+   * Tear down every pooled server so the next acquire spawns a fresh one.
+   *
+   * Why this exists: opencode builds its provider map ONCE per process (an
+   * InstanceState in provider/provider.ts) and never watches auth.json. A
+   * credential added or removed through Settings is therefore invisible to
+   * every already-running server — prompts for that provider's models fail
+   * with ProviderModelNotFoundError (the provider is absent from runtime
+   * state; the "did you mean" suggestion comes from the static catalog) until
+   * an app restart. Recycling is the only reload signal we have.
+   *
+   * Deletion precedes the kill, exactly as releaseHandle does: a racing
+   * acquire() must spawn a FRESH server rather than get handed a dying handle,
+   * and the child's 'exit' handler is identity-gated on `handles.get(key)`, so
+   * removing the entry first suppresses its duplicate cleanup + fan-out. The
+   * exit listeners ARE fanned out here (unlike release/dispose) so attached
+   * sessions drop their connections now and lazily reconnect — their
+   * markDisconnected → releaseIfCurrent no-ops against the already-removed
+   * handle, so no refcount underflow and no second kill.
+   *
+   * In-flight spawns (`pending`) are deliberately left alone: a process that
+   * hasn't started yet builds its provider state lazily on its first request,
+   * which necessarily happens after the auth.json write that triggered us.
+   */
+  recycleAll(): void {
+    for (const [key, handle] of [...this.handles]) {
+      this.handles.delete(key)
+      const listeners = [...handle.exitListeners]
+      handle.exitListeners.clear()
+      for (const cb of listeners) {
+        try {
+          cb()
+        } catch {
+          // One bad subscriber must never starve the others.
+        }
+      }
+      this.killProcess(handle.process)
+      handle.mcpHost.close().catch(() => {})
     }
   }
 
