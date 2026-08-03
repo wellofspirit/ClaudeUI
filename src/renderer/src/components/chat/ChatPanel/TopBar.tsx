@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
@@ -68,6 +68,65 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
+  const [overflowOpen, setOverflowOpen] = useState(false)
+  const overflowRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * Mobile overflow ("⋯") menu contents. The desktop right-side buttons don't
+   * fit a phone bar, so the ones that still make sense there live behind this
+   * menu. Kept as an array so future entries (Skills, MCP) slot in with their
+   * own gates — and so an empty list can hide the button entirely rather than
+   * opening an empty popover.
+   */
+  const overflowItems = useMemo(
+    () =>
+      cwd
+        ? [
+            {
+              id: 'permissions',
+              label: 'Permissions',
+              testId: 'TopBar.overflowMenuPermissions',
+              icon: (
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="shrink-0"
+                >
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                </svg>
+              ),
+              onSelect: () => setPermissionsOpen(true)
+            }
+          ]
+        : [],
+    [cwd]
+  )
+
+  // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
+  // that starts outside never lands on whatever the menu was covering.
+  useEffect(() => {
+    if (!overflowOpen) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
+        setOverflowOpen(false)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOverflowOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [overflowOpen])
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -480,8 +539,47 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         )}
         {!isMobileCtx && <WorktreePill />}
         {!isMobileCtx && <GitBranchPill />}
-        {!isMobileCtx && <GitChangesPill />}
+        {/* Mobile keeps the changes pill — it doubles as the git-panel entry
+            point (MobileGitView) and self-hides outside a git repo. */}
+        <GitChangesPill />
         {!isMobileCtx && <WindowControls />}
+        {/* The dropdown below deliberately has no positioned wrapper: it anchors
+            to the TopBar itself (the nearest positioned ancestor), so it hangs
+            below the whole bar right-aligned instead of mid-bar off the button. */}
+        {isMobileCtx && overflowItems.length > 0 && (
+          <div ref={overflowRef}>
+            <button
+              data-testid="TopBar.overflowMenu"
+              onClick={() => setOverflowOpen((o) => !o)}
+              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+              title="More"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="5" r="1.6" />
+                <circle cx="12" cy="12" r="1.6" />
+                <circle cx="12" cy="19" r="1.6" />
+              </svg>
+            </button>
+            {overflowOpen && (
+              <div className="absolute top-full right-0 mt-1 z-50 min-w-[180px] bg-bg-primary border border-border rounded-lg shadow-lg py-1 animate-fade-in">
+                {overflowItems.map((item) => (
+                  <button
+                    key={item.id}
+                    data-testid={item.testId}
+                    onClick={() => {
+                      setOverflowOpen(false)
+                      item.onSelect()
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-text-secondary hover:bg-bg-hover transition-colors"
+                  >
+                    {item.icon}
+                    <span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <SkillsDialog open={skillsOpen} onClose={() => setSkillsOpen(false)} cwd={cwd} />
       <McpDialog

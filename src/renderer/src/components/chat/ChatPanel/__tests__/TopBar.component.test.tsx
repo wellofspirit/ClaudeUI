@@ -15,12 +15,12 @@
  * down the shared jsdom `window.api` out from under this one.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, fireEvent, screen, act } from '@testing-library/react'
+import { render, fireEvent, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { SidebarContext } from '../../../SessionView'
-import type { StatusLineData } from '../../../../../../shared/types'
+import type { GitStatusData, StatusLineData } from '../../../../../../shared/types'
 
 const ROUTE = 'route-topbar'
 
@@ -428,5 +428,136 @@ describe('TopBar — mobile web fullscreen control removed', () => {
     const { unmount } = renderTopBar(true)
     expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
     unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mobile right-side entry points (Option C): the changes pill (the only way
+// into MobileGitView from the bar) plus a "⋯" overflow menu holding the
+// actions whose desktop buttons don't fit a phone bar. Desktop must gain
+// nothing — the overflow button is mobile-only.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — mobile entry points', () => {
+  let app: TestApp
+
+  // setGitStatus populates a module-level cache keyed by cwd that outlives
+  // store resets (createEmptySession re-hydrates isGitRepo/gitStatus from it),
+  // so each git-shaped fixture needs a cwd of its own or tests leak into each
+  // other in file order.
+  const GIT_CWD = '/d/repo-topbar-git'
+  const PLAIN_CWD = '/d/repo-topbar-plain'
+
+  function makeGitStatus(overrides: Partial<GitStatusData> = {}): GitStatusData {
+    return {
+      branch: 'main',
+      ahead: 0,
+      behind: 0,
+      trackingBranch: 'origin/main',
+      files: [{ path: 'a.ts', index: ' ', working: 'M' }],
+      staged: [],
+      unstaged: ['a.ts'],
+      untracked: [],
+      linesAdded: 3,
+      linesRemoved: 1,
+      ...overrides
+    } as GitStatusData
+  }
+
+  function renderTopBar(isMobile: boolean) {
+    return render(
+      <SidebarContext.Provider value={{ collapsed: true, toggle: () => {}, isMobile }}>
+        <TopBar hasContent />
+      </SidebarContext.Provider>
+    )
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    // The permissions dialog loads on open; keep both probes resolvable so the
+    // menu → dialog assertion isn't racing a rejected IPC.
+    app.bridge.ipcMain.handle('claude:load-permissions' as never, async () => ({
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: []
+    }))
+    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
+    useSessionStore.getState().createNewSession(ROUTE, PLAIN_CWD)
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    // Unmount before window.api goes away — TopBar reads window.api.platform
+    // during render, and the store reset below would re-render a live tree.
+    cleanup()
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  it('renders GitChangesPill on mobile once the session is a git repo with status', () => {
+    useSessionStore.getState().createNewSession('route-topbar-gitrepo', GIT_CWD)
+    useSessionStore.setState({ activeSessionId: 'route-topbar-gitrepo' })
+    useSessionStore.getState().setIsGitRepo('route-topbar-gitrepo', true)
+    useSessionStore.getState().setGitStatus('route-topbar-gitrepo', makeGitStatus())
+
+    renderTopBar(true)
+    expect(screen.getByTestId('GitChangesPill')).toBeInTheDocument()
+  })
+
+  it('omits GitChangesPill on mobile outside a git repo (the pill self-gates)', () => {
+    renderTopBar(true)
+    expect(screen.queryByTestId('GitChangesPill')).toBeNull()
+  })
+
+  it('renders the ⋯ overflow button on mobile when a cwd is set', () => {
+    renderTopBar(true)
+    expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
+    // Closed until tapped.
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('hides the ⋯ button entirely when there are no items to show (no cwd)', () => {
+    useSessionStore.getState().createNewSession('route-topbar-nocwd', '')
+    useSessionStore.setState({ activeSessionId: 'route-topbar-nocwd' })
+
+    renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
+  })
+
+  it('opens the permissions dialog from the overflow menu', async () => {
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuPermissions'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(screen.getByTestId('PermissionsDialog')).toBeInTheDocument()
+    // The menu closes behind the dialog.
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('closes the overflow menu on outside pointerdown and on Escape', () => {
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('desktop keeps its own buttons and never grows a ⋯ menu (regression lock)', () => {
+    renderTopBar(false)
+
+    expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
+    expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
   })
 })
