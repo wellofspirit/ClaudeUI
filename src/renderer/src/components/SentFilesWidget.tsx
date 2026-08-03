@@ -157,9 +157,9 @@ export function SentFilesWidget(): React.JSX.Element | null {
       data-testid="SentFilesWidget"
       ref={drag.ref}
       data-dragged={drag.dragged || undefined}
-      className="bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
+      className="pointer-events-auto bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
       style={{
-        width: expanded ? 'min(400px, 45%)' : 155,
+        width: expanded ? 'min(400px, 90%)' : 155,
         borderRadius: expanded ? 12 : 8,
         ...drag.style
       }}

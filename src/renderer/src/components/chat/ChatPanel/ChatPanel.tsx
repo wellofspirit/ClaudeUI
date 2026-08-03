@@ -308,8 +308,11 @@ export function ChatPanel(): React.JSX.Element {
 
       {/* Floating widget stack — each child renders null when it has nothing to
           show, so the gap only appears when both are live. Positioning lives
-          here (not in the widgets) so the stack stays a single decision. */}
-      <div className="absolute top-14 right-4 z-10 flex flex-col items-end gap-2">
+          here (not in the widgets) so the stack stays a single decision.
+          Spans the panel (left-4/right-4) so the widgets' percentage widths
+          resolve against the panel, not a shrink-wrapped box; pointer-events
+          pass through the empty band, the widgets re-enable their own. */}
+      <div className="absolute top-14 left-4 right-4 z-10 flex flex-col items-end gap-2 pointer-events-none">
         <TodoWidget />
         <SentFilesWidget />
       </div>
