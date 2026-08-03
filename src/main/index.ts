@@ -1,4 +1,14 @@
-import { app, shell, BrowserWindow, ipcMain, Menu, clipboard, crashReporter, dialog } from 'electron'
+import {
+  app,
+  shell,
+  screen,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  clipboard,
+  crashReporter,
+  dialog
+} from 'electron'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
@@ -103,6 +113,31 @@ if (!gotSingleInstanceLock) {
 // only an explicit env var / CLI switch opts in.
 const remoteAccessDisabled =
   process.env.CLAUDEUI_DISABLE_REMOTE === '1' || process.argv.includes('--disable-remote')
+
+// "Headless" mode for harness/eval instances (scripts/app-shot.mjs, evals): the
+// window must render without taking focus or a taskbar slot. A TRULY hidden
+// window is not an option — a hide()-den window produces no compositor frames,
+// so Playwright's page.screenshot() times out, webContents.capturePage() never
+// resolves, and clicks fail actionability. So "headless" here means shown but
+// inactive and positioned beyond the virtual desktop: it still paints, it just
+// isn't visible or focusable.
+//
+// The switch is deliberately NOT called `--headless`: Electron forwards unknown
+// argv switches to Chromium, and `--headless` is a real Chromium switch that
+// would put the whole app into browser headless mode and break it.
+const headlessWindow =
+  process.env.CLAUDEUI_HEADLESS === '1' || process.argv.includes('--claudeui-headless')
+
+if (headlessWindow) {
+  // Chromium's occlusion tracker treats an off-screen window as occluded and
+  // stops producing frames for it — screenshots would hang exactly as with a
+  // hidden window. The first switch is the load-bearing one; the other two keep
+  // timers/rAF running at foreground cadence so Playwright's actionability
+  // checks (which wait for a stable box) resolve instead of timing out.
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+  app.commandLine.appendSwitch('disable-background-timer-throttling')
+}
 
 // Crashpad must be started before app.whenReady resolves, otherwise a hard
 // crash (V8 heap exhaustion, native abort) leaves no artefact at all: those
@@ -251,6 +286,8 @@ function createWindow(): void {
           backgroundMaterial: 'acrylic'
         }),
     ...(process.platform === 'linux' ? { icon } : {}),
+    // Headless harness instances must not claim a taskbar slot either.
+    ...(headlessWindow ? { skipTaskbar: true } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -739,7 +776,22 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+    if (headlessWindow) {
+      // Move beyond the virtual desktop BEFORE showing, so the window never
+      // flashes on a real monitor. Never hardcode negative coords — a secondary
+      // display can sit at negative x — derive the right edge from the layout.
+      // showInactive() keeps frames flowing (unlike hide()) but does not
+      // activate, so focus stays where the user left it; a late blur() does not
+      // reliably undo an activating show().
+      const right = Math.max(...screen.getAllDisplays().map((d) => d.bounds.x + d.bounds.width))
+      mainWindow.setPosition(right + 64, 64)
+      mainWindow.showInactive()
+      // Belt-and-braces alongside the occlusion command-line switch: never let
+      // this webContents throttle rAF/timers just because it's off-screen.
+      mainWindow.webContents.setBackgroundThrottling(false)
+    } else {
+      mainWindow.show()
+    }
   })
 
   // Close log viewer (and any other child windows) when the main window closes

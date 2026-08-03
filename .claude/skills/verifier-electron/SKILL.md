@@ -42,8 +42,9 @@ Run from the project root:
 ```
 node scripts/app-shot.mjs [--out <png>] [--needle <text>] [--settle <ms>]
                           [--click <selector>]...   # repeatable, clicked in order
-                          [--keep]                   # leave the app open
+                          [--keep]                   # leave the app open (implies --headed)
                           [--with-remote]            # don't suppress remote access
+                          [--headed]                 # show the window on-screen
 ```
 
 It launches the app, waits for the first window + `--settle` ms (default 3000) so
@@ -51,7 +52,7 @@ React mounts and first IPC settles, performs each `--click` in order, screenshot
 to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
 
 ```json
-{ "ok": true, "screenshot": "...", "windowTitle": "ClaudeUI",
+{ "ok": true, "screenshot": "...", "headless": true, "windowTitle": "ClaudeUI",
   "needle": "Codex", "needleVisibleInDom": 0, "needleInRawHtml": 0,
   "consoleErrors": [] }
 ```
@@ -76,6 +77,17 @@ the user's remote access. Pass `--with-remote` to opt out (only when you must
 verify remote-listener UI live, and only with no other instance running). The
 app honours the `--disable-remote` CLI switch as well as the env var; with it
 set, `remote:start` and `remote:force-reserve` reject.
+
+**The app runs "headless" by default.** The harness launches it with
+`CLAUDEUI_HEADLESS=1` (the app also honours a `--claudeui-headless` CLI switch),
+which shows the window *inactive*, positioned beyond the virtual desktop, with
+no taskbar entry — so a verifier run never steals your focus, covers your
+screen, or leaves a stray taskbar button. Screenshots, `capturePage`, and clicks
+all still work because the window is genuinely shown and keeps painting
+(`--disable-backgrounding-occluded-windows`); a *hidden* window produces no
+compositor frames at all and hangs `screenshot()`. Pass `--headed` to opt out
+and get a normal visible window; `--keep` implies `--headed`, since an
+invisible, taskbar-less instance left running is impossible to close by hand.
 
 ## Driving the UI
 
