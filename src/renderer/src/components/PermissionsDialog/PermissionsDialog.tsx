@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { ClaudePermissions, PermissionScope } from '../../../../shared/types'
-import { PermissionsDialogView, type RuleCategory } from './View'
+import { useIsMobile } from '../../hooks/useIsMobile'
+import { PermissionsDialogView } from './View'
+import { PermissionsMobileView } from './MobileView'
+import type { RuleCategory } from './shared'
 
 interface PermissionsDialogProps {
   open: boolean
@@ -23,6 +26,7 @@ export function PermissionsDialog({
   cwd,
   initialTab
 }: PermissionsDialogProps): React.JSX.Element | null {
+  const isMobile = useIsMobile()
   const [activeTab, setActiveTab] = useState<PermissionScope>(initialTab ?? 'local')
   const [permsMap, setPermsMap] = useState<Record<PermissionScope, ClaudePermissions>>({
     local: { ...EMPTY_PERMS },
@@ -182,8 +186,13 @@ export function PermissionsDialog({
   const perms = permsMap[activeTab]
   const hasDirty = tabs.some((s) => dirty[s])
 
+  // Same props, two presentations: the mobile view is a fullscreen two-layer
+  // takeover (browse + entry sheet) because the desktop dialog's per-section
+  // text inputs are unusable under a soft keyboard. See MobileView.tsx.
+  const View = isMobile ? PermissionsMobileView : PermissionsDialogView
+
   return (
-    <PermissionsDialogView
+    <View
       loading={loading}
       saving={saving}
       activeTab={activeTab}

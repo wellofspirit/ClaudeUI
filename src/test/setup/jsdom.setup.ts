@@ -33,6 +33,29 @@ Object.defineProperty(globalThis, 'localStorage', {
   }
 })
 
+// jsdom ships no matchMedia, so any component reaching for a media query
+// (useIsMobile, and everything that mounts it) would throw on mount. Install a
+// never-matching stub: viewport-derived hooks then fall back to
+// window.innerWidth (1024 in jsdom → desktop), and tests that need mobile mock
+// the hook or override this stub themselves.
+if (typeof window !== 'undefined' && !window.matchMedia) {
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: (query: string) =>
+      ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false
+      }) as unknown as MediaQueryList
+  })
+}
+
 // Provide a minimal Notification stub for tests
 if (!('Notification' in globalThis)) {
   Object.defineProperty(globalThis, 'Notification', {
