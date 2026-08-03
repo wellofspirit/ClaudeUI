@@ -4,6 +4,7 @@ import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { MobileTaskView } from './MobileTaskView'
 import { GitPanel } from './git/GitPanel'
+import { MobileGitView } from './git/MobileGitView'
 import { PlanReviewPanel } from './plan/PlanReviewPanel'
 import { MockupPanel } from './MockupPanel'
 import { UsageView } from './usage/UsageView'
@@ -316,6 +317,8 @@ export function SessionView(): React.JSX.Element {
             >
               {isMobile && rightPanel === 'task' ? (
                 <MobileTaskView />
+              ) : isMobile && rightPanel === 'git' ? (
+                <MobileGitView />
               ) : activeView.type === 'usage' ? (
                 <UsageView onClose={() => setActiveView({ type: 'chat' })} />
               ) : activeView.type === 'automations' ? (

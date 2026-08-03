@@ -51,6 +51,9 @@ vi.mock('../chat/ChatPanel', () => ({
 vi.mock('../git/GitPanel', () => ({
   GitPanel: () => <div data-testid="GitPanel" />
 }))
+vi.mock('../git/MobileGitView', () => ({
+  MobileGitView: () => <div data-testid="MobileGitView" />
+}))
 vi.mock('../plan/PlanReviewPanel', () => ({
   PlanReviewPanel: () => <div data-testid="PlanReviewPanel" />
 }))
@@ -196,5 +199,42 @@ describe('SessionView — mobile task takeover', () => {
     expect(screen.queryByTestId('MobileTaskView')).not.toBeInTheDocument()
     const panel = screen.getByTestId('TaskDetailPanel')
     expect(panel.dataset.variant).toBe('panel')
+  })
+
+  // The git panel gets the same treatment as the task panel: a side panel on
+  // desktop, a full-screen takeover of the ChatPanel slot on mobile.
+  it('mobile + rightPanel=git: renders MobileGitView full-screen, not ChatPanel', async () => {
+    mockIsMobile = true
+    useSessionStore.getState().openGitPanel(ROUTE)
+
+    await renderSessionView()
+
+    expect(screen.getByTestId('MobileGitView')).toBeInTheDocument()
+    expect(screen.queryByTestId('ChatPanel')).not.toBeInTheDocument()
+    // Never both — the desktop side panel stays out of the mobile layout.
+    expect(screen.queryByTestId('GitPanel')).not.toBeInTheDocument()
+  })
+
+  it('desktop + rightPanel=git: side panel unchanged (regression lock)', async () => {
+    mockIsMobile = false
+    useSessionStore.getState().openGitPanel(ROUTE)
+
+    await renderSessionView()
+
+    expect(screen.getByTestId('ChatPanel')).toBeInTheDocument()
+    expect(screen.getByTestId('GitPanel')).toBeInTheDocument()
+    expect(screen.queryByTestId('MobileGitView')).not.toBeInTheDocument()
+  })
+
+  it('mobile + rightPanel=task still wins over git when both were opened', async () => {
+    mockIsMobile = true
+    useSessionStore.getState().openGitPanel(ROUTE)
+    useSessionStore.getState().openTaskPanel(ROUTE, 'tu-1')
+
+    await renderSessionView()
+
+    // rightPanel is a single slot — the last opener owns it.
+    expect(screen.getByTestId('MobileTaskView')).toBeInTheDocument()
+    expect(screen.queryByTestId('MobileGitView')).not.toBeInTheDocument()
   })
 })
