@@ -25,29 +25,6 @@ function formatCost(costUsd: number): string {
   return `$${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`
 }
 
-/** iOS Safari's pre-standard standalone-mode flag — not in lib.dom's Navigator type. */
-type NavigatorWithIosStandalone = Navigator & { standalone?: boolean }
-
-/**
- * The fullscreen control is for the remote web client on mobile only: it
- * needs the standard Fullscreen API, and is pointless (and its own toggle
- * would conflict with the OS chrome) once the page is already running as an
- * installed standalone PWA.
- */
-function canShowFullscreenControl(isMobileCtx: boolean): boolean {
-  if (!isMobileCtx || window.api.platform !== 'web') return false
-  if (
-    document.fullscreenEnabled !== true ||
-    typeof document.documentElement.requestFullscreen !== 'function' ||
-    typeof document.exitFullscreen !== 'function'
-  ) {
-    return false
-  }
-  if (window.matchMedia('(display-mode: standalone)').matches) return false
-  if ((navigator as NavigatorWithIosStandalone).standalone) return false
-  return true
-}
-
 /**
  * Display label for a dispatched (cross-engine, Slice C) cost row. Reuses
  * shortModelName — it already recognizes Claude family names anywhere in the
@@ -91,8 +68,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
-  const showFullscreenControl = canShowFullscreenControl(isMobileCtx)
-  const [isFullscreen, setIsFullscreen] = useState(() => !!document.fullscreenElement)
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -100,26 +75,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   }, [])
   const infoMouseLeave = useCallback(() => {
     infoLeaveTimer.current = setTimeout(() => setInfoHover(false), 150)
-  }, [])
-
-  useEffect(() => {
-    if (!showFullscreenControl) return
-    const handleFullscreenChange = (): void => setIsFullscreen(!!document.fullscreenElement)
-    // Sync immediately — the control can newly appear (e.g. a viewport/context
-    // transition into mobile) after the document already entered fullscreen
-    // through some other path, and the listener alone only catches *future*
-    // fullscreenchange events.
-    handleFullscreenChange()
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
-  }, [showFullscreenControl])
-
-  const handleToggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {})
-    } else {
-      document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {})
-    }
   }, [])
 
   const displaySessionId = sdkSessionId || activeSessionId
@@ -410,50 +365,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         </div>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
-        {showFullscreenControl && (
-          <button
-            type="button"
-            data-testid="TopBar.fullscreen"
-            onClick={handleToggleFullscreen}
-            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-            className="w-[40px] h-[40px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-          >
-            {isFullscreen ? (
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M8 3v3a2 2 0 01-2 2H3" />
-                <path d="M21 8h-3a2 2 0 01-2-2V3" />
-                <path d="M3 16h3a2 2 0 012 2v3" />
-                <path d="M16 21v-3a2 2 0 012-2h3" />
-              </svg>
-            ) : (
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M8 3H5a2 2 0 00-2 2v3" />
-                <path d="M16 3h3a2 2 0 012 2v3" />
-                <path d="M8 21H5a2 2 0 01-2-2v-3" />
-                <path d="M16 21h3a2 2 0 002-2v-3" />
-              </svg>
-            )}
-          </button>
-        )}
         {!isMobileCtx && cwd && (
           <button
             data-testid="TopBar.openVSCode"
