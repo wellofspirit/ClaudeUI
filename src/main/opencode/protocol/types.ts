@@ -105,6 +105,19 @@ export interface StoredMessagePart {
     title?: string
     metadata?: Record<string, unknown>
   }
+  /**
+   * Present for `file` parts: the declared media type. Real attachments carry
+   * the image/pdf mime; @-mentioned files/directories carry `text/plain` /
+   * `application/x-directory` (see vendor prompt.ts resolvePromptParts).
+   */
+  mime?: string
+  /**
+   * Present for `file` parts: `data:<mime>;base64,<data>` for inline attachments
+   * (and MCP resource blobs), `file://…` for @-mentions.
+   */
+  url?: string
+  /** Present for `file` parts: the display filename, when opencode knows one. */
+  filename?: string
   /** Part ids and message linkage */
   id?: string
   messageID?: string

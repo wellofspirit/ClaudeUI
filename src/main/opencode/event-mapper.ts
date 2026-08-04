@@ -945,6 +945,53 @@ export function makeUserMessageId(): string {
 }
 
 /**
+ * Media types the engine-neutral `image` ContentBlock models (src/shared/types.ts).
+ * Anything else is dropped rather than widened — the renderer builds
+ * `data:<mediaType>;base64,…` URLs from these verbatim.
+ */
+const ATTACHMENT_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+
+/**
+ * Decode the base64 payload of a `data:<mime>;base64,<data>` URI, requiring the
+ * header to match `mime` exactly. Returns null for anything else (`file://`
+ * @-mention urls, missing comma, empty payload, mime/header mismatch, a
+ * non-base64 data URI) — stored parts are untrusted input.
+ */
+function decodeBase64DataUri(url: string, mime: string): string | null {
+  const comma = url.indexOf(',')
+  if (comma === -1) return null
+  if (url.slice(0, comma) !== `data:${mime};base64`) return null
+  const data = url.slice(comma + 1)
+  return data || null
+}
+
+/**
+ * Map a stored `file` part to an attachment ContentBlock, or null when it is not
+ * an inline user attachment. opencode uses `file` parts for two unrelated things:
+ * real attachments (`data:` url, image/pdf mime — see OpencodeSession's file
+ * parts) and @-mentioned files/directories (`file://` url, `text/plain` /
+ * `application/x-directory` mime — vendor prompt.ts resolvePromptParts, already
+ * expanded into synthetic text parts). Only the former is rehydrated.
+ */
+function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | null {
+  const { mime, url, filename } = part
+  if (typeof mime !== 'string' || typeof url !== 'string') return null
+  const isImage = ATTACHMENT_IMAGE_MIME_TYPES.has(mime)
+  if (!isImage && mime !== 'application/pdf') return null
+  const base64Data = decodeBase64DataUri(url, mime)
+  if (!base64Data) return null
+  const fileName = filename ? { fileName: filename } : {}
+  return isImage
+    ? {
+        type: 'image',
+        mediaType: mime as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+        base64Data,
+        ...fileName
+      }
+    : { type: 'document', mediaType: 'application/pdf', base64Data, ...fileName }
+}
+
+/**
  * Convert a single stored opencode message (from GET /session/{id}/message) into
  * a `ChatMessage` for history replay.
  *
@@ -953,9 +1000,10 @@ export function makeUserMessageId(): string {
  *   reasoning → { type:'thinking', text }
  *   tool      → { type:'tool_use', toolUseId, toolName, toolInput }
  *              + { type:'tool_result', toolUseId, toolResult, isError } when completed/error
+ *   file      → { type:'image'|'document', … } for inline USER attachments only
  *
- * Step-start, step-finish, file, agent, subtask, compaction, and any unknown
- * part types are silently skipped (same treatment as buildChatMessage).
+ * Step-start, step-finish, agent, subtask, compaction, non-attachment file parts,
+ * and any unknown part types are silently skipped.
  *
  * Returns null if the message has no displayable content (so the caller can skip it).
  */
@@ -968,11 +1016,20 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
   if (role !== 'user' && role !== 'assistant') return null
 
   const content: ContentBlock[] = []
+  // Attachments are hoisted ahead of the rest: ClaudeUI sends opencode
+  // [text, ...fileParts] so they persist AFTER the prompt, while the live echo
+  // (session-store.ts addUserMessage / OpencodeSession.buildUserContent) puts
+  // them first. Replay must match the live order.
+  const attachments: ContentBlock[] = []
 
   for (const part of (parts ?? []) as StoredMessagePart[]) {
     const type = part.type
 
-    if (type === 'text') {
+    if (type === 'file') {
+      if (role !== 'user') continue
+      const block = storedFilePartToAttachment(part)
+      if (block) attachments.push(block)
+    } else if (type === 'text') {
       const text = part.text ?? ''
       if (text) content.push({ type: 'text', text })
     } else if (type === 'reasoning') {
@@ -998,8 +1055,10 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
         })
       }
     }
-    // step-start, step-finish, file, agent, subtask, compaction → skip
+    // step-start, step-finish, agent, subtask, compaction → skip
   }
+
+  if (attachments.length > 0) content.unshift(...attachments)
 
   // If there's no renderable content, skip this message entirely.
   if (content.length === 0) return null

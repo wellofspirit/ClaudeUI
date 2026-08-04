@@ -809,6 +809,50 @@ function extractOutputFile(text: string): string {
 }
 
 /**
+ * Media types the engine-neutral `image` ContentBlock models (src/shared/types.ts).
+ * Anything else a transcript may carry is dropped rather than widened — the
+ * renderer builds `data:<mediaType>;base64,…` URLs from these verbatim.
+ */
+const ATTACHMENT_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+
+/**
+ * Rehydrate user-attachment blocks from a `type:'user'` transcript line's array
+ * content. cli.js persists them as (verified against real transcripts):
+ *
+ *   { type:'image',    source:{ type:'base64', media_type:'image/png', data:'<b64>' } }
+ *   { type:'document', source:{ type:'base64', media_type:'application/pdf', data:'<b64>' } }
+ *
+ * The transcript carries no filename, so `fileName` is omitted. Blocks with a
+ * non-base64 source, a missing/empty `data`, or a media type outside the model's
+ * allowlist are skipped — never thrown on (a transcript is untrusted input).
+ */
+function extractAttachmentBlocks(content: unknown): ContentBlock[] {
+  if (!Array.isArray(content)) return []
+  const blocks: ContentBlock[] = []
+  for (const raw of content) {
+    if (!raw || typeof raw !== 'object') continue
+    const block = raw as Record<string, unknown>
+    if (block.type !== 'image' && block.type !== 'document') continue
+    const source = block.source as Record<string, unknown> | undefined
+    if (!source || source.type !== 'base64') continue
+    const mediaType = source.media_type
+    const data = source.data
+    if (typeof mediaType !== 'string' || typeof data !== 'string' || !data) continue
+    if (block.type === 'image') {
+      if (!ATTACHMENT_IMAGE_MEDIA_TYPES.has(mediaType)) continue
+      blocks.push({
+        type: 'image',
+        mediaType: mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+        base64Data: data
+      })
+    } else if (mediaType === 'application/pdf') {
+      blocks.push({ type: 'document', mediaType: 'application/pdf', base64Data: data })
+    }
+  }
+  return blocks
+}
+
+/**
  * Resolve the JSONL line `uuid` to pass to cli.js `--resume-session-at` when
  * forking ("branching") a new session from an assistant message.
  *
@@ -985,15 +1029,15 @@ export async function loadSessionHistory(
           if (!isArray) return
 
           // Array content — check block types
-          const hasTextBlock = content.some((b: Record<string, unknown>) => b.type === 'text')
           const hasToolResult = content.some(
             (b: Record<string, unknown>) => b.type === 'tool_result'
           )
 
-          // External user prompt with text blocks
-          if (userType === 'external' && hasTextBlock) {
+          // External user prompt: text block and/or attachment blocks
+          if (userType === 'external') {
             const textBlock = content.find((b: Record<string, unknown>) => b.type === 'text')
             const text = textBlock ? (textBlock.text as string) : ''
+            const attachments = extractAttachmentBlocks(content)
 
             // Check if text is actually a task notification
             const notif = text ? parseTaskNotificationXml(text) : null
@@ -1013,11 +1057,14 @@ export async function loadSessionHistory(
                   timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
                 })
               }
-            } else if (text) {
+            } else if (text || attachments.length > 0) {
+              // Attachments first, then the text — matches the live-session
+              // order (session-store.ts addUserMessage) and the transcript's own
+              // block order. An attachments-only prompt is a real message too.
               messages.push({
                 id: obj.uuid || `user-${messages.length}`,
                 role: 'user',
-                content: [{ type: 'text', text }],
+                content: [...attachments, ...(text ? [{ type: 'text' as const, text }] : [])],
                 timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
                 ...(obj.planContent ? { planContent: obj.planContent as string } : {})
               })
@@ -1449,13 +1496,10 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           if (!content) return
           const userType = obj.userType as string | undefined
           const isArray = Array.isArray(content)
-          const hasTextBlock = isArray
-            ? content.some((b: Record<string, unknown>) => b.type === 'text')
-            : typeof content === 'string'
           const hasToolResult =
             isArray && content.some((b: Record<string, unknown>) => b.type === 'tool_result')
 
-          if (userType === 'external' && hasTextBlock) {
+          if (userType === 'external') {
             let text = ''
             if (typeof content === 'string') {
               text = content
@@ -1463,11 +1507,14 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
               const textBlock = content.find((b: Record<string, unknown>) => b.type === 'text')
               if (textBlock) text = textBlock.text as string
             }
-            if (text && !parseTaskNotificationXml(text)) {
+            const attachments = isArray ? extractAttachmentBlocks(content) : []
+            const isNotif = text ? parseTaskNotificationXml(text) !== null : false
+            if (!isNotif && (text || attachments.length > 0)) {
+              // Attachments before text — see the main parser for rationale.
               messages.push({
                 id: obj.uuid || `user-${messages.length}`,
                 role: 'user',
-                content: [{ type: 'text', text }],
+                content: [...attachments, ...(text ? [{ type: 'text' as const, text }] : [])],
                 timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
               })
             }
