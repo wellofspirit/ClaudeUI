@@ -128,6 +128,36 @@ describe('PermissionsDialog FC', () => {
     expect(viewProps.tabs).toEqual(['user'])
   })
 
+  it('returns to the local tab when cwd arrives after a null-cwd mount (boot order)', async () => {
+    // TopBar mounts the dialog from app boot, before the restored session's
+    // cwd hydrates. The null-cwd window forces the user tab; once cwd lands
+    // the default must come back to local — the old one-way reset left every
+    // post-boot open stranded on Global.
+    const { PermissionsDialog } = await import('../PermissionsDialog')
+    let result!: ReturnType<typeof render>
+    await act(async () => {
+      result = await renderFC({ open: true, cwd: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(viewProps.activeTab).toBe('user')
+
+    await act(async () => {
+      result.rerender(
+        React.createElement(PermissionsDialog, {
+          open: true,
+          cwd: CWD,
+          onClose: onClose as () => void
+        })
+      )
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(viewProps.activeTab).toBe('local')
+    expect(viewProps.tabs).toEqual(['local', 'project', 'user'])
+  })
+
   it('onAddRule marks active scope as dirty and updates perms', async () => {
     await act(async () => {
       await renderFC({ open: true, cwd: CWD, initialTab: 'user' })

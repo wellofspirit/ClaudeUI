@@ -52,10 +52,14 @@ export function PermissionsDialog({
     [cwd]
   )
 
-  // Reset active tab only when cwd or initialTab changes (not when activeTab changes)
+  // Reset active tab only when cwd or initialTab changes (not when activeTab
+  // changes). The reset must run in BOTH directions: the dialog is mounted
+  // (closed) from app boot, when cwd is briefly null — forcing 'user' then
+  // never coming back meant the dialog always opened on Global instead of
+  // Local once the session hydrated.
   useEffect(() => {
     if (initialTab) setActiveTab(initialTab)
-    else if (!cwd) setActiveTab('user')
+    else setActiveTab(cwd ? 'local' : 'user')
   }, [cwd, initialTab])
 
   useEffect(() => {
