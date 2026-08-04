@@ -17,6 +17,15 @@ import type { SentFile } from '../../../../shared/types'
 const ROUTE = 'route-sent-files'
 const CWD = '/d/repo'
 
+let nextPointerId = 100
+
+/** ImageViewerOverlay resolves taps from pointer events, never from `click`. */
+function tapViewer(el: Element): void {
+  const pointerId = nextPointerId++
+  fireEvent.pointerDown(el, { pointerId, clientX: 500, clientY: 400, button: 0 })
+  fireEvent.pointerUp(el, { pointerId, clientX: 500, clientY: 400, button: 0 })
+}
+
 function makeFile(overrides: Partial<SentFile> = {}): SentFile {
   return { path: 'report.html', toolUseId: 'tu-1', ...overrides }
 }
@@ -206,7 +215,9 @@ describe('SentFilesWidget', () => {
     expect(container.textContent).toContain('/d/repo/big.png')
   })
 
-  it('opens and closes the lightbox from the thumbnail', async () => {
+  // The widget's own ad-hoc lightbox was replaced by the shared
+  // ImageViewerOverlay, so these assert that component's testids now.
+  it('opens and closes the shared image viewer from the thumbnail', async () => {
     setPreview(vi.fn().mockResolvedValue({ src: 'data:image/png;base64,BBBB' }))
     useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'shot.png' })])
 
@@ -214,20 +225,53 @@ describe('SentFilesWidget', () => {
     fireEvent.click(getByTestId('SentFilesWidget.row'))
     fireEvent.click(await waitFor(() => getByTestId('SentFilesWidget.thumb')))
 
-    const lightbox = getByTestId('SentFilesWidget.lightbox')
-    expect(lightbox).toBeInTheDocument()
-    // Clicking the image itself must not dismiss it.
-    fireEvent.click(lightbox.querySelector('img') as HTMLImageElement)
-    expect(queryByTestId('SentFilesWidget.lightbox')).not.toBeNull()
-    // Backdrop click closes.
-    fireEvent.click(lightbox)
-    expect(queryByTestId('SentFilesWidget.lightbox')).toBeNull()
+    expect(getByTestId('ImageViewerOverlay')).toBeInTheDocument()
+    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,BBBB'
+    )
+    // Tapping the image itself must not dismiss it.
+    tapViewer(getByTestId('ImageViewerOverlay.image'))
+    expect(queryByTestId('ImageViewerOverlay')).not.toBeNull()
+    // A tap on the backdrop around the image closes (dismissal lives in the
+    // pointer state machine, not in a click handler — see ImageViewerOverlay).
+    tapViewer(getByTestId('ImageViewerOverlay.viewport'))
+    expect(queryByTestId('ImageViewerOverlay')).toBeNull()
 
     // Escape closes too.
     fireEvent.click(getByTestId('SentFilesWidget.thumb'))
-    expect(queryByTestId('SentFilesWidget.lightbox')).not.toBeNull()
+    expect(queryByTestId('ImageViewerOverlay')).not.toBeNull()
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(queryByTestId('SentFilesWidget.lightbox')).toBeNull()
+    expect(queryByTestId('ImageViewerOverlay')).toBeNull()
+  })
+
+  it('pages the viewer across every sent file that has a loaded preview', async () => {
+    setPreview(
+      vi
+        .fn()
+        .mockImplementation((_session: string, path: string) =>
+          Promise.resolve({ src: `data:image/png;base64,${path.endsWith('a.png') ? 'AAAA' : 'BBBB'}` })
+        )
+    )
+    useSessionStore
+      .getState()
+      .setSentFiles(ROUTE, [
+        makeFile({ path: 'a.png', toolUseId: 'tu-a' }),
+        makeFile({ path: 'b.png', toolUseId: 'tu-b' })
+      ])
+
+    const { getAllByTestId, getByTestId } = render(<SentFilesWidget />)
+    // Rows render newest-first, so the gallery is [b.png, a.png].
+    fireEvent.click(getAllByTestId('SentFilesWidget.row')[0])
+    fireEvent.click(getAllByTestId('SentFilesWidget.row')[1])
+    await waitFor(() => expect(getAllByTestId('SentFilesWidget.thumb')).toHaveLength(2))
+
+    fireEvent.click(getAllByTestId('SentFilesWidget.thumb')[1])
+    expect(getByTestId('ImageViewerOverlay.counter').textContent).toBe('2 / 2')
+    fireEvent.click(getByTestId('ImageViewerOverlay.prev'))
+    expect(getByTestId('ImageViewerOverlay.counter').textContent).toBe('1 / 2')
+    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,BBBB'
+    )
   })
 
   // -------------------------------------------------------------------------

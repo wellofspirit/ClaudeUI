@@ -20,10 +20,10 @@
  * `useDraggableWidget` (ADR-043 §2).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useCallback, useRef, useState } from 'react'
 import { useActiveSession, useSessionStore } from '../stores/session-store'
 import { useDraggableWidget } from '../hooks/useDraggableWidget'
+import { ImageViewerOverlay } from './shared/ImageViewer'
 import { fileBasename, isImagePath } from '../../../shared/file-mime'
 import { resolveSentFilePath } from '../../../shared/sent-file-path'
 import { buildSentFileUrl } from '../../../shared/sent-file-url'
@@ -69,7 +69,9 @@ export function SentFilesWidget(): React.JSX.Element | null {
   // Transient per-row failure text from the shell IPC (not part of session state).
   const [openErrors, setOpenErrors] = useState<Record<string, string>>({})
   const [previews, setPreviews] = useState<Record<string, PreviewState>>({})
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+  // Which row's preview the viewer is showing. Stored as the row key (not an
+  // index) because the gallery shifts as more previews finish loading.
+  const [viewerRowKey, setViewerRowKey] = useState<string | null>(null)
   const inFlight = useRef<Set<string>>(new Set())
   const drag = useDraggableWidget('claudeui.widgetPos.files')
 
@@ -97,20 +99,22 @@ export function SentFilesWidget(): React.JSX.Element | null {
     [sessionKey]
   )
 
-  // Escape closes the lightbox (backdrop click is handled inline).
-  useEffect(() => {
-    if (!lightboxSrc) return
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setLightboxSrc(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [lightboxSrc])
-
   if (sentFiles.length === 0) return null
 
   // Newest first — buildSentFilesFromMessages appends in send order.
   const rows = [...sentFiles].reverse()
+
+  // Every already-loaded thumbnail forms one gallery, so the viewer's prev/next
+  // pages across sent files instead of being a single-image lightbox.
+  const galleryKeys: string[] = []
+  const galleryImages: { src: string; fileName: string }[] = []
+  for (const file of rows) {
+    const preview = previews[rowKey(file)]
+    if (preview?.status !== 'ready') continue
+    galleryKeys.push(rowKey(file))
+    galleryImages.push({ src: preview.src, fileName: fileBasename(file.path) })
+  }
+  const viewerIndex = viewerRowKey ? galleryKeys.indexOf(viewerRowKey) : -1
 
   const canPreview = typeof window.api?.getSentFilePreview === 'function'
 
@@ -254,7 +258,7 @@ export function SentFilesWidget(): React.JSX.Element | null {
                           data-testid="SentFilesWidget.thumb"
                           src={preview.src}
                           alt={fileBasename(file.path)}
-                          onClick={() => setLightboxSrc(preview.src)}
+                          onClick={() => setViewerRowKey(key)}
                           className="max-h-[120px] max-w-full rounded object-contain cursor-zoom-in border border-border"
                         />
                       )}
@@ -324,24 +328,16 @@ export function SentFilesWidget(): React.JSX.Element | null {
         </div>
       </div>
 
-      {/* Lightbox — portalled to <body> so neither the widget's `overflow-hidden`
-          nor a dragged (position: fixed) root can clip or restack it. */}
-      {lightboxSrc &&
-        createPortal(
-          <div
-            data-testid="SentFilesWidget.lightbox"
-            onClick={() => setLightboxSrc(null)}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 cursor-zoom-out"
-          >
-            <img
-              src={lightboxSrc}
-              alt=""
-              onClick={(e) => e.stopPropagation()}
-              className="max-w-[90vw] max-h-[85vh] object-contain rounded shadow-2xl cursor-default"
-            />
-          </div>,
-          document.body
-        )}
+      {/* The shared viewer (zoom / pan / prev-next), which portals itself to
+          <body> so neither the widget's `overflow-hidden` nor a dragged
+          (position: fixed) root can clip or restack it. */}
+      {viewerIndex >= 0 && (
+        <ImageViewerOverlay
+          tabs={[{ id: 'sentFiles', label: 'Sent files', images: galleryImages }]}
+          initialIndex={viewerIndex}
+          onClose={() => setViewerRowKey(null)}
+        />
+      )}
     </div>
   )
 }
