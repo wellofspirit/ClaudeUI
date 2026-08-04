@@ -39,6 +39,9 @@ autocomplete — which works over remote today — and the `@`-mention browser).
    need a host directory on web (AutomationConfig's cwd field, the first-run screen).
    PermissionsDialog's `AddRuleInput` keeps its private copy of the path mechanics for now;
    whoever touches it next should lift the shared helpers out of `DirectoryBrowserInput`.
+   *(Partially done by ADR-048: the mechanics were extracted into `useDirSuggestions` in
+   `PermissionsDialog/shared.ts`, shared by the desktop input and the mobile entry sheet.
+   Unifying with `DirectoryBrowserInput` is still open — start from the hook.)*
 
 ## Consequences
 
