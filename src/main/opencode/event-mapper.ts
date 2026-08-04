@@ -7,8 +7,10 @@ import type {
   SessionResult,
   AskUserQuestion,
   TodoItem,
-  FileDiff
+  FileDiff,
+  ToolResultImage
 } from '../../shared/types'
+import { isImageMediaType } from '../../shared/types'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
@@ -87,6 +89,32 @@ export interface ToolPartState {
   error?: string
   metadata?: Record<string, unknown>
   title?: string
+  /**
+   * Media a COMPLETED tool returned — `read` on a .png/.pdf, an MCP tool
+   * returning a resource. Verified against the pinned vendor source
+   * (vendor/opencode-src): `session/processor.ts` `completeToolCall` writes
+   * `state.attachments = output.attachments` (the tool's own
+   * `attachments: FilePart[]`), and `sdk/js/.../types.gen.ts`
+   * `ToolStateCompleted.attachments?: FilePart[]` is the schema.
+   *
+   * IMPORTANT: these live on the TOOL part, not as separate assistant-message
+   * `file` parts, so no part-ordering heuristic is needed to associate them
+   * with their tool call. `status: 'error'` parts never carry them.
+   */
+  attachments?: ToolAttachment[]
+}
+
+/**
+ * A `FilePart`-shaped attachment as it rides on a tool part's state. Only the
+ * fields ClaudeUI reads are modelled (`source` and the part ids are ignored);
+ * everything is optional because this is untrusted wire/stored input.
+ */
+export interface ToolAttachment {
+  /** Always 'file' on the wire; unused for gating (the mime + data URI decide). */
+  type?: string
+  mime?: string
+  url?: string
+  filename?: string
 }
 
 // ── Mapper output types ───────────────────────────────────────────────────────
@@ -915,7 +943,13 @@ export function extractFileDiffs(
 export function extractToolResult(
   _partId: string,
   snap: PartSnapshot
-): { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] } | null {
+): {
+  toolUseId: string
+  result: string
+  isError: boolean
+  fileDiffs?: FileDiff[]
+  images?: ToolResultImage[]
+} | null {
   if (snap.type !== 'tool') return null
   const status = snap.state?.status
   if (status !== 'completed' && status !== 'error') return null
@@ -931,11 +965,13 @@ export function extractToolResult(
       : (snap.state?.output ?? metadata?.output)
   const result = rawOutput !== undefined ? String(rawOutput) : ''
   const fileDiffs = extractFileDiffs(metadata, snap.state?.input)
+  const images = toolAttachmentImages(snap.state?.attachments)
   return {
     toolUseId,
     result,
     isError: status === 'error',
-    ...(fileDiffs ? { fileDiffs } : {})
+    ...(fileDiffs ? { fileDiffs } : {}),
+    ...(images ? { images } : {})
   }
 }
 
@@ -943,13 +979,6 @@ export function extractToolResult(
 export function makeUserMessageId(): string {
   return uuid()
 }
-
-/**
- * Media types the engine-neutral `image` ContentBlock models (src/shared/types.ts).
- * Anything else is dropped rather than widened — the renderer builds
- * `data:<mediaType>;base64,…` URLs from these verbatim.
- */
-const ATTACHMENT_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 
 /**
  * Decode the base64 payload of a `data:<mime>;base64,<data>` URI, requiring the
@@ -966,6 +995,33 @@ function decodeBase64DataUri(url: string, mime: string): string | null {
 }
 
 /**
+ * Images a tool RETURNED, from its part state's `attachments` (see
+ * `ToolPartState.attachments` for the vendor-source provenance). Shared by the
+ * live accumulator path (`extractToolResult`) and the stored-replay path
+ * (`convertStoredMessage`), so both produce the same set.
+ *
+ * Reuses the same gates as the user-attachment reader: an image mime in
+ * `IMAGE_MEDIA_TYPES` and a genuine `data:<mime>;base64,` URI. PDFs and
+ * `file://` urls are skipped (the gallery is images-only). Returns undefined
+ * rather than [] when nothing survives.
+ */
+function toolAttachmentImages(
+  attachments: ToolAttachment[] | undefined
+): ToolResultImage[] | undefined {
+  if (!Array.isArray(attachments)) return undefined
+  const images: ToolResultImage[] = []
+  for (const a of attachments) {
+    if (!a || typeof a !== 'object') continue
+    const { mime, url, filename } = a
+    if (!isImageMediaType(mime) || typeof url !== 'string') continue
+    const base64Data = decodeBase64DataUri(url, mime)
+    if (!base64Data) continue
+    images.push({ mediaType: mime, base64Data, ...(filename ? { fileName: filename } : {}) })
+  }
+  return images.length > 0 ? images : undefined
+}
+
+/**
  * Map a stored `file` part to an attachment ContentBlock, or null when it is not
  * an inline user attachment. opencode uses `file` parts for two unrelated things:
  * real attachments (`data:` url, image/pdf mime — see OpencodeSession's file
@@ -976,18 +1032,13 @@ function decodeBase64DataUri(url: string, mime: string): string | null {
 function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | null {
   const { mime, url, filename } = part
   if (typeof mime !== 'string' || typeof url !== 'string') return null
-  const isImage = ATTACHMENT_IMAGE_MIME_TYPES.has(mime)
+  const isImage = isImageMediaType(mime)
   if (!isImage && mime !== 'application/pdf') return null
   const base64Data = decodeBase64DataUri(url, mime)
   if (!base64Data) return null
   const fileName = filename ? { fileName: filename } : {}
   return isImage
-    ? {
-        type: 'image',
-        mediaType: mime as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data,
-        ...fileName
-      }
+    ? { type: 'image', mediaType: mime, base64Data, ...fileName }
     : { type: 'document', mediaType: 'application/pdf', base64Data, ...fileName }
 }
 
@@ -999,11 +1050,15 @@ function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | nul
  *   text      → { type:'text', text }
  *   reasoning → { type:'thinking', text }
  *   tool      → { type:'tool_use', toolUseId, toolName, toolInput }
- *              + { type:'tool_result', toolUseId, toolResult, isError } when completed/error
+ *              + { type:'tool_result', toolUseId, toolResult, isError, images? }
+ *                when completed/error — `images` from the part's own
+ *                `state.attachments` (media the TOOL returned)
  *   file      → { type:'image'|'document', … } for inline USER attachments only
  *
  * Step-start, step-finish, agent, subtask, compaction, non-attachment file parts,
- * and any unknown part types are silently skipped.
+ * and any unknown part types are silently skipped. Assistant-role `file` parts
+ * are NOT a tool-image carrier in this opencode version (see
+ * `ToolPartState.attachments`), so they remain skipped.
  *
  * Returns null if the message has no displayable content (so the caller can skip it).
  */
@@ -1046,12 +1101,16 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
       if (status === 'completed' || status === 'error') {
         const rawOutput = part.state?.output ?? part.state?.error ?? ''
         const fileDiffs = extractFileDiffs(part.state?.metadata, input)
+        // Media the tool returned rides on the tool part's OWN state, not as a
+        // separate assistant `file` part — see ToolPartState.attachments.
+        const images = toolAttachmentImages(part.state?.attachments)
         content.push({
           type: 'tool_result',
           toolUseId,
           toolResult: rawOutput ?? '',
           isError: status === 'error',
-          ...(fileDiffs ? { fileDiffs } : {})
+          ...(fileDiffs ? { fileDiffs } : {}),
+          ...(images ? { images } : {})
         })
       }
     }

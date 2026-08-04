@@ -1022,3 +1022,51 @@ describe('buildPiChatMessage', () => {
     })
   })
 })
+
+describe('mapPiEvent — toolResult images', () => {
+  it('collects image content blocks onto the tool_result output', () => {
+    // pi's read tool on an image returns PiImageContent blocks
+    // (`{type:'image', data, mimeType}`); the mapper used to filter to text only.
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_img',
+          toolName: 'read',
+          content: [
+            { type: 'text', text: 'Image read' },
+            { type: 'image', data: 'LIVEIMG', mimeType: 'image/png' }
+          ]
+        })
+      },
+      state
+    )
+    expect(out).toEqual([
+      {
+        kind: 'tool_result',
+        toolUseId: 'call_img',
+        result: 'Image read',
+        isError: false,
+        images: [{ mediaType: 'image/png', base64Data: 'LIVEIMG' }]
+      }
+    ])
+  })
+
+  it('drops image blocks whose mime type is outside the modelled set', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: toolResultMsg({
+          toolCallId: 'call_svg',
+          content: [{ type: 'image', data: 'SVG', mimeType: 'image/svg+xml' }]
+        })
+      },
+      state
+    )
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_svg', result: '', isError: false }
+    ])
+  })
+})

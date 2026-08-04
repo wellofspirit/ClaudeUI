@@ -233,6 +233,62 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     ])
   })
 
+  it('carries a toolResult\'s image content onto the folded tool_result block', async () => {
+    // pi's read tool on an image returns `{type:'image', data, mimeType}` content
+    // blocks alongside (or instead of) text; the replay used to keep only text.
+    writeSessionFile('--proj-toolimg--', 'x_sess-toolimg.jsonl', [
+      { type: 'session', version: 3, id: 'sess-toolimg', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/toolimg' },
+      userEntry('u1', null, 'read the png'),
+      {
+        type: 'message',
+        id: 'a1',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call_img', name: 'read', arguments: { path: '/x.png' } }],
+          api: 'a',
+          provider: 'p',
+          model: 'm',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: 'toolUse',
+          timestamp: 2
+        }
+      },
+      {
+        type: 'message',
+        id: 'tr1',
+        parentId: 'a1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_img',
+          toolName: 'read',
+          content: [
+            { type: 'text', text: 'Image read' },
+            { type: 'image', data: 'PIIMG', mimeType: 'image/png' },
+            { type: 'image', data: 'DROPME', mimeType: 'image/svg+xml' }
+          ],
+          isError: false,
+          timestamp: 3
+        }
+      }
+    ])
+
+    const messages = await loadPiSessionHistory('sess-toolimg')
+    const result = messages
+      .find((m) => m.id === 'a1')!
+      .content.find((b) => b.type === 'tool_result')
+    expect(result).toEqual({
+      type: 'tool_result',
+      toolUseId: 'call_img',
+      toolResult: 'Image read',
+      isError: false,
+      // image/svg+xml is outside the modelled media types — dropped, not widened.
+      images: [{ mediaType: 'image/png', base64Data: 'PIIMG' }]
+    })
+  })
+
   it('converts a compaction entry to a compact_separator system message', async () => {
     writeSessionFile('--proj-compact--', 'x_sess-compact.jsonl', [
       { type: 'session', version: 3, id: 'sess-compact', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/compact' },

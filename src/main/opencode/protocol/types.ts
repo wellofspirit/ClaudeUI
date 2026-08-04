@@ -104,6 +104,13 @@ export interface StoredMessagePart {
     error?: string
     title?: string
     metadata?: Record<string, unknown>
+    /**
+     * Present on COMPLETED tool parts that returned media (read on a .png, an
+     * MCP resource): the tool's own `FilePart[]` attachments, persisted verbatim
+     * on the part state. Mirrors the live `ToolPartState.attachments` — see the
+     * doc comment there for the vendor-source provenance.
+     */
+    attachments?: Array<{ type?: string; mime?: string; url?: string; filename?: string }>
   }
   /**
    * Present for `file` parts: the declared media type. Real attachments carry

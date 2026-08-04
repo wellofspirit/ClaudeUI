@@ -3,13 +3,14 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { ChatMessage, ContentBlock } from '../../../../../../shared/types'
+import type { ChatMessage, ContentBlock, ToolResultImage } from '../../../../../../shared/types'
 import {
   attachmentKey,
   deriveAttachmentGallery,
   deriveGalleries,
   deriveToolResultGallery,
-  imageBlocksOf
+  imageBlocksOf,
+  toolResultKey
 } from '../gallery'
 
 let counter = 0
@@ -76,57 +77,69 @@ describe('deriveAttachmentGallery', () => {
 })
 
 describe('deriveToolResultGallery', () => {
-  // The `images` field is not on ContentBlock yet (see the TODO in gallery.ts).
-  // These blocks are hand-built to pin the reader's contract for when it lands.
-  function toolResult(toolUseId: string, images: unknown): ContentBlock {
-    return { type: 'tool_result', toolUseId, toolResult: 'ok', images } as ContentBlock
+  function toolResult(toolUseId: string, images?: ToolResultImage[]): ContentBlock {
+    return { type: 'tool_result', toolUseId, toolResult: 'ok', ...(images ? { images } : {}) }
   }
 
-  it('is empty for the tool_result blocks we actually emit today', () => {
+  function toolImage(base64Data: string, fileName?: string): ToolResultImage {
+    return { mediaType: 'image/png', base64Data, ...(fileName ? { fileName } : {}) }
+  }
+
+  it('is empty for a tool_result with no images', () => {
     const messages = [
       message('assistant', [{ type: 'tool_result', toolUseId: 't1', toolResult: 'done' }])
     ]
     expect(deriveToolResultGallery(messages)).toEqual([])
   })
 
-  it('reads a ready-made src', () => {
-    const messages = [message('assistant', [toolResult('t1', [{ src: 'blob:x', fileName: 'x.png' }])], 'm-1')]
-    expect(deriveToolResultGallery(messages)).toEqual([
-      { key: 'm-1#t1#0', src: 'blob:x', fileName: 'x.png' }
-    ])
-  })
-
-  it('reads a mediaType + base64Data pair', () => {
+  it('builds a data URI from mediaType + base64Data, keyed by message#toolUse#index', () => {
     const messages = [
-      message('assistant', [toolResult('t1', [{ mediaType: 'image/webp', base64Data: 'ZZZ' }])], 'm-1')
+      message('assistant', [toolResult('t1', [toolImage('ZZZ', 'shot.png')])], 'm-1')
     ]
     expect(deriveToolResultGallery(messages)).toEqual([
-      { key: 'm-1#t1#0', src: 'data:image/webp;base64,ZZZ', fileName: undefined }
+      {
+        key: 'm-1#t1#0',
+        src: 'data:image/png;base64,ZZZ',
+        fileName: 'shot.png',
+        toolUseId: 't1',
+        indexWithinResult: 0
+      }
     ])
+    expect(toolResultKey('m-1', 't1', 0)).toBe('m-1#t1#0')
   })
 
-  it('skips malformed entries instead of rendering broken images', () => {
+  it('flattens several tool calls and several images per call, in order', () => {
     const messages = [
       message(
         'assistant',
         [
-          toolResult('t1', [
-            null,
-            'nope',
-            { mediaType: 'image/png' },
-            { base64Data: 'AAA' },
-            { src: '' },
-            { src: 'ok:1' }
-          ])
+          toolResult('t1', [toolImage('A'), toolImage('B')]),
+          { type: 'text', text: 'between' },
+          toolResult('t2', [toolImage('C')])
         ],
         'm-1'
-      )
+      ),
+      message('assistant', [toolResult('t3', [toolImage('D')])], 'm-2')
     ]
-    expect(deriveToolResultGallery(messages)).toEqual([{ key: 'm-1#t1#0', src: 'ok:1', fileName: undefined }])
+    expect(deriveToolResultGallery(messages).map((e) => [e.key, e.src])).toEqual([
+      ['m-1#t1#0', 'data:image/png;base64,A'],
+      ['m-1#t1#1', 'data:image/png;base64,B'],
+      ['m-1#t2#0', 'data:image/png;base64,C'],
+      ['m-2#t3#0', 'data:image/png;base64,D']
+    ])
   })
 
-  it('ignores a non-array images field', () => {
-    expect(deriveToolResultGallery([message('assistant', [toolResult('t1', { a: 1 })])])).toEqual([])
+  it('includes tool results on USER-role messages (Claude attaches them there)', () => {
+    // The subagent-watcher path emits tool_result blocks on a synthetic
+    // user-role message — unlike the attachments gallery, this one is
+    // role-agnostic on purpose.
+    const messages = [message('user', [toolResult('t1', [toolImage('U')])], 'm-u')]
+    expect(deriveToolResultGallery(messages).map((e) => e.key)).toEqual(['m-u#t1#0'])
+  })
+
+  it('reuses the same data-URI string across derivations (no re-encode per partial)', () => {
+    const msg = message('assistant', [toolResult('t1', [toolImage('AAA')])])
+    expect(deriveToolResultGallery([msg])[0].src).toBe(deriveToolResultGallery([msg])[0].src)
   })
 })
 

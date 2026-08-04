@@ -766,6 +766,38 @@ describe('extractToolResult', () => {
     expect(res?.isError).toBe(false)
   })
 
+  it('carries state.attachments data-URIs onto the result as images (live path)', () => {
+    // Verified against the pinned vendor source: a tool that returns media has
+    // the FilePart attachments on its OWN tool part state.attachments
+    // (processor.ts completeToolCall / ToolStateCompleted.attachments), not as
+    // separate assistant-message file parts. They were dropped entirely.
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c-img',
+      state: {
+        status: 'completed',
+        output: 'Image read successfully',
+        attachments: [
+          { type: 'file', mime: 'image/png', url: 'data:image/png;base64,LIVE', filename: 'a.png' },
+          { type: 'file', mime: 'image/tiff', url: 'data:image/tiff;base64,DROP' }
+        ]
+      }
+    })
+    expect(res?.images).toEqual([
+      { mediaType: 'image/png', base64Data: 'LIVE', fileName: 'a.png' }
+    ])
+  })
+
+  it('omits images for a tool that returned none', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c-plain',
+      state: { status: 'completed', output: 'text only' }
+    })
+    expect(res).not.toBeNull()
+    expect('images' in res!).toBe(false)
+  })
+
   it('returns error result for errored tool', () => {
     const res = extractToolResult('p1', {
       type: 'tool',

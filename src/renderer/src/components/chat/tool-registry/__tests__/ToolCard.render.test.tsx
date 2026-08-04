@@ -454,3 +454,113 @@ describe('ToolCard — approval', () => {
     expect(screen.getByText('Deny')).toBeInTheDocument()
   })
 })
+
+describe('ToolCard — tool-result images strip', () => {
+  const IMAGES = [
+    { mediaType: 'image/png' as const, base64Data: 'AAA', fileName: 'a.png' },
+    { mediaType: 'image/webp' as const, base64Data: 'BBB' }
+  ]
+
+  function imageResult(): ToolResultBlock {
+    return { type: 'tool_result', toolUseId: 'tu-1', toolResult: '', isError: false, images: IMAGES }
+  }
+
+  it('renders one thumb per image for a fileRead whose result text is empty', () => {
+    // FileReadBody hides its whole result section when toolResult is '' — the
+    // strip lives in ToolCard, so an image-only Read still shows its images.
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'fileRead',
+          view: { kind: 'fileRead', path: '/shot.png', content: '' },
+          block: block('Read', { file_path: '/shot.png' }),
+          result: imageResult()
+        })}
+      />
+    )
+    expect(screen.queryByTestId('CodeView')).toBeNull()
+    const thumbs = screen.getAllByTestId('ToolResultImages.thumb')
+    expect(thumbs).toHaveLength(2)
+    expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,AAA'
+    )
+    expect((thumbs[1].querySelector('img') as HTMLImageElement).src).toBe(
+      'data:image/webp;base64,BBB'
+    )
+  })
+
+  it('stays visible while the card is COLLAPSED (the image is the result)', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'fileRead',
+          view: { kind: 'fileRead', path: '/shot.png', content: '' },
+          block: block('Read', { file_path: '/shot.png' }),
+          result: imageResult(),
+          expandToolCalls: false,
+          expandReadResults: false
+        })}
+      />
+    )
+    expect(screen.queryByTestId('FileReadBody')).toBeNull()
+    expect(screen.getAllByTestId('ToolResultImages.thumb')).toHaveLength(2)
+  })
+
+  it('covers a non-Read kind with no per-kind wiring (mcp)', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'mcp',
+          view: { kind: 'mcp', input: {} },
+          block: block('mcp__shots__capture', {}),
+          result: { ...imageResult(), toolResult: 'ok' }
+        })}
+      />
+    )
+    expect(screen.getAllByTestId('ToolResultImages.thumb')).toHaveLength(2)
+  })
+
+  it('renders nothing for an empty images array (never an empty bordered strip)', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'ls', output: 'a' },
+          block: block('Bash', { command: 'ls' }),
+          result: { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'a', images: [] }
+        })}
+      />
+    )
+    expect(screen.queryByTestId('ToolResultImages')).toBeNull()
+  })
+
+  it('custom-layout kinds render their own card and so get NO strip', () => {
+    // diagram/mockup synthesize their visual from the tool INPUT and have never
+    // carried returned images — documented limitation, pinned here.
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'diagram',
+          view: { kind: 'diagram', source: 'graph TD; A-->B', title: 'Flow' },
+          block: block('mcp__claude-ui__render_mermaid', { source: 'graph TD; A-->B' }),
+          result: imageResult()
+        })}
+      />
+    )
+    expect(screen.queryByTestId('ToolResultImages')).toBeNull()
+  })
+
+  it('thumbs are inert without an ImageGalleryProvider above', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'mcp',
+          view: { kind: 'mcp', input: {} },
+          block: block('mcp__shots__capture', {}),
+          result: imageResult()
+        })}
+      />
+    )
+    expect(screen.getAllByTestId('ToolResultImages.thumb')[0]).toBeDisabled()
+  })
+})

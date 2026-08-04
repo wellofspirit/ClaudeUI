@@ -33,6 +33,7 @@ import { parseModelString } from '../opencode/model-discovery'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig } from './ui-config'
 import { transformAssistantMessage } from './assistant-message'
+import { extractToolResultContent } from './tool-result-content'
 // event-mapper.ts is a leaf module (no cycle risk — it does not import
 // OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
@@ -2048,20 +2049,13 @@ export class CrossEngineDispatcher {
         if (!block || block.type !== 'tool_result') continue
         const toolResultToolUseId = block.tool_use_id as string | undefined
         if (!toolResultToolUseId) continue
-        let resultText = ''
-        const blockContent = block.content
-        if (typeof blockContent === 'string') {
-          resultText = blockContent
-        } else if (Array.isArray(blockContent)) {
-          resultText = (blockContent as Array<Record<string, unknown>>)
-            .map((c) => (c.text as string) || '')
-            .join('\n')
-        }
+        const { text: resultText, images } = extractToolResultContent(block.content)
         entry.ctx.emit('session:subagent-tool-result', {
           toolUseId,
           toolResultToolUseId,
           result: resultText,
-          isError: !!block.is_error
+          isError: !!block.is_error,
+          ...(images ? { images } : {})
         })
       }
     }

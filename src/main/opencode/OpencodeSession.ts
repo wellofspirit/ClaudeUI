@@ -728,7 +728,8 @@ export class OpencodeSession extends BaseSession {
               toolUseId: block.toolUseId,
               result: block.toolResult,
               isError: block.isError ?? false,
-              ...(block.fileDiffs ? { fileDiffs: block.fileDiffs } : {})
+              ...(block.fileDiffs ? { fileDiffs: block.fileDiffs } : {}),
+              ...(block.images ? { images: block.images } : {})
             })
           }
         }
@@ -1195,7 +1196,8 @@ export class OpencodeSession extends BaseSession {
                   toolResultToolUseId: toolRes.toolUseId,
                   result: toolRes.result,
                   isError: toolRes.isError,
-                  ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {})
+                  ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {}),
+                  ...(toolRes.images ? { images: toolRes.images } : {})
                 })
               }
             }

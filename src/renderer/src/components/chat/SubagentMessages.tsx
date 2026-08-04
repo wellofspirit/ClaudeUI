@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import type { ChatMessage, ContentBlock } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { ImageGalleryProvider } from '../shared/ImageViewer'
 import { ToolCallBlock } from './ToolCallBlock'
 
 interface Props {
@@ -71,23 +72,32 @@ export const SubagentMessages = memo(function SubagentMessages({
 
   return (
     <div data-testid="SubagentMessages" className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight }}>
-      {messages.map((msg) => (
-        <div key={msg.id} data-testid="SubagentMessage" data-id={msg.id} className="flex flex-col gap-1.5">
-          {msg.content.map((block, i) => {
-            if (block.type === 'tool_result') return null
-            if (block.type === 'tool_use') {
-              return (
-                <ToolCallBlock
-                  key={`${msg.id}-${i}`}
-                  block={block}
-                  result={resultMap.get(block.toolUseId)}
-                />
-              )
-            }
-            return <ContentBlockView key={`${msg.id}-${i}`} block={block} />
-          })}
-        </div>
-      ))}
+      {/* Its OWN gallery, scoped to the subagent's messages. A subagent's tool
+          results live in `subagentMessages`, outside the chat provider's message
+          list, so without this the image thumbnails inside these cards would
+          render as clickable-but-dead (openToolResult finds no entry). Nesting
+          shadows the outer provider only within this list, which is exactly the
+          scoping we want: paging a subagent's images shouldn't walk into the
+          parent transcript's. Renders a fragment — no extra wrapper element. */}
+      <ImageGalleryProvider messages={messages}>
+        {messages.map((msg) => (
+          <div key={msg.id} data-testid="SubagentMessage" data-id={msg.id} className="flex flex-col gap-1.5">
+            {msg.content.map((block, i) => {
+              if (block.type === 'tool_result') return null
+              if (block.type === 'tool_use') {
+                return (
+                  <ToolCallBlock
+                    key={`${msg.id}-${i}`}
+                    block={block}
+                    result={resultMap.get(block.toolUseId)}
+                  />
+                )
+              }
+              return <ContentBlockView key={`${msg.id}-${i}`} block={block} />
+            })}
+          </div>
+        ))}
+      </ImageGalleryProvider>
     </div>
   )
 })

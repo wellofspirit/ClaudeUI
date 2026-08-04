@@ -11,6 +11,7 @@ export {
   deriveAttachmentGallery,
   deriveGalleries,
   deriveToolResultGallery,
-  imageBlocksOf
+  imageBlocksOf,
+  toolResultKey
 } from './gallery'
 export type { DerivedGalleries, GalleryEntry } from './gallery'

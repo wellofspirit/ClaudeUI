@@ -8,6 +8,7 @@ import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts } from './claude-session'
 import { BaseSession } from '../providers/BaseSession'
 import { loadSessionHistory } from './session-history'
+import { extractToolResultContent } from './tool-result-content'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import {
@@ -848,21 +849,14 @@ export class AutomationManager {
       const toolUseId = block.tool_use_id as string
       if (!toolUseId) continue
 
-      let resultText = ''
-      const blockContent = block.content
-      if (typeof blockContent === 'string') {
-        resultText = blockContent
-      } else if (Array.isArray(blockContent)) {
-        resultText = blockContent
-          .map((c: Record<string, unknown>) => (c.text as string) || '')
-          .join('\n')
-      }
+      const { text: resultText, images } = extractToolResultContent(block.content)
 
       results.push({
         type: 'tool_result',
         toolUseId,
         toolResult: resultText,
-        isError: !!block.is_error
+        isError: !!block.is_error,
+        ...(images ? { images } : {})
       })
     }
     return results

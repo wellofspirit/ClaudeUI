@@ -54,3 +54,47 @@ describe('SubagentMessages — persisted thinking block honors expandThinking', 
     expect(screen.getByText('a visible reasoning trace')).toBeInTheDocument()
   })
 })
+
+/**
+ * Subagent tool-result images. A subagent's results live in
+ * `subagentMessages`, outside the chat's ImageGalleryProvider, so
+ * SubagentMessages mounts its OWN provider scoped to its list — otherwise the
+ * thumbnails inside its tool cards would be clickable but dead.
+ */
+describe('SubagentMessages — tool-result image thumbnails', () => {
+  afterEach(() => {
+    useSessionStore.setState({ settings: defaultSettings })
+    document.body.style.overflow = ''
+  })
+
+  const toolMsg = (base64Data: string, fileName: string): ChatMessage => ({
+    id: 'm-tool-1',
+    role: 'assistant',
+    content: [
+      { type: 'tool_use', toolUseId: 'sub-tu-1', toolName: 'Read', toolInput: { file_path: '/s.png' } },
+      {
+        type: 'tool_result',
+        toolUseId: 'sub-tu-1',
+        toolResult: '',
+        isError: false,
+        images: [{ mediaType: 'image/png', base64Data, fileName }]
+      }
+    ],
+    timestamp: Date.now()
+  })
+
+  it('renders the strip and opens the scoped viewer on click', () => {
+    render(<SubagentMessages messages={[toolMsg('SUBIMG', 'sub.png')]} />)
+
+    const thumb = screen.getAllByTestId('ToolResultImages.thumb')[0]
+    expect(thumb).not.toBeDisabled()
+    fireEvent.click(thumb)
+
+    expect(screen.getByTestId('ImageViewerOverlay.filename').textContent).toBe('sub.png')
+    expect((screen.getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,SUBIMG'
+    )
+    // Only the tool-results gallery is non-empty here, so no tab bar.
+    expect(screen.queryAllByTestId('ImageViewerOverlay.tab')).toHaveLength(0)
+  })
+})

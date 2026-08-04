@@ -5,12 +5,13 @@
  * Two galleries, each a flat list in message order:
  *   - **Attachments** — every `image` block on a **user** message, i.e. what the
  *     user attached to a prompt. This is what a chat thumbnail opens.
- *   - **Tool results** — images an engine returned from a tool call. See the
- *     TODO on `deriveToolResultGallery`: the wire field is not in `ContentBlock`
- *     yet, so this gallery is empty in practice today.
+ *   - **Tool results** — images an engine returned from a tool call
+ *     (`tool_result.images`, see `ToolResultImage`): Read on a .png, a
+ *     screenshot tool, an MCP tool rendering something. This is what a tool
+ *     card's thumbnail strip opens.
  */
 
-import type { ChatMessage, ContentBlock } from '../../../../../shared/types'
+import type { ChatMessage, ContentBlock, ToolResultImage } from '../../../../../shared/types'
 import type { ViewerImage } from './ImageViewerOverlay'
 
 export const ATTACHMENTS_TAB_ID = 'attachments'
@@ -21,6 +22,14 @@ export const TOOL_RESULTS_TAB_LABEL = 'Tool results'
 /** A gallery entry plus the identity a thumbnail uses to find its own index. */
 export interface GalleryEntry extends ViewerImage {
   key: string
+  /**
+   * Tool-results gallery only: the tool call that returned this image, and the
+   * image's index within that result. A tool card knows only these two — it has
+   * no access to its own `ChatMessage.id` — so `openToolResult` resolves the
+   * gallery position from them instead of from `key`.
+   */
+  toolUseId?: string
+  indexWithinResult?: number
 }
 
 export interface DerivedGalleries {
@@ -80,64 +89,47 @@ export function deriveAttachmentGallery(messages: ChatMessage[]): GalleryEntry[]
 }
 
 /**
- * Shape this reader assumes for images attached to a tool result.
- *
- * TODO(tool-result-images): `ContentBlock`'s `tool_result` variant carries no
- * `images` field yet — threading engine-returned images through the wire is a
- * follow-up task. Rather than stub the gallery out to `[]` (which would leave the
- * whole multi-tab code path dead), the reader is written defensively against this
- * assumed shape and validates every field at runtime, so an engine that starts
- * emitting either form lights the tab up. When the field lands on `ContentBlock`
- * for real, delete this interface and the cast in `readToolResultImages` — the
- * rest of the function is already correct.
+ * `data:` URIs for tool-result images are cached per image object, for the same
+ * reason as `dataUriCache` above — a streaming turn re-derives the galleries on
+ * every partial, and a screenshot's base64 payload is megabytes.
  */
-interface ToolResultImagesShape {
-  images?: unknown
-}
+const toolResultUriCache = new WeakMap<ToolResultImage, string>()
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
+function toolResultImageSrc(image: ToolResultImage): string {
+  const cached = toolResultUriCache.get(image)
+  if (cached !== undefined) return cached
+  const src = `data:${image.mediaType};base64,${image.base64Data}`
+  toolResultUriCache.set(image, src)
+  return src
 }
 
 /**
- * Read the images off one `tool_result` block. Accepts either a ready-made `src`
- * or a `mediaType` + `base64Data` pair (the form the `image` content block uses);
- * anything else in the array is skipped rather than rendered as a broken image.
+ * Identity of one tool-result image: the message, the tool call that returned
+ * it, and its index within that result. `toolUseId` alone is not enough (a tool
+ * can return several images) and `messageId` alone is not enough (one assistant
+ * message holds many tool calls).
  */
-function readToolResultImages(block: ContentBlock): ViewerImage[] {
-  if (block.type !== 'tool_result') return []
-  const raw = (block as ContentBlock & ToolResultImagesShape).images
-  if (!Array.isArray(raw)) return []
-
-  const out: ViewerImage[] = []
-  for (const item of raw) {
-    if (!isRecord(item)) continue
-    const fileName = optionalString(item.fileName)
-    const src = optionalString(item.src)
-    if (src) {
-      out.push({ src, fileName })
-      continue
-    }
-    const mediaType = optionalString(item.mediaType)
-    const base64Data = optionalString(item.base64Data)
-    if (mediaType && base64Data) {
-      out.push({ src: `data:${mediaType};base64,${base64Data}`, fileName })
-    }
-  }
-  return out
+export function toolResultKey(
+  messageId: string,
+  toolUseId: string,
+  indexWithinResult: number
+): string {
+  return `${messageId}#${toolUseId}#${indexWithinResult}`
 }
 
 export function deriveToolResultGallery(messages: ChatMessage[]): GalleryEntry[] {
   const entries: GalleryEntry[] = []
   for (const message of messages) {
     for (const block of message.content) {
-      if (block.type !== 'tool_result') continue
-      readToolResultImages(block).forEach((image, i) => {
-        entries.push({ ...image, key: `${message.id}#${block.toolUseId}#${i}` })
+      if (block.type !== 'tool_result' || !block.images) continue
+      block.images.forEach((image, i) => {
+        entries.push({
+          key: toolResultKey(message.id, block.toolUseId, i),
+          src: toolResultImageSrc(image),
+          fileName: image.fileName,
+          toolUseId: block.toolUseId,
+          indexWithinResult: i
+        })
       })
     }
   }

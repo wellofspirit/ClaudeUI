@@ -13,6 +13,7 @@ import type {
   ModelCostEntry,
   EngineId
 } from '../../shared/types'
+import { isImageMediaType } from '../../shared/types'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { getContextWindowSize } from './context-window'
@@ -21,6 +22,7 @@ import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { extractToolResultContent } from './tool-result-content'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -809,22 +811,19 @@ function extractOutputFile(text: string): string {
 }
 
 /**
- * Media types the engine-neutral `image` ContentBlock models (src/shared/types.ts).
- * Anything else a transcript may carry is dropped rather than widened — the
- * renderer builds `data:<mediaType>;base64,…` URLs from these verbatim.
- */
-const ATTACHMENT_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
-
-/**
  * Rehydrate user-attachment blocks from a `type:'user'` transcript line's array
- * content. cli.js persists them as (verified against real transcripts):
+ * content. Sibling to `extractToolResultImages` (tool-result-content.ts), which
+ * reads the same wire shape out of a tool_result's content.
+ *
+ * cli.js persists them as (verified against real transcripts):
  *
  *   { type:'image',    source:{ type:'base64', media_type:'image/png', data:'<b64>' } }
  *   { type:'document', source:{ type:'base64', media_type:'application/pdf', data:'<b64>' } }
  *
  * The transcript carries no filename, so `fileName` is omitted. Blocks with a
- * non-base64 source, a missing/empty `data`, or a media type outside the model's
- * allowlist are skipped — never thrown on (a transcript is untrusted input).
+ * non-base64 source, a missing/empty `data`, or a media type outside
+ * `IMAGE_MEDIA_TYPES` are skipped — never thrown on (a transcript is untrusted
+ * input).
  */
 function extractAttachmentBlocks(content: unknown): ContentBlock[] {
   if (!Array.isArray(content)) return []
@@ -839,12 +838,8 @@ function extractAttachmentBlocks(content: unknown): ContentBlock[] {
     const data = source.data
     if (typeof mediaType !== 'string' || typeof data !== 'string' || !data) continue
     if (block.type === 'image') {
-      if (!ATTACHMENT_IMAGE_MEDIA_TYPES.has(mediaType)) continue
-      blocks.push({
-        type: 'image',
-        mediaType: mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data: data
-      })
+      if (!isImageMediaType(mediaType)) continue
+      blocks.push({ type: 'image', mediaType, base64Data: data })
     } else if (mediaType === 'application/pdf') {
       blocks.push({ type: 'document', mediaType: 'application/pdf', base64Data: data })
     }
@@ -1075,14 +1070,7 @@ export async function loadSessionHistory(
           if (hasToolResult) {
             for (const block of content) {
               if (block.type === 'tool_result' && block.tool_use_id) {
-                let resultText = ''
-                if (typeof block.content === 'string') {
-                  resultText = block.content
-                } else if (Array.isArray(block.content)) {
-                  resultText = block.content
-                    .map((c: Record<string, unknown>) => (c.text as string) || '')
-                    .join('\n')
-                }
+                const { text: resultText, images } = extractToolResultContent(block.content)
 
                 // Extract agentId from Task tool results for mapping
                 const agentMatch = resultText.match(/(?:agentId|agent_id):\s*(\S+)/)
@@ -1106,7 +1094,8 @@ export async function loadSessionHistory(
                           type: 'tool_result',
                           toolUseId: block.tool_use_id,
                           toolResult: resultText,
-                          isError: !!block.is_error
+                          isError: !!block.is_error,
+                          ...(images ? { images } : {})
                         }
                       ]
                     }
@@ -1155,20 +1144,13 @@ export async function loadSessionHistory(
                 toolUseId: block.id as string
               }
             } else if (blockType === 'tool_result') {
-              const resultContent = block.content
-              let text = ''
-              if (typeof resultContent === 'string') {
-                text = resultContent
-              } else if (Array.isArray(resultContent)) {
-                text = resultContent
-                  .map((c: Record<string, unknown>) => (c.text as string) || '')
-                  .join('\n')
-              }
+              const { text, images } = extractToolResultContent(block.content)
               return {
                 type: 'tool_result' as const,
                 toolUseId: block.tool_use_id as string,
                 toolResult: text,
-                isError: block.is_error as boolean
+                isError: block.is_error as boolean,
+                ...(images ? { images } : {})
               }
             } else if (blockType === 'thinking') {
               return { type: 'thinking' as const, text: block.thinking as string }
@@ -1523,14 +1505,7 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           if (hasToolResult && isArray) {
             for (const block of content) {
               if (block.type === 'tool_result' && block.tool_use_id) {
-                let resultText = ''
-                if (typeof block.content === 'string') {
-                  resultText = block.content
-                } else if (Array.isArray(block.content)) {
-                  resultText = block.content
-                    .map((c: Record<string, unknown>) => (c.text as string) || '')
-                    .join('\n')
-                }
+                const { text: resultText, images } = extractToolResultContent(block.content)
                 for (let i = messages.length - 1; i >= 0; i--) {
                   const msg = messages[i]
                   if (msg.role !== 'assistant') continue
@@ -1547,7 +1522,8 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
                           type: 'tool_result',
                           toolUseId: block.tool_use_id,
                           toolResult: resultText,
-                          isError: !!block.is_error
+                          isError: !!block.is_error,
+                          ...(images ? { images } : {})
                         }
                       ]
                     }
@@ -1574,16 +1550,13 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
                 toolUseId: block.id as string
               }
             if (blockType === 'tool_result') {
-              const rc = block.content
-              let text = ''
-              if (typeof rc === 'string') text = rc
-              else if (Array.isArray(rc))
-                text = rc.map((c: Record<string, unknown>) => (c.text as string) || '').join('\n')
+              const { text, images } = extractToolResultContent(block.content)
               return {
                 type: 'tool_result' as const,
                 toolUseId: block.tool_use_id as string,
                 toolResult: text,
-                isError: block.is_error as boolean
+                isError: block.is_error as boolean,
+                ...(images ? { images } : {})
               }
             }
             if (blockType === 'thinking')

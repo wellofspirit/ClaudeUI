@@ -23,7 +23,13 @@ import { logger } from '../services/logger'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
-import { mapPiEvent, createPiMapperState, buildPiChatMessage } from './event-mapper'
+import {
+  mapPiEvent,
+  createPiMapperState,
+  buildPiChatMessage,
+  piToolResultImages,
+  piToolResultText
+} from './event-mapper'
 import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
 import type {
   PiCloneData,
@@ -1155,7 +1161,8 @@ export class PiSession extends BaseSession {
           toolUseId: output.toolUseId,
           result: output.result,
           isError: output.isError,
-          ...(output.fileDiffs ? { fileDiffs: output.fileDiffs } : {})
+          ...(output.fileDiffs ? { fileDiffs: output.fileDiffs } : {}),
+          ...(output.images ? { images: output.images } : {})
         })
         break
 
@@ -1259,15 +1266,15 @@ export class PiSession extends BaseSession {
           const message = buildPiChatMessage(uuid(), msg.content)
           this.send('session:subagent-message', { toolUseId, message })
         } else if (msg.role === 'toolResult') {
-          const result = msg.content
-            .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
-            .map((b) => b.text)
-            .join('')
+          // Same helpers as the own-turn path (event-mapper.ts) so a subagent's
+          // image-returning tool lights up its card the same way.
+          const images = piToolResultImages(msg.content)
           this.send('session:subagent-tool-result', {
             toolUseId,
             toolResultToolUseId: msg.toolCallId,
-            result,
-            isError: msg.isError
+            result: piToolResultText(msg.content),
+            isError: msg.isError,
+            ...(images ? { images } : {})
           })
         }
         // user/bashExecution: never emitted by the child's own JSON-mode

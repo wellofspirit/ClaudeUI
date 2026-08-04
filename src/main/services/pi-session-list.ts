@@ -20,6 +20,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { ChatMessage, ContentBlock, ForkAnchorResult, SessionInfo } from '../../shared/types'
+import { isImageMediaType } from '../../shared/types'
 import type {
   PiAgentMessage,
   PiImageContent,
@@ -30,6 +31,7 @@ import type {
   PiUserMessage
 } from '../pi/pi-protocol'
 import { cwdToProjectKey } from '../../shared/project-key'
+import { piToolResultImages, piToolResultText } from '../pi/event-mapper'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
 
@@ -323,15 +325,15 @@ export function convertPiEntryMessage(
         })
         const result = toolResultsByCallId.get(block.id)
         if (result) {
-          const resultText = result.content
-            .filter((b): b is PiTextContent => b.type === 'text')
-            .map((b) => b.text)
-            .join('')
+          // Shared with the live mapper (pi/event-mapper.ts) so a replayed
+          // transcript produces byte-identical text + the same image set.
+          const images = piToolResultImages(result.content)
           content.push({
             type: 'tool_result',
             toolUseId: block.id,
-            toolResult: resultText,
-            isError: result.isError
+            toolResult: piToolResultText(result.content),
+            isError: result.isError,
+            ...(images ? { images } : {})
           })
         }
       }
@@ -344,8 +346,6 @@ export function convertPiEntryMessage(
   return null
 }
 
-const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
-
 function convertPiTextOrImageContent(content: string | Array<PiTextContent | PiImageContent>): ContentBlock[] {
   if (typeof content === 'string') {
     return content ? [{ type: 'text', text: content }] : []
@@ -354,14 +354,10 @@ function convertPiTextOrImageContent(content: string | Array<PiTextContent | PiI
   for (const b of content) {
     if (b.type === 'text') {
       if (b.text) blocks.push({ type: 'text', text: b.text })
-    } else if (ALLOWED_IMAGE_MIME_TYPES.has(b.mimeType)) {
-      blocks.push({
-        type: 'image',
-        mediaType: b.mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        base64Data: b.data
-      })
+    } else if (isImageMediaType(b.mimeType)) {
+      blocks.push({ type: 'image', mediaType: b.mimeType, base64Data: b.data })
     }
-    // Unrecognised mime types are dropped — ClaudeUI only ever sends the 4 above.
+    // Unrecognised mime types are dropped — see IMAGE_MEDIA_TYPES.
   }
   return blocks
 }

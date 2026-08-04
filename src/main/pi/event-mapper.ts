@@ -12,8 +12,9 @@
  *   turn_end → … → agent_end → agent_settled (the real turn-complete signal).
  */
 import { v4 as uuid } from 'uuid'
-import type { ChatMessage, ContentBlock, FileDiff } from '../../shared/types'
-import type { PiAgentMessage, PiAssistantContentBlock, PiAssistantMessage, PiEvent, PiToolExecutionPartialResult } from './pi-protocol'
+import type { ChatMessage, ContentBlock, FileDiff, ToolResultImage } from '../../shared/types'
+import { isImageMediaType } from '../../shared/types'
+import type { PiAgentMessage, PiAssistantContentBlock, PiAssistantMessage, PiEvent, PiImageContent, PiTextContent, PiToolExecutionPartialResult } from './pi-protocol'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -88,7 +89,15 @@ export interface PiSubagentUpdatePayload {
 export type PiMapperOutput =
   | { kind: 'stream'; streamType: 'text' | 'thinking'; delta: string; messageId: string }
   | { kind: 'message'; message: ChatMessage }
-  | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] }
+  | {
+      kind: 'tool_result'
+      toolUseId: string
+      result: string
+      isError: boolean
+      fileDiffs?: FileDiff[]
+      /** Images the tool returned (pi `image` content blocks). Omitted when none. */
+      images?: ToolResultImage[]
+    }
   | { kind: 'usage'; provider: string; modelId: string; tokens: PiUsageTokens; costUsd: number; messageId: string }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
@@ -219,10 +228,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       }
 
       if (msg.role === 'toolResult') {
-        const result = msg.content
-          .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
-          .map((b) => b.text)
-          .join('')
+        const result = piToolResultText(msg.content)
+        // Images the tool RETURNED (pi's read on a .png, screenshot tools).
+        // NOTE: only the FINAL result carries them through — the in-flight
+        // `tool_execution_update` path (extractPartialResultText) stays
+        // text-only by design, so a long-running image tool shows its image
+        // once it completes.
+        const images = piToolResultImages(msg.content)
 
         // M2: rich diff — pi's `edit` tool result carries a ready-made unified
         // diff at msg.details.patch, but (unlike opencode's apply_patch/edit)
@@ -248,7 +260,8 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
             toolUseId: msg.toolCallId,
             result,
             isError: msg.isError,
-            ...(fileDiffs ? { fileDiffs } : {})
+            ...(fileDiffs ? { fileDiffs } : {}),
+            ...(images ? { images } : {})
           }
         ]
 
@@ -405,6 +418,43 @@ function buildPiEditFileDiffs(
   }
 
   return [{ path, patch, changeType: toolName === 'write' ? 'add' : 'update', additions, deletions }]
+}
+
+/**
+ * Join the text blocks of a pi toolResult's content. Exported because
+ * `pi-session-list.ts` replays the SAME `PiToolResultMessage` shape off disk and
+ * must produce the identical `toolResult` string as the live path.
+ */
+export function piToolResultText(content: Array<PiTextContent | PiImageContent>): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((b): b is PiTextContent => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+}
+
+/**
+ * Images a pi tool RETURNED, from its toolResult content blocks
+ * (`PiImageContent`: `{type:'image', data:<base64>, mimeType}` — note the
+ * camelCase `mimeType`, unlike Claude's nested `source.media_type`).
+ *
+ * `mimeType` is a free-form string on the wire, so it is filtered through
+ * `IMAGE_MEDIA_TYPES`; pi carries no filename, so `fileName` is omitted.
+ * Returns undefined (not []) when there is nothing to carry.
+ *
+ * Shared with the stored-replay path in pi-session-list.ts.
+ */
+export function piToolResultImages(
+  content: Array<PiTextContent | PiImageContent>
+): ToolResultImage[] | undefined {
+  if (!Array.isArray(content)) return undefined
+  const images: ToolResultImage[] = []
+  for (const b of content) {
+    if (b.type !== 'image') continue
+    if (!isImageMediaType(b.mimeType) || !b.data) continue
+    images.push({ mediaType: b.mimeType, base64Data: b.data })
+  }
+  return images.length > 0 ? images : undefined
 }
 
 /**

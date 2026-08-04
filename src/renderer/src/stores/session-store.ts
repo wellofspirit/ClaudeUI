@@ -48,6 +48,7 @@ import type {
   ModelRef,
   EngineConfig,
   FileDiff,
+  ToolResultImage,
   FileAttachment
 } from '../../../shared/types'
 
@@ -1051,7 +1052,8 @@ interface SessionState {
     toolUseId: string,
     result: string,
     isError: boolean,
-    fileDiffs?: FileDiff[]
+    fileDiffs?: FileDiff[],
+    images?: ToolResultImage[]
   ) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
   setSentFiles: (routingId: string, sentFiles: SentFile[]) => void
@@ -1077,7 +1079,8 @@ interface SessionState {
     toolResultToolUseId: string,
     result: string,
     isError: boolean,
-    fileDiffs?: FileDiff[]
+    fileDiffs?: FileDiff[],
+    images?: ToolResultImage[]
   ) => void
   setBashOutput: (
     routingId: string,
@@ -2149,7 +2152,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
-  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs) =>
+  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs, images) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -2180,7 +2183,8 @@ export const useSessionStore = create<SessionState>((set) => ({
                   toolUseId,
                   toolResult: result,
                   isError,
-                  ...(fileDiffs ? { fileDiffs } : {})
+                  ...(fileDiffs ? { fileDiffs } : {}),
+                  ...(images ? { images } : {})
                 }
               ]
             }
@@ -2350,7 +2354,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     toolResultToolUseId,
     result,
     isError,
-    fileDiffs
+    fileDiffs,
+    images
   ) =>
     set((state) => {
       const session = state.sessions[routingId]
@@ -2374,7 +2379,8 @@ export const useSessionStore = create<SessionState>((set) => ({
                 toolUseId: toolResultToolUseId,
                 toolResult: result,
                 isError,
-                ...(fileDiffs ? { fileDiffs } : {})
+                ...(fileDiffs ? { fileDiffs } : {}),
+                ...(images ? { images } : {})
               }
             ]
           }

@@ -12,7 +12,7 @@ import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { MessageBubble } from '../../../chat/MessageBubble'
 import { ImageGalleryProvider, useImageGallery } from '../ImageGalleryProvider'
-import type { ChatMessage, ContentBlock } from '../../../../../../shared/types'
+import type { ChatMessage, ContentBlock, ToolResultImage } from '../../../../../../shared/types'
 
 const ROUTE = 'route-image-gallery'
 
@@ -168,5 +168,144 @@ describe('ImageGalleryProvider + MessageBubble thumbnails', () => {
     )
     expect(seen).toHaveLength(2)
     expect(seen[1]).toBe(seen[0])
+  })
+})
+
+/**
+ * Layer 2b: images a TOOL returned — `tool_result.images` → the strip in the
+ * tool card → the viewer's "Tool results" tab.
+ *
+ * Rendered through the real MessageBubble → renderToolBlock → ToolCard chain, so
+ * this also pins that ToolCard's shared placement covers a kind whose body would
+ * otherwise hide the result section (fileRead with an empty `toolResult`, which
+ * is exactly what an image-only Read produces).
+ */
+describe('ImageGalleryProvider + tool-result image thumbnails', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    document.body.style.overflow = ''
+  })
+
+  function toolImage(base64Data: string, fileName?: string): ToolResultImage {
+    return { mediaType: 'image/png', base64Data, ...(fileName ? { fileName } : {}) }
+  }
+
+  /** An assistant turn: one Read tool_use + its image-only tool_result. */
+  function readWithImages(
+    id: string,
+    toolUseId: string,
+    images: ToolResultImage[],
+    toolResult = ''
+  ): ChatMessage {
+    return {
+      id,
+      role: 'assistant',
+      content: [
+        { type: 'tool_use', toolUseId, toolName: 'Read', toolInput: { file_path: '/shot.png' } },
+        { type: 'tool_result', toolUseId, toolResult, isError: false, images }
+      ],
+      timestamp: 2
+    }
+  }
+
+  it('renders one clickable thumb per returned image inside the tool card', () => {
+    const { getByTestId, getAllByTestId } = renderChat([
+      readWithImages('a1', 'tu-1', [toolImage('AAA', 'shot.png'), toolImage('BBB')])
+    ])
+    // Inside the card, not the message-attachment strip.
+    expect(getByTestId('ToolCard')).toContainElement(getByTestId('ToolResultImages'))
+
+    const thumbs = getAllByTestId('ToolResultImages.thumb')
+    expect(thumbs).toHaveLength(2)
+    expect(thumbs.map((t) => t.getAttribute('data-id'))).toEqual(['0', '1'])
+    expect(thumbs[0]).not.toBeDisabled()
+    expect(thumbs[0].getAttribute('aria-label')).toBe('View image shot.png')
+    expect(thumbs[1].getAttribute('aria-label')).toBe('View tool result image')
+    expect((thumbs[0].querySelector('img') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,AAA'
+    )
+  })
+
+  it('opens the viewer on the Tool results tab, indexed across all tool calls', () => {
+    const { getAllByTestId, getByTestId } = renderChat([
+      readWithImages('a1', 'tu-1', [toolImage('AAA', 'a.png')]),
+      readWithImages('a2', 'tu-2', [toolImage('BBB', 'b.png'), toolImage('CCC', 'c.png')])
+    ])
+
+    // Third thumb overall = second image of the second tool call.
+    fireEvent.click(getAllByTestId('ToolResultImages.thumb')[2])
+    expect(getByTestId('ImageViewerOverlay.counter').textContent).toBe('3 / 3')
+    expect(getByTestId('ImageViewerOverlay.filename').textContent).toBe('c.png')
+    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,CCC'
+    )
+  })
+
+  it('shows both tabs when the conversation has attachments AND tool results, opening on the right one', () => {
+    const { getAllByTestId, getByTestId } = renderChat([
+      userMessage('m1', [image('USER')]),
+      readWithImages('a1', 'tu-1', [toolImage('TOOL', 't.png')])
+    ])
+
+    fireEvent.click(getAllByTestId('ToolResultImages.thumb')[0])
+    const tabs = getAllByTestId('ImageViewerOverlay.tab')
+    expect(tabs.map((t) => t.textContent)).toEqual(['Attachments', 'Tool results'])
+    expect(tabs.find((t) => t.getAttribute('data-active'))!.textContent).toBe('Tool results')
+    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,TOOL'
+    )
+
+    // Switching to Attachments pages that gallery instead.
+    fireEvent.click(tabs[0])
+    expect((getByTestId('ImageViewerOverlay.image') as HTMLImageElement).src).toBe(
+      'data:image/png;base64,USER'
+    )
+  })
+
+  it('a user attachment thumb still opens the Attachments tab when both galleries exist', () => {
+    const { getAllByTestId } = renderChat([
+      userMessage('m1', [image('USER')]),
+      readWithImages('a1', 'tu-1', [toolImage('TOOL')])
+    ])
+    fireEvent.click(getAllByTestId('MessageBubble.imageThumb')[0])
+    const active = getAllByTestId('ImageViewerOverlay.tab').find((t) =>
+      t.getAttribute('data-active')
+    )!
+    expect(active.textContent).toBe('Attachments')
+  })
+
+  it('renders no strip for a tool result without images', () => {
+    const { queryByTestId } = renderChat([
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', toolUseId: 'tu-1', toolName: 'Bash', toolInput: { command: 'ls' } },
+          { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'a\nb', isError: false }
+        ],
+        timestamp: 2
+      }
+    ])
+    expect(queryByTestId('ToolResultImages')).toBeNull()
+  })
+
+  it('renders inert thumbnails when no provider is mounted', () => {
+    const { getAllByTestId, queryByTestId } = renderChat(
+      [readWithImages('a1', 'tu-1', [toolImage('AAA')])],
+      false
+    )
+    const thumb = getAllByTestId('ToolResultImages.thumb')[0]
+    expect(thumb).toBeDisabled()
+    fireEvent.click(thumb)
+    expect(queryByTestId('ImageViewerOverlay')).toBeNull()
   })
 })

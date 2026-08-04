@@ -30,10 +30,63 @@ export interface FileDiff {
   changeType?: 'add' | 'update' | 'delete' | 'move'
 }
 
+/**
+ * An image an ENGINE returned from a tool call — Read on a .png, a screenshot
+ * tool, an MCP tool rendering something. Distinct from the `image` ContentBlock,
+ * which is an image the USER attached to a prompt: these hang off the
+ * `tool_result` block that produced them, feed the image viewer's "Tool results"
+ * gallery, and are never sent back up as prompt input.
+ *
+ * Field names are load-bearing — the gallery reader
+ * (renderer/components/shared/ImageViewer/gallery.ts) builds
+ * `data:<mediaType>;base64,<base64Data>` from them verbatim, so the media type
+ * is narrowed to what an `<img src>` will actually render.
+ *
+ * Producers must OMIT the carrying `images` key when there is nothing to carry
+ * (never `images: []`) — the renderer's gallery/tab visibility is driven by
+ * presence.
+ */
+export interface ToolResultImage {
+  mediaType: ImageMediaType
+  base64Data: string
+  /** Only when the engine supplies one (opencode file parts); Claude transcripts carry none. */
+  fileName?: string
+}
+
+/** The image media types the `image` ContentBlock and `ToolResultImage` model. */
+export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+
+/**
+ * Runtime companion to `ImageMediaType` — the single allowlist every engine
+ * adapter filters through before emitting an image to the renderer (there used
+ * to be one hand-rolled copy per adapter). Anything outside it (image/svg+xml,
+ * image/tiff, image/bmp, …) is DROPPED rather than widened: the renderer builds
+ * `data:<mediaType>;base64,…` verbatim, so an unrenderable type would surface as
+ * a broken image in the chat and the viewer.
+ */
+export const IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set<ImageMediaType>([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp'
+])
+
+/** Narrowing guard for `IMAGE_MEDIA_TYPES` — use instead of casting a string. */
+export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaType {
+  return typeof mediaType === 'string' && IMAGE_MEDIA_TYPES.has(mediaType)
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
-  | { type: 'tool_result'; toolUseId: string; toolResult: string; isError?: boolean; fileDiffs?: FileDiff[] }
+  | {
+      type: 'tool_result'
+      toolUseId: string
+      toolResult: string
+      isError?: boolean
+      fileDiffs?: FileDiff[]
+      images?: ToolResultImage[]
+    }
   | { type: 'thinking'; text: string; durationMs?: number }
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
   | { type: 'api_error'; errorType: string; errorMessage: string }
@@ -724,6 +777,8 @@ export interface SubagentToolResultData {
   result: string
   isError: boolean
   fileDiffs?: FileDiff[]
+  /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
+  images?: ToolResultImage[]
 }
 
 export interface BackgroundOutput {
@@ -937,7 +992,14 @@ interface SessionAPI {
   onToolResult(
     cb: (
       routingId: string,
-      data: { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] }
+      data: {
+        toolUseId: string
+        result: string
+        isError: boolean
+        fileDiffs?: FileDiff[]
+        /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
+        images?: ToolResultImage[]
+      }
     ) => void
   ): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void

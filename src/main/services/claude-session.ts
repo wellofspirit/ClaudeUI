@@ -19,6 +19,7 @@ import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
+import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -2385,15 +2386,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       const toolUseId = b.tool_use_id as string
       if (!toolUseId) continue
 
-      let resultText = ''
-      const blockContent = b.content
-      if (typeof blockContent === 'string') {
-        resultText = blockContent
-      } else if (Array.isArray(blockContent)) {
-        resultText = blockContent
-          .map((c: Record<string, unknown>) => (c.text as string) || '')
-          .join('\n')
-      }
+      // Images the tool RETURNED ride along in the same array content — see
+      // tool-result-content.ts. The text collapse is unchanged.
+      const { text: resultText, images } = extractToolResultContent(b.content)
 
       // Record agentId→toolUseId mapping for task notifications
       if (!parentToolUseId) {
@@ -2405,13 +2400,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           toolUseId: parentToolUseId,
           toolResultToolUseId: toolUseId,
           result: resultText,
-          isError: !!b.is_error
+          isError: !!b.is_error,
+          ...(images ? { images } : {})
         })
       } else {
         this.send('session:tool-result', {
           toolUseId,
           result: resultText,
-          isError: !!b.is_error
+          isError: !!b.is_error,
+          ...(images ? { images } : {})
         })
       }
 

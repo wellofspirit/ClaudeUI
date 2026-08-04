@@ -255,3 +255,125 @@ describe('loadSubagentHistory — user attachment rehydration', () => {
     expect(messages[0].content).toEqual([{ type: 'text', text: 'plain' }])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Tool-result images (a tool that RETURNED an image, e.g. Read on a .png)
+//
+// cli.js persists these as image content blocks INSIDE the tool_result block —
+// the same `{type:'image', source:{type:'base64',…}}` shape as a user
+// attachment, but hanging off the tool call rather than the prompt. Both
+// parsers collapsed the tool_result content with `(c.text)||''`, dropping them.
+// ---------------------------------------------------------------------------
+
+/** A `type:'user'` transcript line carrying tool_result blocks. */
+function toolResultLine(blocks: unknown[], uuid = 'tr1'): object {
+  return { type: 'user', message: { role: 'user', content: blocks }, uuid, timestamp: TS }
+}
+
+function toolResultBlock(toolUseId: string, content: unknown): object {
+  return { type: 'tool_result', tool_use_id: toolUseId, content }
+}
+
+/** An assistant line whose message content holds a tool_use (so results can attach). */
+function assistantToolUse(toolUseId: string, uuid = 'a1'): object {
+  return {
+    type: 'assistant',
+    message: {
+      id: `msg-${toolUseId}`,
+      content: [{ type: 'tool_use', id: toolUseId, name: 'Read', input: { file_path: '/x.png' } }]
+    },
+    uuid,
+    timestamp: TS
+  }
+}
+
+describe('loadSessionHistory — tool-result images', () => {
+  it('attaches images from a user-line tool_result to the preceding assistant message', async () => {
+    writeTranscript([
+      assistantToolUse('tu-1'),
+      toolResultLine([toolResultBlock('tu-1', [imageBlock('image/png', 'SHOT')])])
+    ])
+
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    const result = messages[0].content.find((b) => b.type === 'tool_result')
+    expect(result).toMatchObject({
+      type: 'tool_result',
+      toolUseId: 'tu-1',
+      images: [{ mediaType: 'image/png', base64Data: 'SHOT' }]
+    })
+  })
+
+  it('attaches images from an assistant-line tool_result block', async () => {
+    writeTranscript([
+      {
+        type: 'assistant',
+        message: {
+          id: 'msg-emb',
+          content: [
+            toolResultBlock('tu-emb', [
+              { type: 'text', text: 'Image read' },
+              imageBlock('image/webp', 'EMB')
+            ])
+          ]
+        },
+        uuid: 'a-emb',
+        timestamp: TS
+      }
+    ])
+
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages[0].content[0]).toMatchObject({
+      type: 'tool_result',
+      toolUseId: 'tu-emb',
+      images: [{ mediaType: 'image/webp', base64Data: 'EMB' }]
+    })
+  })
+
+  it('omits images for a text-only tool_result', async () => {
+    writeTranscript([
+      assistantToolUse('tu-txt'),
+      toolResultLine([toolResultBlock('tu-txt', 'plain output')])
+    ])
+
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    const result = messages[0].content.find((b) => b.type === 'tool_result')
+    expect(result).toBeDefined()
+    expect('images' in result!).toBe(false)
+  })
+})
+
+describe('loadSubagentHistory — tool-result images', () => {
+  it('attaches images from a user-line tool_result', async () => {
+    writeSubagentTranscript([
+      assistantToolUse('tu-s1', 'sa1'),
+      toolResultLine([toolResultBlock('tu-s1', [imageBlock('image/jpeg', 'SUBSHOT')])], 'str1')
+    ])
+
+    const messages = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
+    const result = messages[0].content.find((b) => b.type === 'tool_result')
+    expect(result).toMatchObject({
+      toolUseId: 'tu-s1',
+      images: [{ mediaType: 'image/jpeg', base64Data: 'SUBSHOT' }]
+    })
+  })
+
+  it('attaches images from an assistant-line tool_result block', async () => {
+    writeSubagentTranscript([
+      {
+        type: 'assistant',
+        message: {
+          id: 'msg-sub-emb',
+          content: [toolResultBlock('tu-s2', [imageBlock('image/gif', 'SUBEMB')])]
+        },
+        uuid: 'sa2',
+        timestamp: TS
+      }
+    ])
+
+    const messages = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
+    expect(messages[0].content[0]).toMatchObject({
+      toolUseId: 'tu-s2',
+      images: [{ mediaType: 'image/gif', base64Data: 'SUBEMB' }]
+    })
+  })
+})

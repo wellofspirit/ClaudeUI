@@ -309,9 +309,9 @@ export function useClaudeEvents(): void {
       window.api.onMessagesRetracted((routingId, { messageIds }) => {
         retractMessages(resolveRoutingId(routingId), messageIds)
       }),
-      window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs }) => {
+      window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs, images }) => {
         routingId = resolveRoutingId(routingId)
-        appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
+        appendToolResult(routingId, toolUseId, result, isError, fileDiffs, images)
         // Belt-and-suspenders: when cli.js has produced a result for this
         // tool_use, any approval still sitting in the store for it is
         // necessarily stale (resolver already ran). Clear it so late
@@ -411,7 +411,8 @@ export function useClaudeEvents(): void {
           data.toolResultToolUseId,
           data.result,
           data.isError,
-          data.fileDiffs
+          data.fileDiffs,
+          data.images
         )
       }),
       window.api.onBashOutput((routingId, data) => {
