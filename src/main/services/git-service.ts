@@ -619,6 +619,13 @@ export class GitService {
     }
   }
 
+  /**
+   * Begin polling `getStatus()` on `intervalMs`.
+   *
+   * Invariant: **every `startPolling()` emits the current status exactly once,
+   * then only on change.** `stopPolling()` (called first, below) clears the
+   * change-detection fingerprint to guarantee the first half of that.
+   */
   startPolling(callback: (status: GitStatusData) => void, intervalMs: number): void {
     this.stopPolling()
     const generation = ++this.pollGeneration
@@ -653,6 +660,19 @@ export class GitService {
     // Retire the current generation so an in-flight poll can't fire the
     // callback after the caller has torn its listener down.
     this.pollGeneration++
+    // Clear the change-detection fingerprint so the NEXT startPolling() always
+    // emits once. This lives here rather than in startPolling() because
+    // startPolling() calls us first — putting it here makes the reset
+    // unskippable on every (re)start path.
+    //
+    // Without it, a GitService cached by gitServiceManager comes back with a
+    // primed fingerprint and the new caller's first poll is suppressed. That is
+    // exactly what left a freshly connected remote client with no git status at
+    // all (its pill never rendered), and it also means a desktop re-watch of an
+    // unchanged cwd emits nothing — currently masked only by the renderer's
+    // gitStatusCache. `statusFingerprint()` always joins >= 9 parts, so '' can
+    // never collide with a real fingerprint.
+    this.lastStatusFingerprint = ''
     if (this.pollTimer) {
       clearInterval(this.pollTimer)
       this.pollTimer = null

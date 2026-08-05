@@ -13,6 +13,7 @@ import {
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
+import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../services/git-watch-registry'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { accountManager } from '../services/account-manager'
 import {
@@ -623,10 +624,25 @@ export function registerRemoteHandlers(
   // -------------------------------------------------------------------------
   // Git — full parity incl. mutations (user decision: token is the sole gate).
   // Same gitServiceManager the desktop git:* IPC handlers use (get/release).
-  // NOTE: git:start-watching / git:stop-watching are intentionally NOT
-  // registered — they are web no-ops by design (api-adapter), driven instead by
-  // the desktop's own polling broadcast over the remote bridge.
+  //
+  // Live watching goes through gitWatchRegistry, the SAME registry the desktop
+  // `git:start-watching` IPC handler uses, under a separate owner id. It must not
+  // start its own poller: GitService.startPolling() holds a single callback, so
+  // that would replace the desktop's broadcast. The registry starts at most one
+  // poller per cwd, fans `git:status-update` out to the main window AND every
+  // extra window (the remote bridge is registered as one, so remote clients get
+  // it over the existing forwarding), and replays the cached status to a
+  // late-joining owner — the previous model, "driven by the desktop's own
+  // polling broadcast", was dead because that broadcast only fires on CHANGE and
+  // exists at all only if the desktop happens to be watching the same cwd.
   // -------------------------------------------------------------------------
+
+  dispatcher.register('git:start-watching', async (cwd: string) => {
+    gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+  })
+  dispatcher.register('git:stop-watching', async (cwd: string) => {
+    gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+  })
 
   dispatcher.register('git:check-repo', async (cwd: string) => withGit(cwd, (s) => s.isGitRepo()))
   dispatcher.register('git:status', async (cwd: string) => withGit(cwd, (s) => s.getStatus()))

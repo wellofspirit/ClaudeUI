@@ -424,8 +424,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
     gitPull: (cwd) => unwrap('git:pull', cwd),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
-    gitStartWatching: async () => {}, // Git polling not supported in remote
-    gitStopWatching: async () => {},
+    // Live watching is real over remote: the server shares one poller per cwd
+    // with the desktop (gitWatchRegistry) and pushes git:status-update over the
+    // bridge. Without these the pill never rendered — gitStatus stayed null.
+    gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
+    gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
 
     // File ops
     listDir: (dirPath) =>

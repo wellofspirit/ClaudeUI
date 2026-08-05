@@ -114,7 +114,9 @@ const gitSvcStub = vi.hoisted(() => ({
   push: vi.fn(async () => {}),
   pushWithUpstream: vi.fn(async () => {}),
   pull: vi.fn(async () => {}),
-  fetch: vi.fn(async () => {})
+  fetch: vi.fn(async () => {}),
+  startPolling: vi.fn(),
+  stopPolling: vi.fn()
 }))
 
 const gitManagerSpies = vi.hoisted(() => ({
@@ -247,6 +249,7 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
+import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../../services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
 import { setProxyEnv } from '../../sdk/proxy'
@@ -376,6 +379,9 @@ describe('registerRemoteHandlers', () => {
   })
 
   afterEach(() => {
+    // gitWatchRegistry is a module singleton shared with the desktop IPC path —
+    // unwind the remote owner so watch state can't leak between tests.
+    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     vi.clearAllMocks()
   })
 
@@ -743,13 +749,66 @@ describe('registerRemoteHandlers', () => {
         'git:push',
         'git:push-with-upstream',
         'git:pull',
-        'git:fetch'
+        'git:fetch',
+        // Live watching: previously unregistered web no-ops, which is why the
+        // remote client's gitStatus stayed null and its changes pill never
+        // rendered. Now routed through the shared gitWatchRegistry.
+        'git:start-watching',
+        'git:stop-watching'
       ]) {
+        // register() silently skips BLOCKED channels, so a channel appearing here
+        // also proves it is not on the denylist. (remote-channel-parity.test.ts
+        // asserts the denylist side independently, from source.)
         expect(channels).toContain(ch)
       }
-      // Web no-ops — deliberately NOT registered (desktop-driven polling).
-      expect(channels).not.toContain('git:start-watching')
-      expect(channels).not.toContain('git:stop-watching')
+    })
+
+    it('git:start-watching registers the remote owner and starts exactly one poller', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      ).resolves.toBeUndefined()
+      expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
+      expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
+      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([GIT_WATCH_OWNER_REMOTE])
+
+      // A second remote client on the same cwd attaches; it must NOT re-start the
+      // poller (that would replace the live callback).
+      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
+    })
+
+    it('a remote poll reaches the injected fan-out (i.e. the bridge/extra windows)', async () => {
+      const pushed: Array<{ cwd: string; status: unknown }> = []
+      // registerRemoteHandlers never installs a fan-out (session.ipc.ts owns the
+      // window handles and does that), so the singleton's broadcast is null here.
+      // Detach again at the end or this closure would silently become the
+      // broadcast for every later test in this file.
+      gitWatchRegistry.init((cwd, status) => pushed.push({ cwd, status }))
+      try {
+        await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+        const emit = gitSvcStub.startPolling.mock.calls[0][0] as (s: unknown) => void
+        emit({ files: [], branch: 'main' })
+        expect(pushed).toEqual([{ cwd: '/tmp/proj', status: { files: [], branch: 'main' } }])
+      } finally {
+        gitWatchRegistry.init(null)
+      }
+    })
+
+    it('git:stop-watching releases the remote owner and stops the poller', async () => {
+      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      await expect(
+        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/proj'))
+      ).resolves.toBeUndefined()
+      expect(gitSvcStub.stopPolling).toHaveBeenCalledTimes(1)
+      expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([])
+    })
+
+    it('git:stop-watching for a cwd nobody watches is a no-op', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/never'))
+      ).resolves.toBeUndefined()
+      expect(gitSvcStub.stopPolling).not.toHaveBeenCalled()
     })
 
     it('registers the multi-engine + account + generation channels', () => {

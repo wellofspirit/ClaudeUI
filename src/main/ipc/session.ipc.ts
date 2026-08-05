@@ -44,6 +44,7 @@ import {
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
+import { gitWatchRegistry, GIT_WATCH_OWNER_DESKTOP } from '../services/git-watch-registry'
 import {
   createWorktree,
   getWorktreeStatus,
@@ -1550,37 +1551,26 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     })
   )
 
-  // Git polling — persistent service per cwd
-  const gitWatchers = new Map<string, { refCount: number }>()
+  // Git polling — one poller per cwd, shared with the remote path through
+  // gitWatchRegistry. GitService.startPolling() holds a SINGLE callback, so two
+  // independent starts on one cwd would silently clobber each other; the
+  // registry is what keeps desktop and remote owners coexisting. This is also
+  // the only place that knows the window fan-out, so it installs it.
+  gitWatchRegistry.init((cwd, status) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('git:status-update', { cwd, status })
+    }
+    for (const w of BaseSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
+    }
+  })
 
   ipcMain.handle('git:start-watching', async (_e, cwd: string) => {
-    const existing = gitWatchers.get(cwd)
-    if (existing) {
-      existing.refCount++
-      return
-    }
-    gitWatchers.set(cwd, { refCount: 1 })
-    const svc = gitServiceManager.get(cwd)
-    svc.startPolling((status) => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('git:status-update', { cwd, status })
-      }
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
-      }
-    }, 5000)
+    gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
   })
 
   ipcMain.handle('git:stop-watching', async (_e, cwd: string) => {
-    const entry = gitWatchers.get(cwd)
-    if (!entry) return
-    entry.refCount--
-    if (entry.refCount <= 0) {
-      gitWatchers.delete(cwd)
-      const svc = gitServiceManager.getIfExists(cwd)
-      svc?.stopPolling()
-      gitServiceManager.release(cwd)
-    }
+    gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
   })
 
   // -------------------------------------------------------------------------

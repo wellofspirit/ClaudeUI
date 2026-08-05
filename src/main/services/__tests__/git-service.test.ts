@@ -1078,6 +1078,58 @@ describe('GitService polling change detection', () => {
 })
 
 // ---------------------------------------------------------------------------
+// startPolling — first-emit invariant
+//
+// Invariant: every startPolling() emits the CURRENT status exactly once, then
+// only on change. Before the fingerprint reset in stopPolling(), a GitService
+// handed back by gitServiceManager with a primed fingerprint swallowed the new
+// caller's first poll — which is why a freshly connected remote client received
+// no git:status-update at all and its changes pill never rendered.
+// ---------------------------------------------------------------------------
+
+describe('GitService polling first-emit invariant', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+  })
+
+  afterEach(async () => {
+    svc.stopPolling()
+    vi.restoreAllMocks()
+    await repo.cleanup()
+  })
+
+  it('a restart on a primed service still emits the current status (GUARD)', async () => {
+    // Long interval: every emission below must come from the INITIAL poll of its
+    // own startPolling() call, not from a later tick.
+    const first: GitStatusData[] = []
+    svc.startPolling((s) => first.push(s), 60_000)
+    await waitFor(() => first.length >= 1, 5000)
+    expect(first).toHaveLength(1)
+    svc.stopPolling()
+
+    // Second caller (the remote owner, or a desktop re-watch after a session
+    // switch) — same instance, unchanged working tree.
+    const second: GitStatusData[] = []
+    svc.startPolling((s) => second.push(s), 60_000)
+    await waitFor(() => second.length >= 1, 5000)
+    expect(second).toHaveLength(1)
+    expect(second[0].branch).toBe(first[0].branch)
+  })
+
+  it('emits exactly once while the tree stays unchanged', async () => {
+    const fired: GitStatusData[] = []
+    svc.startPolling((s) => fired.push(s), 20)
+    await waitFor(() => fired.length >= 1, 5000)
+    await sleep(300)
+    expect(fired).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // getStatus — untracked line-count budget + cache
 // ---------------------------------------------------------------------------
 

@@ -138,6 +138,11 @@ vi.mock('../tunnel-manager', () => {
 // Imported after the mocks are registered.
 import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
+import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../git-watch-registry'
+import { BaseSession } from '../../providers/BaseSession'
+import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
+import type { WsEvent } from '../../../shared/remote-protocol'
+import type { GitStatusData } from '../../../shared/types'
 import { computeStoredCredential } from '../remote-auth'
 import { TailscaleServeError, serveTargetForPort } from '../tailscale-manager'
 import type { ServeOccupancy } from '../tailscale-manager'
@@ -315,6 +320,19 @@ function waitForTerminal(ws: WebSocket): Promise<{ code?: number; reason?: strin
   })
 }
 
+/**
+ * Poll until `pred` holds. The server's own `ws.on('close')` bookkeeping runs
+ * after the client observes the close frame, so assertions about server-side
+ * state need a short settle window.
+ */
+async function waitUntil(pred: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -473,6 +491,188 @@ describe('RemoteServer', () => {
     // getStatus after stop() should reflect zero clients.
     expect(server.getStatus().connectedClients).toBe(0)
   })
+})
+
+// ---------------------------------------------------------------------------
+// Git watching lifecycle — a departed client must not leave a 5s poller behind.
+//
+// A remote client that drops abruptly (phone sleeps, tab closed) never sends
+// git:stop-watching, so the collective 'remote' owner in gitWatchRegistry has to
+// be released by the server itself once the last client is gone.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — git watch owner release', () => {
+  let server: RemoteServer
+  let port: number
+  let releaseSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    releaseSpy = vi.spyOn(gitWatchRegistry, 'releaseOwner')
+  })
+
+  afterEach(() => {
+    releaseSpy.mockRestore()
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  it("releases the 'remote' owner only when the LAST client disconnects", async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await Promise.all([c1.ready, c2.ready])
+    releaseSpy.mockClear()
+
+    c1.close()
+    await waitForTerminal(c1.ws)
+    await waitUntil(() => server.getStatus().connectedClients === 1)
+    // One client still connected — its watch must survive.
+    expect(releaseSpy).not.toHaveBeenCalled()
+
+    c2.close()
+    await waitForTerminal(c2.ws)
+    await waitUntil(() => releaseSpy.mock.calls.length > 0)
+    expect(releaseSpy).toHaveBeenCalledWith(GIT_WATCH_OWNER_REMOTE)
+  })
+
+  it('releases the owner on stop() without waiting for the sockets to close', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await c1.ready
+    releaseSpy.mockClear()
+
+    server.stop()
+    expect(releaseSpy).toHaveBeenCalledWith(GIT_WATCH_OWNER_REMOTE)
+  })
+
+  it('releasing an owner that holds nothing is harmless (no throw, real registry)', async () => {
+    releaseSpy.mockRestore()
+    const res = await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await c1.ready
+    c1.close()
+    await waitForTerminal(c1.ws)
+    await waitUntil(() => server.getStatus().connectedClients === 0)
+    expect(gitWatchRegistry.ownersOf('/anything')).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The user-visible remote chain, end to end, against a REAL git repo.
+//
+// Every hop below is unit-covered elsewhere, but nothing proved the whole path —
+// and the whole path is what silently broke: the pill stayed invisible on the web
+// client because no `git:status-update` frame ever reached it. This asserts the
+// exact frame the web client's `onGitStatusUpdate` consumes to populate
+// `gitStatus`, which is the single input GitChangesPill was missing.
+//
+// Real: the git repo, GitService + its poller, gitWatchRegistry, the RemoteBridge
+// registered as a BaseSession extra window, the event log, the WS broadcast, and
+// an authenticating client. GitService is deliberately NOT mocked — the payload
+// has to carry real `git status` output.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — remote git watching end-to-end', () => {
+  let server: RemoteServer
+  let port: number
+  let repo: TempGitRepo
+
+  beforeEach(async () => {
+    const dispatcher = new RemoteDispatcher()
+    // The live-watch pair, registered exactly as remote-handlers.ts does.
+    // `registerRemoteHandlers()` itself cannot be loaded in this file — it pulls
+    // the entire session/engine/auth service graph, which this file deliberately
+    // does not mock. That single hop (the `dispatcher.register` call and its owner
+    // id) is covered by remote-handlers.ipc.test.ts; everything DOWNSTREAM of the
+    // handler here is the real production path.
+    dispatcher.register('git:start-watching', async (cwd: string) => {
+      gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+    })
+    dispatcher.register('git:stop-watching', async (cwd: string) => {
+      gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+    })
+
+    server = new RemoteServer(dispatcher)
+    port = await ephemeralPort()
+
+    // Production installs this fan-out in registerSessionIpc(); replicated here
+    // verbatim minus the desktop main window (there is none in this harness). The
+    // `BaseSession.getExtraWindows()` hop is the load-bearing one: RemoteServer
+    // .start() registers its RemoteBridge there, and the bridge is what turns the
+    // send into a WS frame. Pushing to the server directly instead would bypass
+    // the bridge and prove nothing, so this is the ONLY wiring the test does.
+    gitWatchRegistry.init((cwd, status) => {
+      for (const w of BaseSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
+      }
+    })
+
+    // A committed file, then a real uncommitted modification to it.
+    repo = await makeTempGitRepo({ seed: { 'tracked.txt': 'v1\n' } })
+    await repo.writeFile('tracked.txt', 'v1\nv2\n')
+  })
+
+  afterEach(async () => {
+    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+    gitWatchRegistry.init(null)
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+    await repo.cleanup()
+  })
+
+  it(
+    'pushes a real git:status-update frame to an authenticated client after git:start-watching',
+    async () => {
+      const res = await server.start(port, '127.0.0.1')
+      const client = await connectRemoteClient({
+        url: `ws://127.0.0.1:${port}/`,
+        token: res.token
+      })
+      await client.ready
+
+      // Collect RAW frames: the assertion is about what actually crosses the
+      // socket, not about a helper's parsed convenience view.
+      const frames: WsEvent[] = []
+      client.onMessage((msg) => {
+        if (msg.type === 'event' && msg.channel === 'git:status-update') frames.push(msg)
+      })
+
+      await client.invoke('git:start-watching', repo.path)
+      expect(gitWatchRegistry.ownersOf(repo.path)).toEqual([GIT_WATCH_OWNER_REMOTE])
+
+      // No 5s wait: the poller's FIRST poll always emits (the fingerprint-reset
+      // invariant in GitService.stopPolling()). Generous ceiling only because a
+      // real `git status` on Windows costs a few hundred ms.
+      await waitUntil(() => frames.length > 0, 20000)
+      expect(frames).toHaveLength(1)
+
+      const payload = frames[0].args[0] as { cwd: string; status: GitStatusData }
+      expect(payload.cwd).toBe(repo.path)
+      expect(payload.status.branch).toBe('main')
+      expect(payload.status.files.length).toBeGreaterThan(0)
+      expect(payload.status.files.some((f) => f.path === 'tracked.txt')).toBe(true)
+      expect(payload.status.linesAdded).toBeGreaterThan(0)
+
+      // Tearing down removes the only owner, so the poller is stopped and the
+      // GitService released.
+      await client.invoke('git:stop-watching', repo.path)
+      expect(gitWatchRegistry.ownersOf(repo.path)).toEqual([])
+
+      const framesAfterStop = frames.length
+      client.close()
+      await waitForTerminal(client.ws)
+      expect(frames).toHaveLength(framesAfterStop)
+    },
+    40000
+  )
 })
 
 describe('RemoteServer — mockup HTTP route', () => {

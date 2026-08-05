@@ -9,6 +9,7 @@ import { app } from 'electron'
 import { EventLog } from './event-log'
 import { RemoteDispatcher } from './remote-dispatcher'
 import { RemoteBridge } from './remote-bridge'
+import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from './git-watch-registry'
 import { BaseSession } from '../providers/BaseSession'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
@@ -627,6 +628,10 @@ export class RemoteServer {
       ws.close(1001, 'Server stopping')
     }
     this.clients.clear()
+
+    // Drop the git-watch owner synchronously rather than waiting on each
+    // socket's async `close` handler — the server is going away now.
+    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
 
     // Remove bridge from BaseSession
     BaseSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
@@ -1786,6 +1791,12 @@ export class RemoteServer {
         )
         this.notifyStatus()
       }
+      // Nobody left ⇒ drop the collective 'remote' git-watch owner. A client that
+      // drops abruptly (phone sleeps, tab closed) never sends git:stop-watching,
+      // so without this the 5 s poller would run forever. Also covers the
+      // disconnectPasswordClients() and checkIdleClients() paths, which both
+      // delegate their cleanup to this handler. No-op when nothing is held.
+      if (this.clients.size === 0) gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     })
 
     ws.on('error', (err) => {
