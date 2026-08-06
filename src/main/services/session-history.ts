@@ -13,27 +13,19 @@ import type {
   ModelCostEntry,
   EngineId
 } from '../../shared/types'
+import { isImageMediaType } from '../../shared/types'
 import { logger } from './logger'
+import { isPathInside } from './path-containment'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
 import { resolvePiForkAnchor } from './pi-session-list'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
+import { cwdToProjectKey } from '../../shared/project-key'
+import { extractToolResultContent } from './tool-result-content'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
-/**
- * Derive cli.js's transcript project key from a working directory. The SDK
- * replaces path separators, drive colons, AND dots with '-' — on disk,
- * `D:\WorkPlace\ClaudeUI` → `D--WorkPlace-ClaudeUI` and `/home/u/proj.x` →
- * `-home-u-proj-x`. The old inline derivations only replaced `/` and `.`,
- * which produced a nonexistent path for every Windows cwd — so every
- * consumer (JSONL reconciliation, resume seeding, fork-anchor resolution,
- * the disk-fallback message loader) silently no-opped on Windows.
- */
-export function projectKeyForCwd(cwd: string): string {
-  return cwd.replace(/[\\/:.]/g, '-')
-}
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
 const CACHE_FILE = path.join(CACHE_DIR, 'directory-cache.json')
 
@@ -380,7 +372,13 @@ export async function computeTokenMetrics(
           // sum below — no realistic transcript has both). duration_ms is
           // deliberately NOT accumulated here — the turn-span accumulator
           // (above) is the sole source for the emitted totalDurationMs.
-          totalCostUsd += (data.total_cost_usd as number) || 0
+          //
+          // total_cost_usd is CUMULATIVE-per-process — REPLACE, never add (same
+          // invariant handleResultMessage enforces on the live overlay, where
+          // `+=` was a documented bug: N result lines in one process would each
+          // re-add the whole running total). Keep the last value; fall back to
+          // the running figure when a line omits the field.
+          totalCostUsd = (data.total_cost_usd as number) || totalCostUsd
           totalApiDurationMs += (data.duration_api_ms as number) || 0
         }
       } catch (err) {
@@ -813,6 +811,43 @@ function extractOutputFile(text: string): string {
 }
 
 /**
+ * Rehydrate user-attachment blocks from a `type:'user'` transcript line's array
+ * content. Sibling to `extractToolResultImages` (tool-result-content.ts), which
+ * reads the same wire shape out of a tool_result's content.
+ *
+ * cli.js persists them as (verified against real transcripts):
+ *
+ *   { type:'image',    source:{ type:'base64', media_type:'image/png', data:'<b64>' } }
+ *   { type:'document', source:{ type:'base64', media_type:'application/pdf', data:'<b64>' } }
+ *
+ * The transcript carries no filename, so `fileName` is omitted. Blocks with a
+ * non-base64 source, a missing/empty `data`, or a media type outside
+ * `IMAGE_MEDIA_TYPES` are skipped — never thrown on (a transcript is untrusted
+ * input).
+ */
+function extractAttachmentBlocks(content: unknown): ContentBlock[] {
+  if (!Array.isArray(content)) return []
+  const blocks: ContentBlock[] = []
+  for (const raw of content) {
+    if (!raw || typeof raw !== 'object') continue
+    const block = raw as Record<string, unknown>
+    if (block.type !== 'image' && block.type !== 'document') continue
+    const source = block.source as Record<string, unknown> | undefined
+    if (!source || source.type !== 'base64') continue
+    const mediaType = source.media_type
+    const data = source.data
+    if (typeof mediaType !== 'string' || typeof data !== 'string' || !data) continue
+    if (block.type === 'image') {
+      if (!isImageMediaType(mediaType)) continue
+      blocks.push({ type: 'image', mediaType, base64Data: data })
+    } else if (mediaType === 'application/pdf') {
+      blocks.push({ type: 'document', mediaType: 'application/pdf', base64Data: data })
+    }
+  }
+  return blocks
+}
+
+/**
  * Resolve the JSONL line `uuid` to pass to cli.js `--resume-session-at` when
  * forking ("branching") a new session from an assistant message.
  *
@@ -849,7 +884,7 @@ export async function resolveForkAnchor(
 ): Promise<ForkAnchorResult> {
   if (engineId === 'pi') return resolvePiForkAnchor(sessionId, messageIndex)
 
-  const projectKey = projectKeyForCwd(cwd)
+  const projectKey = cwdToProjectKey(cwd)
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
   if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
 
@@ -989,15 +1024,15 @@ export async function loadSessionHistory(
           if (!isArray) return
 
           // Array content — check block types
-          const hasTextBlock = content.some((b: Record<string, unknown>) => b.type === 'text')
           const hasToolResult = content.some(
             (b: Record<string, unknown>) => b.type === 'tool_result'
           )
 
-          // External user prompt with text blocks
-          if (userType === 'external' && hasTextBlock) {
+          // External user prompt: text block and/or attachment blocks
+          if (userType === 'external') {
             const textBlock = content.find((b: Record<string, unknown>) => b.type === 'text')
             const text = textBlock ? (textBlock.text as string) : ''
+            const attachments = extractAttachmentBlocks(content)
 
             // Check if text is actually a task notification
             const notif = text ? parseTaskNotificationXml(text) : null
@@ -1017,11 +1052,14 @@ export async function loadSessionHistory(
                   timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
                 })
               }
-            } else if (text) {
+            } else if (text || attachments.length > 0) {
+              // Attachments first, then the text — matches the live-session
+              // order (session-store.ts addUserMessage) and the transcript's own
+              // block order. An attachments-only prompt is a real message too.
               messages.push({
                 id: obj.uuid || `user-${messages.length}`,
                 role: 'user',
-                content: [{ type: 'text', text }],
+                content: [...attachments, ...(text ? [{ type: 'text' as const, text }] : [])],
                 timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
                 ...(obj.planContent ? { planContent: obj.planContent as string } : {})
               })
@@ -1032,14 +1070,7 @@ export async function loadSessionHistory(
           if (hasToolResult) {
             for (const block of content) {
               if (block.type === 'tool_result' && block.tool_use_id) {
-                let resultText = ''
-                if (typeof block.content === 'string') {
-                  resultText = block.content
-                } else if (Array.isArray(block.content)) {
-                  resultText = block.content
-                    .map((c: Record<string, unknown>) => (c.text as string) || '')
-                    .join('\n')
-                }
+                const { text: resultText, images } = extractToolResultContent(block.content)
 
                 // Extract agentId from Task tool results for mapping
                 const agentMatch = resultText.match(/(?:agentId|agent_id):\s*(\S+)/)
@@ -1063,7 +1094,8 @@ export async function loadSessionHistory(
                           type: 'tool_result',
                           toolUseId: block.tool_use_id,
                           toolResult: resultText,
-                          isError: !!block.is_error
+                          isError: !!block.is_error,
+                          ...(images ? { images } : {})
                         }
                       ]
                     }
@@ -1112,20 +1144,13 @@ export async function loadSessionHistory(
                 toolUseId: block.id as string
               }
             } else if (blockType === 'tool_result') {
-              const resultContent = block.content
-              let text = ''
-              if (typeof resultContent === 'string') {
-                text = resultContent
-              } else if (Array.isArray(resultContent)) {
-                text = resultContent
-                  .map((c: Record<string, unknown>) => (c.text as string) || '')
-                  .join('\n')
-              }
+              const { text, images } = extractToolResultContent(block.content)
               return {
                 type: 'tool_result' as const,
                 toolUseId: block.tool_use_id as string,
                 toolResult: text,
-                isError: block.is_error as boolean
+                isError: block.is_error as boolean,
+                ...(images ? { images } : {})
               }
             } else if (blockType === 'thinking') {
               return { type: 'thinking' as const, text: block.thinking as string }
@@ -1350,6 +1375,32 @@ export function buildSubagentFileMap(
  * Load background bash task output from /tmp.
  */
 /**
+ * Temp roots under which cli.js background-task `.output` files legitimately
+ * live. cli.js chooses the path (background bash writes to a temp file) and
+ * reports it in the task-notification `<output-file>`; this channel is reachable
+ * remotely with a CALLER-supplied `outputFile`, so without confinement it is an
+ * arbitrary-file-read primitive (gpt#8). We confine reads to the OS temp
+ * directory. Containment choice + limit:
+ *  - Root: `os.tmpdir()` plus, on POSIX, `/tmp` and `/private/tmp` — because
+ *    cli.js on macOS writes under `/tmp` (a symlink to `/private/tmp`) whereas
+ *    `os.tmpdir()` there is `/var/folders/...` and would miss those files.
+ *  - This blocks the dangerous targets (home dir, `~/.ssh`,
+ *    `~/.claude/.credentials.json`, project source, `/etc/...`). It does NOT
+ *    police co-tenant files already inside the shared temp dir — a far weaker,
+ *    pre-existing local-trust concern, not a remote arbitrary-read.
+ */
+function backgroundOutputRoots(): string[] {
+  const roots = [os.tmpdir()]
+  if (process.platform !== 'win32') roots.push('/tmp', '/private/tmp')
+  return roots
+}
+
+/** True iff `file` resolves under one of the legitimate temp output roots. */
+function isContainedBackgroundOutput(file: string): boolean {
+  return backgroundOutputRoots().some((root) => isPathInside(root, file))
+}
+
+/**
  * Load background bash task output.
  * Tries outputFile (from task-notification) first, falls back to path interpolation.
  */
@@ -1358,27 +1409,35 @@ export function loadBackgroundOutput(
   taskId: string,
   outputFile?: string
 ): { content: string | null; purged: boolean } {
-  // Try the explicit output file path first (from task-notification XML)
-  if (outputFile && fs.existsSync(outputFile)) {
-    try {
-      const content = fs.readFileSync(outputFile, 'utf-8')
-      return { content, purged: false }
-    } catch (err) {
-      logger.warn('SessionHistory', 'Failed to read background output file', err)
+  // Try the explicit output file path first (from task-notification XML). Reject
+  // any path outside the legitimate temp output roots — the caller may be a
+  // remote client supplying an arbitrary path.
+  if (outputFile) {
+    if (isContainedBackgroundOutput(outputFile)) {
+      if (fs.existsSync(outputFile)) {
+        try {
+          const content = fs.readFileSync(outputFile, 'utf-8')
+          return { content, purged: false }
+        } catch (err) {
+          logger.warn('SessionHistory', 'Failed to read background output file', err)
+        }
+      }
+    } else {
+      logger.warn(
+        'SessionHistory',
+        `Rejected out-of-root background outputFile: ${outputFile}`
+      )
     }
   }
 
-  // Fallback: interpolate path
+  // Fallback: interpolate path. projectKey/taskId are caller-supplied too, so
+  // confirm the joined path stays under the per-uid claude temp root (a crafted
+  // projectKey like '../../..' would otherwise escape via path.join).
   const uid = process.getuid?.() ?? 0
-  const outputPath = path.join(
-    '/private/tmp',
-    `claude-${uid}`,
-    projectKey,
-    'tasks',
-    `${taskId}.output`
-  )
+  const base = path.join('/private/tmp', `claude-${uid}`)
+  const outputPath = path.join(base, projectKey, 'tasks', `${taskId}.output`)
 
-  if (!fs.existsSync(outputPath)) {
+  if (!isPathInside(base, outputPath) || !fs.existsSync(outputPath)) {
     return { content: null, purged: true }
   }
 
@@ -1419,13 +1478,10 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           if (!content) return
           const userType = obj.userType as string | undefined
           const isArray = Array.isArray(content)
-          const hasTextBlock = isArray
-            ? content.some((b: Record<string, unknown>) => b.type === 'text')
-            : typeof content === 'string'
           const hasToolResult =
             isArray && content.some((b: Record<string, unknown>) => b.type === 'tool_result')
 
-          if (userType === 'external' && hasTextBlock) {
+          if (userType === 'external') {
             let text = ''
             if (typeof content === 'string') {
               text = content
@@ -1433,11 +1489,14 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
               const textBlock = content.find((b: Record<string, unknown>) => b.type === 'text')
               if (textBlock) text = textBlock.text as string
             }
-            if (text && !parseTaskNotificationXml(text)) {
+            const attachments = isArray ? extractAttachmentBlocks(content) : []
+            const isNotif = text ? parseTaskNotificationXml(text) !== null : false
+            if (!isNotif && (text || attachments.length > 0)) {
+              // Attachments before text — see the main parser for rationale.
               messages.push({
                 id: obj.uuid || `user-${messages.length}`,
                 role: 'user',
-                content: [{ type: 'text', text }],
+                content: [...attachments, ...(text ? [{ type: 'text' as const, text }] : [])],
                 timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
               })
             }
@@ -1446,14 +1505,7 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           if (hasToolResult && isArray) {
             for (const block of content) {
               if (block.type === 'tool_result' && block.tool_use_id) {
-                let resultText = ''
-                if (typeof block.content === 'string') {
-                  resultText = block.content
-                } else if (Array.isArray(block.content)) {
-                  resultText = block.content
-                    .map((c: Record<string, unknown>) => (c.text as string) || '')
-                    .join('\n')
-                }
+                const { text: resultText, images } = extractToolResultContent(block.content)
                 for (let i = messages.length - 1; i >= 0; i--) {
                   const msg = messages[i]
                   if (msg.role !== 'assistant') continue
@@ -1470,7 +1522,8 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
                           type: 'tool_result',
                           toolUseId: block.tool_use_id,
                           toolResult: resultText,
-                          isError: !!block.is_error
+                          isError: !!block.is_error,
+                          ...(images ? { images } : {})
                         }
                       ]
                     }
@@ -1497,16 +1550,13 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
                 toolUseId: block.id as string
               }
             if (blockType === 'tool_result') {
-              const rc = block.content
-              let text = ''
-              if (typeof rc === 'string') text = rc
-              else if (Array.isArray(rc))
-                text = rc.map((c: Record<string, unknown>) => (c.text as string) || '').join('\n')
+              const { text, images } = extractToolResultContent(block.content)
               return {
                 type: 'tool_result' as const,
                 toolUseId: block.tool_use_id as string,
                 toolResult: text,
-                isError: block.is_error as boolean
+                isError: block.is_error as boolean,
+                ...(images ? { images } : {})
               }
             }
             if (blockType === 'thinking')

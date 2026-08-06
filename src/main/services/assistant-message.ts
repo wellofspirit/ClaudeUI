@@ -14,6 +14,7 @@
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock } from '../../shared/types'
 import { fallbackBlockText } from './session-history'
+import { extractToolResultContent } from './tool-result-content'
 
 export function transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {
   const betaMessage = msg.message as Record<string, unknown> | undefined
@@ -34,18 +35,13 @@ export function transformAssistantMessage(msg: Record<string, unknown>): ChatMes
         toolUseId: block.id as string
       }
     } else if (blockType === 'tool_result') {
-      const resultContent = block.content
-      let text = ''
-      if (typeof resultContent === 'string') {
-        text = resultContent
-      } else if (Array.isArray(resultContent)) {
-        text = resultContent.map((c: Record<string, unknown>) => (c.text as string) || '').join('\n')
-      }
+      const { text, images } = extractToolResultContent(block.content)
       return {
         type: 'tool_result' as const,
         toolUseId: block.tool_use_id as string,
         toolResult: text,
-        isError: block.is_error as boolean
+        isError: block.is_error as boolean,
+        ...(images ? { images } : {})
       }
     } else if (blockType === 'thinking') {
       return { type: 'thinking' as const, text: block.thinking as string }

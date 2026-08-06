@@ -61,7 +61,6 @@ vi.mock('../claude-mcp', () => ({
 }))
 vi.mock('../session-history', () => ({
   computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
-  projectKeyForCwd: (cwd: string) => cwd.replace(/[\\/:.]/g, '-'),
   fallbackBlockText: vi.fn(() => '')
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
@@ -78,12 +77,6 @@ vi.mock('../account-manager', () => ({
 }))
 vi.mock('../../auth/ClaudeAuthProvider', () => ({
   claudeAuthProvider: { buildAccountRef: vi.fn(() => null), updateAuthSource: vi.fn() }
-}))
-vi.mock('../auto-classifier', () => ({
-  getClassifier: vi.fn(),
-  stopClassifier: vi.fn(),
-  isSafeTool: vi.fn(() => false),
-  buildTranscript: vi.fn(() => '')
 }))
 
 // Import AFTER mocks.

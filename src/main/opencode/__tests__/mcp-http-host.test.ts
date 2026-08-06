@@ -135,6 +135,22 @@ describe('startMcpHttpHost', () => {
     expect(status).toBe(401)
   })
 
+  it('a same-length wrong token still lands on 401 (timing-safe path, never 500)', async () => {
+    // timingSafeEqual THROWS on a length mismatch, so the equal-length case is
+    // the branch that actually reaches the constant-time compare. It must 401,
+    // never 500 or hang.
+    const host = await startMcpHttpHost(makeBlankServer())
+    hosts.push(host)
+
+    const sameLenWrong = 'a'.repeat(host.token.length)
+    const { status } = await httpPost(
+      `http://127.0.0.1:${host.port}/mcp`,
+      { Authorization: `Bearer ${sameLenWrong}` },
+      MCP_INITIALIZE
+    )
+    expect(status).toBe(401)
+  })
+
   it('accepts MCP initialize with the correct bearer token', async () => {
     const host = await startMcpHttpHost(makeBlankServer())
     hosts.push(host)

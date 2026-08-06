@@ -2,52 +2,11 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
+import { parseFrontmatter, extractFirstLine } from '../skill-scanner'
 
-// ---------------------------------------------------------------------------
-// Replicate the private parseFrontmatter and extractFirstLine from skill-scanner.ts
-// ---------------------------------------------------------------------------
-
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/
-
-interface Frontmatter {
-  name?: string
-  description?: string
-  [key: string]: unknown
-}
-
-function parseFrontmatter(raw: string): { frontmatter: Frontmatter; body: string } {
-  const m = raw.match(FRONTMATTER_RE)
-  if (!m) return { frontmatter: {}, body: raw }
-
-  const yamlBlock = m[1]
-  const body = m[2]
-  const fm: Frontmatter = {}
-
-  let currentKey: string | null = null
-  let currentValue = ''
-
-  for (const line of yamlBlock.split(/\r?\n/)) {
-    const kvMatch = line.match(/^(\w[\w-]*):\s*(.*)$/)
-    if (kvMatch) {
-      if (currentKey) fm[currentKey] = currentValue.trim()
-      currentKey = kvMatch[1]
-      currentValue = kvMatch[2]
-    } else if (currentKey && (line.startsWith('  ') || line.startsWith('\t'))) {
-      currentValue += '\n' + line.trim()
-    }
-  }
-  if (currentKey) fm[currentKey] = currentValue.trim()
-
-  return { frontmatter: fm, body }
-}
-
-function extractFirstLine(body: string): string {
-  for (const line of body.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (trimmed && !trimmed.startsWith('#')) return trimmed.slice(0, 200)
-  }
-  return ''
-}
+// parseFrontmatter / extractFirstLine used to be replicated verbatim in this
+// file, so the tests never actually exercised skill-scanner.ts. They are now
+// imported (marked @internal there) — the assertions below cover the real code.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -139,6 +98,70 @@ Body`
 
     const { frontmatter } = parseFrontmatter(raw)
     expect(frontmatter.description).toBe('Use this: when needed')
+  })
+
+  it('handles a literal block scalar (description: |) without leaking the indicator', () => {
+    const raw = `---
+name: my-skill
+description: |
+  First block line
+  Second block line
+---
+Body`
+
+    const { frontmatter, body } = parseFrontmatter(raw)
+    expect(frontmatter.description).toBe('First block line\nSecond block line')
+    expect(frontmatter.description).not.toContain('|')
+    expect(frontmatter.name).toBe('my-skill')
+    expect(body).toBe('Body')
+  })
+
+  it('handles a strip-chomped literal block scalar (|-)', () => {
+    const raw = `---
+description: |-
+  Line one
+  Line two
+
+---
+Body`
+
+    const { frontmatter } = parseFrontmatter(raw)
+    expect(frontmatter.description).toBe('Line one\nLine two')
+  })
+
+  it('folds a folded block scalar (>) onto one line', () => {
+    const raw = `---
+description: >
+  Folded one
+  folded two
+---
+Body`
+
+    const { frontmatter } = parseFrontmatter(raw)
+    expect(frontmatter.description).toBe('Folded one folded two')
+  })
+
+  it('does not treat a value merely containing a pipe as a block scalar', () => {
+    const raw = `---
+description: use a | pipe here
+---
+Body`
+
+    const { frontmatter } = parseFrontmatter(raw)
+    expect(frontmatter.description).toBe('use a | pipe here')
+  })
+
+  it('resumes normal key parsing after a block scalar', () => {
+    const raw = `---
+description: |
+  Block line
+version: 1.0
+---
+Body`
+
+    const { frontmatter } = parseFrontmatter(raw)
+    expect(frontmatter.description).toBe('Block line')
+    expect(frontmatter.version).toBe('1.0')
   })
 
   it('handles tab-indented continuation lines', () => {

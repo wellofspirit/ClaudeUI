@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
 import { useSessionStore, PI_DEFAULT_MODEL } from '../../../stores/session-store'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
@@ -27,6 +27,28 @@ const group: EngineModelGroup = {
       engineId: 'pi'
     }
   ]
+}
+
+/**
+ * The pi default-model control is a themed `ModelPicker`, not a native
+ * `<select>` — open its trigger to read/click the option rows.
+ */
+function pickerOptionValues(field: HTMLElement): (string | null)[] {
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  const values = within(field)
+    .getAllByTestId('ModelPicker.option')
+    .map((o) => o.getAttribute('data-value'))
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  return values
+}
+
+function pickModel(field: HTMLElement, value: string): void {
+  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
+  const option = within(field)
+    .getAllByTestId('ModelPicker.option')
+    .find((o) => o.getAttribute('data-value') === value)
+  expect(option, `ModelPicker option for "${value}"`).toBeTruthy()
+  fireEvent.click(option!)
 }
 
 function renderSection(): void {
@@ -63,15 +85,17 @@ describe('PiDefaultModelSection', () => {
   })
   afterEach(cleanup)
 
-  it('renders discovered models as visible select options and persists selection', async () => {
+  it('renders discovered models as visible picker options and persists selection', async () => {
     renderSection()
-    const select = (await screen.findByTestId(
-      'PiDefaultModelSection.defaultModel'
-    )) as HTMLSelectElement
-    expect(Array.from(select.options).map((option) => option.value)).toEqual(
-      expect.arrayContaining(['openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-5'])
+    const field = await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    // Themed ModelPicker, never a native select (the Monokai fix from 8bc26d7).
+    expect(field.querySelector('select')).toBeNull()
+    expect(within(field).getByTestId('ModelPicker')).toBeTruthy()
+    expect(pickerOptionValues(field)).toEqual(
+      // Pinned default row, the discovered models, then the custom escape hatch.
+      expect.arrayContaining(['', 'openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-5', '__custom__'])
     )
-    fireEvent.change(select, { target: { value: 'openai-codex/gpt-5.6-luna' } })
+    pickModel(field, 'openai-codex/gpt-5.6-luna')
     await waitFor(() =>
       expect(saveEngineConfig).toHaveBeenCalledWith(
         'pi',
@@ -86,8 +110,9 @@ describe('PiDefaultModelSection', () => {
   it('reveals custom input without clearing the persisted default', async () => {
     loadEngineConfig.mockResolvedValue({ piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' } })
     renderSection()
-    const select = await screen.findByTestId('PiDefaultModelSection.defaultModel')
-    fireEvent.change(select, { target: { value: '__custom__' } })
+    const field = await screen.findByTestId('PiDefaultModelSection.defaultModel')
+    pickModel(field, '__custom__')
+    expect(field.getAttribute('data-value')).toBe('__custom__')
     expect(saveEngineConfig).not.toHaveBeenCalled()
     expect(screen.getByTestId('PiDefaultModelSection.customModel')).toHaveValue(
       'openai-codex/gpt-5.6-luna'

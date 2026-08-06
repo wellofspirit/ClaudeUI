@@ -1,8 +1,32 @@
-import { mkdirSync, appendFileSync } from 'fs'
+import { mkdirSync, appendFileSync, statSync } from 'fs'
+import { readdir, unlink, appendFile } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 
-const LOG_DIR = join(homedir(), '.claude', 'ui', 'logs')
+// CLAUDE_UI_LOG_DIR lets tests/embedders redirect file output away from the
+// real user log dir; resolved once here at module load.
+const LOG_DIR = process.env.CLAUDE_UI_LOG_DIR || join(homedir(), '.claude', 'ui', 'logs')
+
+// ---------------------------------------------------------------------------
+// File-write policy (M-LG1)
+//
+// Every logger call used to hit `appendFileSync`, blocking the main process's
+// event loop once per line. Lines are now queued in memory and flushed with
+// `fs.promises.appendFile`, with a single in-flight flush so appends stay
+// ordered. `flushSync()` (wired to `process.on('exit')`) drains the tail.
+//
+// This module is imported at module-load time, long before app.whenReady —
+// it must never touch an Electron API. Keep it to `fs`/`path`/`os`.
+// ---------------------------------------------------------------------------
+
+/** Flush as soon as this many lines are queued. */
+export const LOG_FLUSH_LINES = 64
+/** …or this long after the first line was queued, whichever comes first. */
+export const LOG_FLUSH_INTERVAL_MS = 500
+/** Daily log files older than this are pruned once per process. */
+export const LOG_RETENTION_DAYS = 14
+/** Hard per-day ceiling; past this the day's file stops growing. */
+export const LOG_MAX_BYTES_PER_DAY = 50 * 1024 * 1024
 
 let dirEnsured = false
 
@@ -16,12 +40,13 @@ function ensureDir(): void {
   }
 }
 
-function getLogFilePath(): string {
+/** Local-date key of the current daily log file, e.g. `20260727`. */
+function currentDayKey(): string {
   const now = new Date()
   const y = now.getFullYear()
   const m = String(now.getMonth() + 1).padStart(2, '0')
   const d = String(now.getDate()).padStart(2, '0')
-  return join(LOG_DIR, `${y}${m}${d}.log`)
+  return `${y}${m}${d}`
 }
 
 function timestamp(): string {
@@ -45,6 +70,133 @@ function formatError(err: unknown): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Buffered writer
+// ---------------------------------------------------------------------------
+
+/** Lines queued for `bufferPath`, not yet handed to the filesystem. */
+let buffer: string[] = []
+/** The file every line currently in `buffer` belongs to. */
+let bufferPath = ''
+/** A flush is awaiting its `appendFile` promise — hold the next one back so appends stay ordered. */
+let flushing = false
+let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Day key whose byte budget `bytesToday` tracks. */
+let budgetDay = ''
+let bytesToday = 0
+let capReached = false
+let prunedThisProcess = false
+
+function clearFlushTimer(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+}
+
+/** Hand the queued lines to the filesystem. No-op while another flush is in flight. */
+function flush(): void {
+  clearFlushTimer()
+  if (flushing || buffer.length === 0) return
+  const chunk = buffer.join('')
+  const target = bufferPath
+  buffer = []
+  flushing = true
+  appendFile(target, chunk, 'utf-8')
+    .catch(() => {
+      // Can't write to log file — nothing we can do
+    })
+    .finally(() => {
+      flushing = false
+      // Lines queued while we were writing go out now.
+      if (buffer.length > 0) flush()
+    })
+}
+
+/**
+ * Drain the queue synchronously. Wired to `process.on('exit')` (async work
+ * cannot run there) and exported so tests can force the file to materialise.
+ *
+ * If an async flush happens to be in flight, its chunk may land after this
+ * one — an at-exit-only ordering wrinkle, since the process is about to die
+ * before that promise can settle anyway.
+ */
+export function flushSync(): void {
+  clearFlushTimer()
+  if (buffer.length === 0) return
+  const chunk = buffer.join('')
+  buffer = []
+  try {
+    appendFileSync(bufferPath, chunk, 'utf-8')
+  } catch {
+    // Can't write to log file — nothing we can do
+  }
+}
+
+process.on('exit', flushSync)
+
+/**
+ * Delete daily log files older than `LOG_RETENTION_DAYS`. Runs at most once
+ * per process (fired, not awaited, from the first file write) and swallows
+ * every error — losing a prune is strictly better than losing a log line.
+ * Exported so tests can await it.
+ */
+export async function pruneOldLogs(): Promise<void> {
+  const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000
+  let names: string[]
+  try {
+    names = await readdir(LOG_DIR)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    if (!/^\d{8}\.log$/.test(name)) continue
+    const y = Number(name.slice(0, 4))
+    const m = Number(name.slice(4, 6))
+    const d = Number(name.slice(6, 8))
+    const day = new Date(y, m - 1, d).getTime()
+    if (!Number.isFinite(day) || day >= cutoff) continue
+    try {
+      await unlink(join(LOG_DIR, name))
+    } catch {
+      // File vanished or is locked — skip it
+    }
+  }
+}
+
+/**
+ * Re-point the buffer at `path`, draining anything still queued for the
+ * previous day's file first. Happens at most once a day (at midnight), so the
+ * synchronous drain here is not a hot path.
+ */
+function retargetBuffer(path: string): void {
+  if (bufferPath === path) return
+  if (bufferPath && buffer.length > 0) flushSync()
+  bufferPath = path
+}
+
+/** Reset the per-day byte budget when the date rolls, seeding it from the file already on disk. */
+function ensureDayBudget(path: string, day: string): void {
+  if (budgetDay === day) return
+  budgetDay = day
+  capReached = false
+  try {
+    bytesToday = statSync(path).size
+  } catch {
+    bytesToday = 0
+  }
+}
+
+function queueLine(line: string): void {
+  buffer.push(line)
+  if (buffer.length >= LOG_FLUSH_LINES) {
+    flush()
+    return
+  }
+  if (!flushTimer) flushTimer = setTimeout(flush, LOG_FLUSH_INTERVAL_MS)
+}
+
 function writeToFile(level: string, source: string, message: string, err?: unknown): void {
   ensureDir()
   let line = `[${timestamp()}] [${level}] [${source}] ${message}`
@@ -52,10 +204,26 @@ function writeToFile(level: string, source: string, message: string, err?: unkno
     line += `\n  ${formatError(err).replace(/\n/g, '\n  ')}`
   }
   line += '\n'
-  try {
-    appendFileSync(getLogFilePath(), line, 'utf-8')
-  } catch {
-    // Can't write to log file — nothing we can do
+
+  const day = currentDayKey()
+  const path = join(LOG_DIR, `${day}.log`)
+  retargetBuffer(path)
+  ensureDayBudget(path, day)
+
+  if (!prunedThisProcess) {
+    prunedThisProcess = true
+    void pruneOldLogs()
+  }
+
+  // Past the daily ceiling the file stops growing; console output continues.
+  if (capReached) return
+  bytesToday += Buffer.byteLength(line, 'utf-8')
+  queueLine(line)
+  if (bytesToday >= LOG_MAX_BYTES_PER_DAY) {
+    capReached = true
+    queueLine(
+      `[${timestamp()}] [WARN] [logger] size cap reached (${LOG_MAX_BYTES_PER_DAY} bytes) — no further file output for ${day}\n`
+    )
   }
 }
 

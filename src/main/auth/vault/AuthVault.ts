@@ -78,7 +78,21 @@ export class AuthVault {
     }
   }
   async beginLogin(): Promise<{ authorizeUrl: string }> {
-    if (this.activeFlow) throw new Error('AuthVault: a login is already in progress')
+    if (this.activeFlow) {
+      // Supersede a ZOMBIE flow — one that already reached a terminal outcome
+      // (its 5-min timeout fired, or it errored/was cancelled) but whose
+      // completeLogin() was never called, so activeFlow was never cleared.
+      // Without this, an abandoned authorize (user closed the browser tab, or
+      // the renderer reloaded between authorize and callback) would block
+      // re-login with "a login is already in progress" until cancel or restart.
+      // A flow that is still LIVE (isSettled false, or a fake with no isSettled)
+      // still blocks a concurrent login — the single-flight guard is preserved.
+      if (this.activeFlow.isSettled?.()) {
+        this.activeFlow = undefined
+      } else {
+        throw new Error('AuthVault: a login is already in progress')
+      }
+    }
     this.activeFlow = this.loginFlowFactory()
     try {
       return { authorizeUrl: (await this.activeFlow.start()).authorizeUrl }

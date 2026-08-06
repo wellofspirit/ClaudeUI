@@ -15,12 +15,12 @@
  * down the shared jsdom `window.api` out from under this one.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, fireEvent, screen, act } from '@testing-library/react'
+import { render, fireEvent, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { SidebarContext } from '../../../SessionView'
-import type { StatusLineData } from '../../../../../../shared/types'
+import type { GitStatusData, StatusLineData } from '../../../../../../shared/types'
 
 const ROUTE = 'route-topbar'
 
@@ -346,14 +346,16 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
 })
 
 // ---------------------------------------------------------------------------
-// Mobile-web fullscreen control (TopBar.fullscreen) — remote web client on
-// mobile only, gated behind Fullscreen API support and standalone display
-// mode. Fullscreen state lives on `document`/`window`, not the store, so
-// every mutated global is captured up front and restored in afterEach —
-// nothing here may leak into the other describe blocks in this file.
+// The mobile-web fullscreen control is GONE from TopBar — it moved to a
+// double-tap gesture on the chat scroll area (see
+// hooks/__tests__/useFullscreenDoubleTap.unit.test.tsx). This block is the
+// regression lock: even with every condition the old gate required satisfied,
+// no button may come back. Fullscreen state lives on `document`/`window`, not
+// the store, so every mutated global is captured up front and restored in
+// afterEach — nothing here may leak into the other describe blocks.
 // ---------------------------------------------------------------------------
 
-describe('TopBar — mobile web fullscreen control', () => {
+describe('TopBar — mobile web fullscreen control removed', () => {
   let app: TestApp
 
   const originalMatchMedia = window.matchMedia
@@ -418,127 +420,144 @@ describe('TopBar — mobile web fullscreen control', () => {
     else doc.fullscreenElement = originalFullscreenElement
   })
 
-  it('is hidden on desktop (non-mobile) even when the API is supported and platform is web', () => {
+  it('never renders TopBar.fullscreen, even with every old gate condition satisfied', () => {
     setFullscreenApiSupported()
-    app.api.platform = 'web'
-
-    const { unmount } = renderTopBar(false)
-    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
-    unmount()
-  })
-
-  it('is hidden in Electron (non-web) even on mobile', () => {
-    setFullscreenApiSupported()
-    app.api.platform = 'darwin'
-
-    const { unmount } = renderTopBar(true)
-    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
-    unmount()
-  })
-
-  it('is hidden when the Fullscreen API is unavailable', () => {
-    // jsdom has no Fullscreen API by default — leave request/exitFullscreen
-    // unset so this exercises the real "unsupported" shape, not a stub.
-    ;(document as unknown as { fullscreenEnabled: boolean }).fullscreenEnabled = true
+    setStandalone(false)
     app.api.platform = 'web'
 
     const { unmount } = renderTopBar(true)
     expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
     unmount()
   })
+})
 
-  it('is hidden in standalone display mode', () => {
-    setFullscreenApiSupported()
-    setStandalone(true)
-    app.api.platform = 'web'
+// ---------------------------------------------------------------------------
+// Mobile right-side entry points (Option C): the changes pill (the only way
+// into MobileGitView from the bar) plus a "⋯" overflow menu holding the
+// actions whose desktop buttons don't fit a phone bar. Desktop must gain
+// nothing — the overflow button is mobile-only.
+// ---------------------------------------------------------------------------
 
-    const { unmount } = renderTopBar(true)
-    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
-    unmount()
-  })
+describe('TopBar — mobile entry points', () => {
+  let app: TestApp
 
-  it('is visible on mobile web with the API supported, and requests fullscreen on click', () => {
-    setFullscreenApiSupported()
-    app.api.platform = 'web'
+  // setGitStatus populates a module-level cache keyed by cwd that outlives
+  // store resets (createEmptySession re-hydrates isGitRepo/gitStatus from it),
+  // so each git-shaped fixture needs a cwd of its own or tests leak into each
+  // other in file order.
+  const GIT_CWD = '/d/repo-topbar-git'
+  const PLAIN_CWD = '/d/repo-topbar-plain'
 
-    const { unmount } = renderTopBar(true)
-    const button = screen.getByTestId('TopBar.fullscreen')
-    expect(button).toHaveAttribute('aria-label', 'Enter fullscreen')
-    expect(button).toHaveAttribute('title', 'Enter fullscreen')
+  function makeGitStatus(overrides: Partial<GitStatusData> = {}): GitStatusData {
+    return {
+      branch: 'main',
+      ahead: 0,
+      behind: 0,
+      trackingBranch: 'origin/main',
+      files: [{ path: 'a.ts', index: ' ', working: 'M' }],
+      staged: [],
+      unstaged: ['a.ts'],
+      untracked: [],
+      linesAdded: 3,
+      linesRemoved: 1,
+      ...overrides
+    } as GitStatusData
+  }
 
-    fireEvent.click(button)
-    expect(document.documentElement.requestFullscreen).toHaveBeenCalledWith({
-      navigationUI: 'hide'
-    })
-
-    unmount()
-  })
-
-  it('updates to the exit state on fullscreenchange, and calls exitFullscreen on click', () => {
-    setFullscreenApiSupported()
-    app.api.platform = 'web'
-
-    const { unmount } = renderTopBar(true)
-    const button = screen.getByTestId('TopBar.fullscreen')
-
-    ;(document as unknown as { fullscreenElement: Element | null }).fullscreenElement =
-      document.documentElement
-    act(() => {
-      document.dispatchEvent(new Event('fullscreenchange'))
-    })
-
-    expect(button).toHaveAttribute('aria-label', 'Exit fullscreen')
-    expect(button).toHaveAttribute('title', 'Exit fullscreen')
-
-    fireEvent.click(button)
-    expect(document.exitFullscreen).toHaveBeenCalled()
-
-    unmount()
-  })
-
-  it('syncs isFullscreen immediately when the control newly appears, without waiting for a fullscreenchange event', () => {
-    // The document is already fullscreen (e.g. entered via some other path)
-    // before the control becomes visible — no fullscreenchange event fires
-    // as part of this test, so the icon must reflect fullscreen state purely
-    // from the initial sync on mount/re-show, not from the event listener.
-    setFullscreenApiSupported()
-    app.api.platform = 'web'
-    ;(document as unknown as { fullscreenElement: Element | null }).fullscreenElement =
-      document.documentElement
-
-    const { rerender, unmount } = renderTopBar(false)
-    expect(screen.queryByTestId('TopBar.fullscreen')).toBeNull()
-
-    rerender(
-      <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: true }}>
+  function renderTopBar(isMobile: boolean) {
+    return render(
+      <SidebarContext.Provider value={{ collapsed: true, toggle: () => {}, isMobile }}>
         <TopBar hasContent />
       </SidebarContext.Provider>
     )
+  }
 
-    const button = screen.getByTestId('TopBar.fullscreen')
-    expect(button).toHaveAttribute('aria-label', 'Exit fullscreen')
-    expect(button).toHaveAttribute('title', 'Exit fullscreen')
-
-    unmount()
+  beforeEach(async () => {
+    app = await bootTestApp()
+    // The permissions dialog loads on open; keep both probes resolvable so the
+    // menu → dialog assertion isn't racing a rejected IPC.
+    app.bridge.ipcMain.handle('claude:load-permissions' as never, async () => ({
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: []
+    }))
+    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
+    useSessionStore.getState().createNewSession(ROUTE, PLAIN_CWD)
+    useSessionStore.setState({ activeSessionId: ROUTE })
   })
 
-  it('swallows a rejected requestFullscreen without throwing or changing state', async () => {
-    ;(document as unknown as { fullscreenEnabled: boolean }).fullscreenEnabled = true
-    document.documentElement.requestFullscreen = vi.fn(() => Promise.reject(new Error('denied')))
-    ;(document as unknown as { exitFullscreen: () => Promise<void> }).exitFullscreen = vi.fn(() =>
-      Promise.resolve()
-    )
-    app.api.platform = 'web'
+  afterEach(() => {
+    // Unmount before window.api goes away — TopBar reads window.api.platform
+    // during render, and the store reset below would re-render a live tree.
+    cleanup()
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
 
-    const { unmount } = renderTopBar(true)
-    const button = screen.getByTestId('TopBar.fullscreen')
+  it('renders GitChangesPill on mobile once the session is a git repo with status', () => {
+    useSessionStore.getState().createNewSession('route-topbar-gitrepo', GIT_CWD)
+    useSessionStore.setState({ activeSessionId: 'route-topbar-gitrepo' })
+    useSessionStore.getState().setIsGitRepo('route-topbar-gitrepo', true)
+    useSessionStore.getState().setGitStatus('route-topbar-gitrepo', makeGitStatus())
 
+    renderTopBar(true)
+    expect(screen.getByTestId('GitChangesPill')).toBeInTheDocument()
+  })
+
+  it('omits GitChangesPill on mobile outside a git repo (the pill self-gates)', () => {
+    renderTopBar(true)
+    expect(screen.queryByTestId('GitChangesPill')).toBeNull()
+  })
+
+  it('renders the ⋯ overflow button on mobile when a cwd is set', () => {
+    renderTopBar(true)
+    expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
+    // Closed until tapped.
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('hides the ⋯ button entirely when there are no items to show (no cwd)', () => {
+    useSessionStore.getState().createNewSession('route-topbar-nocwd', '')
+    useSessionStore.setState({ activeSessionId: 'route-topbar-nocwd' })
+
+    renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
+  })
+
+  it('opens the permissions dialog from the overflow menu', async () => {
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
     await act(async () => {
-      fireEvent.click(button)
-      await Promise.resolve()
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuPermissions'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
-    expect(button).toHaveAttribute('aria-label', 'Enter fullscreen')
-    unmount()
+    expect(screen.getByTestId('PermissionsDialog')).toBeInTheDocument()
+    // The menu closes behind the dialog.
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('closes the overflow menu on outside pointerdown and on Escape', () => {
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('desktop keeps its own buttons and never grows a ⋯ menu (regression lock)', () => {
+    renderTopBar(false)
+
+    expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
+    expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
   })
 })

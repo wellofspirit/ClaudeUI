@@ -79,7 +79,11 @@ vi.mock('../logger', () => ({
 }))
 
 // Import after mocks are registered.
-import { TunnelManager } from '../tunnel-manager'
+import { TunnelManager, assertHttpsUrl, verifyFileChecksum } from '../tunnel-manager'
+import { createHash } from 'node:crypto'
+import { writeFileSync, mkdtempSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -188,5 +192,36 @@ describe('TunnelManager', () => {
     await expect(manager.start(9999)).rejects.toThrow(/already running/i)
     // Second start should not have spawned another process.
     expect(spawnCalls.length).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M-RM1: cloudflared download integrity
+// ---------------------------------------------------------------------------
+
+describe('cloudflared download integrity (M-RM1)', () => {
+  it('assertHttpsUrl refuses plain HTTP (redirect-downgrade guard)', () => {
+    expect(() => assertHttpsUrl('http://github.com/foo')).toThrow(/non-HTTPS/i)
+    expect(() => assertHttpsUrl('ftp://example.com/x')).toThrow(/non-HTTPS/i)
+    expect(() => assertHttpsUrl('not a url')).toThrow(/Invalid download URL/i)
+  })
+
+  it('assertHttpsUrl accepts https', () => {
+    expect(() => assertHttpsUrl('https://github.com/cloudflare/cloudflared')).not.toThrow()
+  })
+
+  it('verifyFileChecksum rejects a wrong digest and accepts the right one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cf-sum-'))
+    const file = join(dir, 'cloudflared.bin')
+    const bytes = Buffer.from('fake cloudflared payload')
+    writeFileSync(file, bytes)
+    const good = createHash('sha256').update(bytes).digest('hex')
+
+    expect(() => verifyFileChecksum(file, good)).not.toThrow()
+    // Case-insensitive comparison holds.
+    expect(() => verifyFileChecksum(file, good.toUpperCase())).not.toThrow()
+    // A wrong pin fails closed.
+    const wrong = 'deadbeef'.repeat(8)
+    expect(() => verifyFileChecksum(file, wrong)).toThrow(/checksum mismatch/i)
   })
 })

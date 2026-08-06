@@ -115,7 +115,22 @@ export class ControlChannel {
           )
         }, timeoutMs)
       }
-      this.writer.write({ type: 'control_request', request_id, request })
+      // If the write doesn't land (child gone / stdin ended), reject NOW rather
+      // than leaving the entry pending. Without this a request on a stale handle
+      // waited the full timeout — and `timeoutMs: 0` subtypes (oauth /
+      // mcp_authenticate) waited forever, sticking auth flows in 'authorizing'
+      // when the child died between handle-capture and the call (M-CL2).
+      const wrote = this.writer.write({ type: 'control_request', request_id, request })
+      if (!wrote) {
+        const pending = this.pending.get(request_id)
+        if (pending) {
+          this.pending.delete(request_id)
+          const subtype = (request as { subtype?: string }).subtype ?? '<unknown>'
+          pending.reject(
+            new Error(`control_request ${subtype} (${request_id}) failed: stream not writable`)
+          )
+        }
+      }
     })
   }
 

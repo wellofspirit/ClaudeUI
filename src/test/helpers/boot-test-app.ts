@@ -115,6 +115,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onToolResult: onEvent('session:tool-result'),
     onTaskProgress: onEvent('session:task-progress'),
     onTaskNotification: onEvent('session:task-notification'),
+    onTaskStarted: onEvent('session:task-started'),
     onSubagentStream: onEvent('session:subagent-stream'),
     onSubagentMessage: onEvent('session:subagent-message'),
     onSubagentMessageBatch: onEvent('session:subagent-message-batch'),
@@ -178,6 +179,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getModels: () => ipcRenderer.invoke('session:get-models'),
     getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
+    setOpencodeProviderDisabled: (providerId, disabled) =>
+      ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
+    removeOpencodeProvider: (providerId, kind) =>
+      ipcRenderer.invoke('session:remove-opencode-provider', providerId, kind),
     getOpencodeProviderModels: (providerId) =>
       ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
     getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
@@ -212,6 +217,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     // App
     confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+    cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
 
     // Git
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),
@@ -270,6 +276,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('claude:load-permissions', scope, cwd),
     saveClaudePermissions: (scope, permissions, cwd?) =>
       ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
+    isWorkspaceTrusted: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
 
     mcpServerStatus: (routingId) => ipcRenderer.invoke('mcp:status', routingId),
     mcpToggleServer: (routingId, serverName, enabled) =>
@@ -340,6 +347,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
     getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
     onRemoteStatus: onEvent('remote:status'),
+    getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
+    setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
+    setRemotePassword: (password) => ipcRenderer.invoke('remote:set-password', password),
+    clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
+    detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
+    forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
     voiceStartServer: (routingId) => unwrap('voice:start-server', routingId),
     voiceStopServer: (routingId) => unwrap('voice:stop-server', routingId),

@@ -12,9 +12,9 @@
  *      re-resolve against the current TEMP_HOME.
  *   3. Dynamic-import the manager AFTER seeding TEMP_HOME.
  *
- * The SDK, claude-session, session-history, auto-classifier, and logger are
- * all mocked — we're testing AutomationManager's lifecycle / persistence
- * logic, not its downstream integrations.
+ * The SDK, claude-session, session-history, and logger are all mocked — we're
+ * testing AutomationManager's lifecycle / persistence logic, not its
+ * downstream integrations.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -116,13 +116,6 @@ vi.mock('../claude-session', () => ({
 
 vi.mock('../session-history', () => ({
   loadSessionHistory: vi.fn(async () => ({ messages: [] }))
-}))
-
-vi.mock('../auto-classifier', () => ({
-  isSafeTool: () => true,
-  getClassifier: () => ({ classify: vi.fn(async () => ({ shouldBlock: false, reason: '' })) }),
-  buildTranscript: () => '',
-  stopClassifier: vi.fn()
 }))
 
 vi.mock('../logger', () => ({
@@ -282,6 +275,43 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.stopAll()
   })
 
+  it('H11: a long (30-day) interval chains past the 32-bit clamp and does not fire early', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    vi.useFakeTimers()
+    try {
+      const executeSpy = vi
+        .spyOn(mgr as any, 'executeRun')
+        .mockResolvedValue({ costUsd: 0, lastText: '' })
+
+      const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000 // 2_592_000_000 ms > 2^31-1
+      mgr.upsert(
+        makeAutomation({
+          id: 'h11-long',
+          enabled: true,
+          schedule: { type: 'interval', intervalMs: THIRTY_DAYS }
+        })
+      )
+
+      const MAX = 2_147_483_647
+      // One full clamp window elapses. Pre-fix the runtime clamps the 30-day
+      // delay to 1ms and executeRun fires almost immediately; post-fix this only
+      // re-arms the chained remainder.
+      await vi.advanceTimersByTimeAsync(MAX)
+      expect(executeSpy).not.toHaveBeenCalled()
+      // A timer is still pending (the chained remainder) — the schedule isn't wedged.
+      expect((mgr as any).timers.has('h11-long')).toBe(true)
+
+      // Advancing the remaining ~14 days fires exactly one run.
+      await vi.advanceTimersByTimeAsync(THIRTY_DAYS)
+      expect(executeSpy).toHaveBeenCalledTimes(1)
+
+      mgr.stopAll()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('concurrent runs: two automations execute independently with separate run state', async () => {
     const { mgr } = await freshManager()
     mgr.load()
@@ -305,6 +335,42 @@ describe('AutomationManager — scheduling & runtime', () => {
     // Both succeeded — one did not block the other.
     expect(runsA[0].status).toBe('success')
     expect(runsB[0].status).toBe('success')
+
+    mgr.stopAll()
+  })
+
+  it('records the cost of a sendMessage follow-up turn onto the resumed run', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    // Initial scheduled run: establishes the session id + a first cost.
+    sdkMode = {
+      kind: 'events',
+      events: [
+        { type: 'system', subtype: 'init', session_id: 'ses-followup' },
+        { type: 'result', total_cost_usd: 0.01 }
+      ]
+    }
+    mgr.upsert(makeAutomation({ id: 'followup-1' }))
+    await mgr.runNow('followup-1')
+
+    const afterRun = mgr.listRuns('followup-1')
+    expect(afterRun).toHaveLength(1)
+    expect(afterRun[0].totalCostUsd).toBeCloseTo(0.01)
+    expect((mgr as any).sessionIds.get('followup-1')).toBe('ses-followup')
+
+    // A follow-up message resumes the session and spends more. Pre-fix its cost
+    // landed NOWHERE (currentRunIds was empty for follow-ups → the result
+    // handler skipped persistence). It must now fold onto the resumed run.
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0.02 }] }
+    mgr.sendMessage('followup-1', 'do more')
+
+    await vi.waitFor(() => {
+      const runs = mgr.listRuns('followup-1')
+      expect(runs[0].totalCostUsd).toBeCloseTo(0.03) // 0.01 + 0.02
+    })
+    // The follow-up association is cleared afterward (no leak into later runs).
+    expect((mgr as any).currentRunIds.has('followup-1')).toBe(false)
 
     mgr.stopAll()
   })
@@ -700,6 +766,141 @@ describe('AutomationManager — scheduling & runtime', () => {
     // defaultEffort for opus-4-7 is xhigh per model-capabilities heuristic.
     expect(lastSdkParams?.options?.effort).toBe('xhigh')
 
+    mgr.stopAll()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M-AU1 — an edit during a run must not be clobbered by run-completion save
+// M-AU2 — deleting a running automation must not resurrect it
+// ---------------------------------------------------------------------------
+
+describe('AutomationManager — edit/delete during a live run', () => {
+  it('M-AU1: an edit mid-run survives the run-completion save (no stale clobber)', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+
+    // The run blocks until aborted, giving us a window to edit mid-flight.
+    sdkMode = { kind: 'waitForAbort' }
+    mgr.upsert(
+      makeAutomation({
+        id: 'edit-1',
+        prompt: 'original prompt',
+        enabled: true,
+        schedule: { type: 'interval', intervalMs: 60_000 }
+      })
+    )
+
+    const runPromise = mgr.runNow('edit-1')
+    await new Promise((r) => setTimeout(r, 20))
+    expect((mgr as any).activeRuns.has('edit-1')).toBe(true)
+
+    // User edits the automation while the run is in flight (a NEW object with a
+    // new prompt is persisted; the run still holds the object captured at start).
+    mgr.upsert(
+      makeAutomation({
+        id: 'edit-1',
+        prompt: 'EDITED prompt',
+        enabled: true,
+        schedule: { type: 'interval', intervalMs: 60_000 }
+      })
+    )
+
+    // End the run so executeRun's finally runs.
+    mgr.cancelRun('edit-1')
+    await runPromise
+
+    const onDisk = JSON.parse(
+      fs.readFileSync(nodePath.join(automationDir(), 'edit-1.json'), 'utf-8')
+    )
+    // Pre-fix: the finally re-saved the stale captured object → 'original prompt'.
+    expect(onDisk.prompt).toBe('EDITED prompt')
+    // Run-result fields are still merged onto the latest object.
+    expect(onDisk.lastRunStatus).toBeTruthy()
+    expect(onDisk.lastRunAt).toBeTruthy()
+
+    mgr.stopAll()
+  })
+
+  it('M-AU2: deleting a running automation does not resurrect its files', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'waitForAbort' }
+    mgr.upsert(makeAutomation({ id: 'zombie-1' }))
+
+    const runPromise = mgr.runNow('zombie-1')
+    await new Promise((r) => setTimeout(r, 20))
+    expect((mgr as any).activeRuns.has('zombie-1')).toBe(true)
+
+    const autoFile = nodePath.join(automationDir(), 'zombie-1.json')
+    const runsDirPath = nodePath.join(automationDir(), 'runs', 'zombie-1')
+    expect(fs.existsSync(autoFile)).toBe(true)
+    expect(fs.existsSync(runsDirPath)).toBe(true)
+
+    // Delete mid-run: aborts the run, drops it from memory, rm's its files.
+    mgr.delete('zombie-1')
+    await runPromise
+    // Give any stray async write a chance to (wrongly) recreate the files.
+    await new Promise((r) => setTimeout(r, 30))
+
+    // Pre-fix: executeRun's finally re-wrote both → a zombie reappeared.
+    expect(fs.existsSync(autoFile)).toBe(false)
+    expect(fs.existsSync(runsDirPath)).toBe(false)
+    expect(mgr.list().find((a) => a.id === 'zombie-1')).toBeUndefined()
+
+    mgr.stopAll()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M-AU3 — automation id path-traversal
+// ---------------------------------------------------------------------------
+
+describe('AutomationManager — id validation (M-AU3)', () => {
+  it('isValidAutomationId accepts uuids/slugs and rejects traversal', async () => {
+    const { isValidAutomationId } = await import('../automation-manager')
+    expect(isValidAutomationId('550e8400-e29b-41d4-a716-446655440000')).toBe(true)
+    expect(isValidAutomationId('drift-1')).toBe(true)
+    expect(isValidAutomationId('a_b-C9')).toBe(true)
+    expect(isValidAutomationId('../..')).toBe(false)
+    expect(isValidAutomationId('../../etc/passwd')).toBe(false)
+    expect(isValidAutomationId('a/b')).toBe(false)
+    expect(isValidAutomationId('a\\b')).toBe(false)
+    expect(isValidAutomationId('..')).toBe(false)
+    expect(isValidAutomationId('.')).toBe(false)
+    expect(isValidAutomationId('')).toBe(false)
+    expect(isValidAutomationId(null)).toBe(false)
+  })
+
+  it('delete() with a traversal id throws and never rm-rf a dir above the automation dir', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+
+    // ~/.claude/ui — the exact dir runsDir('../..') resolves to and would
+    // recursively delete pre-fix. Seed a precious file there.
+    const uiDir = nodePath.dirname(automationDir())
+    const precious = nodePath.join(uiDir, 'precious.txt')
+    fs.writeFileSync(precious, 'do-not-delete')
+
+    expect(() => mgr.delete('../..')).toThrow(/invalid automation id/i)
+    expect(() => mgr.delete('../../..')).toThrow(/invalid automation id/i)
+
+    // The dir + its contents are untouched.
+    expect(fs.existsSync(precious)).toBe(true)
+    expect(fs.existsSync(uiDir)).toBe(true)
+    expect(fs.existsSync(automationDir())).toBe(true)
+
+    mgr.stopAll()
+  })
+
+  it('upsert() with a traversal id throws before writing any file', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+    expect(() => mgr.upsert(makeAutomation({ id: '../evil' }))).toThrow(/invalid automation id/i)
+    // No file named after the traversal was created anywhere under the dir.
+    const entries = fs.existsSync(automationDir()) ? fs.readdirSync(automationDir()) : []
+    expect(entries.every((e) => !e.includes('evil'))).toBe(true)
     mgr.stopAll()
   })
 })

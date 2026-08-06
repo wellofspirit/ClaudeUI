@@ -75,6 +75,9 @@ describe('PermissionsDialog FC', () => {
         saveCalls.push({ scope, perms, cwd })
       }
     )
+
+    // Default: trusted, so the trust banner stays out of the other tests' way.
+    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
   })
 
   afterEach(() => {
@@ -123,6 +126,36 @@ describe('PermissionsDialog FC', () => {
     expect(loadCalls).toHaveLength(1)
     expect(loadCalls[0].scope).toBe('user')
     expect(viewProps.tabs).toEqual(['user'])
+  })
+
+  it('returns to the local tab when cwd arrives after a null-cwd mount (boot order)', async () => {
+    // TopBar mounts the dialog from app boot, before the restored session's
+    // cwd hydrates. The null-cwd window forces the user tab; once cwd lands
+    // the default must come back to local — the old one-way reset left every
+    // post-boot open stranded on Global.
+    const { PermissionsDialog } = await import('../PermissionsDialog')
+    let result!: ReturnType<typeof render>
+    await act(async () => {
+      result = await renderFC({ open: true, cwd: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(viewProps.activeTab).toBe('user')
+
+    await act(async () => {
+      result.rerender(
+        React.createElement(PermissionsDialog, {
+          open: true,
+          cwd: CWD,
+          onClose: onClose as () => void
+        })
+      )
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(viewProps.activeTab).toBe('local')
+    expect(viewProps.tabs).toEqual(['local', 'project', 'user'])
   })
 
   it('onAddRule marks active scope as dirty and updates perms', async () => {
@@ -315,6 +348,54 @@ describe('PermissionsDialog FC', () => {
 
     expect(viewProps.activeTab).toBe('user')
     expect(viewProps.tabs).toEqual(['user'])
+  })
+
+  // Untrusted workspace: cli.js silently discards project/local ALLOW rules,
+  // and suppresses its own warning non-interactively — so the dialog is the
+  // only place the user can learn the rules they are editing are inert.
+  describe('workspace trust', () => {
+    function stubTrust(trusted: boolean | Error): void {
+      app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => {
+        if (trusted instanceof Error) throw trusted
+        return trusted
+      })
+    }
+
+    async function renderAndSettle(
+      cwd: string | null,
+      initialTab?: PermissionScope
+    ): Promise<void> {
+      await act(async () => {
+        await renderFC({ open: true, cwd, initialTab })
+      })
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0))
+      })
+    }
+
+    it('reports untrusted to the View', async () => {
+      stubTrust(false)
+      await renderAndSettle(CWD, 'project')
+      expect(viewProps.workspaceTrusted).toBe(false)
+    })
+
+    it('reports trusted to the View', async () => {
+      stubTrust(true)
+      await renderAndSettle(CWD, 'project')
+      expect(viewProps.workspaceTrusted).toBe(true)
+    })
+
+    it('leaves trust unknown (null) when there is no cwd to probe', async () => {
+      stubTrust(false)
+      await renderAndSettle(null)
+      expect(viewProps.workspaceTrusted).toBeNull()
+    })
+
+    it('leaves trust unknown (null) when the probe fails — no false alarm', async () => {
+      stubTrust(new Error('IPC failed'))
+      await renderAndSettle(CWD, 'project')
+      expect(viewProps.workspaceTrusted).toBeNull()
+    })
   })
 
   it('onListDir prop delegates to listDir IPC', async () => {

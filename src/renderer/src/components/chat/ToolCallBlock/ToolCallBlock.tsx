@@ -120,18 +120,20 @@ export const ToolCallBlock = memo(function ToolCallBlock({
 
   const handleStopTask = async (): Promise<void> => {
     if (!activeSessionId) return
-    setTaskStopping(activeSessionId, toolUseId)
-    const stopResult = await window.api.stopTask(activeSessionId, toolUseId)
+    // Capture the session id: switching sessions within the 10s fallback window
+    // must still clear THIS session's stop pill, not whichever is active later.
+    const rid = activeSessionId
+    setTaskStopping(rid, toolUseId)
+    const stopResult = await window.api.stopTask(rid, toolUseId)
 
     if (!stopResult.success) {
       window.api.logError('ToolCallBlock', `Failed to stop task: ${stopResult.error}`)
-      clearTaskStopping(activeSessionId, toolUseId)
+      clearTaskStopping(rid, toolUseId)
       return
     }
 
     setTimeout(() => {
-      const rid = useSessionStore.getState().activeSessionId
-      if (rid) clearTaskStopping(rid, toolUseId)
+      clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 

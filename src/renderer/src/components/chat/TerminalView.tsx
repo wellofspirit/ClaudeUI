@@ -17,16 +17,20 @@ function terminalColors(theme: ThemeId): { bg: string; fg: string } {
   return { bg: '#0d1117', fg: '#d1d5db' }
 }
 
-const ansi = new AnsiUp()
-ansi.use_classes = false
-ansi.escape_html = true
-
 export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
   const theme = useSessionStore((s) => s.settings.theme)
   const { bg, fg } = terminalColors(theme)
   const preRef = useRef<HTMLPreElement>(null)
 
-  const html = useMemo(() => ansi.ansi_to_html(text), [text])
+  // Fresh AnsiUp per conversion: AnsiUp carries SGR state across calls, so a
+  // shared module-level instance bled colors between unrelated tool cards. Each
+  // card renders its complete text, so no cross-call state is needed.
+  const html = useMemo(() => {
+    const ansi = new AnsiUp()
+    ansi.use_classes = false
+    ansi.escape_html = true
+    return ansi.ansi_to_html(text)
+  }, [text])
 
   // Auto-scroll to bottom when content changes
   useEffect(() => {

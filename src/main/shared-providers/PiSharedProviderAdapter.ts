@@ -3,6 +3,7 @@ import * as path from 'node:path'
 import type { SharedProviderDefinition, SharedProviderModel } from '../../shared/shared-provider'
 import { piAgentDir } from '../services/pi-session-list'
 import { invalidatePiModelCache } from '../pi/model-discovery'
+import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 16_384
@@ -66,6 +67,7 @@ export class PiSharedProviderAdapter {
     }
     if (definition.kind !== 'custom') return
 
+    assertNoPiBuiltinCollision(definition)
     const providerId = nativeProviderId(definition)
     const compiled = compileProvider(definition)
     const file = this.readModelsFile()
@@ -131,6 +133,7 @@ export class PiSharedProviderAdapter {
       throw new Error('Pi API keys are only supported for custom providers')
     }
     if (!definition.routes.pi.enabled) return
+    assertNoPiBuiltinCollision(definition)
     await this.deps.auth.setVendorApiKey(nativeProviderId(definition), key)
   }
 
@@ -146,6 +149,13 @@ export class PiSharedProviderAdapter {
   }
 
   async removeCredential(definition: SharedProviderDefinition): Promise<void> {
+    // Defense in depth (M-AT4): never delete a built-in pi vendor's native
+    // credential on behalf of a COLLIDING custom provider. Such a definition is
+    // rejected at save/apply, so this only fires for one persisted before the
+    // fix; skipping the delete preserves the user's real native credential.
+    // ChatGPT (kind:'subscription') legitimately targets built-in 'openai-codex'
+    // and is NOT a collision, so it still removes as before.
+    if (isPiBuiltinCollision(definition)) return
     await this.deps.auth.removeVendorAuth(nativeProviderId(definition))
   }
 
@@ -234,11 +244,29 @@ function compileModel(model: SharedProviderModel): PiModelConfig {
   }
 }
 
-function nativeProviderId(definition: SharedProviderDefinition): string {
+export function nativeProviderId(definition: SharedProviderDefinition): string {
   return (
     definition.routes.pi.providerId ??
     (definition.id === 'chatgpt' ? 'openai-codex' : definition.id)
   )
+}
+
+/**
+ * True when a CUSTOM shared provider's effective pi providerId collides with a
+ * built-in native pi vendor id (M-AT4). Only custom providers are checked —
+ * the built-in ChatGPT provider (kind:'subscription') legitimately targets the
+ * native 'openai-codex' and must never be flagged.
+ */
+export function isPiBuiltinCollision(definition: SharedProviderDefinition): boolean {
+  return definition.kind === 'custom' && PI_NATIVE_VENDOR_IDS.has(nativeProviderId(definition))
+}
+
+function assertNoPiBuiltinCollision(definition: SharedProviderDefinition): void {
+  if (isPiBuiltinCollision(definition)) {
+    throw new Error(
+      `Pi provider id "${nativeProviderId(definition)}" collides with a built-in pi vendor; choose a different provider id`
+    )
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

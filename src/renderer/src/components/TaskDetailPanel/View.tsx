@@ -13,6 +13,13 @@ export interface TaskDetailPanelViewProps {
   style?: React.CSSProperties
   entries: TaskEntryDescriptor[]
   onClose: () => void
+  /**
+   * 'panel' (default) is the desktop side panel — bordered, its own "Tasks"
+   * header with a close (X) button. 'fullscreen' is the mobile takeover —
+   * no side border, and the header is omitted because the caller (
+   * MobileTaskView) already renders a back button + title above it.
+   */
+  variant?: 'panel' | 'fullscreen'
 }
 
 function HResizeHandle({
@@ -37,8 +44,10 @@ function PanelEntry({ entry }: { entry: TaskEntryDescriptor }): React.JSX.Elemen
 export function TaskDetailPanelView({
   style,
   entries,
-  onClose
+  onClose,
+  variant = 'panel'
 }: TaskDetailPanelViewProps): React.JSX.Element {
+  const isFullscreen = variant === 'fullscreen'
   const count = entries.length
   const [ratios, setRatios] = useState<number[]>(() => Array(count).fill(1 / Math.max(count, 1)))
   const prevCount = useRef(count)
@@ -102,28 +111,30 @@ export function TaskDetailPanelView({
     <div
       data-testid="TaskDetailPanel"
       style={style}
-      className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full"
+      className={`${isFullscreen ? 'flex-1 min-w-0' : 'shrink-0 border-l border-border'} bg-bg-secondary flex flex-col h-full`}
     >
-      <div className="shrink-0 flex items-center px-4 h-12 border-b border-border [-webkit-app-region:drag]">
-        <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
-        <button
-          data-testid="TaskDetailPanel.close"
-          onClick={onClose}
-          className="[-webkit-app-region:no-drag] text-text-muted hover:text-text-primary transition-colors cursor-pointer"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
+      {!isFullscreen && (
+        <div className="shrink-0 flex items-center px-4 h-12 border-b border-border [-webkit-app-region:drag]">
+          <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
+          <button
+            data-testid="TaskDetailPanel.close"
+            onClick={onClose}
+            className="[-webkit-app-region:no-drag] text-text-muted hover:text-text-primary transition-colors cursor-pointer"
           >
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </div>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       <div ref={containerRef} className="flex-1 min-h-0 flex flex-col">
         {entries.map((entry, i) => (

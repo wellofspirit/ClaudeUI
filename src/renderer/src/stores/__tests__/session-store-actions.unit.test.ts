@@ -12,7 +12,12 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore, useActiveSession, type PerSessionState } from '../session-store'
+import {
+  useSessionStore,
+  useActiveSession,
+  resolveRoutingId,
+  type PerSessionState
+} from '../session-store'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -21,7 +26,7 @@ import {
   makeSessionStatus,
   resetFactoryCounter
 } from '@test/factories/messages'
-import { claudeModel } from '../../../../shared/types'
+import { claudeModel, type GitStatusData } from '../../../../shared/types'
 import { renderHook } from '@testing-library/react'
 
 const store = () => useSessionStore.getState()
@@ -41,7 +46,8 @@ beforeEach(() => {
     killTerminal: vi.fn(),
     deleteSession: vi.fn().mockResolvedValue(undefined),
     deleteProject: vi.fn().mockResolvedValue(undefined),
-    logError: vi.fn()
+    logError: vi.fn(),
+    setPermissionMode: vi.fn().mockResolvedValue(undefined)
   } as any
 
   useSessionStore.setState({
@@ -264,6 +270,103 @@ describe('appendToolResult', () => {
   it('is a no-op when the session does not exist', () => {
     expect(() => store().appendToolResult('ghost', 'tu-1', 'r', false)).not.toThrow()
     expect(store().sessions['ghost']).toBeUndefined()
+  })
+
+  // RN10 — a replayed onToolResult (reconnect catchup / history replay) used to
+  // append a SECOND tool_result block for the same toolUseId. The renderer only
+  // shows the first, so the duplicates grew the message invisibly.
+  it('is idempotent: a replayed result for the same toolUseId does not duplicate the block', () => {
+    store().createNewSession('r1', '/p')
+    store().addMessage(
+      'r1',
+      makeChatMessage({
+        id: 'a-1',
+        role: 'assistant',
+        content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1')]
+      })
+    )
+
+    store().appendToolResult('r1', 'tu-1', 'first', false)
+    const afterFirst = store().sessions['r1'].messages[0]
+    // Replay of the very same event, plus a differing-payload replay.
+    store().appendToolResult('r1', 'tu-1', 'first', false)
+    store().appendToolResult('r1', 'tu-1', 'second', true)
+
+    const msg = store().sessions['r1'].messages[0]
+    const results = msg.content.filter((b) => b.type === 'tool_result')
+    expect(results).toHaveLength(1)
+    // First result wins, untouched.
+    expect(results[0]).toMatchObject({ toolUseId: 'tu-1', toolResult: 'first', isError: false })
+    // And the no-op returns the identical state (no needless re-render).
+    expect(msg).toBe(afterFirst)
+  })
+
+  it('still attaches results for a DIFFERENT toolUseId in the same message', () => {
+    store().createNewSession('r1', '/p')
+    store().addMessage(
+      'r1',
+      makeChatMessage({
+        id: 'a-1',
+        role: 'assistant',
+        content: [makeToolUseBlock('Bash', {}, 'tu-1'), makeToolUseBlock('Read', {}, 'tu-2')]
+      })
+    )
+    store().appendToolResult('r1', 'tu-1', 'one', false)
+    store().appendToolResult('r1', 'tu-2', 'two', false)
+    const results = store().sessions['r1'].messages[0].content.filter(
+      (b) => b.type === 'tool_result'
+    )
+    expect(results.map((r) => r.toolUseId)).toEqual(['tu-1', 'tu-2'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Bounded module-level caches (RN8) — rekeyMap and gitStatusCache live for the
+// whole renderer process, so they must evict rather than grow forever.
+// ---------------------------------------------------------------------------
+
+describe('bounded module caches (RN8)', () => {
+  it('rekeyMap evicts the oldest mapping past its 200-entry cap', () => {
+    // Both targets exist as live sessions, so resolveRoutingId would happily
+    // resolve either — the ONLY reason the oldest fails to resolve is eviction.
+    store().createNewSession('new-0', '/p', false)
+    store().createNewSession('new-200', '/p', false)
+
+    // 201 distinct mappings → the first one falls off a 200-entry cap.
+    for (let i = 0; i <= 200; i++) store().rekeySession(`old-${i}`, `new-${i}`)
+
+    expect(resolveRoutingId('old-0')).toBe('old-0') // evicted → passthrough
+    expect(resolveRoutingId('old-200')).toBe('new-200') // newest → still mapped
+  })
+
+  it('gitStatusCache evicts the oldest cwd past its 100-entry cap', () => {
+    const status = (branch: string): GitStatusData => ({
+      branch,
+      ahead: 0,
+      behind: 0,
+      trackingBranch: null,
+      files: [],
+      staged: [],
+      unstaged: [],
+      untracked: [],
+      linesAdded: 0,
+      linesRemoved: 0
+    })
+
+    // 101 distinct cwds → the first cached cwd falls off a 100-entry cap.
+    for (let i = 0; i <= 100; i++) {
+      store().createNewSession(`g-${i}`, `/cap-cwd-${i}`, false)
+      store().setGitStatus(`g-${i}`, status(`b-${i}`))
+    }
+
+    // A brand-new session on the EVICTED cwd gets no seeded git state...
+    store().createNewSession('probe-old', '/cap-cwd-0', false)
+    expect(store().sessions['probe-old'].gitStatus).toBeNull()
+    expect(store().sessions['probe-old'].isGitRepo).toBe(false)
+    // ...while the most recent cwd is still warm.
+    store().createNewSession('probe-new', '/cap-cwd-100', false)
+    expect(store().sessions['probe-new'].gitStatus).toMatchObject({ branch: 'b-100' })
+    expect(store().sessions['probe-new'].isGitRepo).toBe(true)
   })
 })
 
@@ -650,6 +753,63 @@ describe('clearConversation', () => {
   it('is a no-op when the session does not exist', () => {
     expect(() => store().clearConversation('ghost')).not.toThrow()
     expect(store().sessions['ghost']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Extra: changePermissionMode — centralized apply semantics for the desktop
+// Shift+Tab handler + the mobile mode picker (both call this action now).
+// ---------------------------------------------------------------------------
+
+describe('changePermissionMode', () => {
+  it('pre-spawn: optimistically updates the store AND calls the api for auto', async () => {
+    store().createNewSession('r1', '/p')
+    expect(store().sessions['r1'].sdkActive).toBe(false)
+
+    store().changePermissionMode('r1', 'auto')
+
+    expect(store().sessions['r1'].permissionMode).toBe('auto')
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'auto')
+  })
+
+  it('live session: does NOT optimistically update for auto, but still calls the api', async () => {
+    store().createNewSession('r1', '/p')
+    useSessionStore.setState((st) => ({
+      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
+    }))
+
+    store().changePermissionMode('r1', 'auto')
+
+    // Main process owns the broadcast for a live session's auto rejection —
+    // the store must NOT jump ahead of it.
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'auto')
+  })
+
+  it('live session: DOES optimistically update for a non-auto mode', () => {
+    store().createNewSession('r1', '/p')
+    useSessionStore.setState((st) => ({
+      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
+    }))
+
+    store().changePermissionMode('r1', 'acceptEdits')
+
+    expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
+  })
+
+  it('reverts to the previous mode when the api call rejects', async () => {
+    store().createNewSession('r1', '/p')
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+    ;(window.api.setPermissionMode as any).mockRejectedValueOnce(new Error('rejected by SDK'))
+
+    store().changePermissionMode('r1', 'acceptEdits')
+    // Optimistic update applies immediately (non-auto mode).
+    expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
+
+    // Let the rejected promise's .catch() handler run.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store().sessions['r1'].permissionMode).toBe('default')
   })
 })
 

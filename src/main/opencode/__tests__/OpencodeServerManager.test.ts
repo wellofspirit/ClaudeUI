@@ -545,6 +545,28 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(hosts[1].closed).toBe(true)
   })
 
+  it('dispose() during an in-flight spawn reaps the resolving server instead of orphaning it', async () => {
+    // Widen the spawn window so dispose() lands while spawnFn is still pending.
+    const { spawnFn, calls } = makeSpawnFn(25)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    const acquiring = mgr.acquire('/work/proj') // spawn in flight
+    await new Promise((r) => setTimeout(r, 5)) // ensure spawnFn was entered
+    mgr.dispose() // dispose BEFORE the spawn resolves
+
+    // Pre-fix, the spawn resolved AFTER dispose() cleared `handles`, re-inserting
+    // its handle (an orphaned opencode.exe surviving app quit). Now it must self-
+    // terminate: the acquire rejects, no handle is registered, and the child +
+    // MCP host we DID spawn are both reaped.
+    await expect(acquiring).rejects.toThrow(/disposed/)
+    expect(mgr.activeCount).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].child.killed).toBe(true)
+    await new Promise((r) => setTimeout(r, 10)) // let close() run
+    expect(hosts[0].closed).toBe(true)
+  })
+
   it('generates a distinct random password (Basic auth header) per server', async () => {
     const { spawnFn } = makeSpawnFn()
     const { startMcpHostFn } = makeMcpHostFn()
@@ -575,5 +597,256 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(calls[0].mcpToken).toBe(hosts[0].token)
 
     mgr.release('/work/proj')
+  })
+})
+
+// Unexpected-death fan-out + identity-checked release. Both exist so a session
+// can react to its server dying (emit 'disconnected') WITHOUT a stale release
+// decrementing a replacement server another session is using.
+describe('OpencodeServerManager exit fan-out + releaseIfCurrent', () => {
+  it('subscribeExit fires on an unexpected child exit', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let fired = 0
+    mgr.subscribeExit(cwd, () => fired++)
+
+    calls[0].child.emit('exit', 1, null) // crash, nobody called release()
+    expect(fired).toBe(1)
+  })
+
+  it('a throwing subscriber does not starve the others, and listeners fire at most once', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let second = 0
+    mgr.subscribeExit(cwd, () => {
+      throw new Error('bad subscriber')
+    })
+    mgr.subscribeExit(cwd, () => second++)
+
+    calls[0].child.emit('exit', 1, null)
+    calls[0].child.emit('exit', 1, null) // handle already dropped — gate closed
+    expect(second).toBe(1)
+  })
+
+  it('subscribeExit does NOT fire on the deliberate refcount-0 release() kill', async () => {
+    const { spawnFn } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let fired = 0
+    mgr.subscribeExit(cwd, () => fired++)
+
+    mgr.release(cwd) // last ref → kills the child, which emits 'exit'
+    expect(mgr.activeCount).toBe(0)
+    expect(fired).toBe(0)
+  })
+
+  it('subscribeExit does NOT fire on dispose()', async () => {
+    const { spawnFn } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let fired = 0
+    mgr.subscribeExit(cwd, () => fired++)
+
+    mgr.dispose()
+    expect(fired).toBe(0)
+  })
+
+  it('unsubscribe removes the listener; a stale unsubscribe cannot touch a respawned handle', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let firstFired = 0
+    const unsubscribeFirst = mgr.subscribeExit(cwd, () => firstFired++)
+    unsubscribeFirst()
+    calls[0].child.emit('exit', 1, null)
+    expect(firstFired).toBe(0)
+
+    // Respawn for the same cwd, resubscribe, then replay the STALE unsubscribe:
+    // it is bound to the dead handle and must not remove the new listener.
+    await mgr.acquire(cwd)
+    let secondFired = 0
+    mgr.subscribeExit(cwd, () => secondFired++)
+    unsubscribeFirst()
+    calls[1].child.emit('exit', 1, null)
+    expect(secondFired).toBe(1)
+  })
+
+  it('subscribeExit on a cwd with no live server returns a no-op unsubscribe', () => {
+    const { spawnFn } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const unsubscribe = mgr.subscribeExit('/never/acquired', () => {})
+    expect(() => unsubscribe()).not.toThrow()
+  })
+
+  it('releaseIfCurrent no-ops when the handle was already dropped by the death', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    const conn = await mgr.acquire(cwd)
+    calls[0].child.emit('exit', 1, null)
+    expect(mgr.activeCount).toBe(0)
+
+    expect(() => mgr.releaseIfCurrent(cwd, conn)).not.toThrow()
+    expect(mgr.activeCount).toBe(0)
+  })
+
+  it('releaseIfCurrent does NOT decrement a fresh server spawned for the same cwd after the old one died', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    // Session A acquires, then its server crashes.
+    const connA = await mgr.acquire(cwd)
+    calls[0].child.emit('exit', 1, null)
+
+    // Session B acquires a REPLACEMENT for the same cwd (refCount 1).
+    await mgr.acquire(cwd)
+    expect(calls).toHaveLength(2)
+    expect(mgr.activeCount).toBe(1)
+
+    // A's late cleanup must be a no-op: a plain release(cwd) here would drop B's
+    // refcount to 0 and kill the server B is actively using.
+    mgr.releaseIfCurrent(cwd, connA)
+    expect(calls[1].child.killed).toBe(false)
+    expect(mgr.activeCount).toBe(1)
+
+    // B's own release still tears it down.
+    mgr.release(cwd)
+    expect(calls[1].child.killed).toBe(true)
+    expect(mgr.activeCount).toBe(0)
+  })
+
+  it('releaseIfCurrent releases normally when the connection IS the current spawn', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    const conn = await mgr.acquire(cwd)
+    mgr.releaseIfCurrent(cwd, conn)
+    expect(calls[0].child.killed).toBe(true)
+    expect(mgr.activeCount).toBe(0)
+  })
+})
+
+// recycleAll(): the auth-mutation reload signal. opencode builds its provider
+// map once per process, so a credential change is only visible to a server
+// started AFTER the auth.json write — every pooled server must go.
+describe('OpencodeServerManager recycleAll', () => {
+  it('kills every live server, clears all handles, closes all MCP hosts', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    await mgr.acquire('/work/a')
+    await mgr.acquire('/work/b')
+    expect(mgr.activeCount).toBe(2)
+
+    mgr.recycleAll()
+
+    expect(calls[0].child.killed).toBe(true)
+    expect(calls[1].child.killed).toBe(true)
+    expect(mgr.activeCount).toBe(0)
+    await new Promise((r) => setTimeout(r, 10)) // let the async close() run
+    expect(hosts[0].closed).toBe(true)
+    expect(hosts[1].closed).toBe(true)
+  })
+
+  it('fans out exit listeners exactly once per handle (drained set, gated child exit)', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    await mgr.acquire(cwd)
+    let fired = 0
+    // A re-subscribing listener is the nasty case: subscribeExit inside the
+    // callback would re-add to the set we are iterating a COPY of, and the
+    // handle is already out of the map, so nothing can fire it again.
+    mgr.subscribeExit(cwd, () => {
+      fired++
+      mgr.subscribeExit(cwd, () => fired++)
+    })
+
+    mgr.recycleAll()
+    expect(fired).toBe(1)
+
+    // The fake child's kill() already emitted 'exit'; replay it to prove the
+    // identity gate (handle removed from the map first) does nothing extra.
+    calls[0].child.emit('exit', null, 'SIGTERM')
+    expect(fired).toBe(1)
+    expect(mgr.activeCount).toBe(0)
+  })
+
+  it('next acquire for the same cwd spawns a FRESH server', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    const before = await mgr.acquire(cwd)
+    expect(calls).toHaveLength(1)
+
+    mgr.recycleAll()
+
+    const after = await mgr.acquire(cwd)
+    expect(calls).toHaveLength(2) // a new process, which re-reads auth.json
+    expect(after.baseUrl).not.toBe(before.baseUrl) // a different spawn, not a revived handle
+    expect(mgr.activeCount).toBe(1)
+    mgr.release(cwd)
+  })
+
+  it('a post-recycle releaseIfCurrent from the old connection is a no-op', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+    const cwd = '/work/proj'
+
+    const oldConn = await mgr.acquire(cwd)
+    mgr.recycleAll()
+
+    // A session's markDisconnected lands here after the recycle. Its handle is
+    // already gone, so this must not underflow or touch the replacement below.
+    expect(() => mgr.releaseIfCurrent(cwd, oldConn)).not.toThrow()
+    expect(mgr.activeCount).toBe(0)
+
+    await mgr.acquire(cwd) // the session reconnects (refCount 1)
+    mgr.releaseIfCurrent(cwd, oldConn) // replayed stale release
+    expect(calls[1].child.killed).toBe(false)
+    expect(mgr.activeCount).toBe(1)
+
+    mgr.release(cwd)
+    expect(calls[1].child.killed).toBe(true)
+  })
+
+  it('is a no-op with zero handles', () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    expect(() => mgr.recycleAll()).not.toThrow()
+    expect(calls).toHaveLength(0)
+    expect(mgr.activeCount).toBe(0)
   })
 })

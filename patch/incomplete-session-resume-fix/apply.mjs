@@ -183,6 +183,23 @@ if (anchorCount !== 1) {
   process.exit(1)
 }
 
+// Verify the anchor is unique across the WHOLE bundle too. The injection below
+// is a first-occurrence String.replace over all ~13 MB — a regional-only check
+// would happily inject at an *earlier*, unrelated `FUNC(MAP);` call site and
+// silently corrupt cli.js. Minifier name reuse makes that a live risk on any
+// future SDK bump, so this is fatal, not a warning.
+const globalAnchorCount = src.split(postLoopLiteral).length - 1
+if (globalAnchorCount !== 1) {
+  console.error(
+    `ERROR: Expected exactly 1 occurrence of ${postLoopLiteral} in the whole bundle, found ${globalAnchorCount}.`
+  )
+  console.error(
+    'Refusing to inject: src.replace() targets the FIRST occurrence, which may not be the post-loop call.'
+  )
+  console.error('Re-derive a longer/unique anchor for this SDK version before re-running.')
+  process.exit(1)
+}
+
 // Inject the parentUuid fixup right before the post-loop call
 const fixupCode =
   `if(typeof _pcf_redir!=="undefined"&&_pcf_redir.size>0){` +

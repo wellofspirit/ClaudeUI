@@ -8,7 +8,7 @@
  */
 import { createServer } from 'node:http'
 import type { Server } from 'node:http'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 
@@ -44,10 +44,15 @@ export async function startMcpHttpHost(mcpServer: McpServer): Promise<McpHttpHos
   // Connect the McpServer to the transport before the server starts accepting.
   await mcpServer.connect(transport)
 
+  const expectedAuth = Buffer.from(`Bearer ${token}`, 'utf-8')
   const server: Server = createServer((req, res) => {
-    // Validate Bearer auth on every request.
-    const authHeader = req.headers.authorization
-    if (!authHeader || authHeader !== `Bearer ${token}`) {
+    // Validate Bearer auth on every request with a timing-safe compare — a
+    // naive `!==` leaks the token byte-by-byte via early-exit string comparison
+    // (matches PiBridgeHost's pattern). Length is checked first because
+    // timingSafeEqual THROWS on a length mismatch; a missing or wrong-length
+    // header must still land on the same 401.
+    const provided = Buffer.from(req.headers.authorization ?? '', 'utf-8')
+    if (provided.length !== expectedAuth.length || !timingSafeEqual(provided, expectedAuth)) {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return

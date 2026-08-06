@@ -399,24 +399,38 @@ export function readAgent(
 }
 
 /**
- * Save an agent: writes to `agents/<name>.md` in the appropriate scope directory.
- * Creates the directory if it doesn't exist.
+ * Save an agent, writing IN PLACE where the agent actually lives.
+ *
+ * M-OC8: `readAgentFile`/`listAgents` search `agent/` before `agents/`, so an
+ * agent that lives in `<base>/agent/<name>.md` was being SHADOWED — the old
+ * behavior always wrote to `<base>/agents/<name>.md`, creating a second file the
+ * reader never surfaced, so edits silently didn't stick. Resolve the existing
+ * file (both subdirs, `agent/` first) and overwrite THAT, exactly like
+ * `setAgentDisabled`. Only a brand-new agent (no existing file) defaults to
+ * `agents/`.
  */
 export function saveAgent(input: OpencodeAgentInput, cwd?: string): void {
-  let targetDir: string
+  let baseDir: string
   if (input.scope === 'global') {
-    targetDir = path.join(opencodeConfigDir(), 'agents')
+    baseDir = opencodeConfigDir()
   } else {
     if (!cwd) throw new Error('cwd is required for project-scoped agents')
-    targetDir = path.join(cwd, '.opencode', 'agents')
+    baseDir = path.join(cwd, '.opencode')
   }
-
-  fs.mkdirSync(targetDir, { recursive: true })
 
   const fm = inputToFrontmatter(input)
   const fileText = matter.stringify(input.prompt ?? '', fm)
 
-  fs.writeFileSync(path.join(targetDir, `${input.name}.md`), fileText, 'utf8')
+  const existing = readAgentFile(input.name, [
+    path.join(baseDir, 'agent'),
+    path.join(baseDir, 'agents'),
+  ])
+  const targetPath = existing
+    ? existing.filePath
+    : path.join(baseDir, 'agents', `${input.name}.md`)
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+  fs.writeFileSync(targetPath, fileText, 'utf8')
 }
 
 /**

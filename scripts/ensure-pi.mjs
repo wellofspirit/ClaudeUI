@@ -59,9 +59,22 @@ function getPinnedVersion() {
 function isCacheHit(version) {
   const versionFile = join(VENDOR_DIR, 'version.json')
   if (!existsSync(versionFile)) return false
+  // The binary must actually be present — an AV quarantine or partial checkout
+  // can leave version.json behind with no executable (M-BD1). pi ships in
+  // either a flat (pi-cli/pi[.exe]) or nested (pi-cli/pi/pi[.exe]) layout.
+  const binName = process.platform === 'win32' ? 'pi.exe' : 'pi'
+  if (!existsSync(join(VENDOR_DIR, binName)) && !existsSync(join(VENDOR_DIR, 'pi', binName))) {
+    return false
+  }
   try {
     const saved = JSON.parse(readFileSync(versionFile, 'utf8'))
-    return saved.version === version
+    // Match platform/arch too — a checkout copied across machines/architectures
+    // otherwise keeps a wrong-arch binary the version alone can't detect.
+    return (
+      saved.version === version &&
+      saved.platform === process.platform &&
+      saved.arch === process.arch
+    )
   } catch {
     return false
   }

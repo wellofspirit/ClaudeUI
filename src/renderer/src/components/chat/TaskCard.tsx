@@ -3,7 +3,7 @@ import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { SubagentMessages } from './SubagentMessages'
+import { SubagentOutputBody } from './SubagentOutputBody'
 import { ApprovalButtons } from './ApprovalButtons'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -87,6 +87,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const subagentText = useActiveSession((s) => s.subagentStreamingText)
   const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
+  const activeTasks = useActiveSession((s) => s.activeTasks)
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
@@ -102,9 +103,27 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
   const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
   const isBackground = !!view.background
+  // Has this task received a task_started wire event with no matching
+  // task_notification yet? If so it is DEFINITELY still running, regardless
+  // of tool_result/background-flag state — see PerSessionState.activeTasks.
+  // Claude 2.1.219+ makes Agent/Task background-by-default and usually omits
+  // `run_in_background` on the tool_use input (so `isBackground` above reads
+  // false), while an immediate "Async agent launched successfully"
+  // tool_result arrives (so `hasResult` reads true) — the pre-existing
+  // `!hasResult` check alone would flip the card to "complete" instantly.
+  // opencode/pi child sessions and historical transcripts never emit
+  // task_started, so they have no activeTasks record and fall through to the
+  // unchanged legacy heuristic below.
+  const hasActiveTask = !isHistorical && !!activeTasks[toolUseId]
   // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
   const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
-  const isRunning = isHistorical ? false : isBackground ? !bgNotification : !hasResult
+  const isRunning = isHistorical
+    ? false
+    : hasActiveTask
+      ? true
+      : isBackground
+        ? !bgNotification
+        : !hasResult
   // In historical mode, tasks without results show as "loaded" (neutral state)
   const isLoaded = isHistorical && !hasResult && !bgNotification
 
@@ -157,8 +176,18 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
     block.toolName === 'dispatch_agent'
   // Gated on capabilities.backgroundTasks — engines without background execution
   // never offer "Send to background". Claude: true → unchanged.
+  // !hasActiveTask: a task with an activeTasks record is ALREADY running
+  // async (background-by-default, 2.1.219+) — offering to "send it to
+  // background" is meaningless since it's already there. Only the residual
+  // synchronous-foreground path (no activeTasks record, isRunning via the
+  // legacy !hasResult heuristic) can still be manually backgrounded.
   const canBackground =
-    isRunning && !isBackground && !isStopping && backgroundTasksEnabled && !isDispatch
+    isRunning &&
+    !isBackground &&
+    !hasActiveTask &&
+    !isStopping &&
+    backgroundTasksEnabled &&
+    !isDispatch
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
   const handleBackgroundTask = async (): Promise<void> => {
@@ -188,22 +217,24 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
 
   const handleStopTask = async (): Promise<void> => {
     if (!activeSessionId) return
-    setTaskStopping(activeSessionId, toolUseId)
+    // Capture the session id: switching sessions within the 10s fallback window
+    // must still clear THIS session's stop pill, not whichever is active later.
+    const rid = activeSessionId
+    setTaskStopping(rid, toolUseId)
     // isDispatch: routes to the dispatcher with a durable stop-intent — a
     // dispatch card can show "running" before the dispatch has even reached
     // the main process (ADR-033 M3), so the plain toolUseId lookup can miss.
-    const result = await window.api.stopTask(activeSessionId, toolUseId, isDispatch)
+    const result = await window.api.stopTask(rid, toolUseId, isDispatch)
 
     if (!result.success) {
       window.api.logError('TaskCard', `Failed to stop task: ${result.error}`)
-      clearTaskStopping(activeSessionId, toolUseId)
+      clearTaskStopping(rid, toolUseId)
       return
     }
 
     // Set timeout to clear state if notification doesn't arrive within 10s
     setTimeout(() => {
-      const rid = useSessionStore.getState().activeSessionId
-      if (rid) clearTaskStopping(rid, toolUseId)
+      clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 
@@ -378,27 +409,15 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
           <div className="border-t border-border">
             {hasSubagentOutput ? (
               <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
-                {isRunning && isBackground && (
-                  <div className="flex items-center gap-2 text-[12px] text-text-muted mb-2">
-                    <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
-                    <span>Running in background...</span>
-                    {elapsed != null && (
-                      <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
-                    )}
-                  </div>
-                )}
-                {streamThinking && (
-                  <div className="text-[12px] text-text-secondary/60 italic mb-1.5">
-                    {streamThinking.slice(-200)}
-                  </div>
-                )}
-                {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
-                {streamText && (
-                  <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
-                    <MarkdownRenderer content={streamText} />
-                    <span className="inline-block w-[2px] h-[14px] bg-accent ml-0.5 align-middle animate-cursor-blink" />
-                  </div>
-                )}
+                <SubagentOutputBody
+                  msgs={msgs}
+                  streamThinking={streamThinking}
+                  streamText={streamText}
+                  isRunning={isRunning}
+                  isBackground={isBackground}
+                  elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}
+                  size="sm"
+                />
               </div>
             ) : resultBody && !isBackground ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">

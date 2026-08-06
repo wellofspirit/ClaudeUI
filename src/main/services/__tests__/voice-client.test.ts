@@ -118,11 +118,15 @@ import { VoiceClient } from '../voice-client'
 // --- Test helpers -----------------------------------------------------------
 
 interface FakeBrowserWindow {
-  webContents: { send: ReturnType<typeof vi.fn> }
+  webContents: { send: ReturnType<typeof vi.fn>; isDestroyed?: () => boolean }
+  isDestroyed?: () => boolean
 }
 
-function makeWin(): FakeBrowserWindow {
-  return { webContents: { send: vi.fn() } }
+function makeWin(destroyed = false): FakeBrowserWindow {
+  return {
+    isDestroyed: () => destroyed,
+    webContents: { send: vi.fn(), isDestroyed: () => destroyed }
+  }
 }
 
 /** Simulate the socket completing its TCP handshake. */
@@ -220,6 +224,38 @@ describe('VoiceClient', () => {
     const audioFrames2 = sentMessages().filter((m) => m.type === 'audio')
     expect(audioFrames2.length).toBe(2)
     expect(audioFrames2[1].data).toBe(Buffer.from([0x01, 0x02, 0x03]).toString('base64'))
+  })
+
+  it('rejects a second startRecording() while the first is still connecting (no orphan socket)', async () => {
+    const win = makeWin()
+    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+
+    // First call: enters 'connecting' and awaits the TCP handshake (not fired).
+    const p1 = client.startRecording('en')
+    expect(connectMock).toHaveBeenCalledTimes(1)
+
+    // Second call during the connect window must be a no-op — otherwise it would
+    // build a second socket that orphans the first.
+    await client.startRecording('en')
+    expect(connectMock).toHaveBeenCalledTimes(1)
+
+    // Let the first connect complete so the pending promise settles cleanly.
+    fireConnect()
+    await p1
+    expect(connectMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call webContents.send when the window is destroyed', async () => {
+    const win = makeWin(true)
+    const client = new VoiceClient(4000, win as unknown as never, 'routing-A')
+
+    // startRecording transitions state (which would send 'voice:state') — every
+    // send must be suppressed against a destroyed window rather than throwing.
+    const p = client.startRecording('en')
+    fireConnect()
+    await p
+
+    expect(win.webContents.send).not.toHaveBeenCalled()
   })
 
   it('stopRecording() sends voice_stop and cleans up after the server closes, restoring idle state', async () => {

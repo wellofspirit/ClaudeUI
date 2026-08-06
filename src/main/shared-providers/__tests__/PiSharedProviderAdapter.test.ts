@@ -278,6 +278,66 @@ describe('PiSharedProviderAdapter', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// M-AT4: a CUSTOM provider whose effective pi providerId collides with a
+// built-in native vendor id (e.g. 'anthropic') would vend its key over — and
+// delete on removal — the user's real native pi credential. Reject/guard it.
+//
+// RED-FIRST NOTE: pre-fix, applyDefinition('anthropic') wrote models.json under
+// 'anthropic' (no throw, since the file had no such provider), vendApiKey called
+// setVendorApiKey('anthropic', ...), and removeCredential called
+// removeVendorAuth('anthropic') — every assertion below FAILS against that code.
+// ---------------------------------------------------------------------------
+describe('PiSharedProviderAdapter — built-in vendor id collision (M-AT4)', () => {
+  const colliding: SharedProviderDefinition = {
+    ...provider,
+    routes: { pi: { enabled: true, providerId: 'anthropic' }, opencode: { enabled: false } }
+  }
+
+  it('applyDefinition rejects a custom route whose providerId is a built-in pi vendor', () => {
+    expect(() => adapter().applyDefinition(colliding)).toThrow(/collides with a built-in pi vendor/)
+    expect(() => readModels()).toThrow() // models.json never written
+  })
+
+  it('applyDefinition rejects when the fallback id (no explicit providerId) is a built-in vendor', () => {
+    const byId: SharedProviderDefinition = {
+      ...provider,
+      id: 'anthropic',
+      routes: { pi: { enabled: true }, opencode: { enabled: false } }
+    }
+    expect(() => adapter().applyDefinition(byId)).toThrow(/collides with a built-in pi vendor/)
+  })
+
+  it('vendApiKey refuses to overwrite a built-in vendor credential', async () => {
+    await expect(adapter().vendApiKey(colliding, 'sk-x')).rejects.toThrow(
+      /collides with a built-in pi vendor/
+    )
+    expect(auth.setVendorApiKey).not.toHaveBeenCalled()
+  })
+
+  it('removeCredential never deletes a built-in vendor credential for a colliding custom provider', async () => {
+    await adapter().removeCredential(colliding)
+    expect(auth.removeVendorAuth).not.toHaveBeenCalled()
+  })
+
+  it('still removes a NON-colliding custom provider and ChatGPT credentials normally', async () => {
+    await adapter().removeCredential(provider) // 'private-api' — not a built-in
+    expect(auth.removeVendorAuth).toHaveBeenCalledWith('private-api')
+
+    const chatgpt: SharedProviderDefinition = {
+      ...provider,
+      id: 'chatgpt',
+      kind: 'subscription',
+      protocol: undefined,
+      baseUrl: undefined,
+      models: [],
+      routes: { pi: { enabled: true, providerId: 'openai-codex' }, opencode: { enabled: true } }
+    }
+    await adapter().removeCredential(chatgpt) // built-in ChatGPT is exempt
+    expect(auth.removeVendorAuth).toHaveBeenCalledWith('openai-codex')
+  })
+})
+
 function compiledProvider() {
   return {
     baseUrl: 'https://api.example.test/v1',

@@ -10,11 +10,13 @@
  * On Windows, line endings inside diffs/file contents are normalized with
  * .replace(/\r\n/g, '\n') before assertions.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { GitService, gitServiceManager } from '../git-service'
+import { logger } from '../logger'
+import type { GitStatusData } from '../../../shared/types'
 import {
   makeTempGitRepo,
   makeBareRemoteRepo,
@@ -22,6 +24,17 @@ import {
 } from '../../../test/helpers/temp-git-repo'
 
 const norm = (s: string): string => s.replace(/\r\n/g, '\n')
+
+/** Poll until `pred` holds or `timeoutMs` elapses. Windows git calls are slow. */
+const waitFor = async (pred: () => boolean, timeoutMs: number): Promise<void> => {
+  const start = Date.now()
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 // ---------------------------------------------------------------------------
 // isGitRepo
@@ -686,6 +699,73 @@ describe('GitService.getFileContents', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Tracked content / diff size caps (audit M-GT1)
+//
+// Before the cap, clicking a huge TRACKED file buffered it fully (git show /
+// git diff into a JS string) and IPC'd a multi-hundred-MB payload — and a
+// multi-GB tracked blob crashed the main process on V8's String::kMaxLength.
+// getFilePatch must return a "too large" placeholder (isBinary) instead of the
+// giant diff; getFileContents must return a marker per oversized side, never
+// the content.
+// ---------------------------------------------------------------------------
+
+describe('GitService tracked size caps (M-GT1)', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+  // 10 MiB + 1 of printable 'a' — over the 10 MiB cap, and NOT binary (no NUL),
+  // so this exercises the size cap independently of the binary heuristic.
+  const OVERSIZE = 10 * 1024 * 1024 + 1
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+    // Commit a huge tracked text file, then modify it so there is a real diff.
+    await fs.promises.writeFile(path.join(repo.path, 'huge.txt'), Buffer.alloc(OVERSIZE, 0x61))
+    await repo.git.add('huge.txt')
+    await repo.commit('add huge tracked file')
+    await fs.promises.appendFile(path.join(repo.path, 'huge.txt'), 'zzz\n')
+  })
+
+  afterEach(async () => {
+    await repo.cleanup()
+  })
+
+  it('getFilePatch returns a too-large placeholder for an oversized tracked file (no giant diff)', async () => {
+    const { patch, isBinary } = await svc.getFilePatch('huge.txt', false)
+    expect(isBinary).toBe(true)
+    // The placeholder — never the 10 MiB of content, never a real hunk.
+    expect(patch.length).toBeLessThan(1024)
+    expect(patch).toMatch(/too large/i)
+    expect(patch.includes('@@')).toBe(false)
+    // A long run of the file's bytes must not appear.
+    expect(patch.includes('a'.repeat(1000))).toBe(false)
+  })
+
+  it('getFileContents returns a marker per oversized side, never the content', async () => {
+    const { oldContent, newContent } = await svc.getFileContents('huge.txt', false)
+    // old side = the committed index blob (10 MiB) → marker.
+    expect(oldContent).toMatch(/too large/i)
+    expect(oldContent.length).toBeLessThan(512)
+    // new side = the working-tree file (10 MiB) → marker.
+    expect(newContent).toMatch(/too large/i)
+    expect(newContent.length).toBeLessThan(512)
+    expect(newContent.includes('a'.repeat(1000))).toBe(false)
+  })
+
+  it('does not affect a normal-sized tracked file (cap is non-vacuous)', async () => {
+    await repo.writeFile('small.txt', 'one\ntwo\n')
+    await repo.commit('seed small')
+    await repo.writeFile('small.txt', 'one\ntwo\nthree\n')
+    const { patch, isBinary } = await svc.getFilePatch('small.txt', false)
+    expect(isBinary).toBeUndefined()
+    expect(norm(patch)).toMatch(/\+three/m)
+    const { oldContent, newContent } = await svc.getFileContents('small.txt', false)
+    expect(norm(oldContent)).toBe('one\ntwo\n')
+    expect(norm(newContent)).toBe('one\ntwo\nthree\n')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // discardFile
 // ---------------------------------------------------------------------------
 
@@ -723,6 +803,85 @@ describe('GitService.discardFile', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Path containment for file operations (audit M-GT2 / gpt#5)
+//
+// Every IPC-exposed file op must reject a repo-relative path that escapes the
+// repository root. The most dangerous is discardFile: a `../secret` path fails
+// both `git show` probes, is classified untracked, and pre-fix was fs.unlink'd
+// outside the repo.
+// ---------------------------------------------------------------------------
+
+describe('GitService path containment', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+  let sentinel: string
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+    // A precious file OUTSIDE the repo, addressable via `../` from repo root.
+    sentinel = path.resolve(repo.path, '..', `claudeui-sentinel-${Date.now()}.txt`)
+    await fs.promises.writeFile(sentinel, 'do-not-touch\n', 'utf-8')
+  })
+
+  afterEach(async () => {
+    try {
+      await fs.promises.rm(sentinel, { force: true, maxRetries: 5 })
+    } catch {
+      /* ignore */
+    }
+    await repo.cleanup()
+  })
+
+  const relToSentinel = (): string => `../${path.basename(sentinel)}`
+
+  it('discardFile refuses a ../ path and never unlinks the outside file', async () => {
+    await expect(svc.discardFile(relToSentinel())).rejects.toThrow(/outside the repository/)
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('discardFile refuses a deep traversal that escapes via a subdirectory', async () => {
+    await expect(svc.discardFile(`sub/../../${path.basename(sentinel)}`)).rejects.toThrow(
+      /outside the repository/
+    )
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('getFileContents refuses a ../ path', async () => {
+    await expect(svc.getFileContents(relToSentinel(), false)).rejects.toThrow(
+      /outside the repository/
+    )
+    expect(fs.existsSync(sentinel)).toBe(true)
+  })
+
+  it('getFilePatch refuses a ../ path', async () => {
+    await expect(svc.getFilePatch(relToSentinel(), false)).rejects.toThrow(/outside the repository/)
+  })
+
+  it('stageFile refuses a ../ path', async () => {
+    await expect(svc.stageFile(relToSentinel())).rejects.toThrow(/outside the repository/)
+  })
+
+  it('unstageFile refuses a ../ path', async () => {
+    await expect(svc.unstageFile(relToSentinel())).rejects.toThrow(/outside the repository/)
+  })
+
+  it('still operates on a legitimately nested in-repo path', async () => {
+    // A file in a subdirectory must remain fully functional post-containment.
+    await repo.writeFile('nested/dir/file.txt', 'v1\n')
+    await repo.commit('seed nested')
+    await repo.writeFile('nested/dir/file.txt', 'v2\n')
+
+    const { oldContent, newContent } = await svc.getFileContents('nested/dir/file.txt', false)
+    expect(norm(oldContent)).toBe('v1\n')
+    expect(norm(newContent)).toBe('v2\n')
+
+    await svc.discardFile('nested/dir/file.txt')
+    expect(norm(await repo.readFile('nested/dir/file.txt'))).toBe('v1\n')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // startPolling / stopPolling
 // ---------------------------------------------------------------------------
 
@@ -748,14 +907,6 @@ describe('GitService polling', () => {
 
     // Wait for the initial poll to fire. On Windows CI, each simple-git
     // subprocess call costs ~150-200ms, so a fixed timeout is flaky.
-    const waitFor = async (pred: () => boolean, timeoutMs: number): Promise<void> => {
-      const start = Date.now()
-      while (!pred()) {
-        if (Date.now() - start > timeoutMs) return
-        await new Promise((r) => setTimeout(r, 25))
-      }
-    }
-
     await waitFor(() => calls.length >= 1, 5000)
     const initialCalls = calls.length
     expect(initialCalls).toBeGreaterThanOrEqual(1)
@@ -773,6 +924,338 @@ describe('GitService polling', () => {
     const afterStop = calls.length
     await new Promise((r) => setTimeout(r, 300))
     expect(calls.length).toBe(afterStop)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// startPolling — in-flight guard (main-process OOM regression guard)
+//
+// Before the guard, `setInterval(poll, 5000)` fired regardless of whether the
+// previous async getStatus() had settled. On a large working tree each poll
+// took longer than the interval, so invocations accumulated behind simple-git's
+// per-instance task queue until the main process ran out of heap — a V8 abort,
+// which produces no JS exception, no log line, and no Windows WER entry.
+// ---------------------------------------------------------------------------
+
+const emptyStatus = (over: Partial<GitStatusData> = {}): GitStatusData => ({
+  branch: 'main',
+  ahead: 0,
+  behind: 0,
+  trackingBranch: null,
+  files: [],
+  staged: [],
+  unstaged: [],
+  untracked: [],
+  linesAdded: 0,
+  linesRemoved: 0,
+  ...over
+})
+
+describe('GitService polling in-flight guard', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+  })
+
+  afterEach(async () => {
+    svc.stopPolling()
+    vi.restoreAllMocks()
+    await repo.cleanup()
+  })
+
+  it('skips ticks while the previous getStatus() is still in flight', async () => {
+    let started = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    vi.spyOn(svc, 'getStatus').mockImplementation(async () => {
+      started++
+      await gate
+      return emptyStatus()
+    })
+
+    // ~20 ticks would fire in 200 ms at a 10 ms interval.
+    svc.startPolling(() => {}, 10)
+    await sleep(200)
+    expect(started).toBe(1)
+
+    // Once the in-flight poll settles, polling resumes normally.
+    release()
+    await waitFor(() => started > 1, 1000)
+    expect(started).toBeGreaterThan(1)
+  })
+
+  it('does not fire the callback for a poll that settles after stopPolling', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    vi.spyOn(svc, 'getStatus').mockImplementation(async () => {
+      await gate
+      return emptyStatus()
+    })
+
+    const calls: GitStatusData[] = []
+    svc.startPolling((s) => calls.push(s), 10)
+    await sleep(30)
+    svc.stopPolling()
+    release()
+    await sleep(50)
+    expect(calls).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// startPolling — cheap fingerprint change detection
+// ---------------------------------------------------------------------------
+
+describe('GitService polling change detection', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+  })
+
+  afterEach(async () => {
+    svc.stopPolling()
+    vi.restoreAllMocks()
+    await repo.cleanup()
+  })
+
+  it('fires on per-file status letter changes and on ahead/behind changes, not on repeats', async () => {
+    const modified = (): GitStatusData =>
+      emptyStatus({
+        files: [{ path: 'a.txt', index: ' ', working: 'M' }],
+        unstaged: ['a.txt'],
+        linesAdded: 1
+      })
+    // Same branch, same file count, same line counts — only the status letters
+    // move. A fingerprint that skipped per-file letters would miss this.
+    const staged = (): GitStatusData =>
+      emptyStatus({
+        files: [{ path: 'a.txt', index: 'M', working: ' ' }],
+        staged: ['a.txt'],
+        linesAdded: 1
+      })
+
+    const queue: GitStatusData[] = [
+      modified(),
+      modified(), // fresh object, identical content → must NOT fire
+      staged(),
+      staged(), // fresh object, identical content → must NOT fire
+      emptyStatus({
+        files: [{ path: 'a.txt', index: 'M', working: ' ' }],
+        staged: ['a.txt'],
+        linesAdded: 1,
+        ahead: 1
+      })
+    ]
+    let consumed = 0
+    vi.spyOn(svc, 'getStatus').mockImplementation(async () => {
+      const next = queue[Math.min(consumed, queue.length - 1)]
+      consumed++
+      return next
+    })
+
+    const fired: GitStatusData[] = []
+    svc.startPolling((s) => fired.push(s), 5)
+    await waitFor(() => consumed >= queue.length, 3000)
+    await sleep(30)
+    svc.stopPolling()
+
+    expect(consumed).toBeGreaterThanOrEqual(queue.length)
+    expect(fired.length).toBe(3)
+    expect(fired[0].files[0].working).toBe('M')
+    expect(fired[1].files[0].index).toBe('M')
+    expect(fired[2].ahead).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// startPolling — first-emit invariant
+//
+// Invariant: every startPolling() emits the CURRENT status exactly once, then
+// only on change. Before the fingerprint reset in stopPolling(), a GitService
+// handed back by gitServiceManager with a primed fingerprint swallowed the new
+// caller's first poll — which is why a freshly connected remote client received
+// no git:status-update at all and its changes pill never rendered.
+// ---------------------------------------------------------------------------
+
+describe('GitService polling first-emit invariant', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+  })
+
+  afterEach(async () => {
+    svc.stopPolling()
+    vi.restoreAllMocks()
+    await repo.cleanup()
+  })
+
+  it('a restart on a primed service still emits the current status (GUARD)', async () => {
+    // Long interval: every emission below must come from the INITIAL poll of its
+    // own startPolling() call, not from a later tick.
+    const first: GitStatusData[] = []
+    svc.startPolling((s) => first.push(s), 60_000)
+    await waitFor(() => first.length >= 1, 5000)
+    expect(first).toHaveLength(1)
+    svc.stopPolling()
+
+    // Second caller (the remote owner, or a desktop re-watch after a session
+    // switch) — same instance, unchanged working tree.
+    const second: GitStatusData[] = []
+    svc.startPolling((s) => second.push(s), 60_000)
+    await waitFor(() => second.length >= 1, 5000)
+    expect(second).toHaveLength(1)
+    expect(second[0].branch).toBe(first[0].branch)
+  })
+
+  it('emits exactly once while the tree stays unchanged', async () => {
+    const fired: GitStatusData[] = []
+    svc.startPolling((s) => fired.push(s), 20)
+    await waitFor(() => fired.length >= 1, 5000)
+    await sleep(300)
+    expect(fired).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getStatus — untracked line-count budget + cache
+// ---------------------------------------------------------------------------
+
+describe('GitService untracked line-count budget', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+  })
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await repo.cleanup()
+  })
+
+  it('caps how many untracked files it line-counts and flags the truncation', async () => {
+    // 205 untracked files, one countable line each. Cap is 200.
+    const total = 205
+    await Promise.all(
+      Array.from({ length: total }, (_, i) =>
+        repo.writeFile(`u${String(i).padStart(4, '0')}.txt`, 'a\n')
+      )
+    )
+
+    const readSpy = vi.spyOn(fs.promises, 'readFile')
+    const status = await svc.getStatus()
+
+    // Every file is still reported — only the line counts are budgeted.
+    expect(status.untracked.length).toBe(total)
+    expect(status.lineCountsTruncated).toBe(true)
+    expect(status.linesAdded).toBe(200)
+    expect(readSpy).toHaveBeenCalledTimes(200)
+  })
+
+  it('stops line-counting once the cumulative byte budget is exhausted', async () => {
+    // 6 × 9 MiB = 54 MiB of untracked text; the budget is 50 MiB, so the 6th
+    // file must not be read. Each file is one line (no newline anywhere).
+    const chunk = Buffer.alloc(9 * 1024 * 1024, 0x61)
+    for (let i = 0; i < 6; i++) {
+      await fs.promises.writeFile(path.join(repo.path, `big${i}.log`), chunk)
+    }
+
+    const readSpy = vi.spyOn(fs.promises, 'readFile')
+    const status = await svc.getStatus()
+
+    expect(status.untracked.length).toBe(6)
+    expect(status.lineCountsTruncated).toBe(true)
+    // 5 × 9 MiB = 45 MiB read; the 6th would push past 50 MiB.
+    expect(readSpy).toHaveBeenCalledTimes(5)
+    expect(status.linesAdded).toBe(5)
+  })
+
+  it('caches line counts by (size, mtime) so unchanged files are read once', async () => {
+    await repo.writeFile('a.txt', 'one\ntwo\n')
+    await repo.writeFile('b.txt', 'x\n')
+
+    const first = await svc.getStatus()
+    expect(first.linesAdded).toBe(3)
+
+    const readSpy = vi.spyOn(fs.promises, 'readFile')
+    const openSpy = vi.spyOn(fs.promises, 'open')
+    const second = await svc.getStatus()
+    expect(second.linesAdded).toBe(3)
+    // Nothing changed on disk — no full reads and no binary sniffs at all.
+    expect(readSpy).not.toHaveBeenCalled()
+    expect(openSpy).not.toHaveBeenCalled()
+
+    // Changing one file's size invalidates only that entry.
+    await repo.writeFile('b.txt', 'x\ny\nz\n')
+    const third = await svc.getStatus()
+    expect(third.linesAdded).toBe(5)
+    expect(readSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('caps the status lists that cross the IPC boundary', async () => {
+    // 5100 untracked entries; the IPC cap is 5000. Protects the structured
+    // clone broadcast to every open window on a pathological working tree.
+    const total = 5100
+    const batch = 500
+    for (let start = 0; start < total; start += batch) {
+      await Promise.all(
+        Array.from({ length: Math.min(batch, total - start) }, (_, i) =>
+          repo.writeFile(`f${String(start + i).padStart(5, '0')}.txt`, 'a\n')
+        )
+      )
+    }
+
+    const status = await svc.getStatus()
+    expect(status.filesTruncated).toBe(true)
+    expect(status.untracked).toHaveLength(5000)
+    expect(status.files).toHaveLength(5000)
+    // Line counting is separately budgeted and stops far earlier.
+    expect(status.lineCountsTruncated).toBe(true)
+    expect(status.linesAdded).toBe(200)
+  })
+
+  it('leaves lineCountsTruncated unset for an ordinary working tree', async () => {
+    await repo.writeFile('a.txt', 'one\n')
+    const status = await svc.getStatus()
+    expect(status.lineCountsTruncated).toBeUndefined()
+    expect(status.filesTruncated).toBeUndefined()
+  })
+
+  it('emits a single aggregated warn instead of one per unreadable file', async () => {
+    await Promise.all(Array.from({ length: 5 }, (_, i) => repo.writeFile(`bad${i}.txt`, 'x\n')))
+    // Simulate the real-world failure mode (EPERM / Windows long paths) for
+    // just these five files; everything else must keep working.
+    const realStat = fs.promises.stat
+    vi.spyOn(fs.promises, 'stat').mockImplementation(((p: fs.PathLike) => {
+      if (String(p).includes('bad')) {
+        return Promise.reject(Object.assign(new Error('EPERM'), { code: 'EPERM' }))
+      }
+      return realStat(p)
+    }) as unknown as typeof fs.promises.stat)
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+
+    const status = await svc.getStatus()
+    expect(status.untracked.length).toBe(5)
+    const untrackedWarns = warnSpy.mock.calls.filter((c) =>
+      String(c[1]).includes('untracked file(s) for line count')
+    )
+    expect(untrackedWarns).toHaveLength(1)
+    expect(untrackedWarns[0][1]).toContain('Failed to read 5 untracked file(s)')
+    expect(untrackedWarns[0][1]).toContain('bad0.txt')
   })
 })
 

@@ -11,6 +11,7 @@ import * as path from 'path'
 import * as os from 'os'
 import type { ChatMessage, ContentBlock } from '../../shared/types'
 import { logger } from './logger'
+import { extractToolResultContent } from './tool-result-content'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -119,19 +120,13 @@ function parseJsonlLine(line: string): ChatMessage | null {
         const toolResults: ContentBlock[] = []
         for (const block of content) {
           if (block.type === 'tool_result' && block.tool_use_id) {
-            let resultText = ''
-            if (typeof block.content === 'string') {
-              resultText = block.content
-            } else if (Array.isArray(block.content)) {
-              resultText = block.content
-                .map((c: Record<string, unknown>) => (c.text as string) || '')
-                .join('\n')
-            }
+            const { text: resultText, images } = extractToolResultContent(block.content)
             toolResults.push({
               type: 'tool_result',
               toolUseId: block.tool_use_id,
               toolResult: resultText,
-              isError: !!block.is_error
+              isError: !!block.is_error,
+              ...(images ? { images } : {})
             })
           }
         }
@@ -165,16 +160,13 @@ function parseJsonlLine(line: string): ChatMessage | null {
             }
           }
           if (blockType === 'tool_result') {
-            const rc = block.content
-            let text = ''
-            if (typeof rc === 'string') text = rc
-            else if (Array.isArray(rc))
-              text = rc.map((c: Record<string, unknown>) => (c.text as string) || '').join('\n')
+            const { text, images } = extractToolResultContent(block.content)
             return {
               type: 'tool_result' as const,
               toolUseId: block.tool_use_id as string,
               toolResult: text,
-              isError: block.is_error as boolean
+              isError: block.is_error as boolean,
+              ...(images ? { images } : {})
             }
           }
           if (blockType === 'thinking')
@@ -298,7 +290,7 @@ export function watchSubagent(
 
     // Watch for further changes
     try {
-      entry.watcher = fs.watch(filePath, () => {
+      const w = fs.watch(filePath, () => {
         if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
         entry.debounceTimer = setTimeout(() => {
           const { messages: newMsgs, newOffset: updatedOffset } = readNewMessages(
@@ -311,6 +303,25 @@ export function watchSubagent(
           }
         }, 150)
       })
+      // fs.watch emits 'error' on Windows when the watched file is deleted. With
+      // no listener that becomes an uncaughtException, and the dead entry keeps
+      // `watched.has(toolUseId)` true so re-watching is blocked (M-CL5). Drop
+      // the dead watcher so a later watchSubagent() can re-establish it.
+      w.on('error', (err) => {
+        logger.warn('SubagentWatcher', 'watch error; removing dead watcher', { filePath, err })
+        const cur = watched.get(toolUseId)
+        if (cur && cur.watcher === w) {
+          if (cur.debounceTimer) clearTimeout(cur.debounceTimer)
+          cur.watcher = null
+          watched.delete(toolUseId)
+        }
+        try {
+          w.close()
+        } catch {
+          /* already dead */
+        }
+      })
+      entry.watcher = w
     } catch (err) {
       logger.warn('SubagentWatcher', 'Failed to watch file, may have been removed', {
         filePath,

@@ -101,6 +101,9 @@ describe('terminal.ipc', () => {
     const id = await harness.call<string>('terminal:create', '/tmp/proj')
     ptyStub.spawned[0].emitData('hello world')
 
+    // Output is coalesced behind an 8ms flush timer (M-PT1); wait for the batch.
+    await new Promise((r) => setTimeout(r, 25))
+
     expect(dataEvents).toHaveLength(1)
     expect(dataEvents[0]).toEqual({ terminalId: id, data: 'hello world' })
   })

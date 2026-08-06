@@ -303,9 +303,11 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     if (getProxyAllSubprocesses()) env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
     else delete env.CLAUDEUI_PROXY_SUBPROCESSES
   } else {
-    delete env.HTTP_PROXY
-    delete env.HTTPS_PROXY
-    delete env.ALL_PROXY
+    // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
+    // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
+    // (docs/protocol/01-transport §1.5); deleting them left a user behind a
+    // corporate/env proxy with no connectivity (M-CL4). Only clear our own
+    // marker so the default subprocess-proxy-strip behavior applies.
     delete env.CLAUDEUI_PROXY_SUBPROCESSES
   }
 
@@ -316,10 +318,12 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   if (endpoint) {
     env.ANTHROPIC_BASE_URL = endpoint.ANTHROPIC_BASE_URL
     env.ANTHROPIC_AUTH_TOKEN = endpoint.ANTHROPIC_AUTH_TOKEN
-  } else {
-    delete env.ANTHROPIC_BASE_URL
-    delete env.ANTHROPIC_AUTH_TOKEN
   }
+  // No in-app endpoint configured: do NOT delete inherited ANTHROPIC_BASE_URL/
+  // ANTHROPIC_AUTH_TOKEN. A user routing through a gateway/LiteLLM via their own
+  // env relies on them and the stock CLI supports them (M-CL4). These inherited
+  // values are the user's own shell env — the Codex/vault path never writes
+  // ANTHROPIC_* to process.env, so this cannot leak vault tokens into Claude.
 
   // Scoped model override: each field is set only when non-empty so partial
   // overrides leave cli.js's defaults intact for the unset families.
@@ -343,21 +347,26 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
   }
 
-  // Multi-account credential storage (ADR-015). Precedence: an explicit
-  // per-spawn override (options.env, already merged into `env` — used by
-  // add-account login into a specific dir) wins; else the active account's dir
-  // from module state; else clear so single-account Keychain mode is restored.
-  if (env.SKIP_SECURESTORAGE) {
-    // explicit per-spawn override — leave SKIP_SECURESTORAGE + dir as provided
+  // Multi-account credential storage (ADR-015). Precedence: the active
+  // account's dir from module state (setSecurestorageEnv, wired by
+  // AccountManager.applyActive) is AUTHORITATIVE and wins over anything in the
+  // spawn env. Treating an inherited `SKIP_SECURESTORAGE` (from the parent
+  // shell's process.env) as an explicit per-spawn override skipped this overlay,
+  // so every account silently shared one inherited credential dir instead of its
+  // own. Only when multi-account is OFF (no module state) do we honor a
+  // SKIP_SECURESTORAGE already present in the env, else clear so single-account
+  // Keychain mode is restored.
+  const ss = getSecurestorageEnv()
+  if (ss) {
+    env.SKIP_SECURESTORAGE = '1'
+    env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ss.dir
+  } else if (env.SKIP_SECURESTORAGE) {
+    // Single-account mode, but SKIP_SECURESTORAGE is present in the spawn env
+    // (an explicit per-spawn override, or one inherited from the shell) — with no
+    // active-account dir to enforce, leave it as provided.
   } else {
-    const ss = getSecurestorageEnv()
-    if (ss) {
-      env.SKIP_SECURESTORAGE = '1'
-      env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ss.dir
-    } else {
-      delete env.SKIP_SECURESTORAGE
-      delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR
-    }
+    delete env.SKIP_SECURESTORAGE
+    delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR
   }
 
   // Inject our app's node_modules into NODE_PATH so cli.js can resolve

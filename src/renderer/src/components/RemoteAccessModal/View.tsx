@@ -1,5 +1,6 @@
 import { useRef, useCallback } from 'react'
 import type { RemoteStatus, NetworkInterfaceInfo } from '../../../../shared/types'
+import { SelectMenu } from '../shared/SelectMenu'
 
 export interface RemoteAccessModalViewProps {
   status: RemoteStatus | null
@@ -34,7 +35,9 @@ export function RemoteAccessModalView({
 }: RemoteAccessModalViewProps): React.JSX.Element {
   const overlayRef = useRef<HTMLDivElement>(null)
 
-  const shareUrl = status?.tunnelUrl ?? status?.lanUrl ?? null
+  // Same precedence as the container's QR source — see RemoteAccessModal.tsx.
+  const tlsUrl = status?.tls?.url ?? null
+  const shareUrl = tlsUrl ?? status?.tunnelUrl ?? status?.lanUrl ?? null
   const displayUrl = shareUrl ? shareUrl.replace(/#.*$/, '') : null
 
   const handleOverlayClick = useCallback(
@@ -173,7 +176,7 @@ export function RemoteAccessModalView({
                       <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                       <path d="M7 11V7a5 5 0 0110 0v4" />
                     </svg>
-                    E2E encrypted via Cloudflare Tunnel
+                    End-to-end encrypted messages over a Cloudflare tunnel
                   </div>
                 )}
               </div>
@@ -184,24 +187,21 @@ export function RemoteAccessModalView({
                   <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">
                     Network Interface
                   </label>
-                  <select
+                  <SelectMenu
+                    testid="RemoteAccessModal.interface"
                     value={selectedHost}
-                    onChange={(e) => onSelectHost(e.target.value)}
-                    className="w-full bg-bg-primary border border-border rounded-lg px-3 py-2 text-[12px] text-text-primary outline-none focus:border-accent transition-colors appearance-none cursor-pointer"
-                    style={{
-                      backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
-                      backgroundRepeat: 'no-repeat',
-                      backgroundPosition: 'right 10px center'
-                    }}
-                  >
-                    <option value="">All interfaces (auto-detect)</option>
-                    {interfaces.map((iface) => (
-                      <option key={`${iface.name}-${iface.address}`} value={iface.address}>
-                        {iface.name} — {iface.address}
-                        {iface.priority >= 9 ? ' (VPN)' : iface.priority <= 1 ? ' ★' : ''}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={onSelectHost}
+                    options={[
+                      { value: '', label: 'All interfaces (auto-detect)' },
+                      ...interfaces.map((iface) => ({
+                        value: iface.address,
+                        label: `${iface.name} — ${iface.address}${
+                          iface.priority >= 9 ? ' (VPN)' : iface.priority <= 1 ? ' ★' : ''
+                        }`
+                      }))
+                    ]}
+                    triggerClassName="w-full bg-bg-primary border border-border rounded-lg px-3 py-2 text-[12px] text-text-primary outline-none focus:border-accent transition-colors"
+                  />
                 </div>
               )}
 
@@ -213,6 +213,17 @@ export function RemoteAccessModalView({
               >
                 {starting ? 'Starting...' : 'Start Remote Server'}
               </button>
+
+              {/* Surfaces a failed listen attempt (e.g. from a failed autostart —
+                  there's no modal open at that point to show it any other way). */}
+              {status?.lastError && (
+                <div
+                  data-testid="RemoteAccessModal.lastError"
+                  className="w-full text-danger text-[11px] text-center px-2"
+                >
+                  {status.lastError}
+                </div>
+              )}
             </div>
           ) : status ? (
             /* Running state */
@@ -260,7 +271,7 @@ export function RemoteAccessModalView({
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                           <path d="M7 11V7a5 5 0 0110 0v4" />
                         </svg>
-                        <span className="text-success text-[11px]">E2E Encrypted</span>
+                        <span className="text-success text-[11px]">End-to-end encrypted</span>
                       </>
                     )}
                     {isTunnelError && (
@@ -278,6 +289,28 @@ export function RemoteAccessModalView({
                         URL may change — re-scan QR if needed
                       </div>
                     )}
+                </div>
+              )}
+
+              {/* TLS mode: why there is no token in the URL, and who can use it. */}
+              {tlsUrl && (
+                <div
+                  data-testid="RemoteAccessModal.tlsIdentity"
+                  className="w-full text-[11px] text-success px-1"
+                >
+                  Authenticated by Tailscale identity — only this machine&apos;s Tailscale owner can
+                  sign in. No token in the link.
+                </div>
+              )}
+
+              {/* TLS mode asked for but `tailscale serve` is not up (autostart
+                  keeps retrying) — this is the only place the reason surfaces. */}
+              {status.tls?.detectionMessage && (
+                <div
+                  data-testid="RemoteAccessModal.tlsDetection"
+                  className="w-full text-danger text-[11px] text-center px-2"
+                >
+                  {status.tls.detectionMessage}
                 </div>
               )}
 
@@ -340,12 +373,14 @@ export function RemoteAccessModalView({
                 <span className="text-text-muted">Port {status.port}</span>
               </div>
 
-              {/* Client IPs */}
+              {/* Connected clients — the tailnet login when we know it (every row
+                  reads 127.0.0.1 behind the serve proxy, which tells the user
+                  nothing), otherwise the address. */}
               {status.clientIps && status.clientIps.length > 0 && (
                 <div className="w-full text-[11px] text-text-muted px-1">
                   {status.clientIps.map((ip, i) => (
                     <span key={i} className="mr-2">
-                      {ip}
+                      {status.clientLogins?.[i] ?? ip}
                     </span>
                   ))}
                 </div>

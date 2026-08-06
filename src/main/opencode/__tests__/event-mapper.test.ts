@@ -66,6 +66,31 @@ describe('mapEvent — cross-session filter', () => {
       expect(out.delta).toBe('child text')
     }
   })
+
+  it('surfaces a session.error that carries NO sessionID (plugin crash) instead of dropping it', () => {
+    // The vendor publishes plugin faults as session.error with no sessionID
+    // (plugin/index.ts). ClaudeUI always loads claudeui-xeng-plugin, so such a
+    // crash matched neither the own nor a child branch and fell through to
+    // {kind:'ignore'} — surfacing nowhere. It must now become a generic error.
+    const ev = makeEvent('session.error', {
+      error: { name: 'UnknownError', data: { message: 'plugin boom' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, new Map())
+    expect(out.kind).toBe('error')
+    if (out.kind === 'error') expect(out.message).toBe('plugin boom')
+  })
+
+  it('still IGNORES a session.error scoped to an unrelated foreign session', () => {
+    // A sessionID that IS present but matches neither own nor a child belongs to
+    // someone else — it must stay ignored (only the sessionID-less GLOBAL error
+    // is adopted).
+    const ev = makeEvent('session.error', {
+      sessionID: 'ses_SOMEONE_ELSE',
+      error: { name: 'UnknownError', data: { message: 'not ours' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, new Map())
+    expect(out.kind).toBe('ignore')
+  })
 })
 
 describe('mapEvent — message.part.delta', () => {
@@ -253,6 +278,130 @@ describe('mapEvent — permission.asked', () => {
     } else {
       throw new Error('expected approval')
     }
+  })
+
+  // M-OC6: surface the real tool input to the approval/judge for MCP tools that
+  // ask with metadata:{}.
+  it('surfaces the accumulated tool-call input when metadata is empty (M-OC6)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    // The streamed tool part carrying the real args arrives BEFORE the ask.
+    mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: SESSION_ID,
+        part: {
+          id: 'prt_1',
+          messageID: 'msg_1',
+          type: 'tool',
+          tool: 'claudeui_dispatch_agent',
+          callID: 'call_9',
+          state: { status: 'pending', input: { engine: 'claude', prompt: 'do the thing' } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_mcp',
+        permission: 'claudeui_dispatch_agent',
+        tool: { messageID: 'msg_1', callID: 'call_9' },
+        metadata: {} // the MCP-tool blind spot
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    expect(out.kind).toBe('approval')
+    if (out.kind === 'approval') {
+      // Pre-fix this was {} (metadata); now it carries the real args.
+      expect(out.approval.input).toEqual({ engine: 'claude', prompt: 'do the thing' })
+    }
+  })
+
+  it('finds the tool input even when the ask omits messageID (scans all accumulators)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    mapEvent(
+      makeEvent('message.part.updated', {
+        sessionID: SESSION_ID,
+        part: {
+          id: 'prt_2',
+          messageID: 'msg_2',
+          type: 'tool',
+          tool: 'somemcp',
+          callID: 'call_x',
+          state: { input: { a: 1 } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_x',
+        permission: 'somemcp',
+        tool: { callID: 'call_x' }, // no messageID
+        metadata: {}
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    if (out.kind === 'approval') expect(out.approval.input).toEqual({ a: 1 })
+    else throw new Error('expected approval')
+  })
+
+  it('falls back to metadata when no matching tool part carries input', () => {
+    const out = mapEvent(
+      makeEvent('permission.asked', {
+        sessionID: SESSION_ID,
+        id: 'perm_meta',
+        permission: 'bash',
+        tool: { callID: 'call_none' },
+        metadata: { command: 'ls' }
+      }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    if (out.kind === 'approval') expect(out.approval.input).toEqual({ command: 'ls' })
+    else throw new Error('expected approval')
+  })
+})
+
+// M-OC2: permission.replied retracts the (possibly cascade-resolved) card.
+describe('mapEvent — permission.replied (M-OC2)', () => {
+  it('maps permission.replied → approval-resolved with the requestID', () => {
+    const out = mapEvent(
+      makeEvent('permission.replied', { sessionID: SESSION_ID, requestID: 'perm_1' }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    // Pre-fix this fell through to {kind:'ignore'} — the stale card never cleared.
+    expect(out.kind).toBe('approval-resolved')
+    if (out.kind === 'approval-resolved') expect(out.requestId).toBe('perm_1')
+  })
+
+  it('ignores a permission.replied with no requestID', () => {
+    const out = mapEvent(
+      makeEvent('permission.replied', { sessionID: SESSION_ID }),
+      SESSION_ID,
+      new Map(),
+      START_TIME,
+      { value: 0 }
+    )
+    expect(out.kind).toBe('ignore')
   })
 })
 
@@ -615,6 +764,38 @@ describe('extractToolResult', () => {
     expect(res?.toolUseId).toBe('c1')
     expect(res?.result).toBe('file content')
     expect(res?.isError).toBe(false)
+  })
+
+  it('carries state.attachments data-URIs onto the result as images (live path)', () => {
+    // Verified against the pinned vendor source: a tool that returns media has
+    // the FilePart attachments on its OWN tool part state.attachments
+    // (processor.ts completeToolCall / ToolStateCompleted.attachments), not as
+    // separate assistant-message file parts. They were dropped entirely.
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c-img',
+      state: {
+        status: 'completed',
+        output: 'Image read successfully',
+        attachments: [
+          { type: 'file', mime: 'image/png', url: 'data:image/png;base64,LIVE', filename: 'a.png' },
+          { type: 'file', mime: 'image/tiff', url: 'data:image/tiff;base64,DROP' }
+        ]
+      }
+    })
+    expect(res?.images).toEqual([
+      { mediaType: 'image/png', base64Data: 'LIVE', fileName: 'a.png' }
+    ])
+  })
+
+  it('omits images for a tool that returned none', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c-plain',
+      state: { status: 'completed', output: 'text only' }
+    })
+    expect(res).not.toBeNull()
+    expect('images' in res!).toBe(false)
   })
 
   it('returns error result for errored tool', () => {

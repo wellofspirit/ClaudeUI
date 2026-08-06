@@ -59,6 +59,12 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     }
   )
 
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
+    }
+  )
+
   onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
     (routingId, status) => {
       let effectiveRoutingId = routingId
@@ -76,7 +82,8 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
         return
       }
       store().setStatus(effectiveRoutingId, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effectiveRoutingId)
+      // Do NOT clear pending approvals on idle — background subagents outlive
+      // the parent turn's result. See useClaudeEvents.ts's onStatus.
     }
   )
 
@@ -97,6 +104,7 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
   >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
     store().appendToolResult(routingId, toolUseId, result, isError)
+    if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
   })
 
   onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
@@ -217,20 +225,21 @@ describe('E2E: approval flow', () => {
     const approval = makePendingApproval({
       requestId: 'req-1',
       toolName: 'Bash',
-      input: { command: 'rm -rf /' }
+      input: { command: 'rm -rf /' },
+      toolUseId: 'tool-1'
     })
     app.emit('session:approval-request', routingId, approval)
 
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
 
-    // User approves — tool result comes back
+    // User approves — tool result comes back, which already clears the approval
     app.emit('session:tool-result', routingId, {
       toolUseId: 'tool-1',
       result: 'command executed',
       isError: false
     })
 
-    // Status back to idle clears approvals
+    // Idle is a no-op for pendingApprovals here — the tool_result above cleared it
     app.emit(
       'session:status',
       routingId,

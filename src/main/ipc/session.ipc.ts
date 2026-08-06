@@ -16,6 +16,8 @@ import {
   resolveForkAnchor
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
+import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { socks5Connect } from '../services/socks-bridge'
 import {
   loadSettings,
   loadSessionConfig,
@@ -29,8 +31,8 @@ import {
 } from '../services/ui-config'
 import {
   loadClaudePermissions,
-  saveClaudePermissions,
-  loadCleanupPeriodDays
+  loadCleanupPeriodDays,
+  isWorkspaceTrusted
 } from '../services/claude-settings'
 import {
   loadMcpServers,
@@ -42,6 +44,7 @@ import {
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
+import { gitWatchRegistry, GIT_WATCH_OWNER_DESKTOP } from '../services/git-watch-registry'
 import {
   createWorktree,
   getWorktreeStatus,
@@ -72,7 +75,11 @@ import type {
   EngineConfig,
   VendorConfig,
   VendorAuthMap,
-  VendorAuthOption
+  VendorAuthOption,
+  OpencodeProviderCatalogEntry,
+  ProviderRemoveKind,
+  PermissionScope,
+  ClaudePermissions
 } from '../../shared/types'
 import type {
   ConfigurableHarnessId,
@@ -84,6 +91,10 @@ import {
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
+import {
+  removeOpencodeProvider,
+  setOpencodeProviderDisabled
+} from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import {
   discoverPiModels,
@@ -130,12 +141,14 @@ import {
   backgroundTask,
   dequeueMessage,
   askSideQuestion,
+  setPermissionMode,
   setEffort,
   setThinkingMode,
   getPlanContent,
   getSessionLogPath,
   mcpStatus,
   setCleanupPeriod,
+  savePermissionsAndNotify,
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
@@ -351,6 +364,8 @@ const SESSION_IPC_CHANNELS = [
   'session:get-models',
   'session:get-engine-models',
   'session:get-opencode-providers',
+  'session:set-opencode-provider-disabled',
+  'session:remove-opencode-provider',
   'session:get-opencode-provider-models',
   'session:get-pi-model-catalog',
   'session:generate-title',
@@ -470,7 +485,6 @@ async function testProxyConnection(
 ): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
   const http = await import('node:http')
   const tls = await import('node:tls')
-  const net = await import('node:net')
 
   const start = Date.now()
   const TARGET_HOST = 'api.anthropic.com'
@@ -519,120 +533,49 @@ async function testProxyConnection(
   }
 
   if (proxy.type === 'socks5') {
-    // SOCKS5 handshake (RFC 1928) → connect to target → TLS verify
+    // SOCKS5 handshake (RFC 1928) → connect to target → TLS verify.
+    // LOW-RW5: the handshake is socks-bridge.ts's socks5Connect. The hand-rolled
+    // copy that used to live here assumed one SOCKS5 message per TCP chunk, so a
+    // split greeting/CONNECT reply failed the proxy test spuriously.
     return new Promise((resolve) => {
+      let settled = false
+      // The outer 10s budget stays authoritative (socks5Connect's own 15s
+      // internal timeout would otherwise outlive it).
       const timer = setTimeout(() => {
-        socket.destroy()
+        if (settled) return
+        settled = true
         resolve({ ok: false, latencyMs: Date.now() - start, error: 'Connection timed out (10s)' })
       }, TIMEOUT_MS)
 
-      const socket = net.connect({ host: proxy.hostname, port: proxy.port })
-
-      socket.on('error', (err) => {
-        clearTimeout(timer)
-        resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
-      })
-
-      socket.once('connect', () => {
-        // Step 1: greeting — offer no-auth (0x00) and user/pass (0x02)
-        const methods = proxy.username
-          ? Buffer.from([0x05, 0x02, 0x00, 0x02])
-          : Buffer.from([0x05, 0x01, 0x00])
-        socket.write(methods)
-      })
-
-      let phase: 'greeting' | 'auth' | 'connect' = 'greeting'
-
-      socket.on('data', async (data: Buffer) => {
-        if (phase === 'greeting') {
-          if (data.length < 2 || data[0] !== 0x05) {
-            clearTimeout(timer)
+      socks5Connect(
+        {
+          socksHost: proxy.hostname,
+          socksPort: proxy.port,
+          username: proxy.username,
+          password: proxy.password
+        },
+        TARGET_HOST,
+        TARGET_PORT
+      )
+        .then(async ({ socket, leftover }) => {
+          if (settled) {
+            // Outer timeout already answered — drop the late tunnel.
             socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'Invalid SOCKS5 greeting response'
-            })
             return
           }
-          const method = data[1]
-          if (method === 0x02 && proxy.username) {
-            // Step 2: username/password auth (RFC 1929)
-            phase = 'auth'
-            const uBuf = Buffer.from(proxy.username, 'utf8')
-            const pBuf = Buffer.from(proxy.password, 'utf8')
-            const authBuf = Buffer.alloc(3 + uBuf.length + pBuf.length)
-            authBuf[0] = 0x01 // version
-            authBuf[1] = uBuf.length
-            uBuf.copy(authBuf, 2)
-            authBuf[2 + uBuf.length] = pBuf.length
-            pBuf.copy(authBuf, 3 + uBuf.length)
-            socket.write(authBuf)
-          } else if (method === 0x00) {
-            // No auth required — send connect request
-            phase = 'connect'
-            socket.write(buildSocks5ConnectRequest(TARGET_HOST, TARGET_PORT))
-          } else if (method === 0xff) {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'SOCKS5 proxy rejected authentication methods'
-            })
-          }
-        } else if (phase === 'auth') {
-          if (data.length < 2 || data[1] !== 0x00) {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'SOCKS5 authentication failed'
-            })
-            return
-          }
-          // Auth succeeded — send connect request
-          phase = 'connect'
-          socket.write(buildSocks5ConnectRequest(TARGET_HOST, TARGET_PORT))
-        } else if (phase === 'connect') {
-          if (data.length < 2 || data[0] !== 0x05) {
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: 'Invalid SOCKS5 connect response'
-            })
-            return
-          }
-          if (data[1] !== 0x00) {
-            const errors: Record<number, string> = {
-              0x01: 'general failure',
-              0x02: 'connection not allowed',
-              0x03: 'network unreachable',
-              0x04: 'host unreachable',
-              0x05: 'connection refused',
-              0x06: 'TTL expired',
-              0x07: 'command not supported',
-              0x08: 'address type not supported'
-            }
-            clearTimeout(timer)
-            socket.destroy()
-            resolve({
-              ok: false,
-              latencyMs: Date.now() - start,
-              error: `SOCKS5: ${errors[data[1]] || `error 0x${data[1].toString(16)}`}`
-            })
-            return
-          }
-          // Tunnel established — remove listeners, verify with TLS
+          settled = true
           clearTimeout(timer)
-          socket.removeAllListeners('data')
-          const result = await verifyThroughTls(socket)
-          resolve(result)
-        }
-      })
+          // For TLS the client speaks first, so the proxy should not have sent
+          // anything past the CONNECT reply — but never drop bytes if it did.
+          if (leftover.length > 0) socket.unshift(leftover)
+          resolve(await verifyThroughTls(socket))
+        })
+        .catch((err: Error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
+        })
     })
   }
 
@@ -681,20 +624,6 @@ async function testProxyConnection(
 
     req.end()
   })
-}
-
-/** Build a SOCKS5 connect request for a domain:port target. */
-function buildSocks5ConnectRequest(host: string, port: number): Buffer {
-  const hostBuf = Buffer.from(host, 'utf8')
-  const buf = Buffer.alloc(7 + hostBuf.length)
-  buf[0] = 0x05 // SOCKS version
-  buf[1] = 0x01 // CONNECT
-  buf[2] = 0x00 // reserved
-  buf[3] = 0x03 // domain name
-  buf[4] = hostBuf.length
-  hostBuf.copy(buf, 5)
-  buf.writeUInt16BE(port, 5 + hostBuf.length)
-  return buf
 }
 
 /** Shared SessionManager — created once, used by both IPC and remote handlers. */
@@ -864,9 +793,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     askSideQuestion(manager, routingId, question)
   )
 
-  ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) => {
-    await manager.get(routingId)?.setPermissionMode(mode)
-  })
+  ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) =>
+    setPermissionMode(manager, win, routingId, mode)
+  )
 
   // Voice input handlers (Claude-only: capabilities.voice)
   ipcMain.handle(
@@ -964,8 +893,31 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // when opencode isn't installed or discovery fails (opencode is optional).
   ipcMain.handle('session:get-opencode-providers', async () => {
     if (!opencodeServerManager.isBinaryAvailable()) return []
-    return await discoverOpencodeProviderCatalog()
+    const catalog = await discoverOpencodeProviderCatalog()
+    // Decorate with shared-provider ownership HERE rather than inside discovery:
+    // shared-providers/index → OpencodeSharedProviderAdapter → model-discovery,
+    // so a shared-provider import inside model-discovery would be a cycle.
+    return decorateSharedProviderClaims(catalog)
   })
+
+  // Enable/disable is a reversible veto (opencode's disabled_providers) and is
+  // deliberately NOT the same operation as removal — see provider-management.ts.
+  ipcMain.handle(
+    'session:set-opencode-provider-disabled',
+    async (_e, providerId: string, disabled: boolean) => {
+      setOpencodeProviderDisabled(providerId, disabled)
+    }
+  )
+
+  // Destructive: deletes the credential and/or the provider declaration ClaudeUI
+  // owns. `kind` must come from the entry's resolved actions — widening it here
+  // would delete something the UI never warned about.
+  ipcMain.handle(
+    'session:remove-opencode-provider',
+    async (_e, providerId: string, kind: ProviderRemoveKind) => {
+      await removeOpencodeProvider(providerId, kind)
+    }
+  )
 
   // All catalog models for one provider (drives the model-allowlist dialog).
   ipcMain.handle(
@@ -990,6 +942,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle(
     'session:write-custom-title',
     async (_e, sessionId: string, projectKey: string, title: string) => {
+      // LOW-RW3: both identifiers are caller-supplied and interpolated straight
+      // into a path — a `..`/separator segment would append attacker-controlled
+      // JSON to any *.jsonl on disk. Same check as deleteSessionFiles(); the
+      // remote twin of this handler (remote-handlers.ts) is reachable by any
+      // token-holding remote client, so the guard must exist on both.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
       const filePath = path.join(
         os.homedir(),
         '.claude',
@@ -1282,24 +1241,24 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>
     loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
   )
+  // Hot-reload is belt-and-braces, not the only propagation path: cli.js DOES
+  // run its chokidar settings watcher in ClaudeUI's child, so a disk write
+  // lands on its own within ~1-1.5s (awaitWriteFinish). notifySettingsChanged
+  // makes it immediate and deterministic, and covers a missed watcher event.
   ipcMain.handle(
     'claude:save-permissions',
-    async (_e, scope: string, permissions: unknown, cwd?: string) => {
-      saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd)
-
-      // Hot-reload: tell running CLI sessions to re-read settings from disk.
-      // The CLI's file watcher is disabled in SDK mode, so writing to disk
-      // alone doesn't propagate.  notifySettingsChanged() sends an empty
-      // apply_flag_settings({}) which triggers the CLI's settings-change
-      // subscriber to invalidate its cache and re-read all sources from disk,
-      // respecting managed policies and the normal priority hierarchy.
-      manager.forEach((session) => {
-        if (!cwd || session.cwd === cwd || scope === 'user') {
-          session.notifySettingsChanged?.().catch(() => {})
-        }
-      })
-    }
+    async (_e, scope: string, permissions: unknown, cwd?: string) =>
+      savePermissionsAndNotify(
+        manager,
+        scope as PermissionScope,
+        permissions as ClaudePermissions,
+        cwd
+      )
   )
+
+  // Whether cli.js will honor this workspace's project/local ALLOW rules —
+  // read-only surfacing of the trust gate (see isWorkspaceTrusted).
+  ipcMain.handle('claude:workspace-trust', (_e, cwd: string) => isWorkspaceTrusted(cwd))
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
   ipcMain.handle('claude:get-cleanup-period', () => loadCleanupPeriodDays())
@@ -1592,37 +1551,26 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     })
   )
 
-  // Git polling — persistent service per cwd
-  const gitWatchers = new Map<string, { refCount: number }>()
+  // Git polling — one poller per cwd, shared with the remote path through
+  // gitWatchRegistry. GitService.startPolling() holds a SINGLE callback, so two
+  // independent starts on one cwd would silently clobber each other; the
+  // registry is what keeps desktop and remote owners coexisting. This is also
+  // the only place that knows the window fan-out, so it installs it.
+  gitWatchRegistry.init((cwd, status) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('git:status-update', { cwd, status })
+    }
+    for (const w of BaseSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
+    }
+  })
 
   ipcMain.handle('git:start-watching', async (_e, cwd: string) => {
-    const existing = gitWatchers.get(cwd)
-    if (existing) {
-      existing.refCount++
-      return
-    }
-    gitWatchers.set(cwd, { refCount: 1 })
-    const svc = gitServiceManager.get(cwd)
-    svc.startPolling((status) => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('git:status-update', { cwd, status })
-      }
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
-      }
-    }, 5000)
+    gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
   })
 
   ipcMain.handle('git:stop-watching', async (_e, cwd: string) => {
-    const entry = gitWatchers.get(cwd)
-    if (!entry) return
-    entry.refCount--
-    if (entry.refCount <= 0) {
-      gitWatchers.delete(cwd)
-      const svc = gitServiceManager.getIfExists(cwd)
-      svc?.stopPolling()
-      gitServiceManager.release(cwd)
-    }
+    gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
   })
 
   // -------------------------------------------------------------------------
@@ -1898,12 +1846,19 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     })
   )
 
-  // Mockup preview — read HTML from mockup directory
+  // Mockup preview — read HTML from mockup directory. `cwd`/`directory` are
+  // caller-supplied (and reachable remotely), so confine the read to a direct
+  // child of the project's mockups root — a crafted `directory` (e.g. '../../..')
+  // must not traverse out. Mirrors mockup-protocol.ts's path-traversal guard.
   ipcMain.handle(
     'mockup:read-html',
     safeHandler(async (_e: unknown, cwd: string, directory: string) => {
-      const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
-      return fs.promises.readFile(htmlPath, 'utf-8')
+      const mockupsRoot = path.resolve(path.join(cwd, '.claude', 'ui', 'mockups'))
+      const mockupDir = path.resolve(path.join(mockupsRoot, directory))
+      if (!isPathInside(mockupsRoot, mockupDir)) {
+        throw new Error('Invalid mockup directory')
+      }
+      return fs.promises.readFile(path.join(mockupDir, 'index.html'), 'utf-8')
     })
   )
 
@@ -1983,4 +1938,39 @@ function startProjectsWatcher(win: BrowserWindow): void {
   } catch (err) {
     logger.warn('ProjectsWatcher', 'Failed to watch projects directory', err)
   }
+}
+
+/**
+ * Mark catalog entries whose vendor id is claimed by an ENABLED shared-provider
+ * route (today: `chatgpt` → opencode vendor `openai`).
+ *
+ * Why the row needs to know: CredentialSync re-feeds a shared credential on
+ * every refresh, so removing that credential in the opencode provider manager is
+ * silently undone — "Remove" would appear to do nothing. The row warns and
+ * offers to turn the shared route off instead of losing the race.
+ */
+function decorateSharedProviderClaims(
+  catalog: OpencodeProviderCatalogEntry[]
+): OpencodeProviderCatalogEntry[] {
+  let claims: Map<string, { id: string; name: string }>
+  try {
+    claims = new Map(
+      sharedProviderService
+        .listDefinitions()
+        .filter((definition) => definition.routes.opencode.enabled)
+        .map((definition) => [
+          definition.routes.opencode.providerId ?? definition.id,
+          { id: definition.id, name: definition.name }
+        ])
+    )
+  } catch (err) {
+    // Shared-provider config is optional; an unreadable definition must not take
+    // down the provider list.
+    logger.warn('opencode', `Shared-provider claim lookup failed: ${String(err)}`)
+    return catalog
+  }
+  return catalog.map((entry) => {
+    const claim = claims.get(entry.id)
+    return claim ? { ...entry, sharedProviderClaim: claim } : entry
+  })
 }

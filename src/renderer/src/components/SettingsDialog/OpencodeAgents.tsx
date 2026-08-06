@@ -11,6 +11,7 @@ import { useState, useEffect } from 'react'
 import type { OpencodeAgentScope, OpencodeAgentSummary, OpencodeAgentDetail, OpencodeAgentInput, OpencodeAgentMode, ModelInfo } from '../../../../shared/types'
 import { useActiveSession } from '../../stores/session-store'
 import { SettingsSlider } from './settings-controls'
+import { SelectMenu } from '../shared/SelectMenu'
 
 // ── useOpencodeInstalled ─────────────────────────────────────────────
 
@@ -597,15 +598,13 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
         {/* Model */}
         <div className="px-3 py-1.5 text-[13px] text-text-secondary">
           <div className="mb-1">Model</div>
-          <select
+          <SelectMenu
+            testid="OpencodeAgentsSection.model"
             value={draft.model}
-            onChange={(e) => update({ model: e.target.value })}
-            className={`${inputClass} w-full`}
-          >
-            {modelOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
+            onChange={(v) => update({ model: v })}
+            options={modelOptions}
+            triggerClassName={`${inputClass} w-full`}
+          />
         </div>
 
         {/* System prompt */}
@@ -688,15 +687,17 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
             </div>
             <div className="py-1.5 text-[13px] text-text-secondary">
               <div className="mb-1 text-[11px]">Reasoning effort</div>
-              <select
+              <SelectMenu
+                testid="OpencodeAgentsSection.reasoningEffort"
                 value={draft.reasoningEffort}
-                onChange={(e) => update({ reasoningEffort: e.target.value })}
-                className={`${inputClass} w-full`}
-              >
-                <option value="">Default</option>
-                <option value="low">Low</option>
-                <option value="high">High</option>
-              </select>
+                onChange={(v) => update({ reasoningEffort: v })}
+                options={[
+                  { value: '', label: 'Default' },
+                  { value: 'low', label: 'Low' },
+                  { value: 'high', label: 'High' }
+                ]}
+                triggerClassName={`${inputClass} w-full`}
+              />
             </div>
           </div>
         </details>

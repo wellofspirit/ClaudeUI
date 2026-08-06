@@ -10,6 +10,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 
+// The fetch stub in setupMocks must never leak into other files sharing this
+// worker fork — vitest.config sets no unstubGlobals, so clean up explicitly.
+afterEach(() => vi.unstubAllGlobals())
+
 // ---------------------------------------------------------------------------
 // Stub BrowserWindow (Electron is unavailable in vitest node env)
 // ---------------------------------------------------------------------------
@@ -31,6 +35,8 @@ class MockWindow extends EventEmitter {
 const {
   mockAcquire,
   mockRelease,
+  mockReleaseIfCurrent,
+  mockSubscribeExit,
   mockCreateSession,
   mockPromptAsync,
   mockAbortSession,
@@ -51,6 +57,10 @@ const {
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
   const mockRelease = vi.fn()
+  const mockReleaseIfCurrent = vi.fn()
+  // Records every exit subscription so tests can fire a server death, and hands
+  // back a real unsubscribe so the session's bookkeeping is exercised too.
+  const mockSubscribeExit = vi.fn()
   const mockCreateSession = vi.fn()
   const mockPromptAsync = vi.fn()
   const mockAbortSession = vi.fn()
@@ -75,6 +85,8 @@ const {
   return {
     mockAcquire,
     mockRelease,
+    mockReleaseIfCurrent,
+    mockSubscribeExit,
     mockCreateSession,
     mockPromptAsync,
     mockAbortSession,
@@ -98,7 +110,9 @@ const {
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease
+    release: mockRelease,
+    releaseIfCurrent: mockReleaseIfCurrent,
+    subscribeExit: mockSubscribeExit
   }
 }))
 
@@ -141,6 +155,20 @@ vi.mock('../model-discovery', () => ({
   }
 }))
 
+// Phase-3 ground truth shells out to `git`/`gh`. Mock only the CAPTURES (the
+// detection tables and recordToolOutcome stay real, so the wiring tests
+// exercise the same predicates production does) — otherwise every auto-mode
+// test would spawn subprocesses against the test cwd.
+const mockCaptureGitRemotes = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+const mockCaptureGitStatus = vi.hoisted(() => vi.fn().mockResolvedValue(null))
+const mockCaptureRepoVisibility = vi.hoisted(() => vi.fn().mockResolvedValue('unknown'))
+vi.mock('../../automode/ground-truth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../automode/ground-truth')>()),
+  captureGitRemotes: mockCaptureGitRemotes,
+  captureGitStatus: mockCaptureGitStatus,
+  captureRepoVisibility: mockCaptureRepoVisibility
+}))
+
 // discoverSkills (Item 3 — ISession.discoverSkills) delegates to
 // discoverOpencodeSkills; mock it directly so the test doesn't depend on the
 // module's internal per-cwd cache or the OpencodeServerManager/OpencodeClient
@@ -163,10 +191,30 @@ import type { BrowserWindow } from 'electron'
 // Setup helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Live unexpected-exit subscribers registered via the mocked
+ * opencodeServerManager.subscribeExit. `killServer()` fires them, standing in
+ * for the manager's fan-out when an `opencode serve` child dies.
+ */
+const serverExitListeners: Array<() => void> = []
+function killServer(): void {
+  for (const cb of [...serverExitListeners]) cb()
+}
+
 function setupMocks(): void {
   // Reset all call histories
   mockAcquire.mockReset()
   mockRelease.mockReset()
+  mockReleaseIfCurrent.mockReset()
+  mockSubscribeExit.mockReset()
+  serverExitListeners.length = 0
+  mockSubscribeExit.mockImplementation((_cwd: string, cb: () => void) => {
+    serverExitListeners.push(cb)
+    return () => {
+      const i = serverExitListeners.indexOf(cb)
+      if (i >= 0) serverExitListeners.splice(i, 1)
+    }
+  })
   mockCreateSession.mockReset()
   mockPromptAsync.mockReset()
   mockAbortSession.mockReset()
@@ -191,6 +239,12 @@ function setupMocks(): void {
   mockDiscoverOpencodeModels.mockResolvedValue([])
   mockDiscoverOpencodeSkills.mockReset()
   mockDiscoverOpencodeSkills.mockResolvedValue([])
+  mockCaptureGitRemotes.mockReset()
+  mockCaptureGitRemotes.mockResolvedValue([])
+  mockCaptureGitStatus.mockReset()
+  mockCaptureGitStatus.mockResolvedValue(null)
+  mockCaptureRepoVisibility.mockReset()
+  mockCaptureRepoVisibility.mockResolvedValue('unknown')
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -213,14 +267,25 @@ function setupMocks(): void {
 
   // Set default implementations
   mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
+  // The judge transport probes `GET /doc` to decide whether this server has the
+  // patched /judge/completion route (ADR-037 P1). Stub it: unit tests must never
+  // touch the network, and an UNSTUBBED probe would really connect to
+  // 127.0.0.1:9999 — usually refused, but nondeterministic if anything happens
+  // to be listening, and its late rejection surfaced as a flaky unhandled error.
+  // "No such route" keeps these tests on the session-judge transport they assert.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response('{"paths":{}}', { headers: { 'Content-Type': 'application/json' } }))
+  )
   mockCreateSession.mockResolvedValue({ id: 'ses_opencode_1' })
   mockPromptAsync.mockResolvedValue(undefined)
   mockAbortSession.mockResolvedValue(undefined)
   mockPatchSession.mockResolvedValue(undefined)
   mockReplyPermission.mockResolvedValue(undefined)
-  mockSubscribeEvents.mockImplementation(async function* () {
-    // empty SSE stream
-  })
+  // Real opencode SSE stays open for the whole session — park until aborted so
+  // consumeEvents' end-of-stream recovery (H20) only fires on a genuine close,
+  // not on the mock spontaneously returning.
+  mockSubscribeEvents.mockImplementation(parkingStream)
 
   // Reset the OpencodeClient constructor mock to return fresh mock instances.
   // Must use a regular function (not arrow) so it works correctly with `new`.
@@ -646,7 +711,18 @@ describe('OpencodeSession — cancel()', () => {
     expect(mockRelease).toHaveBeenCalledWith('/tmp/test-cwd')
   })
 
-  it('emits status with state=idle after cancel', async () => {
+  it('aborts the turn server-side on cancel (so a same-cwd server that survives our release does not keep running headless)', async () => {
+    const session = makeSession()
+    await session.run('hello') // establishes openSessionId = ses_opencode_1
+    mockAbortSession.mockClear()
+    session.cancel()
+    // Fire-and-forget abort of OUR session before the ref release. Pre-fix
+    // cancel() never sent abortSession, so a turn on a server kept alive by
+    // another same-cwd session kept burning tokens with no SSE consumer.
+    expect(mockAbortSession).toHaveBeenCalledWith('ses_opencode_1')
+  })
+
+  it('emits status with state=disconnected after cancel', async () => {
     const win = new MockWindow() as unknown as BrowserWindow
     mockCreateSession.mockResolvedValue({ id: 'ses_c' })
     const session = new OpencodeSession('rc', win, '/tmp')
@@ -657,7 +733,10 @@ describe('OpencodeSession — cancel()', () => {
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     const statusCall = calls.find((c) => c[0] === 'session:status')
     expect(statusCall).toBeDefined()
-    expect(statusCall![2].state).toBe('idle')
+    // cancel() is deliberate teardown; 'disconnected' is the only status the
+    // renderer acts on to clear sdkActive (the sidebar's green dot). It stores
+    // the session as idle on receipt — see useClaudeEvents' session:status.
+    expect(statusCall![2].state).toBe('disconnected')
   })
 })
 
@@ -777,10 +856,30 @@ describe('OpencodeSession — capabilities', () => {
 // opencode message id, with the FINAL tokens (not the sum of the two snapshots).
 // ---------------------------------------------------------------------------
 
-/** Build an async-iterable SSE stream from a fixed list of events. */
-function streamOf(events: OpencodeEvent[]): () => AsyncGenerator<OpencodeEvent> {
-  return async function* () {
+/** Resolve when the abort signal fires (or immediately if already aborted). Used
+ *  to keep mocked SSE streams open for the session's lifetime, mirroring the real
+ *  opencode subscription (which never spontaneously returns). */
+function parkUntilAborted(signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve()
+    signal?.addEventListener('abort', () => resolve())
+  })
+}
+
+/** A mock SSE stream that yields nothing and stays open until aborted — the
+ *  realistic default (opencode holds the subscription open for the session). */
+// eslint-disable-next-line require-yield
+const parkingStream = async function* (signal?: AbortSignal): AsyncGenerator<OpencodeEvent> {
+  await parkUntilAborted(signal)
+}
+
+/** Build an async-iterable SSE stream from a fixed list of events, then park (as
+ *  a real opencode stream does) until aborted — so consumeEvents' H20 recovery
+ *  isn't tripped by the mock ending mid-turn. */
+function streamOf(events: OpencodeEvent[]): (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent> {
+  return async function* (signal?: AbortSignal) {
     for (const ev of events) yield ev
+    await parkUntilAborted(signal)
   }
 }
 
@@ -840,17 +939,18 @@ describe('OpencodeSession — usage_event recording', () => {
     expect(row.engineId).toBe('opencode')
     expect(row.vendorId).toBe('openai')
     expect(row.modelId).toBe('gpt-4o')
-    // FINAL snapshot — output 90, NOT 20+90=110
+    // FINAL snapshot — output 90+12, NOT (20+5)+(90+12)=127
     expect(row.inputTokens).toBe(100)
-    expect(row.outputTokens).toBe(90)
+    // BD-j: reasoning IS folded into output (providers bill it as output tokens,
+    // and info.cost already includes it) — 90 output + 12 reasoning.
+    expect(row.outputTokens).toBe(102)
     expect(row.cacheWriteTokens).toBe(4)
     expect(row.cacheReadTokens).toBe(10)
-    // reasoning is NOT folded into input/output
     // engine cost is the per-message cumulative cost snapshot
     expect(row.engineCostUsd).toBeCloseTo(0.002)
     // equiv cost via pricing table: gpt-4o input $2.5/MTok, output $10/MTok, cacheRead $1.25/MTok
     const expectedEquiv =
-      (100 / 1_000_000) * 2.5 + (90 / 1_000_000) * 10 + (4 / 1_000_000) * 2.5 + (10 / 1_000_000) * 1.25
+      (100 / 1_000_000) * 2.5 + (102 / 1_000_000) * 10 + (4 / 1_000_000) * 2.5 + (10 / 1_000_000) * 1.25
     expect(row.equivCostUsd!).toBeCloseTo(expectedEquiv)
     expect(row.source).toBe('live')
     session.dispose()
@@ -996,16 +1096,26 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     await session.run('hi')
     const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
     // Mirrors opencode's built-in plan agent: edit denied, task denied for the
-    // `general` subagent ONLY (read-only subagents stay allowed via baseline).
+    // `general` subagent ONLY (read-only subagents stay allowed via baseline)
+    // — PLUS the bash/webfetch gates `default` carries. opencode's own plan
+    // agent leaves those on the `{*:allow}` baseline, which made ClaudeUI's
+    // plan mode strictly MORE permissive than its default mode for command
+    // execution and network fetch. The neutral autonomy ladder (ADR-022)
+    // requires plan ≤ default; see permission-conformance.test.ts.
     expect(rs).toEqual([
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'edit', pattern: '*', action: 'deny' },
       { permission: 'task', pattern: 'general', action: 'deny' },
+      { permission: 'bash', pattern: '*', action: 'ask' },
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
       DISPATCH_ASK_RULE
     ])
     // Regression for the over-restriction: there must be NO blanket task deny.
     expect(rs.some((r) => r.permission === 'task' && r.pattern === '*')).toBe(false)
+    // Regression for the plan-mode fail-open: bash must never fall through to
+    // the `{*:allow}` baseline in the most restrictive autonomy mode.
+    expect(rs.find((r) => r.permission === 'bash')?.action).toBe('ask')
     expect(mockPromptAsync.mock.calls.at(-1)?.[1]?.agent).toBe('plan')
     session.dispose()
   })
@@ -1124,13 +1234,39 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockCreateSession.mockResolvedValue({ id: SES })
   }
 
-  function feedPermissionAsked(permission: string, id = 'per_a', callID = 'c1'): void {
-    mockSubscribeEvents.mockImplementation(async function* () {
+  function feedPermissionAsked(
+    permission: string,
+    id = 'per_a',
+    callID = 'c1',
+    patterns: string[] = ['x']
+  ): void {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'e1',
         type: 'permission.asked',
-        properties: { sessionID: SES, id, permission, patterns: ['x'], tool: { callID } }
+        properties: { sessionID: SES, id, permission, patterns, tool: { callID } }
       } as OpencodeEvent
+      await parkUntilAborted(signal)
+    })
+  }
+
+  /** A one-shot `bash` approval carrying a real command (phase 3 captures key
+   *  off the command string, not the tool name alone). */
+  function feedPermissionAskedWithCommand(id: string, command: string, callID = 'c1'): void {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      yield {
+        id: 'e1',
+        type: 'permission.asked',
+        properties: {
+          sessionID: SES,
+          id,
+          permission: 'bash',
+          patterns: [command],
+          metadata: { command },
+          tool: { callID }
+        }
+      } as OpencodeEvent
+      await parkUntilAborted(signal)
     })
   }
 
@@ -1194,6 +1330,136 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
+  /** Two approvals, the second released only once the test says so — the
+   *  denial caps are sequential state, so overlapping classify() calls would
+   *  make "which block was the 2nd" a race. */
+  function feedTwoPermissionAsked(ids: [string, string], gate: Promise<void>): void {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      yield {
+        id: 'e1',
+        type: 'permission.asked',
+        properties: { sessionID: SES, id: ids[0], permission: 'bash', patterns: ['x'], tool: { callID: 'c1' } }
+      } as OpencodeEvent
+      await gate
+      yield {
+        id: 'e2',
+        type: 'permission.asked',
+        properties: { sessionID: SES, id: ids[1], permission: 'bash', patterns: ['y'], tool: { callID: 'c2' } }
+      } as OpencodeEvent
+      await parkUntilAborted(signal)
+    })
+  }
+
+  it('denial caps: the SECOND block on the SAME rule hands over, naming the rule on the approval card', async () => {
+    // An agent blocked twice on one rule is grinding one intent; rewording will
+    // not produce the consent it lacks, so the human gets it a block early
+    // (shared AutoModeDenialTracker, keyed on ClassifyResult.category).
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({
+      parts: [
+        {
+          type: 'text',
+          text: '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] would drop pushed commits</reason>'
+        }
+      ]
+    })
+    let release = (): void => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    feedTwoPermissionAsked(['per_cat_1', 'per_cat_2'], gate)
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cat_cap', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+
+    // 1st block: denied as usual.
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_cat_1',
+        'reject',
+        'Auto mode blocked: [Git Destructive] would drop pushed commits'
+      )
+    )
+    release()
+
+    // 2nd block on the same rule: the human decides, and the card says why.
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.find(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBeDefined()
+    })
+    // send(channel, routingId, payload) — the approval is arg 2.
+    const approval = (win as unknown as MockWindow).webContents.send.mock.calls.find(
+      (c) => c[0] === 'session:approval-request'
+    )![2] as { requestId: string; decisionReason?: string }
+    expect(approval.requestId).toBe('per_cat_2')
+    expect(approval.decisionReason).toContain('Git Destructive')
+    expect(approval.decisionReason).toContain('2 times')
+    // Handing over is not denying — nothing was auto-rejected for per_cat_2.
+    expect(mockReplyPermission).not.toHaveBeenCalledWith('per_cat_2', 'reject', expect.anything())
+    session.dispose()
+  })
+
+  it('denial caps: two blocks on DIFFERENT rules still only deny (the category cap is not a 2-consecutive cap)', async () => {
+    enableAutoMode()
+    mockPrompt
+      .mockResolvedValueOnce({
+        parts: [{ type: 'text', text: '<block>yes</block><category>Git Destructive</category><reason>a</reason>' }]
+      })
+      .mockResolvedValue({
+        parts: [{ type: 'text', text: '<block>yes</block><category>Network Exposure</category><reason>b</reason>' }]
+      })
+    let release = (): void => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    feedTwoPermissionAsked(['per_mix_1', 'per_mix_2'], gate)
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_mix_cap', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_mix_1', 'reject', expect.stringContaining('Git Destructive'))
+    )
+    release()
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_mix_2', 'reject', expect.stringContaining('Network Exposure'))
+    )
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+      (c) => c[0] === 'session:approval-request'
+    )
+    expect(sent).toBe(false)
+    session.dispose()
+  })
+
+  it('a block whose reason omits the rule name gets it prefixed from the corpus', async () => {
+    // Without the rule name the agent cannot tell WHICH bar it hit, and so
+    // cannot ask the user for the consent that would clear it.
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({
+      parts: [
+        {
+          type: 'text',
+          text: '<block>yes</block><category>Network Exposure</category><reason>exposes the dev server</reason>'
+        }
+      ]
+    })
+    feedPermissionAsked('bash', 'per_rule_named')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_rule_named',
+        'reject',
+        'Auto mode blocked: [Network Exposure] exposes the dev server'
+      )
+    )
+    session.dispose()
+  })
+
   it('read-only fast-path → allow WITHOUT calling the judge', async () => {
     enableAutoMode()
     feedPermissionAsked('read', 'per_read')
@@ -1221,6 +1487,640 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
+  it('the judge session is patched TOOL-DENIED before it is prompted', async () => {
+    // A fresh opencode session inherits the vendor's `{*: allow}` default, so an
+    // unpatched judge — fed a possibly attacker-influenced transcript and asked
+    // to reason about it — could really run bash/edit, with no human and no
+    // gate. It also blocks forever if it raises an ask nobody consumes. Mirrors
+    // askSideQuestion's deny-all patch.
+    const JUDGE_SES = 'ses_judge'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_judge_gated')
+
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_gated', 'once'))
+
+    expect(mockPatchSession).toHaveBeenCalledWith(JUDGE_SES, {
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      // Sealed as well — see the permissionHermetic tests below.
+      permissionHermetic: true
+    })
+    // …and BEFORE the judge prompt (order matters — the ruleset must be in
+    // place before the model can call a tool).
+    const judgePatchIdx = mockPatchSession.mock.calls.findIndex((c) => c[0] === JUDGE_SES)
+    expect(judgePatchIdx).toBeGreaterThanOrEqual(0)
+    expect(mockPatchSession.mock.invocationCallOrder[judgePatchIdx]).toBeLessThan(
+      mockPrompt.mock.invocationCallOrder.at(-1)!
+    )
+    session.dispose()
+  })
+
+  it('fail-closed: a failed deny-all patch on the judge session hands the approval to the human (never prompts an ungated judge)', async () => {
+    const JUDGE_SES = 'ses_judge_patch_fail'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPatchSession.mockImplementation(async (id: string) => {
+      if (id === JUDGE_SES) throw new Error('patch refused')
+    })
+    feedPermissionAsked('bash', 'per_judge_patch_fail')
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_judge_patch_fail', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    // The judge was never prompted, so nothing auto-replied on its behalf.
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // ── P2: throwaway sessions are SEALED, not merely deny-all (ADR-037) ──────
+  // The deny-all ruleset alone loses: opencode keeps "always" approvals in
+  // instance-global state and appends them AFTER the session ruleset with
+  // last-match-wins, so a pattern the user once always-approved in ANY session
+  // on this server outranks the judge's deny-all (plan §7 Q5, confirmed live).
+  // `permissionHermetic` makes the judge session evaluate against its own
+  // ruleset alone.
+
+  it('P2: the judge session is sealed with permissionHermetic in the SAME patch as the deny-all', async () => {
+    const JUDGE_SES = 'ses_judge_sealed'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_judge_sealed')
+
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_sealed', 'once'))
+
+    const judgePatch = mockPatchSession.mock.calls.find((c) => c[0] === JUDGE_SES)
+    expect(judgePatch).toBeDefined()
+    // One atomic patch: a session that is deny-all but not yet sealed is still
+    // pierceable, so the two must never be split across two round-trips.
+    expect(judgePatch![1]).toEqual({
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      permissionHermetic: true
+    })
+    session.dispose()
+  })
+
+  it('P2: the flag is sent unconditionally — the MAIN session is never sealed', async () => {
+    // No fork detection gates the flag: the stock PATCH schema ignores unknown
+    // keys (measured against the unpatched 1.18.9 release build), so an
+    // unpatched server drops it. But it must only ever be sent for throwaway
+    // sessions — sealing the user's real session would silently discard their
+    // "always" approvals.
+    const JUDGE_SES = 'ses_judge_main_unsealed'
+    enableAutoMode()
+    mockCreateSession.mockReset()
+    mockCreateSession.mockResolvedValueOnce({ id: SES }).mockResolvedValue({ id: JUDGE_SES })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_main_unsealed')
+
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_main_unsealed', 'once'))
+
+    const mainPatches = mockPatchSession.mock.calls.filter((c) => c[0] === SES)
+    expect(mainPatches.length).toBeGreaterThan(0)
+    for (const [, body] of mainPatches) {
+      expect(body).not.toHaveProperty('permissionHermetic')
+    }
+    session.dispose()
+  })
+
+  // ── G9: a user-authored `ask` rule outranks the classifier ────────────────
+  // Otherwise auto mode is a permission DOWNGRADE for exactly the actions the
+  // user singled out. opencode discards the matched rule before publishing
+  // `permission.asked`, so we re-match host-side against our own compiled
+  // user rules (docs/automode-rework-plan.md §4.5).
+
+  function withUserAskRule(ask: string[], allow: string[] = []): void {
+    mockLoadClaudePermissions.mockReturnValue({
+      allow,
+      deny: [],
+      ask,
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+  }
+
+  // ── User ALLOW rules must not bypass the classifier (cli.js §3 step 2) ─────
+  // Live evidence: with `Bash(git:*)` allowed, NO git command raised
+  // permission.asked, so the judge never saw one — an agent then evaded the
+  // static deny `Bash(git push --force:*)` by reordering arguments and the
+  // force-pushes landed unclassified. In auto mode the ALLOW half of the user's
+  // ruleset is patched OUT (`withoutAllowRules`) so those actions ask, and the
+  // classifier decides them. The provenance set the G9 guard reads keeps the
+  // FULL rules, so this is a route to the JUDGE, not to the human.
+
+  /** The compiled user-rule tail of the last patched ruleset (base + user + dispatch). */
+  function lastPatchedRules(): { permission: string; pattern: string; action: string }[] {
+    return (mockPatchSession.mock.calls.at(-1)?.[1] as {
+      permission: { permission: string; pattern: string; action: string }[]
+    }).permission
+  }
+
+  it('auto mode: a user ALLOW rule is patched OUT of the session ruleset', async () => {
+    enableAutoMode()
+    withUserAskRule([], ['Bash(git:*)'])
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    const rs = lastPatchedRules()
+    // The classifier-bypassing rule is gone…
+    expect(rs.some((r) => r.action === 'allow' && r.pattern === 'git*')).toBe(false)
+    // …and the base still gates bash, so `git …` now raises permission.asked.
+    expect(rs.some((r) => r.permission === 'bash' && r.pattern === '*' && r.action === 'ask')).toBe(
+      true
+    )
+    session.dispose()
+  })
+
+  // NOTE on coverage split: the REAL opencode server is what turns the patched
+  // ruleset into a `permission.asked`, and these tests feed that event
+  // synthetically — so the test above (the ruleset no longer carries the allow)
+  // is the one that actually guards the fix; the test below guards the second
+  // half of the claim, that such an ask lands on the judge rather than the human.
+  it('auto mode: a user-ALLOWED bash action reaches the JUDGE (not the human, not auto-allowed)', async () => {
+    enableAutoMode()
+    withUserAskRule([], ['Bash(git:*)'])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_user_allow', 'c1', ['git push origin main --force'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_user_allow', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_user_allow', 'once'))
+    // The judge decided it — the user's allow rule did not make it invisible…
+    expect(mockPrompt).toHaveBeenCalled()
+    // …and it did NOT degrade into an interruption either: an allow rule still
+    // means "don't ask me", it just no longer means "skip the monitor".
+    expect(
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+    ).toBe(false)
+    session.dispose()
+  })
+
+  it('auto mode: a user ASK rule still goes to the human with ZERO judge calls, even alongside an allow', async () => {
+    // The allow filter must not disturb G9: the provenance set keeps the full
+    // compiled rules, so an ask the user wrote still outranks the classifier.
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)'], ['Bash(git:*)'])
+    feedPermissionAsked('bash', 'per_ask_and_allow', 'c1', ['git push --force origin main'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_ask_and_allow', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('NON-auto modes keep the user allow rules — the filter is auto-mode-only', async () => {
+    // With no judge in the loop an allow rule is the user's only way to stop
+    // being asked; dropping it there would be a pure regression.
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    withUserAskRule([], ['Bash(git:*)'])
+    for (const mode of ['default', 'acceptEdits', 'full'] as const) {
+      mockPatchSession.mockClear()
+      const session = makeSession(undefined, mode)
+      await session.run('go')
+      expect(lastPatchedRules()).toContainEqual({
+        permission: 'bash',
+        pattern: 'git*',
+        action: 'allow'
+      })
+      session.dispose()
+    }
+  })
+
+  it('G9: an approval matching a user ask rule goes to the human with ZERO judge calls', async () => {
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)'])
+    feedPermissionAsked('bash', 'per_user_ask', 'c1', ['git push --force origin main'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_user_ask', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    // The judge is never consulted, and nothing is auto-replied on its behalf.
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('G9: an approval NOT covered by a user ask rule still reaches the judge', async () => {
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)'])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_not_user_ask', 'c1', ['ls -la'])
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_not_user_ask', 'once'))
+    expect(mockPrompt).toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('G9: the guard runs BEFORE the read-only fast path', async () => {
+    // A user who wrote `Read(secrets/**)` as an ask must still be asked, even
+    // though `read` is on the zero-token allowlist.
+    enableAutoMode()
+    withUserAskRule(['Read(secrets/**)'])
+    feedPermissionAsked('read', 'per_read_user_ask', 'c1', ['secrets/prod.env'])
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_read_user_ask', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // ── G10: re-check the mode after the judge returns ────────────────────────
+
+  it('G10: mode switched away while the judge was in flight → human, verdict discarded', async () => {
+    enableAutoMode()
+    let releaseJudge: (v: unknown) => void = () => {}
+    mockPrompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseJudge = resolve
+        })
+    )
+    feedPermissionAsked('bash', 'per_mode_switch')
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_mode_switch', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    // The user leaves auto mode mid-flight, then the judge answers ALLOW.
+    await session.setPermissionMode('default')
+    releaseJudge({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    // The stale ALLOW must NOT auto-approve anything.
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('G10: mode unchanged → the verdict is applied as usual', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_mode_same')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mode_same', 'once'))
+    session.dispose()
+  })
+
+  // ── Phase 3: harness ground truth (docs/automode-rework-plan.md §5) ───────
+  // The judge cannot see tool results (the slimmer drops them), so a refusal, a
+  // dirty tree and the repo's remotes only reach it if the HOST measures them
+  // and injects them. These are the wiring assertions for that.
+
+  /** A controllable SSE feed — lets a test interleave `resolveApproval` between
+   *  two `permission.asked` events, which is what a retry actually looks like. */
+  function makeEventFeed(): (e: OpencodeEvent) => void {
+    const queue: OpencodeEvent[] = []
+    let wake: (() => void) | null = null
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
+      for (;;) {
+        while (queue.length > 0) yield queue.shift()!
+        if (signal?.aborted) return
+        await new Promise<void>((resolve) => {
+          wake = resolve
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        wake = null
+      }
+    })
+    return (e) => {
+      queue.push(e)
+      wake?.()
+    }
+  }
+
+  /** A running tool part — puts a `tool_use` block into messageHistory so the
+   *  slimmer has a call to hang the `{"outcome":…}` annotation on. */
+  const toolPartEvent = (callID: string, command: string): OpencodeEvent =>
+    ({
+      id: `ev_part_${callID}`,
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { status: 'running', input: { command } }
+        }
+      }
+    }) as OpencodeEvent
+
+  const permissionEvent = (
+    id: string,
+    callID: string,
+    command: string,
+    patterns: string[] = [command]
+  ): OpencodeEvent =>
+    ({
+      id: `ev_perm_${id}`,
+      type: 'permission.asked',
+      properties: {
+        sessionID: SES,
+        id,
+        permission: 'bash',
+        patterns,
+        metadata: { command },
+        tool: { callID, messageID: `msg_${callID}` }
+      }
+    }) as OpencodeEvent
+
+  /** What the judge was actually shown on its Nth call. */
+  const judgePrompt = (n = -1): { system: string; user: string } => {
+    const body = mockPrompt.mock.calls.at(n)![1] as {
+      system: string
+      parts: Array<{ text?: string }>
+    }
+    return { system: body.system, user: body.parts.map((p) => p.text ?? '').join('') }
+  }
+
+  it('phase 3: a HUMAN reject is annotated `rejected-by-user` on the retry', async () => {
+    // Without this the retry looks like a fresh proposal and the mandatory
+    // Transient Retry exception waves it through — the permissiveness hole the
+    // corpus currently guards against in prose only.
+    enableAutoMode()
+    withUserAskRule(['Bash(git push:*)']) // sends the FIRST approval to the human
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    const push = makeEventFeed()
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_gt_reject', win, '/tmp/test-cwd', {
+      permissionMode: 'full'
+    })
+    await session.run('go')
+
+    push(toolPartEvent('c_push', 'git push --force origin main'))
+    push(permissionEvent('per_h1', 'c_push', 'git push --force origin main'))
+    await vi.waitFor(() =>
+      expect(
+        (win as unknown as MockWindow).webContents.send.mock.calls.some(
+          (c) => c[0] === 'session:approval-request'
+        )
+      ).toBe(true)
+    )
+    expect(mockPrompt).not.toHaveBeenCalled()
+
+    // The human declines.
+    session.resolveApproval('per_h1', 'deny')
+
+    // The agent retries the same command; this one reaches the judge.
+    push(permissionEvent('per_h2', 'c_push2', 'git push --force origin main', ['retry']))
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain(
+      'bash {"command":"git push --force origin main"}\n{"outcome":"rejected-by-user"}'
+    )
+    session.dispose()
+  })
+
+  it('phase 3: a CLASSIFIER block is annotated `automode-blocked` on the retry', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({
+      parts: [{ type: 'text', text: '<block>yes</block><reason>prod</reason>' }]
+    })
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(toolPartEvent('c_b1', 'kubectl delete ns prod'))
+    push(permissionEvent('per_b1', 'c_b1', 'kubectl delete ns prod'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_b1', 'reject', 'Auto mode blocked: prod')
+    )
+
+    push(permissionEvent('per_b2', 'c_b2', 'kubectl delete ns prod'))
+    await vi.waitFor(() => expect(mockPrompt.mock.calls.length).toBeGreaterThan(1))
+
+    expect(judgePrompt().user).toContain(
+      'bash {"command":"kubectl delete ns prod"}\n{"outcome":"automode-blocked"}'
+    )
+    session.dispose()
+  })
+
+  it('phase 3: a tool RESULT annotates ok / error', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(toolPartEvent('c_ok', 'bun run test'))
+    push({
+      id: 'ev_done',
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: 'p_c_ok',
+          messageID: 'msg_c_ok',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'c_ok',
+          state: { status: 'error', input: { command: 'bun run test' }, error: 'exit 1' }
+        }
+      }
+    } as OpencodeEvent)
+    push(permissionEvent('per_ok', 'c_next', 'bun run test'))
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain('bash {"command":"bun run test"}\n{"outcome":"error"}')
+    session.dispose()
+  })
+
+  it('phase 3: gitStatus is measured for a tree-affecting command and rendered ABOVE the action', async () => {
+    enableAutoMode()
+    mockCaptureGitStatus.mockResolvedValue({ clean: false, modified: 2, untracked: ['.env'] })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_gs', 'git add -A && git commit -m wip')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(mockCaptureGitStatus).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(judgePrompt().user).toContain(
+      '{"meta":{"gitStatus":{"clean":false,"modified":2,"untracked":[".env"]}}}\nProposed next action:'
+    )
+    session.dispose()
+  })
+
+  it('phase 3: a FAILED gitStatus capture emits no meta line (never a fake clean tree)', async () => {
+    enableAutoMode()
+    mockCaptureGitStatus.mockResolvedValue(null)
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_gs_fail', 'git add -A')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(mockCaptureGitStatus).toHaveBeenCalled()
+    expect(judgePrompt().user).not.toContain('{"meta"')
+    session.dispose()
+  })
+
+  it('phase 3: a command that touches nothing measurable costs no captures', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_plain', 'bun run typecheck')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(mockCaptureGitStatus).not.toHaveBeenCalled()
+    expect(mockCaptureRepoVisibility).not.toHaveBeenCalled()
+    expect(judgePrompt().user).not.toContain('{"meta"')
+    session.dispose()
+  })
+
+  it('redirects: an in-scope `cmd > file 2>&1` is MEASURED into the meta line (no subprocess)', async () => {
+    // The hot path this exists for: without the measurement a redirect is an
+    // unanalysable overwrite and every log-and-grep loop escalates to stage 2.
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_rd', 'bun run test > build.log 2>&1')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    expect(judgePrompt().user).toContain(
+      '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
+        '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
+    )
+    // Pure analysis — it must not have cost a capture subprocess.
+    expect(mockCaptureGitStatus).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('redirects: a protected target rides the meta line as a protectedHit', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_rd_p', 'echo malicious > ~/.bashrc')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const user = judgePrompt().user
+    expect(user).toContain('"protectedHits":[".bashrc"]')
+    expect(user).toContain('"allInScope":false')
+    session.dispose()
+  })
+
+  it('redirects: a command with NO redirect adds no redirects key', async () => {
+    enableAutoMode()
+    mockCaptureGitStatus.mockResolvedValue({ clean: true, modified: 0, untracked: [] })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_rd_none', 'git add -A')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const user = judgePrompt().user
+    expect(user).toContain('{"meta":{"gitStatus"') // the meta line itself is present…
+    expect(user).not.toContain('redirects') // …and carries no redirect claim
+    session.dispose()
+  })
+
+  it('phase 3: repoVisibility rides both the meta line and the Environment section', async () => {
+    enableAutoMode()
+    mockCaptureRepoVisibility.mockResolvedValue('public')
+    mockCaptureGitStatus.mockResolvedValue({ clean: true, modified: 0, untracked: [] })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_vis', 'git push origin main')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const { system, user } = judgePrompt()
+    expect(user).toContain('"repoVisibility":"public"')
+    // Resolved on THIS call, not one approval later.
+    expect(system).toContain('- Repository visibility: public')
+    session.dispose()
+  })
+
+  it('phase 3: an UNKNOWN visibility stays out of the Environment section', async () => {
+    // The policy's unset-visibility fallback ("assume PRIVATE for
+    // confidentiality, assume PUBLIC for secret exposure") is strictly more
+    // useful to the judge than the bare word "unknown".
+    enableAutoMode()
+    mockCaptureRepoVisibility.mockResolvedValue('unknown')
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAskedWithCommand('per_vis_unk', 'git push origin main')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockPrompt).toHaveBeenCalled())
+
+    const { system, user } = judgePrompt()
+    expect(user).toContain('"repoVisibility":"unknown"') // honest: we looked, we can't tell
+    expect(system).toContain('Repository visibility: unknown — assume PRIVATE')
+    session.dispose()
+  })
+
+  it('phase 3: session-start remotes are captured ONCE and reused', async () => {
+    // Session-start semantics (ref §9.1): a remote added mid-session is exactly
+    // what the exfiltration rules exist to catch, so this must never refresh.
+    enableAutoMode()
+    mockCaptureGitRemotes.mockResolvedValue([
+      { name: 'origin', url: 'git@github.com:acme/app.git' }
+    ])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    const push = makeEventFeed()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+
+    push(permissionEvent('per_r1', 'c_r1', 'bun run build'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_r1', 'once'))
+    // A remote appears mid-session — the cached value must win.
+    mockCaptureGitRemotes.mockResolvedValue([{ name: 'evil', url: 'git@evil:x.git' }])
+    push(permissionEvent('per_r2', 'c_r2', 'bun run test'))
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_r2', 'once'))
+
+    expect(mockCaptureGitRemotes).toHaveBeenCalledTimes(1)
+    expect(judgePrompt().system).toContain('origin → git@github.com:acme/app.git')
+    expect(judgePrompt().system).not.toContain('evil')
+    session.dispose()
+  })
+
   it('disabled auto-mode in full → emits approval to the human (no judge call)', async () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
     mockCreateSession.mockResolvedValue({ id: SES })
@@ -1235,6 +2135,136 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       expect(sent).toBe(true)
     })
     expect(mockPrompt).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Permission-patch failure must fail CLOSED. The patch is the only thing
+// between the user's chosen autonomy mode (+ deny rules) and opencode's
+// `{*: allow}` session default, so warn-and-continue silently downgraded the
+// whole turn to allow-everything on any transient failure.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — permission patch failure fails CLOSED', () => {
+  beforeEach(setupMocks)
+
+  it('run(): a failed patchSession emits session:error and NEVER sends the prompt', async () => {
+    mockPatchSession.mockRejectedValue(new Error('server said no'))
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_failclosed', win, '/tmp', { permissionMode: 'plan' })
+
+    await session.run('do something dangerous')
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    const errored = sent.find((c) => c[0] === 'session:error')
+    expect(errored, 'expected a session:error banner').toBeTruthy()
+    // send() is (channel, routingId, payload) — the message is arg 2.
+    expect(String(errored![2])).toContain('permission mode')
+    // The critical assertion: no prompt was ever sent, so the model never got
+    // a turn on an ungated session.
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('setPermissionMode(): a failed patchSession surfaces session:error without rejecting the IPC call', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_setmode_fail', win, '/tmp', { permissionMode: 'default' })
+    await session.run('hi') // establishes openSessionId with a working patch
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    mockPatchSession.mockRejectedValue(new Error('server said no'))
+    // A rejected `session:set-permission-mode` invoke would blow up in the
+    // renderer with no user-visible explanation — surface a banner instead.
+    await expect(session.setPermissionMode('plan')).resolves.toBeUndefined()
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(sent.some((c) => c[0] === 'session:error')).toBe(true)
+    session.dispose()
+  })
+
+  it('a FRESH turn re-applies the stored mode and fails closed when the patch is still down', async () => {
+    // After a failed setPermissionMode the session holds the newly requested
+    // mode but the OLD server-side ruleset (never a widened one). The next
+    // turn that owns its own applyPermissionMode must refuse to run rather
+    // than prompt with a stale ruleset. (A prompt arriving MID-turn takes the
+    // steer path, which deliberately does not re-patch — the running turn
+    // already owns its ruleset — so this drives a fresh session instead.)
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_reapply_fail', win, '/tmp', { permissionMode: 'default' })
+    await session.setPermissionMode('plan') // no live session yet → no patch attempted
+    expect(mockPatchSession).not.toHaveBeenCalled()
+
+    mockPatchSession.mockRejectedValue(new Error('still down'))
+    await session.run('now do it')
+
+    expect(mockPatchSession).toHaveBeenCalled()
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// notifySettingsChanged — mid-session permission-rule hot reload
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — notifySettingsChanged', () => {
+  beforeEach(setupMocks)
+
+  function lastRuleset(): Rule[] {
+    return (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
+  }
+
+  it('recompiles the live ruleset from the CHANGED settings on disk', async () => {
+    const session = makeSession(undefined, 'default')
+    await session.run('hi')
+    expect(lastRuleset().some((r) => r.permission === 'bash' && r.action === 'deny')).toBe(false)
+
+    // The user adds a deny rule in the permissions dialog.
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: [],
+      deny: ['Bash(rm:*)'],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+    mockPatchSession.mockClear()
+    await session.notifySettingsChanged()
+
+    expect(mockPatchSession).toHaveBeenCalledTimes(1)
+    expect(lastRuleset().some((r) => r.permission === 'bash' && r.action === 'deny')).toBe(true)
+    session.dispose()
+  })
+
+  it('keeps the session mode — a rule refresh is not a mode change', async () => {
+    const session = makeSession(undefined, 'plan')
+    await session.run('hi')
+    const before = lastRuleset()
+    await session.notifySettingsChanged()
+    expect(lastRuleset()).toEqual(before)
+    session.dispose()
+  })
+
+  it('is a no-op with no live session (the next establishSession reads fresh)', async () => {
+    const session = makeSession(undefined, 'default')
+    await expect(session.notifySettingsChanged()).resolves.toBeUndefined()
+    expect(mockPatchSession).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('swallows a patch failure: no session:error, the active ruleset stays', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_notify_fail', win, '/tmp', { permissionMode: 'default' })
+    await session.run('hi')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    // applyPermissionMode is fail-closed for TURN gating; a background refresh
+    // must not surface as a session error.
+    mockPatchSession.mockRejectedValue(new Error('server said no'))
+    await expect(session.notifySettingsChanged()).resolves.toBeUndefined()
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(sent.some((c) => c[0] === 'session:error')).toBe(false)
     session.dispose()
   })
 })
@@ -1295,9 +2325,12 @@ describe('OpencodeSession — askSideQuestion', () => {
     await session.askSideQuestion('aside?')
 
     // The throwaway session got a deny-all ruleset (no tool can raise an
-    // unanswerable permission.asked that would hang the synchronous prompt).
+    // unanswerable permission.asked that would hang the synchronous prompt),
+    // AND permissionHermetic so an instance-global "always" approval cannot
+    // outrank that deny (ADR-037 P2 / plan §7 Q5).
     expect(mockPatchSession).toHaveBeenCalledWith(SIDE_SES.id, {
-      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+      permissionHermetic: true
     })
 
     // And the deny-all patch happened BEFORE the prompt (order matters — the
@@ -1369,7 +2402,7 @@ describe('OpencodeSession — question.asked routing', () => {
 
   function feedQuestionAsked(id = 'que_r1', callID = 'call_q1'): void {
     mockCreateSession.mockResolvedValue({ id: SES })
-    mockSubscribeEvents.mockImplementation(async function* () {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'eq1',
         type: 'question.asked',
@@ -1387,6 +2420,7 @@ describe('OpencodeSession — question.asked routing', () => {
           tool: { callID }
         }
       } as OpencodeEvent
+      await parkUntilAborted(signal)
     })
   }
 
@@ -1452,7 +2486,7 @@ describe('OpencodeSession — resolveApproval question branch', () => {
     }>
   ): Promise<void> {
     mockCreateSession.mockResolvedValue({ id: SES })
-    mockSubscribeEvents.mockImplementation(async function* () {
+    mockSubscribeEvents.mockImplementation(async function* (signal?: AbortSignal) {
       yield {
         id: 'eq',
         type: 'question.asked',
@@ -1463,6 +2497,7 @@ describe('OpencodeSession — resolveApproval question branch', () => {
           tool: { callID: 'call_test' }
         }
       } as OpencodeEvent
+      await parkUntilAborted(signal)
     })
     await session.run('go')
     // Wait for the approval to reach the UI
@@ -2643,6 +3678,75 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
 
     session.dispose()
   })
+
+  it('BD-j: folds tokens.reasoning into outputTokens for parent AND child rows', async () => {
+    // opencode reports reasoning tokens separately, but every provider it meters
+    // this way bills them as OUTPUT tokens (info.cost already includes them).
+    // Both recordUsageEvent call sites in recordTurnUsage must fold them in.
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_rz', messageID: 'msg_par_rz',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e2', type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: 'msg_par_reasoning', role: 'assistant', cost: 0.01,
+                    tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } } }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e3', type: 'message.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            info: {
+              id: 'msg_child_reasoning',
+              role: 'assistant',
+              providerID: 'anthropic',
+              modelID: 'claude-sonnet-4-6',
+              cost: 0.007,
+              tokens: { input: 200, output: 100, reasoning: 40, cache: { read: 0, write: 0 } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e4', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_rz', messageID: 'msg_child_reasoning', type: 'text', text: 'done' }
+          }
+        } as OpencodeEvent,
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+
+    await vi.waitFor(() => expect(getUsageEventByMessageId('msg_par_reasoning')).toBeDefined())
+
+    const parentRow = getUsageEventByMessageId('msg_par_reasoning')!
+    expect(parentRow.inputTokens).toBe(100)
+    expect(parentRow.outputTokens).toBe(75) // 50 output + 25 reasoning
+
+    const childRow = getUsageEventByMessageId('msg_child_reasoning')!
+    expect(childRow).toBeDefined()
+    expect(childRow.inputTokens).toBe(200)
+    expect(childRow.outputTokens).toBe(140) // 100 output + 40 reasoning
+
+    session.dispose()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -3466,6 +4570,251 @@ describe('OpencodeSession — setModel() capabilities from discovery cache', () 
     )
     await session.setModel('openai/gpt-4o-vision')
     expect(session.capabilities.vision).toBe(true)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// H20 + M-OC9 — dead SSE recovery and steer-consumed only on delivered sends.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — dead SSE recovery (H20)', () => {
+  beforeEach(setupMocks)
+
+  it('an unexpected mid-turn stream end clears sseAbort, resets isProcessing, and surfaces session:error', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    // Server dies: the subscription returns immediately (NOT via cancel/abort)
+    // while the turn is still in flight (no session.idle).
+    mockSubscribeEvents.mockImplementation(async function* () {
+      // ends right away
+    })
+    const session = new OpencodeSession('r_h20', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:error'
+      )
+      expect(sent).toBe(true)
+    })
+
+    // isProcessing unwedged (would be stuck true pre-fix → interrupt() hangs);
+    // the reported state is 'disconnected', not 'idle' — see the disconnect
+    // describe block below.
+    expect(session.status.state).toBe('disconnected')
+    // Guard cleared so a later run() can re-establish the consumer.
+    expect((session as unknown as { sseAbort: AbortController | null }).sseAbort).toBeNull()
+
+    session.dispose()
+  })
+
+  it('a deliberate cancel does NOT emit a session:error from the stream end', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_h20_cancel', win, '/tmp')
+    await session.run('go')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    session.cancel() // aborts the subscription deliberately
+    await new Promise<void>((r) => setTimeout(r, 0))
+
+    const errored = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+      (c) => c[0] === 'session:error'
+    )
+    expect(errored).toBe(false)
+  })
+})
+
+describe('OpencodeSession — steer delivery (M-OC9)', () => {
+  beforeEach(setupMocks)
+
+  it('a failed steer send does NOT emit session:steer-consumed and surfaces session:error', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    // Parking stream keeps isProcessing=true so the second run() steers.
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_oc9', win, '/tmp')
+    await session.run('initial') // establishes client + openSessionId; isProcessing stays true
+    expect(session.status.state).toBe('running')
+
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    // The steer's send fails (server gone).
+    mockPromptAsync.mockRejectedValueOnce(new Error('server gone'))
+    await session.run('steer that never lands')
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(false)
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    // The undelivered message is not retained in local history.
+    const userMsgs = session.getMessages().filter((m) => m.role === 'user')
+    expect(userMsgs.some((m) => m.content.some((b) => b.type === 'text' && b.text === 'steer that never lands'))).toBe(false)
+
+    session.dispose()
+  })
+
+  it('a successful steer send DOES emit session:steer-consumed', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_oc9_ok', win, '/tmp')
+    await session.run('initial')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    await session.run('steer that lands')
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(true)
+
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Disconnect state — the ONLY status the renderer acts on to clear `sdkActive`
+// (useClaudeEvents' session:status handler), i.e. to turn the sidebar's green
+// activity dot off. Pre-fix OpencodeSession never emitted it on ANY path, so
+// the dot stayed green forever for every opencode session.
+// ---------------------------------------------------------------------------
+
+/** A stream that yields `events`, then ends when `gate` resolves — a NON-aborted
+ *  end, i.e. the server dying / transport breaking (parseSSEStream swallows the
+ *  transport error and just ends the generator). Parks on abort like the real one. */
+function streamUntilGated(
+  events: OpencodeEvent[],
+  gate: Promise<void>
+): (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent> {
+  return async function* (signal?: AbortSignal) {
+    for (const ev of events) yield ev
+    await Promise.race([gate, parkUntilAborted(signal)])
+  }
+}
+
+function statusStates(win: BrowserWindow): string[] {
+  return (win as unknown as MockWindow).webContents.send.mock.calls
+    .filter((c) => c[0] === 'session:status')
+    .map((c) => c[2].state)
+}
+
+describe('OpencodeSession — disconnect status', () => {
+  beforeEach(setupMocks)
+
+  it('an unexpected stream end while IDLE emits status disconnected (guard)', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    let endStream!: () => void
+    const gate = new Promise<void>((r) => {
+      endStream = r
+    })
+    // The turn completes normally (session.idle → isProcessing false), and only
+    // THEN does the stream die. Pre-fix the `!deliberate && this.isProcessing`
+    // guard skipped everything here, so the renderer got no event at all.
+    mockSubscribeEvents.mockImplementation(
+      streamUntilGated(
+        [{ id: 'e1', type: 'session.idle', properties: { sessionID: 'ses_opencode_1' } } as OpencodeEvent],
+        gate
+      )
+    )
+    const session = new OpencodeSession('r_disc_idle', win, '/tmp')
+    await session.run('go')
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    endStream()
+    await vi.waitFor(() => expect(statusStates(win)).toContain('disconnected'))
+
+    expect(session.status.state).toBe('disconnected')
+    // An idle drop is not a turn failure — no error banner.
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(false)
+    // Released by spawn identity, never by cwd key — another same-cwd session
+    // may already hold a replacement server (see releaseIfCurrent).
+    expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp', expect.objectContaining({ baseUrl: 'http://127.0.0.1:9999' }))
+    // Scoped to THIS session's cwd: the unmocked auth provider's warmCache also
+    // acquires/releases the manager, for its own PERSISTED_SESSIONS_DIR.
+    expect(mockRelease).not.toHaveBeenCalledWith('/tmp')
+  })
+
+  it('an unexpected stream end MID-TURN emits session:error and status disconnected (not idle)', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    let endStream!: () => void
+    const gate = new Promise<void>((r) => {
+      endStream = r
+    })
+    mockSubscribeEvents.mockImplementation(streamUntilGated([], gate))
+    const session = new OpencodeSession('r_disc_turn', win, '/tmp')
+    await session.run('go')
+    expect(session.status.state).toBe('running')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    endStream()
+    await vi.waitFor(() => expect(statusStates(win)).toContain('disconnected'))
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    expect(statusStates(win)).not.toContain('idle')
+    expect(session.status.state).toBe('disconnected')
+  })
+
+  it('cancel() leaves disconnected as the LAST emitted status', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    const session = new OpencodeSession('r_disc_cancel', win, '/tmp')
+    await session.run('go')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    session.cancel()
+    await new Promise<void>((r) => setTimeout(r, 0))
+
+    const states = statusStates(win)
+    expect(states.at(-1)).toBe('disconnected')
+  })
+
+  it('a run() after a disconnect re-acquires the server and returns to running', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    let endStream!: () => void
+    const gate = new Promise<void>((r) => {
+      endStream = r
+    })
+    mockSubscribeEvents.mockImplementation(streamUntilGated([], gate))
+    const session = new OpencodeSession('r_disc_retry', win, '/tmp')
+    await session.run('go')
+    endStream()
+    await vi.waitFor(() => expect(session.status.state).toBe('disconnected'))
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+
+    // The manager already dropped the dead handle, so the reacquire respawns.
+    mockSubscribeEvents.mockImplementation(parkingStream)
+    await session.run('again')
+
+    expect(mockAcquire).toHaveBeenCalledTimes(2)
+    expect(session.status.state).toBe('running')
+    session.dispose()
+  })
+
+  it('a never-prompted (eager-connect only) session reports disconnected when the server dies', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_disc_eager', win, '/tmp')
+    // run(null) warms the connection but starts NO SSE consumer — without the
+    // manager's exit fan-out this session is completely blind to server death.
+    await session.run(null)
+    await vi.waitFor(() => expect(mockSubscribeExit).toHaveBeenCalled())
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    killServer()
+
+    expect(statusStates(win)).toContain('disconnected')
+    expect(session.status.state).toBe('disconnected')
+    session.dispose()
+  })
+
+  it('a run() whose server acquire REJECTS ends disconnected, not idle', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    // No connection is ever established, so there is nothing to fan out an exit
+    // and no SSE consumer to lose — the failing turn itself is the only signal.
+    mockAcquire.mockRejectedValue(new Error('opencode serve did not print port within 15s'))
+    const session = new OpencodeSession('r_disc_acquire_fail', win, '/tmp')
+    await session.run('go')
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    expect(statusStates(win).at(-1)).toBe('disconnected')
+    expect(session.status.state).toBe('disconnected')
     session.dispose()
   })
 })

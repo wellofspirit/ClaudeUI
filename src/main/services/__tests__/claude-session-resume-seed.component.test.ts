@@ -50,9 +50,6 @@ vi.mock('../claude-mcp', () => ({
 }))
 vi.mock('../session-history', () => ({
   computeTokenMetrics: mockComputeTokenMetrics,
-  // Real derivation — transcriptPathFor's Windows-vs-POSIX behavior is part
-  // of what these tests guard.
-  projectKeyForCwd: (cwd: string) => cwd.replace(/[\\/:.]/g, '-'),
   fallbackBlockText: vi.fn(() => '')
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
@@ -69,12 +66,6 @@ vi.mock('../account-manager', () => ({
 }))
 vi.mock('../../auth/ClaudeAuthProvider', () => ({
   claudeAuthProvider: { buildAccountRef: vi.fn(() => null), updateAuthSource: vi.fn() }
-}))
-vi.mock('../auto-classifier', () => ({
-  getClassifier: vi.fn(),
-  stopClassifier: vi.fn(),
-  isSafeTool: vi.fn(() => false),
-  buildTranscript: vi.fn(() => '')
 }))
 
 // Import AFTER mocks.

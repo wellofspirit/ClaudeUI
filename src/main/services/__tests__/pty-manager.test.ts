@@ -56,6 +56,10 @@ import { PtyManager } from '../pty-manager'
 // Convenience: flush queued microtasks (for kill -> emitExit via queueMicrotask).
 const flushMicrotasks = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve))
 
+// PTY output is coalesced behind an 8ms timer (M-PT1). Wait past it so the
+// batched terminal:data send lands before asserting.
+const flushPtyBatch = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25))
+
 describe('PtyManager', () => {
   let manager: PtyManager
   const originalShell = process.env.SHELL
@@ -157,7 +161,7 @@ describe('PtyManager', () => {
       expect(new Set([id1, id2, id3]).size).toBe(3)
     })
 
-    it('onData callback fires with (id, data) when PTY emits data', () => {
+    it('coalesces multiple chunks into a single batched onData call (M-PT1)', async () => {
       mockPlatform = 'linux'
       process.env.SHELL = '/bin/bash'
 
@@ -165,12 +169,15 @@ describe('PtyManager', () => {
       const id = manager.create('/x', onData, vi.fn())
       const fake = ptyStub.spawned[0]
 
-      fake.emitData('hello')
+      fake.emitData('hello ')
       fake.emitData('world')
+      // Buffered, not yet flushed — no IPC storm of one message per chunk.
+      expect(onData).not.toHaveBeenCalled()
 
-      expect(onData).toHaveBeenCalledTimes(2)
-      expect(onData).toHaveBeenNthCalledWith(1, id, 'hello')
-      expect(onData).toHaveBeenNthCalledWith(2, id, 'world')
+      await flushPtyBatch()
+      // Both chunks arrive as ONE batched message.
+      expect(onData).toHaveBeenCalledTimes(1)
+      expect(onData).toHaveBeenCalledWith(id, 'hello world')
     })
 
     it('onExit callback fires with (id, exitCode) and removes the entry from the map', () => {
@@ -188,6 +195,69 @@ describe('PtyManager', () => {
       expect(onExit).toHaveBeenCalledTimes(1)
       expect(onExit).toHaveBeenCalledWith(id, 42)
       expect(manager.has(id)).toBe(false)
+    })
+  })
+
+  describe('flow control (M-PT1)', () => {
+    beforeEach(() => {
+      mockPlatform = 'linux'
+      process.env.SHELL = '/bin/bash'
+    })
+
+    it('pauses the pty when output floods past the high-water mark', () => {
+      manager.create('/x', vi.fn(), vi.fn())
+      const fake = ptyStub.spawned[0]
+
+      // > 1 MiB emitted synchronously within one flush window (before the 8ms
+      // timer fires) → the buffer crosses the high-water mark and we pause.
+      const chunk = 'a'.repeat(64 * 1024) // 64 KiB
+      for (let i = 0; i < 20; i++) fake.emitData(chunk) // ~1.25 MiB
+
+      expect(fake.pauseCount).toBeGreaterThan(0)
+      expect(fake.paused).toBe(true)
+    })
+
+    it('does NOT pause for ordinary interactive output', async () => {
+      manager.create('/x', vi.fn(), vi.fn())
+      const fake = ptyStub.spawned[0]
+
+      fake.emitData('$ ls\r\n')
+      fake.emitData('file1 file2\r\n')
+      await flushPtyBatch()
+
+      expect(fake.pauseCount).toBe(0)
+      expect(fake.paused).toBe(false)
+    })
+
+    it('resumes the pty after the buffered flood is flushed to the renderer', async () => {
+      const onData = vi.fn()
+      manager.create('/x', onData, vi.fn())
+      const fake = ptyStub.spawned[0]
+
+      const chunk = 'a'.repeat(64 * 1024)
+      for (let i = 0; i < 20; i++) fake.emitData(chunk)
+      expect(fake.paused).toBe(true)
+
+      await flushPtyBatch()
+      // The batched flood was delivered in one send, and flow control lifted.
+      expect(onData).toHaveBeenCalledTimes(1)
+      expect(onData.mock.calls[0][1].length).toBe(20 * 64 * 1024)
+      expect(fake.paused).toBe(false)
+      expect(fake.resumeCount).toBeGreaterThan(0)
+    })
+
+    it('kill() clears the pending flush timer (no leaked send after kill)', async () => {
+      const onData = vi.fn()
+      const id = manager.create('/x', onData, vi.fn())
+      const fake = ptyStub.spawned[0]
+
+      fake.emitData('buffered but never flushed')
+      manager.kill(id)
+      await flushPtyBatch()
+
+      // The scheduled flush was cancelled; kill's emitExit path also has nothing
+      // to deliver, so no stale data lands.
+      expect(onData).not.toHaveBeenCalled()
     })
   })
 

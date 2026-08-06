@@ -36,13 +36,45 @@ export interface SharedProviderDefinition {
   managed: true
 }
 
+/**
+ * Why an enabled, credentialed route still surfaces zero models.
+ *
+ * A bare "delivered · 0 models" is what made a real failure opaque: ChatGPT's
+ * credential was being vended to opencode correctly, but opencode's
+ * `disabled_providers` hid the provider, so every model came back unavailable
+ * and the status had nothing to say about it. These codes name the cause so the
+ * next instance diagnoses itself.
+ *
+ * - `provider-disabled`    — the engine's own provider veto hides it (opencode's
+ *                            `disabled_providers`). The credential is fine.
+ * - `models-restricted`    — a per-provider model allowlist filters every model
+ *                            out (an empty allowlist surfaces nothing).
+ * - `no-models-discovered` — the engine reported no models at all: not installed,
+ *                            or discovery failed.
+ */
+export type SharedProviderRouteDiagnosis =
+  | 'provider-disabled'
+  | 'models-restricted'
+  | 'no-models-discovered'
+
 export interface SharedProviderStatus {
   id: string
   connected: boolean
   modelCount?: number
   routes: Record<
     ConfigurableHarnessId,
-    { enabled: boolean; delivered: boolean; modelCount?: number; error?: string }
+    {
+      enabled: boolean
+      delivered: boolean
+      modelCount?: number
+      error?: string
+      /**
+       * Set only when the route is enabled and surfaces zero models. Distinct
+       * from `error`, which means an operation FAILED — a diagnosis is a healthy
+       * route with a configuration reason for being empty.
+       */
+      diagnosis?: SharedProviderRouteDiagnosis
+    }
   >
 }
 

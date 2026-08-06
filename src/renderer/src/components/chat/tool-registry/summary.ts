@@ -11,7 +11,30 @@
 import { shorten } from '../ToolCallBlock/utils'
 import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 
-export function summarizeTool(kind: ToolKind, view: ToolView): string {
+/**
+ * Claude's `SendUserFile` has no ToolKind of its own (it lands on 'unknown',
+ * whose default summary is the raw input JSON). Rather than mint a kind for a
+ * single Claude-only tool, special-case its summary here: the floating Files
+ * widget owns the rich presentation, the card header just needs a readable line.
+ */
+function summarizeSendUserFile(rawInput: unknown): string {
+  const input = (rawInput ?? {}) as Record<string, unknown>
+  const raw = input.files
+  const files = (Array.isArray(raw) ? raw : [raw]).filter(
+    (f): f is string => typeof f === 'string' && f.length > 0
+  )
+  if (files.length === 0) return JSON.stringify(input)
+  const names = files.map((f) => f.split(/[\\/]/).filter(Boolean).pop() || f)
+  const head = `Sent ${files.length} file${files.length !== 1 ? 's' : ''}: ${names.join(', ')}`
+  const caption = typeof input.caption === 'string' && input.caption ? ` — ${input.caption}` : ''
+  return head + caption
+}
+
+export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string): string {
+  if (kind === 'unknown' && view.kind === 'unknown' && toolName === 'SendUserFile') {
+    return summarizeSendUserFile(view.input)
+  }
+
   switch (kind) {
     case 'command':
       return view.kind === 'command' ? view.command : ''

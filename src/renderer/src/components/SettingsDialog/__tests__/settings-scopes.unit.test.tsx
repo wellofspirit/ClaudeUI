@@ -110,9 +110,12 @@ describe('SCOPES structure', () => {
       ])
     })
 
-    it('Vendor subgroup contains vendor-opencode, opencode-providers in order', () => {
+    it('Vendor subgroup contains only vendor-opencode', () => {
+      // 'opencode-providers' ("Custom providers") was merged INTO vendor-opencode:
+      // custom declarations now sit in the single Providers list, edited through the
+      // provider configuration dialog rather than their own section.
       const vendor = opencode.subgroups.find((sg) => sg.label === 'Vendor')!
-      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-opencode', 'opencode-providers'])
+      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-opencode'])
     })
 
     it('Agents subgroup contains opencode-agents', () => {
@@ -130,9 +133,9 @@ describe('SCOPES structure', () => {
       expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor'])
     })
 
-    it('Engine subgroup contains only pi-models (no auto-mode/dispatch in M3)', () => {
+    it('Engine subgroup contains pi-automode then pi-models (no dispatch — pi is source-only)', () => {
       const engine = pi.subgroups.find((sg) => sg.label === 'Engine')!
-      expect(engine.sections.map((s) => s.id)).toEqual(['pi-models'])
+      expect(engine.sections.map((s) => s.id)).toEqual(['pi-automode', 'pi-models'])
     })
 
     it('Vendor subgroup contains vendor-pi', () => {
@@ -200,8 +203,8 @@ describe('SECTION_SCOPE_MAP', () => {
     expect(SECTION_SCOPE_MAP.get('claude-dispatch')).toBe('claude')
   })
 
-  it('opencode-providers → opencode', () => {
-    expect(SECTION_SCOPE_MAP.get('opencode-providers')).toBe('opencode')
+  it('opencode-providers is no longer a section (merged into vendor-opencode)', () => {
+    expect(SECTION_SCOPE_MAP.has('opencode-providers')).toBe(false)
   })
 
   it('opencode-agents → opencode', () => {
@@ -214,6 +217,10 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('pi-models → pi', () => {
     expect(SECTION_SCOPE_MAP.get('pi-models')).toBe('pi')
+  })
+
+  it('pi-automode → pi', () => {
+    expect(SECTION_SCOPE_MAP.get('pi-automode')).toBe('pi')
   })
 
   it('vendor-pi → pi', () => {

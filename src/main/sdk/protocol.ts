@@ -52,9 +52,27 @@ export class NdjsonReader {
 export class NdjsonWriter {
   constructor(private readonly stream: Writable) {}
 
-  write(obj: JsonLine): void {
-    if (!this.stream.writable) return
-    this.stream.write(JSON.stringify(obj) + '\n')
+  /**
+   * Serialize + write one ndjson line. Returns `true` if the line was handed
+   * to the stream, `false` if the stream was unwritable (child gone / stdin
+   * ended) or the write threw synchronously.
+   *
+   * The boolean matters for the control channel: a silent no-op here used to
+   * leave the caller's request registered as pending, so a request issued on a
+   * dead handle waited the full timeout — or, for `timeoutMs: 0` subtypes
+   * (oauth / mcp_authenticate), forever (M-CL2). Callers reject the pending
+   * request when we report the write didn't land.
+   */
+  write(obj: JsonLine): boolean {
+    if (!this.stream.writable) return false
+    try {
+      this.stream.write(JSON.stringify(obj) + '\n')
+      return true
+    } catch {
+      // A half-open pipe can throw synchronously (e.g. EPIPE on Windows).
+      // Treat it as an unwritable stream rather than crashing the caller.
+      return false
+    }
   }
 
   end(): void {

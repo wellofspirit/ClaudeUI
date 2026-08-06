@@ -56,6 +56,21 @@ describe('getLang', () => {
     expect(getLang('DOCKERFILE')).toBe('docker')
     expect(getLang('MAKEFILE')).toBe('makefile')
   })
+
+  // RN11 — a Windows path contains no '/', so splitting on '/' alone kept the
+  // WHOLE path as the "file name". Extensionless files (Dockerfile, Makefile)
+  // then missed the name lookup and fell through to plaintext.
+  it('handles Windows backslash paths', () => {
+    expect(getLang('D:\\proj\\Dockerfile')).toBe('docker')
+    expect(getLang('D:\\proj\\sub\\Makefile')).toBe('makefile')
+    expect(getLang('D:\\x\\file.rs')).toBe('rust')
+    expect(getLang('C:\\a b\\c\\Foo.tsx')).toBe('tsx')
+  })
+
+  it('handles mixed separators (Node/Git-Bash normalized paths)', () => {
+    expect(getLang('D:\\proj/src\\main.py')).toBe('python')
+    expect(getLang('src/renderer\\Dockerfile')).toBe('docker')
+  })
 })
 
 describe('tokenizeLines', () => {

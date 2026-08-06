@@ -425,6 +425,13 @@ describe('hydrateConfigFromDisk loads piDefaultModel', () => {
         Promise.resolve(engineId === 'pi' ? { piConfig } : {})
       ),
       loadOpencodeSettings: vi.fn().mockResolvedValue({}),
+      loadClaudePermissions: vi.fn().mockResolvedValue({
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }),
       saveSettings: vi.fn(),
       saveSessionConfig: vi.fn()
     } as any

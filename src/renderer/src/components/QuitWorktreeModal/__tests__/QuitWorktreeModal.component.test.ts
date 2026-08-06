@@ -36,16 +36,21 @@ function makeWorktreeInfo(name: string): WorktreeInfo {
 describe('QuitWorktreeModal FC', () => {
   let app: TestApp
   let confirmQuitCalls: number
+  let cancelQuitCalls: number
   let removeCalls: number
 
   beforeEach(async () => {
     app = await bootTestApp()
     viewProps = null
     confirmQuitCalls = 0
+    cancelQuitCalls = 0
     removeCalls = 0
 
     app.bridge.ipcMain.handle('app:quit-confirm', async () => {
       confirmQuitCalls++
+    })
+    app.bridge.ipcMain.handle('app:quit-cancel', async () => {
+      cancelQuitCalls++
     })
     app.bridge.ipcMain.handle('worktree:remove', async () => {
       removeCalls++
@@ -71,7 +76,7 @@ describe('QuitWorktreeModal FC', () => {
     expect(viewProps).toBeNull()
   })
 
-  it('onCancel clears quitWorktrees in the store', async () => {
+  it('onCancel aborts the pending quit and clears quitWorktrees in the store', async () => {
     useSessionStore.setState({
       quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }]
     })
@@ -80,7 +85,13 @@ describe('QuitWorktreeModal FC', () => {
     act(() => {
       viewProps!.onCancel()
     })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
+    // Cancel must reach main (clear the fallback timer) and must NOT confirm quit.
+    expect(cancelQuitCalls).toBe(1)
+    expect(confirmQuitCalls).toBe(0)
     expect(useSessionStore.getState().quitWorktrees).toBeNull()
   })
 

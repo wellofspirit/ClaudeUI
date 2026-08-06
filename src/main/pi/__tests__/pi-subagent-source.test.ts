@@ -613,12 +613,19 @@ describe('abort', () => {
   })
 })
 
+// Production temp dirs are exactly 'pi-subagent-' + a 6-char mkdtemp suffix
+// (pi-subagent-source.ts). A bare startsWith('pi-subagent-') also matches other
+// test files' fixtures (e.g. PiBridgeHost's 'pi-subagent-host-test-*') created
+// concurrently under vitest's parallel workers, making the cleanup assertions
+// order-dependent — so match the exact production shape.
+const isProdSubagentTmpDir = (n: string): boolean => /^pi-subagent-[A-Za-z0-9]{6}$/.test(n)
+
 describe('final result shape + temp-prompt-file cleanup', () => {
   it('an agent WITH a non-empty systemPrompt body writes a temp prompt file and cleans it up on completion', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-cleanup-'))
     writeAgentFixture(dir, 'echoer.md', { name: 'echoer', description: 'Echoes' }, 'You are an echo agent.')
 
-    const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('pi-subagent-')))
+    const before = new Set(readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n)))
 
     let capturedArgs: string[] = []
     const fakeProc = new FakeChildProcess()
@@ -636,7 +643,7 @@ describe('final result shape + temp-prompt-file cleanup', () => {
       // A NEW pi-subagent-* tmpdir must exist WHILE the child is "running" —
       // proves writePromptToTempFile actually ran (not asserting the exact
       // path, which is random by design).
-      const during = readdirSync(tmpdir()).filter((n) => n.startsWith('pi-subagent-') && !before.has(n))
+      const during = readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n) && !before.has(n))
       expect(during.length).toBeGreaterThan(0)
 
       fakeProc.emit('close', 0)
@@ -648,7 +655,7 @@ describe('final result shape + temp-prompt-file cleanup', () => {
       expect(finalAgents[0].status).toBe('done')
 
       // Cleanup: no leftover pi-subagent-* dirs beyond what existed before this test.
-      const after = readdirSync(tmpdir()).filter((n) => n.startsWith('pi-subagent-') && !before.has(n))
+      const after = readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n) && !before.has(n))
       expect(after).toEqual([])
     })
 
@@ -659,7 +666,7 @@ describe('final result shape + temp-prompt-file cleanup', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-cleanup-fail-'))
     writeAgentFixture(dir, 'echoer.md', { name: 'echoer', description: 'Echoes' }, 'Non-empty system prompt.')
 
-    const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('pi-subagent-')))
+    const before = new Set(readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n)))
     const fakeProc = new FakeChildProcess()
     mockSpawn.mockImplementation(() => fakeProc)
 
@@ -675,7 +682,7 @@ describe('final result shape + temp-prompt-file cleanup', () => {
         .agents
       expect(finalAgents[0].status).toBe('error')
 
-      const after = readdirSync(tmpdir()).filter((n) => n.startsWith('pi-subagent-') && !before.has(n))
+      const after = readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n) && !before.has(n))
       expect(after).toEqual([])
     })
 

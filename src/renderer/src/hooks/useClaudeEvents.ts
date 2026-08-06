@@ -1,5 +1,10 @@
 import { useEffect } from 'react'
-import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
+import {
+  useSessionStore,
+  buildTodosFromMessages,
+  buildSentFilesFromMessages,
+  resolveRoutingId
+} from '../stores/session-store'
 
 /** Send a system notification if the session is not currently focused */
 function notifyIfNeeded(routingId: string, title: string, body: string): void {
@@ -16,6 +21,32 @@ function notifyIfNeeded(routingId: string, title: string, body: string): void {
 
 const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
 
+/** Claude Code's file-delivery tool — drives the floating Files widget. */
+const SEND_USER_FILE_TOOL = 'SendUserFile'
+
+/**
+ * Built-in tool names whose result text is trusted to declare an entered
+ * worktree. Gating on an EXACT name (not a `/worktree/i` substring over every
+ * tool) closes the injection funnel behind audit C2: a third-party MCP tool
+ * named e.g. `mcp__evil__worktree_helper` can no longer plant a `worktreePath`
+ * that later flows into `worktree:remove`. `EnterWorktree` is the only cli.js
+ * built-in that emits "Created worktree at: <path> on branch: <branch>".
+ */
+export const WORKTREE_ENTER_TOOL_NAMES = new Set(['EnterWorktree'])
+
+/**
+ * Display name for an entered worktree: the path's last segment, falling back
+ * to the branch with its `worktree-` prefix stripped.
+ *
+ * Splits on BOTH separators — a Windows worktree path (`D:\wt\feature-x`) has
+ * no `/`, so a `/`-only split yielded the ENTIRE path as the display name
+ * (RN11). Exported so the hook's behavior is tested directly rather than via a
+ * copy of this expression in the test harness.
+ */
+export function deriveWorktreeName(wtPath: string, wtBranch: string): string {
+  return wtPath.split(/[\\/]/).pop() || wtBranch.replace(/^worktree-/, '')
+}
+
 /** Rebuild todos from all messages when a task-related tool call is detected */
 function rebuildTodos(routingId: string): void {
   const { sessions, setTodos } = useSessionStore.getState()
@@ -23,6 +54,21 @@ function rebuildTodos(routingId: string): void {
   if (!session) return
   const todos = buildTodosFromMessages(session.messages)
   if (todos) setTodos(routingId, todos)
+}
+
+/**
+ * Rebuild the SendUserFile list from all messages.
+ *
+ * Same derive-from-transcript contract as {@link rebuildTodos} — which is what
+ * makes the widget survive session resumption for free — but the result is
+ * never cleared on turn end (see the `onResult` handler below).
+ */
+function rebuildSentFiles(routingId: string): void {
+  const { sessions, setSentFiles } = useSessionStore.getState()
+  const session = sessions[routingId]
+  if (!session) return
+  const sentFiles = buildSentFilesFromMessages(session.messages)
+  if (sentFiles) setSentFiles(routingId, sentFiles)
 }
 
 export function useClaudeEvents(): void {
@@ -39,6 +85,7 @@ export function useClaudeEvents(): void {
   const retractMessages = useSessionStore((s) => s.retractMessages)
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
+  const setTaskStarted = useSessionStore((s) => s.setTaskStarted)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
   const addSubagentMessage = useSessionStore((s) => s.addSubagentMessage)
   const appendSubagentMessageBatch = useSessionStore((s) => s.appendSubagentMessageBatch)
@@ -118,6 +165,10 @@ export function useClaudeEvents(): void {
       // When queued (sent while session is running), store as queuedText instead of adding
       // to the chat stream — the message will appear in chat when actually consumed by cli.js.
       window.api.onUserMessage((routingId, data) => {
+        // Resolve a possibly-stale (pre-rekey) id to the canonical session id at
+        // the event boundary so every handler targets the same session across a
+        // rekey (xhigh#9). No-op when no rekey mapping applies.
+        routingId = resolveRoutingId(routingId)
         const store = useSessionStore.getState()
         if (!store.sessions[routingId]) return
         if (data.queued) {
@@ -125,7 +176,9 @@ export function useClaudeEvents(): void {
         } else {
           store.addUserMessage(
             routingId,
-            `msg-${Date.now()}`,
+            // crypto.randomUUID (not Date.now) so two user messages within the
+            // same ms can't collide into a duplicate React key (Low).
+            `msg-${crypto.randomUUID()}`,
             data.prompt,
             undefined,
             data.attachments
@@ -133,6 +186,7 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onMessage((routingId, msg) => {
+        routingId = resolveRoutingId(routingId)
         addMessage(routingId, msg)
 
         // Rebuild todos when task-related tool calls arrive
@@ -140,8 +194,15 @@ export function useClaudeEvents(): void {
           (b) => b.type === 'tool_use' && TASK_TOOLS.has(b.toolName)
         )
         if (hasTaskTool) rebuildTodos(routingId)
+
+        // Rebuild the Files widget when a SendUserFile call arrives
+        const hasSendUserFile = msg.content.some(
+          (b) => b.type === 'tool_use' && b.toolName === SEND_USER_FILE_TOOL
+        )
+        if (hasSendUserFile) rebuildSentFiles(routingId)
       }),
       window.api.onStreamEvent((routingId, data) => {
+        routingId = resolveRoutingId(routingId)
         if (data.type === 'thinking') {
           appendStreamingThinking(routingId, data.text)
         } else {
@@ -149,6 +210,7 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onApprovalRequest((routingId, approval) => {
+        routingId = resolveRoutingId(routingId)
         addPendingApproval(routingId, approval)
         const state = useSessionStore.getState()
         if (state.activeSessionId !== routingId || !document.hasFocus()) {
@@ -163,7 +225,7 @@ export function useClaudeEvents(): void {
       // Externally-resolved approval (e.g. opencode's deny-cascade on a
       // dispatch target, ADR-033) — remove the stale card.
       window.api.onApprovalDismiss((routingId, { requestId }) => {
-        removePendingApproval(routingId, requestId)
+        removePendingApproval(resolveRoutingId(routingId), requestId)
       }),
       window.api.onStatus((routingId, status) => {
         // Re-key session when SDK provides its stable session ID
@@ -190,7 +252,13 @@ export function useClaudeEvents(): void {
         }
         setStatus(effectiveRoutingId, status)
         if (status.state === 'idle') {
-          clearPendingApprovals(effectiveRoutingId)
+          // Do NOT clear pending approvals here: background subagents (Task
+          // tool) outlive the parent turn's `result`, and their can_use_tool
+          // requests may arrive — or remain unresolved — after cli.js reports
+          // idle. Card removal is driven exclusively by explicit events
+          // (session:approval-dismiss, tool_result matching via
+          // removePendingApprovalByToolUse, or the user's own resolution),
+          // never inferred from turn state.
           if (priorState === 'running') {
             useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
           }
@@ -209,6 +277,7 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onResult((routingId) => {
+        routingId = resolveRoutingId(routingId)
         // Dismiss completed task list when turn ends
         const state = useSessionStore.getState()
         const session = state.sessions[routingId]
@@ -227,20 +296,22 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onVendorAuthRequired((routingId, data) => {
-        useSessionStore.getState().setVendorAuthRequired(routingId, data)
+        useSessionStore.getState().setVendorAuthRequired(resolveRoutingId(routingId), data)
       }),
       window.api.onError((routingId, error) => {
+        routingId = resolveRoutingId(routingId)
         addError(routingId, error)
         window.api.logError('session', `[routingId=${routingId}] ${error}`)
       }),
       window.api.onWarning((routingId, warning) => {
-        addWarning(routingId, warning)
+        addWarning(resolveRoutingId(routingId), warning)
       }),
       window.api.onMessagesRetracted((routingId, { messageIds }) => {
-        retractMessages(routingId, messageIds)
+        retractMessages(resolveRoutingId(routingId), messageIds)
       }),
-      window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs }) => {
-        appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
+      window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs, images }) => {
+        routingId = resolveRoutingId(routingId)
+        appendToolResult(routingId, toolUseId, result, isError, fileDiffs, images)
         // Belt-and-suspenders: when cli.js has produced a result for this
         // tool_use, any approval still sitting in the store for it is
         // necessarily stale (resolver already ran). Clear it so late
@@ -248,6 +319,20 @@ export function useClaudeEvents(): void {
         if (toolUseId) removePendingApprovalByToolUse(routingId, toolUseId)
         // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
         if (!isError) rebuildTodos(routingId)
+
+        // The paired result for an in-flight SendUserFile: rebuild so the row
+        // picks up its error text. Gated on the toolUseId already being known
+        // to the widget (the tool_use lands via onMessage first), so an
+        // unrelated tool result never triggers a full transcript re-scan.
+        // Unlike todos this runs for error results too — that IS the payload.
+        if (
+          toolUseId &&
+          useSessionStore
+            .getState()
+            .sessions[routingId]?.sentFiles.some((f) => f.toolUseId === toolUseId)
+        ) {
+          rebuildSentFiles(routingId)
+        }
 
         // Detect worktree enter from EnterWorktree tool result
         if (!isError && result) {
@@ -262,7 +347,7 @@ export function useClaudeEvents(): void {
               if (
                 toolBlock &&
                 toolBlock.type === 'tool_use' &&
-                /worktree/i.test(toolBlock.toolName)
+                WORKTREE_ENTER_TOOL_NAMES.has(toolBlock.toolName)
               ) {
                 // SDK result format: "Created worktree at <path> on branch <branch>. ..."
                 const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
@@ -279,7 +364,7 @@ export function useClaudeEvents(): void {
                   const wtPath = pathMatch.trim()
                   const wtBranch = branchMatch.trim()
                   // Derive name from path (last segment) or branch (strip worktree- prefix)
-                  const wtName = wtPath.split('/').pop() || wtBranch.replace(/^worktree-/, '')
+                  const wtName = deriveWorktreeName(wtPath, wtBranch)
                   store.setWorktreeInfo(routingId, {
                     worktreePath: wtPath,
                     worktreeBranch: wtBranch,
@@ -297,12 +382,16 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onTaskProgress((routingId, data) => {
-        updateTaskProgress(routingId, data)
+        updateTaskProgress(resolveRoutingId(routingId), data)
+      }),
+      window.api.onTaskStarted((routingId, data) => {
+        setTaskStarted(resolveRoutingId(routingId), data)
       }),
       window.api.onTaskNotification((routingId, data) => {
-        addTaskNotification(routingId, data)
+        addTaskNotification(resolveRoutingId(routingId), data)
       }),
       window.api.onSubagentStream((routingId, data) => {
+        routingId = resolveRoutingId(routingId)
         if (data.type === 'thinking') {
           appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
         } else {
@@ -310,57 +399,80 @@ export function useClaudeEvents(): void {
         }
       }),
       window.api.onSubagentMessage((routingId, data) => {
-        addSubagentMessage(routingId, data.toolUseId, data.message)
+        addSubagentMessage(resolveRoutingId(routingId), data.toolUseId, data.message)
       }),
       window.api.onSubagentMessageBatch((routingId, data) => {
-        appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
+        appendSubagentMessageBatch(resolveRoutingId(routingId), data.toolUseId, data.messages)
       }),
       window.api.onSubagentToolResult((routingId, data) => {
         appendSubagentToolResult(
-          routingId,
+          resolveRoutingId(routingId),
           data.toolUseId,
           data.toolResultToolUseId,
           data.result,
           data.isError,
-          data.fileDiffs
+          data.fileDiffs,
+          data.images
         )
       }),
       window.api.onBashOutput((routingId, data) => {
-        setBashOutput(routingId, data.toolUseId, data.output, data.totalLines, data.totalBytes)
+        setBashOutput(
+          resolveRoutingId(routingId),
+          data.toolUseId,
+          data.output,
+          data.totalLines,
+          data.totalBytes
+        )
       }),
       window.api.onBackgroundOutput((routingId, data) => {
-        setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
+        setBackgroundOutput(resolveRoutingId(routingId), data.toolUseId, data.tail, data.totalSize)
       }),
       window.api.onStatusLine((routingId, data) => {
-        setStatusLine(routingId, data)
+        setStatusLine(resolveRoutingId(routingId), data)
       }),
       window.api.onMetering((routingId, data) => {
-        useSessionStore.getState().setMetering(routingId, data)
+        useSessionStore.getState().setMetering(resolveRoutingId(routingId), data)
       }),
       window.api.onPlanSteps((routingId, todos) => {
-        useSessionStore.getState().setTodos(routingId, todos)
+        useSessionStore.getState().setTodos(resolveRoutingId(routingId), todos)
       }),
       window.api.onPermissionMode((routingId, mode) => {
-        setPermissionMode(mode, routingId)
+        setPermissionMode(mode, resolveRoutingId(routingId))
       }),
-      window.api.onSlashCommands((_routingId, commands) => {
+      window.api.onSlashCommands((routingId, commands) => {
         setSlashCommands(commands)
-        setCustomCommands([]) // SDK list is authoritative — clear filesystem-scanned commands
+        // The filesystem list is NOT cleared here: mergeSlashCommands already
+        // gives the engine list precedence by name, so the scan can only fill
+        // gaps (engines that under-report, skills added after spawn). Clearing
+        // it left the fallback empty for the rest of the app's lifetime, since
+        // the only other scan is keyed on cwd changes. Re-scan instead — the
+        // main-process scanner caches per cwd for 30s, so this is cheap.
+        const cwd = useSessionStore.getState().sessions[resolveRoutingId(routingId)]?.cwd
+        if (cwd) {
+          window.api
+            .scanCustomCommands(cwd)
+            .then((names) => setCustomCommands(names.map((name) => ({ name }))))
+            .catch(() => {
+              /* scanner failed — keep existing commands */
+            })
+        }
         window.api.saveSlashCommands(commands)
       }),
       window.api.onSkills((_routingId, names) => {
         setSdkSkillNames(names)
       }),
       window.api.onSandboxViolation((routingId, message) => {
-        addSandboxViolation(routingId, message)
+        addSandboxViolation(resolveRoutingId(routingId), message)
       }),
       window.api.onSteerConsumed((routingId) => {
-        useSessionStore.getState().consumeQueuedText(routingId)
+        useSessionStore.getState().consumeQueuedText(resolveRoutingId(routingId))
       }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
+        routingId = resolveRoutingId(routingId)
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
         if (statusLine) setStatusLine(routingId, statusLine)
         rebuildTodos(routingId)
+        rebuildSentFiles(routingId)
         // Dismiss completed task list for watched sessions (no result event)
         const session = useSessionStore.getState().sessions[routingId]
         if (session && session.todos.length > 0) {
@@ -441,13 +553,13 @@ export function useClaudeEvents(): void {
       }),
       // Voice input events
       window.api.onVoiceTranscript((routingId, data) => {
-        appendVoiceTranscript(routingId, data.text, data.isFinal)
+        appendVoiceTranscript(resolveRoutingId(routingId), data.text, data.isFinal)
       }),
       window.api.onVoiceState((routingId, state) => {
-        setVoiceState(routingId, state)
+        setVoiceState(resolveRoutingId(routingId), state)
       }),
       window.api.onVoiceError((routingId, error) => {
-        addError(routingId, error)
+        addError(resolveRoutingId(routingId), error)
       }),
       // Plugin views
       window.api.onPluginViewsChanged((views) => {
@@ -500,6 +612,7 @@ export function useClaudeEvents(): void {
     retractMessages,
     appendToolResult,
     updateTaskProgress,
+    setTaskStarted,
     addTaskNotification,
     addSubagentMessage,
     appendSubagentMessageBatch,

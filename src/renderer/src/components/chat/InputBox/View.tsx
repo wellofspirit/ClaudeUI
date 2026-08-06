@@ -5,7 +5,8 @@ import type {
   SlashCommandInfo,
   DirEntry,
   VoiceState,
-  EngineId
+  EngineId,
+  PermissionMode
 } from '../../../../../shared/types'
 import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
@@ -60,9 +61,21 @@ export interface InputBoxViewProps {
 
   // Permission mode
   permissionMode: string
+  /** Show/hide the mobile mode-picker row (MobileConfigSheet). Hidden pre-session (welcome screen has no session to target). */
+  showModePicker?: boolean
+  /** Engine capability gate for the 'plan' mode option. */
+  canPlan?: boolean
+  /** Availability gate for the 'auto' mode option (Claude account/org gate; always true for other engines). */
+  autoAvailable?: boolean
 
   // Menus
   slashMenuOpen: boolean
+  /**
+   * The MERGED list (engine ∪ filesystem, capability-gated) — the same array
+   * `filteredSlashCommands` is derived from. Feeding the menu anything else
+   * (e.g. the raw engine list) desynchronises its rows from the keyboard
+   * selection index and hides filesystem-scanned commands entirely.
+   */
   slashCommands: SlashCommandInfo[]
   slashFilter: string
   slashMenuIndex: number
@@ -111,6 +124,7 @@ export interface InputBoxViewProps {
   onRemoveFile: (id: string) => void
   onSlashSelect: (name: string) => void
   onFileMentionConfirm: (entry: DirEntry) => void
+  onSelectMode?: (mode: PermissionMode) => void
   onSelectModel: (value: string) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectEffort: (level: EffortLevel) => void
@@ -434,9 +448,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                 ? 'border border-mode-plan-dim focus-within:border-mode-plan'
                 : permissionMode === 'auto'
                   ? 'border border-mode-auto-dim focus-within:border-mode-auto'
-                  : permissionMode === 'localAuto'
-                    ? 'border border-mode-local-auto-dim focus-within:border-mode-local-auto'
-                    : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
+                  : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
           }`}
         >
           {/* Mode tab */}
@@ -447,18 +459,14 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   ? 'border-mode-edit-dim group-focus-within:border-mode-edit bg-mode-edit-dim group-focus-within:bg-mode-edit'
                   : permissionMode === 'auto'
                     ? 'border-mode-auto-dim group-focus-within:border-mode-auto bg-mode-auto-dim group-focus-within:bg-mode-auto'
-                    : permissionMode === 'localAuto'
-                      ? 'border-mode-local-auto-dim group-focus-within:border-mode-local-auto bg-mode-local-auto-dim group-focus-within:bg-mode-local-auto'
-                      : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
+                    : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
               }`}
             >
               {permissionMode === 'acceptEdits'
                 ? 'Accept Edits'
                 : permissionMode === 'auto'
                   ? 'Auto ⏵⏵'
-                  : permissionMode === 'localAuto'
-                    ? 'Local Auto'
-                    : 'Plan'}
+                  : 'Plan'}
             </div>
           )}
 
@@ -518,6 +526,10 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   selectedModel={props.selectedModel}
                   selectedEngineId={props.selectedEngineId}
                   engineLocked={props.engineLocked}
+                  showModePicker={props.showModePicker ?? false}
+                  permissionMode={props.permissionMode as PermissionMode}
+                  canPlan={props.canPlan ?? true}
+                  autoAvailable={props.autoAvailable ?? true}
                   showEnginePicker={props.showEnginePicker}
                   showModelPicker={props.showModelPicker ?? true}
                   showThinkingPicker={props.showThinkingPicker ?? true}
@@ -528,6 +540,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   effort={props.effort}
                   effortSupported={props.effortSupported}
                   allowedEffortLevels={props.allowedEffortLevels}
+                  onSelectMode={props.onSelectMode ?? (() => {})}
                   onSelectEngine={props.onSelectEngine}
                   onSelectModel={props.onSelectModel}
                   onSelectThinking={props.onSelectThinking}

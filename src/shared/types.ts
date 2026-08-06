@@ -30,11 +30,64 @@ export interface FileDiff {
   changeType?: 'add' | 'update' | 'delete' | 'move'
 }
 
+/**
+ * An image an ENGINE returned from a tool call — Read on a .png, a screenshot
+ * tool, an MCP tool rendering something. Distinct from the `image` ContentBlock,
+ * which is an image the USER attached to a prompt: these hang off the
+ * `tool_result` block that produced them, feed the image viewer's "Tool results"
+ * gallery, and are never sent back up as prompt input.
+ *
+ * Field names are load-bearing — the gallery reader
+ * (renderer/components/shared/ImageViewer/gallery.ts) builds
+ * `data:<mediaType>;base64,<base64Data>` from them verbatim, so the media type
+ * is narrowed to what an `<img src>` will actually render.
+ *
+ * Producers must OMIT the carrying `images` key when there is nothing to carry
+ * (never `images: []`) — the renderer's gallery/tab visibility is driven by
+ * presence.
+ */
+export interface ToolResultImage {
+  mediaType: ImageMediaType
+  base64Data: string
+  /** Only when the engine supplies one (opencode file parts); Claude transcripts carry none. */
+  fileName?: string
+}
+
+/** The image media types the `image` ContentBlock and `ToolResultImage` model. */
+export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+
+/**
+ * Runtime companion to `ImageMediaType` — the single allowlist every engine
+ * adapter filters through before emitting an image to the renderer (there used
+ * to be one hand-rolled copy per adapter). Anything outside it (image/svg+xml,
+ * image/tiff, image/bmp, …) is DROPPED rather than widened: the renderer builds
+ * `data:<mediaType>;base64,…` verbatim, so an unrenderable type would surface as
+ * a broken image in the chat and the viewer.
+ */
+export const IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set<ImageMediaType>([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp'
+])
+
+/** Narrowing guard for `IMAGE_MEDIA_TYPES` — use instead of casting a string. */
+export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaType {
+  return typeof mediaType === 'string' && IMAGE_MEDIA_TYPES.has(mediaType)
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
-  | { type: 'tool_result'; toolUseId: string; toolResult: string; isError?: boolean; fileDiffs?: FileDiff[] }
-  | { type: 'thinking'; text: string }
+  | {
+      type: 'tool_result'
+      toolUseId: string
+      toolResult: string
+      isError?: boolean
+      fileDiffs?: FileDiff[]
+      images?: ToolResultImage[]
+    }
+  | { type: 'thinking'; text: string; durationMs?: number }
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
   | { type: 'api_error'; errorType: string; errorMessage: string }
   | { type: 'compact_separator'; text?: string }
@@ -187,6 +240,13 @@ export interface PendingApproval {
   toolUseId?: string
   toolName: string
   input: Record<string, unknown>
+  /**
+   * opencode only: the matched argument(s) the engine evaluated its permission
+   * ruleset against (`permission.asked`'s `patterns` — the command, path, or
+   * subagent type). Needed host-side to re-match the ask against the
+   * user-authored rules, which outrank the auto-mode classifier (ADR-023 G9).
+   */
+  patterns?: string[]
   suggestions?: PermissionSuggestion[]
   decisionReason?: string
   blockedPath?: string
@@ -234,7 +294,7 @@ export interface PluginStreamEvent extends PluginSessionEvent {
 
 export type ApprovalDecision = 'allow' | 'allowForSession' | 'deny'
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'localAuto'
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
 
 export interface ProxySettings {
   enabled: boolean
@@ -427,6 +487,32 @@ export interface OpencodeNativeRaw {
  * (getOpencodeProviderModels) so this list stays cheap even with hundreds of
  * models per provider.
  */
+/** opencode's own provenance label for a configured provider (`/config/providers`). */
+export type OpencodeProviderSource = 'env' | 'config' | 'custom' | 'api'
+
+/** What Remove would actually destroy. `null` when Remove is unavailable. */
+export type ProviderRemoveKind = 'credential' | 'declaration' | 'both'
+
+/**
+ * Which actions the opencode provider row may offer for one provider. Computed
+ * in main by `resolveProviderActions` (see main/opencode/provider-actions.ts for
+ * the full rationale) and carried to the renderer so the row never re-derives it.
+ *
+ * Note the absence of a `canDisable`: Disable is ALWAYS available, because
+ * `disabled_providers` is the one veto that works against every way opencode can
+ * derive a provider into existence.
+ */
+export interface ProviderActions {
+  /** Every non-free provider — the generic /auth path accepts a plain key. */
+  canSetCredential: boolean
+  /** Only a declaration in the single global config file ClaudeUI writes. */
+  canEditDeclaration: boolean
+  canRemove: boolean
+  removeKind: ProviderRemoveKind | null
+  /** Present iff `!canRemove` — tooltip for the greyed trash icon. */
+  blockedReason?: string
+}
+
 export interface OpencodeProviderCatalogEntry {
   id: string
   name: string
@@ -444,6 +530,33 @@ export interface OpencodeProviderCatalogEntry {
   authMethods: ('api' | 'oauth')[]
   /** Number of models the provider exposes in the catalog (for the picker hint). */
   modelCount: number
+  /**
+   * True when the id sits in opencode's `disabled_providers`. Disabled providers
+   * still belong in the "Added providers" list (rendered in a disabled state);
+   * they are NOT addable rows. opencode omits them from GET /provider entirely,
+   * so these entries are re-synthesized — see discoverOpencodeProviderCatalog.
+   */
+  disabled: boolean
+  /**
+   * opencode's own provenance label from /config/providers ('env' | 'config' |
+   * 'custom' | 'api'), absent for providers that aren't currently configured.
+   *
+   * Used for MESSAGE WORDING ONLY — never to decide which actions are offered
+   * (see provider-actions.ts). Read from /config/providers and never from
+   * /provider, whose `all` hardcodes source:'custom' for unconnected entries.
+   */
+  source?: OpencodeProviderSource
+  /** Env var names opencode reads a key from, for the blocked-removal tooltip. */
+  envVarNames?: string[]
+  /** Which row actions are legitimately available. See provider-actions.ts. */
+  actions: ProviderActions
+  /**
+   * Set when an ENABLED shared-provider route vends this vendor id (today
+   * `chatgpt` → `openai`). Removing such a credential is undone by the vault's
+   * next feed, so the row must warn and offer to disable the route instead.
+   * Decorated at the IPC boundary, not in discovery (import-cycle avoidance).
+   */
+  sharedProviderClaim?: { id: string; name: string }
 }
 
 /** A single catalog model for the per-provider model-allowlist dialog. */
@@ -461,7 +574,7 @@ export interface OpencodeCatalogModel {
 export interface EngineConfig {
   sandbox?: SandboxSettings
   proxy?: ProxySettings
-  /** opencode auto-mode (LLM permission gatekeeper) settings. See ADR-023. */
+  /** Auto-mode (LLM permission gatekeeper) settings — opencode and pi. See ADR-023. */
   autoMode?: AutoModeConfig
   /** opencode native config passthrough (injected at spawn via OPENCODE_CONFIG_CONTENT). */
   opencodeConfig?: OpencodeConfigSettings
@@ -508,8 +621,14 @@ export interface DispatchConfig {
 }
 
 /**
- * opencode auto-mode (`full` autonomy) LLM permission-gatekeeper config (ADR-023).
- * Only consumed by the opencode engine; Claude uses cli.js's own classifier.
+ * Auto-mode (`auto`/`full` autonomy) LLM permission-gatekeeper config
+ * (ADR-023, amended by `docs/automode-rework-plan.md`).
+ *
+ * Engine-neutral as of phase 4: read per engine from `engines/<engineId>.json`
+ * by BOTH opencode and pi, which share the whole policy core
+ * (`src/main/automode/`) and differ only in their permission intercept and
+ * judge transport. Claude is the exception — cli.js ships its own classifier,
+ * so none of this reaches it.
  */
 export interface AutoModeConfig {
   /** Master switch. When false, `full` falls back to human approval prompts
@@ -519,6 +638,17 @@ export interface AutoModeConfig {
   judgeModel?: string
   /** Two-stage classifier mode. Defaults to 'both'. */
   twoStageMode?: 'both' | 'fast' | 'thinking'
+  /** Trust lists fed to the classifier's Environment section (phase 2 of
+   *  `docs/automode-rework-plan.md`). Every slot defaults to EMPTY, and an empty
+   *  slot means "nothing is trusted" rather than "anything goes" — the policy
+   *  renders the restrictive fallback text for it (see `EnvironmentInfo`).
+   *  External domains/services the agent may send data to. */
+  trustedDomains?: string[]
+  /** Package registries beyond the project manifest's default. */
+  trustedRegistries?: string[]
+  /** Production/protected target patterns. When set, they REPLACE the default
+   *  'prod'/'production' name heuristic the policy would otherwise apply. */
+  protectedPatterns?: string[]
 }
 
 export interface VendorConfig {
@@ -570,11 +700,50 @@ export interface TodoItem {
   activeForm: string
 }
 
+/**
+ * A file the agent handed to the user via Claude Code's `SendUserFile` tool.
+ *
+ * Derived from the transcript (see `buildSentFilesFromMessages`), never stored
+ * on its own — so it rebuilds for free on session resumption, exactly like
+ * todos. Unlike todos it is never cleared when the turn ends.
+ *
+ * `path` is the raw path as it appeared in the tool input: cli.js accepts both
+ * absolute and cwd-relative paths, so the renderer resolves it against the
+ * session cwd before handing it to the shell IPC. The display name (basename)
+ * is derived in the UI, not stored.
+ */
+export interface SentFile {
+  path: string
+  caption?: string
+  display?: 'render' | 'attach'
+  toolUseId: string
+  /** Present when the paired tool_result was an error (missing file, UNC, URL, …). */
+  error?: string
+}
+
 export interface TaskProgress {
   toolUseId: string
   toolName: string
   parentToolUseId: string | null
   elapsedTimeSeconds: number
+}
+
+/**
+ * Emitted the moment cli.js spawns a Task/Agent (or background Bash) — mirrors
+ * `session:task-notification`'s payload conventions but for the START edge.
+ * Claude 2.1.219+ makes Agent/Task tasks background-by-default and the tool_use
+ * input usually omits `run_in_background`, so the renderer can no longer infer
+ * "is this task actually still running" from tool input alone (an immediate
+ * "Async agent launched successfully" tool_result would otherwise read as
+ * complete). This event is the authoritative "task exists and is running"
+ * signal; task-notification is the authoritative terminal signal. A task with
+ * no task-started record (opencode/pi child sessions, historical transcripts)
+ * falls back to the pre-existing tool_result/background-flag heuristic.
+ */
+export interface TaskStartedData {
+  toolUseId: string
+  taskId: string
+  taskType: string
 }
 
 export interface TaskNotification {
@@ -608,6 +777,8 @@ export interface SubagentToolResultData {
   result: string
   isError: boolean
   fileDiffs?: FileDiff[]
+  /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
+  images?: ToolResultImage[]
 }
 
 export interface BackgroundOutput {
@@ -639,6 +810,10 @@ export interface ModelInfo {
   supportsEffort?: boolean
   supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
   supportsAdaptiveThinking?: boolean
+  /** Whether the 'auto' permission mode is usable with this model/account.
+   *  From the initialize response's models[]; absent on older CLIs — treat
+   *  absence as supported (auto mode is default-available on subscriptions). */
+  supportsAutoMode?: boolean
   /** Engine that owns this model entry. Defaults to 'claude' when absent (legacy). */
   engineId?: EngineId
   /** Vendor id within the engine. */
@@ -817,12 +992,21 @@ interface SessionAPI {
   onToolResult(
     cb: (
       routingId: string,
-      data: { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] }
+      data: {
+        toolUseId: string
+        result: string
+        isError: boolean
+        fileDiffs?: FileDiff[]
+        /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
+        images?: ToolResultImage[]
+      }
     ) => void
   ): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
   onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
   onTaskNotification(cb: (routingId: string, data: TaskNotification) => void): () => void
+  /** Task exists and is running — see TaskStartedData for why this is needed. */
+  onTaskStarted(cb: (routingId: string, data: TaskStartedData) => void): () => void
   onSubagentStream(cb: (routingId: string, data: SubagentStreamDelta) => void): () => void
   onSubagentMessage(cb: (routingId: string, data: SubagentMessageData) => void): () => void
   onSubagentMessageBatch(
@@ -867,6 +1051,14 @@ interface SessionAPI {
   /** Full opencode provider catalog (~146 providers) for the settings provider manager.
    *  Returns [] when opencode isn't installed or discovery fails. */
   getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
+  /** Toggle opencode's `disabled_providers` veto. Reversible; destroys nothing. */
+  setOpencodeProviderDisabled(providerId: string, disabled: boolean): Promise<void>
+  /**
+   * Destructive: deletes the credential and/or provider declaration ClaudeUI owns,
+   * then clears the id from `disabled_providers` and the model allowlist. Pass the
+   * `removeKind` from the entry's resolved `actions` — never a widened value.
+   */
+  removeOpencodeProvider(providerId: string, kind: ProviderRemoveKind): Promise<void>
   /** All catalog models for a single opencode provider (for the model-allowlist dialog). */
   getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]>
   /** Unfiltered authenticated pi catalog for the model-allowlist dialog. */
@@ -910,6 +1102,8 @@ interface SessionAPI {
   loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
+  /** Cancel a pending quit prompt: clears the fallback timer, leaves services running. */
+  cancelQuit(): Promise<void>
   testProxyConnection(
     proxy: ProxySettings
   ): Promise<{ ok: boolean; latencyMs: number; error?: string }>
@@ -1013,6 +1207,10 @@ interface McpAPI {
     permissions: ClaudePermissions,
     cwd?: string
   ): Promise<void>
+  /** Whether Claude Code honors this workspace's project/local ALLOW rules
+   *  (~/.claude.json#projects[cwd].hasTrustDialogAccepted). Untrusted → cli.js
+   *  silently drops them; deny/ask and user-scope allows still apply. */
+  isWorkspaceTrusted(cwd: string): Promise<boolean>
   /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
   getCleanupPeriodDays(): Promise<number | undefined>
   setCleanupPeriodDays(days: number): Promise<void>
@@ -1057,6 +1255,30 @@ interface AutomationAPI {
 interface FileAPI {
   listDir(dirPath: string): Promise<{ entries: DirEntry[]; isRoot: boolean; resolvedPath: string }>
   openInVSCode(cwd: string): Promise<void>
+  /**
+   * Open a local file with the OS default handler. Optional: only the desktop
+   * preload provides it — the remote web client has no local filesystem, so
+   * callers must guard with `window.api?.openPath?.(…)` and hide the
+   * affordance when it is absent. Resolves with `{ error }` on failure.
+   */
+  openPath?(filePath: string): Promise<{ error?: string }>
+  /** Reveal a local file in the OS file manager. Optional — see {@link FileAPI.openPath}. */
+  showInFolder?(filePath: string): Promise<{ error?: string }>
+  /**
+   * Resolve an image `src` for a file delivered by `SendUserFile` (ADR-043 §4).
+   * One member, two transports:
+   *  - desktop preload → IPC that reads the file and returns a `data:` URL;
+   *  - web adapter → an authenticated same-origin `/sent-file?...&inline=1` URL.
+   *
+   * `sessionKey` is the session's routingId: the remote transport needs it to
+   * look up that session's allowlisted files server-side. The desktop transport
+   * ignores it — `filePath` is already the cwd-resolved absolute path and main
+   * re-validates it. Optional, like the shell members: callers must probe.
+   */
+  getSentFilePreview?(
+    sessionKey: string,
+    filePath: string
+  ): Promise<{ src: string } | { error: string }>
   createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
   getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
   removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>
@@ -1152,6 +1374,23 @@ export interface NetworkInterfaceInfo {
   priority: number // lower = more preferred (1 = LAN, 9 = CGNAT/VPN)
 }
 
+/** Sanitized remote-server config — NEVER carries password_salt/password_hash/kdf_params. */
+export interface RemoteConfig {
+  port: number
+  bindHost: string | null
+  autostart: boolean
+  tlsMode: number
+  /**
+   * Pinned `tailscale serve` HTTPS port (ADR-042), 1–65535, default 443. The
+   * ONLY port TLS mode will bind — there is no fallback walk. The last-serve
+   * cleanup record (`last_serve_*`) is deliberately NOT exposed: it is internal
+   * bookkeeping for the startup reconciliation.
+   */
+  tlsHttpsPort: number
+  passwordSet: boolean
+  passwordUpdatedAt: number | null
+}
+
 interface RemoteAPI {
   getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
   startRemoteServer(opts?: {
@@ -1162,7 +1401,85 @@ interface RemoteAPI {
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
+  /** Persisted remote-server config (fixed port, bind host, autostart, tls
+   *  placeholder, password status). Main-only — never reachable via the
+   *  remote WS dispatcher (RemoteDispatcher.BLOCKED). */
+  getRemoteConfig(): Promise<RemoteConfig>
+  /** Partial update of the persisted config; returns the fresh sanitized config. */
+  setRemoteConfig(partial: {
+    port?: number
+    bindHost?: string | null
+    autostart?: boolean
+    tlsMode?: number
+    tlsHttpsPort?: number
+  }): Promise<RemoteConfig>
+  /**
+   * Re-run `tailscale serve` enablement for the running server with
+   * `force: true` — it CLAIMS the pinned HTTPS port, overwriting whatever
+   * handler currently holds it (ADR-042). The user's deliberate "my bookmark
+   * wins" action, surfaced by the serve-failure banner. Main-only (in
+   * `RemoteDispatcher.BLOCKED`): a remote client must never mutate the serve
+   * config of the server it is connected through.
+   */
+  forceReserve(): Promise<void>
+  /** Provision a new remote-access password. Throws (min length 12) on validation failure. */
+  setRemotePassword(password: string): Promise<void>
+  /** Clear the remote-access password credential. */
+  clearRemotePassword(): Promise<void>
+  /**
+   * Probe the local Tailscale installation (Phase 3 TLS mode). The result is
+   * designed to be user-facing: the failure variants carry an actionable
+   * `message` the Settings UI renders verbatim. Main-only — in
+   * `RemoteDispatcher.BLOCKED`, because it discloses the node's DNS name and
+   * the owner's login.
+   */
+  detectTailscale(): Promise<TailscaleDetection>
 }
+
+/**
+ * States {@link TailscaleDetection} can report, and the value carried by
+ * `RemoteStatus.tls.detection`. Declared here (not in the main-only
+ * `tailscale-manager.ts`) because both the renderer and the web client need it;
+ * `tailscale-manager.ts` imports it, so the two can never drift.
+ */
+export type RemoteTlsDetection =
+  | 'ok'
+  | 'not-installed'
+  | 'daemon-down'
+  | 'logged-out'
+  | 'https-disabled'
+  | 'no-operator'
+  | 'error'
+
+/** Outcome of probing the local `tailscale` CLI (`TailscaleManager.detect()`). */
+export type TailscaleDetection =
+  | {
+      state: 'ok'
+      binaryPath: string
+      version: string
+      /** `Self.DNSName` with the trailing dot stripped, e.g. `box.tailXXXX.ts.net`. */
+      dnsName: string
+      /** `CertDomains` from `status --json`; may legitimately be `[]` when the
+       *  tailnet has the `https` node capability but no cert issued yet. */
+      certDomains: string[]
+      /**
+       * Lowercased `LoginName` of the user who owns this node
+       * (`User[Self.UserID].LoginName`), or null when it cannot be determined —
+       * a tagged node, or a status payload with no matching `User` entry. Null
+       * disables tailnet-identity auth entirely (fail closed): it is the ONLY
+       * login the remote server will accept from a `Tailscale-User-Login`
+       * header.
+       */
+      ownerLogin: string | null
+    }
+  | {
+      state: Exclude<RemoteTlsDetection, 'ok'>
+      /** Actionable, user-facing. Safe to render verbatim in the UI. */
+      message: string
+      binaryPath?: string
+      /** Raw diagnostic (stderr tail / BackendState / parse error). Not for the UI. */
+      detail?: string
+    }
 
 export type TunnelState =
   | 'stopped'
@@ -1171,6 +1488,70 @@ export type TunnelState =
   | 'connected'
   | 'error'
   | 'restarting'
+
+/**
+ * Auth methods the remote server accepts on a connection. `'token'` is the
+ * per-start random bearer token from the URL fragment; `'password'` is the
+ * scrypt proof derived from the user's persisted credential;
+ * `'tailnet-identity'` is the spoof-stripped `Tailscale-User-Login` header a
+ * `tailscale serve` proxy attaches, accepted for the node owner's login only.
+ */
+export type RemoteAuthMethod = 'token' | 'password' | 'tailnet-identity'
+
+/**
+ * Why a `tailscale serve` mutation failed. Declared here (not in the main-only
+ * `tailscale-manager.ts`) because it travels to the renderer inside
+ * {@link RemoteTlsStatus.serveError}; `tailscale-manager.ts` imports it as its
+ * `ServeFailureReason`, so the two can never drift.
+ */
+export type RemoteServeFailureReason =
+  /** `detect()` did not return `ok` (Tailscale missing / logged out / certs off / …). */
+  | 'not-ready'
+  /** The PINNED HTTPS port is held by a serve config that is not ours (ADR-042). */
+  | 'port-occupied'
+  /** The CLI exited non-zero (or timed out). */
+  | 'exec-failed'
+  /** The CLI exited 0 but the config did not actually land. */
+  | 'verify-failed'
+
+/**
+ * `tailscale serve` state for the running server (Phase 3). All-null fields
+ * with a non-null object mean "TLS mode is on but serve is not up yet" — read
+ * `serveError` / `detectionMessage` for why.
+ */
+export interface RemoteTlsStatus {
+  /** Mirrors the `tls_mode` the server was STARTED with: 1 = tailscale-serve. */
+  mode: number
+  /**
+   * The HTTPS port serve is CONFIRMED listening on, null until up. Since
+   * ADR-042 this is always {@link RemoteTlsStatus.pinnedHttpsPort} when
+   * non-null — there is no candidate walk any more.
+   */
+  httpsPort: number | null
+  /**
+   * The pinned HTTPS port this run will bind (`remote_config.tls_https_port`,
+   * default 443). Known even while serve is down, which is exactly when the UI
+   * needs to name the port that failed.
+   */
+  pinnedHttpsPort: number
+  /**
+   * The most recent `tailscale serve` failure while TLS mode was requested, or
+   * null when serve is healthy. Rendered by the app-level serve banner; the
+   * `reason` decides whether "Force re-serve" can plausibly fix it
+   * (`port-occupied` → yes, by overwriting the occupant).
+   */
+  serveError: { reason: RemoteServeFailureReason; message: string } | null
+  /** `https://<dnsName>[:port]` — the URL to hand the user. Replaces `lanUrl`. */
+  url: string | null
+  /** Last `detect()` state, so the UI can distinguish "not installed" from "certs off". */
+  detection: RemoteTlsDetection | null
+  /**
+   * Most recent actionable TLS failure message — either the detection message
+   * or the `tailscale serve` failure — renderable verbatim. Null while serve is
+   * healthy.
+   */
+  detectionMessage: string | null
+}
 
 export interface RemoteStatus {
   running: boolean
@@ -1182,6 +1563,24 @@ export interface RemoteStatus {
   tunnelError: string | null
   connectedClients: number
   clientIps: string[]
+  /**
+   * Tailnet logins of the connected clients, parallel to `clientIps`. A `null`
+   * entry means that client authenticated with the token or the password.
+   */
+  clientLogins: (string | null)[]
+  /** `tailscale serve` state, or null when the running server is not in TLS mode. */
+  tls: RemoteTlsStatus | null
+  /** Message from the most recent failed `start()` listen attempt (e.g.
+   *  EADDRINUSE), or null if the last start succeeded / no start has failed
+   *  since the last stop(). Surfaces autostart failures, which are otherwise
+   *  invisible (no modal open to report them to). */
+  lastError: string | null
+  /** Methods this running server will accept: always `'token'`, plus
+   *  `'password'` when a credential is provisioned AND the server is not in
+   *  tunnel (E2E) mode, plus `'tailnet-identity'` when `tailscale serve` is up
+   *  and the node owner's login is known. Empty when not running. Derived
+   *  exactly the same way as `/remote/auth-info`'s `methods`. */
+  authMethods: RemoteAuthMethod[]
 }
 
 // ---------------------------------------------------------------------------
@@ -1794,6 +2193,13 @@ export interface GitStatusData {
   untracked: string[]
   linesAdded: number
   linesRemoved: number
+  /**
+   * True when the untracked-file line-count pass hit its file-count or byte
+   * budget, so `linesAdded` undercounts. The files themselves are still listed.
+   */
+  lineCountsTruncated?: boolean
+  /** True when `files`/`staged`/`unstaged`/`untracked` were capped for IPC. */
+  filesTruncated?: boolean
 }
 
 export interface GitBranchData {

@@ -13,6 +13,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import { PiVendors } from '../PiVendors'
+import {
+  selectMenuOptionValues,
+  chooseSelectMenuOption
+} from '../../../../../test/helpers/select-menu'
 import type { VendorAuthMap, VendorAuthOption } from '../../../../../shared/types'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
 
@@ -135,8 +139,7 @@ describe('PiVendors', () => {
     }
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
-    const select = screen.getByTestId('PiVendors.addVendorSelect') as HTMLSelectElement
-    const optionValues = Array.from(select.options).map((o) => o.value)
+    const optionValues = selectMenuOptionValues(screen.getByTestId('PiVendors.addVendorSelect'))
     // anthropic is already configured -> excluded; openai-codex has no 'api'
     // option (oauth-only) -> excluded; openai has an api option and is
     // unconfigured -> included.
@@ -149,9 +152,7 @@ describe('PiVendors', () => {
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
 
-    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), {
-      target: { value: 'openai' }
-    })
+    chooseSelectMenuOption(screen.getByTestId('PiVendors.addVendorSelect'), 'openai')
     fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), {
       target: { value: 'sk-test-123' }
     })
@@ -195,9 +196,7 @@ describe('PiVendors', () => {
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
 
-    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), {
-      target: { value: 'openai' }
-    })
+    chooseSelectMenuOption(screen.getByTestId('PiVendors.addVendorSelect'), 'openai')
     fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), {
       target: { value: 'sk-test-123' }
     })
@@ -215,9 +214,7 @@ describe('PiVendors', () => {
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
 
-    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), {
-      target: { value: 'openai' }
-    })
+    chooseSelectMenuOption(screen.getByTestId('PiVendors.addVendorSelect'), 'openai')
     fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), {
       target: { value: 'sk-test-123' }
     })

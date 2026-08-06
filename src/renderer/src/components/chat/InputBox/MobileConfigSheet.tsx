@@ -15,7 +15,8 @@ import {
   type EffortLevel,
   type ThinkingMode
 } from '../../../../../shared/model-capabilities'
-import type { EngineId } from '../../../../../shared/types'
+import type { EngineId, PermissionMode } from '../../../../../shared/types'
+import { PERMISSION_MODE_CYCLE, PERMISSION_MODE_LABELS } from '../../../../../shared/permission-modes'
 import { ENGINE_META, engineMeta } from '../../../../../shared/engine-meta'
 import { EngineLogo } from '../../shared/EngineLogo'
 import {
@@ -28,10 +29,11 @@ import {
 const ENGINE_LOCKED_TOOLTIP =
   'Engine cannot change after session initialization or for historical sessions'
 
-type Page = 'root' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort'
+type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort'
 
 const PAGE_HEADING: Record<Page, string> = {
   root: 'Run configuration',
+  mode: 'Autonomy mode',
   engine: 'Engine',
   model: 'Model',
   thinking: 'Thinking mode',
@@ -44,6 +46,10 @@ export interface MobileConfigSheetProps {
   selectedModel: ModelDisplay
   selectedEngineId: EngineId
   engineLocked: boolean
+  showModePicker: boolean
+  permissionMode: PermissionMode
+  canPlan: boolean
+  autoAvailable: boolean
   showEnginePicker: boolean
   showModelPicker: boolean
   showThinkingPicker: boolean
@@ -54,6 +60,7 @@ export interface MobileConfigSheetProps {
   effort: string
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
+  onSelectMode: (mode: PermissionMode) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectModel: (value: string) => void
   onSelectThinking: (mode: ThinkingMode) => void
@@ -187,6 +194,45 @@ function OptionButton({
 // ---------------------------------------------------------------------------
 // Submenu pages
 // ---------------------------------------------------------------------------
+
+function ModePage({
+  permissionMode,
+  canPlan,
+  autoAvailable,
+  onSelect
+}: {
+  permissionMode: PermissionMode
+  canPlan: boolean
+  autoAvailable: boolean
+  onSelect: (mode: PermissionMode) => void
+}): React.JSX.Element {
+  return (
+    <div>
+      {PERMISSION_MODE_CYCLE.map((mode) => {
+        const enabled = (mode !== 'plan' || canPlan) && (mode !== 'auto' || autoAvailable)
+        return (
+          <OptionButton
+            key={mode}
+            testId="MobileConfigSheet.modeOption"
+            dataValue={mode}
+            active={mode === permissionMode}
+            disabled={!enabled}
+            title={
+              enabled
+                ? undefined
+                : mode === 'plan'
+                  ? "Engine doesn't support plan mode"
+                  : 'Auto mode is unavailable for this account/organization'
+            }
+            onClick={() => enabled && onSelect(mode)}
+          >
+            <span className="text-[13px] truncate">{PERMISSION_MODE_LABELS[mode]}</span>
+          </OptionButton>
+        )
+      })}
+    </div>
+  )
+}
 
 function EnginePage({
   selectedEngineId,
@@ -397,6 +443,10 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     selectedModel,
     selectedEngineId,
     engineLocked,
+    showModePicker,
+    permissionMode,
+    canPlan,
+    autoAvailable,
     showEnginePicker,
     showModelPicker,
     showThinkingPicker,
@@ -407,6 +457,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     effort,
     effortSupported,
     allowedEffortLevels,
+    onSelectMode,
     onSelectEngine,
     onSelectModel,
     onSelectThinking,
@@ -419,7 +470,12 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
 
   const showVariantRow = reasoningVariants.length > 0
   const anyRowApplicable =
-    showEnginePicker || showModelPicker || showThinkingPicker || showVariantRow || effortSupported
+    showModePicker ||
+    showEnginePicker ||
+    showModelPicker ||
+    showThinkingPicker ||
+    showVariantRow ||
+    effortSupported
 
   // Reset to root whenever the sheet closes, and fail safe if an external
   // prop change (e.g. a model/engine switch) makes the current submenu
@@ -430,7 +486,8 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
       setPage('root')
       return
     }
-    if (page === 'engine' && !showEnginePicker) setPage('root')
+    if (page === 'mode' && !showModePicker) setPage('root')
+    else if (page === 'engine' && !showEnginePicker) setPage('root')
     else if (page === 'model' && !showModelPicker) setPage('root')
     else if (page === 'thinking' && !showThinkingPicker) setPage('root')
     else if (page === 'variant' && !showVariantRow) setPage('root')
@@ -438,6 +495,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
   }, [
     open,
     page,
+    showModePicker,
     showEnginePicker,
     showModelPicker,
     showThinkingPicker,
@@ -577,6 +635,14 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
             <div className="flex-1 overflow-y-auto overscroll-contain">
               {page === 'root' && (
                 <div>
+                  {showModePicker && (
+                    <RootRow
+                      testId="MobileConfigSheet.mode"
+                      label="Mode"
+                      value={PERMISSION_MODE_LABELS[permissionMode]}
+                      onClick={() => setPage('mode')}
+                    />
+                  )}
                   {showEnginePicker && (
                     <RootRow
                       testId="MobileConfigSheet.engine"
@@ -621,6 +687,18 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                     />
                   )}
                 </div>
+              )}
+
+              {page === 'mode' && (
+                <ModePage
+                  permissionMode={permissionMode}
+                  canPlan={canPlan}
+                  autoAvailable={autoAvailable}
+                  onSelect={(mode) => {
+                    onSelectMode(mode)
+                    goRoot()
+                  }}
+                />
               )}
 
               {page === 'engine' && (

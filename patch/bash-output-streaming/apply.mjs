@@ -218,8 +218,20 @@ writeFileSync(cliPath, src)
 console.log(`\nPatch applied to ${cliPath}`)
 
 const verify = readFileSync(cliPath, 'utf-8')
-console.log(`  ${verify.includes(PATCH_MARKER) ? 'OK' : 'MISSING'} Part A marker`)
-console.log(`  ${verify.includes(EARLY_POLL_MARKER) ? 'OK' : 'MISSING'} Part B marker`)
+const partAok = verify.includes(PATCH_MARKER)
+const partBok = verify.includes(EARLY_POLL_MARKER)
+console.log(`  ${partAok ? 'OK' : 'MISSING'} Part A marker`)
+console.log(`  ${partBok ? 'OK' : 'MISSING'} Part B marker`)
+
+// A missing marker after write means an injection silently no-op'd (e.g. an
+// upstream reshape moved an anchor). Fail the build rather than shipping a
+// half-patched cli.js whose bash output never streams — apply-success is not
+// behavioural correctness (this was the only patch whose final verify was
+// non-fatal).
+if (!partAok || !partBok) {
+  console.error('\nVerification FAILED: expected patch marker(s) absent after write.')
+  process.exit(1)
+}
 
 console.log('\ncli.js verified.')
 console.log('')

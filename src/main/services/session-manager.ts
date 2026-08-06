@@ -4,7 +4,8 @@ import type { ISession, EngineSpawnOptions } from '../providers/ISession'
 import { engineRegistry } from '../providers/EngineRegistry'
 // Side-effect: registers all engine factories (claude, …) at module load time
 import '../providers/register-engines'
-import { loadSessionHistory, projectKeyForCwd } from './session-history'
+import { loadSessionHistory } from './session-history'
+import { cwdToProjectKey } from '../../shared/project-key'
 import { renameDispatchedUsage } from './db'
 import { logger } from './logger'
 
@@ -25,10 +26,16 @@ export class SessionManager {
     opts: EngineSpawnOptions = {},
     engineId: EngineId = 'claude'
   ): ISession {
-    // Clean up existing session with same routingId
+    // Clean up existing session with same routingId. dispose() (not cancel()):
+    // the old object is being PERMANENTLY replaced under this routingId, so it
+    // must be fenced from ever touching the shared routingId again — its late
+    // run()-finally must not re-emit status or re-arm an idle timer whose later
+    // cancel() would broadcast disconnected for, and disposeFor(), the LIVE
+    // replacement session (M-CL3). cancel() leaves the object usable for a
+    // later run() and so does NOT set that fence; dispose() does.
     const existing = this.sessions.get(routingId)
     if (existing) {
-      existing.cancel()
+      existing.dispose()
     }
 
     const session = engineRegistry.createSession(engineId, routingId, win, cwd, opts)
@@ -113,7 +120,7 @@ export class SessionManager {
       }
     }
     // Fall back to disk
-    const projectKey = projectKeyForCwd(cwd)
+    const projectKey = cwdToProjectKey(cwd)
     const result = await loadSessionHistory(sessionId, projectKey)
     return result.messages
   }

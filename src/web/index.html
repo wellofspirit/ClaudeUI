@@ -2,9 +2,15 @@
 <html>
   <head>
     <meta charset="UTF-8" />
+    <!-- interactive-widget=resizes-content: the on-screen keyboard must shrink
+         the LAYOUT viewport, not just the visual one (Chromium >=108 defaults
+         to resizes-visual). Without it the 100dvh document keeps its full
+         height under the keyboard, so the page gains a scrollable dead zone
+         and the browser scrolls the top-anchored app out of alignment with
+         the visible area. iOS ignores the keyword. -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content"
     />
     <title>ClaudeUI Remote</title>
     <link rel="icon" type="image/png" href="/icon.png" />

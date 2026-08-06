@@ -35,6 +35,14 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
   const handleStartFresh = useCallback(async () => {
     if (!planContent || !cwd || !approval || !activeSessionId) return
 
+    // Capture the session's model / effort / thinking BEFORE clearConversation
+    // wipes them back to defaults — threading them keeps the fresh session on the
+    // user's chosen model (like every other spawn path) instead of discarding it.
+    const preSession = useSessionStore.getState().sessions[activeSessionId]
+    const model = preSession?.selectedModel
+    const effort = preSession?.effort ?? undefined
+    const thinkingMode = preSession?.thinkingMode ?? undefined
+
     // Get the session log path before cancelling (for transcript reference)
     const sessionLogPath = await window.api.getSessionLogPath(activeSessionId)
 
@@ -44,16 +52,15 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     await window.api.cancelSession(activeSessionId)
     clearConversation(activeSessionId)
 
-    // Create a fresh SDK session for the same routingId
-    const session = useSessionStore.getState().sessions[activeSessionId]
+    // Create a fresh SDK session for the same routingId.
     await window.api.createSession(
       activeSessionId,
       cwd,
-      session?.effort ?? 'medium',
+      effort,
       undefined,
       'acceptEdits',
-      undefined,
-      undefined,
+      model,
+      thinkingMode,
       undefined,
       undefined,
       selectedEngineId

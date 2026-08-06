@@ -7,8 +7,10 @@ import type {
   SessionResult,
   AskUserQuestion,
   TodoItem,
-  FileDiff
+  FileDiff,
+  ToolResultImage
 } from '../../shared/types'
+import { isImageMediaType } from '../../shared/types'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
@@ -87,6 +89,32 @@ export interface ToolPartState {
   error?: string
   metadata?: Record<string, unknown>
   title?: string
+  /**
+   * Media a COMPLETED tool returned — `read` on a .png/.pdf, an MCP tool
+   * returning a resource. Verified against the pinned vendor source
+   * (vendor/opencode-src): `session/processor.ts` `completeToolCall` writes
+   * `state.attachments = output.attachments` (the tool's own
+   * `attachments: FilePart[]`), and `sdk/js/.../types.gen.ts`
+   * `ToolStateCompleted.attachments?: FilePart[]` is the schema.
+   *
+   * IMPORTANT: these live on the TOOL part, not as separate assistant-message
+   * `file` parts, so no part-ordering heuristic is needed to associate them
+   * with their tool call. `status: 'error'` parts never carry them.
+   */
+  attachments?: ToolAttachment[]
+}
+
+/**
+ * A `FilePart`-shaped attachment as it rides on a tool part's state. Only the
+ * fields ClaudeUI reads are modelled (`source` and the part ids are ignored);
+ * everything is optional because this is untrusted wire/stored input.
+ */
+export interface ToolAttachment {
+  /** Always 'file' on the wire; unused for gating (the mime + data URI decide). */
+  type?: string
+  mime?: string
+  url?: string
+  filename?: string
 }
 
 // ── Mapper output types ───────────────────────────────────────────────────────
@@ -96,6 +124,12 @@ export type MapperOutput =
   | { kind: 'message'; message: ChatMessage }
   | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean }
   | { kind: 'approval'; approval: PendingApproval }
+  /** A pending permission was resolved server-side (M-OC2 — `permission.replied`).
+   *  Fires for the reply we originated AND for every OTHER pending permission the
+   *  vendor cascade-rejects (one reject rejects all) or cascade-approves (an
+   *  `always` auto-approves matching ones). The consumer must retract the stale
+   *  approval card for `requestId` — clicking it later would 404 forever. */
+  | { kind: 'approval-resolved'; requestId: string }
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
   /** Emitted when cost changes OR when a token-snapshot context advance is detected (input+cacheRead
    *  increased on an assistant message). The latter fires even when cost=0 (free models), so that
@@ -154,6 +188,21 @@ export function mapEvent(
   // a child's session.idle emits task-notification, NOT {kind:'result'}.
   if (eventSessionId && childSessions.has(eventSessionId)) {
     return handleChildEvent(ev, eventSessionId, accumulators, childSessions)
+  }
+
+  // ── Route: session.error with no sessionID → surface (don't drop) ─────────
+  // The vendor marks `sessionID` optional on session.error and publishes plugin
+  // crashes without one (plugin/index.ts). ClaudeUI always loads
+  // claudeui-xeng-plugin, so a plugin fault would fall straight through to the
+  // "ignore" fallback below and surface NOWHERE. Route it to a generic error so
+  // the user at least sees that something failed. (A sessionID that IS present
+  // but matches neither own nor a child belongs to another session and stays
+  // ignored — only the sessionID-less global error is adopted here.)
+  if (!eventSessionId && ev.type === 'session.error') {
+    const err = props.error as { data?: Record<string, unknown> } | undefined
+    const message =
+      (err?.data?.message as string | undefined) ?? 'An opencode plugin or server error occurred'
+    return { kind: 'error', message }
   }
 
   // ── Route: unknown foreign session → ignore ───────────────────────────────
@@ -268,14 +317,44 @@ function handleOwnEvent(
       const patterns = props.patterns as string[] | undefined
       const suggestion = suggestOpencodeAllowRule(permission, patterns)
 
+      // M-OC6: prefer the REAL tool-call input over the wire `metadata`. MCP
+      // tools (claudeui_dispatch_agent + every bridged Claude MCP server) ask
+      // with `metadata: {}`, leaving both the approval dialog and the ADR-023
+      // auto-mode judge with zero context about what's being run. The tool part
+      // carrying `state.input` is published (message.part.updated) before the
+      // tool calls ctx.ask (verified vs vendor session/tools.ts — ctx.metadata
+      // sets `input: args`), so it's already in the accumulator here. Fall back
+      // to `metadata` (populated for built-in tools) then {}.
+      const metadata = props.metadata as Record<string, unknown> | undefined
+      const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
+      const input =
+        toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
+
       const approval: PendingApproval = {
         requestId: id,
         toolUseId: tool?.callID,
         toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {},
+        input,
+        // Carried through for the auto-mode ask-rule precedence check (G9) —
+        // the classifier must never auto-approve what a user rule says to ask.
+        ...(patterns && patterns.length > 0 ? { patterns } : {}),
         ...(suggestion ? { suggestions: [suggestion] } : {})
       }
       return { kind: 'approval', approval }
+    }
+
+    case 'permission.replied': {
+      // M-OC2: a permission was resolved on the server. The vendor publishes
+      // this for the reply we originated AND — on a `reject` — for EVERY other
+      // pending permission in the session (cascade-reject), and on `always` for
+      // matching pendings it auto-approves. Either way ClaudeUI's card for that
+      // request is now stale (a later click 404s). Surface the requestId so the
+      // consumer can retract it. Wire shape (vendor permission/index.ts +
+      // event-reducer.test.ts): `{ sessionID, requestID }` — note `requestID`,
+      // NOT `id` (which `permission.asked` uses).
+      const requestId = props.requestID as string | undefined
+      if (!requestId) return { kind: 'ignore' }
+      return { kind: 'approval-resolved', requestId }
     }
 
     case 'session.idle': {
@@ -592,12 +671,16 @@ function handleChildEvent(
       const tool = props.tool as { messageID?: string; callID?: string } | undefined
       if (!id || !permission) return { kind: 'ignore' }
 
+      const childPatterns = props.patterns as string[] | undefined
       const approval: import('../../shared/types').PendingApproval = {
         requestId: id,
         // Child tool's own callID — see note 1 above.
         toolUseId: tool?.callID,
         toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {}
+        input: (props.metadata as Record<string, unknown>) ?? {},
+        // Carried for the auto-mode ask-rule precedence check (G9); a child ask
+        // reaches handleAutoModeApproval on the same path as an own-session one.
+        ...(childPatterns && childPatterns.length > 0 ? { patterns: childPatterns } : {})
         // No `suggestions` — see note 2 above.
       }
       return { kind: 'approval', approval }
@@ -689,6 +772,40 @@ function messageIdFromProps(props: Record<string, unknown>): string | undefined 
 }
 
 /**
+ * M-OC6: find the real input args of an in-flight tool call from the
+ * accumulated tool part (state.input), matched by callID. Returns undefined
+ * when no matching part carries a non-empty input — the caller then falls back
+ * to the wire `metadata`. Checks the named message first, then scans all
+ * accumulators (the permission event's `messageID` may be absent/mismatched).
+ */
+function findToolInput(
+  accumulators: Map<string, MessageAccumulator>,
+  messageId: string | undefined,
+  callId: string | undefined
+): Record<string, unknown> | undefined {
+  if (!callId) return undefined
+  const scan = (acc: MessageAccumulator | undefined): Record<string, unknown> | undefined => {
+    if (!acc) return undefined
+    for (const snap of acc.parts.values()) {
+      if (snap.type === 'tool' && snap.callID === callId) {
+        const input = snap.state?.input
+        if (input && Object.keys(input).length > 0) return input
+      }
+    }
+    return undefined
+  }
+  if (messageId) {
+    const found = scan(accumulators.get(messageId))
+    if (found) return found
+  }
+  for (const acc of accumulators.values()) {
+    const found = scan(acc)
+    if (found) return found
+  }
+  return undefined
+}
+
+/**
  * Sum the cumulative per-message cost snapshots into a turn total.
  *
  * Phase 9a: SKIP child accumulators (isChild). Now that child accumulators
@@ -749,8 +866,8 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
  * bash's `{ output }` metadata (and anything else without `files`/`filediff`)
  * never matches, so callers don't need a hardcoded tool-name allowlist.
  *
- * Verified against vendor/opencode-src tag v1.17.15 (byte-identical to pinned
- * 1.17.14) tool/{apply_patch,edit,write}.ts:
+ * Verified against vendor/opencode-src tag v1.17.15 (byte-identical to 1.17.14;
+ * tool/{apply_patch,edit,write}.ts unchanged through pinned v1.18.9):
  *  - apply_patch result.metadata: `{ diff, files: [{ filePath, relativePath,
  *    type: 'add'|'update'|'delete'|'move', patch, additions, deletions,
  *    movePath }], diagnostics }`. The SAME shape also rides the
@@ -826,7 +943,13 @@ export function extractFileDiffs(
 export function extractToolResult(
   _partId: string,
   snap: PartSnapshot
-): { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] } | null {
+): {
+  toolUseId: string
+  result: string
+  isError: boolean
+  fileDiffs?: FileDiff[]
+  images?: ToolResultImage[]
+} | null {
   if (snap.type !== 'tool') return null
   const status = snap.state?.status
   if (status !== 'completed' && status !== 'error') return null
@@ -842,17 +965,81 @@ export function extractToolResult(
       : (snap.state?.output ?? metadata?.output)
   const result = rawOutput !== undefined ? String(rawOutput) : ''
   const fileDiffs = extractFileDiffs(metadata, snap.state?.input)
+  const images = toolAttachmentImages(snap.state?.attachments)
   return {
     toolUseId,
     result,
     isError: status === 'error',
-    ...(fileDiffs ? { fileDiffs } : {})
+    ...(fileDiffs ? { fileDiffs } : {}),
+    ...(images ? { images } : {})
   }
 }
 
 // Helper: generate a stable uuid for user messages
 export function makeUserMessageId(): string {
   return uuid()
+}
+
+/**
+ * Decode the base64 payload of a `data:<mime>;base64,<data>` URI, requiring the
+ * header to match `mime` exactly. Returns null for anything else (`file://`
+ * @-mention urls, missing comma, empty payload, mime/header mismatch, a
+ * non-base64 data URI) — stored parts are untrusted input.
+ */
+function decodeBase64DataUri(url: string, mime: string): string | null {
+  const comma = url.indexOf(',')
+  if (comma === -1) return null
+  if (url.slice(0, comma) !== `data:${mime};base64`) return null
+  const data = url.slice(comma + 1)
+  return data || null
+}
+
+/**
+ * Images a tool RETURNED, from its part state's `attachments` (see
+ * `ToolPartState.attachments` for the vendor-source provenance). Shared by the
+ * live accumulator path (`extractToolResult`) and the stored-replay path
+ * (`convertStoredMessage`), so both produce the same set.
+ *
+ * Reuses the same gates as the user-attachment reader: an image mime in
+ * `IMAGE_MEDIA_TYPES` and a genuine `data:<mime>;base64,` URI. PDFs and
+ * `file://` urls are skipped (the gallery is images-only). Returns undefined
+ * rather than [] when nothing survives.
+ */
+function toolAttachmentImages(
+  attachments: ToolAttachment[] | undefined
+): ToolResultImage[] | undefined {
+  if (!Array.isArray(attachments)) return undefined
+  const images: ToolResultImage[] = []
+  for (const a of attachments) {
+    if (!a || typeof a !== 'object') continue
+    const { mime, url, filename } = a
+    if (!isImageMediaType(mime) || typeof url !== 'string') continue
+    const base64Data = decodeBase64DataUri(url, mime)
+    if (!base64Data) continue
+    images.push({ mediaType: mime, base64Data, ...(filename ? { fileName: filename } : {}) })
+  }
+  return images.length > 0 ? images : undefined
+}
+
+/**
+ * Map a stored `file` part to an attachment ContentBlock, or null when it is not
+ * an inline user attachment. opencode uses `file` parts for two unrelated things:
+ * real attachments (`data:` url, image/pdf mime — see OpencodeSession's file
+ * parts) and @-mentioned files/directories (`file://` url, `text/plain` /
+ * `application/x-directory` mime — vendor prompt.ts resolvePromptParts, already
+ * expanded into synthetic text parts). Only the former is rehydrated.
+ */
+function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | null {
+  const { mime, url, filename } = part
+  if (typeof mime !== 'string' || typeof url !== 'string') return null
+  const isImage = isImageMediaType(mime)
+  if (!isImage && mime !== 'application/pdf') return null
+  const base64Data = decodeBase64DataUri(url, mime)
+  if (!base64Data) return null
+  const fileName = filename ? { fileName: filename } : {}
+  return isImage
+    ? { type: 'image', mediaType: mime, base64Data, ...fileName }
+    : { type: 'document', mediaType: 'application/pdf', base64Data, ...fileName }
 }
 
 /**
@@ -863,10 +1050,15 @@ export function makeUserMessageId(): string {
  *   text      → { type:'text', text }
  *   reasoning → { type:'thinking', text }
  *   tool      → { type:'tool_use', toolUseId, toolName, toolInput }
- *              + { type:'tool_result', toolUseId, toolResult, isError } when completed/error
+ *              + { type:'tool_result', toolUseId, toolResult, isError, images? }
+ *                when completed/error — `images` from the part's own
+ *                `state.attachments` (media the TOOL returned)
+ *   file      → { type:'image'|'document', … } for inline USER attachments only
  *
- * Step-start, step-finish, file, agent, subtask, compaction, and any unknown
- * part types are silently skipped (same treatment as buildChatMessage).
+ * Step-start, step-finish, agent, subtask, compaction, non-attachment file parts,
+ * and any unknown part types are silently skipped. Assistant-role `file` parts
+ * are NOT a tool-image carrier in this opencode version (see
+ * `ToolPartState.attachments`), so they remain skipped.
  *
  * Returns null if the message has no displayable content (so the caller can skip it).
  */
@@ -879,11 +1071,20 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
   if (role !== 'user' && role !== 'assistant') return null
 
   const content: ContentBlock[] = []
+  // Attachments are hoisted ahead of the rest: ClaudeUI sends opencode
+  // [text, ...fileParts] so they persist AFTER the prompt, while the live echo
+  // (session-store.ts addUserMessage / OpencodeSession.buildUserContent) puts
+  // them first. Replay must match the live order.
+  const attachments: ContentBlock[] = []
 
   for (const part of (parts ?? []) as StoredMessagePart[]) {
     const type = part.type
 
-    if (type === 'text') {
+    if (type === 'file') {
+      if (role !== 'user') continue
+      const block = storedFilePartToAttachment(part)
+      if (block) attachments.push(block)
+    } else if (type === 'text') {
       const text = part.text ?? ''
       if (text) content.push({ type: 'text', text })
     } else if (type === 'reasoning') {
@@ -900,17 +1101,23 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
       if (status === 'completed' || status === 'error') {
         const rawOutput = part.state?.output ?? part.state?.error ?? ''
         const fileDiffs = extractFileDiffs(part.state?.metadata, input)
+        // Media the tool returned rides on the tool part's OWN state, not as a
+        // separate assistant `file` part — see ToolPartState.attachments.
+        const images = toolAttachmentImages(part.state?.attachments)
         content.push({
           type: 'tool_result',
           toolUseId,
           toolResult: rawOutput ?? '',
           isError: status === 'error',
-          ...(fileDiffs ? { fileDiffs } : {})
+          ...(fileDiffs ? { fileDiffs } : {}),
+          ...(images ? { images } : {})
         })
       }
     }
-    // step-start, step-finish, file, agent, subtask, compaction → skip
+    // step-start, step-finish, agent, subtask, compaction → skip
   }
+
+  if (attachments.length > 0) content.unshift(...attachments)
 
   // If there's no renderable content, skip this message entirely.
   if (content.length === 0) return null

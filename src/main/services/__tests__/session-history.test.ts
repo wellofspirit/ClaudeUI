@@ -9,20 +9,8 @@ import {
   computeTokenMetrics,
   computeTurnSpanDurationMs,
   createTurnSpanAccumulator,
-  projectKeyForCwd
+  loadBackgroundOutput
 } from '../session-history'
-
-describe('projectKeyForCwd', () => {
-  it('matches the on-disk key for a Windows cwd (drive colon + backslashes → -)', () => {
-    expect(projectKeyForCwd('D:\\WorkPlace\\ClaudeUI')).toBe('D--WorkPlace-ClaudeUI')
-    expect(projectKeyForCwd('C:\\Users\\why20')).toBe('C--Users-why20')
-  })
-
-  it('matches the on-disk key for a POSIX cwd (slashes and dots → -)', () => {
-    expect(projectKeyForCwd('/home/u/proj.x')).toBe('-home-u-proj-x')
-    expect(projectKeyForCwd('/tmp/proj')).toBe('-tmp-proj')
-  })
-})
 
 // ---------------------------------------------------------------------------
 // Replicate private parser functions from session-history.ts for testing
@@ -647,5 +635,69 @@ describe('computeTokenMetrics — subagent transcripts fold into modelCosts', ()
     const m = await computeTokenMetrics(file)
     fs.unlinkSync(file)
     expect(m.modelCosts).toEqual([{ engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 3 }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R6 — loadBackgroundOutput path containment (remote-reachable, caller-supplied
+// outputFile). Without confinement this channel is an arbitrary-file-read
+// primitive (gpt#8). Reads are confined to the OS temp roots.
+// ---------------------------------------------------------------------------
+
+describe('loadBackgroundOutput containment (R6)', () => {
+  it('reads a legitimate output file inside the temp root', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-out-'))
+    const file = path.join(dir, 'tabc123.output')
+    fs.writeFileSync(file, 'background stdout here')
+    try {
+      const res = loadBackgroundOutput('proj-key', 'tabc123', file)
+      expect(res).toEqual({ content: 'background stdout here', purged: false })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an outputFile OUTSIDE the temp root (GUARD — fails pre-fix)', () => {
+    // A real, existing file well outside any temp root: this test's own repo.
+    const forbidden = path.join(process.cwd(), 'package.json')
+    expect(fs.existsSync(forbidden)).toBe(true)
+    const forbiddenContent = fs.readFileSync(forbidden, 'utf-8')
+
+    const res = loadBackgroundOutput('proj-key', 'tabc123', forbidden)
+    // Pre-fix this returned the file's contents (arbitrary read). Now it's
+    // rejected → falls through to the (non-existent) interpolated path → purged.
+    expect(res.content).not.toBe(forbiddenContent)
+    expect(res).toEqual({ content: null, purged: true })
+  })
+
+  it('refuses a projectKey that traverses out of the interpolated root', () => {
+    // No outputFile → interpolation path; a crafted projectKey must not escape.
+    const res = loadBackgroundOutput('../../../../etc', 'passwd', undefined)
+    expect(res).toEqual({ content: null, purged: true })
+  })
+})
+
+describe('computeTokenMetrics — result-line cost is cumulative-per-process (replace, not add)', () => {
+  it('takes the LAST result total_cost_usd, not the SUM of all result lines (GUARD — fails pre-fix)', async () => {
+    // Real transcripts carry no `result` lines today (this branch is latent),
+    // but if they return, total_cost_usd is cumulative-per-process — the last
+    // line already contains the running total. `+=` double-counted it.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-result-cost-'))
+    const file = path.join(dir, 'x.jsonl')
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'result', total_cost_usd: 5 }),
+        JSON.stringify({ type: 'result', total_cost_usd: 8 })
+      ].join('\n') + '\n',
+      'utf-8'
+    )
+    try {
+      const metrics = await computeTokenMetrics(file)
+      // Replace semantics → 8 (the last cumulative), NOT 13 (5 + 8).
+      expect(metrics.totalCostUsd).toBe(8)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

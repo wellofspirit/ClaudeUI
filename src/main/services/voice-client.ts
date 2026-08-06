@@ -57,7 +57,11 @@ export class VoiceClient {
    * the early buffer, then takes over live audio forwarding.
    */
   async startRecording(language: string, earlyBuffer: Buffer[] = []): Promise<void> {
-    if (this.state !== 'idle' && this.state !== 'connecting') {
+    // Only start from a clean idle state. Previously `connecting` was also
+    // admitted, but a second startRecording during the connect window builds a
+    // second socket that orphans the first; the first socket's eventual 'close'
+    // then runs handleDisconnect → cleanup and tears down the *active* session.
+    if (this.state !== 'idle') {
       logger.warn('VoiceClient', `Cannot start recording in state: ${this.state}`)
       return
     }
@@ -193,7 +197,7 @@ export class VoiceClient {
 
       case 'transcript':
         if (msg.text !== undefined && msg.isFinal !== undefined) {
-          this.win.webContents.send('voice:transcript', this.routingId, {
+          this.send('voice:transcript', this.routingId, {
             text: msg.text,
             isFinal: msg.isFinal
           })
@@ -229,11 +233,23 @@ export class VoiceClient {
 
   private setState(state: VoiceState): void {
     this.state = state
-    this.win.webContents.send('voice:state', this.routingId, state)
+    this.send('voice:state', this.routingId, state)
   }
 
   private sendError(message: string): void {
-    this.win.webContents.send('voice:error', this.routingId, message)
+    this.send('voice:error', this.routingId, message)
+  }
+
+  /**
+   * Guarded webContents.send. The window can be destroyed while a voice
+   * session is still finalizing (user closes the window mid-transcription);
+   * sending to a destroyed webContents throws and would surface as an
+   * uncaughtException. `isDestroyed?.()` tolerates the plain test double.
+   */
+  private send(channel: string, ...args: unknown[]): void {
+    const wc = this.win.webContents
+    if (this.win.isDestroyed?.() || wc?.isDestroyed?.()) return
+    wc.send(channel, ...args)
   }
 
   private cleanup(): void {

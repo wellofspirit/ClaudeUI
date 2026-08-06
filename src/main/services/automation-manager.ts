@@ -8,14 +8,9 @@ import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts } from './claude-session'
 import { BaseSession } from '../providers/BaseSession'
 import { loadSessionHistory } from './session-history'
-import {
-  getClassifier,
-  stopClassifier,
-  isSafeTool,
-  buildTranscript,
-  type TranscriptMessage
-} from './auto-classifier'
+import { extractToolResultContent } from './tool-result-content'
 import { logger } from './logger'
+import { isPathInside } from './path-containment'
 import {
   resolveThinkingMode,
   resolveEffort,
@@ -42,52 +37,19 @@ export type CanUseToolFn = (
 /**
  * Build the canUseTool callback for an automation run.
  *
- * - **auto**: safe tools are fast-path allowed, everything else goes through the
- *   Haiku-based security classifier. On classifier failure, deny for safety.
- * - **default**: blanket deny — no user is present to approve.
+ * Headless runs fail closed: no user is present to approve anything. UI-MCP
+ * tools (our own in-process server) are allowed since they carry no real
+ * side effects; everything else is denied. This is the SAME callback for
+ * both 'auto' and 'default' automations — in 'auto', cli.js's native auto
+ * classifier (upgraded to below in runOneShotQuery) allows the routine stuff
+ * before it ever reaches this callback, so only residual asks land here; in
+ * 'default', everything non-allowlisted asks and is denied.
  */
-export function buildCanUseTool(
-  mode: 'auto' | 'default',
-  collectedMessages: TranscriptMessage[],
-  classifierId: string
-): CanUseToolFn {
-  if (mode === 'auto') {
-    return async (toolName: string, input: Record<string, unknown>) => {
-      if (toolName.startsWith('mcp__claude-ui__')) {
-        return { behavior: 'allow' as const, updatedInput: input }
-      }
-      if (isSafeTool(toolName)) {
-        return { behavior: 'allow' as const, updatedInput: input }
-      }
-      try {
-        const transcript = buildTranscript(collectedMessages)
-        const classifier = getClassifier(classifierId)
-        const result = await classifier.classify(toolName, input, transcript)
-        logger.debug(
-          'AutomationManager',
-          `Classifier ${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`
-        )
-        if (!result.shouldBlock) {
-          return { behavior: 'allow' as const, updatedInput: input }
-        }
-        return {
-          behavior: 'deny' as const,
-          message: `Automation auto mode blocked: ${result.reason}`
-        }
-      } catch (err) {
-        logger.warn(
-          'AutomationManager',
-          `Classifier failed for ${toolName}, denying for safety: ${err}`
-        )
-        return {
-          behavior: 'deny' as const,
-          message: 'Automation: classifier unavailable, denied for safety'
-        }
-      }
+export function buildCanUseTool(): CanUseToolFn {
+  return async (toolName: string, input: Record<string, unknown>) => {
+    if (toolName.startsWith('mcp__claude-ui__')) {
+      return { behavior: 'allow' as const, updatedInput: input }
     }
-  }
-
-  return async (_toolName: string, _input: Record<string, unknown>) => {
     return {
       behavior: 'deny' as const,
       message: 'Automation: tool requires approval but no user is present'
@@ -103,15 +65,41 @@ const AUTOMATION_DIR = path.join(os.homedir(), '.claude', 'ui', 'automation')
 /** @deprecated Legacy single-file storage — migrated to per-file on first load */
 const LEGACY_AUTOMATIONS_FILE = path.join(AUTOMATION_DIR, 'automations.json')
 
+/**
+ * Strict slug for an automation id (audit M-AU3). Renderer-supplied ids flow
+ * into path.join — including the destructive `fs.rmSync(runsDir(id), …)` in
+ * delete() — so an id like `../..` would escape the automation dir and delete
+ * arbitrary directories above it. A hostile/compromised renderer or the remote
+ * surface is the trigger. Real ids are uuid v4 (hex + hyphens); this allows
+ * that plus conservative slug punctuation and rejects any `.`, `/` or `\`
+ * needed for traversal.
+ */
+const AUTOMATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+
+/** True iff `id` is a safe automation/run id (no path-traversal characters). */
+export function isValidAutomationId(id: unknown): id is string {
+  return typeof id === 'string' && AUTOMATION_ID_RE.test(id)
+}
+
+/** Throw unless `id` is a safe id. The single choke point before any path.join. */
+function assertValidAutomationId(id: unknown): asserts id is string {
+  if (!isValidAutomationId(id)) {
+    throw new Error(`Invalid automation id: ${JSON.stringify(id)}`)
+  }
+}
+
 function automationFile(id: string): string {
+  assertValidAutomationId(id)
   return path.join(AUTOMATION_DIR, `${id}.json`)
 }
 
 function runsDir(automationId: string): string {
+  assertValidAutomationId(automationId)
   return path.join(AUTOMATION_DIR, 'runs', automationId)
 }
 
 function runsIndexFile(automationId: string): string {
+  // automationId is validated by runsDir(); no separate assert needed.
   return path.join(runsDir(automationId), 'runs.json')
 }
 
@@ -145,6 +133,9 @@ function writeJson(filePath: string, data: unknown): void {
 // ---------------------------------------------------------------------------
 
 export class AutomationManager {
+  /** Largest delay setTimeout honors before the runtime clamps it to 1ms. */
+  private static readonly MAX_TIMER_DELAY_MS = 2_147_483_647
+
   private win: BrowserWindow
   private automations: Automation[] = []
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -310,14 +301,19 @@ export class AutomationManager {
   }
 
   delete(id: string): void {
+    // M-AU3: reject a traversal id BEFORE any side effect (schedule cancel, list
+    // mutation, and — critically — the recursive rmSync below).
+    assertValidAutomationId(id)
     this.cancelSchedule(id)
     // Abort active run if any
     this.cancelRun(id)
     this.automations = this.automations.filter((a) => a.id !== id)
     this.deleteAutomationFile(id)
-    // Clean up run history on disk
+    // Clean up run history on disk. runsDir() re-validates the id, and we
+    // additionally confirm containment under AUTOMATION_DIR before the recursive
+    // delete — defense in depth for the one irreversible operation here.
     const dir = runsDir(id)
-    if (fs.existsSync(dir)) {
+    if (isPathInside(AUTOMATION_DIR, dir) && fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true })
     }
     this.notifyAutomationsChanged()
@@ -397,9 +393,9 @@ export class AutomationManager {
       return
     }
 
-    const timer = setTimeout(() => {
-      this.timers.delete(automation.id)
-      // Skip if a run is already active for this automation
+    this.armTimer(automation.id, delayMs, () => {
+      // The leaf timer already removed itself from the map (see armTimer).
+      // Skip if a run is already active for this automation.
       if (this.activeRuns.has(automation.id)) {
         logger.debug('AutomationManager', `Skipping ${automation.name}: previous run still active`)
         this.scheduleNext(automation)
@@ -408,9 +404,35 @@ export class AutomationManager {
       this.executeRun(automation).catch((err) => {
         logger.error('AutomationManager', `Run failed for ${automation.name}: ${err}`)
       })
-    }, delayMs)
+    })
+  }
 
-    this.timers.set(automation.id, timer)
+  /**
+   * Arm the single pending timer for an automation, chaining multiple
+   * setTimeouts when the delay exceeds the 32-bit limit. Node (and browsers)
+   * clamp a setTimeout delay > 2^31-1 ms (~24.85 days) down to 1ms, firing it
+   * almost immediately — so a quarterly/yearly cron or a multi-week interval
+   * would fire back-to-back in a tight loop (H11). We instead sleep in
+   * MAX_TIMER_DELAY_MS chunks and only run `onFire` once the FULL delay has
+   * elapsed. The timers map always holds exactly the currently-pending timer
+   * for the id, so cancelSchedule()/edit cleanup and the activeRuns overlap
+   * guard keep working across the chain.
+   */
+  private armTimer(id: string, delayMs: number, onFire: () => void): void {
+    const remaining = Math.max(0, delayMs)
+    if (remaining > AutomationManager.MAX_TIMER_DELAY_MS) {
+      const timer = setTimeout(() => {
+        // Re-arm for the remainder — this is a re-schedule, NOT an execution.
+        this.armTimer(id, remaining - AutomationManager.MAX_TIMER_DELAY_MS, onFire)
+      }, AutomationManager.MAX_TIMER_DELAY_MS)
+      this.timers.set(id, timer)
+    } else {
+      const timer = setTimeout(() => {
+        this.timers.delete(id)
+        onFire()
+      }, remaining)
+      this.timers.set(id, timer)
+    }
   }
 
   private cancelSchedule(id: string): void {
@@ -471,10 +493,28 @@ export class AutomationManager {
     }
     this.emitRunMessage(automationId, userMsg)
 
+    // Attribute this follow-up turn's spend to the run that owns the resumed
+    // session. runOneShotQuery's `result` handler persists cost only when
+    // currentRunIds has an entry (executeRun sets it; sendMessage never did), so
+    // pre-fix every follow-up turn's cost was recorded NOWHERE. The follow-up
+    // continues the same session, so its spend folds into that session's run.
+    const runsForFollowUp = this.loadRuns(automationId)
+    const ownerRun =
+      runsForFollowUp.find((r) => r.sessionId === sessionId) ?? runsForFollowUp[0]
+    if (ownerRun) this.currentRunIds.set(automationId, ownerRun.id)
+
     // Resume the session with a one-shot sdkQuery
-    this.runOneShotQuery(automation, prompt, sessionId).catch((err) => {
-      logger.error('AutomationManager', `sendMessage failed for ${automationId}: ${err}`)
-    })
+    this.runOneShotQuery(automation, prompt, sessionId)
+      .catch((err) => {
+        logger.error('AutomationManager', `sendMessage failed for ${automationId}: ${err}`)
+      })
+      .finally(() => {
+        // runOneShotQuery's finally clears activeRuns/processingAutomations but
+        // NOT currentRunIds (executeRun owns that for scheduled runs). Clear the
+        // follow-up association we set above so a later scheduled run isn't
+        // misattributed to this run id.
+        this.currentRunIds.delete(automationId)
+      })
   }
 
   private emitRunMessage(automationId: string, message: ChatMessage): void {
@@ -540,31 +580,59 @@ export class AutomationManager {
       this.currentRunIds.delete(automation.id)
       // Keep sessionId alive so user can send follow-up messages
 
-      // Update automation metadata
-      automation.lastRunAt = run.startedAt
-      automation.lastRunStatus = run.status === 'running' ? 'error' : run.status
-      this.saveAutomation(automation)
+      // M-AU2: if the automation was deleted while this run was in flight,
+      // do NOT re-persist anything. delete() runs synchronously (abort the run,
+      // drop it from the in-memory list, unlink its files) BEFORE this finally
+      // fires on the abort unwind, so re-writing here would resurrect a zombie
+      // automation file + runs dir (the in-memory list no longer has it and the
+      // watcher is suppressed, so it silently reappears on next reload).
+      const stillExists =
+        this.automations.some((a) => a.id === automation.id) ||
+        fs.existsSync(automationFile(automation.id))
+      if (!stillExists) {
+        // Skip all persistence/scheduling for a deleted automation. (No `return`
+        // here — a return inside finally would swallow exceptions; guard with the
+        // else branch instead.)
+        logger.debug(
+          'AutomationManager',
+          `Run for deleted automation ${automation.id} finished — skipping persist (M-AU2)`
+        )
+      } else {
+        // M-AU1: `automation` was captured at schedule time; a user edit mid-run
+        // (upsert rewrote its prompt/schedule and persisted a NEW object) would
+        // be clobbered if we saved the stale captured object back. Merge only the
+        // run-result fields onto the LATEST persisted object instead, and keep
+        // the in-memory list pointing at that merged object.
+        const latest =
+          readJson<Automation>(automationFile(automation.id)) ??
+          this.automations.find((a) => a.id === automation.id) ??
+          automation
+        latest.lastRunAt = run.startedAt
+        latest.lastRunStatus = run.status === 'running' ? 'error' : run.status
+        const memIdx = this.automations.findIndex((a) => a.id === automation.id)
+        if (memIdx >= 0) this.automations[memIdx] = latest
+        this.saveAutomation(latest)
 
-      // Update run index — merge into the disk entry to preserve fields
-      // (like sessionId/projectKey) that were set during runOneShotQuery
-      const updatedRuns = this.loadRuns(automation.id)
-      const idx = updatedRuns.findIndex((r) => r.id === runId)
-      if (idx >= 0) {
-        updatedRuns[idx] = { ...updatedRuns[idx], ...run }
-      }
-      this.saveRuns(automation.id, updatedRuns)
+        // Update run index — merge into the disk entry to preserve fields
+        // (like sessionId/projectKey) that were set during runOneShotQuery
+        const updatedRuns = this.loadRuns(automation.id)
+        const idx = updatedRuns.findIndex((r) => r.id === runId)
+        if (idx >= 0) {
+          updatedRuns[idx] = { ...updatedRuns[idx], ...run }
+        }
+        this.saveRuns(automation.id, updatedRuns)
 
-      // Notify renderer
-      this.notifyRunUpdate(automation.id, run)
-      this.notifyAutomationsChanged()
+        // Notify renderer
+        this.notifyRunUpdate(automation.id, run)
+        this.notifyAutomationsChanged()
 
-      // Native notification
-      this.sendNativeNotification(automation, run)
+        // Native notification
+        this.sendNativeNotification(latest, run)
 
-      // Schedule next run if still enabled
-      const current = this.automations.find((a) => a.id === automation.id)
-      if (current?.enabled) {
-        this.scheduleNext(current)
+        // Schedule next run if still enabled — off the LATEST schedule (M-AU1).
+        if (latest.enabled) {
+          this.scheduleNext(latest)
+        }
       }
     }
   }
@@ -583,23 +651,10 @@ export class AutomationManager {
     let totalCostUsd = 0
     let lastAssistantText = ''
     let lastAssistantMsg: ChatMessage | null = null
-    // Collect messages for the local auto classifier's transcript context
-    const collectedMessages: TranscriptMessage[] = []
     const useAutoMode = (automation.permissionMode ?? 'auto') === 'auto'
-    const classifierId = `automation:${automation.id}`
 
     try {
-      const canUseTool = buildCanUseTool(
-        useAutoMode ? 'auto' : 'default',
-        collectedMessages,
-        classifierId
-      )
-
-      // Seed transcript with user prompt for classifier context
-      collectedMessages.push({
-        role: 'user',
-        content: [{ type: 'text', text: prompt }]
-      })
+      const canUseTool = buildCanUseTool()
 
       const modelValue = automation.model || 'default'
       const desiredThinking: ThinkingMode =
@@ -662,9 +717,13 @@ export class AutomationManager {
           }
 
           // Try upgrading to native SDK auto mode once session is established.
-          // If the SDK accepts it (paid Anthropic plans), it handles tool approvals
-          // natively and our canUseTool classifier becomes a backup. If rejected,
-          // we stay on acceptEdits + local classifier — no functionality lost.
+          // If the SDK accepts it (paid Anthropic plans, unless an org admin
+          // disabled it), cli.js's own classifier decides tool approvals and only
+          // the residual asks reach our canUseTool above (denied — fail closed,
+          // no user is present). If rejected, the run stays on acceptEdits and
+          // canUseTool denies every ask that reaches it — there is no local
+          // classifier backup anymore, so a rejected upgrade meaningfully
+          // degrades the run (warn, not debug).
           if (useAutoMode && !autoModeUpgraded) {
             autoModeUpgraded = true
             try {
@@ -676,9 +735,9 @@ export class AutomationManager {
                 `Native auto mode accepted for "${automation.name}"`
               )
             } catch {
-              logger.debug(
+              logger.warn(
                 'AutomationManager',
-                `SDK rejected auto mode for "${automation.name}", using local classifier`
+                `SDK rejected auto mode for "${automation.name}" — falling back to acceptEdits, all asks will be denied (fail closed)`
               )
             }
           }
@@ -691,17 +750,6 @@ export class AutomationManager {
             lastAssistantMsg = chatMsg
             const textBlock = chatMsg.content.find((b) => b.type === 'text')
             if (textBlock?.text) lastAssistantText = textBlock.text
-
-            // Collect for classifier transcript
-            collectedMessages.push({
-              role: 'assistant',
-              content: chatMsg.content.map((b) => ({
-                type: b.type,
-                ...('text' in b ? { text: b.text } : {}),
-                ...('toolName' in b ? { toolName: b.toolName, toolInput: b.toolInput } : {}),
-                ...('toolResult' in b ? { toolResult: b.toolResult } : {})
-              }))
-            })
           }
         } else if (type === 'user') {
           const messageParam = msg.message as Record<string, unknown> | undefined
@@ -712,15 +760,6 @@ export class AutomationManager {
             if (toolResults.length > 0) {
               lastAssistantMsg.content.push(...toolResults)
               this.emitRunMessage(automation.id, lastAssistantMsg)
-
-              // Collect tool results for classifier transcript
-              collectedMessages.push({
-                role: 'user',
-                content: toolResults.map((b) => ({
-                  type: b.type,
-                  ...('toolResult' in b ? { toolResult: b.toolResult } : {})
-                }))
-              })
             }
           }
         } else if (type === 'stream_event') {
@@ -768,7 +807,6 @@ export class AutomationManager {
     } finally {
       this.activeRuns.delete(automation.id)
       this.processingAutomations.delete(automation.id)
-      stopClassifier(classifierId)
     }
   }
 
@@ -811,21 +849,14 @@ export class AutomationManager {
       const toolUseId = block.tool_use_id as string
       if (!toolUseId) continue
 
-      let resultText = ''
-      const blockContent = block.content
-      if (typeof blockContent === 'string') {
-        resultText = blockContent
-      } else if (Array.isArray(blockContent)) {
-        resultText = blockContent
-          .map((c: Record<string, unknown>) => (c.text as string) || '')
-          .join('\n')
-      }
+      const { text: resultText, images } = extractToolResultContent(block.content)
 
       results.push({
         type: 'tool_result',
         toolUseId,
         toolResult: resultText,
-        isError: !!block.is_error
+        isError: !!block.is_error,
+        ...(images ? { images } : {})
       })
     }
     return results

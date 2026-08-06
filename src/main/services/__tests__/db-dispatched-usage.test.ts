@@ -32,11 +32,13 @@ function userVersion(db: Db): number {
 }
 
 describe('DB migration — v6 dispatched_usage', () => {
-  it('applies all migrations and reaches user_version 6', () => {
+  it('applies all migrations and reaches the latest user_version', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      expect(userVersion(db)).toBe(6)
+      // Bump alongside MIGRATIONS in db.ts — currently v8 (remote_config pinned
+      // HTTPS port + serve cleanup record, ADR-042).
+      expect(userVersion(db)).toBe(8)
     } finally {
       db.close()
     }

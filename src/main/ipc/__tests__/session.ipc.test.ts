@@ -10,6 +10,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 
 // ---------------------------------------------------------------------------
 // Mocks — every service that session.ipc.ts imports needs a stand-in so we
@@ -162,7 +165,11 @@ vi.mock('../../services/delete-session-files', () => ({
 
 vi.mock('../../services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
-  stopSocksBridge: vi.fn(async () => {})
+  stopSocksBridge: vi.fn(async () => {}),
+  // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
+  socks5Connect: vi.fn(async () => {
+    throw new Error('socks5Connect not stubbed for this test')
+  })
 }))
 
 vi.mock('../../services/usage-fetcher', () => ({
@@ -284,6 +291,12 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { registerSessionIpc } from '../session.ipc'
 import { gitServiceManager } from '../../services/git-service'
+import {
+  gitWatchRegistry,
+  GIT_WATCH_OWNER_DESKTOP,
+  GIT_WATCH_OWNER_REMOTE
+} from '../../services/git-watch-registry'
+import { BaseSession } from '../../providers/BaseSession'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // Fill in the stub's capabilities now that the top-level import is available
@@ -538,6 +551,84 @@ describe('session.ipc', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Git watching — the desktop side of the shared gitWatchRegistry.
+  // -------------------------------------------------------------------------
+
+  describe('git watching', () => {
+    const CWD = '/tmp/watched'
+
+    afterEach(() => {
+      // The registry is a module singleton shared with the remote path; unwind
+      // both owners so state can't leak into the next test.
+      gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_DESKTOP)
+      gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+      for (const w of BaseSession.getExtraWindows()) BaseSession.removeExtraWindow(w)
+    })
+
+    it('git:start-watching starts one poller and broadcasts to the main window AND extra windows', async () => {
+      const extra: any = { webContents: { send: vi.fn() }, isDestroyed: () => false }
+      BaseSession.addExtraWindow(extra)
+
+      await harness.call('git:start-watching', CWD)
+      expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
+      expect(gitSvcSpies.startPolling.mock.calls[0][1]).toBe(5000)
+
+      const status = { files: [], branch: 'main' }
+      const emit = gitSvcSpies.startPolling.mock.calls[0][0] as (s: unknown) => void
+      const received: unknown[][] = []
+      const off = harness.onEvent('git:status-update', (...args) => received.push(args))
+      emit(status)
+      off()
+
+      expect(received).toEqual([[{ cwd: CWD, status }]])
+      // The remote bridge is registered as an extra window — this is the hop that
+      // carries git:status-update to web clients.
+      expect(extra.webContents.send).toHaveBeenCalledWith('git:status-update', {
+        cwd: CWD,
+        status
+      })
+    })
+
+    it('a remote owner attaches to the desktop poller instead of clobbering it (CLOBBER GUARD)', async () => {
+      await harness.call('git:start-watching', CWD)
+      const emit = gitSvcSpies.startPolling.mock.calls[0][0] as (s: unknown) => void
+      emit({ files: [], branch: 'main' })
+
+      // The remote dispatcher path calls the same registry under its own owner.
+      gitWatchRegistry.startWatching(CWD, GIT_WATCH_OWNER_REMOTE)
+      expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
+
+      // The desktop's callback is still the live one.
+      const received: unknown[][] = []
+      const off = harness.onEvent('git:status-update', (...args) => received.push(args))
+      emit({ files: [], branch: 'dev' })
+      off()
+      expect(received).toEqual([[{ cwd: CWD, status: { files: [], branch: 'dev' } }]])
+    })
+
+    it('git:stop-watching keeps the poller alive while the remote owner remains', async () => {
+      await harness.call('git:start-watching', CWD)
+      gitWatchRegistry.startWatching(CWD, GIT_WATCH_OWNER_REMOTE)
+
+      await harness.call('git:stop-watching', CWD)
+      expect(gitSvcSpies.stopPolling).not.toHaveBeenCalled()
+      expect(gitWatchRegistry.ownersOf(CWD)).toEqual([GIT_WATCH_OWNER_REMOTE])
+    })
+
+    it('git:stop-watching tears down when it is the only owner', async () => {
+      await harness.call('git:start-watching', CWD)
+      await harness.call('git:stop-watching', CWD)
+      expect(gitSvcSpies.stopPolling).toHaveBeenCalledTimes(1)
+      expect(gitWatchRegistry.ownersOf(CWD)).toEqual([])
+    })
+
+    it('git:stop-watching for an unwatched cwd is a no-op', async () => {
+      await expect(harness.call('git:stop-watching', '/tmp/never')).resolves.toBeUndefined()
+      expect(gitSvcSpies.stopPolling).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Config channels
   // -------------------------------------------------------------------------
 
@@ -738,6 +829,48 @@ describe('session.ipc', () => {
     it('claude:save-permissions invokes notifySettingsChanged via the neutral forEach iteration', async () => {
       await harness.call('claude:save-permissions', 'user', { allow: [], deny: [], ask: [] })
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+  })
+  // LOW-RW3 — session:write-custom-title builds
+  // ~/.claude/projects/<projectKey>/<sessionId>.jsonl from two caller-supplied
+  // strings and appends to it. A traversal segment let the renderer (and, via
+  // the remote twin, any token-holding remote client) append attacker-shaped
+  // JSON to an arbitrary *.jsonl on disk.
+  describe('session:write-custom-title path-segment validation', () => {
+    let appendSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      appendSpy = vi.spyOn(fs.promises, 'appendFile').mockResolvedValue(undefined)
+    })
+
+    afterEach(() => {
+      appendSpy.mockRestore()
+    })
+
+    it.each([
+      ['..', 'sess-1'],
+      ['a/b', 'sess-1'],
+      ['a\\b', 'sess-1'],
+      ['proj', '../../evil'],
+      ['proj', 'a/b']
+    ])(
+      'rejects traversal (projectKey=%j, sessionId=%j) without writing (GUARD — fails pre-fix)',
+      async (projectKey, sessionId) => {
+        await expect(
+          harness.call('session:write-custom-title', sessionId, projectKey, 'pwned')
+        ).rejects.toThrow(/Invalid (sessionId|projectKey)/)
+        expect(appendSpy).not.toHaveBeenCalled()
+      }
+    )
+
+    it('still appends the custom-title entry for plain identifiers', async () => {
+      await harness.call('session:write-custom-title', 'sess-1', '-d-proj', 'My title')
+      expect(appendSpy).toHaveBeenCalledTimes(1)
+      const [target, payload] = appendSpy.mock.calls[0]
+      expect(String(target)).toBe(
+        path.join(os.homedir(), '.claude', 'projects', '-d-proj', 'sess-1.jsonl')
+      )
+      expect(String(payload)).toContain('"customTitle":"My title"')
     })
   })
 })

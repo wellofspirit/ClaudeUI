@@ -4,6 +4,10 @@ import { useActiveSession, useSessionStore } from '../../stores/session-store'
 interface Props {
   text: string
   isActive: boolean
+  /** Finished-span duration for THIS thinking block. Read from the block itself
+   *  (per-message) so each historical "Thought for Xs" shows its own value
+   *  rather than the latest per-session scalar. Undefined → "Thought" (no time). */
+  durationMs?: number
 }
 
 const WAVE_DURATION_MS = 2000
@@ -30,10 +34,9 @@ function WaveText({ text }: { text: string }): React.JSX.Element {
   )
 }
 
-export function ThinkingBlock({ text, isActive }: Props): React.JSX.Element {
+export function ThinkingBlock({ text, isActive, durationMs }: Props): React.JSX.Element {
   const expandThinking = useSessionStore((s) => s.settings.expandThinking)
   const [expanded, setExpanded] = useState(expandThinking)
-  const thinkingDurationMs = useActiveSession((s) => s.thinkingDurationMs)
   const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
   const [elapsed, setElapsed] = useState(0)
 
@@ -52,8 +55,8 @@ export function ThinkingBlock({ text, isActive }: Props): React.JSX.Element {
 
   const durationSec = isActive
     ? elapsed
-    : thinkingDurationMs != null
-      ? Math.round(thinkingDurationMs / 1000)
+    : durationMs != null
+      ? Math.round(durationMs / 1000)
       : null
 
   const label = isActive

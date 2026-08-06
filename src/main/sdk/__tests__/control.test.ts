@@ -90,6 +90,28 @@ describe('ControlChannel.request', () => {
     await expect(p).resolves.toEqual({ done: true })
   })
 
+  it('rejects immediately when the write does not land, even for timeoutMs:0 (M-CL2)', async () => {
+    // A destroyed stream is unwritable → NdjsonWriter.write returns false. The
+    // request must reject NOW rather than staying pending forever (a timeoutMs:0
+    // subtype like oauth_wait_for_completion would otherwise stick the auth flow
+    // in 'authorizing' when the child died before the call).
+    const pass = new PassThrough()
+    pass.destroy()
+    const writer = new NdjsonWriter(pass)
+    const c = new ControlChannel(writer)
+    await expect(
+      c.request({ subtype: 'claude_oauth_wait_for_completion' }, { timeoutMs: 0 })
+    ).rejects.toThrow(/stream not writable/)
+  })
+
+  it('NdjsonWriter.write reports whether the line landed', () => {
+    const open = new PassThrough()
+    expect(new NdjsonWriter(open).write({ type: 'x' })).toBe(true)
+    const closed = new PassThrough()
+    closed.destroy()
+    expect(new NdjsonWriter(closed).write({ type: 'x' })).toBe(false)
+  })
+
   it('fires onPendingPermissionRequests when the error response rides them', async () => {
     const { writer, written } = makeSink()
     const onPending = vi.fn()

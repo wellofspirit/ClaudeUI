@@ -7,9 +7,10 @@
  *   2. Client sends  { type: 'auth', token }  as plain JSON.
  *   3. Server replies { type: 'auth-response', ok, error? }.
  *   4. If the server was started with a tunnel E2E key, the client sends
- *      { type: 'e2e-activate' }, server replies { type: 'e2e-ack' }, and
- *      all subsequent messages are AES-256-GCM encrypted using HKDF-SHA256
- *      key derivation (shared/e2e-crypto.ts).
+ *      { type: 'e2e-activate' }, server replies with an ENCRYPTED
+ *      { type: 'e2e-ack' } (the ack is the first encrypted frame, not the
+ *      last plaintext one), and all subsequent messages are AES-256-GCM
+ *      encrypted using HKDF-SHA256 key derivation (shared/e2e-crypto.ts).
  *   5. Messages are JSON objects of type 'invoke', 'sync', 'ping', 'pong'
  *      client→server, and 'invoke-response', 'event', 'sync-catchup',
  *      'sync-full', 'ping', 'pong' server→client.
@@ -72,6 +73,15 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
   let e2e: E2ECrypto | null = null
   let nextId = 1
 
+  // Serializes inbound decode+dispatch so frames land in arrival order —
+  // mirrors the same fix in connection.ts / remote-server.ts. A single
+  // decode per frame also avoids a real hazard the old two-listener design
+  // had: two independent `ws.on('message', ...)` handlers each calling
+  // `e2e.decrypt()` on the SAME encrypted frame race on the replay-guard
+  // `recvSeq` — whichever completes second sees its own frame as an
+  // already-consumed replay and throws.
+  let recvQueue: Promise<void> = Promise.resolve()
+
   const ready = new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error(`Handshake timeout after ${handshakeTimeoutMs}ms`))
@@ -97,13 +107,24 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
       reject(new Error(`Unexpected HTTP response: ${res.statusCode}`))
     })
 
-    // Internal message handler for handshake sequencing.
-    const handleHandshake = async (raw: WebSocket.RawData): Promise<void> => {
+    // Single decode + dispatch path for every inbound frame (handshake
+    // sequencing AND post-handshake invoke-response/event/ping routing).
+    // `auth-response`/`e2e-ack` and the post-handshake message types are
+    // mutually exclusive, so running both stages unconditionally per frame
+    // is safe (matches the old dual-handler behavior, minus the double
+    // decrypt).
+    const handleFrame = async (raw: WebSocket.RawData): Promise<void> => {
       const rawStr = raw.toString()
       let parsed: any
 
-      // After e2e is active the server encrypts everything.
-      if (e2e?.isReady && !rawStr.startsWith('{')) {
+      // Once e2e is active EVERY frame — including the ack itself — is
+      // encrypted. Mirror the real client's strict decoder: never fall back
+      // to JSON.parse on a plaintext frame once ready (a regression to a
+      // plaintext ack would time out the handshake here instead of being
+      // silently tolerated). A decrypt failure during the handshake fails
+      // `ready`; once `ready` has settled, `reject()`/`clearTimeout()` below
+      // are no-ops, so a later corrupt/replayed frame is just dropped.
+      if (e2e?.isReady) {
         try {
           parsed = await e2e.decrypt(rawStr)
         } catch (err) {
@@ -143,68 +164,51 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
         resolve()
         return
       }
+
+      // Fan out to raw listeners first.
+      for (const cb of rawListeners) {
+        try {
+          cb(parsed as WsServerMessage)
+        } catch {
+          /* ignore */
+        }
+      }
+
+      if (parsed?.type === 'invoke-response') {
+        const resp = parsed as WsInvokeResponse
+        const req = pending.get(resp.id)
+        if (req) {
+          pending.delete(resp.id)
+          if (resp.ok) req.resolve(resp.data)
+          else req.reject(new Error(resp.error || 'Invoke failed'))
+        }
+      } else if (parsed?.type === 'event') {
+        const evt = parsed as WsEvent
+        const set = listeners.get(evt.channel)
+        if (set) {
+          for (const cb of set) {
+            try {
+              cb(...(evt.args ?? []))
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      } else if (parsed?.type === 'ping') {
+        // Reply with pong to keep the connection alive.
+        void client.send({ type: 'pong', timestamp: Date.now() })
+      }
     }
 
     ws.on('message', (raw) => {
-      // Always route through handshake first — it's a no-op after ready.
-      void handleHandshake(raw)
+      // `.catch` per link so an escaping throw can't poison the chain and
+      // silently drop every later frame (confusing test flakes).
+      recvQueue = recvQueue
+        .then(() => handleFrame(raw))
+        .catch(() => {
+          /* logged nowhere on purpose — test helper */
+        })
     })
-  })
-
-  // After the handshake resolves we also want to dispatch invoke-responses,
-  // events, etc. Rather than swap handlers, keep a single handler and
-  // branch on type.
-  ws.on('message', async (raw) => {
-    const rawStr = raw.toString()
-    let parsed: any
-
-    if (e2e?.isReady && !rawStr.startsWith('{')) {
-      try {
-        parsed = await e2e.decrypt(rawStr)
-      } catch {
-        return
-      }
-    } else {
-      try {
-        parsed = JSON.parse(rawStr)
-      } catch {
-        return
-      }
-    }
-
-    // Fan out to raw listeners first.
-    for (const cb of rawListeners) {
-      try {
-        cb(parsed as WsServerMessage)
-      } catch {
-        /* ignore */
-      }
-    }
-
-    if (parsed?.type === 'invoke-response') {
-      const resp = parsed as WsInvokeResponse
-      const req = pending.get(resp.id)
-      if (req) {
-        pending.delete(resp.id)
-        if (resp.ok) req.resolve(resp.data)
-        else req.reject(new Error(resp.error || 'Invoke failed'))
-      }
-    } else if (parsed?.type === 'event') {
-      const evt = parsed as WsEvent
-      const set = listeners.get(evt.channel)
-      if (set) {
-        for (const cb of set) {
-          try {
-            cb(...(evt.args ?? []))
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    } else if (parsed?.type === 'ping') {
-      // Reply with pong to keep the connection alive.
-      void client.send({ type: 'pong', timestamp: Date.now() })
-    }
   })
 
   const client: RemoteClient = {

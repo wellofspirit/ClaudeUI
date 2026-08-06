@@ -12,7 +12,10 @@
  *   6. Claude provider lacks per-vendor methods → graceful error
  *   7. vendor-auth routing: engineAuthRegistry routes by engineId
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // ---------------------------------------------------------------------------
 // Hoist mock functions before vi.mock() calls
@@ -21,6 +24,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const {
   mockAcquire,
   mockRelease,
+  mockRecycleAll,
   mockGetConfigProviders,
   mockGetProviderAuth,
   mockSetAuth,
@@ -32,6 +36,7 @@ const {
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
   const mockRelease = vi.fn()
+  const mockRecycleAll = vi.fn()
   const mockGetConfigProviders = vi.fn()
   const mockGetProviderAuth = vi.fn()
   const mockSetAuth = vi.fn()
@@ -44,6 +49,7 @@ const {
   return {
     mockAcquire,
     mockRelease,
+    mockRecycleAll,
     mockGetConfigProviders,
     mockGetProviderAuth,
     mockSetAuth,
@@ -58,7 +64,8 @@ const {
 vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease
+    release: mockRelease,
+    recycleAll: mockRecycleAll
   }
 }))
 
@@ -104,6 +111,7 @@ const SAMPLE_PROVIDER_AUTH: Record<string, Array<{ type: string; label: string }
 function setupMocks(): void {
   mockAcquire.mockReset()
   mockRelease.mockReset()
+  mockRecycleAll.mockReset()
   mockGetConfigProviders.mockReset()
   mockGetProviderAuth.mockReset()
   mockSetAuth.mockReset()
@@ -354,6 +362,61 @@ describe('OpencodeAuthProvider — removeVendorAuth()', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Pooled-server recycle. opencode builds its provider map once per process and
+// never watches auth.json, so a credential change is invisible to every
+// already-running server (ProviderModelNotFoundError on the next prompt) until
+// it restarts. Every USER-INITIATED mutation must therefore recycle the pool —
+// but only on success, and only after our own transient ref is released.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeAuthProvider — recycles pooled servers on auth mutations', () => {
+  beforeEach(setupMocks)
+
+  it('setVendorApiKey success recycles exactly once, AFTER release', async () => {
+    await makeProvider().setVendorApiKey('openai', 'sk-test-123')
+    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+    expect(mockRecycleAll.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockRelease.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('setVendorApiKey does NOT recycle when the PUT fails', async () => {
+    mockSetAuth.mockRejectedValueOnce(new Error('403 policy'))
+    await expect(makeProvider().setVendorApiKey('openai', 'sk-test-123')).rejects.toThrow('403')
+    expect(mockRelease).toHaveBeenCalledTimes(1) // ref still released
+    expect(mockRecycleAll).not.toHaveBeenCalled()
+  })
+
+  it('removeVendorAuth success recycles; a failed DELETE does not', async () => {
+    await makeProvider().removeVendorAuth('openai')
+    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
+
+    mockRecycleAll.mockClear()
+    mockRemoveAuth.mockRejectedValueOnce(new Error('delete boom'))
+    await expect(makeProvider().removeVendorAuth('openai')).rejects.toThrow('delete boom')
+    expect(mockRecycleAll).not.toHaveBeenCalled()
+  })
+
+  it('oauthCallback recycles only when the flow actually completed', async () => {
+    await makeProvider().oauthCallback('anthropic', 0, 'abc123')
+    expect(mockRecycleAll).toHaveBeenCalledTimes(1)
+
+    // `false` = flow did not complete → auth.json unchanged → nothing stale.
+    mockRecycleAll.mockClear()
+    mockOauthCallback.mockResolvedValueOnce(false)
+    await makeProvider().oauthCallback('anthropic', 0, 'abc123')
+    expect(mockRecycleAll).not.toHaveBeenCalled()
+
+    mockOauthCallback.mockRejectedValueOnce(new Error('callback boom'))
+    await expect(makeProvider().oauthCallback('anthropic', 0, 'abc123')).rejects.toThrow(
+      'callback boom'
+    )
+    expect(mockRecycleAll).not.toHaveBeenCalled()
+  })
+})
+
 describe('OpencodeAuthProvider — buildAccountRef()', () => {
   beforeEach(setupMocks)
 
@@ -379,5 +442,85 @@ describe('OpencodeAuthProvider — buildAccountRef()', () => {
     await provider.warmCache()
     const ref = provider.buildAccountRef('anthropic')
     expect(ref?.authState).toBe('authenticated')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// H18 / R2: feedOauthCredential is a read-modify-write against opencode's
+// auth.json — it must NOT overwrite a corrupt-but-present file (which would
+// delete every other vendor's credential). auth.json is resolved from
+// XDG_DATA_HOME, redirected to a temp dir here.
+//
+// RED-FIRST NOTE: pre-fix, feedOauthCredential caught the parse error and
+// "started fresh" (file = {}), so the write dropped anthropic — the survival
+// assertions below would FAIL.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeAuthProvider — feedOauthCredential corrupt guard (H18)', () => {
+  let xdg: string
+  let authPath: string
+  let originalXdg: string | undefined
+
+  beforeEach(() => {
+    setupMocks()
+    originalXdg = process.env.XDG_DATA_HOME
+    xdg = mkdtempSync(join(tmpdir(), 'opencode-auth-'))
+    process.env.XDG_DATA_HOME = xdg
+    authPath = join(xdg, 'opencode', 'auth.json')
+  })
+
+  afterEach(() => {
+    if (originalXdg === undefined) delete process.env.XDG_DATA_HOME
+    else process.env.XDG_DATA_HOME = originalXdg
+    rmSync(xdg, { recursive: true, force: true })
+  })
+
+  const corrupt = '{"anthropic":{"type":"api","key":"sk-ant"},"openai":' // truncated
+
+  it('REFUSES to write over a corrupt auth.json — other vendors survive + a backup is made', async () => {
+    mkdirSync(join(xdg, 'opencode'), { recursive: true })
+    writeFileSync(authPath, corrupt, 'utf-8')
+
+    await expect(
+      makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
+    ).rejects.toThrow(/Refusing to overwrite/)
+
+    const onDisk = readFileSync(authPath, 'utf-8')
+    expect(onDisk).toBe(corrupt)
+    expect(onDisk).toContain('sk-ant')
+    expect(readFileSync(`${authPath}.corrupt`, 'utf-8')).toBe(corrupt)
+  })
+
+  it('merges into a VALID auth.json, preserving every other vendor', async () => {
+    mkdirSync(join(xdg, 'opencode'), { recursive: true })
+    writeFileSync(authPath, JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant' } }), 'utf-8')
+
+    await makeProvider().feedOauthCredential('openai', {
+      access: 'a',
+      refresh: 'r',
+      expires: 1,
+      accountId: 'acct-1'
+    })
+
+    expect(JSON.parse(readFileSync(authPath, 'utf-8'))).toEqual({
+      anthropic: { type: 'api', key: 'sk-ant' },
+      openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, accountId: 'acct-1' }
+    })
+  })
+
+  it('creates a fresh auth.json when the file is simply MISSING', async () => {
+    await makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
+    expect(JSON.parse(readFileSync(authPath, 'utf-8'))).toEqual({
+      openai: { type: 'oauth', refresh: 'r', access: 'a', expires: 1 }
+    })
+  })
+
+  it('does NOT recycle pooled servers — this feed fires on a background timer', async () => {
+    // Deliberate asymmetry with the user-initiated mutations: killing whatever
+    // sessions happen to be mid-turn on a refresh tick the user never chose is
+    // worse than the documented 401-until-restart edge. See the LIVE-SERVER
+    // STALENESS block in OpencodeAuthProvider.
+    await makeProvider().feedOauthCredential('openai', { access: 'a', refresh: 'r', expires: 1 })
+    expect(mockRecycleAll).not.toHaveBeenCalled()
   })
 })

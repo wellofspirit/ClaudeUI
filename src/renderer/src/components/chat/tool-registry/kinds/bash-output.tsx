@@ -12,10 +12,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { AnsiUp } from 'ansi_up'
 import { useSessionStore, useActiveSession, type ThemeId } from '../../../../stores/session-store'
 
-const liveAnsiUp = new AnsiUp()
-liveAnsiUp.use_classes = false
-liveAnsiUp.escape_html = true
-
 export function LiveBashOutput({
   output,
   totalLines,
@@ -31,7 +27,14 @@ export function LiveBashOutput({
   const bg = theme === 'light' ? '#e8eaed' : theme === 'monokai' ? '#272822' : '#0d1117'
   const fg = theme === 'light' ? '#1a1d24' : theme === 'monokai' ? '#f8f8f2' : '#d1d5db'
 
-  const html = useMemo(() => liveAnsiUp.ansi_to_html(output), [output])
+  // Fresh AnsiUp per conversion so SGR state can't bleed between bash tool cards
+  // (a shared module-level instance carried color state across cards).
+  const html = useMemo(() => {
+    const ansi = new AnsiUp()
+    ansi.use_classes = false
+    ansi.escape_html = true
+    return ansi.ansi_to_html(output)
+  }, [output])
 
   useEffect(() => {
     const el = preRef.current

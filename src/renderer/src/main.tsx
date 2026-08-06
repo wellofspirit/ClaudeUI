@@ -3,6 +3,7 @@ import './assets/main.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { hydrateConfigFromDisk, getRemoteStateSnapshot } from './stores/session-store'
 
 // Global error handlers — forward uncaught renderer errors to the main process log file
@@ -24,7 +25,9 @@ window.onunhandledrejection = (event: PromiseRejectionEvent): void => {
 hydrateConfigFromDisk().finally(() => {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </StrictMode>
   )
 })

@@ -4,8 +4,7 @@
  * proper MCP protocol support (version negotiation, notifications,
  * progress, resources, prompts) for free.
  *
- * Callers (mermaid-tool, mockup-tool, auto-classifier-tool) keep the same
- * import and signatures.
+ * Callers (mermaid-tool, mockup-tool) keep the same import and signatures.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js'

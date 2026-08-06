@@ -36,6 +36,10 @@ function makeProps(overrides: Partial<MobileConfigSheetProps> = {}): MobileConfi
     selectedModel: opusModel,
     selectedEngineId: 'claude',
     engineLocked: false,
+    showModePicker: false,
+    permissionMode: 'default',
+    canPlan: true,
+    autoAvailable: true,
     showEnginePicker: true,
     showModelPicker: true,
     showThinkingPicker: true,
@@ -46,6 +50,7 @@ function makeProps(overrides: Partial<MobileConfigSheetProps> = {}): MobileConfi
     effort: 'high',
     effortSupported: true,
     allowedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    onSelectMode: vi.fn(),
     onSelectEngine: vi.fn(),
     onSelectModel: vi.fn(),
     onSelectThinking: vi.fn(),
@@ -168,6 +173,91 @@ describe('MobileConfigSheet — root page', () => {
     fireEvent.click(screen.getByTestId('MobileConfigSheet.close'))
     openSheet()
     expect(screen.getByTestId('MobileConfigSheet.engine')).toBeInTheDocument()
+  })
+})
+
+describe('MobileConfigSheet — mode row + submenu', () => {
+  it('renders the mode row with the current label when showModePicker is true', () => {
+    render(<MobileConfigSheet {...makeProps({ showModePicker: true, permissionMode: 'acceptEdits' })} />)
+    openSheet()
+    expect(screen.getByTestId('MobileConfigSheet.mode')).toHaveTextContent('Accept Edits')
+  })
+
+  it('hides the mode row when showModePicker is false', () => {
+    render(<MobileConfigSheet {...makeProps({ showModePicker: false })} />)
+    openSheet()
+    expect(screen.queryByTestId('MobileConfigSheet.mode')).not.toBeInTheDocument()
+  })
+
+  it('tapping the mode row opens the mode page listing all four options', () => {
+    render(<MobileConfigSheet {...makeProps({ showModePicker: true })} />)
+    openSheet()
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.mode'))
+
+    const options = screen.getAllByTestId('MobileConfigSheet.modeOption')
+    expect(options.map((o) => o.getAttribute('data-value'))).toEqual([
+      'default',
+      'acceptEdits',
+      'plan',
+      'auto'
+    ])
+  })
+
+  it('disables the plan option when canPlan is false, leaving the others enabled', () => {
+    render(<MobileConfigSheet {...makeProps({ showModePicker: true, canPlan: false })} />)
+    openSheet()
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.mode'))
+
+    const options = screen.getAllByTestId('MobileConfigSheet.modeOption')
+    const plan = options.find((o) => o.getAttribute('data-value') === 'plan')!
+    expect(plan).toBeDisabled()
+    expect(plan).toHaveAttribute('title', expect.stringContaining("doesn't support plan mode"))
+    for (const value of ['default', 'acceptEdits', 'auto']) {
+      expect(options.find((o) => o.getAttribute('data-value') === value)).toBeEnabled()
+    }
+  })
+
+  it('disables the auto option when autoAvailable is false, leaving the others enabled', () => {
+    render(<MobileConfigSheet {...makeProps({ showModePicker: true, autoAvailable: false })} />)
+    openSheet()
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.mode'))
+
+    const options = screen.getAllByTestId('MobileConfigSheet.modeOption')
+    const auto = options.find((o) => o.getAttribute('data-value') === 'auto')!
+    expect(auto).toBeDisabled()
+    expect(auto).toHaveAttribute('title', expect.stringContaining('unavailable for this account'))
+    for (const value of ['default', 'acceptEdits', 'plan']) {
+      expect(options.find((o) => o.getAttribute('data-value') === value)).toBeEnabled()
+    }
+  })
+
+  it('selecting an option calls onSelectMode with the mode value and returns to root', () => {
+    const onSelectMode = vi.fn()
+    render(<MobileConfigSheet {...makeProps({ showModePicker: true, onSelectMode })} />)
+    openSheet()
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.mode'))
+
+    const options = screen.getAllByTestId('MobileConfigSheet.modeOption')
+    fireEvent.click(options.find((o) => o.getAttribute('data-value') === 'acceptEdits')!)
+
+    expect(onSelectMode).toHaveBeenCalledWith('acceptEdits')
+    expect(screen.getByTestId('MobileConfigSheet.mode')).toBeInTheDocument()
+  })
+
+  it('clicking a disabled mode option does not call onSelectMode', () => {
+    const onSelectMode = vi.fn()
+    render(
+      <MobileConfigSheet
+        {...makeProps({ showModePicker: true, canPlan: false, onSelectMode })}
+      />
+    )
+    openSheet()
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.mode'))
+    const plan = screen
+      .getAllByTestId('MobileConfigSheet.modeOption')
+      .find((o) => o.getAttribute('data-value') === 'plan')!
+    fireEvent.click(plan)
+    expect(onSelectMode).not.toHaveBeenCalled()
   })
 })
 

@@ -27,7 +27,10 @@ const {
   mockOnExit,
   mockEphemeralInstances,
   ephemeralStartError,
+  judgeInstances,
+  judgeScript,
   MockPiRpcClient,
+  mockLoadEngineConfig,
   mockLocatePiBinary,
   mockGetPiModelCatalog,
   mockLoadPiSessionHistory,
@@ -81,12 +84,78 @@ const {
   // configured BEFORE `new PiRpcClient(...)` runs, since askSideQuestion
   // calls `client.start()` synchronously in the same tick it constructs it.
   const ephemeralStartError: { value: Error | null } = { value: null }
+  // Auto-mode judge (phase 4): a THIRD flavor of PiRpcClient — the warm
+  // `--system-prompt` judge process pi-judge.ts owns. Distinguished from the
+  // /btw ephemeral (which also passes --no-session) by that flag, kept in its
+  // own array so askSideQuestion's `lastEphemeralClient()` is unaffected, and
+  // scripted through `judgeScript`: `replies` are consumed one per judge call
+  // (one call in twoStageMode 'fast', two in 'both'), `rejectPrompt` simulates
+  // an unusable judge, and `hold` parks a call so a test can act while the
+  // judge is "thinking" (G10).
+  const judgeInstances: Array<{
+    request: ReturnType<typeof vi.fn>
+    dispose: ReturnType<typeof vi.fn>
+    opts: { cwd: string; args: string[] }
+    /** Every `prompt` message this judge process received, in order. */
+    prompts: string[]
+  }> = []
+  const judgeScript: { replies: string[]; rejectPrompt: boolean; hold: Promise<void> | null } = {
+    replies: [],
+    rejectPrompt: false,
+    hold: null
+  }
   // Regular `function` (not an arrow fn) — PiSession does `new PiRpcClient(...)`,
   // and arrow functions have no [[Construct]] slot.
   const MockPiRpcClient = vi.fn().mockImplementation(function (
     _bin: string,
     opts: { cwd: string; args: string[]; env?: NodeJS.ProcessEnv }
   ) {
+    if (opts?.args?.includes('--system-prompt')) {
+      const eventHandlers: Array<(ev: { type: string }) => void> = []
+      const prompts: string[] = []
+      const inst = {
+        start: vi.fn().mockResolvedValue(undefined),
+        request: vi.fn().mockImplementation(async (cmd: { type: string; message?: string }) => {
+          switch (cmd.type) {
+            case 'prompt':
+              prompts.push(cmd.message ?? '')
+              // Settle asynchronously — pi-judge registers the listener BEFORE
+              // sending the prompt, so this can never race ahead of it.
+              queueMicrotask(() => {
+                for (const h of [...eventHandlers]) h({ type: 'agent_settled' })
+              })
+              return { type: 'response', command: 'prompt', success: !judgeScript.rejectPrompt }
+            case 'get_last_assistant_text': {
+              if (judgeScript.hold) await judgeScript.hold
+              const text = judgeScript.replies.shift()
+              return {
+                type: 'response',
+                command: cmd.type,
+                success: true,
+                data: text === undefined ? {} : { text }
+              }
+            }
+            case 'new_session':
+              return { type: 'response', command: 'new_session', success: true, data: { cancelled: false } }
+            default:
+              return { type: 'response', command: cmd.type, success: true }
+          }
+        }),
+        dispose: vi.fn(),
+        onEvent: vi.fn().mockImplementation((cb: (ev: { type: string }) => void) => {
+          eventHandlers.push(cb)
+          return () => {
+            const i = eventHandlers.indexOf(cb)
+            if (i >= 0) eventHandlers.splice(i, 1)
+          }
+        }),
+        onExit: vi.fn().mockReturnValue(() => {}),
+        opts,
+        prompts
+      }
+      judgeInstances.push(inst)
+      return inst
+    }
     if (opts?.args?.includes('--no-session')) {
       const startErr = ephemeralStartError.value
       ephemeralStartError.value = null
@@ -179,7 +248,14 @@ const {
     mockOnExit,
     mockEphemeralInstances,
     ephemeralStartError,
+    judgeInstances,
+    judgeScript,
     MockPiRpcClient,
+    // Auto mode reads engines/pi.json — mocked so the gating tests never
+    // depend on (or spawn a judge because of) the dev machine's own config.
+    // Default DISABLED: every pre-phase-4 test asserts the historical
+    // allow-everything `full`/`auto` base; the auto-mode block opts in.
+    mockLoadEngineConfig: vi.fn().mockReturnValue({ autoMode: { enabled: false } }),
     mockLocatePiBinary: vi.fn().mockReturnValue('/fake/pi'),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
     mockLoadPiSessionHistory: vi.fn().mockResolvedValue([]),
@@ -266,12 +342,18 @@ vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: { probe: mockPiAuthProbe, buildPiAccountRef: mockBuildPiAccountRef }
 }))
 vi.mock('node:fs', () => ({ existsSync: mockExistsSync }))
-vi.mock('node:os', () => ({ homedir: mockHomedir }))
+// `tmpdir` is part of the mock because ground-truth.ts's redirect scope reads
+// it: a factory that omits it makes the real call throw through vitest's
+// missing-export proxy.
+vi.mock('node:os', () => ({ homedir: mockHomedir, tmpdir: () => '/tmp' }))
 // Hermetic gating tests: never touch the dev machine's real ~/.claude/settings.json.
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
   saveClaudePermissions: mockSaveClaudePermissions
 }))
+// Engine config drives auto mode (phase 4) — and model-discovery's model
+// allowlist. Mocked so both are hermetic.
+vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineConfig }))
 
 import { PiSession } from '../PiSession'
 
@@ -337,6 +419,11 @@ beforeEach(() => {
   mockOnExit.mockClear().mockReturnValue(() => {})
   mockEphemeralInstances.length = 0
   ephemeralStartError.value = null
+  judgeInstances.length = 0
+  judgeScript.replies = []
+  judgeScript.rejectPrompt = false
+  judgeScript.hold = null
+  mockLoadEngineConfig.mockReset().mockReturnValue({ autoMode: { enabled: false } })
   MockPiRpcClient.mockClear()
   mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
@@ -1644,6 +1731,497 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     const requestCountBefore = sentPayloads(win, 'session:approval-request').length
     expect(await gate('call_15', 'bash', { command: 'npm test unit' })).toEqual({ behavior: 'allow' })
     expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 of
+// docs/automode-rework-plan.md. The classifier core is unit-tested in
+// src/main/automode/__tests__; these tests cover PI'S WIRING: the acceptEdits
+// base downgrade that makes the classifier reachable at all, the four routes
+// out of classifyAutoMode (allow / block / user-ask-rule / unavailable), the
+// denial caps, G10, and the ground-truth annotations.
+// ---------------------------------------------------------------------------
+
+describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
+  /** Auto mode ON. `fast` keeps it to ONE judge call per approval, so
+   *  `judgeScript.replies` reads one-verdict-per-gate. */
+  function enableAutoMode(extra: Record<string, unknown> = {}): void {
+    mockLoadEngineConfig.mockReturnValue({
+      autoMode: { enabled: true, twoStageMode: 'fast', ...extra }
+    })
+  }
+
+  /** A session already in `auto` with the bridge gate captured. */
+  async function autoSession(routingId: string, win: MockWindow): Promise<PiSession> {
+    const session = new PiSession(routingId, win as never, '/cwd', {})
+    await session.setPermissionMode('auto')
+    await session.run('hi')
+    return session
+  }
+
+  /** Append a synthetic assistant tool CALL to the retained history — the
+   *  transcript slimmer renders these (and their `{"outcome":…}` annotation)
+   *  for the judge, which is how a recorded outcome becomes observable. */
+  function pushToolCall(session: PiSession, toolUseId: string, toolName: string, input: Record<string, unknown>): void {
+    session.getMessages().push({
+      id: `synthetic-${toolUseId}`,
+      role: 'assistant',
+      content: [{ type: 'tool_use', toolUseId, toolName, toolInput: input }],
+      timestamp: Date.now()
+    })
+  }
+
+  it('ALLOW verdict → the tool runs with no human approval at all', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow', win)
+
+    const decision = await gate('call_a1', 'bash', { command: 'npm test' })
+
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    expect(judgeInstances).toHaveLength(1)
+    session.dispose()
+  })
+
+  it('BLOCK verdict → deny carrying the judge reason, with no human approval', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>ships uncommitted secrets</reason>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-block', win)
+
+    const decision = await gate('call_a2', 'bash', { command: 'git push origin main' })
+
+    expect(decision).toEqual({
+      behavior: 'deny',
+      reason: 'Auto mode blocked: ships uncommitted secrets'
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('a BLOCK records `automode-blocked`, which reaches the judge as the retry\'s outcome annotation', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>nope</reason>', '<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-outcome', win)
+
+    await gate('call_a3', 'bash', { command: 'rm -rf build' })
+    // The blocked call is now part of the visible transcript — a retry must be
+    // judged as a retry of something THIS monitor denied, not a fresh proposal.
+    pushToolCall(session, 'call_a3', 'bash', { command: 'rm -rf build' })
+    await gate('call_a4', 'bash', { command: 'rm -rf build' })
+
+    const retryPrompt = judgeInstances[0].prompts.at(-1) ?? ''
+    expect(retryPrompt).toContain('{"outcome":"automode-blocked"}')
+    session.dispose()
+  })
+
+  it('a HUMAN reject records `rejected-by-user` for the judge (Transient Retry must not cover it)', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    // default mode: the human answers directly, no classifier involved.
+    const session = new PiSession('rid-auto-rejected', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_a5', 'bash', { command: 'npm publish' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    session.resolveApproval(approval.requestId, 'deny')
+    await pending
+
+    pushToolCall(session, 'call_a5', 'bash', { command: 'npm publish' })
+    await session.setPermissionMode('auto')
+    await gate('call_a6', 'bash', { command: 'npm publish' })
+
+    expect(judgeInstances[0].prompts.at(-1) ?? '').toContain('{"outcome":"rejected-by-user"}')
+    session.dispose()
+  })
+
+  it('G9 — an explicit USER ask rule goes to the human with ZERO judge calls', async () => {
+    enableAutoMode()
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: [], deny: [], ask: ['Bash(git push:*)'], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-g9', win)
+
+    void gate('call_a7', 'bash', { command: 'git push origin main' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+
+    // The rule the USER singled out must never be auto-approved — auto mode is
+    // not a permission downgrade. Provenance comes from PiPermissionEngine
+    // itself (decideWithSource), not a host-side re-match.
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('G9 does not swallow a non-matching command — a different bash call is still classified', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: [], deny: [], ask: ['Bash(git push:*)'], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-g9-neg', win)
+
+    expect(await gate('call_a8', 'bash', { command: 'npm test' })).toEqual({ behavior: 'allow' })
+    expect(judgeInstances).toHaveLength(1)
+    session.dispose()
+  })
+
+  // ── User ALLOW rules must not bypass the classifier (cli.js §3 step 2) ─────
+  // Live evidence: with `Bash(git:*)` allowed, no git command ever reached the
+  // judge, and an agent evaded the static `git push --force` deny by reordering
+  // arguments. Under auto mode the allow tier is filtered out of what the engine
+  // decides on (`withoutAllowRules`), so those actions fall through to the
+  // acceptEdits base's 'ask' → the judge. Deny/ask precedence is untouched.
+
+  /** Only `project` scope carries rules; user/local are empty (merge is 3-scope). */
+  function withUserRules(rules: Partial<{ allow: string[]; ask: string[]; deny: string[] }>): void {
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? {
+            allow: rules.allow ?? [],
+            deny: rules.deny ?? [],
+            ask: rules.ask ?? [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+  }
+
+  it('auto mode: a user-ALLOWED bash action goes to the JUDGE, not straight through', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>rewrites pushed history</reason>']
+    withUserRules({ allow: ['Bash(git:*)'] })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow-filtered', win)
+
+    // The exact evasion seen live: the static deny is written `git push --force`,
+    // the agent reorders the flag, and `Bash(git:*)` used to wave it through.
+    expect(await gate('call_al1', 'bash', { command: 'git push origin main --force' })).toEqual({
+      behavior: 'deny',
+      reason: 'Auto mode blocked: rewrites pushed history'
+    })
+    expect(judgeInstances).toHaveLength(1)
+    // Not a downgrade to a human interruption either — the allow rule still
+    // means "don't ask me", it just no longer means "skip the monitor".
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('auto mode: a user ASK rule still reaches the human with ZERO judge calls alongside an allow', async () => {
+    // G9 must survive the allow filter: deny and ask are both evaluated before
+    // the allow tier, so removing allows cannot change which rung answers.
+    enableAutoMode()
+    withUserRules({ allow: ['Bash(git:*)'], ask: ['Bash(git push:*)'] })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow-vs-ask', win)
+
+    void gate('call_al2', 'bash', { command: 'git push origin main' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('auto mode: a user DENY rule still short-circuits ahead of the judge alongside an allow', async () => {
+    enableAutoMode()
+    withUserRules({ allow: ['Bash(git:*)'], deny: ['Bash(git push --force:*)'] })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-allow-vs-deny', win)
+
+    expect(await gate('call_al3', 'bash', { command: 'git push --force origin main' })).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Bash(git push --force:*)'
+    })
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('NON-auto modes: the same allow rule still hard-allows with no judge and no prompt', async () => {
+    // With no judge in the loop an allow rule is the user's only way to stop
+    // being asked; the filter is auto-mode-only for exactly that reason.
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    withUserRules({ allow: ['Bash(git:*)'] })
+    const win = new MockWindow()
+    const session = new PiSession('rid-nonauto-allow', win as never, '/cwd', {})
+    // `default` would otherwise ASK for bash — the allow rule is what silences it.
+    await session.setPermissionMode('default')
+    await session.run('hi')
+
+    expect(await gate('call_al4', 'bash', { command: 'git push origin main --force' })).toEqual({
+      behavior: 'allow'
+    })
+    expect(judgeInstances).toHaveLength(0)
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('an unusable judge → the human decides (unavailable is never a silent allow)', async () => {
+    enableAutoMode()
+    judgeScript.rejectPrompt = true
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-unavailable', win)
+
+    void gate('call_a9', 'bash', { command: 'npm test' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    session.dispose()
+  })
+
+  it('denial caps — the 3rd consecutive block hands control to the human instead of denying again', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block>', '<block>yes</block>', '<block>yes</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-caps', win)
+
+    expect((await gate('call_b1', 'bash', { command: 'a' })).behavior).toBe('deny')
+    expect((await gate('call_b2', 'bash', { command: 'b' })).behavior).toBe('deny')
+    void gate('call_b3', 'bash', { command: 'c' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    session.dispose()
+  })
+
+  it('denial caps — the SECOND block on the SAME rule hands over, naming the rule on the approval card', async () => {
+    // An agent blocked twice on one rule is grinding one intent; rewording will
+    // not produce consent it does not have, so the human gets it a block early
+    // (shared AutoModeDenialTracker, keyed on ClassifyResult.category).
+    enableAutoMode()
+    judgeScript.replies = [
+      '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] would drop pushed commits</reason>',
+      '<block>yes</block><category>Git Destructive</category><reason>[Git Destructive] still would drop pushed commits</reason>'
+    ]
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-caps-category', win)
+
+    expect((await gate('call_b4', 'bash', { command: 'git push --force' })).behavior).toBe('deny')
+    void gate('call_b5', 'bash', { command: 'git push -f origin main' })
+
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { decisionReason?: string }
+    ]
+    expect(approval.decisionReason).toContain('Git Destructive')
+    expect(approval.decisionReason).toContain('2 times')
+    session.dispose()
+  })
+
+  it('two blocks on DIFFERENT rules still only deny — the category cap is not a 2-consecutive cap', async () => {
+    enableAutoMode()
+    judgeScript.replies = [
+      '<block>yes</block><category>Git Destructive</category><reason>a</reason>',
+      '<block>yes</block><category>Network Exposure</category><reason>b</reason>'
+    ]
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-caps-category-neg', win)
+
+    expect((await gate('call_b6', 'bash', { command: 'git push --force' })).behavior).toBe('deny')
+    expect((await gate('call_b7', 'bash', { command: 'ngrok http 3000' })).behavior).toBe('deny')
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('the deny sent to pi names the matched rule even when the judge reason omits it', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><category>Git Destructive</category><reason>would drop pushed commits</reason>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-deny-rule-name', win)
+
+    // Without the rule name the agent cannot tell WHICH bar it hit, and so
+    // cannot ask the user for the consent that would clear it.
+    expect(await gate('call_b8', 'bash', { command: 'git push --force' })).toEqual({
+      behavior: 'deny',
+      reason: 'Auto mode blocked: [Git Destructive] would drop pushed commits'
+    })
+    session.dispose()
+  })
+
+  it('an ALLOW between blocks resets the consecutive counter', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block>', '<block>no</block>', '<block>yes</block>', '<block>yes</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-caps-reset', win)
+
+    expect((await gate('call_c1', 'bash', { command: 'a' })).behavior).toBe('deny')
+    expect((await gate('call_c2', 'bash', { command: 'b' })).behavior).toBe('allow')
+    expect((await gate('call_c3', 'bash', { command: 'c' })).behavior).toBe('deny')
+    // Without the reset this 4th call would be the 3rd consecutive block and
+    // would escalate to the human; with it, it is only the 2nd.
+    expect((await gate('call_c4', 'bash', { command: 'd' })).behavior).toBe('deny')
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('G10 — switching out of auto while the judge is thinking discards the verdict and asks the human', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    let release = (): void => {}
+    judgeScript.hold = new Promise<void>((r) => {
+      release = r
+    })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-g10', win)
+
+    const pending = gate('call_d1', 'bash', { command: 'npm test' })
+    await vi.waitFor(() => expect(judgeInstances[0]?.prompts.length).toBe(1))
+    // The user drops out of auto mode mid-flight — the (ALLOW) verdict is now
+    // stale authority.
+    await session.setPermissionMode('default')
+    release()
+
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    session.resolveApproval(approval.requestId, 'deny')
+    await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'User denied' })
+    session.dispose()
+  })
+
+  it('reads and edits never reach the judge — auto mode runs on the acceptEdits base (G8)', async () => {
+    enableAutoMode()
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-base', win)
+
+    expect(await gate('call_e1', 'read', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_e2', 'ls', { path: 'src' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_e3', 'edit', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(judgeInstances).toHaveLength(0)
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  it('an explicit user DENY rule still beats the classifier in auto mode', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: [], deny: ['Bash(rm:*)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-deny-rule', win)
+
+    expect(await gate('call_f1', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Bash(rm:*)'
+    })
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('auto mode DISABLED keeps `auto`\'s historical allow-everything base (no judge, no prompt)', async () => {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-off', win)
+
+    expect(await gate('call_g1', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({ behavior: 'allow' })
+    expect(judgeInstances).toHaveLength(0)
+    session.dispose()
+  })
+
+  it('the judge process carries the rendered policy as --system-prompt and is torn down with the session', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-judge-proc', win)
+    await gate('call_h1', 'bash', { command: 'npm test' })
+
+    const args = judgeInstances[0].opts.args
+    expect(args).toContain('--no-tools')
+    const system = args[args.indexOf('--system-prompt') + 1]
+    // Rendered from OUR corpus, with the host's environment facts in it.
+    expect(system).toContain('security monitor')
+    expect(system).toContain('/cwd')
+
+    session.cancel()
+    expect(judgeInstances[0].dispose).toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('the judge model comes from autoMode.judgeModel when set', async () => {
+    enableAutoMode({ judgeModel: 'openai-codex/gpt-5.4-mini' })
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-judge-model', win)
+    await gate('call_i1', 'bash', { command: 'npm test' })
+
+    expect(judgeInstances[0].request).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set_model', provider: 'openai-codex', modelId: 'gpt-5.4-mini' })
+    )
+    session.dispose()
+  })
+
+  it('the judge sees ONE warm process across approvals, reset with new_session between them', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>', '<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-warm', win)
+
+    await gate('call_j1', 'bash', { command: 'npm test' })
+    await gate('call_j2', 'bash', { command: 'npm run build' })
+
+    expect(judgeInstances).toHaveLength(1)
+    const types = judgeInstances[0].request.mock.calls.map((c) => (c[0] as { type: string }).type)
+    expect(types.filter((t) => t === 'new_session')).toHaveLength(1)
+    session.dispose()
+  })
+
+  it('the judge prompt carries the PROPOSED action, and a failed ground-truth capture contributes nothing', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-meta', win)
+
+    await gate('call_k1', 'bash', { command: 'git commit -m x' })
+
+    const prompt = judgeInstances[0].prompts[0]
+    expect(prompt).toContain('Proposed next action:\nbash {"command":"git commit -m x"}')
+    // `git commit` DOES request a gitStatus capture, but `/cwd` is not a
+    // repository so the capture fails — and per ground-truth.ts's cardinal
+    // rule a failed capture emits NOTHING. An empty `{"meta":{}}` would read to
+    // the judge as "we measured and found nothing", which is a lie.
+    expect(prompt).not.toContain('"meta"')
+    session.dispose()
+  })
+
+  it('redirects are measured into the meta line, and absent when the command has none', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>', '<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-redirect', win)
+
+    await gate('call_r1', 'bash', { command: 'npm test > build.log 2>&1' })
+    expect(judgeInstances[0].prompts[0]).toContain(
+      '{"meta":{"redirects":{"targets":["build.log"],"allInScope":true,' +
+        '"outOfScope":[],"unresolvable":[],"protectedHits":[]}}}\nProposed next action:'
+    )
+
+    // No redirect → no measurement → no meta line at all (`/cwd` is not a repo,
+    // so the gitStatus capture contributes nothing either).
+    await gate('call_r2', 'bash', { command: 'npm test' })
+    expect(judgeInstances[0].prompts[1]).not.toContain('redirects')
+    session.dispose()
+  })
+
+  it('a protected redirect target (shell rc file) is reported, never waved through', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>yes</block><reason>rc file</reason>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-redirect-rc', win)
+
+    await gate('call_r3', 'bash', { command: 'echo malicious >> ~/.bashrc' })
+
+    const prompt = judgeInstances[0].prompts[0]
+    expect(prompt).toContain('"protectedHits":[".bashrc"]')
+    expect(prompt).toContain('"allInScope":false')
+    session.dispose()
   })
 })
 
@@ -3128,8 +3706,28 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     // model-discovery.ts's ephemeral pattern, PLUS --no-tools). --no-tools is
     // the enforced safety guarantee: bash/edit/write are never registered, so
     // the ephemeral can't mutate the live session's cwd regardless of framing.
-    expect(eph.opts).toEqual({ cwd: '/cwd', args: ['--mode', 'rpc', '--no-session', '--no-tools'] })
+    expect(eph.opts).toEqual({
+      cwd: '/cwd',
+      args: [
+        '--mode',
+        'rpc',
+        '--no-session',
+        '--no-tools',
+        '--no-extensions',
+        '--no-skills',
+        '--no-context-files',
+        '--no-prompt-templates'
+      ]
+    })
     expect(eph.opts.args).toContain('--no-tools')
+    // Discovery is off too: the repo's own AGENTS.md/CLAUDE.md, .pi/skills and
+    // .pi/extensions are all writable by the very agent this ephemeral is being
+    // asked ABOUT, so loading them would let it steer (or run code in) the
+    // observer answering the user's question. The transcript context the
+    // feature needs is passed explicitly in the prompt.
+    expect(eph.opts.args).toContain('--no-context-files')
+    expect(eph.opts.args).toContain('--no-skills')
+    expect(eph.opts.args).toContain('--no-extensions')
     expect(eph.opts.args).not.toContain('-e')
     expect(eph.opts.env).toBeUndefined()
 

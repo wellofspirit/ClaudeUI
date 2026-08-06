@@ -1,6 +1,6 @@
-# ADR-026 — Development workflow: Opus orchestrates, Sonnet implements, review every line
+# ADR-026 — Development workflow: main model orchestrates, sub-agent implements, review every line
 
-**Status:** Accepted
+**Status:** Accepted (model tiers updated 2026-07-30: Fable orchestrates, Opus implements)
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
 **Operational detail:** the loop + standing constraints below. (Originally mirrored from `docs/v2/ROADMAP.md` § "How we work"; the V2 docs were removed after V2 shipped, so this ADR is now the single home.)
 
@@ -8,7 +8,9 @@
 
 All of V2 (engine/vendor/account split, the opencode backend, persistence, metering, the
 interaction-parity series) was built with one division of labour, and it held up: **the main model
-(Opus) is the orchestrator and reviewer; a Sonnet sub-agent writes the code.** Every phase that
+is the orchestrator and reviewer; a cheaper sub-agent writes the code.** (Originally Opus
+orchestrating Sonnet; since 2026-07-30 the tiers are **Fable orchestrating Opus** — the division of
+labour is the decision, the specific models track whatever the current tier pairing is.) Every phase that
 followed it surfaced at least one real bug *in review* — a model-picker regression, dead persisted
 data, a vacuous migration test, an `acquire()` race, a per-frame token overcount, a wrong auth-source
 mapping — bugs that the implementing agent's own summary did not mention. The lesson, repeatedly
@@ -28,9 +30,9 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 
 ### Roles
 
-- **Main model (Opus) — orchestrator + reviewer + committer.** Owns scope, design, the kickoff spec,
+- **Main model (Fable) — orchestrator + reviewer + committer.** Owns scope, design, the kickoff spec,
   line-by-line review, the gates, the real-app verification, and the commit. The buck stops here.
-- **Sonnet sub-agent — implementer.** Writes code against the spec. **Never** commits, `git add`s,
+- **Opus sub-agent — implementer.** Writes code against the spec. **Never** commits, `git add`s,
   creates branches, or runs `bun install`/`add`/`remove`. Leaves the working tree for review and
   reports deltas, exact verify-gate output, and any deviation from the spec. **Never self-certifies.**
 
@@ -45,7 +47,7 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 3. **Write a kickoff spec**: scope decisions with the chosen forks, a precise file/seam map,
    verified facts so the agent doesn't re-discover, an explicit out-of-scope list, step-by-step,
    verify gates, gotchas, a suggested commit message.
-4. **Dispatch the Sonnet agent** (`Agent` tool, `subagent_type: general-purpose`, `model: sonnet`)
+4. **Dispatch the Opus agent** (`Agent` tool, `subagent_type: general-purpose`, `model: opus`)
    pointed at the spec, with the standing constraints (no commit / no branch / no `bun install`).
 5. **Review every single line** of the agent's diff (`git diff <base>`). Read the actual code, not the
    agent's summary. Run independent checks (re-run gates, grep, probe the wire). Hunt subtle bugs.
@@ -72,7 +74,7 @@ review loop and the real-build verification are both clean.
 
 ### Parallelism
 
-Independent slices may be dispatched as **concurrent** Sonnet agents (one per area), but each diff is
+Independent slices may be dispatched as **concurrent** implementer agents (one per area), but each diff is
 reviewed on its own and the gates run on the combined tree before any commit. Parallel dispatch never
 relaxes the review bar.
 
@@ -122,6 +124,6 @@ relaxes the review bar.
 
 - **Let the implementing agent self-certify** (run its own gates and call it done). Rejected: every
   phase proved the implementer misses its own bugs and its summary overstates correctness.
-- **Opus implements directly, no sub-agent.** Viable for small changes (and used for the spec/ADRs/
+- **Main model implements directly, no sub-agent.** Viable for small changes (and used for the spec/ADRs/
   tooling themselves), but burns the orchestrator's context on mechanical edits and loses the
   fresh-eyes review separation on larger work.

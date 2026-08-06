@@ -5,10 +5,38 @@ import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
   SharedProviderModel,
+  SharedProviderRouteDiagnosis,
   SharedProviderStatus
 } from '../../../../shared/shared-provider'
+import { SelectMenu } from '../shared/SelectMenu'
+
+/**
+ * Explain an enabled-but-empty route, and say where to fix it. Each string names
+ * the cause first so the reason is legible even when truncated.
+ */
+function routeDiagnosisText(
+  harness: ConfigurableHarnessId,
+  diagnosis: SharedProviderRouteDiagnosis
+): string {
+  switch (diagnosis) {
+    case 'provider-disabled':
+      return `— disabled in ${harness}; enable it under ${harness} · Providers`
+    case 'models-restricted':
+      return `— every model is filtered out; adjust the allowlist under ${harness} · Providers`
+    case 'no-models-discovered':
+      return `— ${harness} reported no models; check it is installed and reachable`
+  }
+}
 
 const harnesses: ConfigurableHarnessId[] = ['pi', 'opencode']
+
+/** Wire protocols a custom shared provider can speak. First entry = the default. */
+const PROTOCOL_OPTIONS: { value: NonNullable<SharedProviderDefinition['protocol']>; label: string }[] =
+  [
+    { value: 'openai-completions', label: 'OpenAI completions' },
+    { value: 'openai-responses', label: 'OpenAI responses' },
+    { value: 'anthropic-messages', label: 'Anthropic messages' }
+  ]
 const blank = (): SharedProviderDefinition => ({
   id: '',
   name: '',
@@ -336,33 +364,45 @@ function ProviderCard({
                 {routeStatus?.error ??
                   `${routeStatus?.delivered ? 'delivered' : 'not delivered'} · ${routeStatus?.modelCount ?? 0} models`}
               </span>
+              {/* A bare "0 models" is what made a real failure opaque: the
+                  credential was delivered fine, but the engine's own provider veto
+                  hid it. Name the cause AND the fix. */}
+              {routeStatus?.diagnosis && !routeStatus.error && (
+                <span
+                  data-testid="SharedProviderCard.routeDiagnosis"
+                  data-harness={h}
+                  data-diagnosis={routeStatus.diagnosis}
+                  className="text-[10px] text-yellow-400/90"
+                >
+                  {routeDiagnosisText(h, routeStatus.diagnosis)}
+                </span>
+              )}
             </label>
             {route.enabled && (
               <div className="mt-1">
                 <label className="text-[10px] text-text-muted" htmlFor={`${definition.id}-${h}-default`}>
                   Default model for {h}
                 </label>
-                <select
+                <SelectMenu
                   id={`${definition.id}-${h}-default`}
-                  data-testid="SharedProviderCard.defaultModel"
-                  data-harness={h}
+                  testid="SharedProviderCard.defaultModel"
+                  dataAttrs={{ 'data-harness': h }}
                   disabled={busy || readOnly}
-                  aria-label={`${h} default model`}
+                  ariaLabel={`${h} default model`}
                   value={route.defaultModel ?? ''}
-                  onChange={(e) => onDefault(h, e.target.value)}
-                  className="mt-0.5 w-full rounded border border-border/40 bg-bg-input px-2 py-1 text-[11px]"
-                >
-                  <option value="">No default from this provider</option>
-                  {route.defaultModel &&
-                    !available.some((model) => model.id === route.defaultModel) && (
-                      <option value={route.defaultModel}>{route.defaultModel} (unavailable)</option>
-                    )}
-                  {available.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name || m.id}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => onDefault(h, v)}
+                  options={[
+                    { value: '', label: 'No default from this provider' },
+                    // A configured model the provider no longer delivers stays
+                    // selectable so the control reports what is actually saved.
+                    ...(route.defaultModel &&
+                    !available.some((model) => model.id === route.defaultModel)
+                      ? [{ value: route.defaultModel, label: `${route.defaultModel} (unavailable)` }]
+                      : []),
+                    ...available.map((m) => ({ value: m.id, label: m.name || m.id }))
+                  ]}
+                  triggerClassName="mt-0.5 w-full rounded border border-border/40 bg-bg-input px-2 py-1 text-[11px]"
+                />
                 <div className="mt-0.5 text-[10px] text-text-muted/70">
                   All delivered models remain available unless restricted in {h} model settings.
                 </div>
@@ -436,18 +476,15 @@ function ProviderForm({
       <div className="grid grid-cols-[180px_1fr] gap-2">
         <label className="space-y-1 text-[10px] text-text-muted">
           Protocol
-          <select
-            data-testid="SharedProviderForm.protocol"
-            value={draft.protocol}
-            onChange={(e) =>
-              set({ protocol: e.target.value as SharedProviderDefinition['protocol'] })
-            }
-            className={fieldClass}
-          >
-            <option value="openai-completions">OpenAI completions</option>
-            <option value="openai-responses">OpenAI responses</option>
-            <option value="anthropic-messages">Anthropic messages</option>
-          </select>
+          <SelectMenu
+            testid="SharedProviderForm.protocol"
+            // `protocol` is optional on the definition; a native select showed
+            // its first option when unset, so the fallback keeps that reading.
+            value={draft.protocol ?? PROTOCOL_OPTIONS[0].value}
+            onChange={(v) => set({ protocol: v as SharedProviderDefinition['protocol'] })}
+            options={PROTOCOL_OPTIONS}
+            triggerClassName={fieldClass}
+          />
         </label>
         <label className="space-y-1 text-[10px] text-text-muted">
           Base URL

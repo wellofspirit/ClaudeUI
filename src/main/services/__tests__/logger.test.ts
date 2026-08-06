@@ -1,7 +1,27 @@
 /**
  * @vitest-environment node
+ *
+ * Two halves: the pure-logic mirrors below (ring buffer / filter parsing /
+ * error formatting), and — at the bottom — real-module tests for the M-LG1
+ * file-write policy (buffered async appends, retention pruning, per-day size
+ * cap), which redirect `os.homedir()` at a temp dir so LOG_DIR never points at
+ * the developer's real `~/.claude/ui/logs`.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
+import * as realFs from 'node:fs'
+import * as nodePath from 'node:path'
+import * as nodeOs from 'node:os'
+
+let TEMP_HOME = ''
+
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os')
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME }
+  }
+})
 
 // We can't import the logger module directly since it has side effects
 // (reads process.env, opens files). Instead, extract and test the pure logic.
@@ -236,5 +256,190 @@ describe('formatError', () => {
     // JSON.stringify(undefined) returns the JS value undefined (not a string).
     // The function returns that value directly — a minor edge case.
     expect(formatError(undefined)).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Real-module: file-write policy (M-LG1)
+//
+// RED-FIRST NOTE: pre-fix `writeToFile` called `appendFileSync` on every log
+// call, so "the line is NOT on disk before flushSync()" fails immediately (the
+// file exists and already holds the line), there was no `flushSync` /
+// `pruneOldLogs` export at all (the prune + size-cap suites cannot even
+// compile against the old module), and nothing capped a day's file size.
+// ---------------------------------------------------------------------------
+
+type LoggerModule = typeof import('../logger')
+
+function logDir(): string {
+  return nodePath.join(TEMP_HOME, '.claude', 'ui', 'logs')
+}
+
+function dayKey(offsetDays = 0): string {
+  const d = new Date()
+  d.setDate(d.getDate() - offsetDays)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}${m}${day}`
+}
+
+function freshHome(prefix: string): string {
+  return realFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), prefix))
+}
+
+describe('logger — buffered file writes, subscribers, pruning', () => {
+  let mod: LoggerModule
+  let home = ''
+  let savedLogDirEnv: string | undefined
+
+  beforeAll(async () => {
+    home = freshHome('logger-buffered-')
+    TEMP_HOME = home
+    // These tests want LOG_DIR derived from the mocked os.homedir() above —
+    // the vitest setup files set CLAUDE_UI_LOG_DIR globally, which would
+    // otherwise take precedence over the homedir() mock.
+    savedLogDirEnv = process.env.CLAUDE_UI_LOG_DIR
+    delete process.env.CLAUDE_UI_LOG_DIR
+    vi.resetModules()
+    mod = await import('../logger')
+    mod.logger.globalLevel = 'debug'
+  })
+
+  afterAll(() => {
+    TEMP_HOME = home
+    if (savedLogDirEnv !== undefined) process.env.CLAUDE_UI_LOG_DIR = savedLogDirEnv
+    realFs.rmSync(home, { recursive: true, force: true })
+  })
+
+  it('buffers the line in memory and only lands it on disk at flushSync()', () => {
+    const file = nodePath.join(logDir(), `${dayKey()}.log`)
+    mod.logger.info('BufTest', 'buffered-line-marker')
+
+    // Neither the 64-line threshold nor the 500 ms timer has fired.
+    expect(realFs.existsSync(file)).toBe(false)
+
+    mod.flushSync()
+    expect(realFs.readFileSync(file, 'utf-8')).toContain('buffered-line-marker')
+  })
+
+  it('a level-suppressed line reaches subscribers and the ring but never the file', () => {
+    const file = nodePath.join(logDir(), `${dayKey()}.log`)
+    const seen: string[] = []
+    const unsub = mod.logger.subscribe((entry) => seen.push(entry.message))
+
+    mod.logger.globalLevel = 'error'
+    try {
+      mod.logger.info('BufTest', 'suppressed-line-marker')
+    } finally {
+      mod.logger.globalLevel = 'debug'
+      unsub()
+    }
+    mod.flushSync()
+
+    expect(seen).toContain('suppressed-line-marker')
+    expect(mod.logRing.toArray().some((e) => e.message === 'suppressed-line-marker')).toBe(true)
+    expect(realFs.readFileSync(file, 'utf-8')).not.toContain('suppressed-line-marker')
+  })
+
+  it('pruneOldLogs deletes daily files past the retention window and keeps everything else', async () => {
+    const dir = logDir()
+    realFs.mkdirSync(dir, { recursive: true })
+    const stale = nodePath.join(dir, `${dayKey(mod.LOG_RETENTION_DAYS + 3)}.log`)
+    const recent = nodePath.join(dir, `${dayKey(3)}.log`)
+    const unrelated = nodePath.join(dir, 'notes.txt')
+    for (const f of [stale, recent, unrelated]) realFs.writeFileSync(f, 'x')
+
+    await mod.pruneOldLogs()
+
+    expect(realFs.existsSync(stale)).toBe(false)
+    expect(realFs.existsSync(recent)).toBe(true)
+    expect(realFs.existsSync(unrelated)).toBe(true)
+  })
+})
+
+describe('logger — per-day size cap', () => {
+  let mod: LoggerModule
+  let home = ''
+  let savedLogDirEnv: string | undefined
+
+  beforeAll(async () => {
+    home = freshHome('logger-sizecap-')
+    TEMP_HOME = home
+    savedLogDirEnv = process.env.CLAUDE_UI_LOG_DIR
+    delete process.env.CLAUDE_UI_LOG_DIR
+    vi.resetModules()
+    mod = await import('../logger')
+    mod.logger.globalLevel = 'debug'
+  })
+
+  afterAll(() => {
+    TEMP_HOME = home
+    if (savedLogDirEnv !== undefined) process.env.CLAUDE_UI_LOG_DIR = savedLogDirEnv
+    realFs.rmSync(home, { recursive: true, force: true })
+  })
+
+  it('stops appending once the day is over budget, after one final cap notice', () => {
+    const dir = logDir()
+    realFs.mkdirSync(dir, { recursive: true })
+    const file = nodePath.join(dir, `${dayKey()}.log`)
+    // Extend (not fill) the file so statSync reports a day already at the cap.
+    realFs.writeFileSync(file, '')
+    realFs.truncateSync(file, mod.LOG_MAX_BYTES_PER_DAY)
+
+    mod.logger.info('CapTest', 'last-line-before-cap')
+    mod.flushSync()
+    mod.logger.info('CapTest', 'line-after-cap')
+    mod.flushSync()
+
+    // Read only the tail we appended — the leading 50 MB is a hole.
+    const size = realFs.statSync(file).size
+    const tailLen = size - mod.LOG_MAX_BYTES_PER_DAY
+    const buf = Buffer.alloc(tailLen)
+    const fd = realFs.openSync(file, 'r')
+    try {
+      realFs.readSync(fd, buf, 0, tailLen, mod.LOG_MAX_BYTES_PER_DAY)
+    } finally {
+      realFs.closeSync(fd)
+    }
+    const tail = buf.toString('utf-8')
+
+    expect(tail).toContain('last-line-before-cap')
+    expect(tail).toContain('size cap reached')
+    expect(tail).not.toContain('line-after-cap')
+  })
+})
+
+describe('logger — CLAUDE_UI_LOG_DIR redirect (guard: fails pre-fix, when LOG_DIR ignores the env var)', () => {
+  it('writes to the CLAUDE_UI_LOG_DIR-redirected dir, never the real ~/.claude/ui/logs', async () => {
+    const redirectDir = freshHome('logger-redirect-')
+    const savedLogDirEnv = process.env.CLAUDE_UI_LOG_DIR
+    // `node:os` (unlike the bare 'os' specifier mocked above) was never
+    // touched by vi.mock, so this is the genuine machine homedir.
+    const realLogDir = nodePath.join(nodeOs.homedir(), '.claude', 'ui', 'logs')
+    const marker = `guard-marker-${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+    try {
+      process.env.CLAUDE_UI_LOG_DIR = redirectDir
+      vi.resetModules()
+      const mod: LoggerModule = await import('../logger')
+      mod.logger.globalLevel = 'debug'
+      mod.logger.error('GuardTest', marker)
+      mod.flushSync()
+
+      const redirectedFile = nodePath.join(redirectDir, `${dayKey()}.log`)
+      expect(realFs.existsSync(redirectedFile)).toBe(true)
+      expect(realFs.readFileSync(redirectedFile, 'utf-8')).toContain(marker)
+
+      const realFile = nodePath.join(realLogDir, `${dayKey()}.log`)
+      if (realFs.existsSync(realFile)) {
+        expect(realFs.readFileSync(realFile, 'utf-8')).not.toContain(marker)
+      }
+    } finally {
+      if (savedLogDirEnv === undefined) delete process.env.CLAUDE_UI_LOG_DIR
+      else process.env.CLAUDE_UI_LOG_DIR = savedLogDirEnv
+      vi.resetModules()
+      realFs.rmSync(redirectDir, { recursive: true, force: true })
+    }
   })
 })

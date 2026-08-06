@@ -89,7 +89,22 @@ vi.mock('node:fs/promises', () => ({
     const name = basenameOf(p)
     vfs.files.set(name, (vfs.files.get(name) ?? '') + data)
   }),
-  mkdir: vi.fn(async () => undefined)
+  mkdir: vi.fn(async () => undefined),
+  // The .credentials.json refresh write now goes through writeJsonAtomicAsync
+  // (temp-file + rename). Model rename/chmod/unlink over the basename-keyed vfs
+  // so the atomic write still lands the final content under '.credentials.json'.
+  rename: vi.fn(async (from: string | URL, to: string | URL) => {
+    const f = basenameOf(from)
+    const t = basenameOf(to)
+    if (vfs.files.has(f)) {
+      vfs.files.set(t, vfs.files.get(f)!)
+      vfs.files.delete(f)
+    }
+  }),
+  chmod: vi.fn(async () => undefined),
+  unlink: vi.fn(async (p: string | URL) => {
+    vfs.files.delete(basenameOf(p))
+  })
 }))
 
 // ---------------------------------------------------------------------------

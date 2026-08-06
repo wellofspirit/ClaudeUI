@@ -9,6 +9,7 @@ import { StreamingText } from '../StreamingText'
 import { ThinkingBlock } from '../ThinkingBlock'
 import { InputBox } from '../InputBox'
 import { TodoWidget } from '../../TodoWidget'
+import { SentFilesWidget } from '../../SentFilesWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
@@ -16,10 +17,37 @@ import { VendorAuthRequiredCard } from '../VendorAuthRequiredCard'
 import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
+import {
+  canUseFullscreenGesture,
+  useFullscreenDoubleTap
+} from '../../../hooks/useFullscreenDoubleTap'
+import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
+
+/** One-time discovery hint for the mobile-web double-tap fullscreen gesture. */
+const FULLSCREEN_HINT_KEY = 'claudeui.hint.fullscreenDoubleTap'
+/** The hint retires itself even if the user never acknowledges it. */
+const FULLSCREEN_HINT_TIMEOUT_MS = 10_000
+
+function readFullscreenHintDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(FULLSCREEN_HINT_KEY) === '1'
+  } catch {
+    // Private mode — show the hint, it just won't be remembered.
+    return false
+  }
+}
+
+function persistFullscreenHintDismissed(): void {
+  try {
+    window.localStorage.setItem(FULLSCREEN_HINT_KEY, '1')
+  } catch {
+    /* storage unavailable — the hint still stays hidden for this session */
+  }
+}
 
 export function ChatPanel(): React.JSX.Element {
   const focusedData = useFocusedAgentData()
@@ -216,6 +244,24 @@ export function ChatPanel(): React.JSX.Element {
   const hasContent = messages.length > 0 || hasStreamingText || !!thinkingStartedAt
   const showEmptyScreen = !hasContent && status.state === 'idle'
 
+  // Mobile web only: double-tapping the chat toggles browser fullscreen (there
+  // is no button — reclaiming the browser chrome is the whole point).
+  const fullscreenGestureEnabled = canUseFullscreenGesture(isMobile)
+  const [fullscreenHintDismissed, setFullscreenHintDismissed] = useState(
+    readFullscreenHintDismissed
+  )
+  const dismissFullscreenHint = useCallback(() => {
+    setFullscreenHintDismissed(true)
+    persistFullscreenHintDismissed()
+  }, [])
+  useFullscreenDoubleTap(scrollRef, fullscreenGestureEnabled, dismissFullscreenHint)
+  const showFullscreenHint = fullscreenGestureEnabled && !fullscreenHintDismissed
+  useEffect(() => {
+    if (!showFullscreenHint) return
+    const id = setTimeout(dismissFullscreenHint, FULLSCREEN_HINT_TIMEOUT_MS)
+    return () => clearTimeout(id)
+  }, [showFullscreenHint, dismissFullscreenHint])
+
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant') return messages[i].id
@@ -252,16 +298,21 @@ export function ChatPanel(): React.JSX.Element {
               style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }}
               className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}
             >
-              {messages.map((msg) => (
-                <div key={msg.id} className="cv-auto">
-                  <MessageBubble
-                    message={msg}
-                    pendingApprovals={pendingApprovals}
-                    isLastAssistant={msg.id === lastAssistantId}
-                    thinkingStartedAt={thinkingStartedAt}
-                  />
-                </div>
-              ))}
+              {/* Renders a fragment — no wrapper element, so the flex-column
+                  layout of the message list is untouched. Owns the full-screen
+                  image viewer that a thumbnail click opens. */}
+              <ImageGalleryProvider messages={messages}>
+                {messages.map((msg) => (
+                  <div key={msg.id} className="cv-auto">
+                    <MessageBubble
+                      message={msg}
+                      pendingApprovals={pendingApprovals}
+                      isLastAssistant={msg.id === lastAssistantId}
+                      thinkingStartedAt={thinkingStartedAt}
+                    />
+                  </div>
+                ))}
+              </ImageGalleryProvider>
               <div className="flex flex-col gap-5">
                 {hasStreamingText && <StreamingText />}
                 {thinkingStartedAt && <ThinkingBlock text={streamingThinking} isActive />}
@@ -305,7 +356,44 @@ export function ChatPanel(): React.JSX.Element {
         </div>
       </div>
 
-      <TodoWidget />
+      {/* Floating widget stack — each child renders null when it has nothing to
+          show, so the gap only appears when both are live. Positioning lives
+          here (not in the widgets) so the stack stays a single decision.
+          Spans the panel (left-4/right-4) so the widgets' percentage widths
+          resolve against the panel, not a shrink-wrapped box; pointer-events
+          pass through the empty band, the widgets re-enable their own. */}
+      <div className="absolute top-14 left-4 right-4 z-10 flex flex-col items-end gap-2 pointer-events-none">
+        <TodoWidget />
+        <SentFilesWidget />
+      </div>
+      {showFullscreenHint && (
+        <div
+          data-testid="FullscreenHint"
+          className="absolute top-14 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-bg-tertiary border border-border rounded-full px-3 py-1.5 text-[12px] text-text-secondary shadow-lg animate-fade-in"
+        >
+          <span>Double-tap the chat to toggle full screen</span>
+          <button
+            type="button"
+            data-testid="FullscreenHint.dismiss"
+            onClick={dismissFullscreenHint}
+            aria-label="Dismiss hint"
+            className="shrink-0 text-text-muted hover:text-text-primary transition-colors cursor-default"
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
       <FloatingApproval />
       <VendorAuthRequiredCard />
       <FloatingError />

@@ -29,11 +29,13 @@ import {
   REFRESH_MARGIN_MS,
   RETRY_BASE_MS,
   MAX_TRANSIENT_RETRIES,
+  GIVE_UP_BACKOFF_BASE_MS,
   type VaultLike,
   type CodexFeedTarget,
   type CodexCredentialInput,
   type CodexEntrySnapshot
 } from '../CredentialSync'
+import type { FSWatcher } from 'node:fs'
 import type { VaultCredential } from '../codex-oauth'
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,77 @@ function writeRaw(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Poll until `predicate` holds. Generous deadline — nominal completion is
+ *  tens of ms; the slack only matters under full-suite CPU starvation. */
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`waitFor timed out: ${label}`)
+    await sleep(10)
+  }
+}
+
+/**
+ * Fire an IDEMPOTENT `trigger` (an auth-file write) and poll until `done`.
+ * If the watch event never arrives, re-fire the trigger every `refireMs`.
+ *
+ * The re-fire is the actual de-flaker: on macOS, fs.watch arms its FSEvents
+ * stream asynchronously, so a write landing right after `sync.start()` can be
+ * LOST outright — no event, ever. That (not CPU starvation) is what made this
+ * suite flake: a fixed sleep(350) — or any pure wait — times out on a lost
+ * event, while a re-written file re-provokes the (by then live) watcher.
+ * Triggers must be idempotent: re-firing after `done` already flipped, or
+ * re-delivering the same content twice, must not change the asserted outcome
+ * (all triggers below re-write identical content, so extra reconciles hit
+ * CredentialSync's own refresh-equality loop guard).
+ *
+ * `refireMs` must comfortably EXCEED the sync's watchDebounceMs — every event
+ * RESETS the debounce timer, so re-firing faster than the debounce would
+ * starve the reconcile forever.
+ */
+async function triggerUntil(
+  trigger: () => void,
+  done: () => boolean,
+  label: string,
+  refireMs = 500,
+  timeoutMs = 10_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  trigger()
+  let lastFire = Date.now()
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`triggerUntil timed out: ${label}`)
+    if (Date.now() - lastFire >= refireMs) {
+      trigger()
+      lastFire = Date.now()
+    }
+    await sleep(10)
+  }
+}
+
+/**
+ * Shadow the private `handleExternalChange` with a per-engine completion
+ * counter so the fs-watch tests can wait for a guarded reconcile to have
+ * actually RUN before asserting it did NOT adopt — a fixed sleep could pass
+ * without the reconcile ever running (and did, silently, when the watch
+ * event was lost — see triggerUntil).
+ */
+function instrumentReconciles(sync: CredentialSync): (engine: 'pi' | 'opencode') => number {
+  const internals = sync as unknown as {
+    handleExternalChange(engine: 'pi' | 'opencode'): Promise<void>
+  }
+  const original = internals.handleExternalChange.bind(sync)
+  const counts = { pi: 0, opencode: 0 }
+  internals.handleExternalChange = async (engine): Promise<void> => {
+    try {
+      await original(engine)
+    } finally {
+      counts[engine]++
+    }
+  }
+  return (engine) => counts[engine]
 }
 
 // ---------------------------------------------------------------------------
@@ -314,22 +387,58 @@ describe('CredentialSync route policy', () => {
     expect(opencode.feed).not.toHaveBeenCalled()
   })
 
-  it('removes stale disabled credentials on startup with a readable or empty vault', async () => {
+  it('removes a disabled route copy ONLY when it is the managed vault credential; never with an empty vault (M-AT3)', async () => {
+    // Connected vault (refresh 'r') and the disabled opencode store holds the
+    // SAME credential ClaudeUI vended → ours to clean up.
     const readable = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
     const readablePi = fakeFeedTarget()
     const readableOpencode = fakeFeedTarget()
+    readableOpencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
     const readableSync = new CredentialSync({ vault: readable.vault, getEnabledRoutes: piOnly })
     readableSync.configure({ pi: readablePi.target, opencode: readableOpencode.target })
     await readableSync.start()
     expect(readableOpencode.remove).toHaveBeenCalledWith('openai')
     readableSync.stop()
 
+    // Empty vault → ClaudeUI managed nothing → a disabled store's credential is
+    // the user's own; never remove it (this is the M-AT3 data-loss fix).
     const emptyPi = fakeFeedTarget()
     const emptyOpencode = fakeFeedTarget()
+    emptyOpencode.read.mockResolvedValue({ access: 'u', refresh: 'user-own', expires: Date.now() + 999_999 })
     const emptySync = new CredentialSync({ vault: makeFakeVault(null).vault, getEnabledRoutes: piOnly })
     emptySync.configure({ pi: emptyPi.target, opencode: emptyOpencode.target })
     await emptySync.start()
-    expect(emptyOpencode.remove).toHaveBeenCalledWith('openai')
+    expect(emptyOpencode.remove).not.toHaveBeenCalled()
+  })
+
+  it('preserves a user-created disabled-route Codex credential when the vault is empty (M-AT3 guard)', async () => {
+    // User ran `pi /login` themselves; ClaudeUI never connected ChatGPT.
+    const pi = fakeFeedTarget()
+    pi.read.mockResolvedValue({ access: 'ua', refresh: 'user-refresh', expires: Date.now() + 999_999 })
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({
+      vault: makeFakeVault(null).vault,
+      getEnabledRoutes: () => ({ pi: false, opencode: true })
+    })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+    // Pre-fix start() unconditionally removed the disabled route's codex entry.
+    expect(pi.remove).not.toHaveBeenCalled()
+    sync.stop()
+  })
+
+  it('preserves an unmanaged disabled-route copy whose token does not match the vault (M-AT3)', async () => {
+    // Connected vault ('r'), but the disabled opencode store holds a DIFFERENT
+    // (user-owned) credential → not ClaudeUI-vended → must be left intact.
+    const { vault } = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
+    const pi = fakeFeedTarget()
+    const opencode = fakeFeedTarget()
+    opencode.read.mockResolvedValue({ access: 'u', refresh: 'user-own', expires: Date.now() + 999_999 })
+    const sync = new CredentialSync({ vault, getEnabledRoutes: piOnly })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+    expect(opencode.remove).not.toHaveBeenCalled()
+    sync.stop()
   })
 
   it('starts a newly enabled target watcher after a successful feed', async () => {
@@ -357,6 +466,9 @@ describe('CredentialSync route policy', () => {
     try {
       const pi = fakeFeedTarget()
       const opencode = fakeFeedTarget()
+      // Disabled store holds the managed credential (matches the vault), so the
+      // provenance-checked cleanup proceeds to removeVendorAuth — which fails.
+      opencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: Date.now() + 60 * 60 * 1000 })
       opencode.remove.mockRejectedValueOnce(new Error('auth file is locked'))
       const sync = new CredentialSync({
         vault: makeFakeVault({
@@ -394,7 +506,8 @@ describe('CredentialSync route policy', () => {
     })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
-    expect(opencode.read).not.toHaveBeenCalled()
+    // (opencode.read may now be consulted for disabled-copy provenance; the
+    // watcher — authFilePath — must still never be armed for a disabled route.)
     expect(opencodeAuthFilePath).not.toHaveBeenCalled()
     sync.stop()
   })
@@ -413,8 +526,10 @@ describe('CredentialSync route policy', () => {
     const sync = new CredentialSync({ vault, getEnabledRoutes: piOnly })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
-    expect(opencode.read).not.toHaveBeenCalled()
+    // A disabled route is never adopted from (no save), and its mismatched
+    // (user-owned) credential is preserved (not removed).
     expect(save).not.toHaveBeenCalled()
+    expect(opencode.remove).not.toHaveBeenCalled()
     sync.stop()
   })
 
@@ -831,6 +946,93 @@ describe('CredentialSync — refresh scheduler', () => {
     expect(sync.needsReauth).toBe(false)
   })
 
+  it('escalating give-up backoff: after a full transient cycle it waits GIVE_UP_BACKOFF_BASE_MS (not 0), and the next give-up escalates to 2x', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const { vault } = makeFakeVault({
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 1000 // margin already passed → normal schedule fires ~immediately
+    })
+    const refreshAccessToken = vi.fn(async () => {
+      throw new Error('fetch failed') // always transient
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeFeedTarget().target, opencode: fakeFeedTarget().target })
+
+    await sync.start()
+    // Drive the first transient-retry cycle to exhaustion: attempts at
+    // t=0, +30s, +90s, +180s (the 4th trips give-up).
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 3)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(4)
+
+    // PRE-FIX: give-up re-scheduled at delay 0 → a tiny advance fires attempt 5.
+    // POST-FIX: it backs off GIVE_UP_BACKOFF_BASE_MS first.
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(4)
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(5)
+
+    // Second transient cycle to exhaustion → give-up #2.
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 3)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(8)
+
+    // Escalation: at only `base` elapsed since give-up #2 it must NOT fire (a
+    // non-escalated backoff would have); by 2*base it does.
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(8)
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(9)
+
+    sync.stop()
+  })
+
+  it('a successful refresh resets the escalating give-up backoff to the normal schedule', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const { vault } = makeFakeVault({
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 1000
+    })
+    const refreshAccessToken = vi
+      .fn<() => Promise<{ access_token: string; refresh_token: string; expires_in: number }>>()
+      // First give-up cycle: 4 transient failures.
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      // Then the give-up backoff attempt succeeds and reschedules off the new expiry.
+      .mockResolvedValue({ access_token: 'a2', refresh_token: 'r2', expires_in: 3600 })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeFeedTarget().target, opencode: fakeFeedTarget().target })
+
+    await sync.start()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 2)
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS * 3)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(4)
+    // give-up backoff → success → reschedule from the ROTATED token's expiry.
+    await vi.advanceTimersByTimeAsync(GIVE_UP_BACKOFF_BASE_MS)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(5)
+    expect(refreshAccessToken).toHaveBeenLastCalledWith('r1')
+    // Next refresh is the normal margin-based one (giveUpCount was reset), off r2.
+    refreshAccessToken.mockClear()
+    await vi.advanceTimersByTimeAsync(3_600_000 - REFRESH_MARGIN_MS + 1)
+    expect(refreshAccessToken).toHaveBeenCalledWith('r2')
+
+    sync.stop()
+  })
+
   it('stop() clears pending timers — no further refresh attempt fires', async () => {
     vi.useFakeTimers()
     const now = Date.now()
@@ -852,6 +1054,71 @@ describe('CredentialSync — refresh scheduler', () => {
     sync.stop()
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
     expect(refreshAccessToken).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2a. Refresh identity guard (M-AT2) — a late refresh of the OLD credential
+// must not clobber state after a watch-adoption landed a newer one.
+//
+// RED-FIRST NOTE: pre-fix, doRefresh's catch was `if (isCurrent(generation))
+// handleRefreshError(...)`. Adoption does NOT bump the generation, so the stale
+// invalid_grant still ran handleRefreshError → set needsReauth AND cleared the
+// freshly-armed timer. Both post-fix assertions (needsReauth false, timer alive)
+// FAIL against that code.
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync — refresh identity guard (M-AT2)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('a superseded refresh (adoption landed a newer credential mid-flight) does NOT set needsReauth or clear the adopted timer', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const { vault, state } = makeFakeVault({
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 1000
+    })
+    let rejectRefresh: ((err: unknown) => void) | undefined
+    const refreshAccessToken = vi.fn(
+      () =>
+        new Promise<{ access_token: string; refresh_token: string; expires_in: number }>(
+          (_resolve, reject) => {
+            rejectRefresh = reject
+          }
+        )
+    )
+    const pi = fakeFeedTarget()
+    // pi's store holds a newer, externally-rotated credential to be adopted.
+    pi.read.mockResolvedValue({ access: 'a2', refresh: 'r2', expires: now + 5_000_000 })
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    // Kick a refresh of C1 — loads C1, calls refreshAccessToken('r1') (pending).
+    const refreshP = sync.refreshNow()
+    await Promise.resolve()
+    expect(refreshAccessToken).toHaveBeenCalledWith('r1')
+
+    // A watch-adoption of the newer C2 lands while refresh(C1) is in flight.
+    await (
+      sync as unknown as { handleExternalChange(engine: 'pi'): Promise<void> }
+    ).handleExternalChange('pi')
+    expect(state.current?.refresh).toBe('r2')
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // adoption armed a refresh timer
+
+    // The stale refresh(C1) now settles with invalid_grant (r1 was rotated out).
+    rejectRefresh!(new Error('Token refresh failed: 400 - {"error":"invalid_grant"}'))
+    await refreshP
+
+    // Identity guard: the superseded failure must be ignored entirely.
+    expect(sync.needsReauth).toBe(false)
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // adopted timer survived
+    expect(state.current?.refresh).toBe('r2') // vault still holds the adopted credential
+    sync.stop()
   })
 })
 
@@ -1064,30 +1331,46 @@ describe('CredentialSync — fs-watch resync', () => {
     writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
 
     const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    const reconciles = instrumentReconciles(sync)
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await sync.start()
+    await sync.start() // vault ties pi (same refresh) — no adopt, no feed, no watch events yet
 
     try {
-      writeRaw(piFile, 'openai-codex', { access: 'a2', refresh: 'r2', expires: now + 1_999_999 })
-      await sleep(350)
-
+      const rotated = { access: 'a2', refresh: 'r2', expires: now + 1_999_999 }
+      await triggerUntil(
+        () => writeRaw(piFile, 'openai-codex', rotated),
+        () => save.mock.calls.length >= 1,
+        'external rotation adopted'
+      )
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({ refresh: 'r2', expires: now + 1_999_999 })
       )
+      // The re-feed of the other store happens inside the same reconcile,
+      // right after save() — no further fs event needed, a plain wait is safe.
+      await waitFor(() => opencode.feed.mock.calls.length >= 1, 'other store re-fed')
       expect(opencode.feed).toHaveBeenCalledWith(
         'openai',
         expect.objectContaining({ refresh: 'r2' })
       )
 
       // feedAll's own re-write of pi's file (re-syncing the source engine
-      // too) fires the SAME watcher again — the loop guard (refresh token
-      // now matches the vault's) must prevent a second adopt.
-      await sleep(350)
+      // too) fires the SAME watcher again with content matching the vault —
+      // exactly what the re-fired trigger below re-provokes if that event is
+      // lost. Wait for a guarded reconcile to have RUN strictly after the
+      // adopting one completed, then assert the loop guard (refresh token now
+      // matches the vault's) prevented a second adopt.
+      await waitFor(() => reconciles('pi') >= 1, 'adopting reconcile to complete')
+      const basePi = reconciles('pi')
+      await triggerUntil(
+        () => writeRaw(piFile, 'openai-codex', rotated),
+        () => reconciles('pi') > basePi,
+        'guarded self-write reconcile to run'
+      )
       expect(save).toHaveBeenCalledTimes(1)
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it("the vault's OWN feedAll write does not trigger an adopt (loop guard)", async () => {
     const now = Date.now()
@@ -1102,17 +1385,32 @@ describe('CredentialSync — fs-watch resync', () => {
     const opencode = makeRealFeedTarget(opencodeFile)
 
     const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    const reconciles = instrumentReconciles(sync)
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await sync.start()
+    await sync.start() // engines empty, vault newest — no writes at start
 
     try {
       await sync.feedAll(initial) // writes refresh='r1' — identical to the vault's current credential
-      await sleep(350)
+      // Wait for a guarded reconcile per engine to have actually RUN before
+      // asserting neither adopted. The re-fired writeRaw carries the SAME
+      // content feedAll just wrote, so it re-provokes the identical guard
+      // path if the original watch event was lost.
+      const rewrite = { access: initial.access, refresh: initial.refresh, expires: initial.expires }
+      await triggerUntil(
+        () => writeRaw(piFile, 'openai-codex', rewrite),
+        () => reconciles('pi') >= 1,
+        'guarded pi reconcile to run'
+      )
+      await triggerUntil(
+        () => writeRaw(opencodeFile, 'openai', rewrite),
+        () => reconciles('opencode') >= 1,
+        'guarded opencode reconcile to run'
+      )
       expect(save).not.toHaveBeenCalled()
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it('ignores an externally-written credential that is OLDER (earlier expires) than the vault current one', async () => {
     const now = Date.now()
@@ -1128,17 +1426,22 @@ describe('CredentialSync — fs-watch resync', () => {
     writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
 
     const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    const reconciles = instrumentReconciles(sync)
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await sync.start()
+    await sync.start() // vault ties pi — no adopt, no feed, no watch events yet
 
     try {
-      writeRaw(piFile, 'openai-codex', { access: 'a0', refresh: 'r0', expires: now + 1000 }) // different + OLDER
-      await sleep(350)
+      await triggerUntil(
+        // different + OLDER
+        () => writeRaw(piFile, 'openai-codex', { access: 'a0', refresh: 'r0', expires: now + 1000 }),
+        () => reconciles('pi') >= 1,
+        'older-credential reconcile to run'
+      )
       expect(save).not.toHaveBeenCalled()
     } finally {
       sync.stop()
     }
-  })
+  }, 15_000)
 
   it('debounces rapid successive external writes into a single reconciliation using the LAST value', async () => {
     const now = Date.now()
@@ -1153,7 +1456,12 @@ describe('CredentialSync — fs-watch resync', () => {
     const opencode = makeRealFeedTarget(opencodeFile)
     writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
 
-    const sync = new CredentialSync({ vault, watchDebounceMs: 150 })
+    // Debounce is deliberately WIDE relative to the 20ms write spacing: the
+    // coalescing property under test only breaks if a single inter-write gap
+    // exceeds the whole window, and 1000ms keeps that unreachable even under
+    // full-suite CPU starvation (150ms did not — a starved loop iteration
+    // could blow through it and produce a second, mid-sequence save).
+    const sync = new CredentialSync({ vault, watchDebounceMs: 1000 })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
 
@@ -1164,11 +1472,213 @@ describe('CredentialSync — fs-watch resync', () => {
           refresh: `r${i}`,
           expires: now + 2_000_000 + i
         })
-        await sleep(20) // well within the 150ms debounce window
+        await sleep(20) // well within the debounce window
       }
-      await sleep(450) // past the debounce window
+      // The single debounced reconcile fires ~1000ms after the LAST event and
+      // reads the file at that moment — so the one save must carry r4
+      // whichever subset of the burst's events actually got delivered. The
+      // re-fired trigger (final value only, refire > debounce) covers total
+      // event loss; a post-save straggler hits the loop guard (r4 == vault).
+      await triggerUntil(
+        () =>
+          writeRaw(piFile, 'openai-codex', {
+            access: 'a4',
+            refresh: 'r4',
+            expires: now + 2_000_004
+          }),
+        () => save.mock.calls.length >= 1,
+        'debounced reconcile to run',
+        2_500 // must exceed the 1000ms debounce — see triggerUntil
+      )
       expect(save).toHaveBeenCalledTimes(1)
       expect(save).toHaveBeenCalledWith(expect.objectContaining({ refresh: 'r4' }))
+    } finally {
+      sync.stop()
+    }
+  }, 15_000)
+
+  it('an FSWatcher error closes and drops the watcher so it can be re-created (no unhandled process error)', async () => {
+    const now = Date.now()
+    const initial: VaultCredential = {
+      type: 'oauth',
+      access: 'a1',
+      refresh: 'r1',
+      expires: now + 999_999
+    }
+    const { vault } = makeFakeVault(initial)
+    const pi = makeRealFeedTarget(piFile)
+    const opencode = makeRealFeedTarget(opencodeFile)
+    writeRaw(piFile, 'openai-codex', { access: 'a1', refresh: 'r1', expires: initial.expires })
+
+    const sync = new CredentialSync({ vault, watchDebounceMs: 100 })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+
+    try {
+      const watchers = (sync as unknown as { watchers: Map<string, FSWatcher> }).watchers
+      const piWatcher = watchers.get('pi')
+      expect(piWatcher).toBeDefined()
+
+      // PRE-FIX (no 'error' listener): emitting 'error' on an EventEmitter with
+      // no listener throws synchronously at the process level. POST-FIX the
+      // handler swallows it, closes the watcher, and drops it from the map so it
+      // is no longer blocked by the `watchers.has(engine)` guard.
+      expect(() => piWatcher!.emit('error', new Error('simulated watcher failure'))).not.toThrow()
+      expect(watchers.has('pi')).toBe(false)
+
+      // A subsequent feed re-arms the watcher (recovery, not permanent death).
+      await sync.feedAll(initial)
+      expect(watchers.has('pi')).toBe(true)
+    } finally {
+      sync.stop()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. Feed clobber guard (M-AT1)
+//
+// RED-FIRST NOTE: pre-fix `feedOne` called `feedOauthCredential` unconditionally,
+// so the ENGINE-NEWER case below wrote the STALE vault credential over the
+// engine's freshly-rotated one and left the vault holding the dead token — both
+// `expect(pi.feed).not.toHaveBeenCalledWith(... 'r-vault')` and
+// `expect(state.current?.refresh).toBe('r-eng')` fail against the old code.
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync.feedAll — engine rotation clobber guard (M-AT1)', () => {
+  /** A fakeFeedTarget whose readOauthEntry resolves to a preset snapshot (or null). */
+  function readable(snapshot: CodexEntrySnapshot | null): {
+    target: CodexFeedTarget
+    feed: ReturnType<typeof vi.fn>
+    read: ReturnType<typeof vi.fn>
+  } {
+    const t = fakeFeedTarget()
+    t.read.mockResolvedValue(snapshot)
+    return { target: t.target, feed: t.feed, read: t.read }
+  }
+
+  /** Far enough out that the adoption's scheduleRefresh() never fires mid-test. */
+  const FAR = REFRESH_MARGIN_MS + 60_000
+
+  it('ENGINE-NEWER-SKIPS: never overwrites an engine credential with a different refresh token AND a newer expiry — it adopts instead, per engine', async () => {
+    const now = Date.now()
+    const vaultCred: VaultCredential = {
+      type: 'oauth',
+      access: 'a-vault',
+      refresh: 'r-vault',
+      expires: now + 1000
+    }
+    const { vault, state } = makeFakeVault(vaultCred)
+    // pi rotated behind our back — strictly newer.
+    const pi = readable({ access: 'a-eng', refresh: 'r-eng', expires: now + FAR })
+    // opencode is stale — the skip must be PER-ENGINE, so this one still gets written.
+    const opencode = readable({ access: 'a-oc', refresh: 'r-oc', expires: now + 500 })
+    const refreshAccessToken = vi.fn(async () => {
+      throw new Error('refresh must not run in this test')
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(vaultCred)
+
+      // The stale vault credential never reached pi's store.
+      expect(pi.feed).not.toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-vault' })
+      )
+      expect(result.pi).toBe(false)
+
+      // …and the engine's credential was adopted into the vault instead.
+      expect(state.current?.refresh).toBe('r-eng')
+      expect(state.current?.expires).toBe(now + FAR)
+
+      // The other engine is judged independently: it was stale, so it was written
+      // — and the adoption re-synced it to the newest credential afterwards.
+      expect(opencode.feed).toHaveBeenCalledWith(
+        'openai',
+        expect.objectContaining({ refresh: 'r-eng' })
+      )
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('ENGINE-OLDER-WRITES: a different refresh token with an OLDER expiry is a stale copy — the vault still wins', async () => {
+    const now = Date.now()
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'a-vault',
+      refresh: 'r-vault',
+      expires: now + FAR
+    }
+    const { vault, state } = makeFakeVault(cred)
+    const pi = readable({ access: 'a-old', refresh: 'r-old', expires: now + 1000 })
+    const opencode = readable(null)
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(cred)
+      expect(result).toEqual({ pi: true, opencode: true })
+      expect(pi.feed).toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-vault' })
+      )
+      expect(state.current?.refresh).toBe('r-vault')
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('SAME-REFRESH-WRITES: an identical refresh token is our own previous write (no rotation) even with a newer expiry — the write proceeds', async () => {
+    const now = Date.now()
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'a-new',
+      refresh: 'r-same',
+      expires: now + 1000
+    }
+    const { vault } = makeFakeVault(cred)
+    const pi = readable({ access: 'a-stale-access', refresh: 'r-same', expires: now + FAR })
+    const opencode = readable(null)
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(cred)
+      expect(result.pi).toBe(true)
+      expect(pi.feed).toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-same', access: 'a-new' })
+      )
+    } finally {
+      sync.stop()
+    }
+  })
+
+  it('READ-FAILURE-WRITES: an unreadable engine store must not block the feed', async () => {
+    const now = Date.now()
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'a',
+      refresh: 'r-vault',
+      expires: now + FAR
+    }
+    const { vault } = makeFakeVault(cred)
+    const pi = readable(null)
+    pi.read.mockRejectedValue(new Error('EACCES: auth.json unreadable'))
+    const opencode = readable(null)
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    try {
+      const result = await sync.feedAll(cred)
+      expect(result).toEqual({ pi: true, opencode: true })
+      expect(pi.feed).toHaveBeenCalledWith(
+        'openai-codex',
+        expect.objectContaining({ refresh: 'r-vault' })
+      )
     } finally {
       sync.stop()
     }

@@ -50,6 +50,177 @@ const defaultTaskView = {
   subagent: 'explore'
 }
 
+// ---------------------------------------------------------------------------
+// Async-launched task lifecycle (activeTasks / session:task-started)
+// ---------------------------------------------------------------------------
+//
+// Claude 2.1.219+ makes Agent/Task subagents background-by-default: the
+// Agent tool_use gets an IMMEDIATE tool_result ("Async agent launched
+// successfully...") and the input usually omits run_in_background. Pre-fix,
+// TaskCard derived isRunning from `isBackground ? !bgNotification : !hasResult`
+// — with isBackground false (input omits the flag) and hasResult true (the
+// instant tool_result), the card read as complete on arrival, hiding the Stop
+// button entirely. The fix: a store record in `activeTasks` (set on
+// session:task-started, cleared on session:task-notification) is now the
+// authoritative "is this task running" signal, checked BEFORE the legacy
+// tool_result/background-flag heuristic.
+describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  const asyncResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Async agent launched successfully. agentId: agent-abc123',
+    isError: false
+  }
+
+  it('(a) tool_result present + activeTasks record → still shows running + Stop (must fail pre-fix)', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    render(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+
+  it('(a cont.) "Send to background" is suppressed for an already-async task', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    render(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('(b) task-notification arrives → completed, Stop button gone', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    const { rerender } = render(
+      <TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />
+    )
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+
+    useSessionStore.getState().addTaskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: 'call_task_1',
+      status: 'completed',
+      outputFile: '',
+      summary: 'done',
+      usage: undefined
+    })
+
+    rerender(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('(c) no activeTasks record + tool_result → completed (opencode/legacy transcripts unaffected)', () => {
+    // No setTaskStarted call — this engine/path never emits task_started.
+    render(<TaskCard block={makeTaskBlock()} result={asyncResult} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('(d) historical session → never running, even with an activeTasks record', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true }
+      }
+    }))
+
+    // No tool_result at all — historical transcripts can render a task with no result.
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('activeTasks record with NO tool_result yet also shows running + Stop (spawn-to-first-result gap)', () => {
+    useSessionStore.getState().setTaskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent'
+    })
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// "Open in panel" — the mobile task-takeover entry point (see MobileTaskView)
+// ---------------------------------------------------------------------------
+//
+// TaskCard has no isMobile branching at all: "Open in panel" is unconditionally
+// rendered whenever the collapsed footer shows (hasResult || isRunning), on
+// both desktop and mobile. On desktop it opens the TaskDetailPanel side panel;
+// on mobile the same openTaskPanel action now drives SessionView's full-screen
+// MobileTaskView takeover instead. This locks that the button stays reachable
+// and wired to openTaskPanel regardless of viewport.
+describe('TaskCard — "Open in panel" (mobile takeover entry point)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  const completedResult = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'done',
+    isError: false
+  }
+
+  it('is visible on the collapsed completed card', () => {
+    render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.openInPanel')).toBeInTheDocument()
+  })
+
+  it('clicking it opens the task panel via openTaskPanel (rightPanel + openedTaskToolUseIds)', () => {
+    render(<TaskCard block={makeTaskBlock()} result={completedResult} view={defaultTaskView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.openInPanel'))
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.rightPanel).toBe('task')
+    expect(session.openedTaskToolUseIds).toContain('call_task_1')
+  })
+})
+
 describe('TaskCard — inline task approval', () => {
   let app: TestApp
   let respondCalls: Array<{ requestId: string; decision: string }>
@@ -275,5 +446,113 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
       fireEvent.click(screen.getByTestId('TaskCard.stop'))
     })
     expect(stopCalls).toEqual([{ toolUseId: 'call_task_1', isDispatch: false }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Thinking placement + expand-toggle regression (thinking-order-bug)
+// ---------------------------------------------------------------------------
+//
+// Pre-fix: the live streamThinking buffer rendered ABOVE the accumulated
+// message list instead of below it, and both the persisted thinking blocks
+// and the live buffer ignored settings.expandThinking entirely. These pin
+// the fixed ordering (messages, then live thinking, then live text — mirrors
+// ChatPanel's main-view order) and the toggle honoring.
+
+describe('TaskCard — subagent output ordering + thinking toggle', () => {
+  let app: TestApp
+  const defaultSettings = useSessionStore.getState().settings
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {}, settings: defaultSettings })
+  })
+
+  it('renders the message list, then live thinking, then live streamed text, in that DOM order', () => {
+    useSessionStore.getState().addSubagentMessage(ROUTE, 'call_task_1', {
+      id: 'm1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'partial result' }],
+      timestamp: Date.now()
+    })
+    // Set both live buffers directly (bypassing the append* actions): in real
+    // usage appendSubagentStreamingText clears the thinking buffer for the
+    // same toolUseId (thinking ends before text starts), so calling both
+    // actions in sequence can never produce a state with both non-empty.
+    // This test only needs the render-time DOM order for that combined
+    // state, not a realistic action sequence.
+    useSessionStore.setState((state) => {
+      const session = state.sessions[ROUTE]
+      return {
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...session,
+            subagentStreamingThinking: {
+              ...session.subagentStreamingThinking,
+              call_task_1: 'pondering'
+            },
+            subagentStreamingText: { ...session.subagentStreamingText, call_task_1: 'final answer' }
+          }
+        }
+      }
+    })
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+    const msgsEl = screen.getByTestId('subagent-msgs')
+    const thinkingEl = screen.getByTestId('SubagentOutputBody.liveThinking')
+    const textEl = screen.getByTestId('md')
+
+    // Pre-fix, thinkingEl preceded msgsEl in the DOM.
+    expect(
+      msgsEl.compareDocumentPosition(thinkingEl) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      thinkingEl.compareDocumentPosition(textEl) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
+  it('expandThinking=false: live thinking starts collapsed (tail preview only)', () => {
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
+    const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
+    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+    // The full buffer (with the far-back 'x' run) should NOT be visible collapsed.
+    expect(screen.queryByText(longText, { exact: false })).not.toBeInTheDocument()
+    expect(screen.getByTestId('SubagentOutputBody.liveThinking')).toBeInTheDocument()
+  })
+
+  it('expandThinking=false: clicking the live-thinking toggle reveals the full buffer', () => {
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
+    const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
+    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    fireEvent.click(screen.getByTestId('SubagentOutputBody.liveThinking.toggle'))
+
+    expect(screen.getByText(longText)).toBeInTheDocument()
+  })
+
+  it('expandThinking=true: live thinking starts expanded (full buffer visible immediately)', () => {
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: true } }))
+    const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
+    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+    expect(screen.getByText(longText)).toBeInTheDocument()
   })
 })

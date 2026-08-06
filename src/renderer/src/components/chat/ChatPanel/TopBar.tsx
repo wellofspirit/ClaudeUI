@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
@@ -23,29 +23,6 @@ function formatDuration(ms: number): string {
 /** Format a cost figure consistently with the existing Cost/breakdown rows. */
 function formatCost(costUsd: number): string {
   return `$${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`
-}
-
-/** iOS Safari's pre-standard standalone-mode flag — not in lib.dom's Navigator type. */
-type NavigatorWithIosStandalone = Navigator & { standalone?: boolean }
-
-/**
- * The fullscreen control is for the remote web client on mobile only: it
- * needs the standard Fullscreen API, and is pointless (and its own toggle
- * would conflict with the OS chrome) once the page is already running as an
- * installed standalone PWA.
- */
-function canShowFullscreenControl(isMobileCtx: boolean): boolean {
-  if (!isMobileCtx || window.api.platform !== 'web') return false
-  if (
-    document.fullscreenEnabled !== true ||
-    typeof document.documentElement.requestFullscreen !== 'function' ||
-    typeof document.exitFullscreen !== 'function'
-  ) {
-    return false
-  }
-  if (window.matchMedia('(display-mode: standalone)').matches) return false
-  if ((navigator as NavigatorWithIosStandalone).standalone) return false
-  return true
 }
 
 /**
@@ -91,8 +68,65 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
-  const showFullscreenControl = canShowFullscreenControl(isMobileCtx)
-  const [isFullscreen, setIsFullscreen] = useState(() => !!document.fullscreenElement)
+  const [overflowOpen, setOverflowOpen] = useState(false)
+  const overflowRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * Mobile overflow ("⋯") menu contents. The desktop right-side buttons don't
+   * fit a phone bar, so the ones that still make sense there live behind this
+   * menu. Kept as an array so future entries (Skills, MCP) slot in with their
+   * own gates — and so an empty list can hide the button entirely rather than
+   * opening an empty popover.
+   */
+  const overflowItems = useMemo(
+    () =>
+      cwd
+        ? [
+            {
+              id: 'permissions',
+              label: 'Permissions',
+              testId: 'TopBar.overflowMenuPermissions',
+              icon: (
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="shrink-0"
+                >
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                </svg>
+              ),
+              onSelect: () => setPermissionsOpen(true)
+            }
+          ]
+        : [],
+    [cwd]
+  )
+
+  // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
+  // that starts outside never lands on whatever the menu was covering.
+  useEffect(() => {
+    if (!overflowOpen) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
+        setOverflowOpen(false)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOverflowOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [overflowOpen])
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -100,26 +134,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   }, [])
   const infoMouseLeave = useCallback(() => {
     infoLeaveTimer.current = setTimeout(() => setInfoHover(false), 150)
-  }, [])
-
-  useEffect(() => {
-    if (!showFullscreenControl) return
-    const handleFullscreenChange = (): void => setIsFullscreen(!!document.fullscreenElement)
-    // Sync immediately — the control can newly appear (e.g. a viewport/context
-    // transition into mobile) after the document already entered fullscreen
-    // through some other path, and the listener alone only catches *future*
-    // fullscreenchange events.
-    handleFullscreenChange()
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
-  }, [showFullscreenControl])
-
-  const handleToggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {})
-    } else {
-      document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {})
-    }
   }, [])
 
   const displaySessionId = sdkSessionId || activeSessionId
@@ -410,50 +424,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         </div>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
-        {showFullscreenControl && (
-          <button
-            type="button"
-            data-testid="TopBar.fullscreen"
-            onClick={handleToggleFullscreen}
-            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-            className="w-[40px] h-[40px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-          >
-            {isFullscreen ? (
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M8 3v3a2 2 0 01-2 2H3" />
-                <path d="M21 8h-3a2 2 0 01-2-2V3" />
-                <path d="M3 16h3a2 2 0 012 2v3" />
-                <path d="M16 21v-3a2 2 0 012-2h3" />
-              </svg>
-            ) : (
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M8 3H5a2 2 0 00-2 2v3" />
-                <path d="M16 3h3a2 2 0 012 2v3" />
-                <path d="M8 21H5a2 2 0 01-2-2v-3" />
-                <path d="M16 21h3a2 2 0 002-2v-3" />
-              </svg>
-            )}
-          </button>
-        )}
         {!isMobileCtx && cwd && (
           <button
             data-testid="TopBar.openVSCode"
@@ -569,8 +539,47 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         )}
         {!isMobileCtx && <WorktreePill />}
         {!isMobileCtx && <GitBranchPill />}
-        {!isMobileCtx && <GitChangesPill />}
+        {/* Mobile keeps the changes pill — it doubles as the git-panel entry
+            point (MobileGitView) and self-hides outside a git repo. */}
+        <GitChangesPill />
         {!isMobileCtx && <WindowControls />}
+        {/* The dropdown below deliberately has no positioned wrapper: it anchors
+            to the TopBar itself (the nearest positioned ancestor), so it hangs
+            below the whole bar right-aligned instead of mid-bar off the button. */}
+        {isMobileCtx && overflowItems.length > 0 && (
+          <div ref={overflowRef}>
+            <button
+              data-testid="TopBar.overflowMenu"
+              onClick={() => setOverflowOpen((o) => !o)}
+              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+              title="More"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="5" r="1.6" />
+                <circle cx="12" cy="12" r="1.6" />
+                <circle cx="12" cy="19" r="1.6" />
+              </svg>
+            </button>
+            {overflowOpen && (
+              <div className="absolute top-full right-0 mt-1 z-50 min-w-[180px] bg-bg-primary border border-border rounded-lg shadow-lg py-1 animate-fade-in">
+                {overflowItems.map((item) => (
+                  <button
+                    key={item.id}
+                    data-testid={item.testId}
+                    onClick={() => {
+                      setOverflowOpen(false)
+                      item.onSelect()
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-text-secondary hover:bg-bg-hover transition-colors"
+                  >
+                    {item.icon}
+                    <span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <SkillsDialog open={skillsOpen} onClose={() => setSkillsOpen(false)} cwd={cwd} />
       <McpDialog

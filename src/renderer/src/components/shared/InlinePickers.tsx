@@ -152,11 +152,29 @@ export function EnginePicker({
 export function ModelPicker({
   models,
   selectedModel,
-  onSelectModel
+  onSelectModel,
+  placement = 'up',
+  emptyOption,
+  trailingOption
 }: {
   models: ModelDisplay[]
   selectedModel: ModelDisplay
   onSelectModel: (value: string) => void
+  /** Which way the menu opens. 'up' (the default, and every pre-existing call
+   *  site) suits the InputBox controls bar pinned to the window bottom; a
+   *  settings panel grows downward and passes 'down' so the menu isn't clipped
+   *  off the top of the scroll container. */
+  placement?: 'up' | 'down'
+  /** Optional pinned first row meaning "no explicit choice" — picking it calls
+   *  `onSelectModel('')`. The settings judge-model pickers use it for "same as
+   *  the session's model", where an empty stored value means inherit. It is NOT
+   *  subject to the Free filter: it is not a model. */
+  emptyOption?: { label: string }
+  /** Optional pinned LAST row for a non-model escape hatch — pi's settings
+   *  picker uses it for "Custom model ID…", which is a mode switch rather than
+   *  a selectable model. Like `emptyOption` it bypasses the Free filter and the
+   *  group headers; picking it calls `onSelectModel(trailingOption.value)`. */
+  trailingOption?: { value: string; label: string }
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -200,12 +218,32 @@ export function ModelPicker({
           fill="none"
           stroke="currentColor"
           strokeWidth="2.5"
+          className="shrink-0"
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full mb-1 left-0 w-56 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+        <div
+          className={`absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 w-56 max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20`}
+        >
+          {emptyOption && (
+            <button
+              data-testid="ModelPicker.option"
+              data-value=""
+              onClick={() => {
+                onSelectModel('')
+                setOpen(false)
+              }}
+              className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
+                selectedModel.value === ''
+                  ? 'text-text-primary bg-bg-hover'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <span className="text-[12px]">{emptyOption.label}</span>
+            </button>
+          )}
           {hasFreeModels && (
             <div className="px-2 pt-2 pb-1 flex items-center border-b border-border/50">
               <button
@@ -268,6 +306,23 @@ export function ModelPicker({
               ))}
             </div>
           ))}
+          {trailingOption && (
+            <button
+              data-testid="ModelPicker.option"
+              data-value={trailingOption.value}
+              onClick={() => {
+                onSelectModel(trailingOption.value)
+                setOpen(false)
+              }}
+              className={`w-full flex flex-col px-3 py-1.5 border-t border-border/50 transition-colors cursor-pointer text-left ${
+                selectedModel.value === trailingOption.value
+                  ? 'text-text-primary bg-bg-hover'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+            >
+              <span className="text-[12px]">{trailingOption.label}</span>
+            </button>
+          )}
         </div>
       )}
     </div>

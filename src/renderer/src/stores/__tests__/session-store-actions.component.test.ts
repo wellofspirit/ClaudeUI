@@ -686,6 +686,23 @@ describe('deleteSession', () => {
     expect(store().directories).toEqual([])
   })
 
+  // RN8 — the persisted engine/model row is keyed by routingId; without an
+  // explicit delete it outlived every session and grew the config forever.
+  it('drops the sessionEngines row and persists the pruned map', async () => {
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s2', '/test')
+    expect(store().sessionEngines['s1']).toBeDefined()
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    await store().deleteSession('s1', 'proj-key')
+
+    expect(store().sessionEngines['s1']).toBeUndefined()
+    expect(store().sessionEngines['s2']).toBeDefined() // sibling untouched
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.sessionEngines['s1']).toBeUndefined()
+    expect(persisted.sessionEngines['s2']).toBeDefined()
+  })
+
   it('does not mutate store when the IPC call rejects', async () => {
     ;(window.api.deleteSession as any).mockRejectedValueOnce(new Error('EBUSY'))
     store().createNewSession('s1', '/a')
@@ -819,6 +836,43 @@ describe('deleteProject', () => {
     expect(store().sessions['s3']).toBeDefined()
     // Active session cleared since it was inside the deleted project
     expect(store().activeSessionId).toBeNull()
+  })
+
+  // RN8 — same as deleteSession, for every routingId the project takes with it.
+  it('drops the sessionEngines rows for every purged session and persists the pruned map', async () => {
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s2', '/test') // in-memory-only, same cwd
+    store().createNewSession('s3', '/other')
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: '/test',
+          projectKey: 'proj-key',
+          folderName: 'test',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'a',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
+    })
+    ;(window.api.saveSessionConfig as any).mockClear()
+
+    await store().deleteProject('proj-key')
+
+    expect(store().sessionEngines['s1']).toBeUndefined()
+    expect(store().sessionEngines['s2']).toBeUndefined()
+    expect(store().sessionEngines['s3']).toBeDefined() // other project untouched
+    const persisted = (window.api.saveSessionConfig as any).mock.calls.at(-1)[0]
+    expect(persisted.sessionEngines['s1']).toBeUndefined()
+    expect(persisted.sessionEngines['s2']).toBeUndefined()
+    expect(persisted.sessionEngines['s3']).toBeDefined()
   })
 
   it('keeps activeSessionId when the active session is not inside the deleted project', async () => {
@@ -980,6 +1034,37 @@ describe('removePendingApproval', () => {
 // Task / subagent actions
 // ---------------------------------------------------------------------------
 
+// setTaskStarted / activeTasks (Async-agent Stop-button regression):
+// Claude 2.1.219+ makes Agent/Task background-by-default and the tool_use
+// input usually omits run_in_background, so TaskCard can no longer infer
+// running-vs-complete from tool input alone. task_started/task_notification
+// are the authoritative signals — this is the store-level state machine
+// behind that fix.
+describe('setTaskStarted', () => {
+  it('records an activeTasks entry keyed by toolUseId', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
+    expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
+      taskId: 'task-abc',
+      taskType: 'local_agent'
+    })
+  })
+
+  it('does not affect other in-flight tasks', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    store().setTaskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_bash' })
+    expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
+      taskId: 'task-a',
+      taskType: 'local_agent'
+    })
+    expect(store().sessions['r1'].activeTasks['tool-2']).toEqual({
+      taskId: 'task-b',
+      taskType: 'local_bash'
+    })
+  })
+})
+
 describe('addTaskNotification', () => {
   it('appends notification to taskNotifications', () => {
     store().createNewSession('r1', '/test')
@@ -1010,6 +1095,40 @@ describe('addTaskNotification', () => {
     store().setTaskStopping('r1', 'tool-1')
     store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
     expect(store().sessions['r1'].stoppingTaskIds).toContain('tool-1')
+  })
+
+  it('clears the matching activeTasks entry (task_started -> task_notification lifecycle)', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
+    expect(store().sessions['r1'].activeTasks['tool-1']).toBeDefined()
+
+    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
+
+    expect(store().sessions['r1'].activeTasks['tool-1']).toBeUndefined()
+  })
+
+  it('leaves other activeTasks entries untouched', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    store().setTaskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_agent' })
+
+    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
+
+    expect(store().sessions['r1'].activeTasks['tool-1']).toBeUndefined()
+    expect(store().sessions['r1'].activeTasks['tool-2']).toEqual({
+      taskId: 'task-b',
+      taskType: 'local_agent'
+    })
+  })
+
+  it('does not modify activeTasks when toolUseId is null', () => {
+    store().createNewSession('r1', '/test')
+    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
+    expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
+      taskId: 'task-a',
+      taskType: 'local_agent'
+    })
   })
 })
 

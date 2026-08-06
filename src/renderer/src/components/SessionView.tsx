@@ -2,7 +2,9 @@ import { useState, useCallback, useEffect, createContext, useContext } from 'rea
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
+import { MobileTaskView } from './MobileTaskView'
 import { GitPanel } from './git/GitPanel'
+import { MobileGitView } from './git/MobileGitView'
 import { PlanReviewPanel } from './plan/PlanReviewPanel'
 import { MockupPanel } from './MockupPanel'
 import { UsageView } from './usage/UsageView'
@@ -20,8 +22,8 @@ import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
-
-const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
+import { RemoteServeBanner } from './RemoteServeBanner'
+import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
 export const SidebarContext = createContext<{
   collapsed: boolean
@@ -204,36 +206,20 @@ export function SessionView(): React.JSX.Element {
       if (e.key === 'Tab' && e.shiftKey) {
         e.preventDefault()
         const state = useSessionStore.getState()
-        const { activeSessionId, sessions, setPermissionMode } = state
+        const { activeSessionId, sessions } = state
         if (!activeSessionId) return
         const session = sessions[activeSessionId]
         const permissionMode = session?.permissionMode ?? 'default'
         // Engine capability gate: skip modes the engine can't offer (e.g. 'plan'
         // when !capabilities.plan). Claude has plan=true, so the full cycle stands.
         const canPlan = session?.status.capabilities.plan ?? true
-        // localAuto is not in the cycle — treat it as 'auto' for cycling purposes
-        const cycleMode =
-          permissionMode === 'localAuto'
-            ? 'auto'
-            : (permissionMode as (typeof PERMISSION_MODES)[number])
-        const advance = (from: (typeof PERMISSION_MODES)[number]): (typeof PERMISSION_MODES)[number] =>
-          PERMISSION_MODES[(PERMISSION_MODES.indexOf(from) + 1) % PERMISSION_MODES.length]
-        let next = advance(cycleMode)
-        // Plan mode is gated on the engine's plan capability — skip it if absent.
-        if (next === 'plan' && !canPlan) {
-          next = advance('plan')
-        }
-        // Auto mode requires an active SDK session — skip to next mode if session not started
-        if (next === 'auto' && !session?.sdkActive) {
-          next = advance('auto')
-        }
-        // Don't optimistically update for 'auto' — main process may redirect to 'localAuto'
-        if (next !== 'auto') setPermissionMode(next, activeSessionId)
-        window.api.setPermissionMode(activeSessionId, next).catch(() => {
-          // SDK rejected the mode change — revert to previous mode
-          // (the main process already sent the reverted mode via session:permission-mode)
-          setPermissionMode(permissionMode, activeSessionId)
-        })
+        // Auto mode is default-available (subscription accounts get it out of the
+        // box); the only negative gate is Claude's launch-time model info reporting
+        // that no available model supports it. Non-Claude engines' 'auto' is a local
+        // full-autonomy mode with no account gate, so it's always available there.
+        const autoAvailable = autoModeAvailableForEngine(session?.selectedEngineId, state.availableModels)
+        const next = nextPermissionMode(permissionMode, { canPlan, autoAvailable })
+        state.changePermissionMode(activeSessionId, next)
       }
     }
     document.addEventListener('keydown', handler)
@@ -329,7 +315,11 @@ export function SessionView(): React.JSX.Element {
             <div
               className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed || isMobile ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}
             >
-              {activeView.type === 'usage' ? (
+              {isMobile && rightPanel === 'task' ? (
+                <MobileTaskView />
+              ) : isMobile && rightPanel === 'git' ? (
+                <MobileGitView />
+              ) : activeView.type === 'usage' ? (
                 <UsageView onClose={() => setActiveView({ type: 'chat' })} />
               ) : activeView.type === 'automations' ? (
                 <AutomationView onClose={() => setActiveView({ type: 'chat' })} />
@@ -377,6 +367,10 @@ export function SessionView(): React.JSX.Element {
         </div>
       </div>
       <QuitWorktreeModal />
+      {/* App-level (not per-session) notice: `tailscale serve` failed while TLS
+          mode is on, so the remote bookmark is dead. Fixed overlay, desktop-only
+          — renders null on web and while serve is healthy. */}
+      <RemoteServeBanner />
     </SidebarContext.Provider>
   )
 }

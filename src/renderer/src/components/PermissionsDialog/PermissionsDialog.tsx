@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { ClaudePermissions, PermissionScope } from '../../../../shared/types'
-import { PermissionsDialogView, type RuleCategory } from './View'
+import { useIsMobile } from '../../hooks/useIsMobile'
+import { PermissionsDialogView } from './View'
+import { PermissionsMobileView } from './MobileView'
+import type { RuleCategory } from './shared'
 
 interface PermissionsDialogProps {
   open: boolean
@@ -23,6 +26,7 @@ export function PermissionsDialog({
   cwd,
   initialTab
 }: PermissionsDialogProps): React.JSX.Element | null {
+  const isMobile = useIsMobile()
   const [activeTab, setActiveTab] = useState<PermissionScope>(initialTab ?? 'local')
   const [permsMap, setPermsMap] = useState<Record<PermissionScope, ClaudePermissions>>({
     local: { ...EMPTY_PERMS },
@@ -36,6 +40,8 @@ export function PermissionsDialog({
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  /** null until probed / when there is no cwd to probe. */
+  const [workspaceTrusted, setWorkspaceTrusted] = useState<boolean | null>(null)
 
   const loaded = useRef(false)
 
@@ -46,10 +52,14 @@ export function PermissionsDialog({
     [cwd]
   )
 
-  // Reset active tab only when cwd or initialTab changes (not when activeTab changes)
+  // Reset active tab only when cwd or initialTab changes (not when activeTab
+  // changes). The reset must run in BOTH directions: the dialog is mounted
+  // (closed) from app boot, when cwd is briefly null — forcing 'user' then
+  // never coming back meant the dialog always opened on Global instead of
+  // Local once the session hydrated.
   useEffect(() => {
     if (initialTab) setActiveTab(initialTab)
-    else if (!cwd) setActiveTab('user')
+    else setActiveTab(cwd ? 'local' : 'user')
   }, [cwd, initialTab])
 
   useEffect(() => {
@@ -78,6 +88,28 @@ export function PermissionsDialog({
       }
     }
     load()
+  }, [open, cwd])
+
+  // Workspace trust gates whether cli.js honors project/local ALLOW rules at
+  // all, so it's only meaningful once there's a cwd. A probe failure leaves it
+  // null → no banner, rather than crying wolf on an unknown state.
+  useEffect(() => {
+    if (!open || !cwd) {
+      setWorkspaceTrusted(null)
+      return
+    }
+    let cancelled = false
+    window.api
+      .isWorkspaceTrusted(cwd)
+      .then((trusted) => {
+        if (!cancelled) setWorkspaceTrusted(trusted)
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceTrusted(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [open, cwd])
 
   const saveScope = useCallback(
@@ -158,8 +190,13 @@ export function PermissionsDialog({
   const perms = permsMap[activeTab]
   const hasDirty = tabs.some((s) => dirty[s])
 
+  // Same props, two presentations: the mobile view is a fullscreen two-layer
+  // takeover (browse + entry sheet) because the desktop dialog's per-section
+  // text inputs are unusable under a soft keyboard. See MobileView.tsx.
+  const View = isMobile ? PermissionsMobileView : PermissionsDialogView
+
   return (
-    <PermissionsDialogView
+    <View
       loading={loading}
       saving={saving}
       activeTab={activeTab}
@@ -167,6 +204,7 @@ export function PermissionsDialog({
       perms={perms}
       dirty={dirty}
       hasDirty={hasDirty}
+      workspaceTrusted={workspaceTrusted}
       onListDir={window.api.listDir}
       onChangeTab={handleChangeTab}
       onUpdateRule={(category, i, v) =>

@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { stripLineNumbers, getStartLine, EXT_TO_LANG } from '../CodeView'
+import { stripLineNumbers, getStartLine, getLang, EXT_TO_LANG } from '../CodeView'
 
 describe('stripLineNumbers', () => {
   it('stripLineNumbers_standardCatNOutput_removesAllPrefixes', () => {
@@ -149,5 +149,25 @@ describe('EXT_TO_LANG', () => {
   it('EXT_TO_LANG_headerFiles_mapToCOrCpp', () => {
     expect(EXT_TO_LANG['h']).toBe('c')
     expect(EXT_TO_LANG['hpp']).toBe('cpp')
+  })
+})
+
+describe('getLang', () => {
+  it('getLang_posixPath_resolvesByExtension', () => {
+    expect(getLang('src/a.ts')).toBe('typescript')
+    expect(getLang('/a/b/Dockerfile')).toBe('docker')
+  })
+
+  // RN11 — a Windows path contains no '/', so the old `split('/')` kept the whole
+  // path as the "name" and extensionless files fell through to plaintext.
+  it('getLang_windowsBackslashPath_resolvesByName', () => {
+    expect(getLang('D:\\proj\\Dockerfile')).toBe('docker')
+    expect(getLang('D:\\proj\\sub\\Makefile')).toBe('makefile')
+    expect(getLang('D:\\x\\file.rs')).toBe('rust')
+  })
+
+  it('getLang_unknownOrEmpty_returnsPlaintext', () => {
+    expect(getLang(undefined)).toBe('plaintext')
+    expect(getLang('D:\\x\\file.unknown')).toBe('plaintext')
   })
 })

@@ -71,7 +71,29 @@ export function buildRuleset(mode: string): PermissionRule[] {
       // via the baseline, so plan-mode research/`task` still works. `deny`
       // refuses without prompting → no approval round-trip, no hang.
       // (We don't reproduce opencode's plan-file edit allow-list — minor.)
-      return [allowAll, ...guards, rule('edit', 'deny'), { permission: 'task', pattern: 'general', action: 'deny' }]
+      //
+      // …PLUS the same `bash`/`webfetch` gates `default` carries. opencode's
+      // OWN plan agent leaves those on the `{*:allow}` baseline (it relies on
+      // the planning SYSTEM PROMPT to keep the model read-only), which made
+      // ClaudeUI's plan mode strictly MORE permissive than its default mode
+      // for command execution and network fetch — a stricter autonomy tier
+      // silently auto-running `rm -rf` / exfiltrating over webfetch. The
+      // neutral autonomy ladder (ADR-022) requires plan ≤ default everywhere,
+      // so we layer the gates back on. `ask` (not `deny`) mirrors default
+      // exactly: an interactive session has a live SSE consumer, so the
+      // resulting `permission.asked` reaches the approval dialog — no hang,
+      // and read-only recon (`git log`, `ls`) is still one click away instead
+      // of impossible. Kept LAST so the intent reads top-to-bottom; all four
+      // rules live in disjoint permission namespaces, so order among them is
+      // immaterial under last-match-wins.
+      return [
+        allowAll,
+        ...guards,
+        rule('edit', 'deny'),
+        { permission: 'task', pattern: 'general', action: 'deny' },
+        rule('bash', 'ask'),
+        rule('webfetch', 'ask')
+      ]
     case 'auto':
     case 'full':
     case 'default':

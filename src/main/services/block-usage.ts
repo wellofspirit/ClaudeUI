@@ -23,6 +23,7 @@ import type {
 } from '../../shared/types'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
+import { writeJsonAtomic } from './write-json-atomic'
 import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
 import {
   groupEntriesIntoBlocks,
@@ -45,7 +46,7 @@ import {
   type DailyUsageRow
 } from './db'
 import { v4 as uuid } from 'uuid'
-import { equivalentCostUsd } from '../../shared/pricing'
+import { equivalentCostUsd, ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { BaseSession } from '../providers/BaseSession'
 
 // ---------------------------------------------------------------------------
@@ -76,146 +77,10 @@ interface ApiWindow {
 // https://platform.claude.com/docs/en/about-claude/pricing
 // ---------------------------------------------------------------------------
 
-interface ModelPricing {
-  inputPerMTok: number
-  outputPerMTok: number
-  /** 5-minute TTL cache write rate (1.25× input) */
-  cacheWritePerMTok: number
-  /** 1-hour TTL cache write rate (2× input) */
-  cacheWrite1hPerMTok: number
-  cacheReadPerMTok: number
-}
-
-const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
-  // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50)
-  {
-    match: 'fable',
-    pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 50,
-      cacheWritePerMTok: 12.5,
-      cacheWrite1hPerMTok: 20,
-      cacheReadPerMTok: 1
-    }
-  },
-  {
-    match: 'mythos',
-    pricing: {
-      inputPerMTok: 10,
-      outputPerMTok: 50,
-      cacheWritePerMTok: 12.5,
-      cacheWrite1hPerMTok: 20,
-      cacheReadPerMTok: 1
-    }
-  },
-  // Opus 4.5+ (cheaper — match these first before the older opus-4 variants)
-  {
-    match: 'opus-4-5',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-6',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-7',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  {
-    match: 'opus-4-8',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  // Opus 4.0 / 4.1 (older, more expensive)
-  {
-    match: 'opus-4',
-    pricing: {
-      inputPerMTok: 15,
-      outputPerMTok: 75,
-      cacheWritePerMTok: 18.75,
-      cacheWrite1hPerMTok: 30,
-      cacheReadPerMTok: 1.5
-    }
-  },
-  // Opus fallback (assume newer pricing)
-  {
-    match: 'opus',
-    pricing: {
-      inputPerMTok: 5,
-      outputPerMTok: 25,
-      cacheWritePerMTok: 6.25,
-      cacheWrite1hPerMTok: 10,
-      cacheReadPerMTok: 0.5
-    }
-  },
-  // Sonnet (all versions: 3.7, 4, 4.5, 4.6)
-  {
-    match: 'sonnet',
-    pricing: {
-      inputPerMTok: 3,
-      outputPerMTok: 15,
-      cacheWritePerMTok: 3.75,
-      cacheWrite1hPerMTok: 6,
-      cacheReadPerMTok: 0.3
-    }
-  },
-  // Haiku 4.5
-  {
-    match: 'haiku-4',
-    pricing: {
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cacheWritePerMTok: 1.25,
-      cacheWrite1hPerMTok: 2,
-      cacheReadPerMTok: 0.1
-    }
-  },
-  // Haiku 3.5
-  {
-    match: 'haiku-3',
-    pricing: {
-      inputPerMTok: 0.8,
-      outputPerMTok: 4,
-      cacheWritePerMTok: 1,
-      cacheWrite1hPerMTok: 1.6,
-      cacheReadPerMTok: 0.08
-    }
-  },
-  // Haiku (fallback)
-  {
-    match: 'haiku',
-    pricing: {
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cacheWritePerMTok: 1.25,
-      cacheWrite1hPerMTok: 2,
-      cacheReadPerMTok: 0.1
-    }
-  }
-]
+// block-usage's pricing table is the Anthropic slice of the shared table
+// (src/shared/pricing.ts) — same entries, same order, same numbers. It used to
+// be a byte-identical duplicate; it is now derived so the two can't drift.
+const MODEL_PRICING = ANTHROPIC_MODEL_PRICING
 
 // Default pricing (sonnet-tier) for unknown models
 const DEFAULT_PRICING: ModelPricing = {
@@ -548,7 +413,6 @@ export class BlockUsageService {
     }
   }
 
-
   // -------------------------------------------------------------------------
   // Account log
   // -------------------------------------------------------------------------
@@ -668,8 +532,8 @@ export class BlockUsageService {
         }
         if (mtime < cutoff) continue
 
-        // Reparse only this file
-        const entries = await this.parseJsonlFile(filePath, cutoff)
+        // Reparse only this file (full parse; cache holds all entries — M-DB5)
+        const entries = await this.parseJsonlFile(filePath)
         this.fileCache.set(filePath, { mtime, entries })
 
         // Merge new (unseen) entries into the cache
@@ -751,9 +615,7 @@ export class BlockUsageService {
 
     // Apply the account filter for the view (persisted summaries stay unfiltered)
     const viewEntries = this.accountFilter
-      ? dbEntries.filter(
-          (e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter
-        )
+      ? dbEntries.filter((e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter)
       : dbEntries
 
     const blocks = this.groupIntoBlocks(viewEntries)
@@ -780,7 +642,12 @@ export class BlockUsageService {
     // Phase 9a: pass viewEntries so updateProjection can reconstruct cumTokensAt(ts)
     // from the DB window samples (survives app restart).
     if (currentBlock) {
-      currentBlock.projectedUsage = this.updateProjection(currentBlock, currentWindowEnd, now, viewEntries)
+      currentBlock.projectedUsage = this.updateProjection(
+        currentBlock,
+        currentWindowEnd,
+        now,
+        viewEntries
+      )
     }
 
     // Carry projections to newly completed blocks
@@ -960,10 +827,21 @@ export class BlockUsageService {
       const rows = getUsageEventsSince(cutoff)
       if (rows.length === 0) return
 
+      // The day that CONTAINS the cutoff is only PARTIALLY covered by the scan
+      // window — its events before `cutoff` are excluded. Rolling it up would
+      // overwrite the durable full-day total (stored by an earlier rollup while
+      // the day was fully inside the window) with a shrinking partial sum as the
+      // window slides forward, so days silently decay to near-zero once they
+      // cross the boundary while the app runs (H13). Skip it; every OTHER day in
+      // the window is fully covered (all its events are ≥ cutoff), and "today"
+      // only grows. This is a pure JS guard — no schema/upsert-semantics change.
+      const partialDate = dateStrFromTimestamp(cutoff)
+
       // Bucket by (date, engineId, vendorId, modelId).
       const buckets = new Map<string, DailyUsageRow>()
       for (const r of rows) {
         const date = dateStrFromTimestamp(r.ts)
+        if (date === partialDate) continue // boundary day sliding out — leave its stored total intact
         const key = `${date}|${r.engineId}|${r.vendorId}|${r.modelId}`
         let b = buckets.get(key)
         if (!b) {
@@ -1323,7 +1201,8 @@ export class BlockUsageService {
     }
 
     // Don't add a sample if API data is stale or values are too small
-    if (apiAge > 5 * MS_PER_MINUTE) return this.computeProjectionWLS(block, currentWindowEnd, blockEntries)
+    if (apiAge > 5 * MS_PER_MINUTE)
+      return this.computeProjectionWLS(block, currentWindowEnd, blockEntries)
     if (apiPercent < MIN_API_PERCENT_FOR_SAMPLE || currentTok <= 0) return null
 
     // Deduplicate: skip if the latest sample has the same tokens AND percent
@@ -1370,18 +1249,17 @@ export class BlockUsageService {
     // Entries are scoped to this block (block.startTime) inside buildDbProjectionSamples
     // so prior blocks' tokens don't inflate the through-origin WLS fit.
     if (currentWindowEnd) {
-      const dbSamples = this.buildDbProjectionSamples(currentWindowEnd, block.startTime, blockEntries)
+      const dbSamples = this.buildDbProjectionSamples(
+        currentWindowEnd,
+        block.startTime,
+        blockEntries
+      )
       samples = dbSamples.length > 0 ? dbSamples : (this.projectionSamples as AggProjectionSample[])
     } else {
       samples = this.projectionSamples as AggProjectionSample[]
     }
 
-    return computeWLS(
-      samples,
-      totalTokens(block.tokens),
-      block.costUsd,
-      Date.now()
-    )
+    return computeWLS(samples, totalTokens(block.tokens), block.costUsd, Date.now())
   }
 
   /**
@@ -1491,7 +1369,7 @@ export class BlockUsageService {
       if (cached && cached.mtime === mtime) {
         entries = cached.entries
       } else {
-        entries = await this.parseJsonlFile(filePath, cutoff)
+        entries = await this.parseJsonlFile(filePath)
         this.fileCache.set(filePath, { mtime, entries })
       }
 
@@ -1509,7 +1387,20 @@ export class BlockUsageService {
     return allEntries
   }
 
-  private parseJsonlFile(filePath: string, cutoff: number): Promise<ParsedEntry[]> {
+  /**
+   * Parse a single JSONL file into ParsedEntry[], keeping EVERY dated
+   * assistant-usage entry regardless of age.
+   *
+   * M-DB5: this deliberately does NOT filter by a parse-time cutoff. The result
+   * is cached by mtime and shared between scanAllJsonl (cutoff = now-7d) and
+   * backfillHistoricalSummaries via scanJsonlWithCutoff(0). If the parse dropped
+   * pre-cutoff entries, the 7d scan (which runs first) would poison the cache
+   * with a truncated list and the later cutoff-0 backfill would cache-hit and
+   * never see pre-7d entries. Caching the FULL parse and letting each caller
+   * apply its own per-entry cutoff (they already do) fixes that. The tiny extra
+   * parse cost is offset by parsing each file at most once instead of twice.
+   */
+  private parseJsonlFile(filePath: string): Promise<ParsedEntry[]> {
     return new Promise((resolve) => {
       const entries: ParsedEntry[] = []
 
@@ -1529,7 +1420,8 @@ export class BlockUsageService {
 
           const timestamp = data.timestamp ? new Date(data.timestamp as string).getTime() : 0
 
-          if (!timestamp || timestamp < cutoff) return
+          // Keep all dated entries; callers apply their own per-entry cutoff.
+          if (!timestamp) return
 
           const usage = data.message.usage
           const rawModel = (data.message.model as string) || 'unknown'
@@ -1689,7 +1581,7 @@ export class BlockUsageService {
       if (!fs.existsSync(USAGE_DIR)) {
         fs.mkdirSync(USAGE_DIR, { recursive: true })
       }
-      fs.writeFileSync(filePath, JSON.stringify(daily), { mode: 0o600 })
+      writeJsonAtomic(filePath, daily, { mode: 0o600 })
     } catch (err) {
       logger.error('BlockUsage', 'Failed to persist daily file', err)
     }
@@ -1710,7 +1602,7 @@ export class BlockUsageService {
             otherDaily.completedBlocks.push(block)
           }
         }
-        fs.writeFileSync(otherPath, JSON.stringify(otherDaily), { mode: 0o600 })
+        writeJsonAtomic(otherPath, otherDaily, { mode: 0o600 })
       } catch (err) {
         logger.error('BlockUsage', `Failed to persist blocks to ${otherDate}`, err)
       }
@@ -1902,7 +1794,7 @@ export class BlockUsageService {
       if (!fs.existsSync(USAGE_DIR)) {
         fs.mkdirSync(USAGE_DIR, { recursive: true })
       }
-      fs.writeFileSync(filePath, JSON.stringify(daily), { mode: 0o600 })
+      writeJsonAtomic(filePath, daily, { mode: 0o600 })
     } catch (err) {
       logger.error('BlockUsage', `Failed to persist daily summary for ${date}`, err)
     }
@@ -2010,7 +1902,7 @@ export class BlockUsageService {
       if (cached && cached.mtime === mtime) {
         entries = cached.entries
       } else {
-        entries = await this.parseJsonlFile(filePath, cutoff)
+        entries = await this.parseJsonlFile(filePath)
         this.fileCache.set(filePath, { mtime, entries })
       }
 

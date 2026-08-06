@@ -19,6 +19,7 @@ import * as path from 'path'
 import * as os from 'os'
 import type { McpServerConfig } from '../../shared/types'
 import { logger } from './logger'
+import { writeJsonAtomic } from './write-json-atomic'
 
 // ---------------------------------------------------------------------------
 // Path resolution
@@ -151,7 +152,13 @@ export function writeDisabledMcpServers(cwd: string, disabledNames: string[]): v
     projects[normalizedCwd].disabledMcpServers = disabledNames
   }
 
-  fs.writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+  // Atomic write (temp + rename): ~/.claude.json is written by the real CLI and
+  // every bun-claude child too. Atomicity prevents a torn/truncated file (M-CL6).
+  // NOTE the residual cross-process race: without an inter-process lock this
+  // remains last-writer-wins — a concurrent CLI write between our read and our
+  // rename can still clobber a field we did not touch. Atomicity only guarantees
+  // no reader ever observes a half-written file, not serialization across writers.
+  writeJsonAtomic(configPath, data, { indent: 2, trailingNewline: true })
   logger.debug(
     'ClaudeMcp',
     `Wrote disabledMcpServers for ${normalizedCwd}: [${disabledNames.join(', ')}]`
@@ -179,7 +186,7 @@ export function removeMcpServer(scope: McpScope, serverName: string, cwd?: strin
         } else {
           data.mcpServers = servers
         }
-        fs.writeFileSync(paths.mcpJson, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+        writeJsonAtomic(paths.mcpJson, data, { indent: 2, trailingNewline: true })
         logger.debug('ClaudeMcp', `Removed "${serverName}" from ${paths.mcpJson}`)
       }
     }
@@ -196,9 +203,7 @@ export function removeMcpServer(scope: McpScope, serverName: string, cwd?: strin
       } else {
         settingsData.mcpServers = servers
       }
-      fs.writeFileSync(paths.settingsJson, JSON.stringify(settingsData, null, 2) + '\n', {
-        mode: 0o600
-      })
+      writeJsonAtomic(paths.settingsJson, settingsData, { indent: 2, trailingNewline: true })
       logger.debug('ClaudeMcp', `Removed "${serverName}" from ${paths.settingsJson}`)
     }
   }
@@ -232,7 +237,7 @@ export function saveMcpServers(
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
 
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+    writeJsonAtomic(filePath, data, { indent: 2, trailingNewline: true })
     logger.debug('ClaudeMcp', `Saved ${scope} mcpServers to ${filePath}`)
   } else {
     // Write to settings.json / settings.local.json (mcpServers key)
@@ -250,7 +255,7 @@ export function saveMcpServers(
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
 
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+    writeJsonAtomic(filePath, data, { indent: 2, trailingNewline: true })
     logger.debug('ClaudeMcp', `Saved ${scope} mcpServers to ${filePath}`)
   }
 }

@@ -33,6 +33,7 @@ import { parseModelString } from '../opencode/model-discovery'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig } from './ui-config'
 import { transformAssistantMessage } from './assistant-message'
+import { extractToolResultContent } from './tool-result-content'
 // event-mapper.ts is a leaf module (no cycle risk — it does not import
 // OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
@@ -264,6 +265,10 @@ export interface DispatcherDeps {
    * case never actually waits the full duration.
    */
   piAbortSettleGraceMs?: number
+  /** Delay between opencode SSE reconnect attempts after a dropped subscription
+   *  (see runSseLoop). Small enough to recover approval forwarding quickly, big
+   *  enough that a dead server can't hot-spin the loop. Injectable for tests. */
+  sseReconnectDelayMs?: number
   /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
   now?: () => number
   /**
@@ -301,6 +306,9 @@ const HEARTBEAT_MS = 15 * 1000
 const PENDING_STOP_TTL_MS = 60 * 1000
 /** Default for `DispatcherDeps.piAbortSettleGraceMs` — see that field's doc comment. */
 const PI_ABORT_SETTLE_GRACE_MS = 3_000
+
+/** Default for `DispatcherDeps.sseReconnectDelayMs` — see runSseLoop. */
+const SSE_RECONNECT_DELAY_MS = 1_000
 /**
  * Bounded timeout for the BEST-EFFORT `get_session_stats` reconciliation read
  * in `accountPiNonSuccessCostReconciled` (audit-residual C fix) — short,
@@ -864,6 +872,7 @@ export class CrossEngineDispatcher {
   private readonly dispatchTimeoutMs: number
   private readonly heartbeatMs: number
   private readonly piAbortSettleGraceMs: number
+  private readonly sseReconnectDelayMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
   private readonly spawnPiTarget: SpawnPiTargetFn
   private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
@@ -906,6 +915,7 @@ export class CrossEngineDispatcher {
     this.dispatchTimeoutMs = deps.dispatchTimeoutMs ?? DISPATCH_TIMEOUT_MS
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
+    this.sseReconnectDelayMs = deps.sseReconnectDelayMs ?? SSE_RECONNECT_DELAY_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
     this.now = deps.now ?? Date.now
@@ -1183,6 +1193,21 @@ export class CrossEngineDispatcher {
             'Start a fresh dispatch without session_id.'
         )
       }
+      // M-XE1: busy-reject BEFORE touching entry state — same rationale as the
+      // Claude/pi targets. opencode drives ONE turn per session over a single
+      // ambient SSE tap gated by `entry.busy`; two concurrent same-session_id
+      // dispatch_agent calls (their MCP handlers overlap within one assistant
+      // turn) would both clear the cost-cap check before either records spend,
+      // both prompt() the same session, and the first finisher's `finally`
+      // would flip `busy` off and reset `turnToolUseIds` out from under the
+      // still-running second turn. Reject the second call; the running turn is
+      // left completely undisturbed (no abort, no removal, no ctx swap).
+      if (existing.busy) {
+        return errorResult(
+          `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
+          req.sessionId
+        )
+      }
       // ADR-033 M4-C: reject a continuation turn once this target's tracked
       // cumulative cost has met/exceeded the configured cap. The target stays
       // alive — raising dispatch.maxCostUsd or starting a fresh dispatch both
@@ -1347,6 +1372,17 @@ export class CrossEngineDispatcher {
         const detail =
           turnError.data?.message || turnError.name || 'the dispatched agent reported an error'
         emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${detail}`)
+        // opencode RESOLVES the prompt with real `info.tokens`/`info.cost` even
+        // when the turn reports an error (the turn ran, it just didn't finish
+        // cleanly) — capture that spend instead of fabricating nulls, and fold
+        // it into the cap + Slice-C breakdown. Mirrors the Claude failed-subtype
+        // path; without it a target whose turns keep erroring spends real tokens
+        // that never count toward maxCostUsd or the dispatching session's cost.
+        const errInfoTokens = resp?.info?.tokens
+        const errTotalTokens = errInfoTokens
+          ? (errInfoTokens.input ?? 0) + (errInfoTokens.output ?? 0) + (errInfoTokens.reasoning ?? 0)
+          : 0
+        const errTurnCostUsd = resp?.info?.cost ?? 0
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
@@ -1355,10 +1391,14 @@ export class CrossEngineDispatcher {
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
+          totalTokens: errTotalTokens > 0 ? errTotalTokens : null,
+          costUsd: errTurnCostUsd > 0 ? errTurnCostUsd : null,
           durationMs: this.now() - turnStartedAt
         })
+        if (Number.isFinite(errTurnCostUsd) && errTurnCostUsd > 0) {
+          ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
+          entry.cumulativeCostUsd += errTurnCostUsd
+        }
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
       }
       const text = (resp?.parts ?? [])
@@ -1480,20 +1520,52 @@ export class CrossEngineDispatcher {
   // ── SSE approval forwarding (opencode targets only) ──────────────────────
 
   private async runSseLoop(rec: ConnRecord): Promise<void> {
-    try {
-      // subscribeEvents is UNFILTERED — we filter by registered target ids.
-      for await (const ev of rec.client.subscribeEvents(rec.sseAbort.signal)) {
-        if (rec.sseAbort.signal.aborted) break
-        this.handleSseEvent(ev)
+    // opencode holds /event open for the server's lifetime, so a non-aborted end
+    // (stream close or transport error) means the subscription DROPPED, not that
+    // we are done. Un-retried, `permission.asked` forwarding for EVERY target on
+    // this cwd dies silently and their dispatches hang to the 10-min timeout with
+    // no card ever shown. Reconnect until the record is torn down —
+    // releaseConnection() aborts `sseAbort` when the last target leaves, which
+    // both ends the for-await and breaks this loop.
+    while (!rec.sseAbort.signal.aborted) {
+      try {
+        // subscribeEvents is UNFILTERED — we filter by registered target ids.
+        for await (const ev of rec.client.subscribeEvents(rec.sseAbort.signal)) {
+          if (rec.sseAbort.signal.aborted) break
+          this.handleSseEvent(ev)
+        }
+      } catch (err) {
+        if (!rec.sseAbort.signal.aborted) {
+          logger.warn(
+            'CrossEngineDispatcher',
+            `SSE loop error (will reconnect): ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
       }
-    } catch (err) {
-      if (!rec.sseAbort.signal.aborted) {
-        logger.warn(
-          'CrossEngineDispatcher',
-          `SSE loop error: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+      if (rec.sseAbort.signal.aborted) break
+      // Stream ended/broke while targets are still live. Pause briefly before
+      // re-subscribing so a genuinely dead server can't hot-spin the loop (the
+      // pending dispatches' own 10-min timeouts still bound the worst case).
+      await this.sseReconnectDelay(rec.sseAbort.signal)
     }
+  }
+
+  /** Abortable delay between SSE reconnect attempts (see runSseLoop). Resolves
+   *  early if the record is torn down mid-wait, and never leaks its abort
+   *  listener. Overridable via deps for tests. */
+  private sseReconnectDelay(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const onAbort = (): void => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort)
+        resolve()
+      }, this.sseReconnectDelayMs)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
   }
 
   private handleSseEvent(ev: OpencodeEvent): void {
@@ -1977,20 +2049,13 @@ export class CrossEngineDispatcher {
         if (!block || block.type !== 'tool_result') continue
         const toolResultToolUseId = block.tool_use_id as string | undefined
         if (!toolResultToolUseId) continue
-        let resultText = ''
-        const blockContent = block.content
-        if (typeof blockContent === 'string') {
-          resultText = blockContent
-        } else if (Array.isArray(blockContent)) {
-          resultText = (blockContent as Array<Record<string, unknown>>)
-            .map((c) => (c.text as string) || '')
-            .join('\n')
-        }
+        const { text: resultText, images } = extractToolResultContent(block.content)
         entry.ctx.emit('session:subagent-tool-result', {
           toolUseId,
           toolResultToolUseId,
           result: resultText,
-          isError: !!block.is_error
+          isError: !!block.is_error,
+          ...(images ? { images } : {})
         })
       }
     }

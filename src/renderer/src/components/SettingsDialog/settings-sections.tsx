@@ -24,7 +24,9 @@ import type {
   DispatchConfig,
   ModelInfo,
   OpencodeProviderSettings,
-  OpencodeConfigSettings
+  OpencodeConfigSettings,
+  OpencodeProviderCatalogEntry,
+  ProviderRemoveKind
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
@@ -37,6 +39,11 @@ import {
 } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import {
+  AUTONOMY_TO_PERMISSION,
+  PERMISSION_TO_AUTONOMY,
+  AUTONOMY_LABELS
+} from '../../../../shared/permission-modes'
+import {
   SettingsToggle,
   SettingsSlider,
   SettingsSelect,
@@ -45,13 +52,25 @@ import {
   ChatRetentionSetting,
   InfoTooltip
 } from './settings-controls'
+import { ModelPicker, type ModelDisplay } from '../shared/InlinePickers'
+import { SelectMenu } from '../shared/SelectMenu'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { RemoteServerSettings } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
 import { SharedProviders } from './SharedProviders'
 import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
+import { ConfirmModal } from '../shared/ConfirmModal'
+import {
+  IconButton,
+  KeyIcon,
+  PencilIcon,
+  PowerIcon,
+  SlidersIcon,
+  TrashIcon
+} from './ProviderRowIcons'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.9.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 
@@ -237,21 +256,15 @@ function ModelEffortRow({
         <span>{modelLabel}</span>
         <span className="text-[10px] text-text-muted/50">{modelId}</span>
       </div>
-      <select
+      <SelectMenu
+        testid="ModelEffortRow.effort"
         value={current ?? ''}
-        onChange={(e) => {
-          const v = e.target.value
-          onChange(v === '' ? undefined : (v as EffortLevel))
-        }}
-        className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors cursor-pointer"
-      >
-        <option value="">{`Default (${EFFORT_LEVEL_LABEL[fallback]})`}</option>
-        {levels.map((lvl) => (
-          <option key={lvl} value={lvl}>
-            {EFFORT_LEVEL_LABEL[lvl]}
-          </option>
-        ))}
-      </select>
+        onChange={(v) => onChange(v === '' ? undefined : (v as EffortLevel))}
+        options={[
+          { value: '', label: `Default (${EFFORT_LEVEL_LABEL[fallback]})` },
+          ...levels.map((lvl) => ({ value: lvl, label: EFFORT_LEVEL_LABEL[lvl] }))
+        ]}
+      />
     </div>
   )
 }
@@ -363,30 +376,9 @@ function AccountsSetting(): React.JSX.Element {
 
 // ── Autonomy mode picker ─────────────────────────────────────────────
 
-const AUTONOMY_TO_PERMISSION: Record<AutonomyMode, string> = {
-  plan: 'plan',
-  ask: 'default',
-  autoEdit: 'acceptEdits',
-  full: 'auto'
-}
-
-const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
-  plan: 'plan',
-  default: 'ask',
-  acceptEdits: 'autoEdit',
-  auto: 'full',
-  localAuto: 'full'
-}
-
-const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
-  plan: 'Read-only (Plan)',
-  ask: 'Ask (default)',
-  autoEdit: 'Auto-edit files',
-  full: 'Full auto'
-}
-
-function AutonomyModePicker(): React.JSX.Element {
+export function AutonomyModePicker(): React.JSX.Element {
   const [perms, setPerms] = useState<ClaudePermissions | null>(null)
+  const setDefaultPermissionMode = useSessionStore((s) => s.setDefaultPermissionMode)
   const availableModes = CLAUDE_ENGINE_CAPABILITIES.autonomyModes
 
   useEffect(() => {
@@ -402,14 +394,22 @@ function AutonomyModePicker(): React.JSX.Element {
 
   const handleChange = async (mode: AutonomyMode): Promise<void> => {
     if (!perms) return
-    const next: ClaudePermissions = { ...perms, defaultMode: AUTONOMY_TO_PERMISSION[mode] }
+    const permissionMode = AUTONOMY_TO_PERMISSION[mode]
+    const next: ClaudePermissions = { ...perms, defaultMode: permissionMode }
     setPerms(next)
+    // `defaultMode` is bootstrap-only for every engine: mirror it into the store
+    // so sessions created later in this run start in it without an app restart.
+    setDefaultPermissionMode(permissionMode)
     await window.api.saveClaudePermissions('user', next)
   }
 
   return (
     <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="mb-1.5">Autonomy mode</div>
+      <div className="mb-0.5">Autonomy mode</div>
+      <div className="mb-1.5 text-[11px] text-text-muted">
+        Applies to new sessions. Running sessions keep their own mode — change it from the mode
+        control next to the chat input.
+      </div>
       <div className="space-y-1">
         {availableModes.map((mode) => (
           <label
@@ -482,38 +482,156 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
   { value: 'thinking', label: 'Thinking' }
 ]
 
+/** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
+const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
+/** Label for the dispatch default-model picker's "no explicit choice" row. */
+const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
+/** Label for the opencode default/small model pickers' "no explicit choice" row. */
+const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
+
 /**
- * Self-contained (loads/saves its own opencode EngineConfig via window.api —
- * SettingsDialog only wires the 'claude' engine config). Configures the auto-mode
- * LLM permission gatekeeper that runs in Full autonomy on opencode. See ADR-023.
+ * `ModelInfo` → `ModelDisplay` for the shared picker. `value` stays the picker
+ * VALUE (`<provider>/<modelId>`) that `decodeModelValue` consumes.
  */
-function OpencodeAutoModeSection(): React.JSX.Element {
+function toModelDisplays(models: ModelInfo[]): ModelDisplay[] {
+  return models.map((m) => ({ ...m, shortName: m.displayName || m.value }))
+}
+
+/**
+ * The `ModelDisplay` a settings ModelPicker should show as selected.
+ *
+ * An unset value ('') means "inherit / not set" and reads as `emptyLabel`,
+ * matching the pinned empty row. A CONFIGURED-but-undiscovered model
+ * (hand-edited, or a provider not authenticated yet) is shown VERBATIM rather
+ * than collapsing to the empty label, which would misreport what is saved.
+ */
+function selectedModelDisplay(
+  models: ModelInfo[],
+  value: string,
+  emptyLabel: string
+): ModelDisplay {
+  const known = models.find((m) => m.value === value)
+  if (known) return { ...known, shortName: known.displayName || known.value }
+  return {
+    value,
+    displayName: value || emptyLabel,
+    shortName: value || emptyLabel
+  }
+}
+
+/** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
+type TrustListKey = 'trustedDomains' | 'trustedRegistries' | 'protectedPatterns'
+
+/**
+ * The three trust lists spliced into the classifier environment
+ * (src/main/automode/rules/policy.ts). Each `description` states what an EMPTY
+ * list means, because for all three that is the load-bearing, non-obvious half
+ * of the semantics — and for `protectedPatterns` a non-empty list REPLACES a
+ * built-in heuristic rather than adding to it.
+ */
+const TRUST_LISTS: ReadonlyArray<{
+  key: TrustListKey
+  label: string
+  placeholder: string
+  tooltip: string
+  description: string
+}> = [
+  {
+    key: 'trustedDomains',
+    label: 'Trusted domains',
+    placeholder: 'files.example.com',
+    tooltip:
+      'External destinations the judge may treat as safe to reach or send data to (web fetch, uploads, curl targets). Host names, not URLs.',
+    description: 'Empty = no external destination is trusted.'
+  },
+  {
+    key: 'trustedRegistries',
+    label: 'Trusted package registries',
+    placeholder: 'https://npm.internal.example',
+    tooltip:
+      'Registries the judge may treat as safe to install from. Anything else is an untrusted supply-chain source.',
+    description: "Empty = only the project manifest's default registry."
+  },
+  {
+    key: 'protectedPatterns',
+    label: 'Production / protected patterns',
+    placeholder: 'acme-live-*',
+    tooltip:
+      'Names, hosts, or resource patterns the judge must treat as production and refuse to mutate without a human. Setting any pattern REPLACES the built-in heuristic entirely.',
+    description:
+      "Empty = built-in heuristic: 'prod'/'production' as a whole word or segment. Setting this REPLACES the heuristic."
+  }
+]
+
+/**
+ * Shared render/load/save core for the per-engine auto-mode editor.
+ * `OpencodeAutoModeSection` and `PiAutoModeSection` are thin copy/gating
+ * wrappers around this — both engines read the SAME `EngineConfig.autoMode`
+ * block (`loadEngineConfig(<engine>).autoMode` in OpencodeSession /
+ * PiSession), and the classifier policy behind it is engine-neutral
+ * (src/main/automode/), so the editor is too. Mirrors `DispatchSection`'s
+ * structure for the same DRY reason.
+ *
+ * Self-contained: loads/saves its own EngineConfig via window.api
+ * (SettingsDialog only wires the 'claude' engine config), editing ONLY the
+ * `autoMode` block so sibling blocks (`dispatch`, `piConfig`, …) survive.
+ *
+ * `installed`: null = still probing (Loading), false = gate closed.
+ *
+ * The judge-model picker is fed from `getEngineModels()` filtered to this
+ * engine, so its option values are picker VALUES (`<provider>/<modelId>`) —
+ * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
+ * when resolving `autoMode.judgeModel`.
+ *
+ * `AutoModeConfig`'s trust lists (trustedDomains / trustedRegistries /
+ * protectedPatterns) are edited here too, and are engine-neutral for the same
+ * reason: both sessions splice them into the classifier environment with the
+ * SAME `?.length` guard, so an EMPTY array and an ABSENT key are
+ * indistinguishable to the backend. `updateList` therefore deletes the key
+ * rather than storing `[]` — one on-disk representation for one meaning, and
+ * `engines/<engine>.json` stays clean for hand-editing.
+ */
+function AutoModeSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  toggleTooltip,
+  judgeModelTooltip,
+  footerText
+}: {
+  engineId: EngineId
+  testid: string
+  installed: boolean | null
+  notInstalledMessage: string
+  toggleTooltip: string
+  judgeModelTooltip: string
+  footerText: string
+}): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
-      .loadEngineConfig('opencode')
+      .loadEngineConfig(engineId)
       .then(setEngineCfg)
       .catch(() => setEngineCfg({}))
     window.api
       .getEngineModels()
       .then((groups) => {
-        const oc = groups.filter((g) => g.engineId === 'opencode')
-        setModels(oc.flatMap((g) => g.models))
+        const own = groups.filter((g) => g.engineId === engineId)
+        setModels(own.flatMap((g) => g.models))
       })
       .catch(() => {})
-  }, [])
+  }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid="OpencodeAutoModeSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div data-testid="OpencodeAutoModeSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
-        opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full
-        autonomy.
+      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        {notInstalledMessage}
       </div>
     )
   }
@@ -523,53 +641,125 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   const judgeModel = auto.judgeModel ?? ''
   const twoStageMode = auto.twoStageMode ?? 'both'
 
+  const judgeModelOptions = toModelDisplays(models)
+  const selectedJudgeModel = selectedModelDisplay(models, judgeModel, JUDGE_MODEL_DEFAULT_LABEL)
+
   const update = (patch: Partial<AutoModeConfig>): void => {
     const next: EngineConfig = { ...engineCfg, autoMode: { ...auto, ...patch } }
     setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    window.api.saveEngineConfig(engineId, next).catch(() => {})
+  }
+
+  // Trust lists: an empty list is written as an ABSENT key, never `[]`. The
+  // classifier reads them behind `?.length`, so `[]` is not a distinct state —
+  // storing it would invent a second encoding of "restrictive default".
+  const updateList = (key: TrustListKey, items: string[]): void => {
+    const nextAuto: AutoModeConfig = { ...auto }
+    if (items.length > 0) nextAuto[key] = items
+    else delete nextAuto[key]
+    const next: EngineConfig = { ...engineCfg, autoMode: nextAuto }
+    setEngineCfg(next)
+    window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
 
   return (
-    <div data-testid="OpencodeAutoModeSection" className="space-y-1">
+    <div data-testid={testid} className="space-y-1">
       <SettingsToggle
+        testid={`${testid}.enabled`}
         label="Auto mode (LLM gatekeeper)"
         checked={enabled}
         onChange={(v) => update({ enabled: v })}
-        tooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
+        tooltip={toggleTooltip}
       />
       {enabled && (
         <>
           <div className="px-3 py-1.5 text-[13px] text-text-secondary">
             <div className="mb-1 flex items-center gap-1">
               Judge model
-              <InfoTooltip text="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work." />
+              <InfoTooltip text={judgeModelTooltip} />
             </div>
-            <select
-              value={judgeModel}
-              onChange={(e) => update({ judgeModel: e.target.value || undefined })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-            >
-              <option value="">Same as session model (default)</option>
-              {models.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.displayName || m.value}
-                </option>
-              ))}
-            </select>
+            {/* Themed dropdown, not a native <select>: a native option list is
+                painted by the OS with UA colors, so the inherited light-on-dark
+                text was unreadable under Monokai. ModelPicker (the InputBox /
+                AutomationConfig picker) renders options as real DOM styled from
+                the same theme tokens as everything else. The section-scoped
+                `.judgeModel` testid moves to this wrapper; the picker keeps its
+                own `ModelPicker.trigger` / `ModelPicker.option` ids. */}
+            <div data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
+              <ModelPicker
+                placement="down"
+                emptyOption={{ label: JUDGE_MODEL_DEFAULT_LABEL }}
+                models={judgeModelOptions}
+                selectedModel={selectedJudgeModel}
+                onSelectModel={(v) => update({ judgeModel: v || undefined })}
+              />
+            </div>
           </div>
           <SettingsSelect
+            testid={`${testid}.twoStageMode`}
             label="Two-stage judging"
             value={twoStageMode}
             options={TWO_STAGE_OPTIONS}
             onChange={(v) => update({ twoStageMode: v })}
           />
-          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-            Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No
-            per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters.
-          </div>
+          {TRUST_LISTS.map((f) => (
+            <SandboxListSetting
+              key={f.key}
+              testid={`${testid}.${f.key}`}
+              label={f.label}
+              labelColor="text-text-secondary"
+              items={auto[f.key] ?? []}
+              placeholder={f.placeholder}
+              onUpdate={(items) => updateList(f.key, items)}
+              tooltip={f.tooltip}
+              description={f.description}
+            />
+          ))}
+          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * Configures the auto-mode LLM permission gatekeeper that runs in Full
+ * autonomy on opencode. See ADR-023.
+ */
+function OpencodeAutoModeSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <AutoModeSection
+      engineId="opencode"
+      testid="OpencodeAutoModeSection"
+      installed={installed}
+      notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
+      toggleTooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
+      judgeModelTooltip="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
+      footerText="Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters."
+    />
+  )
+}
+
+/**
+ * The pi twin of `OpencodeAutoModeSection`. pi's gatekeeper (PiSession's
+ * phase-4 wiring) reads the very same `engines/pi.json#autoMode` block and runs
+ * the same engine-neutral classifier — the one behavioral difference worth
+ * saying out loud in the copy is that pi's `isAutoMode()` covers BOTH the
+ * `auto` and `full` autonomy modes, where opencode's covers Full only.
+ */
+export function PiAutoModeSection(): React.JSX.Element {
+  const installed = usePiInstalled()
+  return (
+    <AutoModeSection
+      engineId="pi"
+      testid="PiAutoModeSection"
+      installed={installed}
+      notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
+      toggleTooltip="In Auto and Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Auto/Full prompt you like Ask mode. See ADR-023."
+      judgeModelTooltip="The model that decides allow/block. Format: provider/model-id. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
+      footerText="Applies to Auto and Full autonomy on pi. The judge runs in its own short-lived pi process. It sees tool calls, not their output. Config is read once per session — reopen a session to pick up changes."
+    />
   )
 }
 
@@ -659,19 +849,20 @@ function DispatchSection({
           Default model
           <InfoTooltip text={defaultModelTooltip} />
         </div>
-        <select
-          data-testid={`${testid}.defaultModel`}
-          value={defaultModel}
-          onChange={(e) => update({ defaultModel: e.target.value || undefined })}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        >
-          <option value="">(not set)</option>
-          {models.map((m) => (
-            <option key={m.value} value={m.value}>
-              {m.displayName || m.value}
-            </option>
-          ))}
-        </select>
+        {/* Themed ModelPicker, not a native <select> — see the AutoModeSection
+            judge-model note: OS-painted option lists are unreadable in dark
+            themes. The section-scoped `.defaultModel` testid moves to this
+            wrapper and carries `data-value`; the picker keeps its own
+            `ModelPicker.trigger` / `ModelPicker.option` ids. */}
+        <div data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
+          <ModelPicker
+            placement="down"
+            emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
+            models={toModelDisplays(models)}
+            selectedModel={selectedModelDisplay(models, defaultModel, DISPATCH_MODEL_DEFAULT_LABEL)}
+            onSelectModel={(v) => update({ defaultModel: v || undefined })}
+          />
+        </div>
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
@@ -1127,6 +1318,14 @@ function VendorOpencodeSection(): React.JSX.Element {
   const [addingId, setAddingId] = useState<string | null>(null)
   // Provider whose model-allowlist dialog is open.
   const [modelDialogId, setModelDialogId] = useState<string | null>(null)
+  // Declaration being configured: a provider id to edit, or '' for a new one
+  // (null = closed). '' is distinguishable from a real id, which is never blank.
+  const [configId, setConfigId] = useState<string | null>(null)
+  // Provider awaiting remove confirmation, with the resolved kind so the dialog
+  // can name exactly what it will destroy.
+  const [removeTarget, setRemoveTarget] = useState<OpencodeProviderCatalogEntry | null>(null)
+  // Provider whose credential panel is expanded inline on its row.
+  const [credentialId, setCredentialId] = useState<string | null>(null)
   const mountedRef = useRef(true)
   const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
     useShallow((s) => ({
@@ -1177,13 +1376,20 @@ function VendorOpencodeSection(): React.JSX.Element {
     return next
   }
 
-  // A provider is "active" (added) when it's usable now: authenticated/free AND
-  // not explicitly removed (disabledProviders). authState already reflects
-  // /config/providers, which excludes credential-less providers.
-  const activeProviders = (catalog ?? []).filter(
-    (p) => (p.authState === 'authenticated' || p.authState === 'free') && !disabled.includes(p.id)
+  // A provider belongs in the list when it is usable now (authenticated/free)
+  // OR explicitly disabled.
+  //
+  // Disabled providers are INCLUDED deliberately. They used to be filtered out
+  // here and re-offered only in the "Add provider" picker, which made a disabled
+  // provider look identical to one that was never set up — and hid the fact that
+  // opencode was ignoring it. Disable is reversible state, so it must be visible
+  // and toggleable in place, which is the whole point of separating it from
+  // removal. Discovery supplies these entries (GET /provider omits disabled ids
+  // entirely, so their name/modelCount are re-synthesized there).
+  const listedProviders = (catalog ?? []).filter(
+    (p) => p.authState === 'authenticated' || p.authState === 'free' || p.disabled
   )
-  const activeIds = new Set(activeProviders.map((p) => p.id))
+  const activeIds = new Set(listedProviders.map((p) => p.id))
   const addable = (catalog ?? [])
     .filter((p) => !activeIds.has(p.id))
     .filter((p) => {
@@ -1228,24 +1434,65 @@ function VendorOpencodeSection(): React.JSX.Element {
     }
   }
 
-  const handleRemove = async (vendorId: string, isFree: boolean): Promise<void> => {
+  /**
+   * Replace an ALREADY-ADDED provider's credential.
+   *
+   * Deliberately not finishAdd(): that seeds an empty model allowlist (correct
+   * when adding, since a fresh provider would otherwise flood the picker) and
+   * opens the model dialog. Doing either here would silently hide the models an
+   * existing provider is already showing — a "0 models" surprise from what the
+   * user asked to be a credential change.
+   */
+  const handleUpdateKey = async (vendorId: string): Promise<void> => {
+    const key = (apiKeys[vendorId] ?? '').trim()
+    if (!key) return
+    setSaving((prev) => ({ ...prev, [vendorId]: true }))
+    try {
+      await window.api.vendorAuthSetKey('opencode', vendorId, key)
+      setApiKeys((prev) => ({ ...prev, [vendorId]: '' }))
+      setCredentialId(null)
+      useSessionStore.getState().reloadModels()
+      reload()
+    } catch {
+      setOauthError(`Failed to save key for ${vendorId}`)
+    } finally {
+      if (mountedRef.current) setSaving((prev) => ({ ...prev, [vendorId]: false }))
+    }
+  }
+
+  /**
+   * Toggle opencode's `disabled_providers` veto — reversible, destroys nothing.
+   *
+   * Goes through the main-process owner rather than writing the array here: it is
+   * the same config key removal has to clean up, and having two writers for it is
+   * how the original bug (a veto outliving what it vetoed) became possible.
+   */
+  const handleToggleDisabled = async (vendorId: string, nextDisabled: boolean): Promise<void> => {
     setRemoving((prev) => ({ ...prev, [vendorId]: true }))
     try {
-      // Free/credential-less providers have nothing to remove from auth.json;
-      // hide them via disabledProviders. Authed providers also get their creds
-      // dropped so they leave /config/providers.
-      if (!isFree) await window.api.vendorAuthRemove('opencode', vendorId).catch(() => {})
-      const nextDisabled = disabled.includes(vendorId) ? disabled : [...disabled, vendorId]
-      const nextAllow = { ...allowlist }
-      delete nextAllow[vendorId]
-      updateCfg({
-        disabledProviders: nextDisabled,
-        modelAllowlist: Object.keys(nextAllow).length > 0 ? nextAllow : undefined
-      })
+      await window.api.setOpencodeProviderDisabled(vendorId, nextDisabled)
+      // Re-read opencode's config so the row reflects the write, not our guess.
+      const settings = await window.api.loadOpencodeSettings().catch(() => null)
+      if (settings && mountedRef.current) setOpencodeCfg(settings)
+      useSessionStore.getState().reloadModels()
       reload()
     } finally {
       if (mountedRef.current) setRemoving((prev) => ({ ...prev, [vendorId]: false }))
     }
+  }
+
+  /**
+   * Destroy what ClaudeUI owns for this provider. `kind` comes from the entry's
+   * resolved actions and is passed through untouched — widening it here would
+   * delete something the confirmation never mentioned.
+   */
+  const handleRemove = async (entry: OpencodeProviderCatalogEntry): Promise<void> => {
+    if (!entry.actions.removeKind) return
+    await window.api.removeOpencodeProvider(entry.id, entry.actions.removeKind)
+    const settings = await window.api.loadOpencodeSettings().catch(() => null)
+    if (settings && mountedRef.current) setOpencodeCfg(settings)
+    useSessionStore.getState().reloadModels()
+    reload()
   }
 
   const handleOAuthStart = async (vendorId: string): Promise<void> => {
@@ -1306,27 +1553,45 @@ function VendorOpencodeSection(): React.JSX.Element {
         <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
       )}
 
-      {/* Active (added) providers */}
+      {/* All providers — enabled and disabled, in one list. */}
       <div className="space-y-1.5">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Added providers</div>
-        {activeProviders.length === 0 && (
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Providers</div>
+        {listedProviders.length === 0 && (
           <div className="text-[10px] text-text-muted/60 leading-relaxed">
-            No providers added yet. Click “Add provider” to choose one.
+            No providers yet. Add a catalog provider, or add a custom OpenAI-compatible endpoint.
           </div>
         )}
-        {activeProviders.map((p) => {
+        {listedProviders.map((p) => {
           const isFree = p.authState === 'free'
+          const busy = removing[p.id]
+          const claim = p.sharedProviderClaim
+          const rowOauth = (options[p.id] ?? []).filter((o) => o.type === 'oauth')
+          const canRowOauth = p.authMethods.includes('oauth') && rowOauth.length > 0
           return (
             <div
               key={p.id}
               data-testid="VendorOpencodeSection.providerRow"
               data-id={p.id}
-              className="border border-border/30 rounded-md p-2 flex items-center justify-between gap-2"
+              data-disabled={p.disabled ? 'true' : 'false'}
+              className={`border rounded-md p-2 transition-opacity ${
+                p.disabled ? 'border-border/20 opacity-55' : 'border-border/30'
+              }`}
             >
+              <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span className="font-medium text-[12px] truncate">{p.name}</span>
-                  {isFree ? (
+                  {/* Disabled wins the badge: opencode ignores the provider
+                      entirely, so its auth state is not the useful fact. */}
+                  {p.disabled ? (
+                    <span
+                      data-testid="VendorOpencodeSection.disabledBadge"
+                      data-id={p.id}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted"
+                    >
+                      Disabled
+                    </span>
+                  ) : isFree ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
                       Free
                     </span>
@@ -1335,44 +1600,162 @@ function VendorOpencodeSection(): React.JSX.Element {
                       Authenticated
                     </span>
                   )}
+                  {claim && (
+                    <span
+                      data-testid="VendorOpencodeSection.sharedBadge"
+                      data-id={p.id}
+                      title={`Credentials are vended by the shared provider "${claim.name}"`}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+                    >
+                      Shared · {claim.name}
+                    </span>
+                  )}
                 </div>
                 <div className="text-[10px] text-text-muted/60 truncate">
-                  {p.id} · showing {allowlistLabel(p.id)}
+                  {/* A disabled provider surfaces NO models whatever its allowlist
+                      says, so "showing all models" would be a plain lie — the exact
+                      class of misleading label this rework exists to remove. */}
+                  {p.id} ·{' '}
+                  {p.disabled
+                    ? 'ignored by opencode while disabled'
+                    : `showing ${allowlistLabel(p.id)}`}
                 </div>
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
+              <div className="flex items-center gap-0.5 shrink-0">
+                <IconButton
+                  testId="VendorOpencodeSection.providerRow.models"
+                  id={p.id}
+                  label="Manage models"
                   onClick={() => setModelDialogId(p.id)}
-                  className="px-2 py-1 text-[11px] rounded bg-accent/15 hover:bg-accent/25 text-accent transition-colors"
                 >
-                  Manage models
-                </button>
-                <button
-                  onClick={() => void handleRemove(p.id, isFree)}
-                  disabled={removing[p.id]}
-                  className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted/70 hover:text-red-400 transition-colors disabled:opacity-40"
+                  <SlidersIcon />
+                </IconButton>
+                {p.actions.canSetCredential && (
+                  <IconButton
+                    testId="VendorOpencodeSection.providerRow.credential"
+                    id={p.id}
+                    label="Update credential"
+                    active={credentialId === p.id}
+                    onClick={() => setCredentialId(credentialId === p.id ? null : p.id)}
+                  >
+                    <KeyIcon />
+                  </IconButton>
+                )}
+                {p.actions.canEditDeclaration && (
+                  <IconButton
+                    testId="VendorOpencodeSection.providerRow.edit"
+                    id={p.id}
+                    label="Configure provider"
+                    onClick={() => setConfigId(p.id)}
+                  >
+                    <PencilIcon />
+                  </IconButton>
+                )}
+                <IconButton
+                  testId="VendorOpencodeSection.providerRow.disable"
+                  id={p.id}
+                  label={p.disabled ? 'Enable provider' : 'Disable provider (reversible)'}
+                  active={!p.disabled}
+                  disabled={busy}
+                  onClick={() => void handleToggleDisabled(p.id, !p.disabled)}
                 >
-                  {removing[p.id] ? '…' : 'Remove'}
-                </button>
+                  <PowerIcon />
+                </IconButton>
+                <IconButton
+                  testId="VendorOpencodeSection.providerRow.remove"
+                  id={p.id}
+                  // A greyed trash with no explanation reads as a broken button,
+                  // so the blocked reason IS the label here.
+                  label={
+                    p.actions.canRemove
+                      ? removeActionLabel(p.actions.removeKind)
+                      : (p.actions.blockedReason ?? 'Cannot be removed')
+                  }
+                  danger
+                  disabled={!p.actions.canRemove || busy}
+                  onClick={() => setRemoveTarget(p)}
+                >
+                  <TrashIcon />
+                </IconButton>
               </div>
+              </div>
+
+              {credentialId === p.id && (
+                <div
+                  data-testid="VendorOpencodeSection.credentialPanel"
+                  data-id={p.id}
+                  className="mt-2 pt-2 border-t border-border/20 space-y-1.5"
+                >
+                  {claim && (
+                    <div className="text-[10px] text-yellow-400/90 leading-relaxed">
+                      This credential is vended by the shared provider &quot;{claim.name}&quot;. A key
+                      set here is replaced on its next sync.
+                    </div>
+                  )}
+                  {canRowOauth && (
+                    <button
+                      data-testid="VendorOpencodeSection.credentialOauth"
+                      data-id={p.id}
+                      onClick={() => void handleOAuthStart(p.id)}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                    >
+                      {rowOauth[0]?.label ?? 'Sign in with OAuth'}
+                    </button>
+                  )}
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="password"
+                      data-testid="VendorOpencodeSection.credentialKey"
+                      data-id={p.id}
+                      placeholder="Replace API key"
+                      value={apiKeys[p.id] ?? ''}
+                      onChange={(e) =>
+                        setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))
+                      }
+                      className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                    />
+                    <button
+                      data-testid="VendorOpencodeSection.credentialSave"
+                      data-id={p.id}
+                      onClick={() => void handleUpdateKey(p.id)}
+                      disabled={saving[p.id] || !(apiKeys[p.id] ?? '').trim()}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {saving[p.id] ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                  <div className="text-[10px] text-text-muted/50">
+                    Replaces the stored credential. To delete it instead, use Remove.
+                  </div>
+                </div>
+              )}
             </div>
           )
         })}
       </div>
 
-      {/* Add provider */}
+      {/* Add provider — a catalog provider, or a custom endpoint we declare. */}
       {!pickerOpen ? (
-        <button
-          data-testid="VendorOpencodeSection.addProvider"
-          onClick={() => {
-            setPickerOpen(true)
-            setAddSearch('')
-            setAddingId(null)
-          }}
-          className="text-[11px] text-accent hover:text-accent/80 transition-colors"
-        >
-          + Add provider
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            data-testid="VendorOpencodeSection.addProvider"
+            onClick={() => {
+              setPickerOpen(true)
+              setAddSearch('')
+              setAddingId(null)
+            }}
+            className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+          >
+            + Add provider
+          </button>
+          <button
+            data-testid="VendorOpencodeSection.addCustomProvider"
+            onClick={() => setConfigId('')}
+            className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+          >
+            + Add custom provider
+          </button>
+        </div>
       ) : (
         <div className="border border-border/40 rounded-md p-2 space-y-2">
           <div className="flex items-center gap-2">
@@ -1424,21 +1807,12 @@ function VendorOpencodeSection(): React.JSX.Element {
                         {expanded ? '−' : 'Add'}
                       </span>
                     </button>
-                    {/* Free (credential-less) providers only ever show up here after
-                        being removed (disabledProviders) — re-adding just needs the
-                        un-disable in finishAdd, no OAuth / API key. */}
-                    {expanded && p.authState === 'free' && (
-                      <div className="px-2 pb-2 pt-1">
-                        <button
-                          data-testid="VendorOpencodeSection.addFree"
-                          onClick={() => finishAdd(p.id)}
-                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
-                        >
-                          Add — no credentials needed
-                        </button>
-                      </div>
-                    )}
-                    {expanded && p.authState !== 'free' && (
+                    {/* No free-provider branch here any more. A credential-free
+                        gateway always carries authState 'free', so it is always in
+                        the Providers list above — enabled, or disabled with an
+                        Enable action. It can never be an addable row, so the old
+                        keyless "Add" path was unreachable. */}
+                    {expanded && (
                       <div className="px-2 pb-2 pt-1 space-y-1.5">
                         {canOauth && (
                           <button
@@ -1558,7 +1932,89 @@ function VendorOpencodeSection(): React.JSX.Element {
           }}
         />
       )}
+
+      {configId !== null && (
+        <OpencodeProviderConfigModal
+          providerId={configId === '' ? null : configId}
+          onClose={() => {
+            setConfigId(null)
+            reload()
+          }}
+        />
+      )}
+
+      {removeTarget && (
+        <ConfirmModal
+          testId="VendorOpencodeSection.removeConfirm"
+          title={`Remove ${removeTarget.name}?`}
+          confirmLabel="Remove"
+          busyLabel="Removing…"
+          errorTitle="Could not remove"
+          detail={removeTarget.id}
+          body={removeConfirmBody(removeTarget)}
+          onCancel={() => setRemoveTarget(null)}
+          onConfirm={async () => {
+            const target = removeTarget
+            await handleRemove(target)
+            // Only clear AFTER success — on failure ConfirmModal keeps itself open
+            // and shows the error with a Retry, so the dialog must stay mounted.
+            if (mountedRef.current) setRemoveTarget(null)
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+/** Short verb phrase for the trash tooltip, matching what will actually happen. */
+function removeActionLabel(kind: ProviderRemoveKind | null): string {
+  switch (kind) {
+    case 'credential':
+      return 'Remove stored credential'
+    case 'declaration':
+      return 'Remove provider definition'
+    case 'both':
+      return 'Remove credential and provider definition'
+    default:
+      return 'Remove provider'
+  }
+}
+
+/**
+ * Confirmation copy that names exactly what is destroyed. Vague destructive
+ * prompts are how people lose configuration they cannot get back — the
+ * declaration case is unrecoverable from ClaudeUI, so it says so.
+ */
+function removeConfirmBody(entry: OpencodeProviderCatalogEntry): React.ReactNode {
+  const kind = entry.actions.removeKind
+  const claim = entry.sharedProviderClaim
+  return (
+    <>
+      {(kind === 'credential' || kind === 'both') && (
+        <>
+          This deletes <span className="font-medium text-text-primary">{entry.name}</span>&apos;s
+          stored credential from opencode&apos;s auth store. You will need to sign in again to use
+          it.{' '}
+        </>
+      )}
+      {(kind === 'declaration' || kind === 'both') && (
+        <>
+          This deletes its provider definition — base URL, model definitions, and options — from
+          opencode&apos;s config file. This cannot be undone.{' '}
+        </>
+      )}
+      {claim && (
+        <>
+          <br />
+          <br />
+          <span className="text-yellow-400">
+            Heads up: the shared provider &quot;{claim.name}&quot; still vends this credential, so it
+            will be restored on the next sync. Turn its opencode route off in Common · Providers
+            &amp; models to remove it for good.
+          </span>
+        </>
+      )}
+    </>
   )
 }
 
@@ -1610,10 +2066,7 @@ function OpencodeModelsSection(): React.JSX.Element {
     useSessionStore.getState().reloadModels()
   }
 
-  const modelOptions = [
-    { value: '', label: 'Default (use opencode default)' },
-    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value }))
-  ]
+  const modelDisplays = toModelDisplays(models)
 
   return (
     <div data-testid="OpencodeModelsSection" className="space-y-1">
@@ -1622,34 +2075,38 @@ function OpencodeModelsSection(): React.JSX.Element {
           Default model
           <InfoTooltip text="The primary model for opencode sessions. Format: provider/model-id, e.g. anthropic/claude-sonnet-4-6. Applies on next cwd spawn." />
         </div>
-        <select
-          value={cfg.model ?? ''}
-          onChange={(e) => update({ model: e.target.value || undefined })}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        >
-          {modelOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <div data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
+          <ModelPicker
+            placement="down"
+            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+            models={modelDisplays}
+            selectedModel={selectedModelDisplay(
+              models,
+              cfg.model ?? '',
+              OPENCODE_MODEL_DEFAULT_LABEL
+            )}
+            onSelectModel={(v) => update({ model: v || undefined })}
+          />
+        </div>
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
           Small model
           <InfoTooltip text="A cheaper/faster model used by opencode for lightweight tasks (titles, summaries). Format: provider/model-id." />
         </div>
-        <select
-          value={cfg.smallModel ?? ''}
-          onChange={(e) => update({ smallModel: e.target.value || undefined })}
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        >
-          {modelOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <div data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
+          <ModelPicker
+            placement="down"
+            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+            models={modelDisplays}
+            selectedModel={selectedModelDisplay(
+              models,
+              cfg.smallModel ?? '',
+              OPENCODE_MODEL_DEFAULT_LABEL
+            )}
+            onSelectModel={(v) => update({ smallModel: v || undefined })}
+          />
+        </div>
       </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
         Changes apply on the next opencode server start for each working directory.
@@ -1744,26 +2201,37 @@ function PiDefaultModelSection(): React.JSX.Element {
           <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
         </div>
         {models.length > 0 ? (
-          <select
+          // Themed ModelPicker rather than a native <select> (OS-painted option
+          // lists are unreadable in dark themes). `__custom__` stays a real
+          // selectable VALUE — it is a mode switch, not a model, so it rides
+          // the picker's pinned trailing row instead of the model groups.
+          <div
             data-testid="PiDefaultModelSection.defaultModel"
-            value={customMode || !known ? '__custom__' : current}
-            onChange={(e) => {
-              if (e.target.value === '__custom__') setCustomMode(true)
-              else {
-                setCustomMode(false)
-                update(e.target.value)
-              }
-            }}
-            className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
+            data-value={customMode || !known ? '__custom__' : current}
           >
-            <option value="">Default ({PI_DEFAULT_MODEL})</option>
-            {models.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.displayName || m.value}
-              </option>
-            ))}
-            <option value="__custom__">Custom model ID...</option>
-          </select>
+            <ModelPicker
+              placement="down"
+              emptyOption={{ label: `Default (${PI_DEFAULT_MODEL})` }}
+              trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}
+              models={toModelDisplays(models)}
+              selectedModel={
+                customMode || !known
+                  ? {
+                      value: '__custom__',
+                      displayName: 'Custom model ID...',
+                      shortName: 'Custom model ID...'
+                    }
+                  : selectedModelDisplay(models, current, `Default (${PI_DEFAULT_MODEL})`)
+              }
+              onSelectModel={(v) => {
+                if (v === '__custom__') setCustomMode(true)
+                else {
+                  setCustomMode(false)
+                  update(v)
+                }
+              }}
+            />
+          </div>
         ) : (
           <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
             No pi models discovered. Authenticate a provider, then refresh models.
@@ -1855,34 +2323,46 @@ function newProvider(): ProviderRow {
 }
 
 /**
- * Custom OpenAI-compatible provider editor (self-hosted / compatible endpoints).
- * Built-in provider add/remove/auth + per-provider model curation lives in the
- * Providers manager (VendorOpencodeSection). API keys are set there, not here.
+ * Configure ONE opencode provider declaration — the OpenAI-compatible custom
+ * provider form, as a dialog stacked over the settings dialog.
+ *
+ * This form used to be a permanently-expanded row inside a separate "Custom
+ * providers" settings section, which meant declared providers lived somewhere
+ * different from every other provider — and a declared+disabled one (opencode
+ * ignoring it entirely) appeared in neither list. The provider list is now
+ * single and this form is a dialog, so the complex fields get room without
+ * splitting the surface.
+ *
+ * Edits apply as you type, matching the old inline form. That is deliberate:
+ * ModelCapabilityEditor writes model capability fields straight to opencode.json
+ * via patchOpencodeNative and needs a SAVED provider id + model id to target, so
+ * a staged save/cancel here would desync from it.
+ *
+ * @param providerId Existing declaration to edit, or null to create one.
  */
-function OpencodeProvidersSection(): React.JSX.Element {
+export function OpencodeProviderConfigModal({
+  providerId,
+  onClose
+}: {
+  providerId: string | null
+  onClose: () => void
+}): React.JSX.Element {
   const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
-  const installed = useOpencodeInstalled()
-  // Local editing state for provider rows (has a transient _id key for React diffing)
-  const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
-  // Which "provider._key / modelId" capability editors are expanded.
+  const [row, setRow] = useState<ProviderRow | null>(null)
   const [expandedCaps, setExpandedCaps] = useState<Set<string>>(new Set())
-  // Per-row API key input — TRANSIENT UI state only, keyed by the stable _key.
-  // Never merged into the OpencodeConfigSettings payload (ADR-028: opencode.json
-  // stays credential-free); saved separately to opencode's own auth.json via
-  // vendor-auth:set-key, the same mechanism the Providers (catalog) section uses.
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
-  const [keyBusy, setKeyBusy] = useState<Record<string, boolean>>({})
-  const [keyError, setKeyError] = useState<Record<string, string>>({})
-  // Which vendor ids have stored credentials in opencode's auth.json — a
-  // read-only file peek (vendor-auth:list-keys), NOT the auth probe: the probe
-  // reports any declared custom provider as 'authenticated' whether or not it
-  // has a key, which would hide the key input for fresh providers.
+  const [apiKey, setApiKey] = useState('')
+  const [keyBusy, setKeyBusy] = useState(false)
+  const [keyError, setKeyError] = useState<string | null>(null)
   const [credIds, setCredIds] = useState<Record<string, 'api' | 'oauth'>>({})
+  // True when a ClaudeUI shared provider compiles this declaration. Editing it
+  // here would be silently overwritten on the shared provider's next sync, so the
+  // form is replaced by a pointer to its real owner.
+  const [managed, setManaged] = useState(false)
 
   const reloadCredIds = (): void => {
     window.api
       .vendorAuthListKeys('opencode')
-      .then((ids) => setCredIds(ids))
+      .then(setCredIds)
       .catch(() => {})
   }
 
@@ -1894,296 +2374,260 @@ function OpencodeProvidersSection(): React.JSX.Element {
       .then(([settings, sharedProviders]) => {
         setCfg(settings)
         const managedIds = new Set(
-          sharedProviders.map(
-            (provider) => provider.routes.opencode.providerId ?? provider.id
-          )
+          sharedProviders.map((provider) => provider.routes.opencode.providerId ?? provider.id)
         )
-        // Hydrate provider rows from saved config. The saved provider id becomes
-        // both the stable _key and the editable _id.
-        const saved = settings.providers ?? {}
-        const rows: ProviderRow[] = Object.entries(saved).map(([id, p]) => ({
-          _key: id,
-          _id: id,
-          _managed: managedIds.has(id),
-          name: p.name ?? '',
-          npm: p.npm,
-          baseURL: p.baseURL ?? '',
-          models: p.models ?? []
-        }))
-        setProviderRows(rows)
+        if (providerId) setManaged(managedIds.has(providerId))
+        const existing = providerId ? settings.providers?.[providerId] : undefined
+        setRow(
+          providerId
+            ? {
+                _key: providerId,
+                _id: providerId,
+                name: existing?.name ?? '',
+                npm: existing?.npm,
+                baseURL: existing?.baseURL ?? '',
+                models: existing?.models ?? []
+              }
+            : newProvider()
+        )
       })
-      .catch(() => setCfg({}))
+      .catch(() => {
+        setCfg({})
+        setRow(newProvider())
+      })
     reloadCredIds()
-  }, [])
+  }, [providerId])
 
-  if (cfg === null || installed === null) {
-    return <div data-testid="OpencodeProvidersSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
-  }
-  if (!installed) {
-    return (
-      <div data-testid="OpencodeProvidersSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
-        opencode is not installed. Provider settings apply to opencode sessions.
-      </div>
-    )
-  }
+  /**
+   * Splice this one declaration into the FULL providers record.
+   *
+   * Reading the whole record and replacing only our key matters: the old editor
+   * rebuilt the entire record from its own row list, so any declaration it had
+   * not loaded would have been dropped. A rename deletes the previous key, which
+   * the ADR-031 writer turns into `delete ['provider', oldId]` — user intent.
+   */
+  const persist = (next: ProviderRow): void => {
+    if (!cfg) return
+    const providers: Record<string, OpencodeProviderSettings> = { ...(cfg.providers ?? {}) }
+    if (next._key && next._key !== next._id) delete providers[next._key]
 
-  const saveProviders = (rows: ProviderRow[]): void => {
-    // Reconstruct providers Record from rows. The Record is keyed by the editable
-    // provider id (_id). Rows with an empty id are skipped. Model id/name flow
-    // through this projection writer (ADR-031 leaf merge); model CAPABILITY fields
-    // are written separately via patchOpencodeNative and are preserved here.
-    const providers: Record<string, OpencodeProviderSettings> = {}
-    for (const row of rows) {
-      if (!row._id.trim()) continue
-      const models = (row.models ?? [])
+    const nextId = next._id.trim()
+    if (nextId) {
+      const models = (next.models ?? [])
         .filter((m) => m.id.trim())
-        .map((m) => (m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }))
+        .map((m) =>
+          m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }
+        )
       const entry: OpencodeProviderSettings = {}
-      if (row.name) entry.name = row.name
-      if (row.npm) entry.npm = row.npm
-      if (row.baseURL) entry.baseURL = row.baseURL
+      if (next.name) entry.name = next.name
+      if (next.npm) entry.npm = next.npm
+      if (next.baseURL) entry.baseURL = next.baseURL
       if (models.length > 0) entry.models = models
-      providers[row._id] = entry
+      providers[nextId] = entry
     }
-    const next: OpencodeConfigSettings = {
+
+    const updated: OpencodeConfigSettings = {
       ...cfg,
       providers: Object.keys(providers).length > 0 ? providers : undefined
     }
-    setCfg(next)
-    window.api.saveOpencodeSettings(next).catch(() => {})
-    // Custom-provider edits change the discoverable model set — reload the picker.
+    setCfg(updated)
+    window.api.saveOpencodeSettings(updated).catch(() => {})
     useSessionStore.getState().reloadModels()
   }
 
-  const updateRow = (key: string, patch: Partial<ProviderRow>): void => {
-    const next = providerRows.map((r) => (r._key === key ? { ...r, ...patch } : r))
-    setProviderRows(next)
-    saveProviders(next)
+  const update = (patch: Partial<ProviderRow>): void => {
+    setRow((prev) => {
+      if (!prev) return prev
+      const next = { ...prev, ...patch }
+      persist(next)
+      return next
+    })
   }
 
-  const addModel = (key: string): void => {
-    const next = providerRows.map((r) =>
-      r._key === key ? { ...r, models: [...(r.models ?? []), { id: '' }] } : r
-    )
-    setProviderRows(next)
-    // No save yet — an empty-id model is skipped by saveProviders anyway.
-  }
+  // Model-list edits mirror the old inline editor's semantics exactly. Adding
+  // stages an empty row without saving — persist() skips blank model ids anyway.
+  const addModel = (): void =>
+    setRow((prev) => (prev ? { ...prev, models: [...(prev.models ?? []), { id: '' }] } : prev))
 
-  const updateModel = (key: string, idx: number, patch: { id?: string; name?: string }): void => {
-    const next = providerRows.map((r) =>
-      r._key === key
-        ? { ...r, models: (r.models ?? []).map((m, i) => (i === idx ? { ...m, ...patch } : m)) }
-        : r
-    )
-    setProviderRows(next)
-    saveProviders(next)
-  }
+  const updateModel = (idx: number, patch: { id?: string; name?: string }): void =>
+    update({ models: (row?.models ?? []).map((m, i) => (i === idx ? { ...m, ...patch } : m)) })
 
-  const removeModel = (key: string, idx: number): void => {
-    const next = providerRows.map((r) =>
-      r._key === key ? { ...r, models: (r.models ?? []).filter((_, i) => i !== idx) } : r
-    )
-    setProviderRows(next)
-    saveProviders(next)
-  }
+  const removeModel = (idx: number): void =>
+    update({ models: (row?.models ?? []).filter((_, i) => i !== idx) })
 
-  const toggleCaps = (capKey: string): void => {
+  const toggleCaps = (capKey: string): void =>
     setExpandedCaps((prev) => {
       const n = new Set(prev)
       if (n.has(capKey)) n.delete(capKey)
       else n.add(capKey)
       return n
     })
-  }
 
-  const addRow = (): void => {
-    const row = newProvider()
-    const next = [...providerRows, row]
-    setProviderRows(next)
-  }
+  const id = (row?._id ?? '').trim()
+  const hasKey = id.length > 0 && credIds[id] !== undefined
 
-  const removeRow = (key: string): void => {
-    const next = providerRows.filter((r) => r._key !== key)
-    setProviderRows(next)
-    saveProviders(next)
-    setApiKeys((prev) => {
-      const n = { ...prev }
-      delete n[key]
-      return n
-    })
-    setKeyBusy((prev) => {
-      const n = { ...prev }
-      delete n[key]
-      return n
-    })
-    setKeyError((prev) => {
-      const n = { ...prev }
-      delete n[key]
-      return n
-    })
-  }
-
-  /** Save the transient per-row API key to opencode's own auth.json (never opencode.json). */
-  const saveProviderKey = async (row: ProviderRow): Promise<void> => {
-    const id = row._id.trim()
-    const key = (apiKeys[row._key] ?? '').trim()
-    if (!id || !key) return
-    setKeyBusy((prev) => ({ ...prev, [row._key]: true }))
-    setKeyError((prev) => {
-      const n = { ...prev }
-      delete n[row._key]
-      return n
-    })
+  const saveKey = async (): Promise<void> => {
+    const key = apiKey.trim()
+    if (!key || !id) return
+    setKeyBusy(true)
+    setKeyError(null)
     try {
       await window.api.vendorAuthSetKey('opencode', id, key)
-      setApiKeys((prev) => ({ ...prev, [row._key]: '' }))
+      setApiKey('')
       reloadCredIds()
     } catch {
-      setKeyError((prev) => ({ ...prev, [row._key]: 'Failed to save key.' }))
+      setKeyError('Failed to save key.')
     } finally {
-      setKeyBusy((prev) => ({ ...prev, [row._key]: false }))
+      setKeyBusy(false)
     }
   }
 
-  /** Remove credentials for a custom provider id from opencode's auth.json. */
-  const removeProviderKey = async (row: ProviderRow): Promise<void> => {
-    const id = row._id.trim()
+  const removeKey = async (): Promise<void> => {
     if (!id) return
-    setKeyBusy((prev) => ({ ...prev, [row._key]: true }))
-    setKeyError((prev) => {
-      const n = { ...prev }
-      delete n[row._key]
-      return n
-    })
+    setKeyBusy(true)
+    setKeyError(null)
     try {
       await window.api.vendorAuthRemove('opencode', id)
       reloadCredIds()
     } catch {
-      setKeyError((prev) => ({ ...prev, [row._key]: 'Failed to remove key.' }))
+      setKeyError('Failed to remove key.')
     } finally {
-      setKeyBusy((prev) => ({ ...prev, [row._key]: false }))
+      setKeyBusy(false)
     }
   }
 
   return (
-    <div data-testid="OpencodeProvidersSection" className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
-      {/* Custom providers editor */}
-      <div className="space-y-2">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">
-          Custom providers (OpenAI-compatible)
+    <div
+      data-testid="OpencodeProviderConfigModal"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="w-[min(620px,94vw)] max-h-[85vh] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between">
+          <div>
+            <div className="text-[13px] font-medium text-text-primary">
+              {providerId ? `Configure · ${row?.name || providerId}` : 'Add custom provider'}
+            </div>
+            <div className="text-[11px] text-text-muted/70">
+              OpenAI-compatible endpoint. Changes apply on each working directory&apos;s next
+              opencode server start.
+            </div>
+          </div>
+          <button
+            data-testid="OpencodeProviderConfigModal.close"
+            onClick={onClose}
+            className="text-text-muted/60 hover:text-text-primary transition-colors text-[16px] leading-none px-1"
+          >
+            ✕
+          </button>
         </div>
-        <div className="text-[10px] text-text-muted/60 leading-relaxed">
-          Add self-hosted or compatible endpoints. API keys entered here are stored in
-          opencode&apos;s own auth.json — the <em>Providers</em> section remains the place to add
-          and authenticate catalog providers.
-        </div>
-        {providerRows.map((row) => {
-          const id = row._id.trim()
-          if (row._managed) {
-            return (
-              <div
-                key={row._key}
-                data-testid="OpencodeProvidersSection.managedProvider"
-                data-id={id}
-                className="border border-border/30 rounded-md p-2 text-[11px] text-text-secondary"
-              >
-                <div className="font-medium text-text-primary">{row.name || id}</div>
-                <div className="text-text-muted">Managed in Common · Providers & models</div>
-                <button
-                  onClick={() =>
-                    window.dispatchEvent(
-                      new CustomEvent('open-settings', {
-                        detail: { scope: 'common', section: 'shared-providers' }
-                      })
-                    )
-                  }
-                  className="mt-1 text-accent"
-                >
-                  Open shared provider
-                </button>
+
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 text-[13px] text-text-secondary">
+          {row === null ? (
+            <div className="text-[11px] text-text-muted/60">Loading…</div>
+          ) : managed ? (
+            <div
+              data-testid="OpencodeProviderConfigModal.managed"
+              className="space-y-1.5 text-[11px] leading-relaxed"
+            >
+              <div className="text-text-primary font-medium">
+                {row.name || row._id} is managed by a shared provider.
               </div>
-            )
-          }
-          const hasKey = id.length > 0 && credIds[id] !== undefined
-          const busy = keyBusy[row._key] ?? false
-          const error = keyError[row._key]
-          return (
-            <div key={row._key} data-testid="OpencodeProvidersSection.providerRow" data-id={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
-              <div className="flex items-center gap-1.5">
+              <div className="text-text-muted/70">
+                Its definition and credential are compiled from ClaudeUI&apos;s shared provider, so
+                edits made here would be overwritten on the next sync. Change it where it is owned.
+              </div>
+              <button
+                data-testid="OpencodeProviderConfigModal.openShared"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('open-settings', {
+                      detail: { scope: 'common', section: 'shared-providers' }
+                    })
+                  )
+                }
+                className="text-accent hover:text-accent/80 transition-colors"
+              >
+                Open shared provider
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                <label className="block text-[10px] text-text-muted">Provider id</label>
                 <input
                   type="text"
-                  placeholder="Provider id (e.g. my-ollama)"
+                  data-testid="OpencodeProviderConfigModal.id"
+                  placeholder="my-ollama"
                   value={row._id}
-                  onChange={(e) => updateRow(row._key, { _id: e.target.value })}
-                  className={`${inputClass} flex-1`}
+                  onChange={(e) => update({ _id: e.target.value })}
+                  className={`${inputClass} w-full`}
                 />
-                <button
-                  onClick={() => removeRow(row._key)}
-                  className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
-                  title="Remove provider"
-                >
-                  ✕
-                </button>
+                <label className="block text-[10px] text-text-muted">Display name (optional)</label>
+                <input
+                  type="text"
+                  data-testid="OpencodeProviderConfigModal.name"
+                  placeholder="My Ollama"
+                  value={row.name ?? ''}
+                  onChange={(e) => update({ name: e.target.value })}
+                  className={`${inputClass} w-full`}
+                />
+                <label className="block text-[10px] text-text-muted">Base URL</label>
+                <input
+                  type="url"
+                  data-testid="OpencodeProviderConfigModal.baseUrl"
+                  placeholder="http://localhost:11434/v1"
+                  value={row.baseURL ?? ''}
+                  onChange={(e) => update({ baseURL: e.target.value })}
+                  className={`${inputClass} w-full`}
+                />
               </div>
-              <input
-                type="text"
-                placeholder="Display name (optional)"
-                value={row.name ?? ''}
-                onChange={(e) => updateRow(row._key, { name: e.target.value })}
-                className={`${inputClass} w-full`}
-              />
-              <input
-                type="url"
-                placeholder="Base URL (e.g. http://localhost:11434/v1)"
-                value={row.baseURL ?? ''}
-                onChange={(e) => updateRow(row._key, { baseURL: e.target.value })}
-                className={`${inputClass} w-full`}
-              />
+
               <div>
                 <div className="text-[10px] text-text-muted mb-0.5">API key (optional)</div>
                 {hasKey ? (
                   <div className="flex items-center gap-1.5">
                     <span
-                      data-testid="OpencodeProvidersSection.keyStatus"
-                      data-id={row._key}
+                      data-testid="OpencodeProviderConfigModal.keyStatus"
                       className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400"
                     >
                       Key set
                     </span>
                     <button
-                      data-testid="OpencodeProvidersSection.removeKey"
-                      data-id={row._key}
-                      onClick={() => void removeProviderKey(row)}
-                      disabled={busy}
+                      data-testid="OpencodeProviderConfigModal.removeKey"
+                      onClick={() => void removeKey()}
+                      disabled={keyBusy}
                       className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
                     >
-                      {busy ? 'Removing…' : 'Remove key'}
+                      {keyBusy ? 'Removing…' : 'Remove key'}
                     </button>
                   </div>
                 ) : (
                   <div className="flex items-center gap-1.5">
                     <input
                       type="password"
-                      data-testid="OpencodeProvidersSection.apiKey"
-                      data-id={row._key}
+                      data-testid="OpencodeProviderConfigModal.apiKey"
                       placeholder="API key"
-                      value={apiKeys[row._key] ?? ''}
-                      onChange={(e) =>
-                        setApiKeys((prev) => ({ ...prev, [row._key]: e.target.value }))
-                      }
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
                       className={`${inputClass} flex-1`}
                     />
                     <button
-                      onClick={() => void saveProviderKey(row)}
-                      disabled={busy || !id || !(apiKeys[row._key] ?? '').trim()}
+                      data-testid="OpencodeProviderConfigModal.saveKey"
+                      onClick={() => void saveKey()}
+                      disabled={keyBusy || !id || !apiKey.trim()}
                       className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
-                      {busy ? 'Saving…' : 'Save key'}
+                      {keyBusy ? 'Saving…' : 'Save key'}
                     </button>
                   </div>
                 )}
-                {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
+                {keyError && <div className="text-[10px] text-red-400 mt-0.5">{keyError}</div>}
               </div>
+
               <div className="space-y-1.5">
                 <div className="text-[10px] text-text-muted">Models (optional)</div>
                 {(row.models ?? []).map((m, idx) => {
@@ -2194,7 +2638,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
                   return (
                     <div
                       key={idx}
-                      data-testid="OpencodeProvidersSection.modelRow"
+                      data-testid="OpencodeProviderConfigModal.modelRow"
                       data-id={capKey}
                       className="border border-border/20 rounded p-1.5 space-y-1"
                     >
@@ -2203,21 +2647,21 @@ function OpencodeProvidersSection(): React.JSX.Element {
                           type="text"
                           placeholder="Model id (e.g. llama3.2)"
                           value={m.id}
-                          onChange={(e) => updateModel(row._key, idx, { id: e.target.value })}
+                          onChange={(e) => updateModel(idx, { id: e.target.value })}
                           className={`${inputClass} flex-1`}
                         />
                         <input
                           type="text"
                           placeholder="Display name"
                           value={m.name ?? ''}
-                          onChange={(e) => updateModel(row._key, idx, { name: e.target.value })}
+                          onChange={(e) => updateModel(idx, { name: e.target.value })}
                           className={`${inputClass} flex-1`}
                         />
                         <button
                           type="button"
-                          data-testid="OpencodeProvidersSection.removeModel"
+                          data-testid="OpencodeProviderConfigModal.removeModel"
                           data-id={capKey}
-                          onClick={() => removeModel(row._key, idx)}
+                          onClick={() => removeModel(idx)}
                           className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
                           title="Remove model"
                         >
@@ -2227,7 +2671,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
                       {canEditCaps ? (
                         <button
                           type="button"
-                          data-testid="OpencodeProvidersSection.toggleCaps"
+                          data-testid="OpencodeProviderConfigModal.toggleCaps"
                           data-id={capKey}
                           onClick={() => toggleCaps(capKey)}
                           className="text-[10px] text-accent hover:text-accent/80 transition-colors"
@@ -2240,36 +2684,34 @@ function OpencodeProvidersSection(): React.JSX.Element {
                         </div>
                       )}
                       {canEditCaps && capsOpen && (
-                        <ModelCapabilityEditor providerId={row._id.trim()} modelId={modelId} />
+                        <ModelCapabilityEditor providerId={id} modelId={modelId} />
                       )}
                     </div>
                   )
                 })}
                 <button
                   type="button"
-                  data-testid="OpencodeProvidersSection.addModel"
-                  data-id={row._key}
-                  onClick={() => addModel(row._key)}
+                  data-testid="OpencodeProviderConfigModal.addModel"
+                  onClick={addModel}
                   className="text-[11px] text-accent hover:text-accent/80 transition-colors"
                 >
                   + Add model
                 </button>
               </div>
-            </div>
-          )
-        })}
-        <button
-          data-testid="OpencodeProvidersSection.addProvider"
-          onClick={addRow}
-          className="text-[11px] text-accent hover:text-accent/80 transition-colors"
-        >
-          + Add provider
-        </button>
-      </div>
+            </>
+          )}
+        </div>
 
-      <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Add, remove, and authenticate built-in providers under <em>Providers</em>. Changes apply on
-        the next opencode server start for each working directory.
+        <div className="px-4 py-2.5 border-t border-border/50 flex items-center justify-between">
+          <div className="text-[10px] text-text-muted/60">Changes are saved as you type.</div>
+          <button
+            data-testid="OpencodeProviderConfigModal.done"
+            onClick={onClose}
+            className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+          >
+            Done
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -2572,6 +3014,7 @@ export const SECTIONS: Section[] = [
         keywords: 'dark light monokai color',
         render: (s, u) => (
           <SettingsSelect
+            testid="SettingsTheme"
             label="Theme"
             value={s.theme}
             options={[
@@ -3202,17 +3645,12 @@ export const SECTIONS: Section[] = [
           <div className={s.voiceEnabled ? '' : 'opacity-40 pointer-events-none'}>
             <div className="px-3 py-1.5 text-[13px] text-text-secondary">
               <div className="mb-1">Language</div>
-              <select
+              <SelectMenu
+                testid="VoiceLanguageSetting.language"
                 value={s.voiceLanguage}
-                onChange={(e) => u({ voiceLanguage: e.target.value as VoiceLanguageCode })}
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors cursor-pointer"
-              >
-                {VOICE_LANGUAGES.map((lang) => (
-                  <option key={lang.code} value={lang.code}>
-                    {lang.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => u({ voiceLanguage: v as VoiceLanguageCode })}
+                options={VOICE_LANGUAGES.map((lang) => ({ value: lang.code, label: lang.label }))}
+              />
             </div>
           </div>
         )
@@ -3252,6 +3690,12 @@ export const SECTIONS: Section[] = [
             tooltip="When on, the local view auto-switches to sessions created or used by the remote client. When off, remote sessions still run in the background but the local view stays put."
           />
         )
+      },
+      {
+        key: 'remoteServerConfig',
+        label: 'Remote server',
+        keywords: 'remote port password autostart bind interface server',
+        render: () => <RemoteServerSettings />
       }
     ]
   },
@@ -4161,24 +4605,12 @@ export const SECTIONS: Section[] = [
       }
     ]
   },
-  {
-    id: 'opencode-providers',
-    label: 'Custom providers',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
-        <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'opencodeProviders',
-        label: 'Custom providers',
-        keywords: 'opencode provider custom openai compatible self-hosted disable enable base url ollama',
-        render: () => <OpencodeProvidersSection />
-      }
-    ]
-  },
+  // The 'opencode-providers' ("Custom providers") section is intentionally gone.
+  // Custom declarations are no longer a separate surface: they live in the single
+  // Providers list alongside catalog providers, and their form is the provider
+  // configuration dialog (OpencodeProviderConfigModal) opened from a row's pencil
+  // or from "+ Add custom provider". Two lists over the same provider set is what
+  // let a declared+disabled provider render nowhere at all.
   {
     id: 'opencode-agents',
     label: 'Agents',
@@ -4194,6 +4626,25 @@ export const SECTIONS: Section[] = [
         label: 'Agent overrides',
         keywords: 'opencode agent model temperature build plan general explore override',
         render: () => <OpencodeAgentsSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-automode',
+    label: 'Auto mode',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piAutoMode',
+        label: 'Auto mode',
+        keywords:
+          'pi auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+        render: () => <PiAutoModeSection />
       }
     ]
   },
@@ -4267,19 +4718,22 @@ const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
 ])
 
 /** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
-const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode', 'opencode-providers'])
+const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
 
 /** Section ids that belong to opencode Agents subgroup */
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
 /** Section ids that belong to Engines > pi (content self-gates on install).
- *  Default model only — no auto-mode (deferred; opencode's ADR-023 gatekeeper
- *  has no pi equivalent yet). No dispatch section: the Claude/opencode dispatch
- *  sections configure dispatches INTO that engine (allowlist/default/cap for
- *  incoming targets), and pi is a dispatch SOURCE only so far — nothing to
- *  configure until pi-as-target ships (crossEngineDispatch is true for the
- *  source direction as of M4b). */
-const ENGINE_PI_SECTION_IDS = new Set(['pi-models'])
+ *  Auto mode + default model. `pi-automode` edits the same
+ *  `EngineConfig.autoMode` block opencode's does — PiSession reads
+ *  `loadEngineConfig('pi').autoMode` since the phase-4 gatekeeper wiring, so
+ *  the setting was live but unreachable from the UI until this section.
+ *  No dispatch section: the Claude/opencode dispatch sections configure
+ *  dispatches INTO that engine (allowlist/default/cap for incoming targets),
+ *  and pi is a dispatch SOURCE only so far — nothing to configure until
+ *  pi-as-target ships (crossEngineDispatch is true for the source direction as
+ *  of M4b). */
+const ENGINE_PI_SECTION_IDS = new Set(['pi-automode', 'pi-models'])
 
 /** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
 const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
@@ -4365,7 +4819,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'opencode-vendor',
         label: 'Vendor',
-        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS, ['vendor-opencode', 'opencode-providers'])
+        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS, ['vendor-opencode'])
       },
       {
         id: 'opencode-agents',
@@ -4381,7 +4835,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'pi-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-models'])
+        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode', 'pi-models'])
       },
       {
         id: 'pi-vendor',

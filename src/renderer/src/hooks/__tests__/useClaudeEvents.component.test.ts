@@ -99,9 +99,10 @@ function wireEventHandlers(): void {
         return
       }
       store().setStatus(effectiveRoutingId, status)
-      if (status.state === 'idle') {
-        store().clearPendingApprovals(effectiveRoutingId)
-      }
+      // Do NOT clear pending approvals on idle — background subagents outlive
+      // the parent turn's result, so a can_use_tool request may legitimately
+      // still be pending. Card removal is driven exclusively by explicit
+      // events (approval-dismiss, tool_result matching, user resolution).
     }
   )
 
@@ -126,6 +127,7 @@ function wireEventHandlers(): void {
     ) => void
   >('session:tool-result')((routingId, { toolUseId, result, isError, fileDiffs }) => {
     store().appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
+    if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
   })
 
   onEvent<(routingId: string, data: { toolUseId: string; text: string; type?: string }) => void>(
@@ -357,7 +359,7 @@ describe('useClaudeEvents component tests', () => {
       expect(remaining[0].requestId).toBe('req-2')
     })
 
-    it('clears pending approvals when status becomes idle', () => {
+    it('does NOT clear pending approvals when status becomes idle (background subagents outlive the parent turn)', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
@@ -366,7 +368,9 @@ describe('useClaudeEvents component tests', () => {
       bridge.webContents.send('session:approval-request', routingId, approval)
       expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
 
-      // Status → idle → approvals cleared
+      // Status → idle. cli.js ends the parent turn while a background
+      // subagent's can_use_tool request may still be pending — idle must NOT
+      // infer that every approval is resolved (see useClaudeEvents.ts).
       bridge.webContents.send(
         'session:status',
         routingId,
@@ -376,7 +380,7 @@ describe('useClaudeEvents component tests', () => {
         })
       )
 
-      expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
+      expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
     })
 
     it('clears approvals and marks inactive on disconnect', () => {

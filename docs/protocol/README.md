@@ -36,6 +36,7 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 | 11  | [Cancellation](11-cancellation.md)           | Three-tier cancellation + timeouts                             |
 | 12  | [Maintenance](12-maintenance.md)             | How to keep the manual and harness in sync                     |
 | 13  | [Context window](13-context-window.md)       | How cli.js resolves model context windows + ClaudeUI's mirror  |
+| 14  | [Auto mode classifier](14-auto-mode-classifier.md) | `permissionMode: "auto"` — two-stage LLM permission classifier |
 
 ---
 
@@ -85,6 +86,7 @@ See `01-transport.md` for the details, `03-inbound-messages.md` and `06-outbound
 - **"How do I trigger Y in cli.js?"** → `07-control-outbound.md` (control subtype); or set a flag at spawn per `02-cli-flags.md`.
 - **"cli.js is asking me something, what shape do I respond with?"** → `08-control-inbound.md`.
 - **"How does MCP routing work end-to-end?"** → `10-mcp-hosting.md`.
+- **"How does auto mode decide to allow or block?"** → `14-auto-mode-classifier.md`.
 - **"Session got into a bad state"** → `01-transport.md` wire-log section + `11-cancellation.md`.
 
 ---

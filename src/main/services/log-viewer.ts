@@ -27,22 +27,84 @@ function writePrefs(prefs: Record<string, unknown>): void {
 }
 
 // ---------------------------------------------------------------------------
+// Live-entry batching (M-LG1)
+//
+// The viewer used to get one `webContents.send` per log entry — and `notify()`
+// in logger.ts fires for EVERY entry, including level-suppressed ones, so a
+// debug-heavy burst turned into thousands of individual structured-clone IPC
+// round trips. Entries are coalesced into one `log-viewer:entry-batch` send.
+// ---------------------------------------------------------------------------
+
+/** Coalescing window: entries queued within this of the first are sent together. */
+export const ENTRY_BATCH_INTERVAL_MS = 250
+/** Send immediately once the queue reaches this size (bursts shouldn't wait out the timer). */
+export const ENTRY_BATCH_MAX = 200
+
+/**
+ * Timer-and-size-bounded batcher, split out from `LogViewer` so it can be unit
+ * tested without an Electron window: `send` is whatever delivers the batch.
+ */
+export class LogEntryBatcher {
+  private pending: LogEntry[] = []
+  private timer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(private readonly send: (batch: LogEntry[]) => void) {}
+
+  push(entry: LogEntry): void {
+    this.pending.push(entry)
+    if (this.pending.length >= ENTRY_BATCH_MAX) {
+      this.flush()
+      return
+    }
+    if (!this.timer) this.timer = setTimeout(() => this.flush(), ENTRY_BATCH_INTERVAL_MS)
+  }
+
+  flush(): void {
+    this.clearTimer()
+    if (this.pending.length === 0) return
+    const batch = this.pending
+    this.pending = []
+    this.send(batch)
+  }
+
+  /** Drop everything queued — used when the ring dump supersedes the queue, or the window goes away. */
+  reset(): void {
+    this.clearTimer()
+    this.pending = []
+  }
+
+  private clearTimer(): void {
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // LogViewer service
 // ---------------------------------------------------------------------------
 
 export class LogViewer {
   private win: BrowserWindow | null = null
   private unsubLogger: (() => void) | null = null
+  private readonly batcher = new LogEntryBatcher((batch) => {
+    if (this.win && !this.win.isDestroyed()) {
+      this.win.webContents.send('log-viewer:entry-batch', batch)
+    }
+  })
+
+  /** Queue an entry for the viewer window, dropping it outright when no window is open. */
+  private forward(entry: LogEntry): void {
+    if (!this.win || this.win.isDestroyed()) return
+    this.batcher.push(entry)
+  }
 
   constructor(mainWindow: BrowserWindow) {
     // Forward live log entries to the viewer window (if open).
     // logRing (in logger.ts) captures ALL entries from process start,
     // so the viewer can catch up even for entries before this point.
-    this.unsubLogger = logger.subscribe((entry) => {
-      if (this.win && !this.win.isDestroyed()) {
-        this.win.webContents.send('log-viewer:entry', entry)
-      }
-    })
+    this.unsubLogger = logger.subscribe((entry) => this.forward(entry))
 
     // Capture renderer console messages (Event object API)
     mainWindow.webContents.on('console-message', (event) => {
@@ -55,9 +117,7 @@ export class LogViewer {
         message: sourceId ? `${message}  (${sourceId}:${lineNumber})` : message
       }
       logRing.push(entry)
-      if (this.win && !this.win.isDestroyed()) {
-        this.win.webContents.send('log-viewer:entry', entry)
-      }
+      this.forward(entry)
     })
 
     // Register IPC handlers
@@ -67,6 +127,9 @@ export class LogViewer {
     ipcMain.removeHandler('log-viewer:ready')
     ipcMain.handle('log-viewer:ready', () => {
       if (this.win && !this.win.isDestroyed()) {
+        // The ring already contains everything queued so far — dropping the
+        // queue here keeps the viewer from rendering those entries twice.
+        this.batcher.reset()
         this.win.webContents.send('log-viewer:batch', logRing.toArray())
       }
     })
@@ -140,6 +203,7 @@ export class LogViewer {
 
     this.win.on('closed', () => {
       this.win = null
+      this.batcher.reset()
     })
   }
 
@@ -148,6 +212,7 @@ export class LogViewer {
       this.win.close()
       this.win = null
     }
+    this.batcher.reset()
   }
 
   destroy(): void {

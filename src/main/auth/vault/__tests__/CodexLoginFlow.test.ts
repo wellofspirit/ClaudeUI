@@ -169,4 +169,30 @@ describe('CodexLoginFlow', () => {
     const flow = new CodexLoginFlow({ port: 0 })
     expect(() => flow.waitForCallback()).toThrow(/call start\(\)/)
   })
+
+  it('a bind failure (EADDRINUSE) does not leak the callback timeout or arm a pending wait', async () => {
+    // Occupy a fixed port on 127.0.0.1 (the exact interface the flow binds) so
+    // its own listen() fails with EADDRINUSE — the production hazard on port 1455.
+    const blocker = createServer()
+    const port = await new Promise<number>((resolve) =>
+      blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as { port: number }).port))
+    )
+    try {
+      const flow = new CodexLoginFlow({ port, timeoutMs: 20 })
+      await expect(flow.start()).rejects.toThrow()
+
+      // POST-FIX: the optimistically-armed pending promise is torn down (so
+      // waitForCallback() throws the pre-start error) and NO timeout was armed to
+      // later reject a never-awaited promise. PRE-FIX, the timeout was armed
+      // before listen(), so waitForCallback() returned a live promise that a
+      // leaked 20ms timer would reject as an unhandled rejection.
+      expect(() => flow.waitForCallback()).toThrow(/call start\(\)/)
+      expect(flow.isSettled()).toBe(false)
+
+      // Give any (pre-fix) leaked timer time to misfire — it must not.
+      await new Promise((r) => setTimeout(r, 40))
+    } finally {
+      await new Promise<void>((r) => blocker.close(() => r()))
+    }
+  })
 })

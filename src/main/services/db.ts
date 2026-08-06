@@ -15,6 +15,7 @@ import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
 import type { EngineId, ModelRef, AccountInfo, DispatchedUsageSummary } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
+import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
 // Metering types (Phase 7 — Pass 1)
@@ -96,7 +97,12 @@ export interface Migration {
   up: (db: Db) => void
 }
 
-const MIGRATIONS: Migration[] = [
+/**
+ * The production migration list. Exported so tests can replay a PREFIX of it and
+ * assert the upgrade path (e.g. that v8's ALTER TABLEs preserve a v7 row) rather
+ * than only the end state of a fresh DB.
+ */
+export const MIGRATIONS: Migration[] = [
   {
     version: 1,
     up(db) {
@@ -257,6 +263,58 @@ const MIGRATIONS: Migration[] = [
           ON dispatched_usage(from_routing_id);
       `)
     }
+  },
+  {
+    // v7 — Remote-server persisted config + password credential (Phase 1 of
+    // remote auth). Single-row table (id fixed to 1 via CHECK) mirrors the
+    // singleton nature of "the" remote server config — no per-profile config
+    // exists yet. NEVER expose password_salt/password_hash/kdf_params over
+    // IPC (see remote:get-config in main/index.ts) — this table is the one
+    // place those bytes live; UISettings must never carry them (a remote
+    // client can read/write UISettings via config:save-settings).
+    //
+    // tls_mode is a placeholder column (wired in Phase 3) so a later
+    // migration doesn't need to ALTER TABLE just to add it.
+    version: 7,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS remote_config (
+          id                  INTEGER PRIMARY KEY CHECK (id = 1),
+          port                INTEGER NOT NULL DEFAULT 0,
+          bind_host           TEXT,
+          autostart           INTEGER NOT NULL DEFAULT 0,
+          tls_mode            INTEGER NOT NULL DEFAULT 0,
+          password_salt       TEXT,
+          password_hash       TEXT,
+          kdf_params          TEXT,
+          password_updated_at INTEGER,
+          updated_at          INTEGER NOT NULL
+        );
+      `)
+    }
+  },
+  {
+    // v8 — ADR-042: the Tailscale HTTPS port is PINNED config, not a candidate
+    // walk, plus the persisted cleanup record the startup reconciliation reads.
+    //
+    // `tls_https_port` defaults to 443 (bare `https://<node>.ts.net`, the whole
+    // point of the mode: a bookmarkable URL). Any uint16 is legal — `tailscale
+    // serve` accepts any port; 443/8443/10000 is only the Funnel-compatible
+    // triple.
+    //
+    // `last_serve_https_port` / `last_serve_local_port` record the serve entry
+    // we last confirmed: `{httpsPort, localPort}`. On the next startup an entry
+    // on that HTTPS port proxying to `http://127.0.0.1:<localPort>` is PROVABLY
+    // ours (the loopback port is random per run), so it can be removed even
+    // after a force-kill. Nullable: no record means nothing to reconcile.
+    version: 8,
+    up(db) {
+      db.exec(`
+        ALTER TABLE remote_config ADD COLUMN tls_https_port INTEGER NOT NULL DEFAULT 443;
+        ALTER TABLE remote_config ADD COLUMN last_serve_https_port INTEGER;
+        ALTER TABLE remote_config ADD COLUMN last_serve_local_port INTEGER;
+      `)
+    }
   }
 ]
 
@@ -270,14 +328,45 @@ export function runMigrations(db: Db, migrations: Migration[] = MIGRATIONS): voi
   // user_version is an integer stored in the SQLite header (no table needed).
   const currentVersion = (db.pragma('user_version', { simple: true }) as number | null) ?? 0
 
+  // Downgrade guard: an OLDER binary opening a DB that a NEWER build already
+  // migrated forward sees a user_version above everything it knows about. Do NOT
+  // run or rewind anything — warn and proceed read-forward. SQLite tolerates
+  // unknown extra tables/columns, so most reads still work; forcing a rewind (or
+  // throwing) would brick the app for a user who merely downgraded.
+  const latestVersion = migrations.reduce((max, m) => Math.max(max, m.version), 0)
+  if (currentVersion > latestVersion) {
+    logger.warn(
+      'DB',
+      `operational.db user_version ${currentVersion} is newer than this build supports ` +
+        `(max ${latestVersion}); it was likely created by a newer ClaudeUI. Proceeding ` +
+        `without migrating — schema mismatches may cause errors.`
+    )
+    return
+  }
+
   const pending = migrations
     .filter((m) => m.version > currentVersion)
     .sort((a, b) => a.version - b.version)
   if (pending.length === 0) return
 
+  // Each migration's `up` + its user_version bump run inside ONE transaction so a
+  // mid-migration failure (e.g. a future ALTER TABLE that half-applies) rolls
+  // back BOTH the partial DDL and the version bump. The DB then reopens at the
+  // last good version and retries, instead of being left at a half-applied
+  // schema that is permanently unopenable. SQLite DDL and `PRAGMA user_version`
+  // are both transactional (rolled back on ROLLBACK). Manual BEGIN/COMMIT (not
+  // db.transaction()) matches the existing bulk-write pattern in this file and
+  // the node:sqlite test stub, which does not implement db.transaction().
   for (const migration of pending) {
-    migration.up(db)
-    db.pragma(`user_version = ${migration.version}`)
+    db.prepare('BEGIN').run()
+    try {
+      migration.up(db)
+      db.pragma(`user_version = ${migration.version}`)
+      db.prepare('COMMIT').run()
+    } catch (err) {
+      db.prepare('ROLLBACK').run()
+      throw err
+    }
   }
 }
 
@@ -305,7 +394,18 @@ function getDb(): Db {
 
   runMigrations(db)
 
+  // Publish the singleton BEFORE pruning so pruneUsageTables()'s own getDb()
+  // resolves to this instance (no re-open / recursion).
   _db = db
+
+  // Bounded periodic prune (M-DB3): once per process open, off the hot insert
+  // path. Best-effort — a prune failure must never prevent the DB from opening.
+  try {
+    pruneUsageTables()
+  } catch (err) {
+    logger.warn('DB', `usage-table prune on open failed (non-fatal): ${err}`)
+  }
+
   return _db
 }
 
@@ -411,9 +511,9 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
  */
 export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   const db = getDb()
-  const row = db
-    .prepare('SELECT * FROM session_meta WHERE session_id = ?')
-    .get(sessionId) as SessionMetaRow | undefined
+  const row = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(sessionId) as
+    | SessionMetaRow
+    | undefined
   return row ? rowToMeta(row) : undefined
 }
 
@@ -467,9 +567,9 @@ export function allSessionMeta(): Record<string, SessionMeta> {
  */
 export function renameSessionMeta(oldId: string, newId: string, fallback?: SessionMeta): void {
   const db = getDb()
-  const existing = db
-    .prepare('SELECT * FROM session_meta WHERE session_id = ?')
-    .get(oldId) as SessionMetaRow | undefined
+  const existing = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(oldId) as
+    | SessionMetaRow
+    | undefined
 
   if (existing) {
     db.prepare(
@@ -504,9 +604,7 @@ export function importSessionEnginesOnce(
   sessionEngines: Record<string, { engineId: string; model?: ModelRef }>
 ): void {
   const db = getDb()
-  const count = (
-    db.prepare('SELECT COUNT(*) as n FROM session_meta').get() as { n: number }
-  ).n
+  const count = (db.prepare('SELECT COUNT(*) as n FROM session_meta').get() as { n: number }).n
   if (count > 0) return // already populated — skip
 
   const entries = Object.entries(sessionEngines)
@@ -562,9 +660,7 @@ function rowToAccountInfo(row: AccountRow): AccountInfo {
 /** Return all accounts from the DB, ordered by created_at ascending. */
 export function getAllAccounts(): AccountInfo[] {
   const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM account ORDER BY created_at ASC')
-    .all() as AccountRow[]
+  const rows = db.prepare('SELECT * FROM account ORDER BY created_at ASC').all() as AccountRow[]
   return rows.map(rowToAccountInfo)
 }
 
@@ -738,9 +834,9 @@ export function insertUsageEvents(events: UsageEventRow[]): void {
 /** Retrieve a single usage event by message_id (used in tests). */
 export function getUsageEventByMessageId(messageId: string): UsageEventRow | undefined {
   const db = getDb()
-  const row = db
-    .prepare('SELECT * FROM usage_event WHERE message_id = ?')
-    .get(messageId) as UsageEventDbRow | undefined
+  const row = db.prepare('SELECT * FROM usage_event WHERE message_id = ?').get(messageId) as
+    | UsageEventDbRow
+    | undefined
   return row ? rowToUsageEvent(row) : undefined
 }
 
@@ -754,9 +850,7 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
   const db = getDb()
   const rows = engineId
     ? (db
-        .prepare(
-          'SELECT * FROM usage_event WHERE ts >= ? AND engine_id = ? ORDER BY ts ASC'
-        )
+        .prepare('SELECT * FROM usage_event WHERE ts >= ? AND engine_id = ? ORDER BY ts ASC')
         .all(cutoffTs, engineId) as UsageEventDbRow[])
     : (db
         .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
@@ -807,15 +901,63 @@ export function recordWindowSample(sample: WindowSampleRow): void {
   ).run(sample.id, sample.ts, sample.accountUuid, sample.usedPercent, sample.canonicalEnd)
 }
 
-/** Retrieve window samples for an account ordered by ts ascending (used in tests + Pass 2 WLS). */
+/**
+ * Retrieve the MOST RECENT `limit` window samples for an account, returned in
+ * ascending ts order (used in tests + Pass 2 WLS).
+ *
+ * M-DB2: this selects DESC + reverses (rather than `ORDER BY ts ASC LIMIT`).
+ * usage_window_sample is never pruned per-window and accumulates one row per
+ * poll cycle, so past `limit` lifetime samples an ASC LIMIT returns the OLDEST
+ * rows and the ACTIVE window's samples (needed by buildDbProjectionSamples,
+ * which filters on `canonicalEnd === currentWindowEnd`) never appear — the WLS
+ * projection then silently falls back to the in-memory ring forever. Taking the
+ * newest `limit` guarantees the current window is always represented; reversing
+ * restores the ascending contract callers expect.
+ */
 export function getWindowSamples(accountUuid: string, limit = 100): WindowSampleRow[] {
   const db = getDb()
   const rows = db
-    .prepare(
-      'SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts ASC LIMIT ?'
-    )
+    .prepare('SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts DESC LIMIT ?')
     .all(accountUuid, limit) as WindowSampleDbRow[]
-  return rows.map(rowToWindowSample)
+  // Reverse the DESC page back to ascending ts for consumers.
+  return rows.reverse().map(rowToWindowSample)
+}
+
+// ---------------------------------------------------------------------------
+// Usage-table pruning (M-DB3)
+// usage_event and usage_window_sample were never pruned in production and grew
+// without bound. Both are only ever READ over recent horizons, so we sweep the
+// rest on a bounded, once-per-open cadence (see getDb) — never per-insert.
+// ---------------------------------------------------------------------------
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+// usage_event is read only at a 7-day lookback (block-usage's getUsageEventsSince
+// callers) and older days live durably in daily_usage, so 90d is a very
+// conservative floor that keeps well over a week of margin for the reconciler.
+const USAGE_EVENT_RETENTION_DAYS = 90
+// usage_window_sample is read as the newest-N per account for the ACTIVE (a few
+// hours old) window, so 30d never risks the current window while capping growth.
+const WINDOW_SAMPLE_RETENTION_DAYS = 30
+
+/**
+ * Prune the unbounded usage tables (M-DB3). Deletes usage_event rows older than
+ * `usageEventDays` (default 90) and usage_window_sample rows older than
+ * `windowSampleDays` (default 30). Both retentions far exceed every read path,
+ * so the current 5h window's samples (M-DB2) and the 7d event scan window always
+ * survive. A bounded periodic sweep — run once per DB open, never per-insert.
+ * Returns the delete counts for diagnostics/tests. Idempotent (a second call
+ * with the same clock deletes nothing).
+ */
+export function pruneUsageTables(
+  now: number = Date.now(),
+  retention: { usageEventDays?: number; windowSampleDays?: number } = {}
+): { usageEventsDeleted: number; windowSamplesDeleted: number } {
+  const db = getDb()
+  const eventCutoff = now - (retention.usageEventDays ?? USAGE_EVENT_RETENTION_DAYS) * MS_PER_DAY
+  const wsCutoff = now - (retention.windowSampleDays ?? WINDOW_SAMPLE_RETENTION_DAYS) * MS_PER_DAY
+  const e = db.prepare('DELETE FROM usage_event WHERE ts < ?').run(eventCutoff)
+  const w = db.prepare('DELETE FROM usage_window_sample WHERE ts < ?').run(wsCutoff)
+  return { usageEventsDeleted: e.changes, windowSamplesDeleted: w.changes }
 }
 
 // ---------------------------------------------------------------------------
@@ -954,9 +1096,7 @@ export function deleteDailyUsageForDate(date: string): void {
 /** All daily_usage rows ordered by date asc (the chart's source). */
 export function getAllDailyUsage(): DailyUsageRow[] {
   const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM daily_usage ORDER BY date ASC')
-    .all() as DailyUsageDbRow[]
+  const rows = db.prepare('SELECT * FROM daily_usage ORDER BY date ASC').all() as DailyUsageDbRow[]
   return rows.map(rowToDailyUsage)
 }
 
@@ -1148,4 +1288,214 @@ export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string
     newRoutingId,
     oldRoutingId
   )
+}
+
+// ---------------------------------------------------------------------------
+// Remote-server config repository (Phase 1 — persisted remote-server config)
+// Single-row table (id fixed to 1). password_salt/password_hash/kdf_params
+// NEVER cross IPC (see remote:get-config in main/index.ts) — they're read
+// here only by remote-auth.ts (credential verification) and the accessors
+// below. setRemoteConfig/setRemotePassword each preserve the columns owned
+// by the OTHER accessor (read-modify-write against the current row).
+// ---------------------------------------------------------------------------
+
+/**
+ * Default pinned `tailscale serve` HTTPS port (ADR-042) — mirrors the v8 column
+ * default. 443 is what makes the URL a bare `https://<node>.ts.net`.
+ */
+export const DEFAULT_TLS_HTTPS_PORT = 443
+
+interface RemoteConfigDbRow {
+  id: number
+  port: number
+  bind_host: string | null
+  autostart: number
+  tls_mode: number
+  tls_https_port: number
+  last_serve_https_port: number | null
+  last_serve_local_port: number | null
+  password_salt: string | null
+  password_hash: string | null
+  kdf_params: string | null
+  password_updated_at: number | null
+  updated_at: number
+}
+
+export interface RemoteConfigRow {
+  port: number
+  bindHost: string | null
+  autostart: boolean
+  tlsMode: number
+  /** Pinned `tailscale serve` HTTPS port (ADR-042). Default 443. */
+  tlsHttpsPort: number
+  /** HTTPS port of the last CONFIRMED serve entry we created, or null. */
+  lastServeHttpsPort: number | null
+  /** Loopback port that entry proxied to — the proof it is ours. */
+  lastServeLocalPort: number | null
+  passwordSalt: string | null
+  passwordHash: string | null
+  kdfParams: string | null
+  passwordUpdatedAt: number | null
+  updatedAt: number
+}
+
+function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
+  return {
+    port: row.port,
+    bindHost: row.bind_host,
+    autostart: row.autostart === 1,
+    tlsMode: row.tls_mode,
+    // COALESCE in code rather than SQL: a DB written by a build that predates
+    // v8 and re-opened by an even newer build still reads through this mapper.
+    tlsHttpsPort: row.tls_https_port ?? DEFAULT_TLS_HTTPS_PORT,
+    lastServeHttpsPort: row.last_serve_https_port ?? null,
+    lastServeLocalPort: row.last_serve_local_port ?? null,
+    passwordSalt: row.password_salt,
+    passwordHash: row.password_hash,
+    kdfParams: row.kdf_params,
+    passwordUpdatedAt: row.password_updated_at,
+    updatedAt: row.updated_at
+  }
+}
+
+function getRemoteConfigDbRow(db: Db): RemoteConfigDbRow | undefined {
+  return db.prepare('SELECT * FROM remote_config WHERE id = 1').get() as
+    | RemoteConfigDbRow
+    | undefined
+}
+
+/** Read the singleton remote-server config row, or null if never written. */
+export function getRemoteConfig(): RemoteConfigRow | null {
+  const db = getDb()
+  const row = getRemoteConfigDbRow(db)
+  return row ? rowToRemoteConfig(row) : null
+}
+
+/**
+ * Upsert the singleton remote-server config row. Only touches
+ * port/bind_host/autostart/tls_mode/tls_https_port — password columns AND the
+ * last-serve record are left untouched on an existing row (SQLite
+ * `INSERT ... ON CONFLICT DO UPDATE` only reassigns the columns named in the
+ * SET clause) and take their column default on first insert. Fields omitted
+ * from `partial` keep their current value (or the column default if the row
+ * doesn't exist yet).
+ */
+export function setRemoteConfig(partial: {
+  port?: number
+  bindHost?: string | null
+  autostart?: boolean
+  tlsMode?: number
+  tlsHttpsPort?: number
+}): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  const port = partial.port ?? existing?.port ?? 0
+  const bindHost = partial.bindHost !== undefined ? partial.bindHost : (existing?.bind_host ?? null)
+  const autostart =
+    partial.autostart !== undefined ? (partial.autostart ? 1 : 0) : (existing?.autostart ?? 0)
+  const tlsMode = partial.tlsMode ?? existing?.tls_mode ?? 0
+  const tlsHttpsPort = partial.tlsHttpsPort ?? existing?.tls_https_port ?? DEFAULT_TLS_HTTPS_PORT
+
+  db.prepare(
+    `INSERT INTO remote_config (id, port, bind_host, autostart, tls_mode, tls_https_port, updated_at)
+     VALUES (1, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       port           = excluded.port,
+       bind_host      = excluded.bind_host,
+       autostart      = excluded.autostart,
+       tls_mode       = excluded.tls_mode,
+       tls_https_port = excluded.tls_https_port,
+       updated_at     = excluded.updated_at`
+  ).run(port, bindHost, autostart, tlsMode, tlsHttpsPort, Date.now())
+}
+
+/**
+ * Record the serve entry we just confirmed (ADR-042 decision 3): the HTTPS port
+ * and the loopback port it proxies to. Deliberately narrow — it names ONLY the
+ * two last-serve columns in both the INSERT and the SET clause, so it can never
+ * clobber the config or password columns (a serve success can land at any time,
+ * including concurrently with a Settings write).
+ */
+export function setLastServeRecord(httpsPort: number, localPort: number): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO remote_config (id, last_serve_https_port, last_serve_local_port, updated_at)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_serve_https_port = excluded.last_serve_https_port,
+       last_serve_local_port = excluded.last_serve_local_port,
+       updated_at            = excluded.updated_at`
+  ).run(httpsPort, localPort, Date.now())
+}
+
+/**
+ * NULL out the last-serve record — called after a CONFIRMED `disableServe`, or
+ * when reconciliation finds the live config no longer matches the record.
+ * No-op when no row exists (nothing to clear).
+ */
+export function clearLastServeRecord(): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  if (!existing) return
+  db.prepare(
+    `UPDATE remote_config SET
+       last_serve_https_port = NULL,
+       last_serve_local_port = NULL,
+       updated_at = ?
+     WHERE id = 1`
+  ).run(Date.now())
+}
+
+/**
+ * Upsert the password credential columns, preserving the config columns
+ * (port/bindHost/autostart/tlsMode) untouched on an existing row. `salt` and
+ * `hash` are lowercase hex; `kdfParams` is the JSON blob from
+ * remote-auth.ts's computeStoredCredential.
+ */
+export function setRemotePassword(salt: string, hash: string, kdfParams: string): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  const now = Date.now()
+
+  db.prepare(
+    `INSERT INTO remote_config (
+       id, port, bind_host, autostart, tls_mode,
+       password_salt, password_hash, kdf_params, password_updated_at, updated_at
+     ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       password_salt       = excluded.password_salt,
+       password_hash       = excluded.password_hash,
+       kdf_params          = excluded.kdf_params,
+       password_updated_at = excluded.password_updated_at,
+       updated_at          = excluded.updated_at`
+  ).run(
+    existing?.port ?? 0,
+    existing?.bind_host ?? null,
+    existing?.autostart ?? 0,
+    existing?.tls_mode ?? 0,
+    salt,
+    hash,
+    kdfParams,
+    now,
+    now
+  )
+}
+
+/**
+ * NULL out the password credential columns (salt/hash/kdf_params/updated_at).
+ * No-op if the row doesn't exist yet (nothing to clear).
+ */
+export function clearRemotePassword(): void {
+  const db = getDb()
+  const existing = getRemoteConfigDbRow(db)
+  if (!existing) return
+  db.prepare(
+    `UPDATE remote_config SET
+       password_salt = NULL,
+       password_hash = NULL,
+       kdf_params = NULL,
+       password_updated_at = NULL,
+       updated_at = ?
+     WHERE id = 1`
+  ).run(Date.now())
 }

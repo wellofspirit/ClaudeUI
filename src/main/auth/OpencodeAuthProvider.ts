@@ -14,30 +14,25 @@
  * Degrades to {} on any failure — opencode is optional.
  */
 
-import os from 'os'
-import path from 'path'
 import fs from 'fs'
+import {
+  resolveOpencodeAuthJsonPath,
+  readOpencodeCredentialTypes
+} from '../opencode/auth-store'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
+import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
 
-/**
- * opencode's auth store: `<dataDir>/auth.json`, where the data dir mirrors
- * opencode's own resolution — `$XDG_DATA_HOME/opencode`, falling back to
- * `~/.local/share/opencode` (opencode uses XDG paths even on Windows; same
- * resolution as resolveOpencodeDbPath in services/opencode-session-list.ts).
- * Env is read at call time so tests can point it at a temp dir.
- */
-function resolveOpencodeAuthJsonPath(): string {
-  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
-  return path.join(dataHome, 'opencode', 'auth.json')
-}
+// Path resolution + the credential-type read live in opencode/auth-store.ts so
+// model-discovery can consult them for row-action availability without importing
+// this module (which would cycle: this file imports invalidateOpencodeModelCache).
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -178,12 +173,17 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   async setVendorApiKey(vendorId: string, key: string): Promise<void> {
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    let mutated = false
     try {
       await client.setAuth(vendorId, { type: 'api', key })
       this.invalidateCache()
       invalidateOpencodeModelCache()
+      mutated = true
     } finally {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+      // Only on success, and only after our own ref is gone (recycleAll kills
+      // regardless of refcount — releasing first keeps the bookkeeping honest).
+      if (mutated) opencodeServerManager.recycleAll()
     }
   }
 
@@ -200,21 +200,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    * Missing or unparseable file → {} (opencode optional).
    */
   async listVendorCredentialIds(): Promise<Record<string, 'api' | 'oauth'>> {
-    try {
-      const raw = await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
-      const parsed: unknown = JSON.parse(raw)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-      const out: Record<string, 'api' | 'oauth'> = {}
-      for (const [vendorId, entry] of Object.entries(parsed)) {
-        if (typeof entry !== 'object' || entry === null) continue
-        // opencode auth entry types: 'api' | 'oauth' | 'wellknown'. Anything
-        // non-oauth is reported as 'api' (a stored secret of some kind).
-        out[vendorId] = (entry as { type?: unknown }).type === 'oauth' ? 'oauth' : 'api'
-      }
-      return out
-    } catch {
-      return {}
-    }
+    return readOpencodeCredentialTypes()
   }
 
   async oauthAuthorize(
@@ -247,15 +233,20 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     // ProviderAuthOauthMissing, the correct outcome for an orphan callback.
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    let mutated = false
     try {
       const result = await client.oauthCallback(vendorId, method, code)
       this.invalidateCache()
       invalidateOpencodeModelCache()
+      // `false` means the flow did not complete — auth.json is unchanged, so
+      // there is nothing stale to recycle for.
+      mutated = result
       return result
     } finally {
       // Release this call's ref, then the authorize-time hold (flow is over).
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
       this.releaseOauthHold()
+      if (mutated) opencodeServerManager.recycleAll()
     }
   }
 
@@ -271,12 +262,15 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   async removeVendorAuth(vendorId: string): Promise<void> {
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    let mutated = false
     try {
       await client.removeAuth(vendorId)
       this.invalidateCache()
       invalidateOpencodeModelCache()
+      mutated = true
     } finally {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+      if (mutated) opencodeServerManager.recycleAll()
     }
   }
 
@@ -294,17 +288,26 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   // auth.json natively off disk on its OWN process start, so a direct file
   // write is both simpler and correct for what this feed needs.
   //
-  // LIVE-SERVER STALENESS (v1 limitation, noted per the M6b spec): if an
-  // opencode server is ALREADY RUNNING when this feed lands, that process
-  // will not observe the change until its next start — opencode has no
-  // "reload auth.json" signal we can send it. This is acceptable because the
-  // refresh timer (CredentialSync.scheduleRefresh) keeps the ON-DISK copy
-  // valid well before it would actually expire, so any FRESH opencode server
-  // start always finds a good credential. A live server mid-session using a
-  // credential this feed just rotated out from under it is the one case that
-  // can still 401 until its next restart — flagged for M6c/a future revisit
-  // (e.g. an opencode `/auth/{id}` PUT best-effort mirror IF a server happens
-  // to already be running), not solved here.
+  // LIVE-SERVER STALENESS: opencode builds its provider map ONCE per process
+  // and never watches auth.json, so any server already running when a
+  // credential changes keeps its stale map until it restarts. There is no
+  // "reload auth.json" signal to send — only a process recycle. The two
+  // mutation paths in this file deliberately differ:
+  //
+  //   - USER-INITIATED mutations (setVendorApiKey / oauthCallback /
+  //     removeVendorAuth) call opencodeServerManager.recycleAll() on success.
+  //     The user just asked for the change, and attached sessions self-heal
+  //     (exit fan-out → markDisconnected → next prompt re-acquires a fresh
+  //     server), so tearing the pool down is the right trade there.
+  //
+  //   - THIS FEED does NOT recycle. It fires on CredentialSync's background
+  //     refresh timer, at moments the user never chose; killing whatever
+  //     sessions happen to be mid-turn is worse than the edge it would fix.
+  //     The timer keeps the ON-DISK copy valid well before actual expiry, so
+  //     any FRESH server start always finds a good credential. The one case
+  //     left is a live server mid-session using a credential this feed just
+  //     rotated out from under it — it can 401 until its next restart.
+  //     Accepted, not solved here.
   // -------------------------------------------------------------------------
 
   /** opencode's auth.json absolute path — CredentialSync derives its fs.watch dir + filename filter from this. */
@@ -315,20 +318,17 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
   /** RMW-merge a Codex OAuth credential into auth.json. Preserves every other vendor entry AND any unknown field already on this vendor's own entry. Persists `accountId` when known (unlike pi, which doesn't). */
   async feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void> {
     const filePath = resolveOpencodeAuthJsonPath()
-    const dir = path.dirname(filePath)
 
-    let file: Record<string, unknown> = {}
-    try {
-      const raw = fs.readFileSync(filePath, 'utf-8')
-      const parsed: unknown = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) file = parsed as Record<string, unknown>
-    } catch {
-      // Absent or corrupt — start fresh (matches listVendorCredentialIds's degrade-to-{} posture above).
-    }
+    // Read-modify-write. readJsonFileForWrite returns {} for a MISSING file but
+    // THROWS (after a one-time backup) on a corrupt-but-present file, so this
+    // feed never overwrites a partially-written auth.json and deletes every
+    // other vendor's credential (H18/R2). The write is atomic (temp + rename),
+    // which prevents that mid-write truncation in the first place (R1).
+    const file = readJsonFileForWrite(filePath)
 
     const existing = file[vendorId]
     const entry: Record<string, unknown> = {
-      ...(existing && typeof existing === 'object' ? existing : {}),
+      ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
       type: 'oauth',
       refresh: cred.refresh,
       access: cred.access,
@@ -337,18 +337,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     if (cred.accountId) entry.accountId = cred.accountId
     file[vendorId] = entry
 
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(filePath, JSON.stringify(file, null, 2), { mode: 0o600 })
-    // Same rationale as PiAuthProvider.writeAuthFile: writeFileSync's `mode`
-    // only applies to a newly-created file, so an existing file (opencode's
-    // own) keeps its prior permissions unless chmod is forced explicitly.
-    if (process.platform !== 'win32') {
-      try {
-        fs.chmodSync(filePath, 0o600)
-      } catch (err) {
-        logger.warn('OpencodeAuth', `chmod 0600 failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
+    writeJsonAtomic(filePath, file, { indent: 2 })
 
     this.invalidateCache()
     invalidateOpencodeModelCache()

@@ -19,16 +19,56 @@ import type {
   OpencodeCatalogModel
 } from '../../../../../shared/types'
 
+/**
+ * Row-action availability now travels with each catalog entry (resolved in main by
+ * resolveProviderActions). These fixtures mirror the real derivation: a
+ * credentialed catalog provider is removable, a free bundled gateway is not.
+ */
+const entry = (
+  over: Partial<OpencodeProviderCatalogEntry> & Pick<OpencodeProviderCatalogEntry, 'id' | 'name'>
+): OpencodeProviderCatalogEntry => ({
+  authState: 'authenticated',
+  authMethods: ['api'],
+  modelCount: 0,
+  disabled: false,
+  actions: {
+    canSetCredential: true,
+    canEditDeclaration: false,
+    canRemove: true,
+    removeKind: 'credential'
+  },
+  ...over
+})
+
 const CATALOG: OpencodeProviderCatalogEntry[] = [
-  { id: 'openai', name: 'OpenAI', authState: 'authenticated', authMethods: ['api'], modelCount: 5 },
-  { id: 'opencode', name: 'OpenCode Zen', authState: 'free', authMethods: [], modelCount: 2 },
-  {
+  entry({ id: 'openai', name: 'OpenAI', modelCount: 5 }),
+  entry({
+    id: 'opencode',
+    name: 'OpenCode Zen',
+    authState: 'free',
+    authMethods: [],
+    modelCount: 2,
+    actions: {
+      canSetCredential: false,
+      canEditDeclaration: false,
+      canRemove: false,
+      removeKind: null,
+      blockedReason: 'Bundled and needs no credentials, so there is nothing to remove.'
+    }
+  }),
+  entry({
     id: 'openrouter',
     name: 'OpenRouter',
     authState: 'unauthenticated',
-    authMethods: ['api'],
-    modelCount: 3
-  }
+    modelCount: 3,
+    actions: {
+      canSetCredential: true,
+      canEditDeclaration: false,
+      canRemove: false,
+      removeKind: null,
+      blockedReason: 'Configured outside ClaudeUI with no stored credential.'
+    }
+  })
 ]
 
 const OR_MODELS: OpencodeCatalogModel[] = [
@@ -56,33 +96,46 @@ const saveOpencodeSettings = vi.fn(async (cfg: OpencodeConfigSettings) => {
   savedConfigs.push(structuredClone(cfg))
 })
 const vendorAuthSetKey = vi.fn(async () => undefined)
+const setOpencodeProviderDisabled = vi.fn(async (_id: string, _disabled: boolean) => undefined)
+const removeOpencodeProvider = vi.fn(async (_id: string, _kind: string) => undefined)
 const getOpencodeProviderModels = vi.fn(async (providerId: string) => {
   if (providerId === 'opencode') return ZEN_MODELS
   if (providerId === 'openai') return OPENAI_MODELS
   return OR_MODELS
 })
 
-function installApiStub(initial: OpencodeConfigSettings): void {
+/**
+ * @param catalog Override the provider catalog. Disabled-ness now travels ON the
+ *   catalog entry (main computes it from opencode's disabled_providers); the
+ *   renderer no longer re-derives it from the settings payload, so a test for a
+ *   disabled provider must say so here, not via `initial.disabledProviders`.
+ */
+function installApiStub(
+  initial: OpencodeConfigSettings,
+  catalog: OpencodeProviderCatalogEntry[] = CATALOG
+): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     engineIsInstalled: vi.fn(async () => true),
-    getOpencodeProviders: vi.fn(async () => CATALOG),
+    getOpencodeProviders: vi.fn(async () => catalog),
     getOpencodeProviderModels,
     loadOpencodeSettings: vi.fn(async () => structuredClone(initial)),
     saveOpencodeSettings,
     vendorAuthListOptions: vi.fn(async () => ({})),
     vendorAuthSetKey,
     vendorAuthRemove: vi.fn(async () => undefined),
-    vendorAuthOauthCancel: vi.fn(async () => undefined)
+    vendorAuthOauthCancel: vi.fn(async () => undefined),
+    setOpencodeProviderDisabled,
+    removeOpencodeProvider
   }
 }
 
-/** Open the "Manage models" dialog for a given added-provider row. */
+/** Open the "Manage models" dialog for a provider row (now an icon button). */
 async function openModelDialog(providerId: string): Promise<void> {
   const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
   const row = rows.find((r) => r.getAttribute('data-id') === providerId)!
   await act(async () => {
-    fireEvent.click(within(row).getByText('Manage models'))
+    fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.models'))
   })
 }
 
@@ -97,6 +150,8 @@ describe('opencode provider manager', () => {
     saveOpencodeSettings.mockClear()
     vendorAuthSetKey.mockClear()
     getOpencodeProviderModels.mockClear()
+    setOpencodeProviderDisabled.mockClear()
+    removeOpencodeProvider.mockClear()
   })
   afterEach(() => cleanup())
 
@@ -160,52 +215,55 @@ describe('opencode provider manager', () => {
     })
   })
 
-  describe('re-adding a removed free provider (keyless path)', () => {
-    // A free provider only ever appears in the Add picker after being removed
-    // (disabledProviders) — otherwise it's auto-active. The expanded row must
-    // offer a single keyless enable button instead of OAuth / API-key inputs.
-    async function expandFreeAddableRow(): Promise<void> {
-      installApiStub({ disabledProviders: ['opencode'] })
+  describe('a disabled provider stays in the list and re-enables in place', () => {
+    /**
+     * CONTRACT CHANGED. This previously asserted that a disabled free provider
+     * disappeared from the list and came back through the "Add provider" picker
+     * with a keyless Add button.
+     *
+     * A disabled provider now stays in the Providers list, dimmed and badged, with
+     * a power toggle — because Disable is reversible state, not removal. Vanishing
+     * made a disabled provider indistinguishable from one that was never set up,
+     * which is exactly the confusion the Disable/Remove split exists to end.
+     */
+    async function renderWithDisabledZen(): Promise<HTMLElement> {
+      installApiStub(
+        { disabledProviders: ['opencode'] },
+        CATALOG.map((p) => (p.id === 'opencode' ? { ...p, disabled: true } : p))
+      )
       await act(async () => {
         renderManager()
       })
-      // Wait for load (openai renders as added), then: disabled → zen is NOT added.
       expect(await screen.findByText('OpenAI')).toBeTruthy()
-      expect(screen.queryByText('OpenCode Zen')).toBeNull()
-      await act(async () => {
-        fireEvent.click(await screen.findByText('+ Add provider'))
-      })
-      const search = await screen.findByPlaceholderText(/Search providers/)
-      await act(async () => {
-        fireEvent.change(search, { target: { value: 'zen' } })
-      })
-      // Expand the free provider's row.
-      await act(async () => {
-        fireEvent.click(await screen.findByText('OpenCode Zen'))
-      })
+      const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
+      return rows.find((r) => r.getAttribute('data-id') === 'opencode')!
     }
 
-    it('shows the keyless add button and hides OAuth / API-key inputs', async () => {
-      await expandFreeAddableRow()
-      expect(screen.getByTestId('VendorOpencodeSection.addFree')).toBeTruthy()
-      // The non-free auth affordances must NOT render for a free provider.
-      expect(screen.queryByPlaceholderText('API key')).toBeNull()
-      expect(screen.queryByText(/Sign in with OAuth/)).toBeNull()
+    it('renders the disabled provider in the list, badged and dimmed', async () => {
+      const row = await renderWithDisabledZen()
+      expect(row).toBeTruthy()
+      expect(row.getAttribute('data-disabled')).toBe('true')
+      expect(within(row).getByTestId('VendorOpencodeSection.disabledBadge')).toBeTruthy()
+      // It must NOT also be offered as an addable row — that was the duplication.
+      expect(screen.queryByTestId('VendorOpencodeSection.addFree')).toBeNull()
     })
 
-    it('clicking it clears the id from disabledProviders and seeds an empty model allowlist', async () => {
-      await expandFreeAddableRow()
+    it('the power toggle re-enables it through the main-process owner', async () => {
+      const row = await renderWithDisabledZen()
       await act(async () => {
-        fireEvent.click(screen.getByTestId('VendorOpencodeSection.addFree'))
+        fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.disable'))
       })
-      await waitFor(() => {
-        const last = savedConfigs[savedConfigs.length - 1]
-        expect(last).toBeDefined()
-        // finishAdd's contract: [] collapses to undefined, allowlist seeded empty.
-        expect(last.disabledProviders).toBeUndefined()
-        expect(last.modelAllowlist?.opencode).toEqual([])
-      })
-      // No credential call — the free path never touches auth.json.
+      // Enable goes through the single owner of disabled_providers rather than the
+      // renderer rewriting that array — two writers for it is how a veto once
+      // outlived what it vetoed.
+      await waitFor(() =>
+        expect(setOpencodeProviderDisabled).toHaveBeenCalledWith('opencode', false)
+      )
+      // And it must not smuggle in an allowlist seed: enabling is not adding, so
+      // the models the provider already shows stay untouched.
+      expect(
+        savedConfigs.some((c) => c.modelAllowlist?.opencode !== undefined)
+      ).toBe(false)
       expect(vendorAuthSetKey).not.toHaveBeenCalled()
     })
   })

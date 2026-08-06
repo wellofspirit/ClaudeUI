@@ -1,4 +1,4 @@
-// Trimmed types derived from opencode 1.17.14 /doc snapshot
+// Trimmed types derived from opencode 1.18.9 /doc snapshot
 
 export interface ModelCapabilities {
   temperature: boolean
@@ -104,7 +104,27 @@ export interface StoredMessagePart {
     error?: string
     title?: string
     metadata?: Record<string, unknown>
+    /**
+     * Present on COMPLETED tool parts that returned media (read on a .png, an
+     * MCP resource): the tool's own `FilePart[]` attachments, persisted verbatim
+     * on the part state. Mirrors the live `ToolPartState.attachments` — see the
+     * doc comment there for the vendor-source provenance.
+     */
+    attachments?: Array<{ type?: string; mime?: string; url?: string; filename?: string }>
   }
+  /**
+   * Present for `file` parts: the declared media type. Real attachments carry
+   * the image/pdf mime; @-mentioned files/directories carry `text/plain` /
+   * `application/x-directory` (see vendor prompt.ts resolvePromptParts).
+   */
+  mime?: string
+  /**
+   * Present for `file` parts: `data:<mime>;base64,<data>` for inline attachments
+   * (and MCP resource blobs), `file://…` for @-mentions.
+   */
+  url?: string
+  /** Present for `file` parts: the display filename, when opencode knows one. */
+  filename?: string
   /** Part ids and message linkage */
   id?: string
   messageID?: string
@@ -241,6 +261,11 @@ export const EVENT_TYPES = {
   QUESTION_REPLIED: 'question.replied',
   QUESTION_REJECTED: 'question.rejected',
   COMMAND_EXECUTED: 'command.executed',
+  // Handled by the event mapper since M2 but only declared here as of the
+  // 1.18.9 bump (they were absent from the 1.17.14 snapshot's list too).
+  SESSION_IDLE: 'session.idle',
+  SESSION_ERROR: 'session.error',
+  TODO_UPDATED: 'todo.updated',
 } as const
 
 export type KnownEventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]

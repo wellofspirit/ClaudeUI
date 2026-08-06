@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { GitStatusData, GitBranchData, GitFileStatus } from '../../shared/types'
 import { logger } from './logger'
+import { isPathInside } from './path-containment'
 
 /**
  * Skip line counting / diff content for files larger than this. A multi-GB
@@ -14,6 +15,64 @@ const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
 
 /** Bytes to sniff when classifying a file as binary. Matches git's heuristic. */
 const BINARY_SNIFF_BYTES = 8000
+
+/**
+ * Hard caps for the untracked-file line-count pass.
+ *
+ * simple-git hardcodes `--untracked-files=all` on `git status`, so a working
+ * tree with an unignored `node_modules`/`dist` yields *thousands* of entries in
+ * `status.not_added`. Reading every one of them in full on every 5 s poll was
+ * the dominant term in the main-process OOM that made the app vanish without a
+ * log or a crash dump. Past either cap we stop counting lines; the files still
+ * appear in the status lists, only their line counts are missing (surfaced via
+ * `lineCountsTruncated`).
+ */
+const MAX_UNTRACKED_LINECOUNT_FILES = 200
+/** Cumulative bytes read by the untracked line-count pass, per getStatus() call. */
+const MAX_UNTRACKED_LINECOUNT_BYTES = 50 * 1024 * 1024
+
+/**
+ * Cap on the entries put into the status payload that crosses the IPC boundary
+ * (structured clone to the main window + every extra window, every poll).
+ */
+const MAX_STATUS_LIST_ENTRIES = 5000
+
+/** Entry cap for the per-file line-count cache; cleared wholesale when exceeded. */
+const LINE_COUNT_CACHE_MAX_ENTRIES = 10_000
+
+/** Number of unreadable paths sampled into the single aggregated warn per poll. */
+const READ_ERROR_SAMPLE_SIZE = 3
+
+interface LineCountCacheEntry {
+  size: number
+  mtimeMs: number
+  /** Lines attributed to this file. 0 for binary / oversized files. */
+  lines: number
+}
+
+/**
+ * Cheap change detector for the poller. Must be O(files) with a small constant
+ * and must cover everything the UI renders off a status update: the branch
+ * headline, the per-file status letters, and the aggregate line counts.
+ *
+ * Deliberately not `JSON.stringify(status)` — that re-serialised an unbounded
+ * payload (paths appear in `files` *and* in the category arrays) on every tick.
+ */
+function statusFingerprint(status: GitStatusData): string {
+  const parts: string[] = [
+    status.branch,
+    String(status.ahead),
+    String(status.behind),
+    status.trackingBranch ?? '',
+    String(status.linesAdded),
+    String(status.linesRemoved),
+    status.lineCountsTruncated ? '1' : '0',
+    status.filesTruncated ? '1' : '0',
+    String(status.files.length)
+  ]
+  for (const f of status.files) parts.push(`${f.path}:${f.index}:${f.working}`)
+  return parts.join('\n')
+}
 
 /**
  * Heuristic binary detection: open the file and scan the first 8 KB for a
@@ -53,13 +112,54 @@ function binaryAddedPatch(filePath: string): string {
   ].join('\n')
 }
 
+/** MiB, one decimal place — for human-readable "too large" markers. */
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const MAX_TEXT_FILE_MIB = MAX_TEXT_FILE_BYTES / (1024 * 1024)
+
+/**
+ * Placeholder patch for a *tracked* file whose diff would exceed the payload
+ * cap (audit M-GT1). Returned with `isBinary: true` so the diff view shows its
+ * "preview not shown" notice rather than parsing/rendering a multi-hundred-MB
+ * string — the same escape hatch tracked binaries already use. The message body
+ * is carried for the non-desktop consumers (remote surface) that read `patch`.
+ */
+function tooLargePatch(filePath: string, bytes: number): string {
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    `File too large to display (${formatMiB(bytes)}); diff suppressed above the ${MAX_TEXT_FILE_MIB} MB limit`,
+    ''
+  ].join('\n')
+}
+
+/** Sentinel returned by getFileContents when one side exceeds the size cap. */
+function tooLargeContentMarker(bytes: number): string {
+  return `⟪ File too large to display (${formatMiB(bytes)}) — exceeds the ${MAX_TEXT_FILE_MIB} MB diff limit ⟫\n`
+}
+
+/** Sentinel returned by getFileContents for a binary working-tree file. */
+function binaryContentMarker(): string {
+  return `⟪ Binary file — preview not shown ⟫\n`
+}
+
 export class GitService {
   private git: SimpleGit
   private cwd: string
   /** Resolved git repo root (may differ from cwd when session starts in a subdirectory) */
   private repoRoot: string | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
-  private lastStatusJson = ''
+  private lastStatusFingerprint = ''
+  /** True while a polled getStatus() is outstanding — ticks arriving now are dropped. */
+  private pollInFlight = false
+  /**
+   * Bumped by every start/stop. A poll that settles after its generation was
+   * retired must not fire the callback (stopPolling during an in-flight poll).
+   */
+  private pollGeneration = 0
+  /** Line counts for untracked files, keyed by absolute path, validated by (size, mtimeMs). */
+  private lineCountCache = new Map<string, LineCountCacheEntry>()
 
   constructor(cwd: string) {
     this.cwd = cwd
@@ -95,6 +195,45 @@ export class GitService {
     }
   }
 
+  /**
+   * Resolve a repo-relative `filePath` to an absolute path, throwing if it
+   * escapes the repository root (audit M-GT2 / gpt#5). Every IPC-exposed file
+   * operation routes its path through here so a renderer/model-supplied
+   * `../secret` can be neither read (`git show` / `readFile`) nor deleted
+   * (`fs.unlink`). Callers MUST have run `ensureRepoRoot()` first.
+   */
+  private resolveContained(filePath: string): string {
+    const root = this.repoRoot ?? this.cwd
+    const abs = path.resolve(root, filePath)
+    if (!isPathInside(root, abs)) {
+      throw new Error(`Refusing file operation on path outside the repository: ${filePath}`)
+    }
+    return abs
+  }
+
+  /**
+   * Best-effort byte size of a git object at `spec` (e.g. `HEAD:path`, `:path`),
+   * via `git cat-file -s`. Returns null when the object is absent or the command
+   * fails. Used by getFileContents/getFilePatch to cap oversized blobs BEFORE
+   * `git show`/`git diff` buffers them into a JS string — a multi-GB blob read as
+   * utf-8 crashes the main process on V8's String::kMaxLength (audit M-GT1).
+   */
+  private async blobSize(spec: string): Promise<number | null> {
+    try {
+      const raw = await this.git.raw(['cat-file', '-s', spec])
+      const n = parseInt(raw.trim(), 10)
+      return Number.isFinite(n) ? n : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Record a line count for `absPath`, bounding the cache with a wholesale clear. */
+  private cacheLineCount(absPath: string, stat: fs.Stats, lines: number): void {
+    if (this.lineCountCache.size >= LINE_COUNT_CACHE_MAX_ENTRIES) this.lineCountCache.clear()
+    this.lineCountCache.set(absPath, { size: stat.size, mtimeMs: stat.mtimeMs, lines })
+  }
+
   async getStatus(): Promise<GitStatusData> {
     await this.ensureRepoRoot()
     const status = await this.git.status()
@@ -108,6 +247,7 @@ export class GitService {
     // Compute lines added/removed across staged + unstaged changes
     let linesAdded = 0
     let linesRemoved = 0
+    let lineCountsTruncated = false
     try {
       const parseNumstat = (raw: string): void => {
         for (const line of raw.trim().split('\n')) {
@@ -127,36 +267,90 @@ export class GitService {
       // Untracked files — count all their lines as additions, but skip
       // anything that's too large (V8 string-length crash) or binary (line
       // count is meaningless and reading wastes I/O).
+      //
+      // Bounded three ways: a file-count cap, a cumulative byte budget, and a
+      // (size, mtimeMs)-validated cache so an unchanged file is read at most
+      // once across polls. Unreadable files are aggregated into a single warn
+      // — per-file warns meant thousands of synchronous appendFileSync calls
+      // per poll on trees with long paths / EPERM entries.
+      let filesConsidered = 0
+      let bytesRead = 0
+      let readErrors = 0
+      const readErrorSamples: string[] = []
       for (const f of status.not_added) {
+        if (filesConsidered >= MAX_UNTRACKED_LINECOUNT_FILES) {
+          lineCountsTruncated = true
+          break
+        }
+        filesConsidered++
         try {
           const absPath = path.resolve(this.repoRoot!, f)
           const stat = await fs.promises.stat(absPath)
           if (!stat.isFile()) continue
-          if (stat.size > MAX_TEXT_FILE_BYTES) continue
-          if (await isBinaryFile(absPath)) continue
+          const cached = this.lineCountCache.get(absPath)
+          if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+            linesAdded += cached.lines
+            continue
+          }
+          if (stat.size > MAX_TEXT_FILE_BYTES) {
+            this.cacheLineCount(absPath, stat, 0)
+            continue
+          }
+          if (await isBinaryFile(absPath)) {
+            this.cacheLineCount(absPath, stat, 0)
+            continue
+          }
+          // Budget is checked immediately before the full read (and only for
+          // files we would actually read), so the guarantee is a hard "never
+          // read more than MAX_UNTRACKED_LINECOUNT_BYTES per getStatus()".
+          if (bytesRead + stat.size > MAX_UNTRACKED_LINECOUNT_BYTES) {
+            lineCountsTruncated = true
+            break
+          }
           const content = await fs.promises.readFile(absPath, 'utf-8')
+          bytesRead += stat.size
           const lineCount = content.split('\n').length
           // If file ends with newline, split produces an extra empty string
-          linesAdded += content.endsWith('\n') ? lineCount - 1 : lineCount
-        } catch (err) {
-          logger.warn('GitService', `Failed to read untracked file for line count: ${f}`, err)
+          const lines = content.endsWith('\n') ? lineCount - 1 : lineCount
+          linesAdded += lines
+          this.cacheLineCount(absPath, stat, lines)
+        } catch {
+          readErrors++
+          if (readErrorSamples.length < READ_ERROR_SAMPLE_SIZE) readErrorSamples.push(f)
         }
+      }
+      if (readErrors > 0) {
+        logger.warn(
+          'GitService',
+          `Failed to read ${readErrors} untracked file(s) for line count (e.g. ${readErrorSamples.join(', ')})`
+        )
       }
     } catch (err) {
       logger.warn('GitService', 'Failed to compute diff line counts', err)
     }
+
+    // Bound what crosses the IPC boundary — a pathological working tree would
+    // otherwise structured-clone an unbounded payload to every open window.
+    const unstagedAll = status.modified.concat(status.deleted)
+    const filesTruncated =
+      files.length > MAX_STATUS_LIST_ENTRIES ||
+      status.staged.length > MAX_STATUS_LIST_ENTRIES ||
+      unstagedAll.length > MAX_STATUS_LIST_ENTRIES ||
+      status.not_added.length > MAX_STATUS_LIST_ENTRIES
 
     return {
       branch: status.current || 'HEAD',
       ahead: status.ahead,
       behind: status.behind,
       trackingBranch: status.tracking || null,
-      files,
-      staged: status.staged,
-      unstaged: status.modified.concat(status.deleted),
-      untracked: status.not_added,
+      files: files.slice(0, MAX_STATUS_LIST_ENTRIES),
+      staged: status.staged.slice(0, MAX_STATUS_LIST_ENTRIES),
+      unstaged: unstagedAll.slice(0, MAX_STATUS_LIST_ENTRIES),
+      untracked: status.not_added.slice(0, MAX_STATUS_LIST_ENTRIES),
       linesAdded,
-      linesRemoved
+      linesRemoved,
+      ...(lineCountsTruncated ? { lineCountsTruncated: true } : {}),
+      ...(filesTruncated ? { filesTruncated: true } : {})
     }
   }
 
@@ -205,14 +399,44 @@ export class GitService {
     ignoreWhitespace: boolean = false
   ): Promise<{ patch: string; isBinary?: boolean }> {
     await this.ensureRepoRoot()
+    // Reject traversal before handing the path to git or reading it (throws
+    // out of the try below so the IPC layer surfaces a failed result).
+    const absPath = this.resolveContained(filePath)
     const args: string[] = ['diff']
     if (staged) args.push('--cached')
     if (ignoreWhitespace) args.push('-w')
     args.push('--', filePath)
 
     try {
+      // Cap oversized TRACKED files before git buffers a giant diff and we IPC a
+      // multi-hundred-MB string (audit M-GT1). The dominant real-world trigger is
+      // a huge tracked blob (sqlite/duckdb/generated json/log) sitting in the
+      // working tree: stat it cheaply, and only when it's over the cap pay for the
+      // two cat-file probes that confirm it's actually tracked (an untracked
+      // oversized file must fall through to the untracked binary/size guard below,
+      // which emits the /dev/null "Binary files differ" placeholder).
+      let workingSize = 0
+      try {
+        const st = await fs.promises.stat(absPath)
+        if (st.isFile()) workingSize = st.size
+      } catch {
+        /* absent (e.g. a deletion) → 0; the length backstop still covers it */
+      }
+      if (workingSize > MAX_TEXT_FILE_BYTES) {
+        const tracked =
+          (await this.blobSize(`HEAD:${filePath}`)) != null ||
+          (await this.blobSize(`:${filePath}`)) != null
+        if (tracked) return { patch: tooLargePatch(filePath, workingSize), isBinary: true }
+      }
+
       const patch = await this.git.raw(args)
       if (patch) {
+        // Backstop for cases the working-tree stat can't pre-empt (a huge diff of
+        // a file that is small on disk now but large at HEAD, a rename, etc.):
+        // never hand the renderer a payload past the cap.
+        if (patch.length > MAX_TEXT_FILE_BYTES) {
+          return { patch: tooLargePatch(filePath, patch.length), isBinary: true }
+        }
         // Tracked-file path: git itself emits "Binary files ... differ" for
         // binary content. Surface that to the renderer so it can show a
         // proper notice instead of "No changes".
@@ -223,7 +447,6 @@ export class GitService {
       // Empty patch — could be an untracked file.
       // Generate a unified diff manually since `git diff --no-index` exits
       // with code 1 when differences exist and simple-git treats that as error.
-      const absPath = path.resolve(this.repoRoot!, filePath)
       let stat: fs.Stats
       try {
         stat = await fs.promises.stat(absPath)
@@ -271,47 +494,44 @@ export class GitService {
     staged: boolean
   ): Promise<{ oldContent: string; newContent: string }> {
     await this.ensureRepoRoot()
-    const absPath = path.resolve(this.repoRoot!, filePath)
+    // Reject traversal before any `git show` / working-tree read.
+    const absPath = this.resolveContained(filePath)
     const normEol = (s: string): string => s.replace(/\r\n/g, '\n')
+
+    // Read a git object as text, size-capped (audit M-GT1). Returns a marker
+    // string when the blob is over the cap (never buffers the huge blob), the
+    // content when present, or null when the object is absent / show fails (so
+    // callers can fall back to another rev, preserving the prior semantics).
+    const showGuarded = async (spec: string): Promise<string | null> => {
+      const size = await this.blobSize(spec)
+      if (size != null && size > MAX_TEXT_FILE_BYTES) return tooLargeContentMarker(size)
+      try {
+        return await this.git.show([spec])
+      } catch {
+        return null
+      }
+    }
 
     try {
       if (staged) {
-        let oldContent = ''
-        try {
-          oldContent = await this.git.show([`HEAD:${filePath}`])
-        } catch (err) {
-          logger.warn('GitService', `Failed to get HEAD content for staged file: ${filePath}`, err)
-        }
-        let newContent = ''
-        try {
-          newContent = await this.git.show([`:${filePath}`])
-        } catch (err) {
-          logger.warn('GitService', `Failed to get index content for staged file: ${filePath}`, err)
-        }
+        const oldContent = (await showGuarded(`HEAD:${filePath}`)) ?? ''
+        const newContent = (await showGuarded(`:${filePath}`)) ?? ''
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       } else {
-        let oldContent = ''
-        try {
-          oldContent = await this.git.show([`:${filePath}`])
-        } catch (err) {
-          logger.warn(
-            'GitService',
-            `Failed to get index content for unstaged file: ${filePath}`,
-            err
-          )
-          try {
-            oldContent = await this.git.show([`HEAD:${filePath}`])
-          } catch (err2) {
-            logger.warn(
-              'GitService',
-              `Failed to get HEAD content for untracked file: ${filePath}`,
-              err2
-            )
-          }
-        }
+        // old side: index blob, falling back to HEAD blob (matches prior behavior).
+        const oldContent =
+          (await showGuarded(`:${filePath}`)) ?? (await showGuarded(`HEAD:${filePath}`)) ?? ''
+        // new side: working-tree file, capped by size and screened for binary so
+        // a multi-GB blob is never read as utf-8 (V8 kMaxLength crash) and raw
+        // bytes never land in the diff view.
         let newContent = ''
         try {
-          newContent = await fs.promises.readFile(absPath, 'utf-8')
+          const stat = await fs.promises.stat(absPath)
+          if (stat.isFile()) {
+            if (stat.size > MAX_TEXT_FILE_BYTES) newContent = tooLargeContentMarker(stat.size)
+            else if (await isBinaryFile(absPath)) newContent = binaryContentMarker()
+            else newContent = await fs.promises.readFile(absPath, 'utf-8')
+          }
         } catch (err) {
           logger.warn('GitService', `Failed to read working tree file: ${filePath}`, err)
         }
@@ -324,10 +544,14 @@ export class GitService {
   }
 
   async stageFile(filePath: string): Promise<void> {
+    await this.ensureRepoRoot()
+    this.resolveContained(filePath)
     await this.git.add(filePath)
   }
 
   async unstageFile(filePath: string): Promise<void> {
+    await this.ensureRepoRoot()
+    this.resolveContained(filePath)
     await this.git.reset(['HEAD', '--', filePath])
   }
 
@@ -368,6 +592,10 @@ export class GitService {
    */
   async discardFile(filePath: string): Promise<void> {
     await this.ensureRepoRoot()
+    // Reject traversal FIRST — a `../secret` path fails both `git show` probes
+    // below, gets classified untracked, and would otherwise be fs.unlink'd
+    // outside the repo (audit gpt#5).
+    const absPath = this.resolveContained(filePath)
     // Check if file is tracked by trying to show it from HEAD
     let tracked = true
     try {
@@ -383,7 +611,6 @@ export class GitService {
 
     if (!tracked) {
       // Untracked file — delete from disk
-      const absPath = path.resolve(this.repoRoot!, filePath)
       await fs.promises.unlink(absPath)
     } else {
       // Tracked file — unstage and restore working tree to HEAD
@@ -392,18 +619,36 @@ export class GitService {
     }
   }
 
+  /**
+   * Begin polling `getStatus()` on `intervalMs`.
+   *
+   * Invariant: **every `startPolling()` emits the current status exactly once,
+   * then only on change.** `stopPolling()` (called first, below) clears the
+   * change-detection fingerprint to guarantee the first half of that.
+   */
   startPolling(callback: (status: GitStatusData) => void, intervalMs: number): void {
     this.stopPolling()
+    const generation = ++this.pollGeneration
     const poll = async (): Promise<void> => {
+      // In-flight guard: on a big working tree a single getStatus() can outlast
+      // the interval. Without this, invocations pile up behind simple-git's
+      // per-instance task queue and the retained parse results exhaust the
+      // main-process heap (a V8 abort, not a catchable exception).
+      if (this.pollInFlight) return
+      this.pollInFlight = true
       try {
         const status = await this.getStatus()
-        const json = JSON.stringify(status)
-        if (json !== this.lastStatusJson) {
-          this.lastStatusJson = json
+        // Retired by stopPolling()/restart while we were awaiting — drop it.
+        if (generation !== this.pollGeneration) return
+        const fingerprint = statusFingerprint(status)
+        if (fingerprint !== this.lastStatusFingerprint) {
+          this.lastStatusFingerprint = fingerprint
           callback(status)
         }
       } catch (err) {
         logger.warn('GitService', 'Polling error while fetching git status', err)
+      } finally {
+        this.pollInFlight = false
       }
     }
     // Initial poll
@@ -412,6 +657,22 @@ export class GitService {
   }
 
   stopPolling(): void {
+    // Retire the current generation so an in-flight poll can't fire the
+    // callback after the caller has torn its listener down.
+    this.pollGeneration++
+    // Clear the change-detection fingerprint so the NEXT startPolling() always
+    // emits once. This lives here rather than in startPolling() because
+    // startPolling() calls us first — putting it here makes the reset
+    // unskippable on every (re)start path.
+    //
+    // Without it, a GitService cached by gitServiceManager comes back with a
+    // primed fingerprint and the new caller's first poll is suppressed. That is
+    // exactly what left a freshly connected remote client with no git status at
+    // all (its pill never rendered), and it also means a desktop re-watch of an
+    // unchanged cwd emits nothing — currently masked only by the renderer's
+    // gitStatusCache. `statusFingerprint()` always joins >= 9 parts, so '' can
+    // never collide with a real fingerprint.
+    this.lastStatusFingerprint = ''
     if (this.pollTimer) {
       clearInterval(this.pollTimer)
       this.pollTimer = null
@@ -420,6 +681,7 @@ export class GitService {
 
   destroy(): void {
     this.stopPolling()
+    this.lineCountCache.clear()
   }
 }
 

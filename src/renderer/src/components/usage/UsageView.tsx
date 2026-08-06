@@ -20,6 +20,7 @@ import {
   shortModelName,
   getModelColor
 } from './usage-utils'
+import { SelectMenu } from '../shared/SelectMenu'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -571,22 +572,19 @@ function AccountSelector({
   accountFilter: string | null
 }): React.JSX.Element {
   return (
-    <select
+    <SelectMenu
+      testid="UsageView.accountFilter"
       value={accountFilter ?? 'all'}
-      onChange={(e) => {
-        const v = e.target.value
+      onChange={(v) => {
         window.api.setUsageAccountFilter(v === 'all' ? null : v).catch(() => {})
       }}
-      className="[-webkit-app-region:no-drag] text-[10px] bg-bg-secondary border border-border/50 rounded-md px-1.5 py-0.5 text-text-secondary outline-none cursor-default"
+      options={[
+        { value: 'all', label: 'All accounts' },
+        ...accounts.map((email) => ({ value: email, label: email }))
+      ]}
+      triggerClassName="[-webkit-app-region:no-drag] text-[10px] bg-bg-secondary border border-border/50 rounded-md px-1.5 py-0.5 text-text-secondary outline-none"
       title="Filter usage by account"
-    >
-      <option value="all">All accounts</option>
-      {accounts.map((email) => (
-        <option key={email} value={email}>
-          {email}
-        </option>
-      ))}
-    </select>
+    />
   )
 }
 

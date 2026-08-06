@@ -6,10 +6,11 @@ import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
   SharedProviderModel,
+  SharedProviderRouteDiagnosis,
   SharedProviderStatus
 } from '../../shared/shared-provider'
 import { OpencodeSharedProviderAdapter } from './OpencodeSharedProviderAdapter'
-import { PiSharedProviderAdapter } from './PiSharedProviderAdapter'
+import { PiSharedProviderAdapter, isPiBuiltinCollision } from './PiSharedProviderAdapter'
 import { SharedProviderRepository } from './SharedProviderRepository'
 
 type Route = ConfigurableHarnessId
@@ -102,6 +103,15 @@ export class SharedProviderService {
         return
       }
       if (definition.kind !== 'custom') throw new Error('Only custom providers can be saved')
+      // Fail fast (M-AT4): a custom provider whose effective pi providerId
+      // collides with a built-in native vendor (e.g. 'anthropic') would vend its
+      // key over — and delete on removal — the user's real native pi credential.
+      // Reject before applying/vending anything, regardless of route-enabled state.
+      if (isPiBuiltinCollision(definition)) {
+        throw new Error(
+          `Provider id "${definition.routes.pi.providerId ?? definition.id}" collides with a built-in pi vendor; choose a different provider id`
+        )
+      }
       const applied: Route[] = []
       try {
         for (const route of routes) {
@@ -458,15 +468,39 @@ export class SharedProviderService {
     error?: string
   ): SharedProviderStatus['routes'][Route] {
     const enabled = definition.routes[route].enabled
+    const modelCount = models.filter(
+      (model) =>
+        model.harnessOverrides?.[route]?.available !== false &&
+        model.harnessOverrides?.[route]?.enabled !== false
+    ).length
     return {
       enabled,
       delivered: enabled && configured && credential,
-      modelCount: models.filter(
-        (model) =>
-          model.harnessOverrides?.[route]?.available !== false &&
-          model.harnessOverrides?.[route]?.enabled !== false
-      ).length,
-      ...(error ? { error } : {})
+      modelCount,
+      ...(error ? { error } : {}),
+      // Only diagnose a route that is switched on and empty. A disabled route is
+      // empty by intent, and an errored one already says what went wrong — adding
+      // a cause there would compete with the actual failure.
+      ...(enabled && !error && modelCount === 0
+        ? { diagnosis: this.diagnoseRoute(definition, route) }
+        : {})
+    }
+  }
+
+  /**
+   * Ask the route's adapter why it is empty. Only opencode can distinguish causes
+   * (its native provider veto vs a model allowlist); pi has neither concept, so
+   * an empty pi route can only mean nothing was discovered.
+   */
+  private diagnoseRoute(
+    definition: SharedProviderDefinition,
+    route: Route
+  ): SharedProviderRouteDiagnosis {
+    if (route === 'pi') return 'no-models-discovered'
+    try {
+      return this.deps.opencode.diagnoseZeroModels(definition)
+    } catch {
+      return 'no-models-discovered'
     }
   }
   private requireDefinition(id: string): SharedProviderDefinition {

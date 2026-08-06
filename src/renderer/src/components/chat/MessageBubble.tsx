@@ -11,6 +11,7 @@ import { TaskCard } from './TaskCard'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
+import { useImageGallery } from '../shared/ImageViewer'
 
 // ---------------------------------------------------------------------------
 // Unified tool-block dispatch
@@ -84,6 +85,9 @@ export const MessageBubble = memo(function MessageBubble({
   const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
   const engineId = useActiveSession((s) => s.status.engineId)
   const [forking, setForking] = useState(false)
+  // No-op + `enabled: false` when no ImageGalleryProvider is mounted above, so
+  // an unwrapped MessageBubble still renders its thumbnails (just inert).
+  const { openAttachment, enabled: galleryEnabled } = useImageGallery()
 
   const handleFork = async (): Promise<void> => {
     if (!activeSessionId || forking) return
@@ -157,12 +161,27 @@ export const MessageBubble = memo(function MessageBubble({
           {hasAttachments && (
             <div className="flex gap-2 flex-wrap mb-2">
               {imageBlocks.map((block, i) => (
-                <img
+                <button
                   key={`img-${i}`}
-                  src={`data:${block.mediaType};base64,${block.base64Data}`}
-                  alt="Attached"
-                  className="max-w-[200px] max-h-[200px] rounded-lg object-contain"
-                />
+                  type="button"
+                  data-testid="MessageBubble.imageThumb"
+                  data-id={String(i)}
+                  disabled={!galleryEnabled}
+                  onClick={() => openAttachment(message.id, i)}
+                  aria-label={
+                    block.fileName ? `View image ${block.fileName}` : 'View attached image'
+                  }
+                  title={block.fileName}
+                  className={`block rounded-lg leading-none ${
+                    galleryEnabled ? 'cursor-zoom-in' : 'cursor-default'
+                  }`}
+                >
+                  <img
+                    src={`data:${block.mediaType};base64,${block.base64Data}`}
+                    alt={block.fileName || 'Attached'}
+                    className="max-w-[200px] max-h-[200px] rounded-lg object-contain"
+                  />
+                </button>
               ))}
               {docBlocks.map((block, i) => (
                 <div
@@ -289,7 +308,14 @@ export const MessageBubble = memo(function MessageBubble({
             message.timestamp >= thinkingStartedAt
           // Active thinking is rendered by the standalone ThinkingBlock in ChatPanel
           if (isActive) return null
-          return <ThinkingBlock key={item.index} text={item.block.text || ''} isActive={false} />
+          return (
+            <ThinkingBlock
+              key={item.index}
+              text={item.block.text || ''}
+              isActive={false}
+              durationMs={item.block.durationMs}
+            />
+          )
         }
         if (item.kind === 'other') {
           return <ContentBlockView key={item.index} block={item.block} />

@@ -69,8 +69,13 @@ export const DEFAULT_WATCH_DEBOUNCE_MS = 500
 
 /** Linear backoff step for a transient (non-401) refresh failure: attempt N waits N * this. */
 export const RETRY_BASE_MS = 30 * 1000
-/** After this many consecutive transient failures, give up the retry loop and fall back to the normal schedule (which fires ~immediately, since the original margin has already passed). */
+/** After this many consecutive transient failures, give up the current retry loop and re-arm on an escalating give-up backoff (below) rather than the normal schedule — the normal schedule fires ~immediately since the original margin has already passed, which would otherwise hammer the token endpoint in a perpetual ~5-requests/3-min loop during an outage. */
 export const MAX_TRANSIENT_RETRIES = 3
+
+/** Base wait after a full transient-retry cycle exhausts. The give-up delay escalates linearly per consecutive give-up cycle (base * N) up to the ceiling, so an extended endpoint outage backs off instead of re-firing immediately. Reset on any successful refresh / adoption / fresh login (via scheduleRefresh). */
+export const GIVE_UP_BACKOFF_BASE_MS = 5 * 60 * 1000
+/** Ceiling for the escalating give-up backoff. The refresh token typically outlives this, so backing off this long is safe — a recovered endpoint refreshes on the next wake (or the engine adopts, resetting the loop). */
+export const GIVE_UP_BACKOFF_MAX_MS = 60 * 60 * 1000
 
 // ---------------------------------------------------------------------------
 // Structural interfaces (deliberately NOT importing the concrete classes —
@@ -182,12 +187,21 @@ export class CredentialSync {
   private refreshTimer: ReturnType<typeof setTimeout> | undefined
   private retryTimer: ReturnType<typeof setTimeout> | undefined
   private retryCount = 0
+  /** Consecutive give-up cycles (each = a full transient-retry chain exhausting). Drives the escalating give-up backoff; reset to 0 by scheduleRefresh() on any healthy re-arm. */
+  private giveUpCount = 0
   private refreshInFlight: Promise<void> | null = null
   private _needsReauth = false
 
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
   private watchDebounceTimers = new Map<EngineKey, ReturnType<typeof setTimeout>>()
+  /**
+   * Engines currently inside a feed-triggered adoption (M-AT1). The adopt path
+   * calls feedAll() again, which re-enters feedOne() for the same engine; this
+   * makes the recursion bound explicit (one level) instead of relying on the
+   * freshly-adopted refresh token happening to match on the second pass.
+   */
+  private adoptingFromFeed = new Set<EngineKey>()
 
   constructor(deps: CredentialSyncDeps = {}) {
     this.vault = deps.vault ?? authVault
@@ -242,7 +256,7 @@ export class CredentialSync {
     const generation = this.lifecycleGeneration
     const cred = await this.reconcileOnStart(generation)
     try {
-      await this.removeDisabledCopies()
+      await this.removeDisabledCopies(cred)
     } catch (err) {
       logger.warn(
         'CredentialSync',
@@ -369,6 +383,7 @@ export class CredentialSync {
     this.stop()
     this._needsReauth = false
     this.retryCount = 0
+    this.giveUpCount = 0
     const failures: unknown[] = []
     await Promise.all([
       this.removeChatgptCredential().catch((err) => failures.push(err)),
@@ -453,6 +468,26 @@ export class CredentialSync {
       logger.warn('CredentialSync', `feedAll: no ${label} target configured — skipping`)
       return false
     }
+    if (await this.engineOutranksFeed(label, target, vendorId, cred)) {
+      logger.info(
+        'CredentialSync',
+        `feedAll: ${label} holds a strictly-newer credential — skipping the write and adopting instead`
+      )
+      // Arm the watcher regardless of which branch we took: the watch is what
+      // catches the NEXT external rotation, and skipping the write must not
+      // leave this engine unwatched.
+      this.startWatcher(label, target)
+      this.adoptingFromFeed.add(label)
+      try {
+        // Reuse the watch-adoption path verbatim rather than duplicating it —
+        // it re-reads the entry, re-compares against the vault, and carries its
+        // own lifecycleGeneration guards through every await.
+        await this.handleExternalChange(label)
+      } finally {
+        this.adoptingFromFeed.delete(label)
+      }
+      return false
+    }
     try {
       await target.feedOauthCredential(vendorId, cred)
       this.startWatcher(label, target)
@@ -463,17 +498,70 @@ export class CredentialSync {
     }
   }
 
+  /**
+   * Pre-write freshness compare (M-AT1). `feedOauthCredential` overwrites the
+   * engine's entry unconditionally, so an engine that rotated its own token
+   * after our last read gets its NEWER refresh token destroyed by the feed —
+   * and the watch event that follows sees `entry.refresh === vaultCred.refresh`
+   * and files it as "our own write", masking the loss. With rotating refresh
+   * tokens the clobbered token can be the only live one, so the damage only
+   * surfaces later as an `invalid_grant` and a forced re-login.
+   *
+   * True means the engine's on-disk entry strictly beats what we are about to
+   * write — the same rule reconcileOnStart() uses for "engine beats vault":
+   * a DIFFERENT refresh token (not our own prior write) AND a NEWER expiry
+   * (never regress to a stale copy).
+   *
+   * A read failure returns false (write proceeds, as before the fix) — the
+   * feed must not become dependent on a readable engine store.
+   *
+   * REMAINING TOCTOU: the engine can still write between this read and our
+   * write. Closing that window entirely needs cross-process file locking over
+   * both engines' auth stores (out of scope); this removes the common
+   * lost-rotation case, not the instantaneous race.
+   */
+  private async engineOutranksFeed(
+    label: EngineKey,
+    target: CodexFeedTarget,
+    vendorId: string,
+    cred: CodexCredentialInput
+  ): Promise<boolean> {
+    if (this.adoptingFromFeed.has(label)) return false
+    let entry: CodexEntrySnapshot | null
+    try {
+      entry = await target.readOauthEntry(vendorId)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `feedAll: ${label} pre-write read failed — writing anyway: ${errMessage(err)}`
+      )
+      return false
+    }
+    if (!entry) return false
+    return entry.refresh !== cred.refresh && entry.expires > cred.expires
+  }
+
   // -------------------------------------------------------------------------
   // 2. Sole-refresher scheduler
   // -------------------------------------------------------------------------
 
   private scheduleRefresh(cred: VaultCredential): void {
+    // A normal (non-give-up) schedule means we are healthy again — reset the
+    // escalating give-up backoff. Every recovery path (doRefresh success,
+    // adoption, completeLogin, start) routes through here, so this is the single
+    // reset point; the give-up path deliberately re-arms via armRefreshTimer()
+    // to keep escalating.
+    this.giveUpCount = 0
+    this.armRefreshTimer(Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now()))
+  }
+
+  /** Arm the refresh timer at an explicit delay, clearing any prior refresh/retry timer. */
+  private armRefreshTimer(delayMs: number): void {
     this.clearRefreshTimer()
     this.clearRetryTimer()
-    const delay = Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now())
     this.refreshTimer = setTimeout(() => {
       void this.runRefresh()
-    }, delay)
+    }, delayMs)
   }
 
   private clearRefreshTimer(): void {
@@ -513,15 +601,27 @@ export class CredentialSync {
       logger.debug('CredentialSync', 'doRefresh: no vault credential — nothing to refresh')
       return
     }
+    // Identity of the credential we are about to refresh. The generation guard
+    // below only covers a disconnect (which bumps lifecycleGeneration); it does
+    // NOT cover a watch-adoption or another refresh landing a DIFFERENT vault
+    // credential during the network await. Compare against this after the await
+    // and bail if we were superseded — otherwise a late invalid_grant on the
+    // OLD token would falsely set needsReauth AND clear the freshly-armed timer
+    // of a now-valid credential (M-AT2).
+    const refreshedIdentity = cred.refresh
 
     let tokens: TokenResponse
     try {
       tokens = await this.refreshAccessTokenFn(cred.refresh)
     } catch (err) {
-      if (this.isCurrent(generation)) this.handleRefreshError(err, cred)
+      if (this.isCurrent(generation) && (await this.isStillCurrentCredential(generation, refreshedIdentity)))
+        this.handleRefreshError(err)
       return
     }
     if (!this.isCurrent(generation)) return
+    // A concurrent adoption/refresh replaced the vault credential while our
+    // network call was in flight — our (now-stale) result must not overwrite it.
+    if (!(await this.isStillCurrentCredential(generation, refreshedIdentity))) return
 
     this.retryCount = 0
     this._needsReauth = false
@@ -539,7 +639,18 @@ export class CredentialSync {
     if (this.isCurrent(generation)) this.scheduleRefresh(next)
   }
 
-  private handleRefreshError(err: unknown, cred: VaultCredential): void {
+  /**
+   * True iff the vault still holds the credential we set out to refresh (matched
+   * by refresh token) AND this lifecycle generation is still current. Re-reads
+   * the vault; used as the post-await identity guard in doRefresh (M-AT2).
+   */
+  private async isStillCurrentCredential(generation: number, refresh: string): Promise<boolean> {
+    const current = await this.vault.load()
+    if (!this.isCurrent(generation)) return false
+    return current?.refresh === refresh
+  }
+
+  private handleRefreshError(err: unknown): void {
     if (isRefreshRevoked(err)) {
       this._needsReauth = true
       this.clearRefreshTimer()
@@ -554,12 +665,18 @@ export class CredentialSync {
 
     this.retryCount += 1
     if (this.retryCount > MAX_TRANSIENT_RETRIES) {
+      this.retryCount = 0
+      this.giveUpCount += 1
+      // Escalating backoff instead of scheduleRefresh() (which would fire
+      // ~immediately, since the refresh margin has already passed, and hammer
+      // the endpoint). Reset back to the normal schedule on the next success/
+      // adoption via scheduleRefresh().
+      const backoff = Math.min(GIVE_UP_BACKOFF_BASE_MS * this.giveUpCount, GIVE_UP_BACKOFF_MAX_MS)
       logger.error(
         'CredentialSync',
-        `refresh failed ${this.retryCount - 1} time(s) transiently — giving up this cycle: ${errMessage(err)}`
+        `refresh failed ${MAX_TRANSIENT_RETRIES} time(s) transiently — backing off ${backoff}ms before retry (give-up cycle ${this.giveUpCount}): ${errMessage(err)}`
       )
-      this.retryCount = 0
-      this.scheduleRefresh(cred)
+      this.armRefreshTimer(backoff)
       return
     }
 
@@ -623,6 +740,25 @@ export class CredentialSync {
       const watcher = fs.watch(dir, (_event, changedFilename) => {
         if (!changedFilename || changedFilename !== filename) return
         this.debounceWatch(engine)
+      })
+      // An FSWatcher error (e.g. on Windows, deleting the watched dir raises an
+      // async 'error') with no listener would throw at the process level. Handle
+      // it: close the dead watcher and drop it from the map so the next feed /
+      // schedule can re-create it (the `watchers.has(engine)` guard at the top of
+      // startWatcher would otherwise leave external-rotation adoption dead until
+      // app restart). Only evict THIS watcher, not a replacement that superseded
+      // it.
+      watcher.on('error', (err) => {
+        logger.warn(
+          'CredentialSync',
+          `watcher(${engine}) error — closing so it can be re-created: ${errMessage(err)}`
+        )
+        try {
+          watcher.close()
+        } catch {
+          /* already closed */
+        }
+        if (this.watchers.get(engine) === watcher) this.watchers.delete(engine)
       })
       this.watchers.set(engine, watcher)
     } catch (err) {
@@ -748,14 +884,55 @@ export class CredentialSync {
     await this.vault.removeCredential('chatgpt')
   }
 
-  private async removeDisabledCopies(): Promise<void> {
+  /**
+   * On start, remove the Codex copy from any DISABLED route — but only the one
+   * ClaudeUI actually MANAGED (ADR-037: "removes only its ClaudeUI-managed
+   * credential"). Provenance is the vault credential: with no vault credential
+   * ClaudeUI has vended nothing, and a disabled route's Codex entry is the
+   * user's own (e.g. a manual `pi /login`); a matching refresh token proves the
+   * entry is the one we vended. Removing an unmanaged / mismatched entry would
+   * destroy a credential we never owned (M-AT3).
+   */
+  private async removeDisabledCopies(vaultCred: VaultCredential | null): Promise<void> {
+    if (!vaultCred) return
     const routes = this.routes()
     await Promise.allSettled([
-      routes.pi ? undefined : this.removeOne('pi', this.piTarget, PI_CODEX_VENDOR_ID),
+      routes.pi ? undefined : this.removeManagedCopy('pi', this.piTarget, PI_CODEX_VENDOR_ID, vaultCred.refresh),
       routes.opencode
         ? undefined
-        : this.removeOne('opencode', this.opencodeTarget, OPENCODE_CODEX_VENDOR_ID)
+        : this.removeManagedCopy(
+            'opencode',
+            this.opencodeTarget,
+            OPENCODE_CODEX_VENDOR_ID,
+            vaultCred.refresh
+          )
     ])
+  }
+
+  /** Remove a disabled route's Codex entry ONLY when it is the credential ClaudeUI vended (refresh token matches the vault's). A read failure or a mismatched/absent entry is left untouched (fail-safe: never delete when unsure). */
+  private async removeManagedCopy(
+    label: EngineKey,
+    target: CodexFeedTarget | undefined,
+    vendorId: string,
+    vaultRefresh: string
+  ): Promise<void> {
+    if (!target) return
+    let entry: CodexEntrySnapshot | null
+    try {
+      entry = await target.readOauthEntry(vendorId)
+    } catch (err) {
+      logger.warn('CredentialSync', `removeDisabledCopies: readOauthEntry(${label}) failed — preserving: ${errMessage(err)}`)
+      return
+    }
+    if (!entry) return // nothing to remove
+    if (entry.refresh !== vaultRefresh) {
+      logger.info(
+        'CredentialSync',
+        `removeDisabledCopies: ${label} holds an unmanaged Codex credential — preserving`
+      )
+      return
+    }
+    await this.removeOne(label, target, vendorId)
   }
 
   private isCurrent(generation: number): boolean {

@@ -14,6 +14,25 @@ import type {
   Skill,
 } from './protocol/types'
 
+/**
+ * M-OC5: every request gets a timeout + AbortSignal so a dead/hung opencode
+ * server can never block a caller forever. Two tiers:
+ *  - control-plane calls (create/patch/list/reply/…) — fast; 60 s is generous.
+ *  - `prompt()`/`runCommand()` run a whole model turn — a much larger cap, set
+ *    ABOVE the cross-engine dispatcher's own 10-min DISPATCH_TIMEOUT so a
+ *    client timeout never pre-empts the dispatcher's timeout/abort handling; it
+ *    is purely the network-level backstop for a genuinely wedged server
+ *    (the synchronous judge/askSideQuestion/agent-generate prompts).
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
+const PROMPT_TIMEOUT_MS = 15 * 60_000
+
+/** Per-request overrides. `timeoutMs <= 0` disables the timeout. */
+export interface OpencodeRequestOptions {
+  timeoutMs?: number
+  signal?: AbortSignal
+}
+
 export class OpencodeClient {
   private baseUrl: string
   private authHeader: string
@@ -25,39 +44,77 @@ export class OpencodeClient {
 
   // ── HTTP helpers ──────────────────────────────────────────────────────────
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts?: OpencodeRequestOptions
+  ): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: this.authHeader,
       'Content-Type': 'application/json',
       Accept: 'application/json',
     }
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    })
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`opencode ${method} ${path} → ${res.status}: ${text}`)
+
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+    const controller = new AbortController()
+    let timedOut = false
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true
+            controller.abort()
+          }, timeoutMs)
+        : undefined
+    // Chain a caller-supplied signal onto our controller so BOTH a caller abort
+    // and the timeout cancel the in-flight fetch.
+    const external = opts?.signal
+    const onExternalAbort = (): void => controller.abort()
+    if (external) {
+      if (external.aborted) controller.abort()
+      else external.addEventListener('abort', onExternalAbort, { once: true })
     }
-    if (res.status === 204) return undefined as unknown as T
-    return res.json() as Promise<T>
+
+    try {
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw new Error(`opencode ${method} ${path} → ${res.status}: ${text}`)
+      }
+      if (res.status === 204) return undefined as unknown as T
+      return (await res.json()) as T
+    } catch (err) {
+      // Turn our own timeout abort into a clear, actionable error (fetch throws
+      // a generic AbortError). A caller-initiated abort is re-thrown as-is.
+      if (timedOut) {
+        throw new Error(`opencode ${method} ${path} timed out after ${timeoutMs}ms`)
+      }
+      throw err
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (external) external.removeEventListener('abort', onExternalAbort)
+    }
   }
 
-  private get<T>(path: string) {
-    return this.request<T>('GET', path)
+  private get<T>(path: string, opts?: OpencodeRequestOptions) {
+    return this.request<T>('GET', path, undefined, opts)
   }
-  private post<T>(path: string, body?: unknown) {
-    return this.request<T>('POST', path, body)
+  private post<T>(path: string, body?: unknown, opts?: OpencodeRequestOptions) {
+    return this.request<T>('POST', path, body, opts)
   }
-  private put<T>(path: string, body?: unknown) {
-    return this.request<T>('PUT', path, body)
+  private put<T>(path: string, body?: unknown, opts?: OpencodeRequestOptions) {
+    return this.request<T>('PUT', path, body, opts)
   }
-  private del<T>(path: string) {
-    return this.request<T>('DELETE', path)
+  private del<T>(path: string, opts?: OpencodeRequestOptions) {
+    return this.request<T>('DELETE', path, undefined, opts)
   }
-  private patch<T>(path: string, body?: unknown) {
-    return this.request<T>('PATCH', path, body)
+  private patch<T>(path: string, body?: unknown, opts?: OpencodeRequestOptions) {
+    return this.request<T>('PATCH', path, body, opts)
   }
 
   // ── Config / Providers ────────────────────────────────────────────────────
@@ -177,8 +234,11 @@ export class OpencodeClient {
    * Note: 5b will drive this; typed as unknown for now since AssistantMessage shape
    * is complex and will be fully typed in 5b.
    */
-  prompt(sessionId: string, req: PromptRequest): Promise<unknown> {
-    return this.post(`/session/${encodeURIComponent(sessionId)}/message`, req)
+  prompt(sessionId: string, req: PromptRequest, opts?: OpencodeRequestOptions): Promise<unknown> {
+    return this.post(`/session/${encodeURIComponent(sessionId)}/message`, req, {
+      timeoutMs: PROMPT_TIMEOUT_MS,
+      ...opts,
+    })
   }
 
   /**
@@ -190,9 +250,24 @@ export class OpencodeClient {
   }
 
   /** PATCH /session/{id} — update per-session settings (permission ruleset, title, agent) */
+  /**
+   * PATCH /session/{id}.
+   *
+   * `permissionHermetic` is a ClaudeUI fork field (ADR-037 P2): it seals the
+   * session so opencode evaluates it against this ruleset ALONE, ignoring the
+   * instance-global "always" approvals that would otherwise outrank a deny-all.
+   * Safe to send unconditionally — the stock payload schema ignores unknown
+   * keys (verified against the unpatched 1.18.9 release build), so an
+   * unpatched server simply drops it. See patch/opencode-fork/README.md.
+   */
   patchSession(
     sessionId: string,
-    patch: { permission?: Array<{ permission: string; pattern: string; action: string }>; title?: string; agent?: string }
+    patch: {
+      permission?: Array<{ permission: string; pattern: string; action: string }>
+      permissionHermetic?: boolean
+      title?: string
+      agent?: string
+    }
   ): Promise<unknown> {
     return this.patch(`/session/${encodeURIComponent(sessionId)}`, patch)
   }
@@ -237,8 +312,15 @@ export class OpencodeClient {
    * Output also streams via GET /event as normal message.updated / message.part.updated;
    * completion is marked by session.idle (not the command.executed informational event).
    */
-  runCommand(sessionId: string, body: RunCommandRequest): Promise<unknown> {
-    return this.post(`/session/${encodeURIComponent(sessionId)}/command`, body)
+  runCommand(
+    sessionId: string,
+    body: RunCommandRequest,
+    opts?: OpencodeRequestOptions
+  ): Promise<unknown> {
+    return this.post(`/session/${encodeURIComponent(sessionId)}/command`, body, {
+      timeoutMs: PROMPT_TIMEOUT_MS,
+      ...opts,
+    })
   }
 
   /** GET /skill — list all discovered skills (project, user, built-in). */

@@ -64,16 +64,28 @@ continuations).
 - Tool results also arrive as `message_end` with `message.role === "toolResult"`
   (`toolCallId`, `content`, `isError`).
 
-## Verified doc drift (v0.80.10)
+## Verified doc drift (v0.82.1; first verified v0.80.10)
 
 The shipped docs lag the wire in three places we care about:
 
-1. `AssistantMessage.usage` additionally carries `reasoning` (tokens) and `totalTokens` — e.g.
+1. `AssistantMessage.usage` additionally carries `reasoning` (tokens) — e.g.
    `{"input":1119,"output":5,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":1124,"cost":{…,"total":0.001149}}`.
+   (`totalTokens` was also undocumented at 0.80.10; the 0.82.1 docs now document it. `reasoning`
+   remains undocumented.)
 2. `get_commands` entries carry `sourceInfo: {path, source: "cli"|…, scope, origin}` rather than
-   the documented flat `path`/`location` fields.
+   the documented flat `path`/`location` fields. Re-verified on the 0.82.1 wire (2026-07-29).
 3. `get_state` with no configured model returns a placeholder model object with
-   `id/name/api/provider = "unknown"`, not `null`.
+   `id/name/api/provider = "unknown"`, not `null`. (Verified at 0.80.10; not re-probeable with
+   credentials present — a real model resolves. Assumed still true.)
+
+0.81.0–0.82.1 additions the adapter deliberately ignores (default-ignore in `event-mapper.ts`):
+`summarization_retry_scheduled` / `summarization_retry_attempt_start` /
+`summarization_retry_finished` (0.81.1) and `bash_execution_update` (0.82.0 — only fires for the
+direct RPC `bash` command, which we never send). New command `get_available_thinking_levels`
+(0.81.0) is a candidate replacement for the catalog-map half of `resolveCapsForModel`; not
+adopted. 0.81.0 also folds tool/compaction/branch-summary usage into `get_session_stats` totals,
+so a resumed session that compacted live shows a one-time cost jump versus its pre-restart
+display (live path only sums assistant `message_end` usage) — accepted, not a double count.
 
 ## Sessions on disk
 

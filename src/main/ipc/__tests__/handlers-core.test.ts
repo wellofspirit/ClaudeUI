@@ -38,8 +38,10 @@ import {
   getSessionLogPath,
   dequeueMessage,
   saveSessions,
-  listDirEntries
+  listDirEntries,
+  setPermissionMode
 } from '../handlers-core'
+import { BaseSession } from '../../providers/BaseSession'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -132,5 +134,59 @@ describe('handlers-core', () => {
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {
     const res = await listDirEntries('/does/not/exist/zzzzz-unique')
     expect(res).toEqual({ entries: [], isRoot: false, resolvedPath: '' })
+  })
+
+  describe('setPermissionMode', () => {
+    it('delegates to session.setPermissionMode when a live session exists, without sending directly', async () => {
+      const sessionStub = makeSessionStub({ setPermissionMode: vi.fn(async () => {}) })
+      const manager = makeManager(sessionStub)
+      const win = makeFakeWindow()
+
+      await setPermissionMode(manager, win, 'rid-1', 'acceptEdits')
+
+      expect(sessionStub.setPermissionMode).toHaveBeenCalledWith('acceptEdits')
+      expect(win.webContents.send).not.toHaveBeenCalled()
+    })
+
+    it('echoes session:permission-mode to the window and every extra window when no session exists (pre-spawn)', async () => {
+      const manager = makeManager(undefined)
+      const win = makeFakeWindow()
+      const extraWin = makeFakeWindow()
+      BaseSession.addExtraWindow(extraWin)
+      try {
+        await setPermissionMode(manager, win, 'rid-pre-spawn', 'plan')
+
+        expect(win.webContents.send).toHaveBeenCalledWith(
+          'session:permission-mode',
+          'rid-pre-spawn',
+          'plan'
+        )
+        expect(extraWin.webContents.send).toHaveBeenCalledWith(
+          'session:permission-mode',
+          'rid-pre-spawn',
+          'plan'
+        )
+      } finally {
+        BaseSession.removeExtraWindow(extraWin)
+      }
+    })
+
+    it('does not throw and sends nothing for an invalid mode string', async () => {
+      const manager = makeManager(undefined)
+      const win = makeFakeWindow()
+
+      await expect(setPermissionMode(manager, win, 'rid-1', 'not-a-real-mode')).resolves.not.toThrow()
+      expect(win.webContents.send).not.toHaveBeenCalled()
+    })
+
+    it('does not throw and does not call session.setPermissionMode for an invalid mode on a live session', async () => {
+      const sessionStub = makeSessionStub({ setPermissionMode: vi.fn(async () => {}) })
+      const manager = makeManager(sessionStub)
+      const win = makeFakeWindow()
+
+      await setPermissionMode(manager, win, 'rid-1', 'bogus')
+
+      expect(sessionStub.setPermissionMode).not.toHaveBeenCalled()
+    })
   })
 })

@@ -28,6 +28,13 @@ let cachedGroups: EngineModelGroup[] | null = null
  *  session:get-engine-models IPC call) into a single ephemeral spawn, mirroring
  *  OpencodeServerManager's `pending` map precedent. */
 let pendingFetch: Promise<PiModel[]> | null = null
+/** Negative cache: epoch ms of the last EMPTY probe (no auth / transient
+ *  failure). While fresh, callers short-circuit to [] instead of re-spawning a
+ *  15s-timeout probe on every picker open / session construct / setModel. Zeroed
+ *  by invalidatePiModelCache() (fired on login/config change), and it expires,
+ *  so a transient empty can't stick permanently the way an outright cache would. */
+let emptyProbeAtMs = 0
+const EMPTY_CACHE_TTL_MS = 60_000
 
 /**
  * Spawn the ephemeral probe process and fetch the raw model catalog. Shared by
@@ -36,9 +43,13 @@ let pendingFetch: Promise<PiModel[]> | null = null
  */
 async function fetchPiModelCatalog(): Promise<PiModel[]> {
   if (cachedCatalog) return cachedCatalog
+  // Recent empty probe still within its cooldown — skip the expensive spawn.
+  if (emptyProbeAtMs > 0 && Date.now() - emptyProbeAtMs < EMPTY_CACHE_TTL_MS) return []
   if (pendingFetch) return pendingFetch
 
   pendingFetch = (async (): Promise<PiModel[]> => {
+    // Binary-missing is already cheap (no spawn) and can flip when pi is
+    // installed — don't negative-cache it, just re-check.
     if (!piBinaryAvailable()) return []
     const bin = locatePiBinary()
     if (!bin) return []
@@ -54,15 +65,21 @@ async function fetchPiModelCatalog(): Promise<PiModel[]> {
         DISCOVERY_TIMEOUT_MS
       )
       const models = resp.success && resp.data ? resp.data.models : []
-      // Only cache a non-empty result — a transient empty probe (cold auth
-      // cache, momentary spawn hiccup) shouldn't stick permanently.
       if (models.length > 0) cachedCatalog = models
+      // Negative-cache an empty result (no auth, RPC failure) so we don't
+      // re-spawn a fresh 15s-timeout probe on the very next call. Bounded by
+      // EMPTY_CACHE_TTL_MS and cleared by invalidatePiModelCache() (login),
+      // so it never sticks permanently.
+      else emptyProbeAtMs = Date.now()
       return models
     } catch (err) {
       logger.debug(
         'pi',
         `Model discovery failed (pi optional): ${err instanceof Error ? err.message : String(err)}`
       )
+      // A spawn/timeout failure is exactly the pathological repeat-probe case —
+      // negative-cache it too (still bounded by the TTL).
+      emptyProbeAtMs = Date.now()
       return []
     } finally {
       client.dispose()
@@ -221,4 +238,5 @@ export async function resolvePiSpawnModel(requested?: string): Promise<string | 
 export function invalidatePiModelCache(): void {
   cachedCatalog = null
   cachedGroups = null
+  emptyProbeAtMs = 0
 }

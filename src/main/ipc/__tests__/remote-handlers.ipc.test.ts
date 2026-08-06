@@ -47,7 +47,86 @@ vi.mock('../../services/ui-config', () => uiConfigMocks)
 
 vi.mock('../../opencode/model-discovery', () => ({
   resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free'),
-  invalidateOpencodeModelCache: vi.fn()
+  invalidateOpencodeModelCache: vi.fn(),
+  discoverOpencodeModels: vi.fn(async () => []),
+  discoverOpencodeProviderCatalog: vi.fn(async () => []),
+  getOpencodeProviderModels: vi.fn(async () => [])
+}))
+
+vi.mock('../../opencode/OpencodeServerManager', () => ({
+  opencodeServerManager: { isBinaryAvailable: vi.fn(() => false) }
+}))
+
+vi.mock('../../pi/model-discovery', () => ({
+  discoverPiModels: vi.fn(async () => []),
+  getPiModelCatalogGroups: vi.fn(async () => []),
+  // Also consumed by the shared-providers graph pulled in transitively.
+  invalidatePiModelCache: vi.fn(),
+  resolvePiSpawnModel: vi.fn(async (m?: string) => m),
+  getPiModelCatalog: vi.fn(async () => []),
+  effortLevelsFromModel: vi.fn(() => [])
+}))
+
+vi.mock('../../pi/pi-locate', () => ({
+  piBinaryAvailable: vi.fn(() => false),
+  locatePiBinary: vi.fn(() => null)
+}))
+
+vi.mock('../../auth/vault/CredentialSync', () => ({
+  credentialSync: { getStatus: vi.fn(() => ({ connected: false })) }
+}))
+
+vi.mock('../../services/account-manager', () => ({
+  accountManager: { getState: vi.fn(() => ({ enabled: false, accounts: [] })) }
+}))
+
+vi.mock('../../services/session-watcher', () => ({
+  watchSession: vi.fn(),
+  unwatchSession: vi.fn()
+}))
+
+vi.mock('../../services/opencode-session-list', () => ({
+  listOpencodeSessionsGlobal: vi.fn(async () => []),
+  loadOpencodeSessionHistory: vi.fn(async () => [])
+}))
+
+// NB: pi-session-list is a lightweight fs reader whose `piAgentDir` export is
+// also used by the shared-providers graph — mocking it wholesale drops that and
+// breaks the import chain, so we let the real module load (remote-handlers only
+// calls its list/history fns on invoke, which these tests don't exercise).
+
+// A GitService stub whose methods return sentinel values so the git:* dispatch
+// tests can assert routing + get/release bracketing without a real repo.
+const gitSvcStub = vi.hoisted(() => ({
+  isGitRepo: vi.fn(async () => true),
+  getStatus: vi.fn(async () => ({ files: [] })),
+  getBranches: vi.fn(async () => ['main']),
+  checkout: vi.fn(async () => {}),
+  createBranch: vi.fn(async () => {}),
+  getFilePatch: vi.fn(async () => 'diff'),
+  getFileContents: vi.fn(async () => 'contents'),
+  stageFile: vi.fn(async () => {}),
+  unstageFile: vi.fn(async () => {}),
+  discardFile: vi.fn(async () => {}),
+  stageAll: vi.fn(async () => {}),
+  unstageAll: vi.fn(async () => {}),
+  commit: vi.fn(async () => 'sha'),
+  push: vi.fn(async () => {}),
+  pushWithUpstream: vi.fn(async () => {}),
+  pull: vi.fn(async () => {}),
+  fetch: vi.fn(async () => {}),
+  startPolling: vi.fn(),
+  stopPolling: vi.fn()
+}))
+
+const gitManagerSpies = vi.hoisted(() => ({
+  get: vi.fn(() => gitSvcStub),
+  release: vi.fn(),
+  getIfExists: vi.fn(() => gitSvcStub)
+}))
+
+vi.mock('../../services/git-service', () => ({
+  gitServiceManager: gitManagerSpies
 }))
 
 vi.mock('../../sdk/proxy', () => ({
@@ -65,13 +144,24 @@ vi.mock('../../sdk/model-env', () => ({
 
 vi.mock('../../services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
-  stopSocksBridge: vi.fn(async () => {})
+  stopSocksBridge: vi.fn(async () => {}),
+  // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
+  socks5Connect: vi.fn(async () => {
+    throw new Error('socks5Connect not stubbed for this test')
+  })
+}))
+
+const claudeSettingsSpies = vi.hoisted(() => ({
+  saveClaudePermissions: vi.fn(),
+  isWorkspaceTrusted: vi.fn(() => true)
 }))
 
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
-  saveCleanupPeriodDays: vi.fn()
+  saveCleanupPeriodDays: vi.fn(),
+  saveClaudePermissions: claudeSettingsSpies.saveClaudePermissions,
+  isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
@@ -159,6 +249,7 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
+import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../../services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
 import { setProxyEnv } from '../../sdk/proxy'
@@ -288,6 +379,9 @@ describe('registerRemoteHandlers', () => {
   })
 
   afterEach(() => {
+    // gitWatchRegistry is a module singleton shared with the desktop IPC path —
+    // unwind the remote owner so watch state can't leak between tests.
+    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     vi.clearAllMocks()
   })
 
@@ -440,6 +534,69 @@ describe('registerRemoteHandlers', () => {
     })
   })
 
+  // Guard: `claude:save-permissions` was desktop-only — the channel was never
+  // registered on the dispatcher (the web api-adapter stubbed the call out to a
+  // silent no-op), so editing permissions from the remote client did nothing.
+  describe('claude:save-permissions (remote write parity)', () => {
+    const PERMS = {
+      allow: ['Bash(git:*)'],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }
+
+    it('is registered on the dispatcher', () => {
+      expect(dispatcher.channels()).toContain('claude:save-permissions')
+    })
+
+    it('persists the rules and hot-reloads sessions for a user-scope write', async () => {
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+      expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
+        'user',
+        PERMS,
+        undefined
+      )
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+
+    it('notifies user-scope writes even when a cwd is supplied (rules are global)', async () => {
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'))
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+
+    it('scopes a project-scope write to sessions on that cwd', async () => {
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
+        'project',
+        PERMS,
+        '/repo-a'
+      )
+      // sessionStub has no cwd → not this workspace → left alone.
+      expect(sessionStub.notifySettingsChanged).not.toHaveBeenCalled()
+
+      sessionManagerStub.forEach.mockImplementationOnce((cb: (s: any) => void) =>
+        cb({ ...sessionStub, cwd: '/repo-a' })
+      )
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
+    })
+
+    it('survives a session whose notifySettingsChanged rejects', async () => {
+      sessionStub.notifySettingsChanged.mockRejectedValueOnce(new Error('child is gone'))
+      await expect(
+        dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+      ).resolves.toBeUndefined()
+    })
+  })
+
+  it('claude:workspace-trust reports the trust flag for a cwd', async () => {
+    claudeSettingsSpies.isWorkspaceTrusted.mockReturnValueOnce(false)
+    const res = await dispatcher.handle(makeRequest('claude:workspace-trust', '/repo-a'))
+    expect(claudeSettingsSpies.isWorkspaceTrusted).toHaveBeenCalledWith('/repo-a')
+    expect(res).toBe(false)
+  })
+
   it('file:list-dir returns structured result on error (no throw)', async () => {
     // Invalid path → handler catches internally and returns default shape.
     const res: any = await dispatcher.handle(
@@ -538,6 +695,20 @@ describe('registerRemoteHandlers', () => {
       ).rejects.toThrow()
     })
 
+    // R6 GUARD (fails pre-fix — the handler joined cwd+directory with no
+    // containment, so a '../'-laden directory escaped the mockups root).
+    it('mockup:read-html rejects a path-traversal directory', async () => {
+      // Drop a file OUTSIDE the mockups root that a traversal would try to reach.
+      const outside = path.join(cwd, '.claude', 'ui', 'secret.html')
+      fs.writeFileSync(outside, '<h1>secret</h1>')
+      await expect(
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, '../../secret'))
+      ).rejects.toThrow(/Invalid mockup directory/)
+      // Sanity: the in-root path still works (non-vacuous).
+      const ok = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      expect(ok).toBe('<h1>hello</h1>')
+    })
+
     it('mockup:watch/unwatch are idempotent and tolerate a missing directory', async () => {
       // Missing dir → no-op, no throw.
       await expect(
@@ -551,6 +722,153 @@ describe('registerRemoteHandlers', () => {
       await expect(
         dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
       ).resolves.toBeUndefined()
+    })
+  })
+
+  // R5 — full channel parity (user decision: register every non-BLOCKED channel
+  // the web api-adapter invokes). These were previously missing from the
+  // dispatcher, so the web client hit "Channel not available" for git, live
+  // transcript watching, multi-engine catalogs, account state, etc.
+  describe('full channel parity (R5)', () => {
+    it('registers the full git surface incl. mutations', () => {
+      const channels = dispatcher.channels()
+      for (const ch of [
+        'git:check-repo',
+        'git:status',
+        'git:branches',
+        'git:checkout',
+        'git:create-branch',
+        'git:file-patch',
+        'git:file-contents',
+        'git:stage-file',
+        'git:unstage-file',
+        'git:discard-file',
+        'git:stage-all',
+        'git:unstage-all',
+        'git:commit',
+        'git:push',
+        'git:push-with-upstream',
+        'git:pull',
+        'git:fetch',
+        // Live watching: previously unregistered web no-ops, which is why the
+        // remote client's gitStatus stayed null and its changes pill never
+        // rendered. Now routed through the shared gitWatchRegistry.
+        'git:start-watching',
+        'git:stop-watching'
+      ]) {
+        // register() silently skips BLOCKED channels, so a channel appearing here
+        // also proves it is not on the denylist. (remote-channel-parity.test.ts
+        // asserts the denylist side independently, from source.)
+        expect(channels).toContain(ch)
+      }
+    })
+
+    it('git:start-watching registers the remote owner and starts exactly one poller', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      ).resolves.toBeUndefined()
+      expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
+      expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
+      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([GIT_WATCH_OWNER_REMOTE])
+
+      // A second remote client on the same cwd attaches; it must NOT re-start the
+      // poller (that would replace the live callback).
+      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
+    })
+
+    it('a remote poll reaches the injected fan-out (i.e. the bridge/extra windows)', async () => {
+      const pushed: Array<{ cwd: string; status: unknown }> = []
+      // registerRemoteHandlers never installs a fan-out (session.ipc.ts owns the
+      // window handles and does that), so the singleton's broadcast is null here.
+      // Detach again at the end or this closure would silently become the
+      // broadcast for every later test in this file.
+      gitWatchRegistry.init((cwd, status) => pushed.push({ cwd, status }))
+      try {
+        await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+        const emit = gitSvcStub.startPolling.mock.calls[0][0] as (s: unknown) => void
+        emit({ files: [], branch: 'main' })
+        expect(pushed).toEqual([{ cwd: '/tmp/proj', status: { files: [], branch: 'main' } }])
+      } finally {
+        gitWatchRegistry.init(null)
+      }
+    })
+
+    it('git:stop-watching releases the remote owner and stops the poller', async () => {
+      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      await expect(
+        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/proj'))
+      ).resolves.toBeUndefined()
+      expect(gitSvcStub.stopPolling).toHaveBeenCalledTimes(1)
+      expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([])
+    })
+
+    it('git:stop-watching for a cwd nobody watches is a no-op', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/never'))
+      ).resolves.toBeUndefined()
+      expect(gitSvcStub.stopPolling).not.toHaveBeenCalled()
+    })
+
+    it('registers the multi-engine + account + generation channels', () => {
+      const channels = dispatcher.channels()
+      for (const ch of [
+        'session:list-opencode',
+        'session:load-opencode-history',
+        'session:list-pi',
+        'session:load-pi-history',
+        'session:get-engine-models',
+        'session:get-pi-model-catalog',
+        'session:get-opencode-providers',
+        'session:get-opencode-provider-models',
+        'session:watch-session',
+        'session:unwatch-session',
+        'session:set-reasoning-variant',
+        'session:write-custom-title',
+        'session:generate-title',
+        'session:generate-commit-message',
+        'engine:is-installed',
+        'pi:auth-status',
+        'pi:binary-path',
+        'account:get'
+      ]) {
+        expect(channels).toContain(ch)
+      }
+    })
+
+    it('git:commit dispatches to the service with get/release bracketing', async () => {
+      const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'))
+      expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
+      expect(gitSvcStub.commit).toHaveBeenCalledWith('msg')
+      expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+      expect(res).toBe('sha')
+    })
+
+    it('git service is released even when the operation throws', async () => {
+      gitSvcStub.push.mockRejectedValueOnce(new Error('remote rejected'))
+      await expect(dispatcher.handle(makeRequest('git:push', '/tmp/proj'))).rejects.toThrow(
+        'remote rejected'
+      )
+      expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+    })
+
+    it('account:get returns the account-manager state', async () => {
+      const res = await dispatcher.handle(makeRequest('account:get'))
+      expect(res).toEqual({ enabled: false, accounts: [] })
+    })
+
+    it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'claude'))).toBe(true)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'))).toBe(false)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'))).toBe(false)
+    })
+
+    it('does NOT register account mutations (denylist still holds)', () => {
+      const channels = dispatcher.channels()
+      for (const ch of ['account:add', 'account:switch', 'account:delete', 'account:set-enabled']) {
+        expect(channels).not.toContain(ch)
+      }
     })
   })
 
@@ -712,6 +1030,65 @@ describe('registerRemoteHandlers', () => {
         'config:settings-changed',
         expect.not.objectContaining({ sandbox: expect.anything() })
       )
+    })
+  })
+  // LOW-RW3 — session:write-custom-title interpolates both caller-supplied
+  // identifiers straight into ~/.claude/projects/<projectKey>/<sessionId>.jsonl.
+  // This handler is reachable by ANY token-holding remote client, so a
+  // traversal segment let a remote peer append attacker-controlled JSON to an
+  // arbitrary *.jsonl on the host.
+  describe('session:write-custom-title path-segment validation', () => {
+    let appendSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      appendSpy = vi.spyOn(fs.promises, 'appendFile').mockResolvedValue(undefined)
+    })
+
+    afterEach(() => {
+      appendSpy.mockRestore()
+    })
+
+    it.each([
+      ['..', 'sess-1'],
+      ['a/b', 'sess-1'],
+      ['a\\b', 'sess-1'],
+      ['../../..', 'sess-1'],
+      ['proj', '..'],
+      ['proj', 'a/b'],
+      ['proj', 'a\\b'],
+      ['proj', '../../etc/evil']
+    ])(
+      'rejects traversal (projectKey=%j, sessionId=%j) without writing (GUARD — fails pre-fix)',
+      async (projectKey, sessionId) => {
+        await expect(
+          dispatcher.handle(
+            makeRequest('session:write-custom-title', sessionId, projectKey, 'pwned')
+          )
+        ).rejects.toThrow(/Invalid (sessionId|projectKey)/)
+        expect(appendSpy).not.toHaveBeenCalled()
+      }
+    )
+
+    it('rejects empty identifiers without writing', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('session:write-custom-title', '', 'proj', 't'))
+      ).rejects.toThrow(/Invalid sessionId/)
+      await expect(
+        dispatcher.handle(makeRequest('session:write-custom-title', 'sess-1', '', 't'))
+      ).rejects.toThrow(/Invalid projectKey/)
+      expect(appendSpy).not.toHaveBeenCalled()
+    })
+
+    it('still writes for plain identifiers, under the projects root', async () => {
+      await dispatcher.handle(
+        makeRequest('session:write-custom-title', 'sess-1', '-d-proj', 'My title')
+      )
+      expect(appendSpy).toHaveBeenCalledTimes(1)
+      const [target, payload] = appendSpy.mock.calls[0]
+      expect(String(target)).toBe(
+        path.join(os.homedir(), '.claude', 'projects', '-d-proj', 'sess-1.jsonl')
+      )
+      expect(String(payload)).toContain('"customTitle":"My title"')
     })
   })
 })

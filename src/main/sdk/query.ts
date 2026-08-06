@@ -118,12 +118,20 @@ export function query(input: QueryInput): QueryHandle {
   // the pipe. Cheap — one record per control_request / user message.
   const rawWriter = new NdjsonWriter(child.stdin)
   const origWrite = rawWriter.write.bind(rawWriter)
-  rawWriter.write = (obj): void => {
+  rawWriter.write = (obj): boolean => {
     wireLog.record('out', obj)
-    origWrite(obj)
+    return origWrite(obj)
   }
   const writer = rawWriter
   const queue = new MessageQueue()
+
+  // A half-open stdin can emit an async 'error' (EPIPE) after the child dies
+  // while the streaming-input iterator is mid-write. With no listener that
+  // becomes a process-level uncaughtException. Swallow it — writer.write()
+  // already reports unwritable streams to callers (M-CL2).
+  child.stdin.on('error', () => {
+    /* child teardown races input writes — not a session failure */
+  })
 
   // Optional startup-timing logs — toggle with DEBUG_SDK=1. Prints to stderr.
   const t0 = Date.now()
@@ -209,7 +217,19 @@ export function query(input: QueryInput): QueryHandle {
       handleInbound(line, { control, mcpHost, queue, options, hookCallbacks })
     },
     (err) => {
-      queue.finish(new Error(`Failed to parse CLI stream-json: ${err.message}`))
+      // H16: a single malformed line (a stray non-JSON debug print from cli.js
+      // or a plugin) must NOT tear down a LIVE session. Finishing the queue
+      // here reported the session dead while the child + its MCP subprocesses
+      // kept running to app quit — the for-await consumer's next() REJECTS, and
+      // IteratorClose (the iterator's return(), which calls killChild) is
+      // skipped when next() itself rejects, so the child was never signalled.
+      // The next run() then spawned a SECOND `--resume` process alongside the
+      // orphan. Skip the bad line instead; the child's own exit/error events
+      // (below) remain the authoritative teardown signals.
+      wireLog.record('in', { __malformedLine: true, error: err.message })
+      if (process.env.DEBUG_SDK || process.env.DEBUG_HARNESS) {
+        console.error(`[sdk] skipped malformed stream-json line: ${err.message}`)
+      }
     }
   )
   void reader // reader self-attaches; reference kept to silence unused warning
@@ -332,20 +352,64 @@ export function query(input: QueryInput): QueryHandle {
     options.abortController.signal.addEventListener('abort', onAbort, { once: true })
   }
 
-  child.on('exit', (code, signal) => {
-    childClosed = true
+  // Terminal-message drain (M-CL1). `'exit'` fires as soon as the process
+  // dies, but stdout may still hold un-read bytes — the final `result`, crash
+  // diagnostics, or an in-flight `control_response`. Finishing the queue on
+  // `'exit'` discarded them, so the consumer saw a bare
+  // "cli.js exited with code=…" instead of the real terminal message.
+  //
+  // We record the exit code on `'exit'` (to stop the input iterator writing to
+  // a dead pipe) but finalize — reject pending control requests, finish the
+  // queue — on `'close'`, which fires only after every stdio stream has ended
+  // and the NdjsonReader has therefore processed every buffered line. A short
+  // fallback timer guards the rare case where `'close'` is delayed by a
+  // grandchild holding a pipe open (cli.js pipes its MCP subprocesses
+  // separately, so in practice it fires promptly).
+  let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null
+  let finalized = false
+  let closeFallback: ReturnType<typeof setTimeout> | null = null
+  const finalize = (): void => {
+    if (finalized) return
+    finalized = true
+    if (closeFallback) {
+      clearTimeout(closeFallback)
+      closeFallback = null
+    }
     options.abortController?.signal.removeEventListener('abort', onAbort)
     control.rejectAll('cli.js exited')
     writer.end()
+    const code = exitInfo?.code ?? null
+    const signal = exitInfo?.signal ?? null
     if (isCleanExit(code, signal, killedByUs)) {
       queue.finish()
     } else {
       queue.finish(new Error(`cli.js exited with code=${code} signal=${signal}`))
     }
+  }
+
+  child.on('exit', (code, signal) => {
+    childClosed = true
+    exitInfo = { code, signal }
+    // Do NOT finalize here — let stdout drain first. Arm a fallback so a
+    // never-arriving 'close' can't hang the consumer forever.
+    if (!closeFallback && !finalized) {
+      closeFallback = setTimeout(finalize, 2_000)
+    }
+  })
+
+  child.on('close', (code, signal) => {
+    childClosed = true
+    if (!exitInfo) exitInfo = { code, signal }
+    finalize()
   })
 
   child.on('error', (err) => {
     childClosed = true
+    if (closeFallback) {
+      clearTimeout(closeFallback)
+      closeFallback = null
+    }
+    finalized = true
     options.abortController?.signal.removeEventListener('abort', onAbort)
     control.rejectAll(err.message)
     queue.finish(err)
@@ -405,7 +469,12 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
       const message = request.message as Parameters<McpHost['dispatch']>[1]
       const innerMsg = message as { method?: string; id?: string | number | null }
       const isRequest = innerMsg && 'method' in innerMsg && 'id' in innerMsg && innerMsg.id != null
-      const result = await ctx.mcpHost.dispatch(serverName, message)
+      // Thread the per-request abort signal (xhigh#10). When cli.js cancels this
+      // mcp_message (control_cancel_request) or the query is torn down, ac
+      // aborts — mcpHost tells the in-process MCP server to cancel the running
+      // handler (e.g. a dispatch_agent target) so it stops spending instead of
+      // being orphaned, and settles the dispatch with a cancellation error.
+      const result = await ctx.mcpHost.dispatch(serverName, message, { signal: ac.signal })
       // cli.js expects the response wrapped as `{ mcp_response: <jsonrpc> }`.
       // For notifications (no id) the SDK synthesizes a dummy RPC result so
       // cli.js sees a well-formed reply.

@@ -129,6 +129,7 @@ const api: ClaudeAPI = {
   onToolResult: onEvent('session:tool-result'),
   onTaskProgress: onEvent('session:task-progress'),
   onTaskNotification: onEvent('session:task-notification'),
+  onTaskStarted: onEvent('session:task-started'),
   onSubagentStream: onEvent('session:subagent-stream'),
   onSubagentMessage: onEvent('session:subagent-message'),
   onSubagentMessageBatch: onEvent('session:subagent-message-batch'),
@@ -194,6 +195,10 @@ const api: ClaudeAPI = {
   getModels: () => ipcRenderer.invoke('session:get-models'),
   getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
+  setOpencodeProviderDisabled: (providerId: string, disabled: boolean) =>
+    ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
+  removeOpencodeProvider: (providerId, kind) =>
+    ipcRenderer.invoke('session:remove-opencode-provider', providerId, kind),
   getOpencodeProviderModels: (providerId: string) =>
     ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
   getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
@@ -230,6 +235,7 @@ const api: ClaudeAPI = {
 
   // App lifecycle
   confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+  cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
 
   // Git operations — all handlers use safeHandler, so unwrap the { ok, data } envelope
   gitCheckRepo: (cwd: string) => unwrap<boolean>('git:check-repo', cwd),
@@ -257,6 +263,12 @@ const api: ClaudeAPI = {
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
+  openPath: (filePath: string) => ipcRenderer.invoke('shell:open-path', filePath),
+  showInFolder: (filePath: string) => ipcRenderer.invoke('shell:show-in-folder', filePath),
+  // `sessionKey` is ignored on the desktop transport (see FileAPI docs) — the
+  // absolute path is all main needs, and main re-validates it.
+  getSentFilePreview: (_sessionKey: string, filePath: string) =>
+    ipcRenderer.invoke('file:sent-file-preview', filePath),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
@@ -294,6 +306,7 @@ const api: ClaudeAPI = {
   loadClaudePermissions: (scope, cwd?) => ipcRenderer.invoke('claude:load-permissions', scope, cwd),
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
+  isWorkspaceTrusted: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
 
   // Transcript retention window (cleanupPeriodDays in ~/.claude/settings.json)
   getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),
@@ -415,6 +428,12 @@ const api: ClaudeAPI = {
   stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
   getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
   onRemoteStatus: onEvent('remote:status'),
+  getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
+  setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
+  setRemotePassword: (password: string) => ipcRenderer.invoke('remote:set-password', password),
+  clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
+  detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
+  forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
   // Voice input
   voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),

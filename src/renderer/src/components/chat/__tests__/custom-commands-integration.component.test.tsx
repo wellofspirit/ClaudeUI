@@ -124,7 +124,7 @@ describe('custom commands integration (IPC → store → render)', () => {
     expect(renderedCommands()).toEqual(['/refactor', '/deploy'])
   })
 
-  it('SDK init event provides authoritative list and clears custom commands', async () => {
+  it('SDK init event provides the authoritative list, filesystem entries fill gaps', async () => {
     app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/refactor', '/deploy'])
 
     await act(async () => {
@@ -146,20 +146,63 @@ describe('custom commands integration (IPC → store → render)', () => {
     expect(renderedCommands()).toEqual(['/help', '/clear', '/compact', '/refactor', '/deploy'])
   })
 
-  it('deleted custom command disappears after SDK init', async () => {
-    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/refactor', '/old-cmd'])
+  it('SDK init re-scans the session cwd instead of wiping the filesystem list', async () => {
+    // The wipe used to leave the fallback empty for the app's lifetime: the only
+    // other scan is keyed on cwd changes, so a same-cwd session never refilled it.
+    const scanCalls: string[] = []
+    let onDisk = ['/refactor', '/old-cmd']
+    app.bridge.ipcMain.handle('config:scan-custom-commands', async (_e: unknown, cwd: string) => {
+      scanCalls.push(cwd)
+      return onDisk
+    })
+    useSessionStore.getState().createNewSession('session-123', '/my/project')
 
     await act(async () => {
       render(<SlashMenuHarness cwd="/my/project" />)
     })
     expect(renderedCommands()).toContain('/old-cmd')
 
-    // SDK init — /old-cmd was deleted, SDK doesn't include it
+    // /old-cmd deleted on disk; the SDK's list doesn't carry it either.
+    onDisk = ['/refactor']
     await act(async () => {
       app.emit('session:slash-commands', 'session-123', [{ name: '/help' }, { name: '/refactor' }])
     })
 
-    expect(renderedCommands()).not.toContain('/old-cmd')
+    expect(scanCalls).toEqual(['/my/project', '/my/project'])
+    expect(useSessionStore.getState().customCommands).toEqual([{ name: '/refactor' }])
+    expect(renderedCommands()).toEqual(['/help', '/refactor'])
+  })
+
+  it('a skill the engine under-reports survives SDK init', async () => {
+    // The whole point of not wiping: cli.js reports skills as commands, other
+    // engines may not. The filesystem entry must still be offered.
+    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/delegate'])
+    useSessionStore.getState().createNewSession('session-123', '/my/project')
+
+    await act(async () => {
+      render(<SlashMenuHarness cwd="/my/project" />)
+    })
+
+    await act(async () => {
+      app.emit('session:slash-commands', 'session-123', [{ name: '/help' }])
+    })
+
+    expect(renderedCommands()).toEqual(['/help', '/delegate'])
+  })
+
+  it('SDK init for an unknown routingId leaves the filesystem list untouched', async () => {
+    // No session in the store → no cwd to scan. Must not clear what we have.
+    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/refactor'])
+
+    await act(async () => {
+      render(<SlashMenuHarness cwd="/my/project" />)
+    })
+
+    await act(async () => {
+      app.emit('session:slash-commands', 'no-such-session', [{ name: '/help' }])
+    })
+
+    expect(useSessionStore.getState().customCommands).toEqual([{ name: '/refactor' }])
     expect(renderedCommands()).toEqual(['/help', '/refactor'])
   })
 
@@ -240,11 +283,10 @@ describe('custom commands integration (IPC → store → render)', () => {
     expect(renderedCommands()).toEqual(['/deploy-b'])
   })
 
-  it('full lifecycle: scan → merge → SDK init → clean', async () => {
-    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => [
-      '/refactor',
-      '/stale-cmd'
-    ])
+  it('full lifecycle: scan → merge → SDK init → re-scan', async () => {
+    let onDisk = ['/refactor', '/stale-cmd']
+    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => onDisk)
+    useSessionStore.getState().createNewSession('session-123', '/my/project')
 
     await act(async () => {
       render(<SlashMenuHarness cwd="/my/project" />)
@@ -252,6 +294,7 @@ describe('custom commands integration (IPC → store → render)', () => {
     expect(renderedCommands()).toEqual(['/refactor', '/stale-cmd'])
 
     // SDK init arrives — /stale-cmd was deleted
+    onDisk = ['/refactor']
     await act(async () => {
       app.emit('session:slash-commands', 'session-123', [
         { name: '/help' },
@@ -264,7 +307,7 @@ describe('custom commands integration (IPC → store → render)', () => {
     expect(renderedCommands()).not.toContain('/stale-cmd')
 
     const { customCommands, slashCommands } = useSessionStore.getState()
-    expect(customCommands).toEqual([])
+    expect(customCommands).toEqual([{ name: '/refactor' }])
     expect(slashCommands).toHaveLength(3)
   })
 })

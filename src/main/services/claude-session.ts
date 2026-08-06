@@ -16,8 +16,10 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics, projectKeyForCwd } from './session-history'
+import { computeTokenMetrics } from './session-history'
+import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
+import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -36,13 +38,6 @@ import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { accountManager } from './account-manager'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { resolveUsageProvider } from './usage-provider'
-import {
-  getClassifier,
-  stopClassifier,
-  isSafeTool,
-  buildTranscript,
-  type TranscriptMessage
-} from './auto-classifier'
 import {
   resolveThinkingMode,
   resolveClaudeCapabilities,
@@ -124,6 +119,13 @@ class MessageChannel<T> {
   private queue: T[] = []
   private waiting: ((result: IteratorResult<T>) => void) | null = null
   private isDone = false
+
+  /** True once end() has been called — pushes silently no-op from here on, so
+   *  callers (run()'s send path, H17) must (re-)establish a fresh channel
+   *  rather than push into this one. */
+  get isEnded(): boolean {
+    return this.isDone
+  }
 
   push(msg: T): void {
     if (this.isDone) return
@@ -235,6 +237,26 @@ export class ClaudeSession extends BaseSession {
   private liveTotalCostUsd = 0
   private liveModelCosts = new Map<string, number>()
   private messageChannel: MessageChannel<unknown> | null = null
+  /**
+   * Set once by dispose() — the object has been permanently retired (replaced
+   * under its routingId by SessionManager.create, or torn down at app quit).
+   * Distinct from cancel(), which tears down the current cli.js process but
+   * leaves the object usable for a later run() (idle timeout / user Stop). A
+   * disposed object must NOT emit on the shared routingId or re-arm its idle
+   * timer — otherwise its late run()-finally / idle-fired cancel() would clobber
+   * the LIVE session that now owns the routingId (M-CL3).
+   */
+  private disposed = false
+  /**
+   * Set by cancel() (user Stop / idle timeout), cleared at the start of every
+   * run(). cancel() broadcasts a terminal `disconnected` status; without this
+   * flag the dying run's finally then re-emits its computed `idle` status a
+   * moment later (the abort it triggers only reaches the parked for-await
+   * asynchronously), clobbering `disconnected`, and re-arms the inactivity
+   * timer cancel() just cleared. The disposed/superseded fences don't cover a
+   * plain cancel(), so this guards that path specifically.
+   */
+  private cancelled = false
   /** Single source of truth for query method signatures: the SDK layer's
    *  QueryHandle. Previously duplicated here as an inline interface; drift
    *  between the two kept biting us when new methods shipped. */
@@ -404,6 +426,9 @@ export class ClaudeSession extends BaseSession {
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void> {
     this.clearInactivityTimer()
+    // A fresh run reactivates a session a prior cancel() retired — re-enable the
+    // finally's status emit / idle-timer re-arm (see the `cancelled` field doc).
+    this.cancelled = false
 
     // null prompt = spawn-only mode (for voice server, etc.)
     // Just ensure the SDK process is running without sending a message.
@@ -460,11 +485,27 @@ export class ClaudeSession extends BaseSession {
       }
     }
 
-    if (this.messageChannel) {
+    if (this.messageChannel && !this.messageChannel.isEnded) {
       // Session already active — push message (or no-op for spawn-only)
-      if (sdkMessage) this.messageChannel.push(sdkMessage)
+      if (sdkMessage) {
+        this.messageChannel.push(sdkMessage)
+      } else {
+        // hardening-6: run() cleared the idle timer above. A pushed message
+        // starts a turn whose `result` re-arms it; a spawn-only run(null)
+        // (voice server, etc.) starts nothing, so without this the timer stays
+        // disarmed forever and the cli.js child is never reaped.
+        this.resetInactivityTimer()
+      }
       return
     }
+
+    // H17: the channel exists but is ENDED — cancel() (user Stop, or an
+    // idle-timeout auto-cancel firing as the user hit Enter) ended it, but the
+    // run()-finally that nulls it hasn't executed yet. Pushing here would
+    // silently vanish AFTER sendPrompt already broadcast session:user-message.
+    // Fall through to the first-run branch to (re-)establish a fresh cli.js
+    // process; the run()-finally of the superseded run is fenced by channel
+    // identity below so it can't clobber this new run's state.
 
     // First run — start persistent session with streaming input mode.
     // Passing an AsyncIterable (instead of a string) keeps the CLI subprocess
@@ -473,6 +514,12 @@ export class ClaudeSession extends BaseSession {
     this.messageChannel = channel
     if (sdkMessage) channel.push(sdkMessage)
     this.abortController = new AbortController()
+    // Captured for the finally: `this.abortController`/`this.messageChannel` may
+    // be REPLACED by a superseding run (H17 re-establish on an ended channel)
+    // before this run's for-await unwinds. The finally aborts THIS run's own
+    // controller and only touches the shared fields when they still point here.
+    const myAbort = this.abortController
+    const myChannel = channel
 
     // Reset the active-query promise for this run. ensureActiveQuery() awaits
     // it instead of polling. Rejection path fires on any failure before
@@ -482,7 +529,10 @@ export class ClaudeSession extends BaseSession {
       this.rejectActiveQuery = reject
     })
 
-    // Collect stderr chunks so we can include them in error messages
+    // Collect stderr chunks so we can include them in error messages. Bounded
+    // to the last STDERR_MAX_CHUNKS entries (see the push site) so a chatty
+    // child can't grow this unbounded for the process lifetime.
+    const STDERR_MAX_CHUNKS = 200
     const stderrChunks: string[] = []
 
     try {
@@ -698,6 +748,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
                 }
               }
               stderrChunks.push(text)
+              // Bound retention: only the last handful is ever surfaced (error
+              // display slices -30/-20). A chatty child would otherwise grow
+              // this array for the whole process lifetime. 200 keeps ample
+              // crash-diagnostic context while capping memory.
+              if (stderrChunks.length > STDERR_MAX_CHUNKS) {
+                stderrChunks.splice(0, stderrChunks.length - STDERR_MAX_CHUNKS)
+              }
             }
           },
           // Resume precedence: once cli.js has minted a stable sessionId
@@ -722,47 +779,13 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
               return { behavior: 'allow' as const, updatedInput: input }
             }
 
-            // --- Local auto mode: classify tool calls instead of prompting user ---
-            if (this.permissionMode === 'localAuto') {
-              // Fast path: safe tools are always allowed
-              if (isSafeTool(toolName)) {
-                logger.debug('AutoClassifier', `Fast-path allow: ${toolName}`)
-                return { behavior: 'allow' as const, updatedInput: input }
-              }
-
-              try {
-                const transcriptMsgs: TranscriptMessage[] = this.messageHistory.map((m) => ({
-                  role: m.role,
-                  content: m.content.map((b) => ({
-                    type: b.type,
-                    ...('text' in b ? { text: b.text } : {}),
-                    ...('toolName' in b ? { toolName: b.toolName, toolInput: b.toolInput } : {}),
-                    ...('toolResult' in b ? { toolResult: b.toolResult } : {})
-                  }))
-                }))
-                const transcript = buildTranscript(transcriptMsgs)
-
-                const classifier = getClassifier(this.routingId)
-                const result = await classifier.classify(toolName, input, transcript)
-
-                logger.debug(
-                  'AutoClassifier',
-                  `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`
-                )
-
-                if (!result.shouldBlock) {
-                  return { behavior: 'allow' as const, updatedInput: input }
-                }
-
-                // Blocked — notify UI and deny
-                return { behavior: 'deny' as const, message: `Auto mode blocked: ${result.reason}` }
-              } catch (err) {
-                // Classifier failed — fall through to manual approval
-                logger.warn(
-                  'AutoClassifier',
-                  `Classifier failed for ${toolName}, falling back to manual approval: ${err}`
-                )
-              }
+            // A cancel/interrupt racing this callback's entry may have ALREADY
+            // fired opts.signal's 'abort'. The listener added below only fires on
+            // a FUTURE abort, so without this pre-check the approval promise would
+            // hang forever and its card would linger in the UI. Bail before we
+            // even surface a request.
+            if (opts.signal.aborted) {
+              return { behavior: 'deny' as const, message: 'Cancelled' }
             }
 
             const requestId = uuid()
@@ -785,14 +808,24 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
               (resolve) => {
                 this.pendingApprovals.set(requestId, { resolve })
 
-                opts.signal.addEventListener('abort', () => {
-                  this.pendingApprovals.delete(requestId)
-                  resolve({ decision: 'deny' })
-                })
+                opts.signal.addEventListener(
+                  'abort',
+                  () => {
+                    this.pendingApprovals.delete(requestId)
+                    resolve({ decision: 'deny' })
+                    this.send('session:approval-dismiss', { requestId })
+                  },
+                  { once: true }
+                )
               }
             )
 
             this.pendingApprovals.delete(requestId)
+            // Mirror OpencodeSession's approval-resolved emit (M-OC2): tells
+            // remote/multi-window views to drop the card even though they
+            // never saw the local click. The renderer's removal is
+            // idempotent by requestId, so this echo is harmless locally.
+            this.send('session:approval-dismiss', { requestId })
 
             if (decision === 'allow') {
               const updatedInput = answers ? { ...input, answers } : input
@@ -894,18 +927,34 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         this.send('session:error', parts.join('\n'))
       }
     } finally {
-      this.messageChannel?.end()
-      this.messageChannel = null
-      // Reject any in-flight ensureActiveQuery() awaits so callers don't
-      // hang forever on a session that never produced a handle.
-      this.rejectActiveQuery?.(new Error('Session ended before query handle was produced'))
-      this.resolveActiveQuery = null
-      this.rejectActiveQuery = null
-      this.activeQueryPromise = null
-      this.activeQuery = null
-      this.abortController = null
-      this.isProcessing = false
-      this.turnStartedAtMs = null
+      // A superseding run (H17 re-establish, or a same-object respawn) has
+      // already swapped in a fresh channel/controller/query when this no longer
+      // holds. In that case this run's teardown must touch ONLY its own child,
+      // never the shared fields the new run now owns.
+      const superseded = this.messageChannel !== myChannel
+
+      // H16: guarantee THIS run's cli.js child is torn down. If the for-await
+      // above exited via a next() rejection, IteratorClose (the handle's
+      // return()/killChild) is skipped — abort this run's OWN controller
+      // (captured locally) to fire killChild. Idempotent on the normal exit
+      // path (child already exited, abort listener already removed) and when
+      // cancel() already aborted it.
+      myAbort.abort()
+
+      if (!superseded) {
+        this.messageChannel?.end()
+        this.messageChannel = null
+        // Reject any in-flight ensureActiveQuery() awaits so callers don't
+        // hang forever on a session that never produced a handle.
+        this.rejectActiveQuery?.(new Error('Session ended before query handle was produced'))
+        this.resolveActiveQuery = null
+        this.rejectActiveQuery = null
+        this.activeQueryPromise = null
+        this.activeQuery = null
+        this.abortController = null
+        this.isProcessing = false
+        this.turnStartedAtMs = null
+      }
       // Respawn-boundary fold (Slice B): a ClaudeSession object CAN spawn
       // cli.js more than once — messageChannel is now null, so the NEXT
       // run() call on this same object takes the "first run" branch again and
@@ -925,8 +974,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       }
       this.liveTotalCostUsd = 0
       this.liveModelCosts.clear()
-      this.sendStatus()
-      this.resetInactivityTimer()
+      // M-CL3 / H17: only the run that still owns the shared state may emit
+      // status + re-arm the idle timer. A run superseded by a same-object
+      // re-establish must leave the new run's status/timer alone; a DISPOSED
+      // object (replaced under its routingId) must never emit on the shared
+      // routingId or re-arm a timer whose later cancel() would tear down the
+      // LIVE session that now owns that routingId.
+      if (!superseded && !this.disposed && !this.cancelled) {
+        this.sendStatus()
+        this.resetInactivityTimer()
+      }
     }
   }
 
@@ -980,6 +1037,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         this.handleSystemMessage(msg)
         return
       case 'control_response':
+        // NOTE: currently unreachable. sdk/query.ts's handleInbound consumes
+        // every `control_response` via ControlChannel.handleResponse and returns
+        // before pushing to the queue, so dispatchMessage never sees one — the
+        // session:error surfacing in handleControlResponse cannot fire from here.
+        // Control errors DO surface as rejections of the specific awaited control
+        // request. Making the generic surfacing fire would need a control-error
+        // hook exposed from the SDK layer (sdk/control.ts); left in place as a
+        // forward-compat safety net if query.ts ever routes these up.
         this.handleControlResponse(msg)
         return
       case 'request_usage':
@@ -1041,10 +1106,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
         // Sync permission mode from init — the CLI may have rejected the
         // requested mode (e.g. auto-mode gate/model check failed) and fallen
-        // back to default. Don't overwrite localAuto — SDK runs as acceptEdits
-        // underneath.
+        // back to default.
         const initMode = sys.permissionMode
-        if (initMode && initMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+        if (initMode && initMode !== this.permissionMode) {
           this.permissionMode = initMode
           this.send('session:permission-mode', initMode)
         }
@@ -1145,9 +1209,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   private handleSystemMessage(msg: SystemMessage): void {
     if (msg.subtype === 'status') {
-      // Don't overwrite localAuto — SDK runs as acceptEdits underneath.
       const newMode = msg.permissionMode
-      if (newMode && newMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+      if (newMode && newMode !== this.permissionMode) {
         this.permissionMode = newMode
         this.send('session:permission-mode', newMode)
       }
@@ -1225,12 +1288,26 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * stop depending on the regex-extraction inside detectTaskMapping for the
    * notification plumbing. (We still need detectTaskMapping for the output
    * file path, which only ships in tool_result.)
+   *
+   * Also relayed to the renderer as `session:task-started` — the only
+   * reliable "this task is running" signal since 2.1.219 made Agent/Task
+   * background-by-default: the tool_use input usually omits
+   * `run_in_background`, and the immediate "Async agent launched
+   * successfully" tool_result would otherwise read as completion. The
+   * renderer treats a task as running until the matching `session:task-
+   * notification` arrives, regardless of tool_result/background-flag state.
    */
   private handleTaskStarted(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const toolUseId = msg.tool_use_id || ''
     if (!taskId || !toolUseId) return
     this.taskIdMap.set(taskId, toolUseId)
+
+    this.send('session:task-started', {
+      toolUseId,
+      taskId,
+      taskType: msg.task_type || ''
+    })
   }
 
   /**
@@ -1274,7 +1351,12 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private handleTaskNotification(msg: SystemMessage): void {
     const taskId = msg.task_id || ''
     const outputFile = msg.output_file || ''
-    const matchedToolUseId = this.taskIdMap.get(taskId) || null
+    // taskIdMap is populated by task_started/detectTaskMapping and is the
+    // normal path, but the wire's own tool_use_id (docs/protocol/04-system-
+    // subtypes.md §4.4) is a reliable fallback for the rare case the reverse
+    // lookup misses (e.g. task_started never arrived, or the mapping was
+    // already evicted by an earlier stopTask/task_updated race).
+    const matchedToolUseId = this.taskIdMap.get(taskId) || msg.tool_use_id || null
     if (matchedToolUseId) {
       this.markBackgroundDone(matchedToolUseId)
       this.taskIdMap.delete(taskId)
@@ -1490,16 +1572,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   async setPermissionMode(mode: string): Promise<void> {
     const previousMode = this.permissionMode
 
-    // localAuto is our own mode — SDK runs as acceptEdits underneath
-    if (mode === 'localAuto') {
-      this.permissionMode = mode
-      this.send('session:permission-mode', mode)
-      if (this.activeQuery) {
-        await this.activeQuery.setPermissionMode('acceptEdits')
-      }
-      return
-    }
-
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
@@ -1509,11 +1581,18 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         await this.activeQuery.setPermissionMode(mode as import('../sdk').PermissionMode)
       } catch (err) {
         if (mode === 'auto') {
-          // SDK rejected auto mode (feature gate / model check) — fall back to local auto
-          logger.debug('ClaudeSession', 'SDK rejected auto mode, falling back to localAuto')
-          this.permissionMode = 'localAuto'
-          this.send('session:permission-mode', 'localAuto')
-          await this.activeQuery.setPermissionMode('acceptEdits')
+          // SDK rejected auto mode — org admin disabled it, or a model/feature
+          // gate failed. Fall back to manual approval rather than silently
+          // substituting our own classifier (that would bypass the org's
+          // policy). Surface a visible notice so the user knows why.
+          logger.debug('ClaudeSession', 'SDK rejected auto mode, falling back to default')
+          this.permissionMode = 'default'
+          this.send('session:permission-mode', 'default')
+          this.send(
+            'session:warning',
+            'Auto mode was rejected (disabled by your organization?) — falling back to manual approvals.'
+          )
+          await this.activeQuery.setPermissionMode('default')
           return
         }
         // Other mode changes that fail — revert to previous
@@ -1525,9 +1604,21 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   async setModel(model: string): Promise<void> {
+    const previousModel = this.model
     this.model = model
     if (this.activeQuery) {
-      await this.activeQuery.setModel(model)
+      try {
+        await this.activeQuery.setModel(model)
+      } catch (err) {
+        // Revert on failure — leaving this.model on a model cli.js rejected
+        // skews capabilities, context-window sizing and the cost fallback
+        // against a model the session isn't actually running (setPermissionMode
+        // reverts the same way). Re-emit so the renderer resyncs to the real
+        // model, then propagate so the caller sees the failure.
+        this.model = previousModel
+        this.sendStatus()
+        throw err
+      }
     }
     // Re-emit status so capabilities (derived from model) are up to date in the renderer.
     this.sendStatus()
@@ -1706,17 +1797,26 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * Notify the running CLI session that settings files changed on disk so it
    * re-reads them and rebuilds its internal `toolPermissionContext`.
    *
-   * The CLI's file watcher is disabled in SDK mode (`isRemoteMode`), so
-   * writing to settings.json alone doesn't propagate.  We work around this
-   * by sending an empty `apply_flag_settings({})` control message — the merge
-   * is a no-op (nothing injected into the flag layer) but the CLI still fires
-   * `notifyChange("flagSettings")`, which invalidates its settings cache and
-   * triggers the subscriber to re-read all sources from disk.
+   * cli.js DOES run its chokidar settings watcher in the headless bootstrap
+   * ClaudeUI spawns (only `CLAUDE_CODE_SIMPLE`/`--bare` skip it, and we set
+   * neither), so a disk write propagates on its own — but not for ~1-1.5s
+   * (awaitWriteFinish: stabilityThreshold 1000ms / pollInterval 500ms), and
+   * not at all if the watcher drops the event. This call is the immediate,
+   * deterministic trigger: an empty `apply_flag_settings({})` whose merge is a
+   * no-op (nothing injected into the flag layer) but which still fires
+   * `notifyChange("flagSettings")`, invalidating the settings cache and
+   * re-reading every source from disk. Both paths converge on the same state,
+   * so a duplicate refresh is harmless.
    *
-   * This approach is safe for managed/enterprise policies because we don't
-   * inject any rules into the flag layer — the CLI re-evaluates its own
-   * setting sources, respecting `allowManagedPermissionRulesOnly` and the
-   * normal priority hierarchy.
+   * Safe for managed/enterprise policies: we inject no rules into the flag
+   * layer, so the CLI re-evaluates its own setting sources, respecting
+   * `allowManagedPermissionRulesOnly` and the normal priority hierarchy.
+   *
+   * RULES ONLY. The settings-change subscriber rebuilds allow/deny/ask +
+   * additionalDirectories but never re-derives `toolPermissionContext.mode`:
+   * `permissions.defaultMode` is read once at session bootstrap. A live
+   * session's mode changes only via `setPermissionMode` (the
+   * `set_permission_mode` control request).
    */
   async notifySettingsChanged(): Promise<void> {
     if (!this.activeQuery) {
@@ -2006,15 +2106,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   /** Transcript JSONL path for a given session id under this session's cwd.
-   *  Project key derivation is shared with session-history (projectKeyForCwd)
-   *  — the old inline `/`+`.`-only replace produced a nonexistent path for
-   *  every Windows cwd, silently no-opping reconciliation and resume seeding. */
+   *  Project key derivation is the shared `cwdToProjectKey` (replaces EVERY
+   *  non-alphanumeric char with '-', matching cli.js's on-disk naming) — the
+   *  old inline `/`+`.`-only replace produced a nonexistent path for every
+   *  Windows cwd (and any cwd with `_`/space), silently no-opping
+   *  reconciliation and resume seeding. */
   private transcriptPathFor(sessionId: string): string {
     return path.join(
       os.homedir(),
       '.claude',
       'projects',
-      projectKeyForCwd(this.cwd),
+      cwdToProjectKey(this.cwd),
       `${sessionId}.jsonl`
     )
   }
@@ -2075,9 +2177,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   cancel(): void {
+    // Retire the object until the next run() — see the `cancelled` field doc.
+    // Guards the dying run's finally from re-emitting `idle` over the
+    // `disconnected` broadcast below and from re-arming the idle timer.
+    this.cancelled = true
+
     // Deny all pending approvals
-    for (const [, entry] of this.pendingApprovals) {
+    for (const [requestId, entry] of this.pendingApprovals) {
       entry.resolve({ decision: 'deny' })
+      this.send('session:approval-dismiss', { requestId })
     }
     this.pendingApprovals.clear()
 
@@ -2096,9 +2204,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     this.voiceServerPort = null
 
-    // Stop the auto-mode classifier session (if any)
-    stopClassifier(this.routingId)
-
     // End the message channel before aborting so the SDK's streamInput
     // loop can unblock and the CLI subprocess exits cleanly
     this.messageChannel?.end()
@@ -2106,7 +2211,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.abortController = null
     this.isProcessing = false
     this.turnStartedAtMs = null
-    this.send('session:status', { ...this.status, state: 'disconnected' })
+    // M-CL3: a dispose()-driven cancel (object replaced under its routingId)
+    // must NOT broadcast disconnected on the shared routingId — the LIVE
+    // replacement session now owns it and emits its own status. A normal
+    // cancel() (user Stop / idle timeout, object stays usable) still surfaces
+    // the disconnect.
+    if (!this.disposed) {
+      this.send('session:status', { ...this.status, state: 'disconnected' })
+    }
   }
 
   /** Interrupt the current turn without killing the session.
@@ -2117,8 +2229,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.wasInterrupted = true
 
       // Deny pending approvals so the SDK's canUseTool callbacks unblock
-      for (const [, entry] of this.pendingApprovals) {
+      for (const [requestId, entry] of this.pendingApprovals) {
         entry.resolve({ decision: 'deny' })
+        this.send('session:approval-dismiss', { requestId })
       }
       this.pendingApprovals.clear()
 
@@ -2273,15 +2386,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       const toolUseId = b.tool_use_id as string
       if (!toolUseId) continue
 
-      let resultText = ''
-      const blockContent = b.content
-      if (typeof blockContent === 'string') {
-        resultText = blockContent
-      } else if (Array.isArray(blockContent)) {
-        resultText = blockContent
-          .map((c: Record<string, unknown>) => (c.text as string) || '')
-          .join('\n')
-      }
+      // Images the tool RETURNED ride along in the same array content — see
+      // tool-result-content.ts. The text collapse is unchanged.
+      const { text: resultText, images } = extractToolResultContent(b.content)
 
       // Record agentId→toolUseId mapping for task notifications
       if (!parentToolUseId) {
@@ -2293,13 +2400,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           toolUseId: parentToolUseId,
           toolResultToolUseId: toolUseId,
           result: resultText,
-          isError: !!b.is_error
+          isError: !!b.is_error,
+          ...(images ? { images } : {})
         })
       } else {
         this.send('session:tool-result', {
           toolUseId,
           result: resultText,
-          isError: !!b.is_error
+          isError: !!b.is_error,
+          ...(images ? { images } : {})
         })
       }
 
@@ -2545,8 +2654,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.send('session:status', this.status)
   }
 
-  /** Dispose: cancel the session and release all resources. */
+  /** Dispose: permanently retire the session and release all resources. Unlike
+   *  cancel() (which leaves the object usable for a later run() — idle timeout /
+   *  user Stop), this marks the object retired so its late run()-finally can't
+   *  emit status / re-arm the idle timer on a routingId a replacement now owns
+   *  (M-CL3). Sets the flag BEFORE cancel() so cancel()'s own status emit is
+   *  suppressed too. */
   dispose(): void {
+    this.disposed = true
     this.cancel()
   }
 }

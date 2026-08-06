@@ -376,6 +376,34 @@ describe('ExitPlanModeCard FC', () => {
     unmount()
   })
 
+  it('onStartFresh: threads the session model / effort / thinking mode (Low)', async () => {
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [ROUTE_FC]: {
+          ...s.sessions[ROUTE_FC],
+          selectedModel: 'claude-opus-4-7',
+          effort: 'high',
+          thinkingMode: 'enabled'
+        }
+      }
+    }))
+    const { unmount } = renderFC()
+
+    await act(async () => {
+      await viewProps.onStartFresh()
+    })
+
+    // createSession args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
+    const createArgs = lastCall('session:create') as unknown[]
+    // Pre-fix: model was undefined and effort was forced to 'medium'.
+    expect(createArgs[5]).toBe('claude-opus-4-7')
+    expect(createArgs[2]).toBe('high')
+    expect(createArgs[6]).toBe('enabled')
+
+    unmount()
+  })
+
   it('onStartFresh: does nothing when approval is undefined', async () => {
     const { unmount } = render(React.createElement(ExitPlanModeCard, { block, view: planView }))
 

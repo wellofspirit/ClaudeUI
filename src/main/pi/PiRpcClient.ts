@@ -17,6 +17,7 @@ import type { ChildProcess } from 'node:child_process'
 import { v4 as uuid } from 'uuid'
 import type { PiEvent, PiRpcCommand, PiRpcResponse } from './pi-protocol'
 import { logger } from '../services/logger'
+import { killProcessTree } from '../services/process-tree'
 
 export interface PiRpcClientOptions {
   cwd: string
@@ -70,12 +71,26 @@ export class PiRpcClient {
         if (text) logger.debug('PiRpcClient', `stderr: ${text}`)
       })
 
+      // A half-open stdin can emit an async 'error' (EPIPE) after the child
+      // dies while a request write is in flight. With no listener that becomes
+      // a process-level uncaughtException. Swallow it — handleExit already
+      // rejects every pending request (mirrors sdk/query.ts's stdin guard).
+      proc.stdin?.on('error', (err: Error) => {
+        logger.debug('PiRpcClient', `stdin error (child teardown race): ${err.message}`)
+      })
+
       // Both listeners can be attached simultaneously: on a bad binary path,
       // 'error' fires (spawn never happened) and 'spawn' never fires. On a
       // healthy spawn, 'spawn' fires first and settles the promise; a LATER
       // 'error' (e.g. EPIPE) is a no-op against an already-resolved promise.
       proc.once('spawn', () => resolve())
       proc.once('error', (err) => reject(err))
+      // once('error') above only settles the START promise. It fires at most
+      // once, so a SECOND process 'error' (or any error after spawn) would have
+      // no listener → uncaughtException. This persistent handler absorbs those.
+      proc.on('error', (err: Error) => {
+        logger.debug('PiRpcClient', `process error: ${err.message}`)
+      })
 
       proc.on('exit', (code, signal) => this.handleExit(code, signal))
     })
@@ -138,15 +153,10 @@ export class PiRpcClient {
   dispose(): void {
     const proc = this.proc
     if (!proc || this.exited) return
-    if (process.platform === 'win32' && proc.pid != null) {
-      // SIGTERM on Windows only kills the parent; taskkill /T /F reaps the whole tree
-      // (pi shells out to bash for the `bash` tool). Still call proc.kill() so the
-      // in-process 'exit' event fires (needed for pending-request/exit-handler cleanup).
-      proc.kill()
-      spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore' })
-    } else {
-      proc.kill('SIGTERM')
-    }
+    // M-PI3: taskkill MUST reap the tree before proc.kill() runs — see
+    // killProcessTree. taskkill terminating the root still fires the 'exit'
+    // event pending-request/exit-handler cleanup relies on.
+    killProcessTree(proc)
   }
 
   get pid(): number | undefined {

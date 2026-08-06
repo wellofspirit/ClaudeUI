@@ -9,6 +9,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
@@ -68,7 +70,22 @@ describe('RemoteDispatcher', () => {
       'terminal:write',
       'terminal:resize',
       'terminal:kill',
-      'terminal:kill-by-cwd'
+      'terminal:kill-by-cwd',
+      // Remote-server config + credential (Phase 1 of remote auth) — a remote
+      // client must never read/rotate its own auth credential or flip
+      // transport/autostart flags.
+      'remote:get-config',
+      'remote:set-config',
+      'remote:set-password',
+      'remote:clear-password',
+      // Phase 3: the Tailscale probe discloses the tailnet DNS name and the node
+      // owner's login — desktop-only, like the rest of the remote:* config surface.
+      'remote:tailscale-detect',
+      // ADR-042: force re-serve MUTATES this machine's `tailscale serve` config
+      // (it takes the pinned HTTPS port over from whatever holds it), i.e. it can
+      // change or break the very transport the remote caller is connected
+      // through. Desktop-only.
+      'remote:force-reserve'
     ] as const
 
     it.each(BLOCKED_CHANNELS)(
@@ -141,5 +158,40 @@ describe('RemoteDispatcher', () => {
       expect(a).toBe('result-a')
       expect(b).toBe('result-b')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Guard: RemoteStatus stays desktop-only.
+//
+// `RemoteServer.notifyStatus()` pushes `remote:status` via
+// `win.webContents.send` (the real desktop window, not the RemoteBridge), and
+// `remote-handlers.ts` registers NO `remote:*` channel on the RemoteDispatcher —
+// which is a denylist over an EXPLICIT registration set, so an unregistered
+// channel is unreachable. Together that means widening `RemoteStatus`
+// (Phase 2 added `authMethods`; Phase 3 adds tls/clientLogins) cannot leak
+// server internals or one remote user's identity to another.
+//
+// This is a source-level assertion on purpose: importing remote-handlers.ts
+// pulls in the SDK + every service, which a unit test must not do.
+// ---------------------------------------------------------------------------
+
+describe('remote-handlers registration surface (guard)', () => {
+  const HANDLERS_PATH = resolve(__dirname, '../../ipc/remote-handlers.ts')
+
+  it('registers no remote:* channel on the RemoteDispatcher', () => {
+    const src = readFileSync(HANDLERS_PATH, 'utf-8')
+    // Every registration in that file goes through `.register('<channel>'`.
+    const registered = [...src.matchAll(/\.register\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1])
+    expect(registered.length).toBeGreaterThan(50) // non-vacuity: we did parse it
+    expect(registered.filter((c) => c.startsWith('remote:'))).toEqual([])
+  })
+
+  it('registers no remote:* channel via a template/computed channel name either', () => {
+    const src = readFileSync(HANDLERS_PATH, 'utf-8')
+    // A backtick channel or a `'remote:' + x` concatenation would slip past the
+    // literal scan above.
+    expect(src).not.toMatch(/\.register\(\s*`remote:/)
+    expect(src).not.toMatch(/['"`]remote:['"`]\s*\+/)
   })
 })

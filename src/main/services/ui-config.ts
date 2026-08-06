@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
 import { logger } from './logger'
+import { writeFileAtomicSync } from './write-json-atomic'
 import {
   allSessionMeta,
   setSessionMeta,
@@ -74,8 +75,12 @@ const lastWrittenContent = new Map<string, string>()
 function writeJson(filePath: string, data: unknown): void {
   ensureDir()
   const json = JSON.stringify(data, null, 2)
+  // lastWrittenContent must equal the exact bytes on disk (the watcher skips
+  // our own writes by content), so serialize once and hand the SAME string to
+  // the atomic writer — a byte-for-byte drop-in for the old writeFileSync,
+  // now temp-file + rename so a concurrent reader never sees a torn file (P1).
   lastWrittenContent.set(filePath, json)
-  fs.writeFileSync(filePath, json, { mode: 0o600 })
+  writeFileAtomicSync(filePath, json, { mode: 0o600 })
 }
 
 /**
@@ -216,18 +221,30 @@ export function saveSessionConfig(config: UISessionConfig): void {
   // The renderer sends the full UISessionConfig (including sessionEngines) so we
   // extract it here, write it to the DB, and strip it before writing the JSON.
   if (config.sessionEngines) {
-    const currentMeta = allSessionMeta()
     const incoming = config.sessionEngines
+    const incomingIds = Object.keys(incoming)
 
     // Add/update entries present in the incoming map
     for (const [sessionId, meta] of Object.entries(incoming)) {
       setSessionMeta(sessionId, meta)
     }
 
-    // Remove entries that were deleted from the store
-    for (const sessionId of Object.keys(currentMeta)) {
-      if (!(sessionId in incoming)) {
-        deleteSessionMeta(sessionId)
+    // Remove entries absent from the incoming map — but ONLY when the payload
+    // actually carries the full session set. An EMPTY map is the fingerprint of
+    // an impoverished save: a remote/web client (or an older bundle) whose
+    // snapshot never populated sessionEngines round-trips `{}` here, and the old
+    // unconditional delete-loop then wiped every session's engine/model mapping,
+    // reopening all opencode/pi sessions as Claude (H15). A genuinely-empty save
+    // has nothing legitimate to delete toward — any leftover DB rows are just
+    // harmless orphans, far better than a full wipe. The real cleanup this loop
+    // exists for (rekey: client-id → real-session-id) always sends a non-empty
+    // map, so it keeps working.
+    if (incomingIds.length > 0) {
+      const currentMeta = allSessionMeta()
+      for (const sessionId of Object.keys(currentMeta)) {
+        if (!(sessionId in incoming)) {
+          deleteSessionMeta(sessionId)
+        }
       }
     }
   }

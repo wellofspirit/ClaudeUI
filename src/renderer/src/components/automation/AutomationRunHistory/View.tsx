@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AutomationRun, ChatMessage } from '../../../../../shared/types'
 import { MessageBubble } from '../../chat/MessageBubble'
+import { ImageGalleryProvider } from '../../shared/ImageViewer'
 
 export interface AutomationRunHistoryViewProps {
   run: AutomationRun | null
@@ -117,15 +118,19 @@ export function AutomationRunHistoryView({
           </div>
         ) : (
           <div className="space-y-3">
-            {runMessages?.map((msg, idx) => (
-              <MessageBubble
-                key={msg.id || idx}
-                message={msg}
-                pendingApprovals={[]}
-                isLastAssistant={false}
-                thinkingStartedAt={null}
-              />
-            ))}
+            {/* Same viewer as the live chat — attached-image thumbnails in a
+                replayed run are clickable too. Renders no wrapper element. */}
+            <ImageGalleryProvider messages={runMessages ?? []}>
+              {runMessages?.map((msg, idx) => (
+                <MessageBubble
+                  key={msg.id || idx}
+                  message={msg}
+                  pendingApprovals={[]}
+                  isLastAssistant={false}
+                  thinkingStartedAt={null}
+                />
+              ))}
+            </ImageGalleryProvider>
 
             {streamingText && (
               <div className="bg-bg-secondary/60 rounded-xl px-4 py-3 text-sm">

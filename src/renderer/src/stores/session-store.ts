@@ -4,6 +4,7 @@ import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
+import { toPermissionMode } from '../../../shared/permission-modes'
 import {
   engineMeta,
   OPENCODE_DEFAULT_MODEL,
@@ -17,8 +18,10 @@ import type {
   PendingApproval,
   ContentBlock,
   TodoItem,
+  SentFile,
   TaskProgress,
   TaskNotification,
+  TaskStartedData,
   PermissionMode,
   ModelInfo,
   DirectoryGroup,
@@ -44,7 +47,9 @@ import type {
   EngineId,
   ModelRef,
   EngineConfig,
-  FileDiff
+  FileDiff,
+  ToolResultImage,
+  FileAttachment
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -194,6 +199,70 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
   return Array.from(tasks.values())
 }
 
+/** Max chars of a SendUserFile error result kept for display. */
+const SENT_FILE_ERROR_MAX = 500
+
+/**
+ * Scan messages for Claude Code `SendUserFile` tool calls and build the list of
+ * files the agent has handed to the user. Returns null if there are none —
+ * mirroring {@link buildTodosFromMessages}'s contract, so a rebuild never
+ * clobbers existing state when the transcript has nothing to say.
+ *
+ * Semantics that differ from todos:
+ *  - the list is cumulative for the whole session and is NEVER cleared;
+ *  - a re-send of the same path replaces the earlier entry and moves it to the
+ *    end (latest send wins — its caption/display/error are the current truth);
+ *  - a call whose tool_result hasn't landed yet is still included (in-flight),
+ *    and the rebuild triggered by the result later fills in `error`.
+ */
+export function buildSentFilesFromMessages(messages: ChatMessage[]): SentFile[] | null {
+  const byPath = new Map<string, SentFile>()
+  let hasSendCalls = false
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    for (const block of msg.content) {
+      if (block.type !== 'tool_use' || block.toolName !== 'SendUserFile') continue
+      hasSendCalls = true
+      const input = block.toolInput || {}
+
+      // cli.js coerces a bare string to [string]; accept both shapes.
+      const raw = input.files
+      const paths = (Array.isArray(raw) ? raw : [raw]).filter(
+        (p): p is string => typeof p === 'string' && p.trim().length > 0
+      )
+      if (paths.length === 0) continue
+
+      const resultBlock = msg.content.find(
+        (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
+      )
+      const error =
+        resultBlock?.type === 'tool_result' && resultBlock.isError
+          ? resultBlock.toolResult.trim().slice(0, SENT_FILE_ERROR_MAX)
+          : undefined
+
+      const caption = typeof input.caption === 'string' ? input.caption : undefined
+      const display =
+        input.display === 'render' || input.display === 'attach' ? input.display : undefined
+
+      for (const p of paths) {
+        // Delete first so a re-sent path moves to the end of the insertion order.
+        byPath.delete(p)
+        byPath.set(p, {
+          path: p,
+          ...(caption ? { caption } : {}),
+          ...(display ? { display } : {}),
+          toolUseId: block.toolUseId,
+          ...(error ? { error } : {})
+        })
+      }
+    }
+  }
+
+  if (!hasSendCalls) return null
+  return Array.from(byPath.values())
+}
+
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
 export interface AppSettings {
@@ -341,7 +410,8 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     slashCommands,
     loadedEngineConfig,
     opencodeSettings,
-    piEngineConfig
+    piEngineConfig,
+    userPermissions
   ] = await Promise.all([
     window.api.loadSettings(),
     window.api.loadSessionConfig(),
@@ -352,7 +422,13 @@ export async function hydrateConfigFromDisk(): Promise<void> {
       .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
     window.api
       .loadEngineConfig('pi')
-      .catch((): import('../../../shared/types').EngineConfig => ({}))
+      .catch((): import('../../../shared/types').EngineConfig => ({})),
+    // `permissions.defaultMode` (user scope) seeds the mode of sessions created
+    // in this app run. Remote-registered channel, so the web client hydrates
+    // identically.
+    window.api
+      .loadClaudePermissions('user')
+      .catch((): import('../../../shared/types').ClaudePermissions | null => null)
   ])
 
   // One-time migration from localStorage → disk
@@ -398,6 +474,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
+    defaultPermissionMode: toPermissionMode(userPermissions?.defaultMode),
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -453,13 +530,38 @@ export interface PerSessionState {
   streamingThinking: string
   thinkingStartedAt: number | null
   thinkingDurationMs: number | null
+  /** Duration of the most-recently sealed thinking span awaiting attachment to
+   *  the next committed thinking block (see addMessage). Decouples the seal point
+   *  (appendStreamingText) from the block-commit point (addMessage) so each
+   *  thinking block records its OWN duration instead of all reading one scalar. */
+  pendingThinkingDurationMs: number | null
+  /** True once the heavy arrays (messages, subagentMessages, bash/background
+   *  outputs) have been evicted from memory for an inactive session. The entry
+   *  is kept resident (draft/effort/engine preserved) and re-hydrated from disk
+   *  on reselection via loadHistoricalSession. */
+  evicted: boolean
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
   warnings: string[]
   todos: TodoItem[]
+  /** Files delivered via SendUserFile. Derived from `messages` (so it survives
+   *  resumption) and, unlike `todos`, never cleared when the turn ends. */
+  sentFiles: SentFile[]
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
+  /**
+   * Tasks that have received a `task_started` wire event but no matching
+   * `task_notification` yet — keyed by toolUseId. This is the authoritative
+   * "is this task actually still running" signal (see TaskStartedData):
+   * Claude 2.1.219+ makes Agent/Task background-by-default and often omits
+   * `run_in_background` on the tool_use input, so TaskCard can no longer
+   * infer running-vs-complete from tool input + tool_result alone. A record
+   * here means "running" regardless of tool_result/background-flag state;
+   * only opencode/pi child sessions and historical transcripts (which never
+   * emit task_started) fall back to the old heuristic.
+   */
+  activeTasks: Record<string, { taskId: string; taskType: string }>
   openedTaskToolUseIds: string[]
   rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>
@@ -484,6 +586,9 @@ export interface PerSessionState {
   metering: MeteringSnapshot | null
   queuedText: string
   draftText: string
+  /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
+   *  in session A can never be sent from B, and is restored on return to A. */
+  draftAttachments: FileAttachment[]
   selectedModel: string
   /** Engine chosen at session-creation time. Immutable after the session spawns. */
   selectedEngineId: EngineId
@@ -534,6 +639,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   streamingThinking: '',
   thinkingStartedAt: null,
   thinkingDurationMs: null,
+  pendingThinkingDurationMs: null,
+  evicted: false,
   // Full caps assumed for new sessions before the first status event.
   status: {
     state: 'idle',
@@ -549,8 +656,10 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   errors: [],
   warnings: [],
   todos: [],
+  sentFiles: [],
   taskProgressMap: {},
   taskNotifications: [],
+  activeTasks: {},
   openedTaskToolUseIds: [],
   rightPanel: 'none',
   subagentMessages: {},
@@ -570,6 +679,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   metering: null,
   queuedText: '',
   draftText: '',
+  draftAttachments: [],
   selectedModel: 'default',
   selectedEngineId: 'claude' as EngineId,
   worktreeInfo: null,
@@ -596,12 +706,42 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   vendorAuthRequired: null
 }
 
-function createEmptySession(cwd: string): PerSessionState {
+/**
+ * `permissionMode` defaults to 'default' rather than reading the store, so the
+ * paths that only need a placeholder entry (event bootstrap, transcript
+ * re-hydration, clearConversation) are unaffected. Genuine session CREATION
+ * passes the store's `defaultPermissionMode` — see createNewSession.
+ */
+function createEmptySession(
+  cwd: string,
+  defaultPermissionMode: PermissionMode = 'default'
+): PerSessionState {
   const cached = cwd ? gitStatusCache.get(cwd) : undefined
   return {
     ...EMPTY_SESSION_STATE,
     cwd,
+    permissionMode: defaultPermissionMode,
     ...(cached ? { isGitRepo: true, gitStatus: cached } : {})
+  }
+}
+
+/**
+ * Insert into a module-level cache Map, evicting the oldest entries once `cap`
+ * is exceeded. These caches live for the whole renderer process, so without a
+ * bound they grow monotonically across a long-running session (RN8).
+ *
+ * Maps iterate in insertion order, so the first key is the oldest. Re-writing an
+ * existing key deletes-then-sets it, which moves it to the back — a refresh
+ * counts as recent, so a hot key can't be evicted just because it was first
+ * seen long ago.
+ */
+function setCapped<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
+  map.delete(key)
+  map.set(key, value)
+  while (map.size > cap) {
+    const oldest = map.keys().next()
+    if (oldest.done) break
+    map.delete(oldest.value)
   }
 }
 
@@ -610,8 +750,27 @@ function createEmptySession(cwd: string): PerSessionState {
  * When the store rekeys a session, the main process may still send events
  * with the old routingId until it processes the rekey IPC round-trip.
  * This map lets setStatusLine (and potentially other handlers) resolve them.
+ *
+ * Bounded: only *recent* rekeys matter (the main process catches up within one
+ * IPC round-trip), and stale ids die with their session.
  */
+const REKEY_MAP_MAX = 200
 const rekeyMap = new Map<string, string>()
+
+/**
+ * Resolve a possibly-stale (pre-rekey) routingId to the canonical session id.
+ * When a session rekeys to its SDK id, the main process keeps emitting events
+ * with the old routingId until it processes the rekey IPC round-trip. Resolving
+ * at the event boundary (useClaudeEvents) makes ALL handlers — messages,
+ * streams, approvals, tool results — target the same id, so a rekey can no
+ * longer split-brain a session (xhigh#9). Returns the input unchanged when no
+ * mapping applies (pre-rekey, or the mapped session no longer exists).
+ */
+export function resolveRoutingId(routingId: string): string {
+  const mapped = rekeyMap.get(routingId)
+  if (mapped && useSessionStore.getState().sessions[mapped]) return mapped
+  return routingId
+}
 
 /**
  * Monotonic token for the in-flight vendor-OAuth `auto` flow. Each
@@ -629,7 +788,11 @@ let vendorOAuthFlowToken = 0
  * When polling updates arrive they're cached here so that newly-loaded
  * or switched-to sessions with the same cwd get instant git status
  * instead of waiting for the next poll cycle.
+ *
+ * Bounded (RN8): it's a convenience cache, and a miss just means the session
+ * waits one poll cycle for its real status.
  */
+const GIT_STATUS_CACHE_MAX = 100
 const gitStatusCache = new Map<string, GitStatusData>()
 
 /** Helper to update a specific session's state */
@@ -657,6 +820,76 @@ function ensureSession(
   return { ...sessions, [routingId]: createEmptySession('') }
 }
 
+/**
+ * How many recently-viewed transcripts stay fully resident (besides the active
+ * session, pinned sessions, and watched/running ones). Older on-disk
+ * transcripts have their heavy arrays evicted and are re-hydrated on reselect.
+ */
+const MAX_RESIDENT_TRANSCRIPTS = 10
+
+/**
+ * Evict the heavy per-session arrays (messages / subagent messages / bash +
+ * background outputs) for sessions that are neither active, recently-viewed,
+ * pinned, watched, running, nor awaiting an approval — bounding renderer heap
+ * (Opus B). The lightweight entry stays resident (draft, effort, model, engine,
+ * status, todos), and the transcript re-hydrates from disk on reselection via
+ * loadHistoricalSession (the `evicted` flag routes Sidebar.handleClickSession
+ * back through the disk-load path). Only on-disk sessions are eligible, so an
+ * evicted transcript is always reloadable — a fresh, not-yet-flushed session is
+ * never touched. Returns the same map reference when nothing was evicted.
+ */
+function evictColdSessions(
+  sessions: Record<string, PerSessionState>,
+  activeSessionId: string | null,
+  recentSessionIds: string[],
+  pinnedSessionIds: string[],
+  directories: DirectoryGroup[]
+): Record<string, PerSessionState> {
+  const keep = new Set<string>()
+  if (activeSessionId) keep.add(activeSessionId)
+  for (const id of recentSessionIds.slice(0, MAX_RESIDENT_TRANSCRIPTS)) keep.add(id)
+  for (const id of pinnedSessionIds) keep.add(id)
+
+  const onDisk = new Set<string>()
+  for (const group of directories) {
+    for (const s of group.sessions) onDisk.add(s.sessionId)
+  }
+
+  let changed = false
+  const next: Record<string, PerSessionState> = {}
+  for (const id in sessions) {
+    const sess = sessions[id]
+    const canEvict =
+      !keep.has(id) &&
+      !sess.evicted &&
+      !sess.sdkActive &&
+      !sess.isWatching &&
+      sess.pendingApprovals.length === 0 &&
+      sess.messages.length > 0 &&
+      onDisk.has(id)
+    if (canEvict) {
+      changed = true
+      next[id] = {
+        ...sess,
+        evicted: true,
+        isHistorical: true,
+        messages: [],
+        streamingText: '',
+        streamingThinking: '',
+        subagentMessages: {},
+        subagentStreamingText: {},
+        subagentStreamingThinking: {},
+        bashOutputs: {},
+        backgroundOutputs: {},
+        backgroundWatcherCounts: {}
+      }
+    } else {
+      next[id] = sess
+    }
+  }
+  return changed ? next : sessions
+}
+
 interface SessionState {
   // Multi-session
   activeSessionId: string | null
@@ -682,6 +915,12 @@ interface SessionState {
   /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
    *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
   piDefaultModel: string
+  /** `~/.claude/settings.json#permissions.defaultMode`, mapped to a renderer
+   *  PermissionMode. A SESSION-BOOTSTRAP concern only: it seeds the mode of
+   *  sessions created from here on. Running sessions keep the mode they were
+   *  spawned with (cli.js re-derives rules on a settings change but never the
+   *  mode) — changing a live session's mode is `setPermissionMode`'s job. */
+  defaultPermissionMode: PermissionMode
   /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
    *  an opencode provider/default-model change in Settings. */
   modelReloadNonce: number
@@ -736,6 +975,9 @@ interface SessionState {
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
   setPiDefaultModel: (model: string) => void
+  /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
+   *  later in THIS app run pick it up without a restart. */
+  setDefaultPermissionMode: (mode: PermissionMode) => void
   /** Force the model picker to re-fetch the engine model list. */
   reloadModels: () => void
   loadHistoricalSession: (
@@ -810,10 +1052,14 @@ interface SessionState {
     toolUseId: string,
     result: string,
     isError: boolean,
-    fileDiffs?: FileDiff[]
+    fileDiffs?: FileDiff[],
+    images?: ToolResultImage[]
   ) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
+  setSentFiles: (routingId: string, sentFiles: SentFile[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
+  /** Record a task_started event — see PerSessionState.activeTasks doc comment. */
+  setTaskStarted: (routingId: string, data: TaskStartedData) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
   bulkSetSubagentMessages: (
     routingId: string,
@@ -833,7 +1079,8 @@ interface SessionState {
     toolResultToolUseId: string,
     result: string,
     isError: boolean,
-    fileDiffs?: FileDiff[]
+    fileDiffs?: FileDiff[],
+    images?: ToolResultImage[]
   ) => void
   setBashOutput: (
     routingId: string,
@@ -876,9 +1123,11 @@ interface SessionState {
     sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
   }) => void
   applyRemoteSnapshot: (
-    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
+    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot,
+    isResync?: boolean
   ) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
+  changePermissionMode: (routingId: string, next: PermissionMode) => void
   setEffort: (
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
     routingId?: string
@@ -892,6 +1141,12 @@ interface SessionState {
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
+  /** Append unsent attachments to a specific session (keyed by routingId — see impl). */
+  addDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
+  /** Remove one unsent attachment from a session by attachment id. */
+  removeDraftAttachment: (routingId: string, id: string) => void
+  /** Replace a session's unsent attachments (used to clear after a successful send). */
+  setDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Set the active session's model picker value within its selected engine. */
   setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
@@ -1006,6 +1261,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
   piDefaultModel: PI_DEFAULT_MODEL,
+  defaultPermissionMode: 'default' as PermissionMode,
   modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
@@ -1051,10 +1307,25 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
+      const withAttention = updateSession(cleaned.sessions, routingId, () => ({
+        needsAttention: false
+      }))
+      // Bound the renderer heap (Opus B): evict the heavy transcript arrays of
+      // cold, on-disk sessions on every switch. The active/recent/pinned/running/
+      // watched sessions are always kept; an evicted session re-hydrates from
+      // disk on reselect (Sidebar routes an evicted entry through
+      // loadHistoricalSession rather than the resident fast-path).
+      const sessions = evictColdSessions(
+        withAttention,
+        routingId,
+        cleaned.recentSessionIds,
+        state.pinnedSessionIds,
+        state.directories
+      )
       return {
         activeSessionId: routingId,
         activeView: { type: 'chat' } as ActiveView,
-        sessions: updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false })),
+        sessions,
         recentSessionIds: cleaned.recentSessionIds
       }
     }),
@@ -1092,7 +1363,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(defaultModel) }
       }
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
-      const newSession = createEmptySession(cwd)
+      // Settings' autonomy-mode pick is a bootstrap default: it applies here,
+      // at creation, and nowhere else.
+      const newSession = createEmptySession(cwd, state.defaultPermissionMode)
       newSession.selectedEngineId = engineId
       newSession.selectedModel = defaultModel
       // Seed status.engineId/capabilities to match so they're correct before spawn
@@ -1164,6 +1437,8 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setPiDefaultModel: (model) => set({ piDefaultModel: model || PI_DEFAULT_MODEL }),
 
+  setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
+
   reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
 
   loadHistoricalSession: (
@@ -1176,7 +1451,11 @@ export const useSessionStore = create<SessionState>((set) => ({
     warnings?
   ) =>
     set((state) => {
-      const base = createEmptySession(cwd)
+      // Re-hydrating an evicted entry: start from the resident (lightweight)
+      // entry so draft / effort / thinking / permission mode survive the round
+      // trip. A genuinely fresh load starts from a blank session.
+      const prior = state.sessions[routingId]
+      const base = prior?.evicted ? prior : createEmptySession(cwd)
       // Per-session model memory: restore the persisted model when present, so
       // reopening a session brings back the model you last used in it. The engine
       // is restored too (an opencode session reopens as opencode). When NO model
@@ -1194,20 +1473,35 @@ export const useSessionStore = create<SessionState>((set) => ({
         engineMeta(persistedEngineId).defaultModelValue(
           perEngineDefaultModel(persistedEngineId, state.opencodeDefaultModel, state.piDefaultModel)
         )
+      // Engine identity for the LOCAL historical-load path (gpt#3): the restored
+      // engine must also drive status.engineId + capabilities, otherwise a pi /
+      // opencode session reopens with Claude defaults and fork/spawn resolution
+      // uses Claude semantics. (The remote-snapshot path seeds these from the
+      // snapshot's own status — untouched here.)
+      const modelInfo = state.availableModels.find(
+        (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
+      )
       return {
         sessions: {
           ...state.sessions,
           [routingId]: {
             ...base,
+            cwd,
             messages,
             isHistorical: true,
-            taskNotifications: taskNotifications || [],
-            subagentMessages: subagentMessages || {},
-            statusLine: statusLine ?? null,
-            warnings: warnings || [],
-            worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
+            evicted: false,
+            taskNotifications: taskNotifications ?? base.taskNotifications,
+            subagentMessages: subagentMessages ?? base.subagentMessages,
+            statusLine: statusLine ?? base.statusLine ?? null,
+            warnings: warnings ?? base.warnings,
+            worktreeInfo: state.worktreeInfoMap[routingId] ?? base.worktreeInfo ?? null,
             selectedEngineId: persistedEngineId,
-            selectedModel
+            selectedModel,
+            status: {
+              ...base.status,
+              engineId: persistedEngineId,
+              capabilities: engineMeta(persistedEngineId).seedCapabilities(selectedModel, modelInfo)
+            }
           }
         }
       }
@@ -1276,7 +1570,19 @@ export const useSessionStore = create<SessionState>((set) => ({
         newRoutingId,
         ...s.recentSessionIds.filter((id) => id !== newRoutingId)
       ].slice(0, s.settings.maxRecentSessions)
-      saveSessionConfig(s, { recentSessionIds })
+      // Engine identity for the fork (gpt#3): the branch inherits the source's
+      // engine, so its status.engineId/capabilities and the persisted
+      // sessionEngines entry must match — otherwise the fork spawns Claude with
+      // a pi/opencode model (InputBox.doSend reads selectedEngineId).
+      const forkEngineId = src.selectedEngineId
+      const sessionEngines = {
+        ...s.sessionEngines,
+        [newRoutingId]: {
+          engineId: forkEngineId,
+          model: engineMeta(forkEngineId).decodeModelValue(src.selectedModel)
+        }
+      }
+      saveSessionConfig(s, { recentSessionIds, sessionEngines })
       const baseSession = createEmptySession(src.cwd)
       return {
         sessions: {
@@ -1288,17 +1594,24 @@ export const useSessionStore = create<SessionState>((set) => ({
             // InputBox (gated on forkOrigin) overrides the resume target.
             isHistorical: true,
             forkOrigin: { sourceSessionId, anchorUuid },
-            // Inherit the source's model/permission/effort/thinking choices.
+            // Inherit the source's engine/model/permission/effort/thinking choices.
+            selectedEngineId: forkEngineId,
             selectedModel: src.selectedModel,
             permissionMode: src.permissionMode,
             effort: src.effort,
             thinkingMode: src.thinkingMode,
-            reasoningVariant: src.reasoningVariant
+            reasoningVariant: src.reasoningVariant,
+            status: {
+              ...baseSession.status,
+              engineId: src.status.engineId,
+              capabilities: src.status.capabilities
+            }
           }
         },
         activeSessionId: newRoutingId,
         activeView: { type: 'chat' } as ActiveView,
-        recentSessionIds
+        recentSessionIds,
+        sessionEngines
       }
     })
     return newRoutingId
@@ -1419,6 +1732,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       delete customTitles[sessionId]
       const worktreeInfoMap = { ...state.worktreeInfoMap }
       delete worktreeInfoMap[sessionId]
+      // The persisted engine/model row is keyed by routingId too — without this
+      // it survives every delete and accumulates forever (RN8).
+      const sessionEngines = { ...state.sessionEngines }
+      delete sessionEngines[sessionId]
       const sessions = { ...state.sessions }
       delete sessions[sessionId]
       // Drop the session from its directory group; drop the group itself if now empty
@@ -1435,7 +1752,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         pinnedSessionIds,
         hiddenSessionIds,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionEngines
       })
       return {
         recentSessionIds,
@@ -1443,6 +1761,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenSessionIds,
         customTitles,
         worktreeInfoMap,
+        sessionEngines,
         sessions,
         directories,
         activeSessionId
@@ -1480,10 +1799,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
       const customTitles = { ...state.customTitles }
       const worktreeInfoMap = { ...state.worktreeInfoMap }
+      // Persisted engine/model rows are keyed by routingId — purge them with the
+      // rest of the project's state so they can't accumulate forever (RN8).
+      const sessionEngines = { ...state.sessionEngines }
       const sessions = { ...state.sessions }
       for (const id of projectSessionIds) {
         delete customTitles[id]
         delete worktreeInfoMap[id]
+        delete sessionEngines[id]
         delete sessions[id]
       }
       const directories = state.directories.filter((g) => g.projectKey !== projectKey)
@@ -1497,7 +1820,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenSessionIds,
         hiddenProjectKeys,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionEngines
       })
       return {
         recentSessionIds,
@@ -1506,6 +1830,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenProjectKeys,
         customTitles,
         worktreeInfoMap,
+        sessionEngines,
         sessions,
         directories,
         activeSessionId
@@ -1520,26 +1845,39 @@ export const useSessionStore = create<SessionState>((set) => ({
 
       const idx = session.messages.findIndex((m) => m.id === message.id)
       const hasNonThinking = message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
-      const thinkingUpdate =
-        session.thinkingStartedAt && hasNonThinking
-          ? {
-              streamingThinking: '',
-              thinkingDurationMs: Date.now() - session.thinkingStartedAt,
-              thinkingStartedAt: null
-            }
-          : {}
+      const sealedDuration =
+        session.thinkingStartedAt && hasNonThinking ? Date.now() - session.thinkingStartedAt : null
 
-      let updatedMessages: ChatMessage[]
-      if (idx < 0) {
-        updatedMessages = [...session.messages, message]
-      } else {
-        const existing = session.messages[idx]
-        const merged = {
-          ...message,
-          content: mergeContentBlocks(existing.content, message.content)
-        }
-        updatedMessages = session.messages.map((m, i) => (i === idx ? merged : m))
+      let committed: ChatMessage =
+        idx < 0
+          ? message
+          : {
+              ...message,
+              content: mergeContentBlocks(session.messages[idx].content, message.content)
+            }
+
+      // Record the finished thinking span's duration on the block itself, so each
+      // thinking block renders its OWN "Thought for Xs" instead of all reading a
+      // single per-session scalar (Low). The span may seal here (all-in-one
+      // message) or earlier in appendStreamingText (streaming), in which case the
+      // duration was parked in pendingThinkingDurationMs and is consumed now.
+      const durationToStamp = sealedDuration ?? session.pendingThinkingDurationMs
+      let didStamp = false
+      if (durationToStamp != null) {
+        const content = committed.content.map((b) => {
+          if (b.type === 'thinking' && b.durationMs == null) {
+            didStamp = true
+            return { ...b, durationMs: durationToStamp }
+          }
+          return b
+        })
+        if (didStamp) committed = { ...committed, content }
       }
+
+      const updatedMessages =
+        idx < 0
+          ? [...session.messages, committed]
+          : session.messages.map((m, i) => (i === idx ? committed : m))
 
       return {
         sessions: {
@@ -1548,7 +1886,11 @@ export const useSessionStore = create<SessionState>((set) => ({
             ...session,
             messages: updatedMessages,
             streamingText: '',
-            ...thinkingUpdate
+            ...(sealedDuration != null
+              ? { streamingThinking: '', thinkingDurationMs: sealedDuration, thinkingStartedAt: null }
+              : {}),
+            // Keep the parked duration only if it wasn't attached to a block here.
+            pendingThinkingDurationMs: didStamp ? null : durationToStamp
           }
         }
       }
@@ -1616,11 +1958,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = sessions[routingId]
 
       if (session.thinkingStartedAt) {
+        const duration = Date.now() - session.thinkingStartedAt
         return {
-          sessions: updateSession(sessions, routingId, (s) => ({
-            streamingText: s.streamingText + text,
+          sessions: updateSession(sessions, routingId, () => ({
+            streamingText: session.streamingText + text,
             streamingThinking: '',
-            thinkingDurationMs: Date.now() - s.thinkingStartedAt!,
+            thinkingDurationMs: duration,
+            // Park the sealed span's duration so the addMessage that finalizes
+            // THIS thinking block stamps its own durationMs (per-block "Thought
+            // for Xs"), not a shared per-session scalar. thinkingStartedAt is
+            // nulled here, so without this the consuming addMessage has nothing
+            // to read.
+            pendingThinkingDurationMs: duration,
             thinkingStartedAt: null
           }))
         }
@@ -1803,7 +2152,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
-  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs) =>
+  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs, images) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -1816,6 +2165,15 @@ export const useSessionStore = create<SessionState>((set) => ({
             (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
           )
           if (hasToolUse) {
+            // Idempotent: a replayed onToolResult (reconnect catchup / history
+            // replay) must not append a second tool_result block for the same
+            // toolUseId. The renderer only shows the first, so the duplicates
+            // were invisible while still growing the message forever (RN10).
+            // First result wins — no caller replaces an existing result.
+            const alreadyHasResult = msg.content.some(
+              (b) => b.type === 'tool_result' && b.toolUseId === toolUseId
+            )
+            if (alreadyHasResult) return state
             messages[i] = {
               ...msg,
               content: [
@@ -1825,7 +2183,8 @@ export const useSessionStore = create<SessionState>((set) => ({
                   toolUseId,
                   toolResult: result,
                   isError,
-                  ...(fileDiffs ? { fileDiffs } : {})
+                  ...(fileDiffs ? { fileDiffs } : {}),
+                  ...(images ? { images } : {})
                 }
               ]
             }
@@ -1843,10 +2202,25 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ todos }))
     })),
 
+  setSentFiles: (routingId, sentFiles) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ sentFiles }))
+    })),
+
   updateTaskProgress: (routingId, progress) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
         taskProgressMap: { ...s.taskProgressMap, [progress.toolUseId]: progress }
+      }))
+    })),
+
+  setTaskStarted: (routingId, data) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        activeTasks: {
+          ...s.activeTasks,
+          [data.toolUseId]: { taskId: data.taskId, taskType: data.taskType }
+        }
       }))
     })),
 
@@ -1860,10 +2234,15 @@ export const useSessionStore = create<SessionState>((set) => ({
         const bashOutputs = notification.toolUseId
           ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.bashOutputs)
           : s.bashOutputs
+        // The task has reached a terminal state — it's no longer "active".
+        const activeTasks = notification.toolUseId
+          ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.activeTasks)
+          : s.activeTasks
         return {
           taskNotifications: [...s.taskNotifications, notification],
           stoppingTaskIds,
-          bashOutputs
+          bashOutputs,
+          activeTasks
         }
       })
     })),
@@ -1975,7 +2354,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     toolResultToolUseId,
     result,
     isError,
-    fileDiffs
+    fileDiffs,
+    images
   ) =>
     set((state) => {
       const session = state.sessions[routingId]
@@ -1999,7 +2379,8 @@ export const useSessionStore = create<SessionState>((set) => ({
                 toolUseId: toolResultToolUseId,
                 toolResult: result,
                 isError,
-                ...(fileDiffs ? { fileDiffs } : {})
+                ...(fileDiffs ? { fileDiffs } : {}),
+                ...(images ? { images } : {})
               }
             ]
           }
@@ -2166,21 +2547,46 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { settings }
     }),
 
-  // Apply session config from an external source — no save back to disk
+  // Apply session config from an external source — no save back to disk.
+  // Only overwrite a field when the payload GENUINELY carries it: the
+  // file-watcher `config:sessions-changed` payload is the on-disk sessions.json
+  // which strips sessionEngines (it lives in the DB), so `?? {}` would zero the
+  // receiving instance's engine/model map on every external sync (H15). Treat a
+  // missing key as "leave the current value intact".
   applyExternalSessionConfig: (config) =>
-    set(() => ({
-      recentSessionIds: config.recentSessions ?? [],
-      pinnedSessionIds: config.pinnedSessions ?? [],
-      customTitles: config.customTitles ?? {},
-      worktreeInfoMap: config.worktreeInfoMap ?? {},
-      hiddenSessionIds: config.hiddenSessions ?? [],
-      hiddenProjectKeys: config.hiddenProjects ?? [],
-      sessionEngines: config.sessionEngines ?? {}
+    set((state) => ({
+      recentSessionIds:
+        'recentSessions' in config ? (config.recentSessions ?? []) : state.recentSessionIds,
+      pinnedSessionIds:
+        'pinnedSessions' in config ? (config.pinnedSessions ?? []) : state.pinnedSessionIds,
+      customTitles: 'customTitles' in config ? (config.customTitles ?? {}) : state.customTitles,
+      worktreeInfoMap:
+        'worktreeInfoMap' in config ? (config.worktreeInfoMap ?? {}) : state.worktreeInfoMap,
+      hiddenSessionIds:
+        'hiddenSessions' in config ? (config.hiddenSessions ?? []) : state.hiddenSessionIds,
+      hiddenProjectKeys:
+        'hiddenProjects' in config ? (config.hiddenProjects ?? []) : state.hiddenProjectKeys,
+      sessionEngines:
+        'sessionEngines' in config ? (config.sessionEngines ?? {}) : state.sessionEngines
     })),
 
-  // Apply a full state snapshot from the remote server (initial sync)
-  applyRemoteSnapshot: (snapshot) =>
-    set(() => {
+  // Apply a full state snapshot from the remote server (initial sync, or a
+  // reconnect re-sync when `isResync` is true).
+  //
+  // First hydration (isResync falsy): the snapshot wins wholesale — there is no
+  // local state worth preserving yet.
+  //
+  // Re-sync (isResync true): a mobile client that backgrounded/returned may have
+  // navigated to a historical session (loadHistoricalSession) the desktop
+  // snapshot knows nothing about, or may simply be looking at a different
+  // session than the desktop's current `activeSessionId`. Unconditionally
+  // adopting the snapshot here routes the next prompt to the wrong session (or
+  // the wrong engine) — see the mobile-picker-bug investigation. So: keep the
+  // local `activeSessionId` when set, and merge session entries rather than
+  // replacing the map (snapshot entries still win where both sides know the
+  // session — only local-only entries are preserved).
+  applyRemoteSnapshot: (snapshot, isResync) =>
+    set((state) => {
       // Rebuild per-session state from the snapshot
       const sessions: Record<string, PerSessionState> = {}
       for (const [id, snap] of Object.entries(snapshot.sessions)) {
@@ -2193,16 +2599,27 @@ export const useSessionStore = create<SessionState>((set) => ({
           status: snap.status,
           pendingApprovals: snap.pendingApprovals,
           todos: snap.todos,
+          sentFiles: snap.sentFiles ?? [],
           taskNotifications: snap.taskNotifications,
+          activeTasks: snap.activeTasks ?? {},
           taskProgressMap: snap.taskProgressMap,
           subagentMessages: snap.subagentMessages,
           subagentStreamingText: snap.subagentStreamingText,
           subagentStreamingThinking: snap.subagentStreamingThinking,
-          permissionMode: snap.permissionMode as PermissionMode,
+          // Coerce a stale 'localAuto' from an older (pre-removal) remote server —
+          // that mode no longer exists on this client's PermissionMode union.
+          permissionMode: (snap.permissionMode === 'localAuto'
+            ? 'auto'
+            : snap.permissionMode) as PermissionMode,
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
           reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
-          statusLine: snap.statusLine
+          statusLine: snap.statusLine,
+          // H15 — hydrate the live engine identity so a remote first-send steers
+          // the running session instead of respawning it as Claude (InputBox.doSend).
+          sdkActive: snap.sdkActive ?? EMPTY_SESSION_STATE.sdkActive,
+          selectedEngineId: snap.selectedEngineId ?? EMPTY_SESSION_STATE.selectedEngineId,
+          selectedModel: snap.selectedModel ?? EMPTY_SESSION_STATE.selectedModel
         }
       }
 
@@ -2210,15 +2627,38 @@ export const useSessionStore = create<SessionState>((set) => ({
       const settings = { ...DEFAULT_SETTINGS, ...(snapshot.settings as Partial<AppSettings>) }
       applyTheme(settings.theme)
 
+      // Merge the sessions map: snapshot entries win where both sides know the
+      // session, but local-only entries (mobile-hydrated historical sessions
+      // the snapshot never saw) survive.
+      const mergedSessions: Record<string, PerSessionState> = isResync
+        ? { ...state.sessions, ...sessions }
+        : sessions
+
+      let activeSessionId = snapshot.activeSessionId
+      if (isResync) {
+        // Preserve the local active session unless there isn't one — and only
+        // if it still resolves to a real entry post-merge. A local
+        // `activeSessionId` pointing at nothing (shouldn't happen, but a stale
+        // pointer is worse than falling back) drops to the snapshot's choice
+        // rather than rendering a broken view (EMPTY_SESSION_STATE).
+        const preserved = state.activeSessionId ?? snapshot.activeSessionId
+        activeSessionId = preserved && mergedSessions[preserved] ? preserved : snapshot.activeSessionId
+      }
+
       return {
-        sessions,
+        sessions: mergedSessions,
         directories: snapshot.directories,
-        activeSessionId: snapshot.activeSessionId,
+        activeSessionId,
         settings,
         recentSessionIds: snapshot.recentSessionIds ?? [],
         pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
         customTitles: snapshot.customTitles ?? {},
-        worktreeInfoMap: snapshot.worktreeInfoMap ?? {}
+        worktreeInfoMap: snapshot.worktreeInfoMap ?? {},
+        // H15 — hydrate the engine/model map + hidden lists so a subsequent save
+        // from this client round-trips the real state, not an empty map.
+        sessionEngines: snapshot.sessionEngines ?? {},
+        hiddenSessionIds: snapshot.hiddenSessions ?? [],
+        hiddenProjectKeys: snapshot.hiddenProjects ?? []
       }
     }),
 
@@ -2228,6 +2668,28 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ permissionMode: mode })) }
     }),
+
+  // Centralizes the apply semantics for a permission-mode change, shared by
+  // the desktop Shift+Tab handler and the mobile mode picker (any client that
+  // lets the user pick a mode).
+  //
+  // Don't optimistically update for 'auto' on a LIVE session — the main
+  // process may reject it and broadcast a fallback to 'default' instead.
+  // Pre-spawn there is no main-side session to reject/broadcast anything
+  // (manager.get() is a no-op), so update the store directly; the mode still
+  // rides into spawn via createSession, and init-sync corrects it if the
+  // account can't use auto.
+  changePermissionMode: (routingId, next) => {
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
+    const previous = session?.permissionMode ?? 'default'
+    if (next !== 'auto' || !session?.sdkActive) state.setPermissionMode(next, routingId)
+    window.api.setPermissionMode(routingId, next).catch(() => {
+      // SDK rejected the mode change — revert to previous mode (the main
+      // process already sent the reverted mode via session:permission-mode).
+      state.setPermissionMode(previous, routingId)
+    })
+  },
 
   setEffort: (effort, routingId) =>
     set((state) => {
@@ -2315,7 +2777,9 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = state.sessions[routingId]
       if (!session || !session.queuedText) return state
       const userMsg = {
-        id: `steer-${Date.now()}`,
+        // crypto.randomUUID (not Date.now) so two steers within the same ms can't
+        // collide into a duplicate React key (Low).
+        id: `steer-${crypto.randomUUID()}`,
         role: 'user' as const,
         content: [{ type: 'text' as const, text: session.queuedText }],
         timestamp: Date.now()
@@ -2337,6 +2801,38 @@ export const useSessionStore = create<SessionState>((set) => ({
       const id = state.activeSessionId
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
+    }),
+
+  // Draft attachments are keyed by routingId (captured at drop time) rather than
+  // read from activeSessionId, so an async file read that completes after the
+  // user switches sessions lands on the session it was dropped into — never the
+  // now-active one (gpt#14). Unknown ids are a no-op.
+  addDraftAttachments: (routingId, attachments) =>
+    set((state) => {
+      if (!state.sessions[routingId] || attachments.length === 0) return {}
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          draftAttachments: [...s.draftAttachments, ...attachments]
+        }))
+      }
+    }),
+
+  removeDraftAttachment: (routingId, id) =>
+    set((state) => {
+      if (!state.sessions[routingId]) return {}
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          draftAttachments: s.draftAttachments.filter((a) => a.id !== id)
+        }))
+      }
+    }),
+
+  setDraftAttachments: (routingId, attachments) =>
+    set((state) => {
+      if (!state.sessions[routingId]) return {}
+      return {
+        sessions: updateSession(state.sessions, routingId, () => ({ draftAttachments: attachments }))
+      }
     }),
 
   setSelectedModel: (model) =>
@@ -2524,7 +3020,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   rekeySession: (oldId, newId) => {
     // Record the mapping so events arriving with the old routingId can be resolved
-    rekeyMap.set(oldId, newId)
+    setCapped(rekeyMap, oldId, newId, REKEY_MAP_MAX)
     set((state) => {
       if (oldId === newId) return state
       const session = state.sessions[oldId]
@@ -2637,7 +3133,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   setGitStatus: (routingId, status) =>
     set((state) => {
       const session = state.sessions[routingId]
-      if (session?.cwd) gitStatusCache.set(session.cwd, status)
+      if (session?.cwd) setCapped(gitStatusCache, session.cwd, status, GIT_STATUS_CACHE_MAX)
       return { sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status })) }
     }),
 
@@ -3044,7 +3540,9 @@ export function getRemoteStateSnapshot(): {
       status: SessionStatus
       pendingApprovals: PendingApproval[]
       todos: TodoItem[]
+      sentFiles: SentFile[]
       taskNotifications: TaskNotification[]
+      activeTasks: Record<string, { taskId: string; taskType: string }>
       taskProgressMap: Record<string, TaskProgress>
       subagentMessages: Record<string, ChatMessage[]>
       subagentStreamingText: Record<string, string>
@@ -3057,6 +3555,9 @@ export function getRemoteStateSnapshot(): {
       slashCommands: SlashCommandInfo[]
       customCommands: SlashCommandInfo[]
       sdkSkillNames: string[]
+      sdkActive: boolean
+      selectedEngineId: EngineId
+      selectedModel: string
     }
   >
   directories: DirectoryGroup[]
@@ -3066,6 +3567,9 @@ export function getRemoteStateSnapshot(): {
   pinnedSessionIds: string[]
   customTitles: Record<string, string>
   worktreeInfoMap: Record<string, WorktreeInfo>
+  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  hiddenSessions: string[]
+  hiddenProjects: string[]
 } {
   const state = useSessionStore.getState()
   const sessions: Record<string, unknown> = {}
@@ -3080,7 +3584,9 @@ export function getRemoteStateSnapshot(): {
       status: s.status,
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
+      sentFiles: s.sentFiles,
       taskNotifications: s.taskNotifications,
+      activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,
       subagentMessages: s.subagentMessages,
       subagentStreamingText: s.subagentStreamingText,
@@ -3092,7 +3598,12 @@ export function getRemoteStateSnapshot(): {
       statusLine: s.statusLine,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,
-      sdkSkillNames: state.sdkSkillNames
+      sdkSkillNames: state.sdkSkillNames,
+      // H15 — a remote client needs the live engine identity so its first send
+      // steers the running session instead of respawning it as Claude.
+      sdkActive: s.sdkActive,
+      selectedEngineId: s.selectedEngineId,
+      selectedModel: s.selectedModel
     }
   }
 
@@ -3104,6 +3615,12 @@ export function getRemoteStateSnapshot(): {
     recentSessionIds: state.recentSessionIds,
     pinnedSessionIds: state.pinnedSessionIds,
     customTitles: state.customTitles,
-    worktreeInfoMap: state.worktreeInfoMap
+    worktreeInfoMap: state.worktreeInfoMap,
+    // H15 — carry the per-session engine/model map + hidden lists so a remote
+    // client's save round-trips the real state instead of an empty map that
+    // would wipe every session's engine mapping on the desktop.
+    sessionEngines: state.sessionEngines,
+    hiddenSessions: state.hiddenSessionIds,
+    hiddenProjects: state.hiddenProjectKeys
   }
 }

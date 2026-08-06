@@ -2,7 +2,18 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { GitCommitBoxView } from './View'
 
-export function GitCommitBox(): React.JSX.Element {
+interface Props {
+  /**
+   * Select the first remaining file after a commit (keeps the desktop diff
+   * pane populated). Mobile passes false: there the commit box only exists on
+   * the list screen, and a post-commit selection would yank the user into the
+   * diff of a leftover file they never tapped (selection IS navigation on
+   * mobile — see MobileGitView).
+   */
+  autoSelectNext?: boolean
+}
+
+export function GitCommitBox({ autoSelectNext = true }: Props = {}): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const gitCommitMessage = useActiveSession((s) => s.gitCommitMessage)
   const gitStatus = useActiveSession((s) => s.gitStatus)
@@ -167,7 +178,7 @@ export function GitCommitBox(): React.JSX.Element {
       setGitCommitMessage(activeSessionId, '')
       showToast(`Committed: ${hash.slice(0, 7)}`)
       await refreshStatus()
-      selectNextGitFile(activeSessionId)
+      if (autoSelectNext) selectNextGitFile(activeSessionId)
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Commit failed', 'error')
     } finally {
@@ -182,6 +193,7 @@ export function GitCommitBox(): React.JSX.Element {
     setGitCommitMessage,
     refreshStatus,
     showToast,
+    autoSelectNext,
     selectNextGitFile
   ])
 
@@ -209,7 +221,7 @@ export function GitCommitBox(): React.JSX.Element {
         }
       }
       await refreshStatus()
-      selectNextGitFile(activeSessionId)
+      if (autoSelectNext) selectNextGitFile(activeSessionId)
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Commit failed', 'error')
     } finally {
@@ -225,6 +237,7 @@ export function GitCommitBox(): React.JSX.Element {
     setGitCommitMessage,
     refreshStatus,
     showToast,
+    autoSelectNext,
     selectNextGitFile
   ])
 

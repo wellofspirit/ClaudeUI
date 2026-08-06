@@ -13,16 +13,20 @@ describe('buildEnv proxy overlay', () => {
     setProxyAllSubprocesses(false)
   })
 
-  it('no proxy set → HTTP_PROXY/HTTPS_PROXY/ALL_PROXY stripped from overlay', () => {
+  it('no in-app proxy → inherited HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are PRESERVED (M-CL4)', () => {
+    // A user behind an env-configured corporate proxy must keep connectivity —
+    // cli.js honors these for its own API traffic. Deleting them (the old
+    // behavior) left such users with a dead cli.js. Only our own marker var is
+    // cleared when no in-app proxy is configured.
     const env = buildEnv({
-      HTTP_PROXY: 'http://should-not-leak',
-      HTTPS_PROXY: 'http://should-not-leak',
-      ALL_PROXY: 'http://should-not-leak',
+      HTTP_PROXY: 'http://corp-proxy:8080',
+      HTTPS_PROXY: 'http://corp-proxy:8080',
+      ALL_PROXY: 'http://corp-proxy:8080',
       CLAUDEUI_PROXY_SUBPROCESSES: '1'
     })
-    expect(env.HTTP_PROXY).toBeUndefined()
-    expect(env.HTTPS_PROXY).toBeUndefined()
-    expect(env.ALL_PROXY).toBeUndefined()
+    expect(env.HTTP_PROXY).toBe('http://corp-proxy:8080')
+    expect(env.HTTPS_PROXY).toBe('http://corp-proxy:8080')
+    expect(env.ALL_PROXY).toBe('http://corp-proxy:8080')
     expect(env.CLAUDEUI_PROXY_SUBPROCESSES).toBeUndefined()
   })
 

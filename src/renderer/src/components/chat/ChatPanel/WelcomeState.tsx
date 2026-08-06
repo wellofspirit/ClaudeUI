@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { DirectoryBrowserInput } from '../../shared/DirectoryBrowserInput'
 
 const WELCOME_PHRASES = [
   "Let's build",
@@ -70,6 +71,7 @@ export function WelcomeState(): React.JSX.Element {
   const setWorktreeInfo = useSessionStore((s) => s.setWorktreeInfo)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [browseMode, setBrowseMode] = useState(false)
   const [worktreeEnabled, setWorktreeEnabled] = useState(false)
   const [worktreeName, setWorktreeName] = useState(() => generateRandomName())
   const [isCreatingWorktree, setIsCreatingWorktree] = useState(false)
@@ -102,13 +104,26 @@ export function WelcomeState(): React.JSX.Element {
     [worktreeEnabled, worktreeName, createNewSession, setWorktreeInfo]
   )
 
-  const handleSelectDir = (dirCwd: string): void => {
+  const closeDropdown = (): void => {
     setDropdownOpen(false)
+    setBrowseMode(false)
+  }
+
+  const handleSelectDir = (dirCwd: string): void => {
+    closeDropdown()
     startSession(dirCwd)
   }
 
+  // The web client has no native dialog — pickFolder() resolves to null there,
+  // so it browses the host's filesystem through file:list-dir instead.
+  const isWeb = window.api.platform === 'web'
+
   const handleBrowse = async (): Promise<void> => {
-    setDropdownOpen(false)
+    if (isWeb) {
+      setBrowseMode(true)
+      return
+    }
+    closeDropdown()
     const folder = await window.api.pickFolder()
     if (folder) startSession(folder)
   }
@@ -159,7 +174,7 @@ export function WelcomeState(): React.JSX.Element {
         <div className="relative">
           <button
             data-testid="WelcomeState.selectDirectory"
-            onClick={() => setDropdownOpen(!dropdownOpen)}
+            onClick={() => (dropdownOpen ? closeDropdown() : setDropdownOpen(true))}
             className="flex items-center gap-1 text-[14px] text-accent hover:text-accent/80 transition-colors cursor-default"
           >
             <span>Select a project directory</span>
@@ -179,11 +194,13 @@ export function WelcomeState(): React.JSX.Element {
 
           {dropdownOpen && (
             <>
-              <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
+              <div className="fixed inset-0 z-10" onClick={closeDropdown} />
               <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-72 max-h-64 overflow-y-auto rounded-lg bg-bg-tertiary border border-border shadow-lg z-20">
                 {directories.map((group) => (
                   <button
                     key={group.projectKey || group.cwd}
+                    data-testid="WelcomeState.directory"
+                    data-id={group.cwd}
                     onClick={() => handleSelectDir(group.cwd)}
                     className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
                   >
@@ -207,25 +224,35 @@ export function WelcomeState(): React.JSX.Element {
                   </button>
                 ))}
                 {directories.length > 0 && <div className="border-t border-border" />}
-                <button
-                  onClick={handleBrowse}
-                  className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    className="shrink-0 text-text-muted"
+                {browseMode ? (
+                  <DirectoryBrowserInput
+                    listDir={window.api.listDir}
+                    onConfirm={handleSelectDir}
+                    onCancel={() => setBrowseMode(false)}
+                    autoFocus
+                  />
+                ) : (
+                  <button
+                    data-testid="WelcomeState.browse"
+                    onClick={handleBrowse}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
                   >
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="M21 21l-4.35-4.35" />
-                  </svg>
-                  <span>Browse...</span>
-                </button>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      className="shrink-0 text-text-muted"
+                    >
+                      <circle cx="11" cy="11" r="8" />
+                      <path d="M21 21l-4.35-4.35" />
+                    </svg>
+                    <span>{isWeb ? 'Browse path...' : 'Browse...'}</span>
+                  </button>
+                )}
               </div>
             </>
           )}

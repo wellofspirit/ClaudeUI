@@ -2,6 +2,24 @@ import { useEffect } from 'react'
 import { useAutomationStore } from '../stores/automation-store'
 
 /**
+ * True when the selected view should receive this automation's LIVE stream —
+ * i.e. the automation is selected AND either no specific run is selected or the
+ * selected run is the currently-running one. Prevents a new run's streamed text
+ * from leaking into a different (historical) run being viewed (M-RN1). The
+ * run-message/stream IPC carries no runId (main-process, out of scope), so we
+ * derive the running run from the store's own run list.
+ */
+function viewingLiveStream(
+  store: ReturnType<typeof useAutomationStore.getState>,
+  automationId: string
+): boolean {
+  if (automationId !== store.selectedAutomationId) return false
+  const runningRunId = store.runs[automationId]?.find((r) => r.status === 'running')?.id
+  if (runningRunId && store.selectedRunId && store.selectedRunId !== runningRunId) return false
+  return true
+}
+
+/**
  * Registers IPC event listeners for automation run updates and automation changes.
  * Call once from the root layout (SessionView).
  */
@@ -42,15 +60,16 @@ export function useAutomationEvents(): void {
       window.api.onAutomationRunMessage(({ automationId, message }) => {
         const store = useAutomationStore.getState()
         store.appendRunMessage(automationId, message)
-        // Clear streaming text when a final assistant message arrives
-        if (automationId === store.selectedAutomationId && message.role === 'assistant') {
+        // Clear streaming text when a final assistant message arrives — but only
+        // if this stream belongs to the run being viewed (M-RN1).
+        if (message.role === 'assistant' && viewingLiveStream(store, automationId)) {
           store.clearStreamingText()
         }
       }),
 
       window.api.onAutomationStreamEvent(({ automationId, type, text }) => {
         const store = useAutomationStore.getState()
-        if (automationId === store.selectedAutomationId && type === 'text') {
+        if (type === 'text' && viewingLiveStream(store, automationId)) {
           store.appendStreamingText(text)
         }
       })

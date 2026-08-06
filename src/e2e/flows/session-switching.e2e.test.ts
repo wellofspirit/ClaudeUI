@@ -58,12 +58,18 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
         return
       }
       store().setStatus(effective, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effective)
+      // Do NOT clear pending approvals on idle — background subagents outlive
+      // the parent turn's result. See useClaudeEvents.ts's onStatus.
     }
   )
   onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
     (routingId, approval) => {
       store().addPendingApproval(routingId, approval)
+    }
+  )
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
     }
   )
   onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(

@@ -1,34 +1,15 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ClaudePermissions, PermissionScope, DirEntry } from '../../../../shared/types'
 import { FileMentionMenu } from '../chat/FileMentionMenu'
+import {
+  RULE_TEMPLATES,
+  SCOPE_DESCRIPTIONS,
+  SCOPE_LABELS,
+  useDirSuggestions,
+  type RuleCategory
+} from './shared'
 
-export type RuleCategory = 'allow' | 'deny' | 'ask'
-
-const SCOPE_LABELS: Record<PermissionScope, string> = {
-  local: 'Local',
-  project: 'Project',
-  user: 'Global'
-}
-
-const SCOPE_DESCRIPTIONS: Record<PermissionScope, string> = {
-  local: '.claude/settings.local.json (gitignored)',
-  project: '.claude/settings.json (committed)',
-  user: '~/.claude/settings.json (user-wide)'
-}
-
-// Common rule templates for the add helper
-const RULE_TEMPLATES = [
-  { label: 'Bash command', template: 'Bash(command:*)' },
-  { label: 'Edit files', template: 'Edit' },
-  { label: 'Edit in path', template: 'Edit(src/**)' },
-  { label: 'Read files', template: 'Read' },
-  { label: 'Write files', template: 'Write' },
-  { label: 'Glob', template: 'Glob' },
-  { label: 'WebFetch domain', template: 'WebFetch(domain:example.com)' },
-  { label: 'WebSearch', template: 'WebSearch' },
-  { label: 'MCP server', template: 'mcp__server__*' },
-  { label: 'Agent (subagent)', template: 'Agent' }
-]
+export type { RuleCategory }
 
 export interface PermissionsDialogViewProps {
   loading: boolean
@@ -38,6 +19,8 @@ export interface PermissionsDialogViewProps {
   perms: ClaudePermissions
   dirty: Record<PermissionScope, boolean>
   hasDirty: boolean
+  /** ~/.claude.json trust flag for the current cwd; null = unknown/not probed. */
+  workspaceTrusted: boolean | null
   onListDir: (path: string) => Promise<{ entries: DirEntry[]; isRoot: boolean }>
   onChangeTab: (scope: PermissionScope) => Promise<void>
   onUpdateRule: (category: RuleCategory, index: number, value: string) => void
@@ -158,7 +141,6 @@ function AddRuleInput({
   const wrapperRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const [dirEntries, setDirEntries] = useState<DirEntry[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
 
   useEffect(() => {
@@ -171,88 +153,38 @@ function AddRuleInput({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  const { dirPortion, query } = useMemo(() => {
-    if (!dirAutocomplete || !value) return { dirPortion: '', query: '' }
-    const normalized = value.replace(/\\/g, '/')
-    const lastSlash = normalized.lastIndexOf('/')
-    if (lastSlash < 0) return { dirPortion: '', query: normalized }
-    return {
-      dirPortion: value.slice(0, lastSlash) || '/',
-      query: value.slice(lastSlash + 1)
-    }
-  }, [dirAutocomplete, value])
+  const {
+    entries: filteredEntries,
+    dirPortion,
+    navigate,
+    confirmPath
+  } = useDirSuggestions(value, onListDir, !!dirAutocomplete)
 
-  const isAbsolutePath = /^(\/|[A-Za-z]:)/.test(value)
-
-  const [dirIsRoot, setDirIsRoot] = useState(false)
+  // A new listing means a new highlight — dirPortion is exactly what the fetch
+  // is keyed on, so this reproduces the pre-extraction reset.
   useEffect(() => {
-    if (!dirAutocomplete || !isAbsolutePath || !dirPortion) {
-      setDirEntries([])
-      setDirIsRoot(false)
-      return
-    }
-    const listPath = /^[A-Za-z]:$/.test(dirPortion) ? dirPortion + '\\' : dirPortion
-    onListDir(listPath)
-      .then(({ entries, isRoot }) => {
-        setDirEntries(entries.filter((e) => e.isDirectory))
-        setDirIsRoot(isRoot)
-        setSelectedIndex(0)
-      })
-      .catch(() => {
-        setDirEntries([])
-        setDirIsRoot(false)
-      })
-  }, [dirAutocomplete, dirPortion, isAbsolutePath, onListDir])
-
-  const filteredEntries = useMemo(() => {
-    if (!dirAutocomplete || !isAbsolutePath || dirEntries.length === 0) return []
-    const items: DirEntry[] = dirIsRoot
-      ? dirEntries
-      : [{ name: '..', isDirectory: true }, ...dirEntries]
-    if (!query) return items
-    const q = query.toLowerCase()
-    return items.filter((e) => e.name.toLowerCase().includes(q))
-  }, [dirAutocomplete, isAbsolutePath, dirEntries, dirIsRoot, query])
+    setSelectedIndex(0)
+  }, [dirPortion])
 
   const menuOpen = filteredEntries.length > 0
 
   const handleDirNavigate = useCallback(
     (entry: DirEntry) => {
-      const sep = value.includes('\\') ? '\\' : '/'
-      let newValue: string
-      if (entry.name === '..') {
-        const normalized = dirPortion.replace(/\\/g, '/')
-        const lastSlash = normalized.lastIndexOf('/')
-        const parent =
-          lastSlash > 0 ? dirPortion.slice(0, lastSlash) : dirPortion.slice(0, lastSlash + 1)
-        newValue = parent + sep
-      } else {
-        newValue = dirPortion + sep + entry.name + sep
-      }
-      newValue = newValue.replace(/[/\\]{2,}/g, sep)
-      setValue(newValue)
+      setValue(navigate(entry))
       setSelectedIndex(0)
       requestAnimationFrame(() => inputRef.current?.focus())
     },
-    [value, dirPortion]
+    [navigate]
   )
 
   const handleDirConfirm = useCallback(
     (entry: DirEntry) => {
-      if (entry.name === '..') {
-        const trimmed = dirPortion.replace(/[/\\]+$/, '')
-        if (trimmed) {
-          onAdd(trimmed)
-          setValue('')
-        }
-      } else {
-        const sep = value.includes('\\') ? '\\' : '/'
-        const fullPath = (dirPortion + sep + entry.name).replace(/[/\\]{2,}/g, sep)
-        onAdd(fullPath)
-        setValue('')
-      }
+      const fullPath = confirmPath(entry)
+      if (!fullPath) return
+      onAdd(fullPath)
+      setValue('')
     },
-    [value, dirPortion, onAdd]
+    [confirmPath, onAdd]
   )
 
   const commit = (): void => {
@@ -472,6 +404,7 @@ export function PermissionsDialogView({
   perms,
   dirty,
   hasDirty,
+  workspaceTrusted,
   onListDir,
   onChangeTab,
   onUpdateRule,
@@ -483,6 +416,10 @@ export function PermissionsDialogView({
   onSaveAll,
   onClose
 }: PermissionsDialogViewProps): React.JSX.Element {
+  // Untrusted workspace: cli.js drops project/local ALLOW rules on the floor
+  // (silently — the warning is suppressed non-interactively). Only worth saying
+  // on the tabs those rules live in.
+  const showTrustWarning = workspaceTrusted === false && activeTab !== 'user'
   return (
     <div
       data-testid="PermissionsDialog"
@@ -562,6 +499,37 @@ export function PermissionsDialogView({
             {SCOPE_DESCRIPTIONS[activeTab]}
           </span>
         </div>
+
+        {/* Untrusted-workspace warning */}
+        {showTrustWarning && (
+          <div
+            data-testid="PermissionsDialog.trustWarning"
+            className="shrink-0 flex items-start gap-2 px-5 py-2.5 border-b border-warning/30 bg-warning/10 text-[11px] leading-relaxed text-warning"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0 mt-[1px]"
+            >
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <path d="M12 9v4" />
+              <path d="M12 17h.01" />
+            </svg>
+            <span>
+              This workspace is not trusted, so Claude Code ignores every{' '}
+              <strong className="font-semibold">Allow</strong> rule from the Local and Project
+              scopes. Deny and Ask rules still apply, as do Global allows. To trust it, run{' '}
+              <code className="font-mono">claude</code> in this directory once and accept the trust
+              prompt.
+            </span>
+          </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">

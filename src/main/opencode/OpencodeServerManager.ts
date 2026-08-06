@@ -11,6 +11,7 @@ import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
 import type { CallerSessionLookup, DispatchAgentFn } from './opencode-hosted-tools'
 import type { OpencodeMcpEntry } from './claude-mcp-bridge'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
+import { killProcessTree } from '../services/process-tree'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
 
@@ -26,6 +27,13 @@ export interface ServerHandle extends ServerConnection {
   refCount: number
   process: ChildProcess
   mcpHost: McpHttpHost
+  /**
+   * Callbacks fired when THIS spawn goes away and attached sessions must drop
+   * their connection (see subscribeExit): an unexpected death, or a deliberate
+   * recycleAll(). NOT fired on release()/dispose(), which drop the handle (and
+   * clear this set) before killing — the exit handler is identity-gated.
+   */
+  exitListeners: Set<() => void>
 }
 
 /**
@@ -88,7 +96,7 @@ function locateBinary(): string {
 /** ~20 minutes — must exceed the dispatcher's 10-min DISPATCH_TIMEOUT_MS so a
  *  long-running Claude target never gets cut off by opencode's OWN per-server
  *  MCP callTool timeout (config default 5s — see
- *  src/shared/opencode-config-schema.1.17.14.json `McpRemoteConfig.timeout`,
+ *  src/shared/opencode-config-schema.1.18.9.json `McpRemoteConfig.timeout`,
  *  read by `requestTimeout()` in vendor/opencode-src/packages/opencode/src/mcp/index.ts:661-663).
  *  The dispatcher's own heartbeat (sendProgress) ALSO resets this — belt and
  *  suspenders, since opencode may not always ride a progressToken. */
@@ -227,9 +235,15 @@ function spawnServer(
     }, 15_000)
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      // Once the port is parsed the buffers are never read again (all reject
+      // paths gate on `!resolved`). Keep the listener attached so the pipe
+      // still drains — but stop appending, or `stdout` grows unbounded for the
+      // whole server lifetime as opencode keeps logging (a slow main-process
+      // leak). Same for stderr below.
+      if (resolved) return
       stdout += chunk.toString()
       const m = PORT_PATTERN.exec(stdout)
-      if (m && !resolved) {
+      if (m) {
         resolved = true
         clearTimeout(timeout)
         const port = parseInt(m[1], 10)
@@ -240,6 +254,9 @@ function spawnServer(
     child.stderr?.on('data', (chunk: Buffer) => {
       // Warnings (e.g. unset password) AND fatal startup errors land here. We
       // accumulate rather than ignore so the reject paths can surface the cause.
+      // After resolve, stderr is never read again — stop accumulating so it
+      // doesn't grow unbounded (see the stdout note above).
+      if (resolved) return
       stderr += chunk.toString()
     })
 
@@ -294,6 +311,14 @@ export class OpencodeServerManager {
    * instead of each launching a server (the race FIX 1 closes).
    */
   private pending = new Map<string, Promise<ServerHandle>>()
+  /**
+   * Set once dispose() runs. A spawn already in flight when dispose() is called
+   * would otherwise re-insert its resolved handle into `handles` AFTER dispose()
+   * cleared the map — an orphaned `opencode.exe` surviving app quit (there is no
+   * Windows job object reaping it). The spawn checks this flag right before the
+   * insert and self-terminates instead.
+   */
+  private disposed = false
   private binary: string | null = null
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string
@@ -401,8 +426,19 @@ export class OpencodeServerManager {
         authHeader,
         refCount: 0,
         process: child,
-        mcpHost
+        mcpHost,
+        exitListeners: new Set()
       }
+
+      // dispose() ran while this spawn was in flight: do NOT register the handle
+      // (it would leak past app quit — see `disposed`). Reap what we just spawned
+      // and reject so the pending entry is cleared like any other spawn failure.
+      if (this.disposed) {
+        this.killProcess(child)
+        await mcpHost.close().catch(() => {})
+        throw new Error('OpencodeServerManager disposed during spawn')
+      }
+
       this.handles.set(key, handle)
 
       // If the server dies unexpectedly (crash, external kill), drop the handle
@@ -412,6 +448,20 @@ export class OpencodeServerManager {
         if (this.handles.get(key) === handle) {
           this.handles.delete(key)
           mcpHost.close().catch(() => {})
+          // Reaching this identity gate means the death was UNEXPECTED: every
+          // deliberate kill path (release() at refCount 0, dispose()) removes
+          // the handle from the map first. Fan out so each attached session can
+          // drop its now-dangling connection instead of holding a green dot on
+          // a dead server. Drain first — a listener must not see itself again.
+          const listeners = [...handle.exitListeners]
+          handle.exitListeners.clear()
+          for (const cb of listeners) {
+            try {
+              cb()
+            } catch {
+              // One bad subscriber must never starve the others.
+            }
+          }
         }
       })
 
@@ -457,10 +507,94 @@ export class OpencodeServerManager {
     const key = resolvePath(cwd)
     const handle = this.handles.get(key)
     if (!handle) return
+    this.releaseHandle(key, handle)
+  }
 
+  /**
+   * Release a ref ONLY if the stored handle is still the very spawn `conn` came
+   * from. `password` is fresh random bytes per spawn, so baseUrl+password is a
+   * unique spawn identity.
+   *
+   * This is the safe release for a connection-loss path: a plain release(cwd)
+   * looks the cwd up by key alone, so if our server died and another session
+   * has since acquired a NEW one for the same cwd, it would decrement the new
+   * handle's refcount and can kill a server other sessions are still using.
+   * No-op when the handle is absent (already dropped on death) or mismatched.
+   */
+  releaseIfCurrent(cwd: string, conn: ServerConnection): void {
+    const key = resolvePath(cwd)
+    const handle = this.handles.get(key)
+    if (!handle) return
+    if (handle.baseUrl !== conn.baseUrl || handle.password !== conn.password) return
+    this.releaseHandle(key, handle)
+  }
+
+  private releaseHandle(key: string, handle: ServerHandle): void {
     handle.refCount--
     if (handle.refCount <= 0) {
+      // Drop the handle BEFORE killing: the child's 'exit' handler is gated on
+      // handle identity, so this is what marks the death as deliberate and
+      // suppresses the subscribeExit fan-out.
       this.handles.delete(key)
+      handle.exitListeners.clear()
+      this.killProcess(handle.process)
+      handle.mcpHost.close().catch(() => {})
+    }
+  }
+
+  /**
+   * Subscribe to the loss of the server currently serving `cwd` — an unexpected
+   * death, or a deliberate recycleAll() (see that method).
+   * Returns an unsubscribe bound to that exact handle, so a stale unsubscribe
+   * held across a respawn can never remove a listener from the new handle.
+   * A no-op unsubscribe is returned when no server is live for `cwd` — callers
+   * subscribe right after acquire(), where one always is.
+   */
+  subscribeExit(cwd: string, cb: () => void): () => void {
+    const handle = this.handles.get(resolvePath(cwd))
+    if (!handle) return () => {}
+    handle.exitListeners.add(cb)
+    return () => {
+      handle.exitListeners.delete(cb)
+    }
+  }
+
+  /**
+   * Tear down every pooled server so the next acquire spawns a fresh one.
+   *
+   * Why this exists: opencode builds its provider map ONCE per process (an
+   * InstanceState in provider/provider.ts) and never watches auth.json. A
+   * credential added or removed through Settings is therefore invisible to
+   * every already-running server — prompts for that provider's models fail
+   * with ProviderModelNotFoundError (the provider is absent from runtime
+   * state; the "did you mean" suggestion comes from the static catalog) until
+   * an app restart. Recycling is the only reload signal we have.
+   *
+   * Deletion precedes the kill, exactly as releaseHandle does: a racing
+   * acquire() must spawn a FRESH server rather than get handed a dying handle,
+   * and the child's 'exit' handler is identity-gated on `handles.get(key)`, so
+   * removing the entry first suppresses its duplicate cleanup + fan-out. The
+   * exit listeners ARE fanned out here (unlike release/dispose) so attached
+   * sessions drop their connections now and lazily reconnect — their
+   * markDisconnected → releaseIfCurrent no-ops against the already-removed
+   * handle, so no refcount underflow and no second kill.
+   *
+   * In-flight spawns (`pending`) are deliberately left alone: a process that
+   * hasn't started yet builds its provider state lazily on its first request,
+   * which necessarily happens after the auth.json write that triggered us.
+   */
+  recycleAll(): void {
+    for (const [key, handle] of [...this.handles]) {
+      this.handles.delete(key)
+      const listeners = [...handle.exitListeners]
+      handle.exitListeners.clear()
+      for (const cb of listeners) {
+        try {
+          cb()
+        } catch {
+          // One bad subscriber must never starve the others.
+        }
+      }
       this.killProcess(handle.process)
       handle.mcpHost.close().catch(() => {})
     }
@@ -468,7 +602,12 @@ export class OpencodeServerManager {
 
   /** Kill all servers — call on app shutdown. */
   dispose(): void {
+    // Set BEFORE reaping so any spawn still resolving self-terminates at its
+    // pre-insert check instead of registering an orphan (see `disposed`).
+    this.disposed = true
     for (const handle of this.handles.values()) {
+      // App shutdown is deliberate — no session needs a disconnect fan-out.
+      handle.exitListeners.clear()
       this.killProcess(handle.process)
       handle.mcpHost.close().catch(() => {})
     }
@@ -477,15 +616,10 @@ export class OpencodeServerManager {
   }
 
   private killProcess(child: ChildProcess): void {
-    if (process.platform === 'win32' && child.pid != null) {
-      // SIGTERM on Windows only kills the parent; taskkill /T /F reaps the whole tree.
-      // We still call child.kill() so the in-process 'exit' event fires (needed for
-      // the handle-drop listener wired in resolveHandle).
-      child.kill()
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
-    } else {
-      child.kill('SIGTERM')
-    }
+    // M-OC4: taskkill MUST reap the tree before child.kill() runs — see
+    // killProcessTree. taskkill terminating the root still fires the 'exit'
+    // event the handle-drop listener (resolveHandle) relies on.
+    killProcessTree(child)
   }
 
   /** For testing: the count of live (resolved) servers. */

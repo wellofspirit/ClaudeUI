@@ -9,6 +9,7 @@
 
 import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
+import { buildSentFileUrl } from '../shared/sent-file-url'
 import type { RemoteConnection } from './connection'
 
 declare global {
@@ -16,6 +17,11 @@ declare global {
     /** Mockup-scoped auth token injected by the remote server into the served
      *  web-client HTML (only when the WS token in the URL is valid). */
     __MOCKUP_TOKEN__?: string
+    /** File-scoped auth token for `/sent-file` URLs, delivered over the
+     *  authenticated WS in `sync-full` (ADR-043 §5). Undefined on desktop —
+     *  SentFilesWidget uses its presence as the "remote download is available"
+     *  probe. */
+    __FILE_TOKEN__?: string
   }
 }
 
@@ -151,7 +157,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     listDirectories: () =>
       connection.invoke('session:list-directories') as ReturnType<ClaudeAPI['listDirectories']>,
     listOpencodeSessionsGlobal: () =>
-      connection.invoke('session:list-opencode') as ReturnType<ClaudeAPI['listOpencodeSessionsGlobal']>,
+      connection.invoke('session:list-opencode') as ReturnType<
+        ClaudeAPI['listOpencodeSessionsGlobal']
+      >,
     loadOpencodeHistory: (sessionId: string) =>
       connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
         ClaudeAPI['loadOpencodeHistory']
@@ -161,7 +169,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     listPiSessionsGlobal: () =>
       connection.invoke('session:list-pi') as ReturnType<ClaudeAPI['listPiSessionsGlobal']>,
     loadPiHistory: (sessionId: string) =>
-      connection.invoke('session:load-pi-history', sessionId) as ReturnType<ClaudeAPI['loadPiHistory']>,
+      connection.invoke('session:load-pi-history', sessionId) as ReturnType<
+        ClaudeAPI['loadPiHistory']
+      >,
 
     loadSessionHistory: (sessionId, projectKey) =>
       connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<
@@ -217,6 +227,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onToolResult: on('session:tool-result') as ClaudeAPI['onToolResult'],
     onTaskProgress: on('session:task-progress') as ClaudeAPI['onTaskProgress'],
     onTaskNotification: on('session:task-notification') as ClaudeAPI['onTaskNotification'],
+    onTaskStarted: on('session:task-started') as ClaudeAPI['onTaskStarted'],
     onSubagentStream: on('session:subagent-stream') as ClaudeAPI['onSubagentStream'],
     onSubagentMessage: on('session:subagent-message') as ClaudeAPI['onSubagentMessage'],
     onSubagentMessageBatch: on(
@@ -302,6 +313,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:get-opencode-providers') as ReturnType<
         ClaudeAPI['getOpencodeProviders']
       >,
+    setOpencodeProviderDisabled: (providerId, disabled) =>
+      connection.invoke(
+        'session:set-opencode-provider-disabled',
+        providerId,
+        disabled
+      ) as ReturnType<ClaudeAPI['setOpencodeProviderDisabled']>,
+    removeOpencodeProvider: (providerId, kind) =>
+      connection.invoke('session:remove-opencode-provider', providerId, kind) as ReturnType<
+        ClaudeAPI['removeOpencodeProvider']
+      >,
     getOpencodeProviderModels: (providerId) =>
       connection.invoke('session:get-opencode-provider-models', providerId) as ReturnType<
         ClaudeAPI['getOpencodeProviderModels']
@@ -379,8 +400,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     },
     listWorktrees: async () => [],
 
-    // App lifecycle
+    // App lifecycle — quit is desktop-only; no-ops that resolve on web.
     confirmQuit: async () => {}, // No-op on web
+    cancelQuit: async () => {}, // No-op on web
 
     // Git — route through remote server
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),
@@ -402,13 +424,30 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
     gitPull: (cwd) => unwrap('git:pull', cwd),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
-    gitStartWatching: async () => {}, // Git polling not supported in remote
-    gitStopWatching: async () => {},
+    // Live watching is real over remote: the server shares one poller per cwd
+    // with the desktop (gitWatchRegistry) and pushes git:status-update over the
+    // bridge. Without these the pill never rendered — gitStatus stayed null.
+    gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
+    gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
 
     // File ops
     listDir: (dirPath) =>
       connection.invoke('file:list-dir', dirPath) as ReturnType<ClaudeAPI['listDir']>,
     openInVSCode: async () => {}, // No-op on web
+
+    // Sent-file preview: no RPC — the src IS an authenticated same-origin URL
+    // to the server's /sent-file route, so the browser streams the bytes
+    // instead of tunnelling a data: URL through the WS.
+    getSentFilePreview: async (sessionKey, filePath) => {
+      const token = window.__FILE_TOKEN__
+      if (!token) return { error: 'Preview is not available yet' }
+      return {
+        src: buildSentFileUrl(window.location.origin, sessionKey, filePath, {
+          token,
+          inline: true
+        })
+      }
+    },
 
     // Mockup preview — HTML is read from the server's filesystem and rendered client-side
     readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
@@ -455,9 +494,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['setUsageAccountFilter']
       >,
     fetchDispatchedUsage: () =>
-      connection.invoke('usage:fetch-dispatched') as ReturnType<
-        ClaudeAPI['fetchDispatchedUsage']
-      >,
+      connection.invoke('usage:fetch-dispatched') as ReturnType<ClaudeAPI['fetchDispatchedUsage']>,
 
     // Native OAuth (ADR-014) — desktop-only (opens a local browser + loopback).
     // sign-in/submit/cancel are blocklisted on the remote dispatcher; only the
@@ -490,12 +527,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       'account:respawn-sessions'
     ) as ClaudeAPI['onAccountRespawnSessions'],
 
-    // Claude permissions (read-only)
+    // Claude permissions — full parity: the remote handler runs the same
+    // save + hot-reload fan-out as the desktop IPC.
     loadClaudePermissions: (scope, cwd?) =>
       connection.invoke('claude:load-permissions', scope, cwd) as ReturnType<
         ClaudeAPI['loadClaudePermissions']
       >,
-    saveClaudePermissions: async () => {}, // Read-only
+    saveClaudePermissions: (scope, permissions, cwd?) =>
+      connection.invoke('claude:save-permissions', scope, permissions, cwd) as Promise<void>,
+    isWorkspaceTrusted: (cwd) =>
+      connection.invoke('claude:workspace-trust', cwd) as Promise<boolean>,
 
     // Transcript retention window (cleanupPeriodDays)
     getCleanupPeriodDays: () =>
@@ -546,9 +587,38 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       tunnelState: null,
       tunnelError: null,
       connectedClients: 0,
-      clientIps: []
+      clientIps: [],
+      clientLogins: [],
+      tls: null,
+      lastError: null,
+      authMethods: []
     }),
     onRemoteStatus: () => () => {},
+    // Persisted remote-server config (Phase 1) is main-only IPC on the
+    // desktop — never registered on the remote dispatcher (see
+    // RemoteDispatcher.BLOCKED), so a remote/web client must never be able to
+    // read/rotate the credential or flip transport/autostart flags.
+    getRemoteConfig: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    setRemoteConfig: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    setRemotePassword: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    clearRemotePassword: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    detectTailscale: async () => {
+      throw new Error('Not available in remote mode')
+    },
+    // Mutating this machine's `tailscale serve` config is desktop-only
+    // (`remote:force-reserve` is in RemoteDispatcher.BLOCKED) — a remote client
+    // must never take over the transport it is talking through (ADR-042).
+    forceReserve: async () => {
+      throw new Error('Not available in remote mode')
+    },
 
     // Voice input — not available on web (audio hardware is on the server)
     voiceStartServer: async () => {},
@@ -592,7 +662,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveOpencodeAgent: async () => {},
     deleteOpencodeAgent: async () => {},
     setOpencodeAgentDisabled: async () => {},
-    generateOpencodeAgent: async () => { throw new Error('Not available in remote mode') },
+    generateOpencodeAgent: async () => {
+      throw new Error('Not available in remote mode')
+    },
 
     // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
     vendorAuthProbe: async () => ({}),

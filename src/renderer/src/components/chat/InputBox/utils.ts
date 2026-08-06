@@ -34,7 +34,11 @@ export function filterModelsForEngine<T extends ModelEntry>(
 export type SendAction =
   | { type: 'side-question'; question: string }
   | { type: 'clear-session' }
-  | { type: 'queue-prompt'; prompt: string }
+  | {
+      type: 'queue-prompt'
+      prompt: string
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    }
   | {
       type: 'send-prompt'
       prompt: string
@@ -93,7 +97,8 @@ export function resolveSendAction(ctx: SendContext): SendAction {
     // Engines without queue support can't accept a message mid-turn — retain the
     // input (no-op) rather than dropping or mis-sending it. Claude: queue → unchanged.
     if (!(ctx.queueEnabled ?? true)) return { type: 'noop' }
-    return { type: 'queue-prompt', prompt }
+    // Include attachments so an image queued mid-turn isn't dropped (Low).
+    return { type: 'queue-prompt', prompt, attachments }
   }
 
   return { type: 'send-prompt', prompt, attachments }

@@ -57,7 +57,13 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
         return
       }
       store().setStatus(effective, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effective)
+      // Do NOT clear pending approvals on idle — background subagents outlive
+      // the parent turn's result. See useClaudeEvents.ts's onStatus.
+    }
+  )
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
     }
   )
 
@@ -73,6 +79,15 @@ beforeEach(async () => {
   app.bridge.ipcMain.removeHandler?.('session:interrupt')
   app.bridge.ipcMain.handle('session:interrupt', async (_: unknown, routingId: string) => {
     interruptCalls.push(routingId)
+    // Mirror claude-session.ts's interrupt(): deny + dismiss every pending
+    // approval directly, rather than relying on the subsequent idle status
+    // to clear them (it no longer does — see the onStatus fix).
+    const session = useSessionStore.getState().sessions[routingId]
+    if (session) {
+      for (const approval of session.pendingApprovals) {
+        app.emit('session:approval-dismiss', routingId, { requestId: approval.requestId })
+      }
+    }
     return { ok: true, data: null }
   })
 
@@ -154,7 +169,7 @@ describe('E2E: interrupt', () => {
     expect(tracker.interrupts).toBe(1)
   })
 
-  it('interrupt during an approval request clears pending approvals once idle', async () => {
+  it('interrupt denies and dismisses pending approvals directly — not via the later idle status', async () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
     app.emit(
@@ -171,19 +186,46 @@ describe('E2E: interrupt', () => {
     })
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
 
-    // User interrupts
+    // User interrupts — main's interrupt() denies + dismisses the approval
+    // directly (see claude-session.ts). The card is gone before idle even
+    // arrives.
     await app.api.interruptSession(routingId)
     expect(interruptCalls).toEqual([routingId])
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
 
-    // Main emits idle → the status handler clears pending approvals
     app.emit(
       'session:status',
       routingId,
       makeSessionStatus({ state: 'idle', sessionId: routingId })
     )
 
-    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
     expect(useSessionStore.getState().sessions[routingId].status.state).toBe('idle')
+  })
+
+  it('idle alone does not clear an approval interrupt never touched (background subagent case)', () => {
+    const routingId = 'r1'
+    useSessionStore.getState().createNewSession(routingId, '/test')
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'running', sessionId: routingId })
+    )
+
+    useSessionStore.getState().addPendingApproval(routingId, {
+      requestId: 'req-orphan',
+      toolName: 'Bash',
+      input: {}
+    })
+
+    // Status goes idle with NO interrupt/dismiss in between — e.g. a
+    // background subagent's own approval outliving the parent turn's result.
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId })
+    )
+
+    expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
   })
 
   it('interrupt on inactive session does not crash', async () => {

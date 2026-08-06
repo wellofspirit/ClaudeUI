@@ -253,15 +253,40 @@ describe('discoverPiModels', () => {
     expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
   })
 
-  it('does NOT cache an empty catalog — a second (sequential) call re-spawns rather than sticking with a transient empty result', async () => {
+  it('negative-caches an empty catalog — a second call within the cooldown does NOT re-spawn a 15s probe', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: [] } })
     const { discoverPiModels } = await importFresh()
     await discoverPiModels()
     await discoverPiModels()
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+  })
+
+  it('invalidatePiModelCache() clears the negative cache so the next call re-spawns', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: [] } })
+    const { discoverPiModels, invalidatePiModelCache } = await importFresh()
+    await discoverPiModels()
+    invalidatePiModelCache() // e.g. a `pi /login` fired this
+    await discoverPiModels()
     expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
   })
 
-  it('invalidatePiModelCache() clears the cache so the next call re-spawns', async () => {
+  it('the empty negative cache EXPIRES — after the TTL a fresh probe runs (no permanent stick)', async () => {
+    vi.useFakeTimers()
+    try {
+      mockRequest.mockResolvedValue({ success: true, data: { models: [] } })
+      const { discoverPiModels } = await importFresh()
+      await discoverPiModels()
+      await discoverPiModels()
+      expect(MockPiRpcClient).toHaveBeenCalledTimes(1) // within the cooldown
+      vi.advanceTimersByTime(61_000) // past EMPTY_CACHE_TTL_MS (60s)
+      await discoverPiModels()
+      expect(MockPiRpcClient).toHaveBeenCalledTimes(2) // cooldown lapsed → re-probe
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('invalidatePiModelCache() clears the non-empty cache so the next call re-spawns', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     const { discoverPiModels, invalidatePiModelCache } = await importFresh()
     await discoverPiModels()

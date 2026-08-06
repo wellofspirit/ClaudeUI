@@ -25,7 +25,7 @@ vi.mock('../logger', () => ({
   }
 }))
 
-import { startSocksBridge, stopSocksBridge, getBridgePort } from '../socks-bridge'
+import { startSocksBridge, stopSocksBridge, getBridgePort, socks5Connect } from '../socks-bridge'
 
 // ---------------------------------------------------------------------------
 // Minimal SOCKS5 server for tests
@@ -46,7 +46,14 @@ interface FakeSocks5Server {
  *
  * Everything we need to observe is captured in `connects`.
  */
-async function startFakeSocks5Server(): Promise<FakeSocks5Server> {
+interface FakeSocks5Opts {
+  /** Split the greeting reply across two writes (exercises split-frame handling). */
+  fragmentGreeting?: boolean
+  /** Bytes to append to the CONNECT reply write (start-of-tunnel coalesced with the reply). */
+  connectReplyTrailer?: Buffer
+}
+
+async function startFakeSocks5Server(opts: FakeSocks5Opts = {}): Promise<FakeSocks5Server> {
   const connects: Array<{ host: string; port: number }> = []
 
   const server = net.createServer((socket) => {
@@ -55,7 +62,12 @@ async function startFakeSocks5Server(): Promise<FakeSocks5Server> {
     socket.on('data', (data: Buffer) => {
       if (phase === 'greeting') {
         // [VER, NMETHODS, METHODS...] — reply with [VER=5, METHOD=0 (no-auth)].
-        socket.write(Buffer.from([0x05, 0x00]))
+        if (opts.fragmentGreeting) {
+          socket.write(Buffer.from([0x05]))
+          setImmediate(() => socket.write(Buffer.from([0x00])))
+        } else {
+          socket.write(Buffer.from([0x05, 0x00]))
+        }
         phase = 'connect'
         return
       }
@@ -70,8 +82,10 @@ async function startFakeSocks5Server(): Promise<FakeSocks5Server> {
         const port = data.readUInt16BE(5 + hostLen)
         connects.push({ host, port })
 
-        // Reply success: [VER, REP=0, RSV, ATYP=1, BND.ADDR=0.0.0.0, BND.PORT=0]
-        socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+        // Reply success: [VER, REP=0, RSV, ATYP=1, BND.ADDR=0.0.0.0, BND.PORT=0].
+        // Optionally coalesce the first tunnel bytes into the same write.
+        const reply = Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        socket.write(opts.connectReplyTrailer ? Buffer.concat([reply, opts.connectReplyTrailer]) : reply)
         phase = 'tunnel'
         return
       }
@@ -187,6 +201,71 @@ describe('socks-bridge', () => {
     tunneled.destroy()
   })
 
+  it('completes the handshake when the SOCKS5 greeting reply arrives split across chunks', async () => {
+    // The old one-message-per-chunk parser threw "Invalid SOCKS5 greeting
+    // response" on a 1-byte first chunk. The buffered parser must wait for both.
+    const frag = await startFakeSocks5Server({ fragmentGreeting: true })
+    try {
+      const bridgePort = await startSocksBridge({ socksHost: '127.0.0.1', socksPort: frag.port })
+      const tunneled = await httpConnectThrough(bridgePort, 'example.com:443')
+      expect(frag.connects).toEqual([{ host: 'example.com', port: 443 }])
+      tunneled.destroy()
+    } finally {
+      await frag.close()
+    }
+  })
+
+  it('does not drop tunnel bytes coalesced into the same chunk as the CONNECT reply', async () => {
+    // The old code did removeAllListeners('data') + resolve, discarding any
+    // bytes past the CONNECT reply in that chunk. The fix forwards them to the
+    // client as the true start of the tunneled stream. Node's http CONNECT
+    // client may surface those first bytes either in the `head` arg or as a
+    // subsequent 'data' event depending on segmentation — collect both.
+    const expected = 'HELLO-FROM-TARGET'
+    const coalesced = await startFakeSocks5Server({
+      connectReplyTrailer: Buffer.from(expected)
+    })
+    try {
+      const bridgePort = await startSocksBridge({
+        socksHost: '127.0.0.1',
+        socksPort: coalesced.port
+      })
+
+      const received: string = await new Promise((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port: bridgePort,
+          method: 'CONNECT',
+          path: 'example.com:443'
+        })
+        req.on('connect', (res, socket, head: Buffer) => {
+          if (res.statusCode !== 200) {
+            socket.destroy()
+            reject(new Error(`CONNECT failed: ${res.statusCode}`))
+            return
+          }
+          let acc = Buffer.from(head ?? [])
+          const done = (): void => {
+            socket.destroy()
+            resolve(acc.toString())
+          }
+          if (acc.length >= expected.length) return done()
+          socket.on('data', (c) => {
+            acc = Buffer.concat([acc, c])
+            if (acc.length >= expected.length) done()
+          })
+          socket.once('error', reject)
+        })
+        req.on('error', reject)
+        req.end()
+      })
+
+      expect(received).toBe(expected)
+    } finally {
+      await coalesced.close()
+    }
+  })
+
   it('stopSocksBridge() closes the listener and clears getBridgePort()', async () => {
     const port = await startSocksBridge({
       socksHost: '127.0.0.1',
@@ -230,5 +309,63 @@ describe('socks-bridge', () => {
     const tunneled = await httpConnectThrough(p2, 'anthropic.com:443')
     expect(socks.connects.at(-1)).toEqual({ host: 'anthropic.com', port: 443 })
     tunneled.destroy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOW-RW5 — socks5Connect is exported so the proxy connectivity test in
+// session.ipc.ts reuses this TCP-framing-correct handshake instead of its own
+// hand-rolled, one-message-per-chunk copy (which failed on a split reply).
+// ---------------------------------------------------------------------------
+
+describe('socks5Connect (exported for the proxy connectivity test)', () => {
+  let socks: FakeSocks5Server
+
+  afterEach(async () => {
+    await socks?.close()
+  })
+
+  it('is exported and resolves a tunneled socket for a domain target', async () => {
+    socks = await startFakeSocks5Server()
+    const { socket, leftover } = await socks5Connect(
+      { socksHost: '127.0.0.1', socksPort: socks.port },
+      'api.anthropic.com',
+      443
+    )
+    expect(socks.connects.at(-1)).toEqual({ host: 'api.anthropic.com', port: 443 })
+    expect(leftover.length).toBe(0)
+    socket.destroy()
+  })
+
+  it('completes when the greeting reply is split across TCP chunks', async () => {
+    socks = await startFakeSocks5Server({ fragmentGreeting: true })
+    const { socket } = await socks5Connect(
+      { socksHost: '127.0.0.1', socksPort: socks.port },
+      'api.anthropic.com',
+      443
+    )
+    expect(socks.connects.at(-1)).toEqual({ host: 'api.anthropic.com', port: 443 })
+    socket.destroy()
+  })
+
+  it('returns bytes coalesced into the CONNECT reply as `leftover`', async () => {
+    socks = await startFakeSocks5Server({ connectReplyTrailer: Buffer.from('EARLY') })
+    const { socket, leftover } = await socks5Connect(
+      { socksHost: '127.0.0.1', socksPort: socks.port },
+      'api.anthropic.com',
+      443
+    )
+    expect(leftover.toString()).toBe('EARLY')
+    socket.destroy()
+  })
+
+  it('rejects when the SOCKS server is unreachable', async () => {
+    socks = await startFakeSocks5Server()
+    const dead = socks.port
+    await socks.close()
+    await expect(
+      socks5Connect({ socksHost: '127.0.0.1', socksPort: dead }, 'api.anthropic.com', 443)
+    ).rejects.toBeInstanceOf(Error)
+    socks = await startFakeSocks5Server() // afterEach closes it
   })
 })

@@ -40,9 +40,11 @@ export const EXT_TO_LANG: Record<string, string> = {
   makefile: 'makefile'
 }
 
-function getLang(filePath?: string): string {
+/** Exported for tests; CodeView keeps its own (smaller) map — see highlight.ts. */
+export function getLang(filePath?: string): string {
   if (!filePath) return 'plaintext'
-  const name = filePath.split('/').pop()?.toLowerCase() || ''
+  // Split on BOTH separators — a Windows path has no `/` (RN11).
+  const name = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
   // Handle extensionless files like Dockerfile, Makefile
   if (EXT_TO_LANG[name]) return EXT_TO_LANG[name]
   const ext = name.split('.').pop() || ''

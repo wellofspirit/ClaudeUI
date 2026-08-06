@@ -14,6 +14,7 @@ import {
   type StatusKind,
   unitMultiplier,
   naturalUnit,
+  clampIntervalMs,
   computeNextRuns,
   formatScheduleSummary,
   deriveStatus
@@ -24,6 +25,7 @@ import {
   ThinkingPicker,
   type ModelDisplay
 } from '../../shared/InlinePickers'
+import { SelectMenu } from '../../shared/SelectMenu'
 import {
   modelSupportsAdaptiveThinking,
   modelSupportsEffort,
@@ -498,11 +500,14 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
       : 1
   const setIntervalValue = (n: number): void => {
     const clamped = Math.max(1, Math.floor(n) || 1)
-    setSchedule({ type: 'interval', intervalMs: clamped * unitMultiplier(intervalUnit) })
+    setSchedule({
+      type: 'interval',
+      intervalMs: clampIntervalMs(clamped * unitMultiplier(intervalUnit))
+    })
   }
   const changeIntervalUnit = (u: IntervalUnit): void => {
     setIntervalUnit(u)
-    setSchedule({ type: 'interval', intervalMs: intervalValue * unitMultiplier(u) })
+    setSchedule({ type: 'interval', intervalMs: clampIntervalMs(intervalValue * unitMultiplier(u)) })
   }
 
   return (
@@ -901,14 +906,16 @@ function PermissionsPanel(p: PermissionsPanelProps): React.JSX.Element {
       <section className="px-6 py-5 border-t border-border/30">
         <SectionHeader icon="plus">Add rule</SectionHeader>
         <div className="flex gap-2 items-center">
-          <select
+          <SelectMenu
+            testid="AutomationConfig.ruleType"
             value={ruleType}
-            onChange={(e) => setRuleType(e.target.value as 'allow' | 'deny')}
-            className="bg-bg-tertiary border border-border/40 rounded-md px-2 py-1 text-xs text-text-primary"
-          >
-            <option value="allow">Allow</option>
-            <option value="deny">Deny</option>
-          </select>
+            onChange={(v) => setRuleType(v as 'allow' | 'deny')}
+            options={[
+              { value: 'allow', label: 'Allow' },
+              { value: 'deny', label: 'Deny' }
+            ]}
+            triggerClassName="bg-bg-tertiary border border-border/40 rounded-md px-2 py-1 text-xs text-text-primary"
+          />
           <input
             value={newRule}
             onChange={(e) => setNewRule(e.target.value)}

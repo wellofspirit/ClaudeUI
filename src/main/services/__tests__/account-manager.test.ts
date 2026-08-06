@@ -35,7 +35,9 @@ vi.mock('../auth-manager', () => ({
     onLoginSuccess: vi.fn((cb: (a: unknown) => void) => {
       hoisted.loginCb.current = cb
     }),
-    signIn: vi.fn()
+    // Returns a promise so the fire-and-forget `void signIn().catch(...)` in
+    // addAccount() has something to attach to (prod signIn is always async).
+    signIn: vi.fn(async () => {})
   }
 }))
 vi.mock('../logger', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
@@ -44,6 +46,7 @@ import { accountManager } from '../account-manager'
 import { getSecurestorageEnv } from '../../sdk/securestorage-env'
 import { serviceSession } from '../service-session'
 import { authManager } from '../auth-manager'
+import { logger } from '../logger'
 
 const ACCOUNTS_DIR = path.join(hoisted.TEST_HOME, '.claude', 'ui', 'accounts')
 
@@ -103,6 +106,17 @@ describe('AccountManager', () => {
     expect(active.id).toBe(state.accounts[state.accounts.length - 1].id)
     expect(getSecurestorageEnv()?.dir).toBe(path.join(ACCOUNTS_DIR, state.activeId!))
     expect(authManager.signIn).toHaveBeenCalled()
+  })
+
+  it('a failing login start on addAccount is caught (no unhandled rejection) and logged', async () => {
+    ;(authManager.signIn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('service session down')
+    )
+    await accountManager.setEnabled(true)
+    await accountManager.addAccount()
+    // Flush the fire-and-forget catch.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(logger.error).toHaveBeenCalled()
   })
 
   it('switchAccount changes active + env + requests session respawn', async () => {

@@ -401,6 +401,60 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(client.prompt).not.toHaveBeenCalled()
   })
 
+  it('M-XE1 busy target: a concurrent same-session_id opencode dispatch is REJECTED without disturbing the running turn', async () => {
+    // Two dispatch_agent calls with the same session_id can run concurrently
+    // (their MCP handlers overlap within one assistant turn). opencode drives
+    // one turn per session over a single busy-gated SSE tap; letting the second
+    // through would prompt() the same session twice and reset turnToolUseIds /
+    // flip busy off under the still-running first turn. So the second must
+    // busy-reject (M-XE1 — the opencode branch previously lacked this check
+    // that the Claude/pi branches already had).
+    const { dispatcher, client } = makeHarness()
+    const ctx = makeCtx()
+
+    // Turn 1: establish the session_id (default mock prompt resolves at once).
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.sessionId).toBe('oc-sess-1')
+
+    // Turn 2: continuation left in flight — its prompt() never resolves.
+    let releaseSecond: (v: unknown) => void = () => {}
+    client.prompt.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseSecond = resolve))
+    )
+    const second = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
+      ctx
+    )
+    await tick()
+
+    // Turn 3: concurrent continuation while turn 2 is mid-flight → busy-reject.
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: 'oc-sess-1' },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('already running')
+    expect(third.sessionId).toBe('oc-sess-1')
+
+    // The busy-reject never issued a prompt: still exactly turn1 + turn2 = 2
+    // (pre-fix this would be 3 — the guard assertion).
+    expect(client.prompt).toHaveBeenCalledTimes(2)
+
+    // The in-flight turn still completes normally with ITS OWN result.
+    releaseSecond({ parts: [{ type: 'text', text: 'second answer' }] })
+    const secondResult = await second
+    expect(secondResult.isError).toBeUndefined()
+    expect(secondResult.text).toBe('second answer')
+
+    // The target stays continuable once the busy window closes.
+    const fourth = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'four', sessionId: 'oc-sess-1' },
+      ctx
+    )
+    expect(fourth.text).toBe('target answer')
+    expect(client.createSession).toHaveBeenCalledTimes(1)
+  })
+
   it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
     const { dispatcher } = makeHarness()
     const first = await dispatcher.dispatch(
@@ -448,6 +502,36 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(result.isError).toBe(true)
     expect(result.text).toContain('ContextOverflowError')
     expect(result.sessionId).toBe('oc-sess-1')
+  })
+
+  it('a RESOLVED info.error turn still records its real spend and folds it into the dispatching session', async () => {
+    // opencode resolves the prompt with real info.tokens/info.cost even when the
+    // turn errors (the turn ran, it just failed). Pre-fix that branch recorded
+    // costUsd/tokens as null and never folded the spend — a target whose turns
+    // keep erroring spent real money that escaped the cap AND the dispatching
+    // session's breakdown. Must now capture it (parity with Claude failed-subtype).
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    client.prompt.mockResolvedValueOnce({
+      info: {
+        error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } },
+        tokens: { input: 200, output: 80, reasoning: 20 },
+        cost: 0.05
+      },
+      parts: []
+    })
+    const ctx = makeCtx({ toolUseId: 'toolu_err_cost' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolUseId: 'toolu_err_cost',
+        targetEngine: 'opencode',
+        totalTokens: 300, // 200 + 80 + 20
+        costUsd: 0.05
+      })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.05)
   })
 
   it('a failed createSession rolls back the server ref and returns isError', async () => {
@@ -712,6 +796,80 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
     const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
     expect(dismiss).toBeTruthy()
     expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-9` })
+  })
+})
+
+describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)', () => {
+  it('re-subscribes after a dropped SSE stream so a later permission.asked still forwards', async () => {
+    // opencode holds /event open for the server's lifetime; a non-aborted end is
+    // a transport DROP. Pre-fix runSseLoop exited on that first end and never
+    // re-subscribed, silently killing approval forwarding for the whole cwd. The
+    // stream below DROPS on its first subscription, then behaves normally — a
+    // permission.asked that arrives after the reconnect must still forward.
+    let subscribeCount = 0
+    const queue: Array<{ id: string; type: string; properties: Record<string, unknown> }> = []
+    let notify: (() => void) | null = null
+    async function* subscribeEvents(
+      signal?: AbortSignal
+    ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
+      subscribeCount++
+      if (subscribeCount === 1) return // simulate a dropped stream (ends, not aborted)
+      while (!signal?.aborted) {
+        if (queue.length === 0) {
+          await new Promise<void>((resolve) => {
+            notify = resolve
+            signal?.addEventListener('abort', () => resolve(), { once: true })
+          })
+          continue
+        }
+        yield queue.shift()!
+      }
+    }
+    const push = (type: string, properties: Record<string, unknown>): void => {
+      queue.push({ id: `e-${queue.length}`, type, properties })
+      notify?.()
+      notify = null
+    }
+
+    const client = { ...makeFakeClient().client, subscribeEvents }
+    // Hang the prompt so the target + its connection record stay alive across
+    // the reconnect (a resolved dispatch would tear the record down).
+    let releasePrompt!: () => void
+    client.prompt = vi.fn(
+      () =>
+        new Promise((r) => {
+          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
+        })
+    ) as typeof client.prompt
+
+    const serverManager = {
+      acquire: vi.fn(async () => ({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })),
+      release: vi.fn()
+    }
+    const deps: DispatcherDeps = {
+      serverManager,
+      makeClient: () => client,
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
+      dispatchTimeoutMs: 2000,
+      heartbeatMs: 50,
+      piAbortSettleGraceMs: 20,
+      sseReconnectDelayMs: 5
+    }
+    const dispatcher = new CrossEngineDispatcher(deps)
+    const ctx = makeCtx()
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    // The loop must reconnect (second subscription) after the drop + delay.
+    await vi.waitFor(() => expect(subscribeCount).toBeGreaterThanOrEqual(2))
+
+    // A permission.asked delivered on the reconnected stream forwards as before.
+    push('permission.asked', { id: 'perm-recon', sessionID: 'oc-sess-1', permission: 'bash' })
+    await vi.waitFor(() =>
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+    )
+
+    releasePrompt()
+    await pending
   })
 })
 

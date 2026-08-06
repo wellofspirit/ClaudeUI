@@ -6,6 +6,8 @@
  * they're hermetic (no dependence on the dev machine's real ~/.claude).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import path from 'node:path'
+import { homedir } from 'node:os'
 import type { MergedClaudeRules } from '../permission-engine'
 
 const { mockLoadClaudePermissions } = vi.hoisted(() => ({
@@ -20,11 +22,12 @@ vi.mock('../../services/logger', () => ({
 
 import {
   decide,
+  decideWithSource,
   piToolKind,
-  firstMatchingRule,
   sessionAllowKey,
   normalizeWhitespace,
   mergedClaudeRulesFor,
+  withoutAllowRules,
   claudeGlobMatches,
   PI_AUTO_ALLOW_HOSTED_TOOLS,
   PI_HOSTED_TOOL_NAMES,
@@ -270,7 +273,46 @@ describe('isPlanSafeBashCommand (M5a — per-segment validation, deny-when-unsur
     // Unknown / unrecognized commands are denied by default ("when unsure, deny").
     ['', false],
     ['some-random-binary --flag', false],
-    ['./run.sh', false]
+    ['./run.sh', false],
+
+    // ── Flag-level mutation on a read-only command NAME ───────────────────
+    // The safe list is anchored on the command name, so a mutating FLAG used
+    // to sail straight through it. A plan-mode bash allow is an AUTO-allow —
+    // these all executed with no human in the loop.
+    ["find . -name '*.tmp' -delete", false], // deletes files
+    ['find . -name x -exec sh -c bad {} +', false], // runs an arbitrary nested command
+    ['find . -name x -execdir sh -c bad {} +', false],
+    ['find . -type f -fprintf /tmp/out %p', false], // writes a file
+    ['find . -name "*.ts"', true], // plain search stays allowed
+    ['sort -o out.txt in.txt', false], // -o writes a file
+    ['sort --output=out.txt in.txt', false],
+    ['sort -ofile.txt in.txt', false], // GNU bundles the argument
+    ['sort -uo out.txt in.txt', false], // …and bundles the flag
+    ['sort file.txt', true],
+    ['sort -u file.txt', true],
+    ['sort -k2,2 -r file.txt', true], // no `o` in any of these flags
+    ['cat a.txt | sort | uniq -c', true], // the common pipe use survives
+    // `sed` was dropped from the safe list entirely: `-n` suppresses
+    // auto-printing, it does not make sed read-only, and detecting a `w`
+    // command inside a sed script needs a real parser.
+    ["sed -n 'w /tmp/pwned' input.txt", false], // writes a file
+    ["sed -n -i 's/a/b/' input.txt", false], // edits in place
+    ["sed -n '1,5p' input.txt", false], // read-only, but denied — accepted cost
+    // `git branch` / `git remote` are read-only only in their LISTING forms.
+    ['git branch', true],
+    ['git branch -v', true],
+    ['git branch -a', true],
+    ['git branch --show-current', true],
+    ['git branch my-new-branch', false], // creates a ref
+    ['git branch -m old new', false], // renames a ref
+    ['git branch -c old new', false], // copies a ref
+    ['git remote', true],
+    ['git remote -v', true],
+    ['git remote show origin', true],
+    ['git remote get-url origin', true],
+    ['git remote add origin https://evil.example/x.git', false], // adds a push target
+    ['git remote set-url origin https://evil.example/x.git', false],
+    ['git remote rename origin upstream', false]
   ]
 
   it.each(cases)('isPlanSafeBashCommand(%j) === %s', (command, expected) => {
@@ -327,8 +369,10 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
     // source ordering directly instead (mirrors pi-bridge-source.test.ts's
     // skillEnvIdx/earlyReturnIdx technique for the identical "can't observe
     // through the public API yet" situation).
-    const src = decide.toString()
-    const denyIdx = src.indexOf('rules.deny.some')
+    // The ladder itself lives in decideWithSource now (decide() is its
+    // provenance-free projection) — read the source that actually orders it.
+    const src = decideWithSource.toString()
+    const denyIdx = src.indexOf('ctx.rules.deny')
     const autoAllowIdx = src.indexOf('PI_AUTO_ALLOW_HOSTED_TOOLS')
     expect(denyIdx).toBeGreaterThan(-1)
     expect(autoAllowIdx).toBeGreaterThan(-1)
@@ -566,6 +610,77 @@ describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) ar
   })
 })
 
+describe('decide — ABSOLUTE / home-dir / Windows-absolute rule specifiers', () => {
+  // resolveMatchPath always relativises the TOOL path against cwd, but rule
+  // specifiers were matched verbatim — so every absolute-looking specifier
+  // compared an absolute glob against a relative string and could NEVER match.
+  // `Edit(~/.ssh/**)`, `Read(//etc/shadow)` and `Edit(D:\secrets\**)` were
+  // inert: the tool ran with no prompt at all, in every mode.
+  const HOME = homedir()
+
+  const ctx = (partial: Partial<MergedClaudeRules>, cwd?: string) => ({
+    mode: 'default',
+    rules: rules(partial),
+    sessionAllows: NO_SESSION_ALLOWS,
+    ...(cwd === undefined ? {} : { cwd })
+  })
+
+  it('`//abs/path` (Claude double-slash = absolute) matches the absolute tool path', () => {
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))).toBe('deny')
+    expect(decide('edit', { path: '/srv/secrets/k.pem' }, ctx({ deny: ['Edit(//srv/secrets/**)'] }, '/repo'))).toBe(
+      'deny'
+    )
+  })
+
+  it('`~/…` expands to the home directory', () => {
+    const cwd = path.join(HOME, 'proj')
+    expect(decide('read', { path: path.join(HOME, '.ssh', 'id_rsa') }, ctx({ deny: ['Read(~/.ssh/**)'] }, cwd))).toBe(
+      'deny'
+    )
+    // …and a bare `~` covers the whole home tree.
+    expect(decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~)'] }, cwd))).toBe('allow')
+    expect(decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~/**)'] }, cwd))).toBe('deny')
+  })
+
+  it('a Windows-absolute specifier matches regardless of separator or drive-letter case', () => {
+    for (const rule of ['Edit(D:\\secrets\\**)', 'Edit(D:/secrets/**)', 'Edit(d:/secrets/**)']) {
+      expect(decide('edit', { path: 'D:\\secrets\\keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')), rule).toBe('deny')
+      expect(decide('edit', { path: 'd:/secrets/keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')), rule).toBe('deny')
+    }
+  })
+
+  it('a relative tool path is resolved against cwd before the absolute comparison', () => {
+    // `src/a.ts` under cwd D:\secrets IS inside the denied tree.
+    expect(decide('edit', { path: 'src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\secrets'))).toBe('deny')
+  })
+
+  it('an absolute specifier does NOT match a path outside it (no over-broadening)', () => {
+    expect(decide('read', { path: '/etc/hosts' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))).toBe('allow')
+    expect(decide('edit', { path: 'D:\\repo\\src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\repo'))).toBe(
+      'ask'
+    )
+  })
+
+  it('a `..`-containing tool path is normalised before comparing (no traversal escape)', () => {
+    expect(
+      decide('read', { path: '/repo/../etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))
+    ).toBe('deny')
+  })
+
+  it('an absolute specifier still works on the no-cwd best-effort path when the input is already absolute', () => {
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }))).toBe('deny')
+  })
+
+  it('a SINGLE leading slash is NOT treated as absolute (unchanged — Claude reads it as settings-relative)', () => {
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(/etc/passwd)'] }, '/repo'))).toBe('allow')
+  })
+
+  it('ordinary relative specifiers keep their cwd-relative semantics', () => {
+    expect(decide('edit', { path: '/repo/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))).toBe('deny')
+    expect(decide('edit', { path: '/elsewhere/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))).toBe('ask')
+  })
+})
+
 describe('additionalDirectories / defaultMode — deliberately deferred, must stay inert (never default-allow)', () => {
   it('additionalDirectories present in rules does not widen access for a path outside cwd/scope', () => {
     const ctx = {
@@ -667,16 +782,6 @@ describe('decide — unknown Claude tool names never match a pi tool', () => {
   })
 })
 
-describe('firstMatchingRule', () => {
-  it('returns the first rule string that matches the tool_call', () => {
-    expect(firstMatchingRule(['Read', 'Bash(npm:*)'], 'bash', { command: 'npm install' })).toBe('Bash(npm:*)')
-  })
-
-  it('returns undefined when nothing matches', () => {
-    expect(firstMatchingRule(['Read', 'Write'], 'bash', { command: 'x' })).toBeUndefined()
-  })
-})
-
 describe('sessionAllowKey', () => {
   it('scopes bash by normalized command', () => {
     expect(sessionAllowKey('bash', { command: '  npm   test  ' })).toBe('bash:npm test')
@@ -763,5 +868,166 @@ describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
     for (const name of PI_AUTO_ALLOW_HOSTED_TOOLS) {
       expect(PI_HOSTED_TOOL_NAMES.has(name)).toBe(true)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// decideWithSource — provenance. Auto mode (phase 4) needs to tell a user-
+// authored ask from a mode-base ask (G9): the former goes straight to the
+// human, the latter to the classifier. Getting this wrong in either direction
+// is a real permission bug, so the ladder's provenance is pinned rung by rung.
+// ---------------------------------------------------------------------------
+
+describe('decideWithSource — provenance for every rung of the ladder', () => {
+  it('reports ask-rule (with the matched rule) for a USER ask, and mode-base for the same tool without one', () => {
+    const withRule = decideWithSource('bash', { command: 'git push origin main' }, {
+      mode: 'acceptEdits',
+      rules: rules({ ask: ['Bash(git push:*)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    })
+    expect(withRule).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(git push:*)' })
+
+    // Same decision, entirely different provenance — this is the distinction
+    // opencode cannot make natively and pi can.
+    const withoutRule = decideWithSource('bash', { command: 'git push origin main' }, {
+      mode: 'acceptEdits',
+      rules: rules(),
+      sessionAllows: NO_SESSION_ALLOWS
+    })
+    expect(withoutRule).toEqual({ decision: 'ask', source: 'mode-base' })
+  })
+
+  it('a NON-matching ask rule does not claim provenance', () => {
+    expect(
+      decideWithSource('bash', { command: 'npm test' }, {
+        mode: 'acceptEdits',
+        rules: rules({ ask: ['Bash(git push:*)'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'ask', source: 'mode-base' })
+  })
+
+  it('reports deny-rule / allow-rule / session-allow / hosted-auto-allow at their own rungs', () => {
+    expect(
+      decideWithSource('bash', { command: 'rm -rf x' }, {
+        mode: 'full',
+        rules: rules({ deny: ['Bash(rm:*)'], ask: ['Bash'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'deny', source: 'deny-rule', rule: 'Bash(rm:*)' })
+
+    expect(
+      decideWithSource('edit', { path: 'src/x.ts' }, {
+        mode: 'default',
+        rules: rules({ allow: ['Edit(src/**)'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'allow', source: 'allow-rule', rule: 'Edit(src/**)' })
+
+    expect(
+      decideWithSource('bash', { command: 'npm test' }, {
+        mode: 'default',
+        rules: rules(),
+        sessionAllows: new Set(['bash:npm test'])
+      })
+    ).toEqual({ decision: 'allow', source: 'session-allow' })
+
+    expect(
+      decideWithSource('render_mermaid', {}, {
+        mode: 'default',
+        rules: rules(),
+        sessionAllows: NO_SESSION_ALLOWS
+      })
+    ).toEqual({ decision: 'allow', source: 'hosted-auto-allow' })
+  })
+
+  it('decide() is exactly decideWithSource().decision across the whole ladder', () => {
+    const cases: Array<[string, Record<string, unknown>, Partial<MergedClaudeRules>, string]> = [
+      ['bash', { command: 'rm -rf x' }, { deny: ['Bash(rm:*)'] }, 'full'],
+      ['render_mermaid', {}, {}, 'default'],
+      ['bash', { command: 'git push' }, { ask: ['Bash(git push:*)'] }, 'full'],
+      ['edit', { path: 'src/x.ts' }, { allow: ['Edit(src/**)'] }, 'default'],
+      ['read', { path: 'x' }, {}, 'default'],
+      ['bash', { command: 'anything' }, {}, 'acceptEdits'],
+      ['write', { path: 'x' }, {}, 'plan']
+    ]
+    for (const [tool, input, partial, mode] of cases) {
+      const ctx = { mode, rules: rules(partial), sessionAllows: NO_SESSION_ALLOWS }
+      expect(decide(tool, input, ctx)).toBe(decideWithSource(tool, input, ctx).decision)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// withoutAllowRules — auto mode's classifier-bypass filter (cli.js §3 step 2).
+// Applied at PiSession's composition seam; asserted here against the pure
+// ladder, since the property that matters is "precedence is unchanged".
+// ---------------------------------------------------------------------------
+
+describe('withoutAllowRules — the auto-mode allow filter', () => {
+  const full = (): MergedClaudeRules =>
+    rules({
+      allow: ['Bash(git:*)', 'Edit(src/**)'],
+      ask: ['Bash(git push:*)'],
+      deny: ['Bash(rm:*)'],
+      additionalDirectories: ['/extra']
+    })
+
+  it('empties the allow tier and leaves everything else identical', () => {
+    expect(withoutAllowRules(full())).toEqual({ ...full(), allow: [] })
+  })
+
+  it('does NOT mutate its input — PiSession caches the merged rules per session', () => {
+    // A mutating filter would strip the allow tier permanently, so switching out
+    // of auto mode later would silently keep asking about allowed actions.
+    const original = full()
+    withoutAllowRules(original)
+    expect(original.allow).toEqual(['Bash(git:*)', 'Edit(src/**)'])
+  })
+
+  it('a formerly-allowed bash call falls through to the acceptEdits base ask (→ the judge)', () => {
+    const ctx = { mode: 'acceptEdits', sessionAllows: NO_SESSION_ALLOWS, cwd: '/repo' }
+    // Covered by the allow rule but NOT by the ask rule, so this isolates the
+    // allow tier's contribution.
+    const input = { command: 'git reset --hard HEAD~5' }
+    expect(decideWithSource('bash', input, { ...ctx, rules: full() })).toEqual({
+      decision: 'allow',
+      source: 'allow-rule',
+      rule: 'Bash(git:*)'
+    })
+    expect(decideWithSource('bash', input, { ...ctx, rules: withoutAllowRules(full()) })).toEqual({
+      decision: 'ask',
+      source: 'mode-base'
+    })
+  })
+
+  it('deny and ask still answer first — G9 provenance is untouched by the filter', () => {
+    const ctx = {
+      mode: 'acceptEdits',
+      rules: withoutAllowRules(full()),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }
+    expect(decideWithSource('bash', { command: 'rm -rf x' }, ctx)).toEqual({
+      decision: 'deny',
+      source: 'deny-rule',
+      rule: 'Bash(rm:*)'
+    })
+    expect(decideWithSource('bash', { command: 'git push origin main' }, ctx)).toEqual({
+      decision: 'ask',
+      source: 'ask-rule',
+      rule: 'Bash(git push:*)'
+    })
+  })
+
+  it('a session "allow for this session" click still allows — only stored rules are filtered', () => {
+    expect(
+      decideWithSource('bash', { command: 'npm publish' }, {
+        mode: 'acceptEdits',
+        rules: withoutAllowRules(full()),
+        sessionAllows: new Set(['bash:npm publish']),
+        cwd: '/repo'
+      })
+    ).toEqual({ decision: 'allow', source: 'session-allow' })
   })
 })

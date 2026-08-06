@@ -42,7 +42,9 @@ Run from the project root:
 ```
 node scripts/app-shot.mjs [--out <png>] [--needle <text>] [--settle <ms>]
                           [--click <selector>]...   # repeatable, clicked in order
-                          [--keep]                   # leave the app open
+                          [--keep]                   # leave the app open (implies --headed)
+                          [--with-remote]            # don't suppress remote access
+                          [--headed]                 # show the window on-screen
 ```
 
 It launches the app, waits for the first window + `--settle` ms (default 3000) so
@@ -50,7 +52,7 @@ React mounts and first IPC settles, performs each `--click` in order, screenshot
 to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
 
 ```json
-{ "ok": true, "screenshot": "...", "windowTitle": "ClaudeUI",
+{ "ok": true, "screenshot": "...", "headless": true, "windowTitle": "ClaudeUI",
   "needle": "Codex", "needleVisibleInDom": 0, "needleInRawHtml": 0,
   "consoleErrors": [] }
 ```
@@ -63,6 +65,29 @@ to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
 - **Read the PNG** (it's a real image — open it) as your primary evidence.
 
 `.cache/` is gitignored, so screenshots don't pollute the tree.
+
+**Remote access is suppressed by default.** The harness launches the app with
+`CLAUDEUI_DISABLE_REMOTE=1`, so the instance it starts never reconciles the
+`tailscale serve` record, never autostarts the remote listener, and never tears
+either down on quit. Those are *machine-global* (a pinned TCP port + the host's
+serve config), not per-instance: without the suppression a second instance
+treats the primary app's live serve record as a leaked leftover and removes it,
+races it for the port, and disables `tailscale serve` on exit — i.e. it kills
+the user's remote access. Pass `--with-remote` to opt out (only when you must
+verify remote-listener UI live, and only with no other instance running). The
+app honours the `--disable-remote` CLI switch as well as the env var; with it
+set, `remote:start` and `remote:force-reserve` reject.
+
+**The app runs "headless" by default.** The harness launches it with
+`CLAUDEUI_HEADLESS=1` (the app also honours a `--claudeui-headless` CLI switch),
+which shows the window *inactive*, positioned beyond the virtual desktop, with
+no taskbar entry — so a verifier run never steals your focus, covers your
+screen, or leaves a stray taskbar button. Screenshots, `capturePage`, and clicks
+all still work because the window is genuinely shown and keeps painting
+(`--disable-backgrounding-occluded-windows`); a *hidden* window produces no
+compositor frames at all and hangs `screenshot()`. Pass `--headed` to opt out
+and get a normal visible window; `--keep` implies `--headed`, since an
+invisible, taskbar-less instance left running is impossible to close by hand.
 
 ## Driving the UI
 

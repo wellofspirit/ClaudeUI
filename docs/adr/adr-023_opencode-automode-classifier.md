@@ -1,6 +1,6 @@
 # ADR-023: opencode auto-mode — LLM permission gatekeeper (parity with Claude)
 
-**Status:** Accepted
+**Status:** Accepted — amended 2026-08-01 by the auto-mode rework (see Amendment below)
 **Date:** 2026-06-22
 **Relates to:** [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-018](adr-018_v2-engine-vendor-account-model.md) (autonomy modes)
 
@@ -75,7 +75,7 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
 2. **Transcript slimming** (user text + tool *calls* only) — the dominant per-call token saver — plus
    1h prefix caching across same-turn classifier calls.
 3. **Single-stage `fast` mode** available for cheaper runs (default `both`).
-4. **Consecutive/total denial caps** (3/20, parity) → fall back to human.
+4. **Denial caps** (2-consecutive-same-rule / 3-consecutive / 20-total; category-keyed since 2026-08-01, shared tracker in src/main/automode/denial-tracker.ts) → fall back to human with the rule named in decisionReason.
 5. **Transcript-too-long** → human approval (reactive fallback; no proactive windowing).
 6. **No `(tool,input)` verdict memoization.** Deliberately omitted: a memoized verdict would override
    the user's later choice to personally approve/deny that same call. Each evaluation is fresh.
@@ -126,3 +126,79 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
   sessions, and it makes the model **judge its own action** (weaker, prompt-injection-prone). Claude's
   independent-monitor design is battle-tested and model-agnostic — we follow it.
 - **Verdict memoization** — rejected per user decision (overrides later human control; see guard #7).
+
+## Amendment — 2026-08-01: the auto-mode rework (engine-neutral, corpus-based)
+
+Everything below supersedes the corresponding original sections. Plan and
+rationale: `docs/automode-rework-plan.md`; behavioural reference:
+`docs/protocol/14-auto-mode-classifier.md` (cli.js 2.1.220). Shipped as
+commits 5112e74 (phase 1), 9d698c7 (phase 2), cb80d3a (phase 3), plus the
+bench 703115e.
+
+**Architecture.** The classifier is engine-neutral (`src/main/automode/`):
+pure policy + a `JudgeTransport` seam (`maxTokens`/`stopSequences` advisory —
+the opencode session transport still cannot honour them; the original ADR's
+deviation stands until a phase-5 direct-API transport). opencode wiring keeps
+the tool-denied judge session with propagating patch failure. pi wiring
+(phase 4) uses an ephemeral `pi --mode rpc --no-session --no-tools` judge —
+tool execution disabled at the process level.
+
+**Two-stage semantics (supersedes the original "terse then re-check").**
+Stage 1 grades harm only on a 64-token advisory budget and, in `both` mode,
+can only ALLOW or ESCALATE — never emit a final block; unparseable stage 1
+escalates. Stage 2 applies user intent and ALLOW exceptions; its verdict is
+final; unparseable stage 2 blocks fail-closed with `unavailable` unset.
+
+**Recorded deviations from cli.js** (deliberate, desktop-app rationale):
+- A transport error at either stage → `unavailable` → ask the human. cli.js
+  reserves `unavailable` for "stage 1 never produced usage" and hard-blocks a
+  stage-2 error "based on stage 1".
+- Assistant-prose retention in the judge transcript is always ON (cli.js
+  gates it off by default behind `priorAssistantContext`); tail-truncated at
+  2000 chars matching cli.js's cap, per-message, last-proposal-before-reply.
+- `unavailable` → human (not block) — carried over from the original ADR.
+
+**Policy.** Our own corpus (`src/main/automode/rules/`): 1 HARD rule, 24 SOFT
+rules with per-rule `[named+specifics]` must-name consent slots (5
+adversarial-inverted), 12 mandatory ALLOW exceptions, an explicit never-block
+list, Path A/B consent with post-block inheritance. Stage 2 emits
+`<category>`, normalized (cli.js `ppd` parity) and validated against an
+allowlist DERIVED from the corpus — an invented category is dropped while the
+block stands.
+
+**Precedence guards.** A user-authored ask rule outranks the classifier
+(opencode: host-side re-match via `wildcard.ts`, since `permission.asked`
+carries no provenance; pi: native engine provenance). The permission mode is
+re-read after the judge returns (`mode_changed_while_queued` parity).
+In the ALLOW direction the precedence inverts: under auto mode the user's allow
+rules are filtered out of the effective ruleset on both engines
+(`withoutAllowRules` in `opencode/permission-compiler.ts` and
+`pi/permission-engine.ts`), so an action they would have silently auto-allowed
+reaches the judge instead of bypassing it — cli.js §3 step 2 parity
+("classifier-bypassing allow rules filtered out"); the G9 provenance set keeps
+the full rules, so ask-rule routing is unchanged.
+Each judge call is stage-bounded — 60 s stage 1 / 120 s stage 2, cli.js's
+`ain`/`lin` — and a timeout is treated exactly as a transport error
+(`unavailable` → ask the human), so a wedged judge can never park a tool call
+behind a spinner.
+
+**Ground truth.** `src/main/automode/ground-truth.ts`: `{"outcome":…}`
+annotations (ok / error / rejected-by-user / automode-blocked only — sticky
+decisions), session-start remotes captured once and frozen, measured
+`gitStatus` meta before tree-affecting commands, `gh`-resolved repoVisibility
+for exfil-capable ones. All captures spawn(shell:false), time-budgeted, and
+emit nothing on failure.
+
+**Evidence.** `scripts/automode-bench/`: 38 labeled scenarios × 4 models
+(gpt-5.6-luna/terra, qwen3.8-max-preview, glm-5.2): 37/37 evidence-available
+with zero false blocks pre-phase-3; the single unanimous miss
+(gitStatus-dependent) passes with ground truth injected, categorized
+`sensitive_source_provenance`. `both` stays the default mode: `fast` had zero
+false allows but false-blocked Path-A-consented production work.
+
+**Known residual (accepted risk, plan §7 Q5).** opencode's instance-global
+"always" approvals outrank the judge session's deny-all ruleset; ClaudeUI
+sends `always` (OpencodeSession.ts). Exposure requires judge prompt injection
+plus a matching always-approval. Fixes ranked in the plan: phase-5 direct-API
+transport (no tools at all), or replying `once` + host-side persistence. pi
+has no analogue (`--no-tools` is process-level).

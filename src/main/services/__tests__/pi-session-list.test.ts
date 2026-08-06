@@ -122,6 +122,24 @@ describe('listPiSessionsGlobal', () => {
     ])
     expect(await listPiSessionsGlobal()).toEqual([])
   })
+
+  it('derives the LAST session_info rename even when a large image message sits after the first user message', async () => {
+    // The list-row reader skips JSON.parsing big message lines (item 13 perf
+    // fix) but MUST keep scanning to end of file for a later session_info
+    // rename (last wins). A 200KB base64 image line between the first user
+    // message and the rename exercises exactly that skip-but-keep-scanning path.
+    const bigBase64 = 'A'.repeat(200_000)
+    writeSessionFile('--proj-img--', 'x_sess-img.jsonl', [
+      { type: 'session', version: 3, id: 'sess-img', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/img' },
+      { type: 'message', id: 'e1', parentId: null, timestamp: '2024-01-01T00:00:01.000Z', message: { role: 'user', content: 'First user prompt', timestamp: 1 } },
+      { type: 'message', id: 'e2', parentId: 'e1', timestamp: '2024-01-01T00:00:02.000Z', message: { role: 'user', content: [{ type: 'image', image: bigBase64, mimeType: 'image/png' }], timestamp: 2 } },
+      { type: 'session_info', id: 'einfo', parentId: 'e2', timestamp: '2024-01-01T00:00:03.000Z', name: 'Renamed After Image' }
+    ])
+
+    const result = await listPiSessionsGlobal()
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ sessionId: 'sess-img', title: 'Renamed After Image' })
+  })
 })
 
 describe('loadPiSessionHistory — active-branch walk (fork)', () => {
@@ -213,6 +231,62 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       { type: 'tool_use', toolUseId: 'call_1', toolName: 'bash', toolInput: { command: 'ls' } },
       { type: 'tool_result', toolUseId: 'call_1', toolResult: 'file1.txt', isError: false }
     ])
+  })
+
+  it('carries a toolResult\'s image content onto the folded tool_result block', async () => {
+    // pi's read tool on an image returns `{type:'image', data, mimeType}` content
+    // blocks alongside (or instead of) text; the replay used to keep only text.
+    writeSessionFile('--proj-toolimg--', 'x_sess-toolimg.jsonl', [
+      { type: 'session', version: 3, id: 'sess-toolimg', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/toolimg' },
+      userEntry('u1', null, 'read the png'),
+      {
+        type: 'message',
+        id: 'a1',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call_img', name: 'read', arguments: { path: '/x.png' } }],
+          api: 'a',
+          provider: 'p',
+          model: 'm',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: 'toolUse',
+          timestamp: 2
+        }
+      },
+      {
+        type: 'message',
+        id: 'tr1',
+        parentId: 'a1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'call_img',
+          toolName: 'read',
+          content: [
+            { type: 'text', text: 'Image read' },
+            { type: 'image', data: 'PIIMG', mimeType: 'image/png' },
+            { type: 'image', data: 'DROPME', mimeType: 'image/svg+xml' }
+          ],
+          isError: false,
+          timestamp: 3
+        }
+      }
+    ])
+
+    const messages = await loadPiSessionHistory('sess-toolimg')
+    const result = messages
+      .find((m) => m.id === 'a1')!
+      .content.find((b) => b.type === 'tool_result')
+    expect(result).toEqual({
+      type: 'tool_result',
+      toolUseId: 'call_img',
+      toolResult: 'Image read',
+      isError: false,
+      // image/svg+xml is outside the modelled media types — dropped, not widened.
+      images: [{ mediaType: 'image/png', base64Data: 'PIIMG' }]
+    })
   })
 
   it('converts a compaction entry to a compact_separator system message', async () => {

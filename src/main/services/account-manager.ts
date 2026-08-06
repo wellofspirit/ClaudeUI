@@ -99,7 +99,14 @@ class AccountManager {
     this.state.activeId = acc.id
     this.persistAndApply()
     // serviceSession now points at the new (empty) dir — start the login there.
-    void authManager.signIn()
+    // signIn() resolves at the "authorizing" stage and broadcasts terminal
+    // success/error via auth:state, so we deliberately don't await it. Guard the
+    // fire-and-forget with a catch so a spawn-path throw can never surface as an
+    // unhandled rejection (signIn() itself is also hardened to broadcast errors
+    // rather than reject).
+    void authManager.signIn().catch((err) => {
+      logger.error('AccountManager', `Failed to start login for new account: ${err}`)
+    })
     return this.state
   }
 

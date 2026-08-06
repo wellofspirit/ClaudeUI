@@ -322,6 +322,58 @@ describe('OpencodeClient', () => {
     })
   })
 
+  describe('request timeout + abort (M-OC5)', () => {
+    /** A fetch that never resolves until its AbortSignal fires (a hung server). */
+    function hangingFetch() {
+      return vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            const signal = init.signal as AbortSignal
+            const fail = (): void =>
+              reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
+            if (signal.aborted) return fail()
+            signal.addEventListener('abort', fail, { once: true })
+          })
+      )
+    }
+
+    it('times out a hung request and surfaces a clear, actionable error', async () => {
+      vi.stubGlobal('fetch', hangingFetch())
+      // Pre-fix this promise never settled — the caller hung forever.
+      await expect(
+        client.prompt('ses_1', { parts: [{ type: 'text', text: 'hi' }] }, { timeoutMs: 20 })
+      ).rejects.toThrow(/timed out after 20ms/)
+    })
+
+    it('aborts an in-flight request when the caller signal fires (not a timeout)', async () => {
+      vi.stubGlobal('fetch', hangingFetch())
+      const ac = new AbortController()
+      const p = client.prompt(
+        'ses_1',
+        { parts: [{ type: 'text', text: 'hi' }] },
+        { timeoutMs: 0, signal: ac.signal }
+      )
+      ac.abort()
+      // Caller-initiated abort re-throws the AbortError verbatim — NOT the
+      // "timed out" wrapper (which is reserved for our own timer).
+      await expect(p).rejects.toThrow(/aborted/i)
+    })
+
+    it('passes an AbortSignal to fetch on every request', async () => {
+      const mock = mockFetch(200, [])
+      vi.stubGlobal('fetch', mock)
+      await client.listSessions()
+      const init = mock.mock.calls[0][1] as RequestInit
+      expect(init.signal).toBeInstanceOf(AbortSignal)
+    })
+
+    it('a fast response resolves normally (timeout never fires)', async () => {
+      const mock = mockFetch(200, [{ id: 'ses_1' }])
+      vi.stubGlobal('fetch', mock)
+      await expect(client.listSessions()).resolves.toEqual([{ id: 'ses_1' }])
+    })
+  })
+
   describe('promptAsync — reasoning variant', () => {
     it('includes variant in POST body when present', async () => {
       const mock = mockFetch(200, {})

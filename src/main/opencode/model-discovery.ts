@@ -2,11 +2,18 @@ import { opencodeServerManager } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { loadEngineConfig } from '../services/ui-config'
-import { readOpencodeNativeConfig, readDeclaredProviderIds } from './opencode-config'
+import {
+  readOpencodeNativeConfig,
+  readDeclaredProviderIds,
+  resolveOpencodeConfigFile
+} from './opencode-config'
+import { readOpencodeCredentialTypes } from './auth-store'
+import { resolveProviderActions, type ProviderActionInput } from './provider-actions'
 import type {
   EngineModelGroup,
   ModelInfo,
   OpencodeProviderCatalogEntry,
+  OpencodeProviderSource,
   OpencodeCatalogModel
 } from '../../shared/types'
 import type { Provider, AuthOption } from './protocol/types'
@@ -42,8 +49,15 @@ export function parseModelString(model: string): { providerID: string; modelID: 
 interface CatalogSnapshot {
   /** Every supported provider (~146), each carrying its full models record. */
   all: Provider[]
-  /** Provider ids currently usable (present in /config/providers). */
-  configuredIds: Set<string>
+  /**
+   * Providers currently usable (present in /config/providers), keyed by id and
+   * carrying opencode's derived provenance.
+   *
+   * `source`/`env` are read HERE and nowhere else: /provider's `all` runs every
+   * unconnected entry through fromModelsDevProvider, which hardcodes
+   * source:'custom', so only /config/providers reports the real derivation.
+   */
+  configured: Map<string, { source?: OpencodeProviderSource; env: string[] }>
   /** Per-provider auth options (only providers with custom loaders appear here). */
   authCatalog: Record<string, AuthOption[]>
 }
@@ -103,7 +117,11 @@ async function fetchCatalogSnapshot(): Promise<CatalogSnapshot> {
     ])
     const snapshot: CatalogSnapshot = {
       all: providerList.all ?? [],
-      configuredIds: new Set((configResp.providers ?? []).map((p) => p.id)),
+      configured: new Map(
+        (configResp.providers ?? []).map(
+          (p) => [p.id, { source: p.source, env: p.env ?? [] }] as const
+        )
+      ),
       authCatalog: authCatalog ?? {}
     }
     // Only cache a non-empty catalog (a transient empty list shouldn't stick).
@@ -111,6 +129,76 @@ async function fetchCatalogSnapshot(): Promise<CatalogSnapshot> {
     return snapshot
   } finally {
     opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+  }
+}
+
+/**
+ * Who owns what, for deciding which row actions are legitimate. Every field is
+ * a cheap ClaudeUI-owned local read — deliberately NOT a probe of opencode (a
+ * live server never re-reads either file, so a post-mutation probe would answer
+ * from stale state; see provider-actions.ts's header).
+ */
+interface ProviderOwnership {
+  /** Vendor ids with an entry in opencode's auth.json. */
+  credentialIds: Record<string, 'api' | 'oauth'>
+  /** Declared in the `provider` object of the ONE global file ClaudeUI writes. */
+  ourFileProviderIds: Set<string>
+  /** Declared in either global file — the union opencode itself merges. */
+  allGlobalDeclaredIds: Set<string>
+  /** The other global config file, for the blocked-removal tooltip's wording. */
+  otherGlobalConfigPath: string
+}
+
+async function readProviderOwnership(): Promise<ProviderOwnership> {
+  const credentialIds = await readOpencodeCredentialTypes()
+  let ourFileProviderIds = new Set<string>()
+  let allGlobalDeclaredIds = new Set<string>()
+  let otherGlobalConfigPath = ''
+  try {
+    ourFileProviderIds = new Set(Object.keys(readOpencodeNativeConfig().providers ?? {}))
+    allGlobalDeclaredIds = new Set(readDeclaredProviderIds())
+    const resolved = resolveOpencodeConfigFile().path
+    // The sibling of the resolved write target (jsonc ↔ json). opencode merges
+    // both; ClaudeUI's writer only ever touches the resolved one.
+    otherGlobalConfigPath = resolved.endsWith('.jsonc')
+      ? resolved.slice(0, -'.jsonc'.length) + '.json'
+      : resolved.slice(0, -'.json'.length) + '.jsonc'
+  } catch {
+    // opencode's own config files are optional — treat as "nothing declared".
+  }
+  return { credentialIds, ourFileProviderIds, allGlobalDeclaredIds, otherGlobalConfigPath }
+}
+
+/**
+ * opencode's provenance for a provider, for MESSAGE WORDING only. Absent for
+ * providers that are not currently configured (they have no derived source).
+ */
+function describeProviderProvenance(
+  id: string,
+  configured: Map<string, { source?: OpencodeProviderSource; env: string[] }>
+): { source?: OpencodeProviderSource; envVarNames?: string[] } {
+  const entry = configured.get(id)
+  if (!entry) return {}
+  return {
+    ...(entry.source ? { source: entry.source } : {}),
+    ...(entry.env.length > 0 ? { envVarNames: entry.env } : {})
+  }
+}
+
+function buildActionInput(
+  id: string,
+  isFree: boolean,
+  configured: Map<string, { source?: OpencodeProviderSource; env: string[] }>,
+  ownership: ProviderOwnership
+): ProviderActionInput {
+  const declaredInOurFile = ownership.ourFileProviderIds.has(id)
+  return {
+    isFree,
+    hasCredential: ownership.credentialIds[id] !== undefined,
+    declaredInOurFile,
+    declaredElsewhereGlobal: !declaredInOurFile && ownership.allGlobalDeclaredIds.has(id),
+    ...describeProviderProvenance(id, configured),
+    elsewhereConfigPath: ownership.otherGlobalConfigPath || undefined
   }
 }
 
@@ -125,10 +213,16 @@ async function fetchCatalogSnapshot(): Promise<CatalogSnapshot> {
  */
 export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProviderCatalogEntry[]> {
   try {
-    const { all, configuredIds, authCatalog } = await fetchCatalogSnapshot()
+    const { all, configured, authCatalog } = await fetchCatalogSnapshot()
+
+    // Action availability inputs — all cheap ClaudeUI-owned local reads. Read
+    // ONCE here rather than per entry: ~146 providers × three file reads would
+    // otherwise hit the disk on every settings open.
+    const ownership = await readProviderOwnership()
+
     const entries = all.map((provider): OpencodeProviderCatalogEntry => {
       const isFree = FREE_OPENCODE_VENDOR_IDS.has(provider.id)
-      const isConfigured = configuredIds.has(provider.id)
+      const isConfigured = configured.has(provider.id)
       const authState: OpencodeProviderCatalogEntry['authState'] = isFree
         ? 'free'
         : isConfigured
@@ -147,36 +241,44 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
         name: provider.name || provider.id,
         authState,
         authMethods,
-        modelCount: Object.keys(provider.models ?? {}).length
+        modelCount: Object.keys(provider.models ?? {}).length,
+        // Anything reaching this branch came from GET /provider, which excludes
+        // disabled ids outright — so these are all enabled by construction.
+        disabled: false,
+        ...describeProviderProvenance(provider.id, configured),
+        actions: resolveProviderActions(
+          buildActionInput(provider.id, isFree, configured, ownership)
+        )
       }
     })
 
     // opencode's GET /provider EXCLUDES disabled providers from `all` entirely
-    // (verified against the live server), so a provider removed via handleRemove
-    // (which adds it to disabledProviders) vanishes from both "Added providers"
-    // AND the "Add provider" catalog — the un-disable path in finishAdd() becomes
-    // unreachable because the entry never shows up to click "Add" on again.
-    // Re-synthesize a minimal addable entry for each disabled id that isn't
-    // already present in `all` and isn't a user-declared custom provider (those
-    // belong to the Custom providers editor, not this catalog).
+    // (verified against the live server), so a disabled provider is invisible to
+    // the catalog and we have no name / modelCount for it. Re-synthesize an entry
+    // for every disabled id, flagged `disabled: true`, so the single merged
+    // provider list can render it in a disabled state with an Enable action.
+    //
+    // Declared providers are INCLUDED here (they were previously skipped, when
+    // declarations lived in a separate "Custom providers" section). With the two
+    // surfaces merged into one list, a declared+disabled provider that is skipped
+    // renders NOWHERE — it silently vanishes while opencode ignores it, which is
+    // the honesty bug this merge exists to close.
     //
     // The disabled list is read FRESH here on every call — deliberately NOT
-    // folded into the cached fetchCatalogSnapshot() — so that immediately after
-    // finishAdd() clears an id from disabledProviders, the synthetic entry for
-    // it disappears on the very next catalog read even while the underlying
-    // server catalog snapshot is still warm.
-    //
-    // disabledIds comes from readOpencodeNativeConfig() (the single resolved
-    // write target — that's the file ClaudeUI's own remove/re-add writes to),
-    // but declared custom-provider ids must union BOTH global config files:
-    // opencode merges opencode.jsonc AND opencode.json at load, so a split
-    // layout can declare `provider` entries in the file we don't resolve.
-    // See readDeclaredProviderIds().
+    // folded into the cached fetchCatalogSnapshot() — so that immediately after an
+    // enable clears an id from disabledProviders, the synthetic entry for it
+    // disappears on the very next catalog read even while the underlying server
+    // catalog snapshot is still warm.
     let disabledIds: string[] = []
-    let declaredProviderIds = new Set<string>()
+    const declaredNames = new Map<string, string>()
     try {
-      disabledIds = readOpencodeNativeConfig().disabledProviders ?? []
-      declaredProviderIds = new Set(readDeclaredProviderIds())
+      const native = readOpencodeNativeConfig()
+      disabledIds = native.disabledProviders ?? []
+      // A declared provider carries its own display name, which the catalog can
+      // no longer supply once it is disabled. Fall back to the bare id.
+      for (const [id, settings] of Object.entries(native.providers ?? {})) {
+        if (settings.name) declaredNames.set(id, settings.name)
+      }
     } catch {
       // opencode's own config files are optional — treat as "nothing disabled".
     }
@@ -184,17 +286,22 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
     const presentIds = new Set(entries.map((e) => e.id))
     for (const id of disabledIds) {
       if (presentIds.has(id)) continue
-      if (declaredProviderIds.has(id)) continue
       // Mirror the regular-entry derivation: a disabled zen gateway is still a
-      // credential-free provider ('free', no auth methods), so the Add row can
-      // offer the keyless re-add path instead of a meaningless API-key input.
+      // credential-free provider ('free', no auth methods), so the re-enable path
+      // can avoid offering a meaningless API-key input.
       const isFree = FREE_OPENCODE_VENDOR_IDS.has(id)
       entries.push({
         id,
-        name: id,
+        name: declaredNames.get(id) ?? id,
         authState: isFree ? 'free' : 'unauthenticated',
         authMethods: isFree ? [] : deriveAuthMethods(id, authCatalog),
-        modelCount: 0
+        modelCount: 0,
+        disabled: true,
+        // No provenance: a disabled provider is absent from /config/providers, so
+        // opencode reports no source for it. The action decision does not depend
+        // on source (only its wording does), so availability stays correct here.
+        ...describeProviderProvenance(id, configured),
+        actions: resolveProviderActions(buildActionInput(id, isFree, configured, ownership))
       })
     }
 

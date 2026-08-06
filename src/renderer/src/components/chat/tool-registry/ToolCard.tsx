@@ -9,6 +9,8 @@
  *    rendering the input/result content;
  *  - the foreground/background bash extras (BackgroundBashOutput + the
  *    streaming/background "Open in panel" footers);
+ *  - the <ToolResultImages> strip for images the tool RETURNED — placed here,
+ *    not in the kind bodies, because `tool_result.images` is kind-agnostic;
  *  - the shared <ApprovalButtons>.
  *
  * For custom-layout kinds (diagram/mockup), the body renders its own full card
@@ -34,6 +36,7 @@ import { ApprovalButtons } from '../ApprovalButtons'
 import { TOOL_RENDERERS, type PassiveToolKind } from './kinds'
 import { GenericBody } from './kinds/GenericBody'
 import { BackgroundBashOutput } from './kinds/bash-output'
+import { ToolResultImages } from './ToolResultImages'
 import type { BashOutputSlice, BgOutputSlice } from './kinds/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -124,9 +127,12 @@ export function ToolCard({
     if ((bashOutput || bgOutput) && !expanded) setExpanded(true)
   }, [bashOutput, bgOutput]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const summary = summarizeTool(kind, view)
+  const summary = summarizeTool(kind, view, block.toolName)
   const headerName = displayName ?? block.toolName
   const hasResult = !!result
+  // Producers omit `images` when empty, but normalize defensively — an empty
+  // array must not render an empty bordered strip.
+  const resultImages = result?.images?.length ? result.images : undefined
   const isPendingApproval = !isHistorical && !!approval
 
   const bgRunning = isBackgroundBash && !bgNotification && !isHistorical
@@ -314,6 +320,23 @@ export function ToolCard({
       {expanded && (
         <div className="border-t border-border">
           <Body {...bodyProps} />
+        </div>
+      )}
+
+      {/* Images the tool RETURNED, in the shared result area so every standard
+          kind gets them without touching its body. Notably this bypasses
+          FileReadBody's `showResult` gate, which hides the whole result section
+          when `toolResult` is '' — exactly the shape of an image-only Read
+          (Claude's tool_result content is the image block and nothing else).
+
+          Deliberately NOT gated on `expanded` (unlike the body): the image IS
+          the result, a collapsed card gives no hint one exists, and the strip is
+          the only affordance that reaches the viewer's gallery. Same posture as
+          the bash streaming/background footers below, which also sit outside the
+          collapse. */}
+      {resultImages && (
+        <div className="border-t border-border">
+          <ToolResultImages toolUseId={toolUseId} images={resultImages} />
         </div>
       )}
 

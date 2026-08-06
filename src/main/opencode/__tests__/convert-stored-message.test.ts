@@ -140,3 +140,211 @@ describe('convertStoredMessage', () => {
     expect((r!.content[3] as { text: string }).text).toBe('after')
   })
 })
+
+/**
+ * User attachments: opencode persists them as `file` parts carrying a
+ * `data:<mime>;base64,<data>` url (OpencodeSession.buildFileParts). @-mentioned
+ * files/directories use the SAME part type but a `file://` url with
+ * text/plain / application/x-directory mime (vendor prompt.ts resolvePromptParts)
+ * — those stay skipped. Assistant-role file parts are tool-result images and are
+ * handled separately.
+ */
+describe('convertStoredMessage — user attachment file parts', () => {
+  it('maps a data-URI image file part to an image block with fileName', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        { type: 'text', text: 'look' },
+        { type: 'file', mime: 'image/png', url: 'data:image/png;base64,AAAA', filename: 'shot.png' }
+      ])
+    )
+    expect(r).not.toBeNull()
+    expect(r!.content).toEqual([
+      { type: 'image', mediaType: 'image/png', base64Data: 'AAAA', fileName: 'shot.png' },
+      { type: 'text', text: 'look' }
+    ])
+  })
+
+  it('omits fileName when the part has no filename', () => {
+    const r = convertStoredMessage(
+      msg('user', [{ type: 'file', mime: 'image/webp', url: 'data:image/webp;base64,BBBB' }])
+    )
+    expect(r!.content).toEqual([{ type: 'image', mediaType: 'image/webp', base64Data: 'BBBB' }])
+  })
+
+  it('maps a data-URI pdf file part to a document block', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        {
+          type: 'file',
+          mime: 'application/pdf',
+          url: 'data:application/pdf;base64,PDFDATA',
+          filename: 'spec.pdf'
+        }
+      ])
+    )
+    expect(r!.content).toEqual([
+      { type: 'document', mediaType: 'application/pdf', base64Data: 'PDFDATA', fileName: 'spec.pdf' }
+    ])
+  })
+
+  it('does not null an image-only user message', () => {
+    const r = convertStoredMessage(
+      msg('user', [{ type: 'file', mime: 'image/jpeg', url: 'data:image/jpeg;base64,CCCC' }])
+    )
+    expect(r).not.toBeNull()
+    expect(r!.role).toBe('user')
+    expect(r!.content).toHaveLength(1)
+  })
+
+  it('skips a file:// text/plain @-mention part', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        { type: 'text', text: 'see @src/a.ts' },
+        { type: 'file', mime: 'text/plain', url: 'file:///d:/repo/src/a.ts', filename: 'src/a.ts' }
+      ])
+    )
+    expect(r!.content).toEqual([{ type: 'text', text: 'see @src/a.ts' }])
+  })
+
+  it('skips a file:// directory @-mention part', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        { type: 'text', text: 'see @src' },
+        { type: 'file', mime: 'application/x-directory', url: 'file:///d:/repo/src', filename: 'src' }
+      ])
+    )
+    expect(r!.content).toEqual([{ type: 'text', text: 'see @src' }])
+  })
+
+  it('skips a file:// image @-mention part (no inline data available)', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        { type: 'text', text: 'see @a.png' },
+        { type: 'file', mime: 'image/png', url: 'file:///d:/repo/a.png', filename: 'a.png' }
+      ])
+    )
+    expect(r!.content).toEqual([{ type: 'text', text: 'see @a.png' }])
+  })
+
+  it('skips an assistant-role data-URI image file part', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [
+        { type: 'text', text: 'here' },
+        { type: 'file', mime: 'image/png', url: 'data:image/png;base64,DDDD' }
+      ])
+    )
+    expect(r!.content).toEqual([{ type: 'text', text: 'here' }])
+  })
+
+  it('skips malformed data URIs without throwing', () => {
+    const cases: StoredMessage['parts'] = [
+      { type: 'file', mime: 'image/png' },
+      { type: 'file', mime: 'image/png', url: 'data:image/png;base64' },
+      { type: 'file', mime: 'image/png', url: 'data:image/png;base64,' },
+      { type: 'file', mime: 'image/png', url: 'data:image/jpeg;base64,AAAA' },
+      { type: 'file', mime: 'image/png', url: 'data:image/png,AAAA' },
+      { type: 'file', mime: 'image/tiff', url: 'data:image/tiff;base64,AAAA' },
+      { type: 'file', url: 'data:image/png;base64,AAAA' }
+    ]
+    for (const part of cases) {
+      const r = convertStoredMessage(msg('user', [{ type: 'text', text: 'x' }, part]))
+      expect(r!.content, JSON.stringify(part)).toEqual([{ type: 'text', text: 'x' }])
+    }
+  })
+
+  it('keeps multiple attachments in part order, ahead of the text block', () => {
+    const r = convertStoredMessage(
+      msg('user', [
+        { type: 'text', text: 'both' },
+        { type: 'file', mime: 'image/png', url: 'data:image/png;base64,ONE', filename: '1.png' },
+        { type: 'file', mime: 'image/gif', url: 'data:image/gif;base64,TWO', filename: '2.gif' }
+      ])
+    )
+    expect(r!.content).toEqual([
+      { type: 'image', mediaType: 'image/png', base64Data: 'ONE', fileName: '1.png' },
+      { type: 'image', mediaType: 'image/gif', base64Data: 'TWO', fileName: '2.gif' },
+      { type: 'text', text: 'both' }
+    ])
+  })
+})
+
+/**
+ * Tool-RETURNED images.
+ *
+ * Verified against the pinned vendor source (vendor/opencode-src,
+ * packages/opencode/src/session/processor.ts `completeToolCall` +
+ * packages/sdk/js/src/gen/types.gen.ts `ToolStateCompleted`): a tool that
+ * returns media (read on a .png → `attachments: [{type:'file', mime, url}]`)
+ * has those FilePart attachments stored on the tool part's own
+ * `state.attachments`, NOT as separate assistant-message `file` parts. They were
+ * dropped entirely by convertStoredMessage.
+ */
+describe('convertStoredMessage — tool-result images', () => {
+  it('maps state.attachments data-URIs onto the tool_result images field', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [
+        {
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-img',
+          state: {
+            status: 'completed',
+            input: { filePath: '/x.png' },
+            output: 'Image read successfully',
+            attachments: [
+              { type: 'file', mime: 'image/png', url: 'data:image/png;base64,SHOT', filename: 'x.png' }
+            ]
+          }
+        }
+      ])
+    )
+    const result = r!.content.find((b) => b.type === 'tool_result')
+    expect(result).toEqual({
+      type: 'tool_result',
+      toolUseId: 'call-img',
+      toolResult: 'Image read successfully',
+      isError: false,
+      images: [{ mediaType: 'image/png', base64Data: 'SHOT', fileName: 'x.png' }]
+    })
+  })
+
+  it('keeps multiple attachments in order and skips non-image / non-data-URI ones', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [
+        {
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-multi',
+          state: {
+            status: 'completed',
+            output: 'ok',
+            attachments: [
+              { type: 'file', mime: 'image/png', url: 'data:image/png;base64,ONE' },
+              { type: 'file', mime: 'application/pdf', url: 'data:application/pdf;base64,PDF' },
+              { type: 'file', mime: 'image/tiff', url: 'data:image/tiff;base64,TIFF' },
+              { type: 'file', mime: 'image/png', url: 'file:///not-inline.png' },
+              { type: 'file', mime: 'image/webp', url: 'data:image/webp;base64,TWO' }
+            ]
+          }
+        }
+      ])
+    )
+    const result = r!.content.find((b) => b.type === 'tool_result')
+    expect(result).toMatchObject({
+      images: [
+        { mediaType: 'image/png', base64Data: 'ONE' },
+        { mediaType: 'image/webp', base64Data: 'TWO' }
+      ]
+    })
+  })
+
+  it('omits images when the tool returned none', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [
+        { type: 'tool', tool: 'bash', callID: 'c-none', state: { status: 'completed', output: 'x' } }
+      ])
+    )
+    const result = r!.content.find((b) => b.type === 'tool_result')!
+    expect('images' in result).toBe(false)
+  })
+})

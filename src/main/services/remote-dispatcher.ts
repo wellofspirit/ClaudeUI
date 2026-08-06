@@ -7,12 +7,19 @@ type Handler = (...args: any[]) => Promise<unknown>
 /**
  * Routes WebSocket invoke messages to handler functions.
  * Handlers are extracted from the IPC layer and registered here for dual use.
- * Only channels in the allowlist are exposed to remote clients.
+ *
+ * Gating model: this is a DENYLIST over an explicit registration set, NOT an
+ * allowlist. A channel is reachable over remote iff (a) `registerRemoteHandlers`
+ * explicitly registered it AND (b) it is not in {@link BLOCKED}. `register()`
+ * silently drops any channel in the denylist, so listing a channel in BLOCKED
+ * guarantees it can never be exposed even if a future edit tries to register it.
+ * The web client gets full parity with the desktop surface EXCEPT the denied
+ * channels (window/terminal/native-OAuth/account-mutation/pick-folder/…).
  */
 export class RemoteDispatcher {
   private handlers = new Map<string, Handler>()
 
-  /** Channels explicitly blocked from remote access. */
+  /** Channels explicitly blocked from remote access (the denylist). */
   private static readonly BLOCKED = new Set([
     'window:minimize',
     'window:maximize',
@@ -36,7 +43,27 @@ export class RemoteDispatcher {
     'account:switch',
     'account:delete',
     // Spawns a local opencode server — meaningless and unsafe over remote (Phase 9b).
-    'usage:refresh-prices'
+    'usage:refresh-prices',
+    // Remote-server config + credential (Phase 1 of remote auth). A remote
+    // client must never read/rotate its own auth credential or flip
+    // transport/autostart flags for the server it's connected through —
+    // mirrors the auth/account entries above. remote:get-config also never
+    // returns password_salt/password_hash/kdf_params even to the desktop IPC
+    // caller, but blocking it here means a compromised/rogue remote client
+    // can't even learn `passwordSet`/`passwordUpdatedAt`.
+    'remote:get-config',
+    'remote:set-config',
+    'remote:set-password',
+    'remote:clear-password',
+    // Tailscale probe (Phase 3): discloses this node's tailnet DNS name and the
+    // owner's login — local-configuration detail a remote client has no business
+    // reading, and useless to it anyway (it cannot flip tls_mode either).
+    'remote:tailscale-detect',
+    // Force re-serve (ADR-042) MUTATES this machine's `tailscale serve` config,
+    // taking over the pinned HTTPS port from whatever holds it — i.e. it can
+    // change (or break) the very transport the caller is connected through.
+    // Desktop-only, like the rest of the remote:* config surface.
+    'remote:force-reserve'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

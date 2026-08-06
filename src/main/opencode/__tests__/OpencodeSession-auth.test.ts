@@ -78,7 +78,9 @@ const {
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease
+    release: mockRelease,
+    releaseIfCurrent: vi.fn(),
+    subscribeExit: () => () => {}
   }
 }))
 

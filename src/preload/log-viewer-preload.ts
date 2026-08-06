@@ -6,9 +6,9 @@ const logViewerApi = {
     ipcRenderer.invoke('log-viewer:ready')
   },
 
-  /** Subscribe to individual log entries (live stream) */
-  onEntry: (cb: (entry: unknown) => void): void => {
-    ipcRenderer.on('log-viewer:entry', (_, entry) => cb(entry))
+  /** Subscribe to the live stream — entries arrive coalesced into batches */
+  onEntryBatch: (cb: (entries: unknown[]) => void): void => {
+    ipcRenderer.on('log-viewer:entry-batch', (_, entries) => cb(entries))
   },
 
   /** Subscribe to batch of entries (initial catchup) */

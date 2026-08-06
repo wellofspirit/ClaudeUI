@@ -25,6 +25,7 @@
 
 import { useState } from 'react'
 import { SettingsToggle, SandboxListSetting, InfoTooltip } from './settings-controls'
+import { SelectMenu } from '../shared/SelectMenu'
 
 // The vendored schema is loosely typed; a schema node is an open bag of keywords.
 export type SchemaNode = Record<string, unknown>
@@ -447,20 +448,18 @@ export function SchemaField(props: FieldProps): React.JSX.Element {
       return (
         <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
           <FieldLabel name={fieldKey} description={description} />
-          <select
-            data-testid="OpencodeSchemaForm.enum"
-            data-id={fieldKey}
+          <SelectMenu
+            testid="OpencodeSchemaForm.enum"
+            dataAttrs={{ 'data-id': fieldKey }}
             value={value === undefined || value === null ? '' : String(value)}
-            onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}
-            className={`${inputClass} w-full cursor-pointer`}
-          >
-            <option value="">—</option>
-            {options.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => onChange(v === '' ? undefined : v)}
+            options={[
+              // The schema's "unset" choice, explicit as it was in the markup.
+              { value: '', label: '—' },
+              ...options.map((o) => ({ value: o, label: o }))
+            ]}
+            triggerClassName={`${inputClass} w-full`}
+          />
         </div>
       )
     }
