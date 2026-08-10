@@ -262,7 +262,14 @@ export function makeJudgeTransportWithFallback(opts: {
         return fallback(req)
       }
       // Anything else is a real judge failure: propagate so classify() fails
-      // closed and the approval goes to the human.
+      // closed and the approval goes to the human. Log it FIRST — classify()
+      // collapses every transport throw into a silent `unavailable`, so this
+      // warn is the only place the provider's actual complaint (the route's
+      // UpstreamError carries the response body) ever reaches the log.
+      logger.warn(
+        'judge-transport',
+        `judge call failed: ${err instanceof Error ? err.message : String(err)}`
+      )
       throw err
     }
   }

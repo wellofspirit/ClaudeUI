@@ -240,6 +240,12 @@ describe('makeJudgeTransportWithFallback', () => {
     expect(fallback).not.toHaveBeenCalled()
     // A provider outage must not be mistaken for version skew.
     expect(probe.available).toBe(true)
+    // classify() swallows the rethrow into a silent `unavailable`, so this
+    // warn is the only trace of the provider's actual complaint.
+    expect(logger.warn).toHaveBeenCalledWith(
+      'judge-transport',
+      expect.stringContaining('judge call failed:')
+    )
   })
 
   it('uses the fallback for this call but does not cache when the probe itself fails', async () => {
