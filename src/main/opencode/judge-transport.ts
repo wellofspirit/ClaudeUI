@@ -190,7 +190,15 @@ export function makeDirectJudgeTransport(
       )
     }
 
-    const parsed = (await res.json()) as { text?: unknown }
+    const parsed = (await res.json()) as { text?: unknown; usage?: unknown }
+    // Token counts only — no prompt or completion content — so this is safe to
+    // log. It is the one signal that explains an empty/unparseable completion:
+    // a native-reasoning judge can spend the whole `maxTokens` budget on
+    // reasoning tokens and emit no visible text. Logged before the text check
+    // so a malformed response is diagnosable too.
+    if (parsed?.usage && typeof parsed.usage === 'object') {
+      logger.debug('judge-transport', `judge usage ${JSON.stringify(parsed.usage)}`)
+    }
     if (typeof parsed?.text !== 'string') {
       throw new Error(`opencode POST ${JUDGE_COMPLETION_PATH} returned no text field`)
     }

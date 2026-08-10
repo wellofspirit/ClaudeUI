@@ -22,6 +22,9 @@ import {
   STAGE1_STOP_SEQUENCES,
   STAGE1_TIMEOUT_MS,
   STAGE2_TIMEOUT_MS,
+  UNPARSEABLE_REASON,
+  UNPARSEABLE_RAW_TAIL_CHARS,
+  formatUnparseableJudgeReply,
   type ClassifyInput,
   type JudgeRequest
 } from '../classifier'
@@ -443,6 +446,9 @@ describe('classify (orchestrator)', () => {
     expect(r.stage).toBe('fast')
     expect(r.unavailable).toBeUndefined()
     expect(judge).toHaveBeenCalledTimes(1)
+    // The completion rides along so the wiring can debug-log it.
+    expect(r.reason).toBe(UNPARSEABLE_REASON)
+    expect(r.raw).toBe('Sorry, I cannot comply.')
   })
 
   it('thinking mode → a single stage-2 call', async () => {
@@ -580,6 +586,37 @@ describe('classify (orchestrator)', () => {
     expect(r.block).toBe(true)
     expect(r.stage).toBe('thinking')
     expect(r.unavailable).toBeUndefined()
+    expect(r.reason).toBe(UNPARSEABLE_REASON)
+    expect(r.raw).toBe('¯\\_(ツ)_/¯')
+  })
+
+  it('carries the raw completion ONLY on an unparseable verdict', async () => {
+    // Production shape: a native-reasoning judge burns the whole budget inside
+    // <thinking> and the reply is cut off before the verdict.
+    const truncated = '<thinking>weighing the rules and the user’s consent, so far'
+    const judge = vi.fn().mockResolvedValue(truncated)
+    const unreadable = await classify({ ...base, twoStageMode: 'thinking' }, judge)
+    expect(unreadable).toMatchObject({
+      block: true,
+      stage: 'thinking',
+      reason: UNPARSEABLE_REASON,
+      raw: truncated
+    })
+
+    // A verdict we CAN read never carries it — `raw` is the diagnostic channel
+    // for the unreadable case, not a transcript of every judge call.
+    const readable = await classify(
+      { ...base, twoStageMode: 'thinking' },
+      vi.fn().mockResolvedValue('<thinking>fine</thinking><block>no</block>')
+    )
+    expect(readable.raw).toBeUndefined()
+
+    // Nor does a transport error: there is no completion to report.
+    const errored = await classify(
+      { ...base, twoStageMode: 'thinking' },
+      vi.fn().mockRejectedValue(new Error('judge down'))
+    )
+    expect(errored.raw).toBeUndefined()
   })
 
   it('transport throws at STAGE 1 → block + unavailable, no escalation', async () => {
@@ -728,5 +765,35 @@ describe('classify — stage timeouts', () => {
       vi.useRealTimers()
       process.off('unhandledRejection', onUnhandled)
     }
+  })
+})
+
+describe('formatUnparseableJudgeReply', () => {
+  it('reports the stage and the FULL length, but keeps only the tail', () => {
+    const raw = `${'x'.repeat(UNPARSEABLE_RAW_TAIL_CHARS * 2)}<thinking>cut off here`
+    const line = formatUnparseableJudgeReply({
+      block: true,
+      stage: 'thinking',
+      reason: UNPARSEABLE_REASON,
+      raw
+    })
+    expect(line).toContain('stage=thinking')
+    expect(line).toContain(`${raw.length} chars`)
+    // The tail is what shows WHERE a truncated reply stopped; the head carries
+    // no signal and must not bloat the log.
+    expect(line).toContain('<thinking>cut off here')
+    expect(line).not.toContain('x'.repeat(UNPARSEABLE_RAW_TAIL_CHARS + 1))
+  })
+
+  it('keeps a short reply whole', () => {
+    const line = formatUnparseableJudgeReply({
+      block: true,
+      stage: 'fast',
+      reason: UNPARSEABLE_REASON,
+      raw: 'I cannot help with that.'
+    })
+    expect(line).toContain('stage=fast')
+    expect(line).toContain('24 chars')
+    expect(line).toContain(': I cannot help with that.')
   })
 })

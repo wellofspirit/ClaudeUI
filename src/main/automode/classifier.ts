@@ -109,6 +109,13 @@ export interface ClassifyResult {
    * still stands on `<block>`/`<reason>`.
    */
   category?: string
+  /**
+   * The judge's RAW completion text, present ONLY on a fail-closed unparseable
+   * verdict (the one whose `reason` is {@link UNPARSEABLE_REASON}), so engine
+   * wiring can debug-log what the judge actually said. Never present on a
+   * parseable verdict, nor on a transport error — there is no completion then.
+   */
+  raw?: string
 }
 
 /**
@@ -382,7 +389,33 @@ export function buildUserPrompt(input: ClassifyInput, instruction: string): stri
 // ── Verdict parsing (fail-closed) ─────────────────────────────────────────────
 
 /** Reason attached to a fail-closed block caused by an unparseable judge reply. */
-const UNPARSEABLE_REASON = 'the classifier response could not be parsed'
+export const UNPARSEABLE_REASON = 'the classifier response could not be parsed'
+
+/**
+ * How much of an unparseable completion {@link formatUnparseableJudgeReply}
+ * keeps. Its own constant, not {@link MAX_ASSISTANT_PROSE_CHARS}: the two
+ * happen to agree but answer different questions, and a change to the prompt
+ * budget must not silently change what we log.
+ */
+export const UNPARSEABLE_RAW_TAIL_CHARS = 2000
+
+/**
+ * One log line describing an unparseable judge reply — shared by every engine's
+ * wiring, which supplies the logger (this module stays pure).
+ *
+ * The **tail** is kept: the verdict is expected at the end, so on a reply
+ * truncated mid-`<thinking>` (a native-reasoning judge spending the whole
+ * `maxTokens` budget on reasoning is the observed cause) the tail shows exactly
+ * where it stopped. The full length is reported separately since the tail alone
+ * cannot tell a short refusal from a truncated 8 K-token ramble.
+ */
+export function formatUnparseableJudgeReply(result: ClassifyResult): string {
+  const raw = result.raw ?? ''
+  return (
+    `auto-mode judge reply unparseable (stage=${result.stage}, ${raw.length} chars) — ` +
+    `last ${UNPARSEABLE_RAW_TAIL_CHARS}: ${truncateProseTail(raw, UNPARSEABLE_RAW_TAIL_CHARS)}`
+  )
+}
 
 /**
  * Strip `<thinking>` blocks before verdict matching (cli.js `qUs`), so a verdict
@@ -525,7 +558,9 @@ export async function classify(
     const v = parseVerdictOrNull(raw)
     // Fail-closed, but NOT `unavailable`: we did get an answer, we just can't
     // read it — retrying is not obviously the right move, so this is a block.
-    if (!v) return { block: true, stage: 'thinking', reason: UNPARSEABLE_REASON }
+    // `raw` rides along ONLY here (and in `fast` below): a verdict we cannot
+    // read is undiagnosable after the fact without the completion itself.
+    if (!v) return { block: true, stage: 'thinking', reason: UNPARSEABLE_REASON, raw }
     return {
       block: v.block,
       ...(v.reason ? { reason: v.reason } : {}),
@@ -546,7 +581,7 @@ export async function classify(
     })
     if (raw === null) return errored()
     const v = parseVerdictOrNull(raw)
-    if (!v) return { block: true, stage: 'fast', reason: UNPARSEABLE_REASON }
+    if (!v) return { block: true, stage: 'fast', reason: UNPARSEABLE_REASON, raw }
     // `fast` is not asked for a <category>, but one that arrives anyway has
     // still been validated against the derived set, so it is safe to surface.
     return {

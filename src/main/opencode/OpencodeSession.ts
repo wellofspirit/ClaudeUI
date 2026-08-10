@@ -55,6 +55,7 @@ import { makeJudgeTransportWithFallback } from './judge-transport'
 import type { JudgeEndpointProbe } from './judge-transport'
 import {
   classify,
+  formatUnparseableJudgeReply,
   isAutoModeFastPathAllowed,
   type EnvironmentInfo,
   type JudgeTransport
@@ -1795,6 +1796,11 @@ export class OpencodeSession extends BaseSession {
           `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
           (result.reason ? ` — ${result.reason}` : '')
       )
+      // Set only on a fail-closed unparseable verdict — the one block whose
+      // reason says nothing about WHY the judge's answer was unreadable.
+      if (result.raw !== undefined) {
+        logger.debug('OpencodeSession', formatUnparseableJudgeReply(result))
+      }
       if (result.unavailable) {
         this.fallbackToHuman(approval)
         return
