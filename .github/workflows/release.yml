@@ -176,10 +176,43 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      - name: Ad-hoc sign (macOS)
+      # Signs with the self-signed "ClaudeUI Dev" identity when the MAC_CERT_*
+      # secrets are configured, so TCC grants (mic, App Management, ...) keyed on
+      # identifier + certificate root survive updates. Falls back to ad-hoc when
+      # the secrets are absent (forks), which re-prompts on every build.
+      - name: Import signing identity (macOS)
+        if: matrix.platform == 'mac'
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MAC_CERT_P12" ]; then
+            echo "MAC_CERT_P12 secret not set; falling back to ad-hoc signing."
+            exit 0
+          fi
+          security create-keychain -p "" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "" build.keychain
+          printf '%s' "$MAC_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Allow codesign to use the key without a UI prompt
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain > /dev/null
+          security list-keychains -d user -s build.keychain login.keychain
+          # find-identity without -v: the self-signed root is untrusted on the
+          # runner, which is fine for signing but filters it from "valid".
+          IDENTITY=$(security find-identity -p codesigning build.keychain | sed -n 's/.*"\(.*\)"/\1/p' | head -1)
+          if [ -z "$IDENTITY" ]; then
+            echo "Cert imported but no codesigning identity found" >&2
+            exit 1
+          fi
+          echo "MAC_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign (macOS)
         if: matrix.platform == 'mac'
         run: |
-          codesign --force --deep --sign - "${{ matrix.build_dir }}/ClaudeUI.app"
+          codesign --force --deep --sign "${MAC_SIGN_IDENTITY:--}" "${{ matrix.build_dir }}/ClaudeUI.app"
+          codesign --verify --deep --verbose=2 "${{ matrix.build_dir }}/ClaudeUI.app"
 
       - name: Package (Windows)
         if: matrix.platform == 'win'
