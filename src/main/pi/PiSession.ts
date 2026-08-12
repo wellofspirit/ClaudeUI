@@ -76,6 +76,7 @@ import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // pi's own judge transport (docs/automode-rework-plan.md phase 4).
 import {
   classify,
+  formatUnparseableJudgeReply,
   isAutoModeFastPathAllowed,
   type EnvironmentInfo,
   type JudgeTransport
@@ -2084,6 +2085,11 @@ export class PiSession extends BaseSession {
           `${result.category ? `, rule=${result.category}` : ''}) ${toolName}` +
           (result.reason ? ` — ${result.reason}` : '')
       )
+      // Set only on a fail-closed unparseable verdict — the one block whose
+      // reason says nothing about WHY the judge's answer was unreadable.
+      if (result.raw !== undefined) {
+        logger.debug('PiSession', formatUnparseableJudgeReply(result))
+      }
 
       if (result.unavailable) return ASK_HUMAN
 

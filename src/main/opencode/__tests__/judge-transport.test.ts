@@ -7,6 +7,7 @@ import {
   probeJudgeEndpoint
 } from '../judge-transport'
 import type { JudgeEndpointProbe } from '../judge-transport'
+import { logger } from '../../services/logger'
 
 vi.mock('../../services/logger', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
@@ -110,6 +111,21 @@ describe('makeDirectJudgeTransport', () => {
     expect(err).toBeInstanceOf(Error)
     expect(err).not.toBeInstanceOf(JudgeEndpointUnavailableError)
     expect(String(err)).toContain('502')
+  })
+
+  it('debug-logs the token usage a response carries and still returns just the text', async () => {
+    // The counts are the only signal that explains an empty completion (a
+    // reasoning model spending the whole budget before it speaks). Numbers
+    // only — no prompt content — so debug level is safe.
+    const usage = { inputTokens: 12000, outputTokens: 8192, reasoningTokens: 8192 }
+    const fetchImpl = vi.fn().mockResolvedValue(json(200, { text: '', usage }))
+    const transport = makeDirectJudgeTransport(TARGET, MODEL, fetchImpl as unknown as typeof fetch)
+
+    await expect(transport({ system: 's', user: 'u' })).resolves.toBe('')
+    expect(logger.debug).toHaveBeenCalledWith(
+      'judge-transport',
+      expect.stringContaining(JSON.stringify(usage))
+    )
   })
 
   it('throws when the JSON body has no text field', async () => {
@@ -224,6 +240,12 @@ describe('makeJudgeTransportWithFallback', () => {
     expect(fallback).not.toHaveBeenCalled()
     // A provider outage must not be mistaken for version skew.
     expect(probe.available).toBe(true)
+    // classify() swallows the rethrow into a silent `unavailable`, so this
+    // warn is the only trace of the provider's actual complaint.
+    expect(logger.warn).toHaveBeenCalledWith(
+      'judge-transport',
+      expect.stringContaining('judge call failed:')
+    )
   })
 
   it('uses the fallback for this call but does not cache when the probe itself fails', async () => {

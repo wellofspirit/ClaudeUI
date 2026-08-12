@@ -190,7 +190,15 @@ export function makeDirectJudgeTransport(
       )
     }
 
-    const parsed = (await res.json()) as { text?: unknown }
+    const parsed = (await res.json()) as { text?: unknown; usage?: unknown }
+    // Token counts only — no prompt or completion content — so this is safe to
+    // log. It is the one signal that explains an empty/unparseable completion:
+    // a native-reasoning judge can spend the whole `maxTokens` budget on
+    // reasoning tokens and emit no visible text. Logged before the text check
+    // so a malformed response is diagnosable too.
+    if (parsed?.usage && typeof parsed.usage === 'object') {
+      logger.debug('judge-transport', `judge usage ${JSON.stringify(parsed.usage)}`)
+    }
     if (typeof parsed?.text !== 'string') {
       throw new Error(`opencode POST ${JUDGE_COMPLETION_PATH} returned no text field`)
     }
@@ -254,7 +262,14 @@ export function makeJudgeTransportWithFallback(opts: {
         return fallback(req)
       }
       // Anything else is a real judge failure: propagate so classify() fails
-      // closed and the approval goes to the human.
+      // closed and the approval goes to the human. Log it FIRST — classify()
+      // collapses every transport throw into a silent `unavailable`, so this
+      // warn is the only place the provider's actual complaint (the route's
+      // UpstreamError carries the response body) ever reaches the log.
+      logger.warn(
+        'judge-transport',
+        `judge call failed: ${err instanceof Error ? err.message : String(err)}`
+      )
       throw err
     }
   }

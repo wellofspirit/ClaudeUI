@@ -3,10 +3,9 @@
   "include": ["electron.vite.config.*", "src/main/**/*", "src/preload/**/*", "src/shared/**/*", "src/test/**/*", "src/integration/**/*"],
   "compilerOptions": {
     "composite": true,
-    "baseUrl": ".",
     "types": ["electron-vite/node"],
     "paths": {
-      "@test/*": ["src/test/*"]
+      "@test/*": ["./src/test/*"]
     }
   }
 }
