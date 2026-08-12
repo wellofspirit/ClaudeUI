@@ -209,6 +209,8 @@ jobs:
           # Allow codesign to use the key without a UI prompt
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain > /dev/null
           security list-keychains -d user -s build.keychain login.keychain
+          # Debug: show what the import actually produced (names+hashes only)
+          security find-identity build.keychain
           # find-identity without -v: the self-signed root is untrusted on the
           # runner, which is fine for signing but filters it from "valid".
           IDENTITY=$(security find-identity -p codesigning build.keychain | sed -n 's/.*"\(.*\)"/\1/p' | head -1)
