@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import type { AutomationRun, ChatMessage } from '../../../../../shared/types'
 import { MessageBubble } from '../../chat/MessageBubble'
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
+import { DiagramGalleryProvider } from '../../chat/DiagramGallery'
 
 export interface AutomationRunHistoryViewProps {
   run: AutomationRun | null
@@ -118,18 +119,21 @@ export function AutomationRunHistoryView({
           </div>
         ) : (
           <div className="space-y-3">
-            {/* Same viewer as the live chat — attached-image thumbnails in a
-                replayed run are clickable too. Renders no wrapper element. */}
+            {/* Same viewers as the live chat — attached-image thumbnails in a
+                replayed run are clickable too, and its diagrams page as one
+                gallery. Neither renders a wrapper element. */}
             <ImageGalleryProvider messages={runMessages ?? []}>
-              {runMessages?.map((msg, idx) => (
-                <MessageBubble
-                  key={msg.id || idx}
-                  message={msg}
-                  pendingApprovals={[]}
-                  isLastAssistant={false}
-                  thinkingStartedAt={null}
-                />
-              ))}
+              <DiagramGalleryProvider messages={runMessages ?? []}>
+                {runMessages?.map((msg, idx) => (
+                  <MessageBubble
+                    key={msg.id || idx}
+                    message={msg}
+                    pendingApprovals={[]}
+                    isLastAssistant={false}
+                    thinkingStartedAt={null}
+                  />
+                ))}
+              </DiagramGalleryProvider>
             </ImageGalleryProvider>
 
             {streamingText && (

@@ -15,6 +15,9 @@
  *     (dismissal is resolved from pointer events, never from `click` — see
  *     `sealFromAncestors` for the pointer-capture retargeting that forces this)
  *   - navigation stops at the ends (no wrap); changing image or tab resets zoom
+ *   - right-click opens a context menu (copy as image, and for a diagram entry
+ *     copy as markdown). Every gesture handler ignores non-primary buttons, so a
+ *     right-click neither starts a pan nor counts as the backdrop tap that closes.
  *
  * An entry is either a raster image (`<img src>`) or **inline SVG markup**
  * (`ViewerSvgImage`, used by the Mermaid diagram cards). The SVG variant exists
@@ -35,6 +38,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useContextMenu } from '../../../hooks/useContextMenu'
+import { rasterToPngBlob, svgToPngBlob, themeCanvasBackground, writeClipboardImage } from './copy-image'
 import {
   DOUBLE_TAP_SCALE,
   FIT_TRANSFORM,
@@ -78,6 +83,14 @@ export interface ViewerSvgImage {
   intrinsicWidth: number
   intrinsicHeight: number
   fileName?: string
+  /**
+   * The markup's source form, when it has one — for a Mermaid diagram, its
+   * mermaid source. Present ⇒ the context menu offers "Copy as markdown", which
+   * writes it back out as a fenced ```mermaid block. Keeping it on the entry is
+   * what lets the viewer stay ignorant of diagrams: it copies a string it was
+   * handed, it does not know how to make one.
+   */
+  markdownSource?: string
 }
 
 export type ViewerImage = ViewerRasterImage | ViewerSvgImage
@@ -117,6 +130,16 @@ interface GestureState {
    * content, as opposed to the content or a chevron. A tap there closes.
    */
   onBackdrop: boolean
+  /**
+   * The context menu was open when the press started, so this tap is the one that
+   * dismisses the MENU and must not also close the viewer.
+   *
+   * Captured at pointerdown rather than read at pointerup because
+   * `useContextMenu`'s own outside-click dismissal listens on `mousedown`, which
+   * Chromium fires between our pointerdown and pointerup — by the time the tap is
+   * resolved the menu has already closed itself.
+   */
+  menuWasOpen: boolean
 }
 
 export function ImageViewerOverlay({
@@ -131,7 +154,9 @@ export function ImageViewerOverlay({
     () => galleries.find((t) => t.id === initialTabId)?.id ?? galleries[0]?.id ?? ''
   )
   const activeTab = galleries.find((t) => t.id === activeTabId) ?? galleries[0]
-  const images = activeTab?.images ?? []
+  // Memoised only so the `?? []` fallback cannot hand a fresh array identity to
+  // the copy callbacks on every render.
+  const images = useMemo(() => activeTab?.images ?? [], [activeTab])
 
   const [rawIndex, setIndex] = useState(() =>
     Math.min(Math.max(0, initialIndex), Math.max(0, (images.length || 1) - 1))
@@ -154,6 +179,19 @@ export function ImageViewerOverlay({
   useLayoutEffect(() => {
     transformRef.current = transform
   }, [transform])
+
+  // Right-click menu. The hook owns the anchor, the viewport-edge flipping and
+  // outside-click dismissal — the same one the sidebar and git tree use, so the
+  // menu behaves identically to every other context menu in the app. Destructured
+  // rather than kept as a `menu` object so the members can be honest hook
+  // dependencies below (the object itself is new on every render).
+  const {
+    isOpen: menuOpen,
+    ref: menuRef,
+    style: menuStyle,
+    open: openContextMenu,
+    close: closeContextMenu
+  } = useContextMenu()
 
   const total = images.length
   // Clamped at *render* time, not in an effect: the gallery can shrink under an
@@ -251,11 +289,49 @@ export function ImageViewerOverlay({
     setIndex(0)
   }, [])
 
-  // Changing image or tab always returns to a centred fit.
+  // Changing image or tab always returns to a centred fit — and drops a menu that
+  // was opened for the entry we just left.
   useEffect(() => {
     setTransform(FIT_TRANSFORM)
     lastTap.current = null
-  }, [activeTabId, index])
+    closeContextMenu()
+  }, [activeTabId, index, closeContextMenu])
+
+  // ── Copy actions (context menu) ──────────────────────────────────────────
+
+  /**
+   * Both entry variants copy as PNG: Chromium's async clipboard rejects most
+   * other image types, so even a JPEG attachment is re-encoded. The blob is
+   * handed to `writeClipboardImage` as a promise, which is what keeps the write
+   * inside the click's user-gesture window (see that function).
+   *
+   * There is no toast infrastructure at this layer and the viewer is not the place
+   * to introduce one, so a failure is a console error — the menu has already
+   * closed either way.
+   */
+  const copyImage = useCallback((): void => {
+    closeContextMenu()
+    const entry = images[index]
+    if (!entry) return
+    const blob = isSvgImage(entry)
+      ? svgToPngBlob(entry.svgHtml, themeCanvasBackground())
+      : rasterToPngBlob(entry.src)
+    writeClipboardImage(blob).catch((err) => {
+      console.error('Failed to copy image to clipboard:', err)
+    })
+  }, [images, index, closeContextMenu])
+
+  /** Exactly one newline before the closing fence, and nothing after it. */
+  const copyMarkdown = useCallback((): void => {
+    closeContextMenu()
+    const source = currentSvg?.markdownSource
+    if (!source) return
+    navigator.clipboard
+      .writeText(`\`\`\`mermaid\n${source.replace(/\n+$/, '')}\n\`\`\``)
+      .catch((err) => {
+        console.error('Failed to copy diagram source to clipboard:', err)
+      })
+  }, [currentSvg, closeContextMenu])
 
   // ── Keyboard ─────────────────────────────────────────────────────────────
 
@@ -266,6 +342,12 @@ export function ImageViewerOverlay({
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
+        // Innermost thing first: Esc dismisses the context menu, and only a
+        // second Esc closes the viewer.
+        if (menuOpen) {
+          closeContextMenu()
+          return
+        }
         onClose()
         return
       }
@@ -277,7 +359,7 @@ export function ImageViewerOverlay({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose, step])
+  }, [onClose, step, menuOpen, closeContextMenu])
 
   // ── Body scroll lock ─────────────────────────────────────────────────────
 
@@ -310,6 +392,11 @@ export function ImageViewerOverlay({
   // ── Pointer gestures ─────────────────────────────────────────────────────
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    // Primary button only. A right-click must not start a gesture: with no guard
+    // it captured the pointer, and its pointerup then resolved as a zero-movement
+    // tap — closing the viewer outright when the press was on the backdrop. Touch
+    // and pen both report button 0, so this costs them nothing.
+    if (e.button !== 0) return
     const onImage = contentRef.current?.contains(e.target as Node) ?? false
     // Capture only for a gesture that starts on the image: a pan must keep
     // tracking once the pointer leaves the viewport, whereas capturing a press
@@ -326,7 +413,8 @@ export function ImageViewerOverlay({
         moved: false,
         pinchSpan: null,
         onImage,
-        onBackdrop: e.target === e.currentTarget
+        onBackdrop: e.target === e.currentTarget,
+        menuWasOpen: menuOpen
       }
       return
     }
@@ -373,6 +461,10 @@ export function ImageViewerOverlay({
   // pointerup/pointercancel, and calling it for a pointer that was never
   // captured (a press that started on the backdrop) throws NotFoundError.
   const endPointer = (e: React.PointerEvent<HTMLDivElement>): void => {
+    // Mirrors the pointerdown guard: a right-button release must not be resolved
+    // as a tap, and — crucially — must not perturb a left-button gesture that is
+    // still in flight underneath it.
+    if (e.button !== 0) return
     pointers.current.delete(e.pointerId)
     const g = gesture.current
     if (!g) return
@@ -395,6 +487,13 @@ export function ImageViewerOverlay({
         const dir = swipeDirection(e.clientX - g.startX, e.clientY - g.startY)
         if (dir !== 0) step(-dir)
       }
+      return
+    }
+
+    // A tap that began while the context menu was open only dismisses the menu —
+    // one click should not both close the menu and tear down the viewer.
+    if (g.menuWasOpen) {
+      closeContextMenu()
       return
     }
 
@@ -490,6 +589,7 @@ export function ImageViewerOverlay({
       onPointerDown={sealFromAncestors}
       onPointerUp={sealFromAncestors}
       onKeyDown={sealFromAncestors}
+      onContextMenu={sealFromAncestors}
     >
       {/* Top bar: tabs · filename · counter · close */}
       <div className="shrink-0 flex items-center gap-3 px-3 h-11 bg-black/40">
@@ -558,6 +658,7 @@ export function ImageViewerOverlay({
         onPointerMove={onPointerMove}
         onPointerUp={endPointer}
         onPointerCancel={onPointerCancel}
+        onContextMenu={openContextMenu}
         className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden"
         style={{ touchAction: 'none' }}
       >
@@ -622,6 +723,40 @@ export function ImageViewerOverlay({
           </>
         )}
       </div>
+
+      {/* Right-click menu. Inside the overlay root so its own events are sealed
+          from the page behind, and `position: fixed` so the anchor coordinates
+          the hook computed are viewport coordinates. Structure and classes are
+          the app's standard context menu (Sidebar/SessionItem, GitFileTree) —
+          it sits above the viewer's own z-[300] for the same reason those sit
+          above their panels. */}
+      {menuOpen && (
+        <div
+          ref={menuRef}
+          data-testid="ImageViewerOverlay.contextMenu"
+          className="fixed z-[9999] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
+          style={menuStyle}
+        >
+          <button
+            type="button"
+            data-testid="ImageViewerOverlay.copyImage"
+            onClick={copyImage}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+          >
+            Copy as image
+          </button>
+          {currentSvg?.markdownSource && (
+            <button
+              type="button"
+              data-testid="ImageViewerOverlay.copyMarkdown"
+              onClick={copyMarkdown}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Copy as markdown
+            </button>
+          )}
+        </div>
+      )}
     </div>,
     document.body
   )

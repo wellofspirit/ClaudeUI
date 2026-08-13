@@ -1,214 +1,34 @@
+/**
+ * MermaidDiagram — the diagram tool card's rendered/source tabs, the inline
+ * pan/zoom viewport, and the way into the full-screen viewer.
+ *
+ * The render pipeline itself lives in `./mermaid-render` (shared with the
+ * session-wide diagram gallery, which renders diagrams that were never mounted),
+ * and the SVG→PNG clipboard path lives in `shared/ImageViewer/copy-image`
+ * (shared with the viewer's context menu). What is left here is the card.
+ *
+ * Expanding prefers the **gallery**: when a `DiagramGalleryProvider` is mounted
+ * and this card knows its `toolUseId`, the viewer opens on every diagram in the
+ * session with this one selected. The local single-entry overlay below is the
+ * fallback for everything else — no provider (tests, future hosts), no
+ * toolUseId, or a gallery that could not place this diagram.
+ */
+
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
-import DOMPurify from 'dompurify'
 import { Highlight, themes } from 'prism-react-renderer'
 import { useSessionStore } from '../../stores/session-store'
-import { ImageViewerOverlay, type ViewerSvgImage } from '../shared/ImageViewer'
-import { resolveThemeConfig, buildMermaidInitConfig } from './mermaid-themes'
-
-// ---------------------------------------------------------------------------
-// SVG sanitization
-// ---------------------------------------------------------------------------
-
-/**
- * Sanitize Mermaid's rendered SVG before it goes through dangerouslySetInnerHTML.
- *
- * With htmlLabels enabled, Mermaid emits labels as
- * `<foreignObject><div xmlns="…/xhtml">…<br/></div></foreignObject>`. Preserving
- * that inner HTML (while still stripping scripts) requires three things together:
- *  - the `html` profile, so div/span/p/br/b/i are in the allow-list;
- *  - `foreignObject` added as a tag;
- *  - `HTML_INTEGRATION_POINTS: { foreignobject }` — DOMPurify 3.x only treats
- *    `annotation-xml` as an HTML integration point by default, so XHTML children
- *    of `<foreignObject>` otherwise fail its SVG→HTML namespace check and are
- *    dropped (labels render empty). See ADR-012.
- *
- * Scripts, on* handlers, and javascript: hrefs are still removed.
- */
-export function sanitizeMermaidSvg(svg: string): string {
-  return DOMPurify.sanitize(svg, {
-    USE_PROFILES: { svg: true, svgFilters: true, html: true },
-    ADD_TAGS: ['foreignObject'],
-    HTML_INTEGRATION_POINTS: { foreignobject: true, 'annotation-xml': true }
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Unique ID generator for mermaid.render()
-// ---------------------------------------------------------------------------
-
-let mermaidIdCounter = 0
-function nextMermaidId(): string {
-  return `mermaid-diagram-${++mermaidIdCounter}`
-}
-
-// ---------------------------------------------------------------------------
-// Lazy mermaid core loader
-// ---------------------------------------------------------------------------
-
-let mermaidLoad: Promise<(typeof import('mermaid'))['default']> | null = null
-
-/**
- * Memoized dynamic import: mermaid core (~490 kB min) loads on the first
- * diagram render, not at app startup. A failed fetch (flaky tunnel on the web
- * client) resets the memo so the next diagram retries instead of caching the
- * rejection forever.
- */
-function loadMermaid(): Promise<(typeof import('mermaid'))['default']> {
-  mermaidLoad ??= import('mermaid').then(
-    (m) => m.default,
-    (err) => {
-      mermaidLoad = null
-      throw err
-    }
-  )
-  return mermaidLoad
-}
-
-// ---------------------------------------------------------------------------
-// SVG parsing / serialization helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Parse a (possibly HTML-serialized) Mermaid SVG into its <svg> element.
- *
- * Always uses the HTML parser, never image/svg+xml: with htmlLabels enabled,
- * labels are <foreignObject> HTML and DOMPurify serializes void tags as bare
- * <br> (not <br/>). The strict XML parser errors on that — and Chromium then
- * truncates the SVG at the first <br>, silently dropping every node/label after
- * it. The HTML parser tolerates <br> and handles SVG foreign content. ADR-012.
- */
-export function parseSvgElement(svgString: string): SVGSVGElement | null {
-  const doc = new DOMParser().parseFromString(svgString, 'text/html')
-  return doc.querySelector('svg')
-}
-
-/**
- * Serialize an <svg> element to XML-well-formed markup (void tags self-closed,
- * e.g. <br/>). Required for rasterizing via <img src="data:image/svg+xml">,
- * which always parses as strict XML. Strips redundant literal xmlns attributes
- * (Mermaid emits xmlns on the foreignObject's <div>) that would otherwise
- * collide with XMLSerializer's own namespace declarations and produce invalid
- * XML. The element's real namespaces are preserved by the DOM and re-emitted.
- */
-export function svgElementToXml(svgEl: SVGSVGElement): string {
-  const clone = svgEl.cloneNode(true) as SVGSVGElement
-  clone.querySelectorAll('[xmlns]').forEach((el) => el.removeAttribute('xmlns'))
-  return new XMLSerializer().serializeToString(clone)
-}
-
-/**
- * Bake the label font-weight rule into the SVG markup itself.
- *
- * SVG `<text>` labels — everything mermaid renders without htmlLabels'
- * foreignObject: sequence, gantt, ER — read too thin at the default weight 400.
- * The rule used to live in a `<style>` next to the inline viewport, but the
- * rendered SVG string is consumed by three different places (the inline
- * viewport, the full-screen overlay, and the PNG rasterizer) and only the first
- * inherited that stylesheet. Carrying the rule inside the markup means all
- * three get it.
- *
- * The `#id` scope is not cosmetic: an inline-SVG `<style>` is document-global
- * CSS, so a bare `text:not([font-weight])` would restyle every other inline SVG
- * on the page. Mermaid scopes its own embedded styles by the render id the same
- * way. No id (a sanitizer dropped it) means no safe scope, so the injection is
- * skipped rather than leaked.
- */
-export function injectTextWeightRule(svgString: string): string {
-  const svgEl = parseSvgElement(svgString)
-  if (!svgEl) return svgString
-  const id = svgEl.getAttribute('id')
-  if (!id) return svgString
-
-  const style = svgEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'style')
-  style.textContent = `#${CSS.escape(id)} text:not([font-weight]) { font-weight: 500; }`
-  svgEl.prepend(style)
-  return svgEl.outerHTML
-}
-
-/**
- * Guarantee the element has a viewBox and report the intrinsic size every
- * consumer scales against (the inline viewport, the PNG rasterizer, and the
- * full-screen viewer's fit maths all need the same number).
- *
- * An existing viewBox wins and is left untouched — it may carry a non-zero
- * min-x/min-y, and rewriting it as `0 0 w h` would shift the whole diagram.
- * Otherwise the width/height attributes are promoted into one, falling back to
- * 800x600 when they are missing or unusable (a NaN would propagate into a NaN
- * canvas or a NaN CSS box).
- */
-function ensureViewBox(svgEl: SVGSVGElement): { width: number; height: number } {
-  const viewBox = svgEl.getAttribute('viewBox')
-  if (viewBox) {
-    const parts = viewBox.split(/\s+|,/).map(Number)
-    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
-      return { width: parts[2], height: parts[3] }
-    }
-    return { width: 800, height: 600 }
-  }
-  const w = parseFloat(svgEl.getAttribute('width') || '800')
-  const h = parseFloat(svgEl.getAttribute('height') || '600')
-  const size = { width: w > 0 ? w : 800, height: h > 0 ? h : 600 }
-  svgEl.setAttribute('viewBox', `0 0 ${size.width} ${size.height}`)
-  return size
-}
-
-// ---------------------------------------------------------------------------
-// SVG → PNG conversion (used by both export and copy)
-// ---------------------------------------------------------------------------
-
-/**
- * The canvas colour the diagram card sits on, for the PNG's opaque backdrop.
- *
- * Every mermaid theme config sets `background: 'transparent'`, so the diagram is
- * drawn straight onto whatever is behind it — `--color-bg-primary`. A hardcoded
- * white fill therefore pasted dark-theme nodes and light text onto a white
- * sheet. Falls back to white when the variable resolves empty (jsdom, or a theme
- * that stops defining it), which is the historical behaviour.
- */
-export function themeCanvasBackground(): string {
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue('--color-bg-primary')
-    .trim()
-  return value || '#ffffff'
-}
-
-async function svgToPngBlob(svgString: string): Promise<Blob | null> {
-  const svgEl = parseSvgElement(svgString)
-  if (!svgEl) return null
-
-  const { width, height } = ensureViewBox(svgEl)
-
-  // 2x for retina clarity
-  const scale = 2
-  const canvas = document.createElement('canvas')
-  canvas.width = width * scale
-  canvas.height = height * scale
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-  ctx.scale(scale, scale)
-
-  // Fill an opaque background so transparent SVG areas aren't see-through in
-  // the PNG — the app's canvas colour, so the copy matches what was on screen.
-  ctx.fillStyle = themeCanvasBackground()
-  ctx.fillRect(0, 0, width, height)
-
-  // Use a data URI instead of blob URL — blob URLs taint the canvas in Electron,
-  // preventing toBlob() from working. Data URIs are always same-origin.
-  // Serialize to XML-well-formed markup so the <img> SVG (parsed as strict XML)
-  // doesn't choke on htmlLabels' bare <br> tags. See ADR-012.
-  const encoded = btoa(unescape(encodeURIComponent(svgElementToXml(svgEl))))
-  const dataUri = `data:image/svg+xml;base64,${encoded}`
-
-  return new Promise<Blob | null>((resolve) => {
-    const img = new Image()
-    img.onload = () => {
-      ctx.drawImage(img, 0, 0, width, height)
-      canvas.toBlob((pngBlob) => resolve(pngBlob), 'image/png')
-    }
-    img.onerror = () => resolve(null)
-    img.src = dataUri
-  })
-}
+import {
+  ImageViewerOverlay,
+  ensureViewBox,
+  parseSvgElement,
+  svgToPngBlob,
+  themeCanvasBackground,
+  writeClipboardImage,
+  type ViewerSvgImage
+} from '../shared/ImageViewer'
+import { resolveThemeConfig } from './mermaid-themes'
+import { renderMermaidSvg, toViewerSvgEntry } from './mermaid-render'
+import { useDiagramGallery } from './DiagramGallery'
 
 // ---------------------------------------------------------------------------
 // Copy button with feedback (for source tab)
@@ -262,16 +82,9 @@ function DiagramToolbar({
   const handleCopyImage = useCallback(async () => {
     setCopyState('copying')
     try {
-      // ClipboardItem accepts a Promise<Blob> — required in Chromium
-      // for the write to happen within the user-gesture window
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'image/png': svgToPngBlob(svgString).then((blob) => {
-            if (!blob) throw new Error('Failed to generate PNG')
-            return blob
-          })
-        })
-      ])
+      // The blob is handed over as a PROMISE — see writeClipboardImage for why
+      // awaiting it first loses the user-gesture window.
+      await writeClipboardImage(svgToPngBlob(svgString, themeCanvasBackground()))
       setCopyState('copied')
       setTimeout(() => setCopyState('idle'), 1500)
     } catch (err) {
@@ -373,12 +186,21 @@ function SourceView({ source }: { source: string }): React.JSX.Element {
 interface DiagramViewportProps {
   svgString: string
   title: string
+  /** The mermaid source — travels into the viewer entry for "Copy as markdown". */
+  source: string
+  /** Set when the card came from a tool call, which is what the gallery keys on. */
+  toolUseId?: string
 }
 
 /** Movement (px) since mousedown that still counts as a click rather than a pan. */
 const CLICK_SLOP_PX = 4
 
-function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.Element {
+function DiagramViewport({
+  svgString,
+  title,
+  source,
+  toolUseId
+}: DiagramViewportProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
@@ -393,6 +215,9 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
   const lastMouse = useRef({ x: 0, y: 0 })
   /** Path length travelled since mousedown — a pan must not also read as a click. */
   const dragDistance = useRef(0)
+
+  // No-op + `enabled: false` when no DiagramGalleryProvider is mounted above.
+  const { openDiagram, enabled: galleryEnabled } = useDiagramGallery()
 
   // Normalize SVG: ensure it has a viewBox so it scales properly,
   // then remove fixed width/height so it fills the container at zoom=1.
@@ -415,34 +240,31 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
   }, [svgString])
 
   /**
-   * The same SVG prepared for `ImageViewerOverlay`, which sizes the wrapper
-   * itself: both axes are `100%` here (the inline viewport instead wants
-   * `height:auto`, since it scrolls/overflows rather than fitting a box), and the
-   * intrinsic viewBox size rides along because live DOM has no `naturalWidth` for
-   * the overlay to measure.
+   * The same SVG prepared for the local `ImageViewerOverlay` fallback.
    *
-   * Computed only once the viewer is actually open — it is a second full
+   * Computed only once that viewer is actually open — it is a second full
    * parse+serialize of markup that can be hundreds of kB, and most diagrams are
-   * never expanded. Null if the markup has no <svg> at all, in which case there
-   * is nothing to expand.
+   * never expanded (and when the gallery takes the click, never at all).
    */
-  const fullscreenEntry = useMemo<ViewerSvgImage | null>(() => {
-    if (!fullscreen) return null
-    const svg = parseSvgElement(svgString)
-    if (!svg) return null
-    const { width, height } = ensureViewBox(svg)
-    svg.removeAttribute('width')
-    svg.removeAttribute('height')
-    svg.style.width = '100%'
-    svg.style.height = '100%'
-    svg.style.maxWidth = 'none'
-    return {
-      svgHtml: svg.outerHTML,
-      intrinsicWidth: width,
-      intrinsicHeight: height,
-      fileName: title
+  const fullscreenEntry = useMemo<ViewerSvgImage | null>(
+    () => (fullscreen ? toViewerSvgEntry(svgString, title, source) : null),
+    [fullscreen, svgString, title, source]
+  )
+
+  /**
+   * Prefer the session-wide gallery; fall back to the local overlay.
+   *
+   * `openDiagram` resolves false when this diagram is not in the derived gallery
+   * (no provider host for these messages) or when its source failed to re-render
+   * headlessly — in both cases the card still has a perfectly good SVG string of
+   * its own, so expanding must not become a no-op.
+   */
+  const expand = useCallback(async (): Promise<void> => {
+    if (galleryEnabled && toolUseId) {
+      if (await openDiagram(toolUseId)) return
     }
-  }, [fullscreen, svgString, title])
+    setFullscreen(true)
+  }, [galleryEnabled, toolUseId, openDiagram])
 
   const fitToWidth = useCallback(() => {
     setZoom(1)
@@ -483,8 +305,8 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
 
   const handleMouseUp = useCallback(() => {
     setDragging(false)
-    if (dragging && dragDistance.current <= CLICK_SLOP_PX) setFullscreen(true)
-  }, [dragging])
+    if (dragging && dragDistance.current <= CLICK_SLOP_PX) void expand()
+  }, [dragging, expand])
 
   /**
    * Leaving the container only cancels the press. Deliberately *not*
@@ -523,7 +345,7 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
         onZoomOut={handleZoomOut}
         onZoomReset={handleZoomReset}
         onFitToView={fitToWidth}
-        onExpand={() => setFullscreen(true)}
+        onExpand={() => void expand()}
       />
       <div
         ref={containerRef}
@@ -571,16 +393,22 @@ interface MermaidDiagramProps {
   source: string
   /** Tool-call title; shown as the name of the diagram in the full-screen viewer. */
   title?: string
+  /**
+   * The tool call this diagram came from. Threaded down so expanding can open the
+   * session-wide gallery at this diagram; omitted, the card keeps its local
+   * single-entry overlay.
+   */
+  toolUseId?: string
 }
 
 export const MermaidDiagram = memo(function MermaidDiagram({
   source,
-  title
+  title,
+  toolUseId
 }: MermaidDiagramProps): React.JSX.Element {
   const [tab, setTab] = useState<'rendered' | 'source'>('rendered')
   const [svgString, setSvgString] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const renderIdRef = useRef(nextMermaidId())
 
   const appTheme = useSessionStore((s) => s.settings.theme)
   const mermaidThemeSetting = useSessionStore((s) => s.settings.mermaidTheme) ?? 'auto'
@@ -590,38 +418,24 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     [mermaidThemeSetting, appTheme]
   )
 
-  // Render diagram
+  // Render diagram. The pipeline is `renderMermaidSvg` (shared with the gallery);
+  // all this effect owns is dropping a resolution that arrived after the source or
+  // theme changed under it.
   useEffect(() => {
     let cancelled = false
 
-    async function render(): Promise<void> {
-      try {
-        const mermaid = await loadMermaid()
+    renderMermaidSvg(source, themeConfig).then(
+      (svg) => {
         if (cancelled) return
-
-        // The config comes from mermaid-themes.ts rather than being inlined here,
-        // so scripts/audit-mermaid-contrast.mjs measures contrast against the
-        // exact same mermaid setup the app renders with.
-        mermaid.initialize(buildMermaidInitConfig(themeConfig))
-
-        const { svg } = await mermaid.render(renderIdRef.current, source)
-        if (cancelled) return
-
-        // Sanitize SVG output (belt-and-suspenders with securityLevel: 'antiscript').
-        const clean = sanitizeMermaidSvg(svg)
-
-        setSvgString(injectTextWeightRule(clean))
+        setSvgString(svg)
         setError(null)
-      } catch (err: unknown) {
+      },
+      (err: unknown) => {
         if (cancelled) return
-        const message = err instanceof Error ? err.message : String(err)
-        setError(message)
+        setError(err instanceof Error ? err.message : String(err))
         setSvgString(null)
       }
-    }
-
-    renderIdRef.current = nextMermaidId()
-    render()
+    )
 
     return () => {
       cancelled = true
@@ -653,7 +467,12 @@ export const MermaidDiagram = memo(function MermaidDiagram({
       {/* Content */}
       {tab === 'rendered' ? (
         svgString ? (
-          <DiagramViewport svgString={svgString} title={title || 'Mermaid diagram'} />
+          <DiagramViewport
+            svgString={svgString}
+            title={title || 'Mermaid diagram'}
+            source={source}
+            toolUseId={toolUseId}
+          />
         ) : error ? (
           <div
             className="rounded-md border border-danger/30 p-3"

@@ -416,6 +416,259 @@ describe('ImageViewerOverlay', () => {
     })
   })
 
+  /**
+   * The right-click menu. Two halves matter: the menu itself (which item shows
+   * when, and what the clipboard actually receives), and the gesture state machine
+   * NOT treating the right-click as a gesture — before the `e.button` guards, a
+   * right-click on the backdrop resolved as a zero-movement tap and closed the
+   * whole viewer.
+   */
+  describe('context menu', () => {
+    class NoopResizeObserver {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver
+
+    /**
+     * jsdom has no canvas backend, so `getContext` would emit a
+     * not-implemented error into the console on every copy. Returning null is the
+     * shape the real API uses when a context cannot be had, and `svgToPngBlob` /
+     * `rasterToPngBlob` both handle it.
+     */
+    const originalGetContext = HTMLCanvasElement.prototype.getContext
+
+    /**
+     * Stands in for Chromium's ClipboardItem. It has to swallow its own item
+     * promises' rejections the way the real one does (the failure surfaces through
+     * `clipboard.write()`), or the null blob jsdom produces becomes an unhandled
+     * rejection.
+     */
+    class FakeClipboardItem {
+      readonly types: string[]
+      constructor(readonly items: Record<string, Promise<Blob> | Blob>) {
+        this.types = Object.keys(items)
+        for (const value of Object.values(items)) {
+          if (value instanceof Promise) value.catch(() => {})
+        }
+      }
+    }
+
+    let written: FakeClipboardItem[][]
+    let writtenText: string[]
+
+    beforeEach(() => {
+      ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = NoopResizeObserver
+      HTMLCanvasElement.prototype.getContext = (() => null) as typeof originalGetContext
+      written = []
+      writtenText = []
+      ;(globalThis as { ClipboardItem?: unknown }).ClipboardItem = FakeClipboardItem
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          write: async (items: FakeClipboardItem[]) => {
+            written.push(items)
+          },
+          writeText: async (text: string) => {
+            writtenText.push(text)
+          }
+        }
+      })
+    })
+
+    afterEach(() => {
+      ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = originalResizeObserver
+      HTMLCanvasElement.prototype.getContext = originalGetContext
+    })
+
+    const DIAGRAM_TAB: ViewerTab = {
+      id: 'diagrams',
+      label: 'Diagrams',
+      images: [
+        {
+          svgHtml: '<svg viewBox="0 0 100 60"><rect width="10" height="10" /></svg>',
+          intrinsicWidth: 100,
+          intrinsicHeight: 60,
+          fileName: 'Flow chart',
+          markdownSource: 'graph TD;\n  A-->B'
+        }
+      ]
+    }
+
+    function openMenu(el: Element): void {
+      fireEvent.contextMenu(el, { clientX: 120, clientY: 90 })
+    }
+
+    it('opens on right-click in the viewport', () => {
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[THREE]} onClose={vi.fn()} />
+      )
+      expect(queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+      openMenu(getByTestId('ImageViewerOverlay.viewport'))
+      const menu = getByTestId('ImageViewerOverlay.contextMenu')
+      // Inside the overlay root, so the root's event sealing covers it too.
+      expect(getByTestId('ImageViewerOverlay')).toContainElement(menu)
+      expect(getByTestId('ImageViewerOverlay.copyImage')).toBeInTheDocument()
+    })
+
+    it('offers "Copy as markdown" only for an entry that carries a source', () => {
+      const raster = render(<ImageViewerOverlay tabs={[THREE]} onClose={vi.fn()} />)
+      openMenu(raster.getByTestId('ImageViewerOverlay.viewport'))
+      expect(raster.queryByTestId('ImageViewerOverlay.copyMarkdown')).toBeNull()
+      cleanup()
+
+      const svg = render(<ImageViewerOverlay tabs={[DIAGRAM_TAB]} onClose={vi.fn()} />)
+      openMenu(svg.getByTestId('ImageViewerOverlay.viewport'))
+      expect(svg.getByTestId('ImageViewerOverlay.copyMarkdown')).toBeInTheDocument()
+    })
+
+    it('hides "Copy as markdown" for an SVG entry with no source (a bare diagram)', () => {
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay
+          tabs={[
+            {
+              id: 'diagram',
+              label: 'Diagram',
+              images: [
+                {
+                  svgHtml: '<svg viewBox="0 0 10 10"></svg>',
+                  intrinsicWidth: 10,
+                  intrinsicHeight: 10
+                }
+              ]
+            }
+          ]}
+          onClose={vi.fn()}
+        />
+      )
+      openMenu(getByTestId('ImageViewerOverlay.viewport'))
+      expect(queryByTestId('ImageViewerOverlay.copyMarkdown')).toBeNull()
+    })
+
+    it('writes the mermaid source as a fenced block and closes the menu', () => {
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[DIAGRAM_TAB]} onClose={vi.fn()} />
+      )
+      openMenu(getByTestId('ImageViewerOverlay.viewport'))
+      fireEvent.click(getByTestId('ImageViewerOverlay.copyMarkdown'))
+
+      expect(writtenText).toEqual(['```mermaid\ngraph TD;\n  A-->B\n```'])
+      expect(queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+    })
+
+    it('collapses trailing newlines to exactly one before the closing fence', () => {
+      const { getByTestId } = render(
+        <ImageViewerOverlay
+          tabs={[
+            {
+              ...DIAGRAM_TAB,
+              images: [{ ...DIAGRAM_TAB.images[0], markdownSource: 'graph TD;\nA-->B\n\n\n' }]
+            }
+          ]}
+          onClose={vi.fn()}
+        />
+      )
+      openMenu(getByTestId('ImageViewerOverlay.viewport'))
+      fireEvent.click(getByTestId('ImageViewerOverlay.copyMarkdown'))
+      expect(writtenText).toEqual(['```mermaid\ngraph TD;\nA-->B\n```'])
+    })
+
+    it('copies either entry variant as image/png, and closes the menu', () => {
+      const svg = render(<ImageViewerOverlay tabs={[DIAGRAM_TAB]} onClose={vi.fn()} />)
+      openMenu(svg.getByTestId('ImageViewerOverlay.viewport'))
+      fireEvent.click(svg.getByTestId('ImageViewerOverlay.copyImage'))
+      expect(svg.queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+      cleanup()
+
+      const raster = render(<ImageViewerOverlay tabs={[THREE]} onClose={vi.fn()} />)
+      openMenu(raster.getByTestId('ImageViewerOverlay.viewport'))
+      fireEvent.click(raster.getByTestId('ImageViewerOverlay.copyImage'))
+
+      // Both went through as a single PNG ClipboardItem — normalizing away the
+      // source format is the point (Chromium rejects most non-PNG types).
+      expect(written).toHaveLength(2)
+      expect(written.map((items) => items.length)).toEqual([1, 1])
+      expect(written.map((items) => items[0].types)).toEqual([['image/png'], ['image/png']])
+    })
+
+    it('Esc closes the menu; a second Esc closes the viewer', () => {
+      const onClose = vi.fn()
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[THREE]} onClose={onClose} />
+      )
+      openMenu(getByTestId('ImageViewerOverlay.viewport'))
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+      expect(onClose).not.toHaveBeenCalled()
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('a right-click on the backdrop does not close the viewer', () => {
+      // Regression guard: onPointerDown had no `e.button` check, so the
+      // right-click's pointer pair resolved as a zero-movement backdrop tap.
+      const onClose = vi.fn()
+      const { getByTestId } = render(<ImageViewerOverlay tabs={[THREE]} onClose={onClose} />)
+      const viewport = getByTestId('ImageViewerOverlay.viewport')
+
+      const pointerId = nextPointerId++
+      fireEvent.pointerDown(viewport, { pointerId, clientX: 120, clientY: 90, button: 2 })
+      openMenu(viewport)
+      fireEvent.pointerUp(viewport, { pointerId, clientX: 120, clientY: 90, button: 2 })
+
+      expect(onClose).not.toHaveBeenCalled()
+      expect(getByTestId('ImageViewerOverlay.contextMenu')).toBeInTheDocument()
+    })
+
+    it('a right-button drag does not pan a zoomed image', () => {
+      const { getByTestId } = render(<ImageViewerOverlay tabs={[THREE]} onClose={vi.fn()} />)
+      const image = getByTestId('ImageViewerOverlay.image')
+      const viewport = getByTestId('ImageViewerOverlay.viewport')
+
+      // Zoom in first — panning only applies above fit scale.
+      tap(image, { x: 500, y: 400 })
+      tap(image, { x: 500, y: 400 })
+      const zoomed = image.style.transform
+      expect(zoomed).toContain('scale(2.5)')
+
+      const pointerId = nextPointerId++
+      fireEvent.pointerDown(viewport, { pointerId, clientX: 500, clientY: 400, button: 2 })
+      fireEvent.pointerMove(viewport, { pointerId, clientX: 300, clientY: 380 })
+      fireEvent.pointerUp(viewport, { pointerId, clientX: 300, clientY: 380, button: 2 })
+
+      expect(getByTestId('ImageViewerOverlay.image').style.transform).toBe(zoomed)
+    })
+
+    it('a left tap that dismisses the menu does not also close the viewer', () => {
+      const onClose = vi.fn()
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[THREE]} onClose={onClose} />
+      )
+      const viewport = getByTestId('ImageViewerOverlay.viewport')
+      openMenu(viewport)
+
+      tap(viewport)
+      expect(queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+      expect(onClose).not.toHaveBeenCalled()
+
+      // …and once the menu is gone, the backdrop tap dismisses as usual.
+      tap(viewport)
+      expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('drops a menu opened for an entry the gallery has since paged away from', () => {
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[THREE]} onClose={vi.fn()} />
+      )
+      openMenu(getByTestId('ImageViewerOverlay.viewport'))
+      fireEvent.click(getByTestId('ImageViewerOverlay.next'))
+      expect(queryByTestId('ImageViewerOverlay.contextMenu')).toBeNull()
+    })
+  })
+
   it('locks body scrolling for its lifetime and restores the previous value', () => {
     document.body.style.overflow = 'auto'
     const { unmount } = render(<ImageViewerOverlay tabs={[THREE]} onClose={vi.fn()} />)

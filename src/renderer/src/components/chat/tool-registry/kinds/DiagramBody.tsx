@@ -7,6 +7,9 @@
  * header (diagram icon + title + validation-failed badge), an always-visible
  * MermaidDiagram body, and the shared <ApprovalButtons> (no suggestions — same as
  * the old inline buttons).
+ *
+ * The one thing it adds is `block.toolUseId`, which is how the diagram gallery
+ * identifies this card's diagram among the session's.
  */
 
 import { MermaidDiagram } from '../../MermaidDiagram'
@@ -15,6 +18,7 @@ import type { KindBodyProps } from './types'
 
 export function DiagramBody({
   view,
+  block,
   result,
   isPendingApproval,
   approval,
@@ -55,7 +59,9 @@ export function DiagramBody({
         {result?.isError && <span className="text-[11px] text-danger">Validation failed</span>}
       </div>
       <div className="border-t border-border px-3 py-2.5">
-        <MermaidDiagram source={view.source} title={title} />
+        {/* toolUseId is the gallery's key: it lets the card open the session-wide
+            diagram gallery at ITS diagram instead of a local single-entry viewer. */}
+        <MermaidDiagram source={view.source} title={title} toolUseId={block.toolUseId} />
       </div>
       {isPendingApproval && approval && (
         <ApprovalButtons

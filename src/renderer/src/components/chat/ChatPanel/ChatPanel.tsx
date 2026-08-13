@@ -22,6 +22,7 @@ import {
   useFullscreenDoubleTap
 } from '../../../hooks/useFullscreenDoubleTap'
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
+import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
 import { QueuedMessageCard } from './QueuedMessageCard'
@@ -298,20 +299,23 @@ export function ChatPanel(): React.JSX.Element {
               style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }}
               className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}
             >
-              {/* Renders a fragment — no wrapper element, so the flex-column
-                  layout of the message list is untouched. Owns the full-screen
-                  image viewer that a thumbnail click opens. */}
+              {/* Both render fragments — no wrapper element, so the flex-column
+                  layout of the message list is untouched. They own the two
+                  full-screen viewers: a thumbnail click opens the image gallery,
+                  expanding a diagram card opens the diagram gallery. */}
               <ImageGalleryProvider messages={messages}>
-                {messages.map((msg) => (
-                  <div key={msg.id} className="cv-auto">
-                    <MessageBubble
-                      message={msg}
-                      pendingApprovals={pendingApprovals}
-                      isLastAssistant={msg.id === lastAssistantId}
-                      thinkingStartedAt={thinkingStartedAt}
-                    />
-                  </div>
-                ))}
+                <DiagramGalleryProvider messages={messages}>
+                  {messages.map((msg) => (
+                    <div key={msg.id} className="cv-auto">
+                      <MessageBubble
+                        message={msg}
+                        pendingApprovals={pendingApprovals}
+                        isLastAssistant={msg.id === lastAssistantId}
+                        thinkingStartedAt={thinkingStartedAt}
+                      />
+                    </div>
+                  ))}
+                </DiagramGalleryProvider>
               </ImageGalleryProvider>
               <div className="flex flex-col gap-5">
                 {hasStreamingText && <StreamingText />}

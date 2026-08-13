@@ -21,3 +21,10 @@ export {
   toolResultKey
 } from './gallery'
 export type { DerivedGalleries, GalleryEntry } from './gallery'
+export { ensureViewBox, parseSvgElement, svgElementToXml } from './svg-dom'
+export {
+  rasterToPngBlob,
+  svgToPngBlob,
+  themeCanvasBackground,
+  writeClipboardImage
+} from './copy-image'

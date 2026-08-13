@@ -39,7 +39,25 @@ vi.mock('mermaid', () => {
   return { default: { initialize, render: mermaidRender } }
 })
 
-import { MermaidDiagram, injectTextWeightRule, themeCanvasBackground } from '../MermaidDiagram'
+/**
+ * The diagram gallery, stubbed at the context hook.
+ *
+ * `enabled` starts false so every describe above keeps exercising the card's own
+ * local overlay (the no-provider path, which is also what the real app does for a
+ * diagram outside a provider host). The last describe flips it to pin the
+ * hand-off.
+ */
+const { gallery } = vi.hoisted(() => ({
+  gallery: { enabled: false, openDiagram: vi.fn(async () => true) }
+}))
+
+vi.mock('../DiagramGallery', () => ({
+  useDiagramGallery: () => gallery
+}))
+
+import { MermaidDiagram } from '../MermaidDiagram'
+import { injectTextWeightRule } from '../mermaid-render'
+import { themeCanvasBackground } from '../../shared/ImageViewer'
 import { buildMermaidInitConfig, resolveThemeConfig, THEME_CONFIGS } from '../mermaid-themes'
 import { useSessionStore } from '../../../stores/session-store'
 
@@ -197,6 +215,61 @@ describe('MermaidDiagram — embedded label font-weight rule', () => {
   it('skips injection when the svg has no id, rather than emitting an unscoped rule', () => {
     const noId = '<svg viewBox="0 0 10 10"><text>x</text></svg>'
     expect(injectTextWeightRule(noId)).toBe(noId)
+  })
+})
+
+/**
+ * Expanding with a DiagramGalleryProvider above: the SESSION gallery takes the
+ * click, so the card must not also mount its own single-entry overlay. The
+ * fallback direction (no provider) is what every describe above already covers,
+ * and the third case — provider present but this diagram not in its gallery —
+ * matters because the card still holds a perfectly good SVG.
+ */
+describe('MermaidDiagram — hand-off to the diagram gallery', () => {
+  beforeEach(() => {
+    gallery.enabled = true
+    gallery.openDiagram.mockClear()
+    gallery.openDiagram.mockResolvedValue(true)
+  })
+  afterEach(() => {
+    gallery.enabled = false
+  })
+
+  async function mountWithId(): Promise<void> {
+    render(<MermaidDiagram source="graph TD; A-->B" title="Auth flow" toolUseId="tu-7" />)
+    await waitFor(() => expect(screen.getByTestId('MermaidDiagram.canvas')).toBeInTheDocument())
+  }
+
+  it('routes Expand through openDiagram and mounts no local overlay', async () => {
+    await mountWithId()
+    fireEvent.click(screen.getByTestId('MermaidDiagram.expand'))
+    await waitFor(() => expect(gallery.openDiagram).toHaveBeenCalledWith('tu-7'))
+    expect(screen.queryByTestId('ImageViewerOverlay')).toBeNull()
+  })
+
+  it('routes a canvas click through openDiagram too', async () => {
+    await mountWithId()
+    const canvas = screen.getByTestId('MermaidDiagram.canvas')
+    fireEvent.mouseDown(canvas, { button: 0, clientX: 40, clientY: 30 })
+    fireEvent.mouseUp(canvas, { button: 0, clientX: 40, clientY: 30 })
+    await waitFor(() => expect(gallery.openDiagram).toHaveBeenCalledWith('tu-7'))
+    expect(screen.queryByTestId('ImageViewerOverlay')).toBeNull()
+  })
+
+  it('falls back to the local overlay when the gallery cannot place the diagram', async () => {
+    gallery.openDiagram.mockResolvedValue(false)
+    await mountWithId()
+    fireEvent.click(screen.getByTestId('MermaidDiagram.expand'))
+    await waitFor(() => expect(screen.getByTestId('ImageViewerOverlay')).toBeInTheDocument())
+    expect(screen.getByTestId('ImageViewerOverlay.filename').textContent).toBe('Auth flow')
+  })
+
+  it('never consults the gallery for a card with no toolUseId', async () => {
+    render(<MermaidDiagram source="graph TD; A-->B" title="Untracked" />)
+    await waitFor(() => expect(screen.getByTestId('MermaidDiagram.canvas')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('MermaidDiagram.expand'))
+    await waitFor(() => expect(screen.getByTestId('ImageViewerOverlay')).toBeInTheDocument())
+    expect(gallery.openDiagram).not.toHaveBeenCalled()
   })
 })
 
