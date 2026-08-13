@@ -268,6 +268,35 @@ export function svgElementToXml(svgEl: SVGSVGElement): string {
 }
 
 /**
+ * Bake the label font-weight rule into the SVG markup itself.
+ *
+ * SVG `<text>` labels — everything mermaid renders without htmlLabels'
+ * foreignObject: sequence, gantt, ER — read too thin at the default weight 400.
+ * The rule used to live in a `<style>` next to the inline viewport, but the
+ * rendered SVG string is consumed by three different places (the inline
+ * viewport, the full-screen overlay, and the PNG rasterizer) and only the first
+ * inherited that stylesheet. Carrying the rule inside the markup means all
+ * three get it.
+ *
+ * The `#id` scope is not cosmetic: an inline-SVG `<style>` is document-global
+ * CSS, so a bare `text:not([font-weight])` would restyle every other inline SVG
+ * on the page. Mermaid scopes its own embedded styles by the render id the same
+ * way. No id (a sanitizer dropped it) means no safe scope, so the injection is
+ * skipped rather than leaked.
+ */
+export function injectTextWeightRule(svgString: string): string {
+  const svgEl = parseSvgElement(svgString)
+  if (!svgEl) return svgString
+  const id = svgEl.getAttribute('id')
+  if (!id) return svgString
+
+  const style = svgEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'style')
+  style.textContent = `#${CSS.escape(id)} text:not([font-weight]) { font-weight: 500; }`
+  svgEl.prepend(style)
+  return svgEl.outerHTML
+}
+
+/**
  * Guarantee the element has a viewBox and report the intrinsic size every
  * consumer scales against (the inline viewport, the PNG rasterizer, and the
  * full-screen viewer's fit maths all need the same number).
@@ -298,6 +327,22 @@ function ensureViewBox(svgEl: SVGSVGElement): { width: number; height: number } 
 // SVG → PNG conversion (used by both export and copy)
 // ---------------------------------------------------------------------------
 
+/**
+ * The canvas colour the diagram card sits on, for the PNG's opaque backdrop.
+ *
+ * Every mermaid theme config sets `background: 'transparent'`, so the diagram is
+ * drawn straight onto whatever is behind it — `--color-bg-primary`. A hardcoded
+ * white fill therefore pasted dark-theme nodes and light text onto a white
+ * sheet. Falls back to white when the variable resolves empty (jsdom, or a theme
+ * that stops defining it), which is the historical behaviour.
+ */
+export function themeCanvasBackground(): string {
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue('--color-bg-primary')
+    .trim()
+  return value || '#ffffff'
+}
+
 async function svgToPngBlob(svgString: string): Promise<Blob | null> {
   const svgEl = parseSvgElement(svgString)
   if (!svgEl) return null
@@ -313,8 +358,9 @@ async function svgToPngBlob(svgString: string): Promise<Blob | null> {
   if (!ctx) return null
   ctx.scale(scale, scale)
 
-  // Fill white background so transparent SVG areas aren't see-through in the PNG
-  ctx.fillStyle = '#ffffff'
+  // Fill an opaque background so transparent SVG areas aren't see-through in
+  // the PNG — the app's canvas colour, so the copy matches what was on screen.
+  ctx.fillStyle = themeCanvasBackground()
   ctx.fillRect(0, 0, width, height)
 
   // Use a data URI instead of blob URL — blob URLs taint the canvas in Electron,
@@ -509,7 +555,12 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [fullscreen, setFullscreen] = useState(false)
-  const isDragging = useRef(false)
+  /**
+   * State, not a ref: the cursor and the transform transition below are read at
+   * render time, and a ref mutation would leave both stale until some unrelated
+   * render happened to flush them.
+   */
+  const [dragging, setDragging] = useState(false)
   const lastMouse = useRef({ x: 0, y: 0 })
   /** Path length travelled since mousedown — a pan must not also read as a click. */
   const dragDistance = useRef(0)
@@ -581,28 +632,30 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     // Only left button
     if (e.button !== 0) return
-    isDragging.current = true
+    setDragging(true)
     dragDistance.current = 0
     lastMouse.current = { x: e.clientX, y: e.clientY }
     e.preventDefault()
   }, [])
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isDragging.current) return
-    const dx = e.clientX - lastMouse.current.x
-    const dy = e.clientY - lastMouse.current.y
-    lastMouse.current = { x: e.clientX, y: e.clientY }
-    // Path length, not displacement: a drag that wanders back to where it
-    // started is still a pan, and must not fall through to the click.
-    dragDistance.current += Math.hypot(dx, dy)
-    setPan((p) => ({ x: p.x + dx, y: p.y + dy }))
-  }, [])
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (!dragging) return
+      const dx = e.clientX - lastMouse.current.x
+      const dy = e.clientY - lastMouse.current.y
+      lastMouse.current = { x: e.clientX, y: e.clientY }
+      // Path length, not displacement: a drag that wanders back to where it
+      // started is still a pan, and must not fall through to the click.
+      dragDistance.current += Math.hypot(dx, dy)
+      setPan((p) => ({ x: p.x + dx, y: p.y + dy }))
+    },
+    [dragging]
+  )
 
   const handleMouseUp = useCallback(() => {
-    const wasPressed = isDragging.current
-    isDragging.current = false
-    if (wasPressed && dragDistance.current <= CLICK_SLOP_PX) setFullscreen(true)
-  }, [])
+    setDragging(false)
+    if (dragging && dragDistance.current <= CLICK_SLOP_PX) setFullscreen(true)
+  }, [dragging])
 
   /**
    * Leaving the container only cancels the press. Deliberately *not*
@@ -611,7 +664,7 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
    * click and pop the viewer open.
    */
   const handleMouseLeave = useCallback(() => {
-    isDragging.current = false
+    setDragging(false)
   }, [])
 
   // Ctrl + scroll wheel to zoom — plain scroll passes through to page.
@@ -649,7 +702,7 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
         className="rounded-md border border-border overflow-hidden p-3"
         style={{
           background: 'var(--color-bg-primary)',
-          cursor: isDragging.current ? 'grabbing' : 'zoom-in',
+          cursor: dragging ? 'grabbing' : 'zoom-in',
           minHeight: 120
         }}
         onMouseDown={handleMouseDown}
@@ -657,7 +710,6 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
       >
-        <style>{`.mermaid-content text:not([font-weight]) { font-weight: 500; }`}</style>
         <div
           ref={contentRef}
           className="mermaid-content"
@@ -667,7 +719,7 @@ function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.
                 ? undefined
                 : `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transformOrigin: 'top left',
-            transition: isDragging.current ? 'none' : 'transform 0.15s ease-out'
+            transition: dragging ? 'none' : 'transform 0.15s ease-out'
           }}
           dangerouslySetInnerHTML={{ __html: normalizedSvg }}
         />
@@ -742,7 +794,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
         // Sanitize SVG output (belt-and-suspenders with securityLevel: 'antiscript').
         const clean = sanitizeMermaidSvg(svg)
 
-        setSvgString(clean)
+        setSvgString(injectTextWeightRule(clean))
         setError(null)
       } catch (err: unknown) {
         if (cancelled) return
@@ -767,7 +819,9 @@ export const MermaidDiagram = memo(function MermaidDiagram({
         {(['rendered', 'source'] as const).map((t) => (
           <button
             key={t}
-            data-testid={t === 'rendered' ? 'MermaidDiagram.tabRendered' : 'MermaidDiagram.tabSource'}
+            data-testid={
+              t === 'rendered' ? 'MermaidDiagram.tabRendered' : 'MermaidDiagram.tabSource'
+            }
             onClick={() => setTab(t)}
             className={`text-[11px] h-6 px-2 rounded transition-colors cursor-pointer capitalize ${
               tab === t

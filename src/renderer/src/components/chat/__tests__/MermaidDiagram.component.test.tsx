@@ -8,8 +8,13 @@
  * Suspense boundary), and once the module resolves the effect still calls
  * initialize (which carries the resolved theme) *before* render.
  *
+ * Also covered: the two properties that only hold because the SVG string is the
+ * single source shared by the inline viewport, the overlay and the PNG export
+ * (the embedded font-weight rule, and the canvas colour that backs the export).
+ *
  * The loader's rejection-reset is deliberately not covered — it is a
- * network-race path with no practical jsdom seam.
+ * network-race path with no practical jsdom seam. `svgToPngBlob` itself is not
+ * covered either: jsdom has no canvas.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -21,8 +26,11 @@ const { loaded, initialize, mermaidRender } = vi.hoisted(() => ({
   // 'mermaid' — so it doubles as a probe for *when* mermaid enters the graph.
   loaded: { current: false },
   initialize: vi.fn(),
+  // The `id` mirrors what real mermaid stamps on the root svg (the render id) —
+  // the font-weight rule is scoped by it, so without one there is nothing to
+  // scope to and the injection is skipped.
   mermaidRender: vi.fn(async () => ({
-    svg: '<svg viewBox="0 0 100 60"><g class="node"><text>NODE</text></g></svg>'
+    svg: '<svg id="mermaid-diagram-mock" viewBox="0 0 100 60"><g class="node"><text>NODE</text></g></svg>'
   }))
 }))
 
@@ -31,7 +39,7 @@ vi.mock('mermaid', () => {
   return { default: { initialize, render: mermaidRender } }
 })
 
-import { MermaidDiagram } from '../MermaidDiagram'
+import { MermaidDiagram, injectTextWeightRule, themeCanvasBackground } from '../MermaidDiagram'
 
 describe('MermaidDiagram — lazy mermaid core', () => {
   it('mounts before mermaid resolves, then initializes before rendering the SVG', async () => {
@@ -128,5 +136,68 @@ describe('MermaidDiagram — full-screen viewer', () => {
     fireEvent.mouseLeave(canvas)
     fireEvent.mouseUp(canvas, { button: 0, clientX: 40, clientY: 30 })
     expect(screen.queryByTestId('ImageViewerOverlay')).toBeNull()
+  })
+
+  it('tracks the drag in the cursor — grabbing while panning, zoom-in once released', async () => {
+    // The press state has to be React state, not a ref: the cursor is computed
+    // during render, so a ref mutation would leave it stale until the next
+    // unrelated render.
+    await mountRendered()
+    const canvas = screen.getByTestId('MermaidDiagram.canvas')
+    expect(canvas.style.cursor).toBe('zoom-in')
+
+    fireEvent.mouseDown(canvas, { button: 0, clientX: 40, clientY: 30 })
+    fireEvent.mouseMove(canvas, { clientX: 70, clientY: 30 })
+    expect(canvas.style.cursor).toBe('grabbing')
+
+    fireEvent.mouseUp(canvas, { button: 0, clientX: 70, clientY: 30 })
+    expect(canvas.style.cursor).toBe('zoom-in')
+  })
+})
+
+/**
+ * The label font-weight rule rides inside the SVG markup. It used to be a
+ * `<style>` sibling of the inline viewport, which the full-screen overlay and
+ * the PNG rasterizer — both fed the same SVG string — never inherited.
+ */
+describe('MermaidDiagram — embedded label font-weight rule', () => {
+  it('injects an id-scoped rule into the rendered svg', async () => {
+    const { container } = render(<MermaidDiagram source="sequenceDiagram" />)
+    await waitFor(() => expect(container.querySelector('svg')).not.toBeNull())
+
+    const style = container.querySelector('svg > style')
+    expect(style?.textContent).toBe(
+      '#mermaid-diagram-mock text:not([font-weight]) { font-weight: 500; }'
+    )
+
+    // ...and the old viewport-level stylesheet, which the other two consumers
+    // never saw, is gone rather than duplicated.
+    const strays = Array.from(container.querySelectorAll('style')).filter((el) =>
+      el.textContent?.includes('.mermaid-content')
+    )
+    expect(strays).toEqual([])
+  })
+
+  it('skips injection when the svg has no id, rather than emitting an unscoped rule', () => {
+    const noId = '<svg viewBox="0 0 10 10"><text>x</text></svg>'
+    expect(injectTextWeightRule(noId)).toBe(noId)
+  })
+})
+
+/**
+ * The PNG background. Every mermaid theme config sets `background: transparent`,
+ * so the copied image needs the app's own canvas colour behind it — a hardcoded
+ * white sheet made dark-theme exports unreadable.
+ */
+describe('themeCanvasBackground', () => {
+  afterEach(() => document.documentElement.style.removeProperty('--color-bg-primary'))
+
+  it('returns the theme canvas colour when the variable is set', () => {
+    document.documentElement.style.setProperty('--color-bg-primary', '#272822')
+    expect(themeCanvasBackground()).toBe('#272822')
+  })
+
+  it('falls back to white when the variable is unset', () => {
+    expect(themeCanvasBackground()).toBe('#ffffff')
   })
 })
