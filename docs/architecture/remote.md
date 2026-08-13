@@ -24,6 +24,14 @@ Remote clients are RPC callers plus consumers of a *mirror of main→desktop-ren
 
 ## Known structural defects (2026-08-13 review)
 
+> **Status update (2026-08-14):** defects 3 and 4 are fixed by SyncCore phase 0
+> (`bf6aa1b` — snapshot watermark under-claims; events buffer until the app
+> mounts, `lastSeq` advances only after dispatch). Defect 6 is fixed by phase 3
+> (`1349ec9` — itemized queue of record per ADR-053). Defect 1 is narrowed by
+> phases 1+3 (single dispatch choke point; queue transitions are broadcast
+> events) but per-session config events still wait on phase 4; defects 2 and 5
+> remain as-built until phase 4.
+
 1. **Interactions are RPCs, not events.** Whether other clients learn of a mutation depends on the handler: `sendPrompt` fans out; `dequeueMessage` broadcasts nothing (`handlers-core.ts`); `set-model`/`set-effort`/`set-thinking-mode` emit nothing any client maps back into picker state; `setPermissionMode` is the only per-session config with a full bidirectional path.
 2. **Privileged desktop renderer.** Snapshot = `window.__getRemoteState()`; a busy/hung/missing renderer silently yields an **empty** snapshot; a remote client's own state (model pick, queued display) is clobbered by the desktop's ignorance on resync (ADR-041 merge: snapshot wins per known session).
 3. **Snapshot seq race** (review.md, confirmed): `getFullState()` stamps `seq` after the async renderer round-trip, so an event appended mid-round-trip is inside the watermark but absent from the state — permanently skipped by the client.
