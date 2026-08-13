@@ -2,13 +2,25 @@
  * Master patch runner — applies all patches in order, then verifies syntax.
  *
  * Usage: node patch/apply-all.mjs
+ *        node patch/apply-all.mjs --quiet   # print only per-patch verdicts +
+ *                                           # warnings/errors; full output on failure
  */
 
 import { execFileSync } from 'node:child_process'
-import { resolve, dirname } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+const QUIET = process.argv.includes('--quiet')
+
+// Colour on a real terminal, or when the orchestrator told us to via
+// FORCE_COLOR (it pipes our stdout, which would otherwise look like a non-TTY).
+// Redirects to a file stay free of escape codes.
+const forceColor = process.env.FORCE_COLOR
+const useColor =
+  !!process.stdout.isTTY || (forceColor !== undefined && forceColor !== '0' && forceColor !== 'false')
+const green = (s) => (useColor ? `\x1b[32m${s}\x1b[0m` : s)
+const red = (s) => (useColor ? `\x1b[31m${s}\x1b[0m` : s)
 
 const patches = [
   resolve(__dirname, 'subagent-streaming/apply.mjs'),
@@ -30,12 +42,30 @@ const patches = [
   // Node-compatibility shim is no longer needed.
 ]
 
-for (const patch of patches) {
-  console.log(`\n>>> Applying ${patch}\n`)
-  execFileSync('node', [patch], { stdio: 'inherit' })
+function runPatch(patch) {
+  const name = basename(dirname(patch))
+  if (QUIET) {
+    try {
+      execFileSync('node', [patch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] })
+      console.log(`>>> ${name} ${green('applied.')}`)
+    } catch (err) {
+      // Errors may live on either stream — dump both.
+      console.error(`\n  >>> ${name} ${red('failed.')}`)
+      if (err.stdout) console.error(err.stdout.toString())
+      if (err.stderr) console.error(err.stderr.toString())
+      process.exit(1)
+    }
+  } else {
+    console.log(`\n>>> Applying ${patch}\n`)
+    execFileSync('node', [patch], { stdio: 'inherit' })
+  }
 }
 
-console.log('\nAll patches applied.')
+for (const patch of patches) {
+  runPatch(patch)
+}
+
+if (!QUIET) console.log('\nAll patches applied.')
 
 // ---------------------------------------------------------------------------
 // Syntax check — verify patched cli.js parses without errors.
@@ -46,7 +76,7 @@ console.log('\nAll patches applied.')
 
 const cliPath = resolve(__dirname, '..', 'vendor', 'claude-cli', 'cli.js')
 
-console.log('\n>>> Syntax check: %s\n', cliPath)
+if (!QUIET) console.log('\n>>> Syntax check: %s\n', cliPath)
 
 const checkers = [
   {
@@ -75,7 +105,7 @@ let checked = false
 for (const checker of checkers) {
   try {
     checker.run()
-    console.log('  OK Syntax check passed (%s)', checker.name)
+    console.log(`  ${green('OK')} Syntax check passed (%s)`, checker.name)
     checked = true
     break
   } catch (err) {
@@ -94,4 +124,4 @@ if (!checked) {
   console.warn('  SKIP Syntax check — none of node, bun, esbuild found in PATH')
 }
 
-console.log('\nDone.')
+if (!QUIET) console.log('\nDone.')

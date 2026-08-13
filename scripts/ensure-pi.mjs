@@ -14,6 +14,7 @@
  * Usage:
  *   node scripts/ensure-pi.mjs              # pinned version from package.json#piCliVersion
  *   node scripts/ensure-pi.mjs --force      # re-download even if vendor/ has it
+ *   node scripts/ensure-pi.mjs --quiet      # suppress info logs (cache-hit/installed lines stay)
  */
 
 import { createHash } from 'node:crypto'
@@ -34,6 +35,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'pi-cli')
 const RELEASE_BASE = 'https://github.com/earendil-works/pi/releases/download'
+
+const QUIET = process.argv.includes('--quiet')
+
+/** Info-level log — suppressed by --quiet. */
+function info(...args) {
+  if (!QUIET) console.log(...args)
+}
 
 // ── Platform detection ────────────────────────────────────────────────────────
 
@@ -249,14 +257,14 @@ function extractTarGz(gzBuf, destDir) {
 
 async function download(assetName, version) {
   const tag = `v${version}`
-  console.log(`[ensure-pi] Downloading ${assetName} for pi ${tag} ...`)
+  info(`[ensure-pi] Downloading ${assetName} for pi ${tag} ...`)
 
   const [assetBytes, sumsBytes] = await Promise.all([
     fetchBytes(`${RELEASE_BASE}/${tag}/${assetName}`),
     fetchBytes(`${RELEASE_BASE}/${tag}/SHA256SUMS`),
   ])
 
-  console.log(`[ensure-pi] Downloaded ${(assetBytes.length / 1024 / 1024).toFixed(1)} MB, verifying SHA256 ...`)
+  info(`[ensure-pi] Downloaded ${(assetBytes.length / 1024 / 1024).toFixed(1)} MB, verifying SHA256 ...`)
   verifySha256(assetBytes, sumsBytes.toString('utf8'), assetName)
 
   // Extract into a temp dir, then swap into place for atomicity.
@@ -269,7 +277,7 @@ async function download(assetName, version) {
     : extractTarGz(assetBytes, tmpDir)
   if (extracted.length === 0) throw new Error(`no files extracted from ${assetName}`)
   for (const f of extracted) {
-    console.log(`[ensure-pi]   ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`)
+    info(`[ensure-pi]   ${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`)
   }
 
   writeFileSync(

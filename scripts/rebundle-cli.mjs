@@ -23,6 +23,7 @@
  *     reads sourceBinary + cli.js from vendor/claude-cli/version.json and
  *     writes vendor/claude-cli/bun-claude<ext>)
  *   node scripts/rebundle-cli.mjs <input.exe> <new-cli.js> <output.exe>
+ *   node scripts/rebundle-cli.mjs --quiet   (any mode — suppress info logs)
  *   node scripts/rebundle-cli.mjs --noop <input.exe> <output.exe>
  *     (NO-OP rebundle: reuse original cli.js contents unchanged — validates
  *      reader/writer symmetry.)
@@ -48,7 +49,7 @@ function parseArgs(argv) {
   const rest = []
   for (const a of argv) {
     if (a === '--noop') args.noop = true
-    else rest.push(a)
+    else if (!a.startsWith('--')) rest.push(a)
   }
   if (args.noop) {
     ;[args.input, args.output] = rest
@@ -97,8 +98,10 @@ function die(msg) {
   process.exit(1)
 }
 
+const QUIET = process.argv.includes('--quiet')
+
 function log(...args) {
-  console.log('[rebundle-cli]', ...args)
+  if (!QUIET) console.log('[rebundle-cli]', ...args)
 }
 
 function alignUp(n, align) {

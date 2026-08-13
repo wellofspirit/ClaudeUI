@@ -33,6 +33,7 @@
  *   node scripts/extract-cli.mjs 2.1.114      # specific version
  *   node scripts/extract-cli.mjs --force      # re-download even if .cache/ has it
  *   node scripts/extract-cli.mjs --binary P   # use pre-downloaded binary P
+ *   node scripts/extract-cli.mjs --quiet      # suppress info logs (errors still shown)
  */
 
 import { createHash } from 'node:crypto'
@@ -73,18 +74,21 @@ function parseArgs(argv) {
   } catch {
     /* fall through */
   }
-  const out = { version: defaultVersion, binaryPath: null, force: false }
+  const out = { version: defaultVersion, binaryPath: null, force: false, quiet: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--binary') out.binaryPath = argv[++i]
     else if (a === '--force') out.force = true
+    else if (a === '--quiet') out.quiet = true
     else if (!a.startsWith('--')) out.version = a
   }
   return out
 }
 
+const QUIET = process.argv.includes('--quiet')
+
 function log(...args) {
-  console.log('[extract-cli]', ...args)
+  if (!QUIET) console.log('[extract-cli]', ...args)
 }
 
 function mb(n) {
@@ -150,7 +154,7 @@ function fetchBinary(url, outPath, redirects = 0) {
       }
       res.on('data', (chunk) => {
         seen += chunk.length
-        if (total) process.stdout.write(`\r  downloaded ${mb(seen)}/${mb(total)}…  `)
+        if (!QUIET && total) process.stdout.write(`\r  downloaded ${mb(seen)}/${mb(total)}…  `)
       })
       // pipe() does NOT forward source-stream errors — a mid-body connection
       // reset would otherwise leave the promise pending and hang the build.
@@ -159,7 +163,7 @@ function fetchBinary(url, outPath, redirects = 0) {
       res.pipe(ws)
       ws.on('finish', () => {
         done = true
-        process.stdout.write('\n')
+        if (!QUIET) process.stdout.write('\n')
         ws.close(resolve)
       })
     })

@@ -28,6 +28,7 @@
  *   node scripts/ensure-opencode.mjs                 # build the fork branch
  *   node scripts/ensure-opencode.mjs --force         # rebuild/re-download even on a cache hit
  *   node scripts/ensure-opencode.mjs --from-release  # unpatched upstream release instead
+ *   node scripts/ensure-opencode.mjs --quiet         # suppress info logs (cache-hit/installed lines stay)
  */
 
 import { createGunzip } from 'node:zlib'
@@ -55,6 +56,13 @@ const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'opencode-cli')
 const CACHE_BASE = join(ROOT, '.cache')
 const FORK_DIR = join(CACHE_BASE, 'opencode-fork')
+
+const QUIET = process.argv.includes('--quiet')
+
+/** Info-level log — suppressed by --quiet. */
+function info(...args) {
+  if (!QUIET) console.log(...args)
+}
 
 // ── Platform detection ────────────────────────────────────────────────────────
 
@@ -259,7 +267,7 @@ async function download(pkgName, version) {
 
   try {
     const fullPkg = `${pkgName}@${version}`
-    console.log(`[ensure-opencode] Downloading ${fullPkg} via npm pack ...`)
+    info(`[ensure-opencode] Downloading ${fullPkg} via npm pack ...`)
 
     // Use execSync with a constructed command string so Node runs it via the
     // shell on all platforms. This avoids the shell:true + array-args deprecation
@@ -280,9 +288,9 @@ async function download(pkgName, version) {
     // The npm pack layout is: package/bin/opencode[.exe]
     const targetSuffix = `bin/${binName}`
 
-    console.log(`[ensure-opencode] Extracting ${binName} from ${tgzFiles[0]} ...`)
+    info(`[ensure-opencode] Extracting ${binName} from ${tgzFiles[0]} ...`)
     const binBytes = await extractFileFromTgz(tgzPath, targetSuffix)
-    console.log(`[ensure-opencode] Extracted ${(binBytes.length / 1024 / 1024).toFixed(1)} MB`)
+    info(`[ensure-opencode] Extracted ${(binBytes.length / 1024 / 1024).toFixed(1)} MB`)
 
     mkdirSync(VENDOR_DIR, { recursive: true })
     const dest = join(VENDOR_DIR, binName)
@@ -312,7 +320,6 @@ async function download(pkgName, version) {
     rmSync(tmpDir, { recursive: true, force: true })
   }
 }
-
 // ── Fork build ────────────────────────────────────────────────────────────────
 
 /**
@@ -357,10 +364,9 @@ function replaceBinary(tmp, dest) {
   try {
     rmSync(displaced, { force: true })
   } catch {
-    console.log(`[ensure-opencode] previous binary still in use; left ${displaced} for later cleanup`)
+    info(`[ensure-opencode] previous binary still in use; left ${displaced} for later cleanup`)
   }
 }
-
 /** Run git, streaming its output. */
 function gitRun(args, cwd) {
   execFileSync('git', args, { cwd, stdio: 'inherit' })
@@ -424,7 +430,7 @@ function ensureBun(forkDir) {
           ? 'bun-linux-aarch64'
           : 'bun-linux-x64'
 
-  console.log(`[ensure-opencode] Local bun does not satisfy ^${required}; fetching ${target} ...`)
+  info(`[ensure-opencode] Local bun does not satisfy ^${required}; fetching ${target} ...`)
   mkdirSync(dir, { recursive: true })
   const url = `https://github.com/oven-sh/bun/releases/download/bun-v${required}/${target}.zip`
   const zip = join(dir, 'bun.zip')
@@ -459,7 +465,7 @@ function ensureBun(forkDir) {
 function syncFork(fork) {
   mkdirSync(CACHE_BASE, { recursive: true })
   if (!existsSync(join(FORK_DIR, '.git'))) {
-    console.log(`[ensure-opencode] Cloning ${fork.repo} (${fork.branch}) ...`)
+    info(`[ensure-opencode] Cloning ${fork.repo} (${fork.branch}) ...`)
     // Blobless: full history/refs (the build reads `git branch --show-current`)
     // without paying for every blob ever committed.
     execFileSync(
@@ -468,7 +474,7 @@ function syncFork(fork) {
       { stdio: 'inherit' }
     )
   } else {
-    console.log(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
+    info(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
     gitRun(['fetch', 'origin', fork.branch], FORK_DIR)
     // `-f` is load-bearing: a previous run's `bun install` rewrites bun.lock in
     // this clone, and a plain checkout refuses to switch over a dirty file.
@@ -508,12 +514,12 @@ async function buildFork(version, fork) {
   const commit = syncFork(fork)
   const bun = ensureBun(FORK_DIR)
 
-  console.log(`[ensure-opencode] Installing fork dependencies (bun: ${bun}) ...`)
+  info(`[ensure-opencode] Installing fork dependencies (bun: ${bun}) ...`)
   withInstallWorkaround(FORK_DIR, () => {
     execFileSync(bun, ['install'], { cwd: FORK_DIR, stdio: 'inherit' })
   })
 
-  console.log(`[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`)
+  info(`[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`)
   const pkgDir = join(FORK_DIR, 'packages', 'opencode')
   execFileSync(bun, ['run', 'script/build.ts', '--single', '--skip-install'], {
     cwd: pkgDir,
