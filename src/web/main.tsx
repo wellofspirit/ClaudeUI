@@ -265,6 +265,17 @@ function AppContent(): React.JSX.Element {
     )
   }, [])
 
+  // Mount-complete: React flushes effects child-first, so App's subtree — which
+  // is where useClaudeEvents registers every window.api.onX listener — has run
+  // by the time this parent effect does. Everything the server pushed during
+  // the snapshot apply → store import → App chunk → mount window has been
+  // buffering; markReady flushes it in seq order and goes live. Before this,
+  // those events were acked and dropped, which is every phone foreground
+  // (remote.md defect 4). Latched, so a reconnect never re-arms the gate.
+  useEffect(() => {
+    if (App) connection.markReady()
+  }, [App])
+
   if (!App) {
     return (
       <div className="flex items-center justify-center h-screen text-text-secondary">

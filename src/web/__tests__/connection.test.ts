@@ -43,18 +43,29 @@ interface Internals {
   decodeIncoming(raw: string): Promise<unknown>
   sendSync(): void
   scheduleReconnect(): void
-  lastSeq: number
-  epoch?: string
+  /** The protocol core: cursor + epoch + registry live here now, not on the
+   *  transport. Poked directly (like every other private in this file) to set
+   *  up a mid-stream cursor without replaying a whole sync. */
+  sync: { lastSeq: number; epoch?: string }
   e2e: unknown
   ws: unknown
   destroyed: boolean
   reconnectTimer?: ReturnType<typeof setTimeout>
 }
 
+/** Channels these tests push through the transport. */
+const CHANNELS = ['session:message', 'session:status', 'x', 'dup', 'new']
+
 function makeConn(): { conn: RemoteConnection; internals: Internals; events: unknown[][] } {
   const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
   const events: unknown[][] = []
-  conn.setEventHandler((channel, ...args) => events.push([channel, ...args]))
+  for (const channel of CHANNELS) {
+    conn.on(channel)((...args) => events.push([channel, ...args]))
+  }
+  // These cases are about a MOUNTED client's message routing, so open the
+  // readiness gate up front. The gate itself is covered below (defect 4) and in
+  // shared/sync/__tests__/sync-client.test.ts.
+  conn.markReady()
   return { conn, internals: conn as unknown as Internals, events }
 }
 
@@ -94,12 +105,12 @@ describe('RemoteConnection', () => {
         ['session:status', 'rid', 'idle']
       ])
       expect(created.conn.getLastSeq()).toBe(2)
-      expect(internals.epoch).toBe('epoch-A')
+      expect(internals.sync.epoch).toBe('epoch-A')
     })
 
     it('skips catchup events at/below lastSeq (no double-apply)', () => {
       const { internals, events } = created
-      internals.lastSeq = 1
+      internals.sync.lastSeq = 1
       internals.handleMessage({
         type: 'sync-catchup',
         epoch: 'epoch-A',
@@ -119,8 +130,8 @@ describe('RemoteConnection', () => {
     it('on a gap: requests sync (with epoch) and does not apply/advance', () => {
       const { internals, events } = created
       const { sent } = attachFakeSocket(internals)
-      internals.lastSeq = 5
-      internals.epoch = 'epoch-A'
+      internals.sync.lastSeq = 5
+      internals.sync.epoch = 'epoch-A'
 
       internals.handleMessage({ type: 'event', seq: 8, channel: 'x', args: [1] })
 
@@ -132,7 +143,7 @@ describe('RemoteConnection', () => {
 
     it('applies a contiguous event and advances lastSeq', () => {
       const { internals, events } = created
-      internals.lastSeq = 5
+      internals.sync.lastSeq = 5
       internals.handleMessage({ type: 'event', seq: 6, channel: 'x', args: [7] })
       expect(events).toEqual([['x', 7]])
       expect(created.conn.getLastSeq()).toBe(6)
@@ -140,10 +151,79 @@ describe('RemoteConnection', () => {
 
     it('ignores a stale/duplicate event (seq <= lastSeq)', () => {
       const { internals, events } = created
-      internals.lastSeq = 6
+      internals.sync.lastSeq = 6
       internals.handleMessage({ type: 'event', seq: 3, channel: 'x', args: [1] })
       expect(events).toEqual([])
       expect(created.conn.getLastSeq()).toBe(6)
+    })
+  })
+
+  // remote.md defect 4 — the web client mounts its listeners several async hops
+  // after the socket connects (snapshot apply → store import → App chunk →
+  // effects). Everything the server pushed in that window used to be dispatched
+  // into an empty registry AND acked, so it was gone for good: the next `sync`
+  // told the server "applied through here". main.tsx now calls markReady() once
+  // App's subtree has mounted.
+  describe('readiness gate (defect 4)', () => {
+    /** Same as makeConn, minus the markReady — i.e. the app hasn't mounted. */
+    function makeUnreadyConn(): {
+      conn: RemoteConnection
+      internals: Internals
+      events: unknown[][]
+    } {
+      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const events: unknown[][] = []
+      for (const channel of CHANNELS) {
+        conn.on(channel)((...args) => events.push([channel, ...args]))
+      }
+      return { conn, internals: conn as unknown as Internals, events }
+    }
+
+    it('holds events (and the cursor) until markReady, then flushes in order (GUARD)', () => {
+      const { conn, internals, events } = makeUnreadyConn()
+      internals.handleMessage({ type: 'sync-full', epoch: 'e', state: { seq: 10 } })
+
+      internals.handleMessage({ type: 'event', seq: 11, channel: 'x', args: ['a'] })
+      internals.handleMessage({ type: 'event', seq: 12, channel: 'x', args: ['b'] })
+
+      expect(events).toEqual([])
+      // The ack must not run ahead of the apply: a `sync` sent right now has to
+      // ask for 11 again.
+      expect(conn.getLastSeq()).toBe(10)
+
+      conn.markReady()
+
+      expect(events).toEqual([
+        ['x', 'a'],
+        ['x', 'b']
+      ])
+      expect(conn.getLastSeq()).toBe(12)
+      conn.destroy()
+    })
+
+    it('holds a pre-mount CATCHUP too (the phone-foreground path)', () => {
+      const { conn, internals, events } = makeUnreadyConn()
+      internals.handleMessage({ type: 'sync-full', epoch: 'e', state: { seq: 3 } })
+      internals.handleMessage({
+        type: 'sync-catchup',
+        epoch: 'e',
+        events: [
+          { seq: 4, channel: 'session:message', args: ['rid', { a: 1 }] },
+          { seq: 5, channel: 'session:status', args: ['rid', 'idle'] }
+        ]
+      })
+
+      expect(events).toEqual([])
+      expect(conn.getLastSeq()).toBe(3)
+
+      conn.markReady()
+
+      expect(events).toEqual([
+        ['session:message', 'rid', { a: 1 }],
+        ['session:status', 'rid', 'idle']
+      ])
+      expect(conn.getLastSeq()).toBe(5)
+      conn.destroy()
     })
   })
 
@@ -325,7 +405,7 @@ describe('RemoteConnection', () => {
         state: { seq: 42 }
       })
 
-      expect(internals.epoch).toBe('epoch-Z')
+      expect(internals.sync.epoch).toBe('epoch-Z')
       expect(conn.getMockupToken()).toBe('mock-123')
       expect(conn.getLastSeq()).toBe(42)
       expect(snapshots).toEqual([{ seq: 42 }])
@@ -353,8 +433,8 @@ describe('RemoteConnection', () => {
     it('sendSync echoes the stored epoch (R7)', () => {
       const { internals } = created
       const { sent } = attachFakeSocket(internals)
-      internals.epoch = 'epoch-Z'
-      internals.lastSeq = 7
+      internals.sync.epoch = 'epoch-Z'
+      internals.sync.lastSeq = 7
       internals.sendSync()
       expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 7, epoch: 'epoch-Z' })
     })

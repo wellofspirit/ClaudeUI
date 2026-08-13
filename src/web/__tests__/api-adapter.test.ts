@@ -10,23 +10,29 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createWebSocketApi } from '../api-adapter'
+import { SyncClient } from '../../shared/sync/sync-client'
 import type { RemoteConnection } from '../connection'
 
 type FakeConnection = {
   invoke: ReturnType<typeof vi.fn>
-  setEventHandler: (cb: (channel: string, ...args: unknown[]) => void) => void
+  on: RemoteConnection['on']
   /** Push a server event to the api's listeners. */
   push: (channel: string, ...args: unknown[]) => void
 }
 
+/**
+ * Fake transport around the REAL protocol core — the adapter now registers its
+ * listeners on the connection's SyncClient, so `push` delivers an event exactly
+ * the way a server frame does (readiness gate opened: the app is "mounted").
+ */
 function makeConnection(): FakeConnection {
-  let handler: ((channel: string, ...args: unknown[]) => void) | null = null
+  const sync = new SyncClient({ requestResync: () => {} })
+  sync.markReady()
+  let seq = 0
   return {
     invoke: vi.fn(async () => undefined),
-    setEventHandler: (cb) => {
-      handler = cb
-    },
-    push: (channel, ...args) => handler?.(channel, ...args)
+    on: (channel) => sync.on(channel),
+    push: (channel, ...args) => sync.receiveEvent({ seq: ++seq, channel, args })
   }
 }
 

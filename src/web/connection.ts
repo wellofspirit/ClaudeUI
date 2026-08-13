@@ -1,4 +1,5 @@
 import { E2ECrypto } from '../shared/e2e-crypto'
+import { SyncClient, type SyncListener } from '../shared/sync/sync-client'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -40,7 +41,6 @@ export interface RemoteCredential {
 const CLOSE_CREDENTIALS_CHANGED = 4008
 const CLOSE_THROTTLED = 4006
 
-type EventCallback = (channel: string, ...args: unknown[]) => void
 type StateCallback = (state: ConnectionState, error?: string) => void
 type FullStateCallback = (state: FullStateSnapshot) => void
 
@@ -55,7 +55,10 @@ const PING_INTERVAL_MS = 15_000
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
 
 /**
- * WebSocket connection manager with auth, sync, and auto-reconnect.
+ * WebSocket TRANSPORT for the sync protocol: auth, E2E, framing, ping/pong,
+ * reconnect, and invoke plumbing. Everything protocol-level — cursor, epoch,
+ * listener registry, readiness buffer, gap detection — lives in the shared
+ * {@link SyncClient} so the phase-4 MessagePort transport reuses it verbatim.
  *
  * States: connecting → authenticating → syncing → connected
  *                                                 ↓ (disconnect)
@@ -68,13 +71,12 @@ export class RemoteConnection {
   private credential: RemoteCredential
   private url: string
   private state: ConnectionState = 'connecting'
-  private lastSeq = 0
   /**
-   * Event-log epoch that `lastSeq` belongs to. Sent back on every `sync` so the
-   * server can tell a same-process reconnect (catchup) from a cross-restart one
-   * (full snapshot) — see M-DB4. Undefined until the first sync response.
+   * Protocol core. Its cursor (`lastSeq` + the event-log `epoch` it belongs to)
+   * rides every `sync` frame so the server can tell a same-process reconnect
+   * (catchup) from a cross-restart one (full snapshot) — see M-DB4.
    */
-  private epoch?: string
+  private readonly sync = new SyncClient({ requestResync: () => this.sendSync() })
   private reqId = 0
   private pendingInvokes = new Map<string, PendingInvoke>()
   private reconnectAttempt = 0
@@ -114,9 +116,7 @@ export class RemoteConnection {
   private e2e: E2ECrypto | null = null
 
   // Callbacks
-  private onEvent: EventCallback | null = null
   private onStateChange: StateCallback | null = null
-  private onFullState: FullStateCallback | null = null
 
   constructor(url: string, credential: RemoteCredential, e2eKeyHex?: string) {
     // Convert http(s) URL to ws(s), strip path and fragment
@@ -137,17 +137,31 @@ export class RemoteConnection {
     if (credential.pwProof !== undefined) this.e2eKeyHex = undefined
   }
 
-  /** Set callback for incoming events. */
-  setEventHandler(cb: EventCallback): void {
-    this.onEvent = cb
+  /**
+   * Subscribe to a server-pushed channel. Returns the registration function
+   * (the api-adapter exposes it as `onFoo(cb)`); calling it returns the
+   * unsubscribe.
+   */
+  on(channel: string): (cb: SyncListener) => () => void {
+    return this.sync.on(channel)
   }
+
+  /**
+   * The app's event listeners are mounted — flush anything that arrived while
+   * they weren't and go live. Until this is called every event buffers instead
+   * of being acked into the void (remote.md defect 4).
+   */
+  markReady(): void {
+    this.sync.markReady()
+  }
+
   /** Set callback for connection state changes. */
   setStateHandler(cb: StateCallback): void {
     this.onStateChange = cb
   }
   /** Set callback for full state snapshots (initial sync or reconnect). */
   setFullStateHandler(cb: FullStateCallback): void {
-    this.onFullState = cb
+    this.sync.setFullStateHandler(cb)
   }
 
   /**
@@ -235,7 +249,7 @@ export class RemoteConnection {
 
   /** Get the current last sequence number (for debugging). */
   getLastSeq(): number {
-    return this.lastSeq
+    return this.sync.getLastSeq()
   }
 
   // ---------------------------------------------------------------------------
@@ -375,11 +389,9 @@ export class RemoteConnection {
       case 'sync-full':
         {
           const full = msg as WsSyncFull
-          this.epoch = full.epoch
           if (full.mockupToken) this.mockupTokenValue = full.mockupToken
           if (full.fileToken) this.fileTokenValue = full.fileToken
-          this.lastSeq = full.state.seq
-          this.onFullState?.(full.state)
+          this.sync.applyFullState(full.state, full.epoch, full.state.seq)
           this.setState('connected')
           this.startPing()
         }
@@ -388,37 +400,14 @@ export class RemoteConnection {
       case 'sync-catchup':
         {
           const catchup = msg as WsSyncCatchup
-          this.epoch = catchup.epoch
-          // Replay each missed event through the SAME live handler the `event`
-          // case uses, in seq order — otherwise every reconnect silently
-          // discards the disconnect-window's messages/approvals/status. Advance
-          // lastSeq as we go so a mid-replay live event doesn't look like a gap.
-          for (const ev of catchup.events) {
-            if (ev.seq <= this.lastSeq) continue // already applied
-            this.onEvent?.(ev.channel, ...ev.args)
-            this.lastSeq = ev.seq
-          }
+          this.sync.applyCatchup(catchup.events, catchup.epoch)
           this.setState('connected')
           this.startPing()
         }
         break
 
       case 'event':
-        {
-          const event = msg as WsEvent
-          // Already-applied / duplicate (e.g. a live event that overlaps a
-          // catchup batch) — ignore.
-          if (event.seq <= this.lastSeq) break
-          // Gap detected: a message was missed. Request a catchup and do NOT
-          // apply this out-of-order event as if it were contiguous — the
-          // catchup redelivers everything from lastSeq, this event included.
-          if (event.seq > this.lastSeq + 1 && this.lastSeq > 0) {
-            this.sendSync()
-            break
-          }
-          this.lastSeq = event.seq
-          this.onEvent?.(event.channel, ...event.args)
-        }
+        this.sync.receiveEvent(msg as WsEvent)
         break
 
       case 'invoke-response':
@@ -449,7 +438,7 @@ export class RemoteConnection {
 
   /** Request a sync/catchup, echoing the epoch our lastSeq belongs to (R7). */
   private sendSync(): void {
-    this.send({ type: 'sync', lastSeq: this.lastSeq, epoch: this.epoch })
+    this.send({ type: 'sync', lastSeq: this.sync.getLastSeq(), epoch: this.sync.getEpoch() })
   }
 
   /** Send a message, encrypting if E2E is active. */

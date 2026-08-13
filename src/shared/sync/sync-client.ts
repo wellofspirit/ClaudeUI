@@ -1,0 +1,228 @@
+import type { FullStateSnapshot } from '../remote-protocol'
+
+/** One domain event as a transport hands it over (frame envelope stripped). */
+export interface SyncEvent {
+  seq: number
+  channel: string
+  args: unknown[]
+}
+
+export type SyncListener = (...args: unknown[]) => void
+export type SyncFullStateHandler = (state: FullStateSnapshot) => void
+
+export interface SyncClientOptions {
+  /**
+   * Ask the transport to send a `sync` frame carrying the current cursor.
+   * Invoked when a gap is detected — the answering catchup redelivers
+   * everything from `lastSeq`, including the event that exposed the gap.
+   */
+  requestResync: () => void
+  /** Override the pre-ready buffer cap (tests; see {@link DEFAULT_BUFFER_LIMIT}). */
+  bufferLimit?: number
+}
+
+/**
+ * Cap on events held while the readiness gate is closed. Matched to the
+ * server's event-log ring: buffering more than the server could replay buys
+ * nothing. Overflow prunes the OLDEST entries, which leaves a hole the flush's
+ * gap check catches — so a client that never mounts degrades into a resync,
+ * never into a silently skipped range.
+ */
+const DEFAULT_BUFFER_LIMIT = 5000
+
+/**
+ * Transport-agnostic sync protocol core: cursor, listener registry, readiness
+ * gate, gap detection. The transport owns the socket, auth, and framing
+ * (WebSocket today; MessagePort in SyncCore phase 4) and feeds decoded frames
+ * in here.
+ *
+ * Two invariants it exists to enforce (SyncCore phase 0):
+ *
+ * 1. **Ack discipline** — `lastSeq` advances only once an event has been
+ *    dispatched through the registry, never at receipt. The server reads
+ *    `lastSeq` as "applied through here" when it answers a `sync`, so an event
+ *    acked before it was applied is a permanent hole.
+ * 2. **Readiness gate** — every event buffers until {@link markReady}. The web
+ *    client mounts its listeners several async hops after the socket connects
+ *    (snapshot apply → store import → App chunk → effects); events landing in
+ *    that window used to be acked and dropped, which is every phone foreground
+ *    (docs/architecture/remote.md defect 4).
+ *
+ * Readiness is a one-way latch for the client's lifetime: listeners outlive
+ * socket churn, so a reconnect must NOT re-arm the gate.
+ */
+export class SyncClient {
+  private readonly listeners = new Map<string, Set<SyncListener>>()
+  private readonly requestResync: () => void
+  private readonly bufferLimit: number
+  /** Pre-ready (and mid-flush) events, kept in seq order. */
+  private readonly buffer: SyncEvent[] = []
+  private lastSeq = 0
+  private epoch?: string
+  private ready = false
+  private draining = false
+  private fullStateHandler: SyncFullStateHandler | null = null
+
+  constructor(options: SyncClientOptions) {
+    this.requestResync = options.requestResync
+    this.bufferLimit = options.bufferLimit ?? DEFAULT_BUFFER_LIMIT
+  }
+
+  /**
+   * Subscribe to a channel. Returns the registration function so callers can
+   * expose it as `onFoo(cb)` (mirrors preload's `onEvent`); that call returns
+   * the unsubscribe.
+   */
+  on(channel: string): (cb: SyncListener) => () => void {
+    return (cb: SyncListener): (() => void) => {
+      let set = this.listeners.get(channel)
+      if (!set) {
+        set = new Set()
+        this.listeners.set(channel, set)
+      }
+      set.add(cb)
+      return () => {
+        this.listeners.get(channel)?.delete(cb)
+      }
+    }
+  }
+
+  /** Set the handler for full snapshots (initial sync and every resync). */
+  setFullStateHandler(cb: SyncFullStateHandler): void {
+    this.fullStateHandler = cb
+  }
+
+  /**
+   * The app's listeners are mounted: flush the buffer in seq order and go live.
+   * Idempotent and permanent — see the class note on the one-way latch.
+   */
+  markReady(): void {
+    if (this.ready) return
+    this.ready = true
+    this.drain()
+  }
+
+  isReady(): boolean {
+    return this.ready
+  }
+
+  /** Cursor: the highest seq DISPATCHED through the registry. */
+  getLastSeq(): number {
+    return this.lastSeq
+  }
+
+  /** Event-log epoch the cursor belongs to; the transport echoes it on `sync`. */
+  getEpoch(): string | undefined {
+    return this.epoch
+  }
+
+  /** A live event frame. */
+  receiveEvent(event: SyncEvent): void {
+    this.ingest(event, true)
+  }
+
+  /**
+   * A catchup batch (reconnect). Replayed through the same dispatch path as
+   * live events so a reconnect can't silently discard the disconnect window.
+   *
+   * No gap check on this path: a catchup batch is contiguous from our cursor by
+   * construction (the server answers with a full snapshot when its ring can't
+   * reach back far enough), and re-requesting a sync on a mis-shaped batch
+   * could loop. A batch that lands while the gate is closed is still gap-checked
+   * at flush time, where acking past a hole is what actually loses events.
+   */
+  applyCatchup(events: readonly SyncEvent[], epoch: string): void {
+    this.epoch = epoch
+    for (const event of events) this.ingest(event, false)
+  }
+
+  /**
+   * A full snapshot. `seq` is the snapshot's watermark, passed explicitly so
+   * the core never has to interpret the payload.
+   *
+   * The watermark REPLACES the cursor, it never maxes with it: the server
+   * under-claims it on purpose (see `event-log.ts` `getFullState`), and
+   * rewinding is what makes the events it may have missed get redelivered.
+   */
+  applyFullState(state: FullStateSnapshot, epoch: string, seq: number): void {
+    this.epoch = epoch
+    this.lastSeq = seq
+    this.fullStateHandler?.(state)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal
+  // ---------------------------------------------------------------------------
+
+  private ingest(event: SyncEvent, gapCheck: boolean): void {
+    // Buffer while the gate is closed, and while a flush is in progress so a
+    // late arrival lands after the events already queued ahead of it.
+    if (!this.ready || this.draining) {
+      this.enqueue(event)
+      return
+    }
+    if (event.seq <= this.lastSeq) return // already applied (e.g. catchup overlap)
+    if (gapCheck && this.lastSeq > 0 && event.seq > this.lastSeq + 1) {
+      // Something was missed. Do NOT apply this event as if it were contiguous:
+      // acking it would strand the missing range forever.
+      this.requestResync()
+      return
+    }
+    this.dispatch(event)
+  }
+
+  /** Ordered insert (append is the common case) + dedupe by seq + cap. */
+  private enqueue(event: SyncEvent): void {
+    let i = this.buffer.length
+    while (i > 0 && this.buffer[i - 1].seq > event.seq) i--
+    if (i > 0 && this.buffer[i - 1].seq === event.seq) return
+    this.buffer.splice(i, 0, event)
+    if (this.buffer.length > this.bufferLimit) {
+      this.buffer.splice(0, this.buffer.length - this.bufferLimit)
+    }
+  }
+
+  private drain(): void {
+    this.draining = true
+    try {
+      // Re-checks the length every pass, so events that arrive mid-flush (and
+      // therefore enqueue) are picked up in order rather than dropped.
+      while (this.buffer.length > 0) {
+        const event = this.buffer.shift()!
+        if (event.seq <= this.lastSeq) continue
+        if (this.lastSeq > 0 && event.seq > this.lastSeq + 1) {
+          // A hole in the buffered range — a lost frame, or an overflow that
+          // pruned the oldest entries. Drop the rest and let the catchup
+          // redeliver from the cursor; dispatching across it would ack the hole.
+          this.buffer.length = 0
+          this.requestResync()
+          return
+        }
+        this.dispatch(event)
+      }
+    } finally {
+      this.draining = false
+    }
+  }
+
+  private dispatch(event: SyncEvent): void {
+    // Cursor first: it is the "applied through here" mark the transport echoes
+    // on the next `sync`, and a listener that re-enters must not see a stale one.
+    this.lastSeq = event.seq
+    this.emit(event.channel, event.args)
+  }
+
+  private emit(channel: string, args: unknown[]): void {
+    const set = this.listeners.get(channel)
+    // A channel nobody subscribed to is a deliberate non-subscription, not a
+    // loss: the cursor still advances (see dispatch).
+    if (!set) return
+    for (const cb of set) {
+      try {
+        cb(...args)
+      } catch {
+        /* prevent one listener from breaking others */
+      }
+    }
+  }
+}

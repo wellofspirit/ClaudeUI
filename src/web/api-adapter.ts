@@ -25,53 +25,18 @@ declare global {
   }
 }
 
-type Listener = (...args: unknown[]) => void
-
 function sharedProviderRemoteMutation(..._args: unknown[]): Promise<never> {
   return Promise.reject(
     new Error('Shared provider settings can only be changed from the desktop app')
   )
 }
 
-/**
- * Create event listener registration that mirrors preload's onEvent().
- * Events arrive via the connection's event handler.
- */
-function createEventRegistry() {
-  const listeners = new Map<string, Set<Listener>>()
-
-  function on(channel: string) {
-    return (cb: Listener): (() => void) => {
-      if (!listeners.has(channel)) listeners.set(channel, new Set())
-      listeners.get(channel)!.add(cb)
-      return () => listeners.get(channel)?.delete(cb)
-    }
-  }
-
-  function emit(channel: string, ...args: unknown[]): void {
-    listeners.get(channel)?.forEach((cb) => {
-      try {
-        cb(...args)
-      } catch {
-        /* prevent one listener from breaking others */
-      }
-    })
-  }
-
-  function clear(): void {
-    listeners.clear()
-  }
-
-  return { on, emit, clear }
-}
-
 export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
-  const { on, emit } = createEventRegistry()
-
-  // Wire up the connection's event handler to dispatch to registered listeners
-  connection.setEventHandler((channel: string, ...args: unknown[]) => {
-    emit(channel, ...args)
-  })
+  // Listener registration mirrors preload's onEvent(). The registry itself
+  // lives in the connection's SyncClient — it has to be the thing that knows an
+  // event was dispatched, or the cursor advances past events nobody applied
+  // (SyncCore phase 0 ack discipline).
+  const on = (channel: string): ReturnType<RemoteConnection['on']> => connection.on(channel)
 
   // Helper: invoke that mirrors preload's unwrap() for safeHandler envelopes
   async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {

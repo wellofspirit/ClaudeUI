@@ -78,35 +78,22 @@ export class EventLog {
   /**
    * Get a full state snapshot from the renderer's Zustand store.
    * Uses executeJavaScript to pull the authoritative state.
+   *
+   * The watermark is captured BEFORE the renderer round-trip, not after. An
+   * event appended while `executeJavaScript` is in flight is not in the state
+   * we get back, so stamping the post-round-trip seq claims coverage the
+   * snapshot does not have, and the client — which starts its cursor at that
+   * seq — never sees that event again (docs/architecture/remote.md defect 3).
+   *
+   * Under-claiming in the other direction is safe by construction: the client
+   * catchup-replays `seqAtStart + 1..now` straight on top, and session events
+   * are built for replay (messages upsert by id, status/permission-mode
+   * replace), so re-applying the few the snapshot already reflects converges.
    */
   async getFullState(): Promise<FullStateSnapshot> {
-    if (!this.win || this.win.isDestroyed()) {
-      return {
-        seq: this.seq,
-        sessions: {},
-        directories: [],
-        activeSessionId: null,
-        settings: {},
-        recentSessionIds: [],
-        pinnedSessionIds: [],
-        customTitles: {},
-        worktreeInfoMap: {}
-      }
-    }
-
-    try {
-      const state = await this.win.webContents.executeJavaScript(
-        'window.__getRemoteState ? window.__getRemoteState() : null'
-      )
-      if (state) {
-        return { ...state, seq: this.seq }
-      }
-    } catch {
-      // Renderer not ready or errored
-    }
-
-    return {
-      seq: this.seq,
+    const seqAtStart = this.seq
+    const empty = (): FullStateSnapshot => ({
+      seq: seqAtStart,
       sessions: {},
       directories: [],
       activeSessionId: null,
@@ -115,7 +102,22 @@ export class EventLog {
       pinnedSessionIds: [],
       customTitles: {},
       worktreeInfoMap: {}
+    })
+
+    if (!this.win || this.win.isDestroyed()) return empty()
+
+    try {
+      const state = await this.win.webContents.executeJavaScript(
+        'window.__getRemoteState ? window.__getRemoteState() : null'
+      )
+      if (state) {
+        return { ...state, seq: seqAtStart }
+      }
+    } catch {
+      // Renderer not ready or errored
     }
+
+    return empty()
   }
 
   /** Clear the buffer (e.g. when server stops). */
