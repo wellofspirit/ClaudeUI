@@ -16,7 +16,8 @@
   "piCliVersion": "0.82.1",
   "ripgrepVersion": "14.1.1",
   "overrides": {
-    "node-abi": "^4.33.0"
+    "node-abi": "^4.33.0",
+    "lightningcss": "^1.33.0"
   },
   "scripts": {
     "format": "prettier --write .",
