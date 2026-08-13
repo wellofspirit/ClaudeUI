@@ -2744,6 +2744,15 @@ export const useSessionStore = create<SessionState>((set) => ({
         directories: snapshot.directories,
         activeSessionId,
         settings,
+        // The web client never runs hydrateConfigFromDisk — this snapshot IS
+        // its hydration, so the fields hydrate derives from settings must be
+        // derived here too. Without this the remote store kept the initial
+        // 'default' forever: no mode tab on the welcome input, and — the real
+        // bug — sessions CREATED from the remote client spawned without the
+        // auto default (createNewSession reads this client's store, and the
+        // initiating client's mode is what the spawn uses).
+        defaultPermissionMode: AUTONOMY_TO_PERMISSION[settings.defaultAutonomyMode] ?? 'default',
+        autoModeDisabledBySettings: snapshot.autoModeDisabledBySettings ?? false,
         recentSessionIds: snapshot.recentSessionIds ?? [],
         pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
         customTitles: snapshot.customTitles ?? {},
@@ -3672,6 +3681,7 @@ export function getRemoteStateSnapshot(): {
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
   hiddenSessions: string[]
   hiddenProjects: string[]
+  autoModeDisabledBySettings: boolean
 } {
   const state = useSessionStore.getState()
   const sessions: Record<string, unknown> = {}
@@ -3723,6 +3733,10 @@ export function getRemoteStateSnapshot(): {
     // would wipe every session's engine mapping on the desktop.
     sessionEngines: state.sessionEngines,
     hiddenSessions: state.hiddenSessionIds,
-    hiddenProjects: state.hiddenProjectKeys
+    hiddenProjects: state.hiddenProjectKeys,
+    // ADR-050 — the remote client derives its new-session default from synced
+    // settings, but it cannot read ~/.claude/settings.json for the
+    // disableAutoMode gate. Ship the host's already-derived flag.
+    autoModeDisabledBySettings: state.autoModeDisabledBySettings
   }
 }

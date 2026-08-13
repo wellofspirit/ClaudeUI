@@ -285,6 +285,15 @@ export interface FullStateSnapshot {
   activeSessionId: string | null
   /** App settings (theme, UI prefs, etc.) */
   settings: Record<string, unknown>
+  /**
+   * Whether the host's Claude settings carry `disableAutoMode: "disable"`
+   * (ADR-050). The remote client can't read `~/.claude/settings.json` itself,
+   * and it needs this to gate the auto default when IT creates a session.
+   * Optional: an older host omits it, which reads as "not disabled" — the
+   * post-spawn rejection fallback stays the backstop for that mixed-version
+   * window.
+   */
+  autoModeDisabledBySettings?: boolean
   /** Recent session IDs */
   recentSessionIds: string[]
   /** Pinned session IDs */

@@ -202,3 +202,43 @@ describe('applyRemoteSnapshot — sentFiles (Files widget) round-trip', () => {
     expect(store().sessions['S'].sentFiles).toEqual([])
   })
 })
+
+describe('applyRemoteSnapshot — new-session default mode (ADR-050)', () => {
+  // The web client never runs hydrateConfigFromDisk: the snapshot IS its
+  // hydration, so the fields hydrate derives from settings must be derived here
+  // too. Pre-fix the remote store kept the initial 'default' forever — no mode
+  // tab on the welcome input, and sessions CREATED from the remote client
+  // spawned without the auto default.
+  it('derives defaultPermissionMode from synced settings.defaultAutonomyMode', () => {
+    store().applyRemoteSnapshot({
+      ...makeSnapshot({}, null),
+      settings: { defaultAutonomyMode: 'full' }
+    })
+    expect(store().defaultPermissionMode).toBe('auto')
+  })
+
+  it('an older host that omits the key still yields the shipped auto default', () => {
+    // {...DEFAULT_SETTINGS, ...snapshot.settings} fills the gap.
+    store().applyRemoteSnapshot(makeSnapshot({}, null))
+    expect(store().defaultPermissionMode).toBe('auto')
+  })
+
+  it('respects a pinned non-auto pick from the host', () => {
+    store().applyRemoteSnapshot({
+      ...makeSnapshot({}, null),
+      settings: { defaultAutonomyMode: 'ask' }
+    })
+    expect(store().defaultPermissionMode).toBe('default')
+  })
+
+  it('hydrates the host-derived disableAutoMode gate', () => {
+    store().applyRemoteSnapshot({
+      ...makeSnapshot({}, null),
+      autoModeDisabledBySettings: true
+    })
+    expect(store().autoModeDisabledBySettings).toBe(true)
+    // ...and an older host omitting it reads as "not disabled".
+    store().applyRemoteSnapshot(makeSnapshot({}, null))
+    expect(store().autoModeDisabledBySettings).toBe(false)
+  })
+})
