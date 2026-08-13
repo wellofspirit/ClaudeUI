@@ -50,9 +50,8 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v8 (remote_config pinned
-      // HTTPS port + serve cleanup record, ADR-042).
-      expect(userVersion(db)).toBe(8)
+      // Bump alongside MIGRATIONS in db.ts — currently v9 (audit_log, ADR-051/052).
+      expect(userVersion(db)).toBe(9)
     } finally {
       db.close()
     }

@@ -8,6 +8,7 @@ import type { BrowserWindow } from 'electron'
 import { app } from 'electron'
 import { EventLog } from './event-log'
 import { RemoteDispatcher } from './remote-dispatcher'
+import { makeRemoteConnection, type CommandConnection } from '../ipc/command-registry'
 import { RemoteBridge } from './remote-bridge'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from './git-watch-registry'
 import { BaseSession } from '../providers/BaseSession'
@@ -227,6 +228,14 @@ interface AuthenticatedClient {
   authMethod: RemoteAuthMethod
   /** Tailnet login for `'tailnet-identity'` clients; null for token/password. */
   login: string | null
+  /**
+   * Per-connection identity + capability grants (SyncCore phase 1, ADR-052).
+   * Minted once at authentication and attached to every command this socket
+   * dispatches, so the audit log can attribute it. Phase 1 issues the
+   * legacy-policy grant set to every remote connection regardless of method —
+   * grant differentiation (passkeys, step-up, `shell` decay) is phase 2.
+   */
+  connection: CommandConnection
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
   e2e: E2ECrypto | null
@@ -1626,6 +1635,7 @@ export class RemoteServer {
         ip,
         authMethod: method,
         login,
+        connection: makeRemoteConnection(method, login),
         lastActivity: Date.now(),
         pingTimer: setInterval(() => {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
@@ -1857,7 +1867,13 @@ export class RemoteServer {
 
   private async handleInvoke(ws: WebSocket, msg: WsInvokeRequest): Promise<void> {
     try {
-      const result = await this.dispatcher.handle(msg)
+      // Only reachable post-auth, so the client is present — except for the
+      // narrow race where the socket closed between the frame landing and this
+      // running. Treat a vanished connection as unauthenticated rather than
+      // dispatching with a synthesized identity.
+      const client = this.clients.get(ws)
+      if (!client) throw new Error('Not authenticated')
+      const result = await this.dispatcher.handle(msg, client.connection)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: true, data: result })
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)

@@ -1,0 +1,271 @@
+/**
+ * @vitest-environment node
+ *
+ * SyncCore phase 1 — the command registry: fail-closed registration, capability
+ * gating, and the audit interceptor.
+ *
+ * The audit sink (db.appendAuditLog) is mocked so these stay pure unit tests;
+ * the repository itself is covered in services/__tests__/db-audit-log.test.ts.
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+
+const appendAuditLog = vi.hoisted(() => vi.fn())
+vi.mock('../../services/db', () => ({ appendAuditLog }))
+
+const loggerSpies = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn()
+}))
+vi.mock('../../services/logger', () => ({ logger: loggerSpies }))
+
+import {
+  CommandRegistry,
+  LEGACY_REMOTE_GRANTS,
+  ALL_GRANTS,
+  PINNED_CAPABILITIES,
+  desktopConnection,
+  makeRemoteConnection,
+  type CommandRegistration
+} from '../command-registry'
+
+let registry: CommandRegistry
+
+beforeEach(() => {
+  registry = new CommandRegistry()
+  appendAuditLog.mockClear()
+  loggerSpies.error.mockClear()
+})
+
+const remoteConn = makeRemoteConnection('tailnet-identity', 'owner@example.com')
+
+/** Register with sane defaults; `reg` overrides any field. */
+function reg(overrides: Partial<CommandRegistration> = {}): CommandRegistration {
+  return {
+    channel: 'test:channel',
+    capability: 'chat',
+    kind: 'command',
+    transport: 'remote',
+    handler: vi.fn(async () => 'ok'),
+    ...overrides
+  } as CommandRegistration
+}
+
+describe('registration is fail-closed', () => {
+  it('throws when no capability is declared (the compile error is belt; this is braces)', () => {
+    // A JS caller — or an `as any` — can still omit it at runtime.
+    expect(() =>
+      registry.register({ ...reg(), capability: undefined as any })
+    ).toThrow(/a declared capability is required/)
+  })
+
+  it('throws on an unknown capability', () => {
+    expect(() =>
+      registry.register({ ...reg(), capability: 'superuser' as any })
+    ).toThrow(/a declared capability is required/)
+  })
+
+  it('throws on an invalid kind', () => {
+    expect(() => registry.register({ ...reg(), kind: 'mutation' as any })).toThrow(
+      /kind must be 'command' or 'query'/
+    )
+  })
+
+  it('throws when a handler is missing', () => {
+    expect(() => registry.register({ ...reg(), handler: undefined as any })).toThrow(
+      /handler must be a function/
+    )
+  })
+
+  it('refuses a capability that contradicts the pinned one', () => {
+    expect(() =>
+      registry.register(reg({ channel: 'terminal:write', capability: 'chat' }))
+    ).toThrow(/pinned to "shell"/)
+    // The pinned capability itself registers fine.
+    expect(() =>
+      registry.register(reg({ channel: 'terminal:write', capability: 'shell' }))
+    ).not.toThrow()
+  })
+
+  it('refuses a second transport that disagrees about the declaration', () => {
+    registry.register(reg({ channel: 'x:y', capability: 'git', kind: 'command' }))
+    expect(() =>
+      registry.register(reg({ channel: 'x:y', capability: 'config', transport: 'desktop' }))
+    ).toThrow(/declaration conflicts/)
+    expect(() =>
+      registry.register(
+        reg({ channel: 'x:y', capability: 'git', kind: 'query', transport: 'desktop' })
+      )
+    ).toThrow(/declaration conflicts/)
+    // Agreeing is fine — that's the shared-channel case.
+    expect(() =>
+      registry.register(
+        reg({ channel: 'x:y', capability: 'git', kind: 'command', transport: 'desktop' })
+      )
+    ).not.toThrow()
+  })
+
+  it('replaces the handler when the same (channel, transport) re-registers', async () => {
+    const first = vi.fn(async () => 'first')
+    const second = vi.fn(async () => 'second')
+    registry.register(reg({ handler: first }))
+    registry.register(reg({ handler: second }))
+    await expect(registry.dispatch('test:channel', 'remote', [], remoteConn)).resolves.toBe(
+      'second'
+    )
+    expect(first).not.toHaveBeenCalled()
+  })
+})
+
+describe('lookup', () => {
+  it('resolves per transport and lists channels sorted', () => {
+    registry.register(reg({ channel: 'b:one' }))
+    registry.register(reg({ channel: 'a:two', transport: 'desktop' }))
+
+    expect(registry.get('b:one', 'remote')?.capability).toBe('chat')
+    expect(registry.get('b:one', 'desktop')).toBeUndefined()
+    expect(registry.channels('remote')).toEqual(['b:one'])
+    expect(registry.channels('desktop')).toEqual(['a:two'])
+    expect(registry.channels()).toEqual(['a:two', 'b:one'])
+  })
+
+  it('unregister drops only that transport', () => {
+    registry.register(reg({ channel: 'c:one' }))
+    registry.register(reg({ channel: 'c:one', transport: 'desktop' }))
+    registry.unregister('c:one', 'remote')
+    expect(registry.get('c:one', 'remote')).toBeUndefined()
+    expect(registry.get('c:one', 'desktop')).toBeDefined()
+  })
+})
+
+describe('capability gating', () => {
+  it('dispatches when the capability is granted', async () => {
+    const handler = vi.fn(async (a: number, b: number) => a + b)
+    registry.register(reg({ capability: 'git', handler }))
+    await expect(registry.dispatch('test:channel', 'remote', [2, 3], remoteConn)).resolves.toBe(5)
+    expect(handler).toHaveBeenCalledWith(2, 3)
+  })
+
+  it('refuses with a permission error when it is not, without running the handler', async () => {
+    const handler = vi.fn()
+    registry.register(reg({ capability: 'admin', handler }))
+    await expect(registry.dispatch('test:channel', 'remote', [], remoteConn)).rejects.toThrow(
+      /Permission denied: "test:channel" requires the "admin" capability/
+    )
+    expect(handler).not.toHaveBeenCalled()
+    expect(appendAuditLog).not.toHaveBeenCalled()
+  })
+
+  it('preserves the historical wording for an unregistered channel', async () => {
+    await expect(registry.dispatch('ghost:channel', 'remote', [], remoteConn)).rejects.toThrow(
+      'Channel not available: ghost:channel'
+    )
+  })
+
+  it('the desktop connection holds every capability', async () => {
+    for (const capability of ALL_GRANTS) {
+      expect(desktopConnection().grants.has(capability)).toBe(true)
+    }
+    registry.register(reg({ channel: 'host:thing', capability: 'host', transport: 'desktop' }))
+    await expect(
+      registry.dispatch('host:thing', 'desktop', [], desktopConnection())
+    ).resolves.toBe('ok')
+  })
+
+  it('the legacy remote grant set excludes shell/admin/host', () => {
+    expect([...LEGACY_REMOTE_GRANTS].sort()).toEqual([
+      'chat',
+      'config',
+      'fs-read',
+      'git',
+      'session-config'
+    ])
+    for (const capability of Object.values(PINNED_CAPABILITIES)) {
+      expect(LEGACY_REMOTE_GRANTS.has(capability)).toBe(false)
+    }
+  })
+})
+
+describe('audit', () => {
+  it('appends one row per command, carrying the connection identity', async () => {
+    registry.register(reg({ channel: 'session:send', capability: 'chat', sessionIdArg: 0 }))
+    await registry.dispatch('session:send', 'remote', ['routing-1', 'hi'], remoteConn)
+
+    expect(appendAuditLog).toHaveBeenCalledTimes(1)
+    expect(appendAuditLog.mock.calls[0][0]).toMatchObject({
+      connectionId: remoteConn.connectionId,
+      method: 'tailnet-identity',
+      label: 'owner@example.com',
+      capability: 'chat',
+      kind: 'command',
+      channel: 'session:send',
+      sessionId: 'routing-1',
+      outcome: 'ok'
+    })
+    expect(typeof appendAuditLog.mock.calls[0][0].ts).toBe('number')
+  })
+
+  it('labels a token connection by its method when there is no login', async () => {
+    const tokenConn = makeRemoteConnection('token', null)
+    expect(tokenConn.identity.label).toBe('token')
+    expect(tokenConn.connectionId).not.toBe(remoteConn.connectionId)
+  })
+
+  it('does not audit queries', async () => {
+    registry.register(reg({ channel: 'git:status', capability: 'git', kind: 'query' }))
+    await registry.dispatch('git:status', 'remote', ['/repo'], remoteConn)
+    expect(appendAuditLog).not.toHaveBeenCalled()
+  })
+
+  it('audits desktop dispatches with method "desktop"', async () => {
+    registry.register(
+      reg({ channel: 'claude:save-permissions', capability: 'config', transport: 'desktop' })
+    )
+    await registry.dispatch('claude:save-permissions', 'desktop', [], desktopConnection())
+    expect(appendAuditLog.mock.calls[0][0]).toMatchObject({
+      method: 'desktop',
+      label: 'desktop-renderer',
+      outcome: 'ok'
+    })
+  })
+
+  it('records sessionId only where the registration declares one', async () => {
+    registry.register(reg({ channel: 'config:save-settings', capability: 'config' }))
+    await registry.dispatch('config:save-settings', 'remote', ['not-a-routing-id'], remoteConn)
+    expect(appendAuditLog.mock.calls[0][0].sessionId).toBeNull()
+  })
+
+  it('records outcome "error" when the handler throws, and rethrows', async () => {
+    registry.register(
+      reg({
+        handler: async () => {
+          throw new Error('boom')
+        }
+      })
+    )
+    await expect(registry.dispatch('test:channel', 'remote', [], remoteConn)).rejects.toThrow(
+      'boom'
+    )
+    expect(appendAuditLog.mock.calls[0][0].outcome).toBe('error')
+  })
+
+  it('records outcome "error" for a safeHandler {ok:false} envelope', async () => {
+    registry.register(reg({ handler: async () => ({ ok: false, error: 'nope' }) }))
+    await registry.dispatch('test:channel', 'remote', [], remoteConn)
+    expect(appendAuditLog.mock.calls[0][0].outcome).toBe('error')
+  })
+
+  it('a failing audit sink never fails the command', async () => {
+    appendAuditLog.mockImplementationOnce(() => {
+      throw new Error('db locked')
+    })
+    registry.register(reg())
+    await expect(registry.dispatch('test:channel', 'remote', [], remoteConn)).resolves.toBe('ok')
+    expect(loggerSpies.error).toHaveBeenCalledWith(
+      'command-registry',
+      expect.stringContaining('audit append failed')
+    )
+  })
+})

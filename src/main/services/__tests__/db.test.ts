@@ -141,8 +141,9 @@ describe('migration framework — user_version guard', () => {
       runMigrations(db)
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
       // v5: daily_usage, v6: dispatched_usage, v7: remote_config,
-      // v8: remote_config pinned HTTPS port + serve cleanup record
-      expect(userVersion(db)).toBe(8)
+      // v8: remote_config pinned HTTPS port + serve cleanup record,
+      // v9: audit_log
+      expect(userVersion(db)).toBe(9)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -221,7 +222,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(8)
+      expect(userVersion(db)).toBe(9)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',

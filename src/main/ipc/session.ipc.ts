@@ -132,6 +132,12 @@ import { deleteSessionByEngine } from '../services/session-delete'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
 import {
+  commandRegistry,
+  desktopConnection,
+  registerCommand,
+  type CommandRegistration
+} from './command-registry'
+import {
   sendPrompt,
   watchBackground,
   unwatchBackground,
@@ -172,6 +178,27 @@ function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
       return { ok: false, error }
     }
   }
+}
+
+/**
+ * Register one desktop-transport command and wire its `ipcMain.handle`.
+ *
+ * The ONE way this file exposes a channel (SyncCore phase 1 — ADR-051/052).
+ * The declaration (capability/kind/sessionIdArg) goes into the shared command
+ * registry, which the remote transport also registers into, and the actual
+ * dispatch — capability check + audit — happens in the registry. Both
+ * transports therefore pass through the same choke point.
+ *
+ * Handlers no longer receive the Electron `IpcMainInvokeEvent`: nothing in this
+ * file ever used it (every body named it `_e`/`_event`), and a handler body
+ * that a headless core can also call must not know about Electron at all. The
+ * event stays here, in the transport adapter, and never reaches the registry.
+ */
+function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
+  registerCommand({ ...reg, transport: 'desktop' })
+  ipcMain.handle(reg.channel, (_event, ...args: unknown[]) =>
+    commandRegistry.dispatch(reg.channel, 'desktop', args, desktopConnection())
+  )
 }
 
 // The model list is derived from cli.js's initialize response, which reflects
@@ -640,18 +667,25 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   const manager = new SessionManager()
   sharedManager = manager
 
-  ipcMain.handle('session:pick-folder', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      properties: ['openDirectory']
-    })
-    if (result.canceled || result.filePaths.length === 0) return null
-    return result.filePaths[0]
+  handleIpc({
+    channel: 'session:pick-folder',
+    capability: 'host',
+    kind: 'command',
+    handler: async () => {
+      const result = await dialog.showOpenDialog(win, {
+        properties: ['openDirectory']
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      return result.filePaths[0]
+    }
   })
 
-  ipcMain.handle(
-    'session:create',
-    async (
-      _event,
+  handleIpc({
+    channel: 'session:create',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (
       routingId: string,
       cwd: string,
       effort?: string,
@@ -681,19 +715,26 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         { notifyMainWindow: false }
       )
     }
-  )
+  })
 
-  ipcMain.handle('session:rekey', (_event, oldId: string, newId: string) => {
-    manager.rekey(oldId, newId)
+  handleIpc({
+    channel: 'session:rekey',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (oldId: string, newId: string) => {
+      manager.rekey(oldId, newId)
+    }
   })
 
   // Resolve the fork ("branch off") anchor, engine-dispatched — Claude by
   // messageId (JSONL line uuid), pi by messageIndex (position, no stable id).
   // Used by the renderer before creating the branch.
-  ipcMain.handle(
-    'session:resolve-fork-anchor',
-    async (
-      _event,
+  handleIpc({
+    channel: 'session:resolve-fork-anchor',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async (
       sessionId: string,
       cwd: string,
       messageId: string,
@@ -702,30 +743,46 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     ) => {
       return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
     }
-  )
+  })
 
-  ipcMain.handle(
-    'session:send',
-    (
-      _event,
+  handleIpc({
+    channel: 'session:send',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (
       routingId: string,
       prompt: string,
       attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
     ) => sendPrompt(manager, win, routingId, prompt, attachments)
-  )
-
-  ipcMain.handle('session:cancel', (_event, routingId: string) => {
-    manager.cancel(routingId)
   })
 
-  ipcMain.handle('session:interrupt', async (_event, routingId: string) => {
-    await manager.interrupt(routingId)
+  handleIpc({
+    channel: 'session:cancel',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string) => {
+      manager.cancel(routingId)
+    }
   })
 
-  ipcMain.handle(
-    'session:approval-response',
-    (
-      _event,
+  handleIpc({
+    channel: 'session:interrupt',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => {
+      await manager.interrupt(routingId)
+    }
+  })
+
+  handleIpc({
+    channel: 'session:approval-response',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (
       routingId: string,
       requestId: string,
       decision: ApprovalDecision,
@@ -741,25 +798,41 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
-  )
+  })
 
-  ipcMain.handle('session:watch-background', (_e, routingId: string, toolUseId: string) =>
-    watchBackground(manager, routingId, toolUseId)
-  )
+  handleIpc({
+    channel: 'session:watch-background',
+    capability: 'chat',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string, toolUseId: string) =>
+      watchBackground(manager, routingId, toolUseId)
+  })
 
-  ipcMain.handle('session:unwatch-background', (_e, routingId: string, toolUseId: string) =>
-    unwatchBackground(manager, routingId, toolUseId)
-  )
+  handleIpc({
+    channel: 'session:unwatch-background',
+    capability: 'chat',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string, toolUseId: string) =>
+      unwatchBackground(manager, routingId, toolUseId)
+  })
 
-  ipcMain.handle(
-    'session:read-background-range',
-    (_e, routingId: string, toolUseId: string, offset: number, length: number) =>
+  handleIpc({
+    channel: 'session:read-background-range',
+    capability: 'fs-read',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string, toolUseId: string, offset: number, length: number) =>
       readBackgroundRange(manager, routingId, toolUseId, offset, length)
-  )
+  })
 
-  ipcMain.handle(
-    'session:stop-task',
-    async (_e, routingId: string, toolUseId: string, isDispatch?: boolean) => {
+  handleIpc({
+    channel: 'session:stop-task',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, toolUseId: string, isDispatch?: boolean) => {
       // A cross-engine dispatch card's toolUseId isn't gated on the dispatching
       // session's own backgroundTasks capability — route to the dispatcher
       // FIRST (ADR-033 M3), same precedent as the xeng: approval-response
@@ -778,169 +851,263 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       if (crossEngineDispatcher.stopDispatch(toolUseId, routingId)) return { success: true }
       return stopTask(manager, routingId, toolUseId)
     }
-  )
+  })
 
-  ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) =>
-    backgroundTask(manager, routingId, toolUseId)
-  )
+  handleIpc({
+    channel: 'session:background-task',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, toolUseId: string) =>
+      backgroundTask(manager, routingId, toolUseId)
+  })
 
-  ipcMain.handle('session:dequeue-message', async (_e, routingId: string, value: string) =>
-    dequeueMessage(manager, routingId, value)
-  )
+  handleIpc({
+    channel: 'session:dequeue-message',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, value: string) =>
+      dequeueMessage(manager, routingId, value)
+  })
 
-  ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) =>
-    askSideQuestion(manager, routingId, question)
-  )
+  handleIpc({
+    channel: 'session:ask-side-question',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, question: string) =>
+      askSideQuestion(manager, routingId, question)
+  })
 
-  ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) =>
-    setPermissionMode(manager, win, routingId, mode)
-  )
+  handleIpc({
+    channel: 'session:set-permission-mode',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, mode: string) =>
+      setPermissionMode(manager, win, routingId, mode)
+  })
 
   // Voice input handlers (Claude-only: capabilities.voice)
-  ipcMain.handle(
-    'voice:start-server',
-    safeHandler(async (_e: unknown, routingId: string) => {
+  handleIpc({
+    channel: 'voice:start-server',
+    capability: 'host',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
       if (!session.capabilities.voice) throw new Error('Provider does not support voice')
       await session.voiceStartServer?.()
     })
-  )
+  })
 
-  ipcMain.handle(
-    'voice:stop-server',
-    safeHandler(async (_e: unknown, routingId: string) => {
+  handleIpc({
+    channel: 'voice:stop-server',
+    capability: 'host',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
       if (!session.capabilities.voice) return
       await session.voiceStopServer?.()
     })
-  )
+  })
 
-  ipcMain.handle(
-    'voice:start-recording',
-    safeHandler(async (_e: unknown, routingId: string, language: string) => {
+  handleIpc({
+    channel: 'voice:start-recording',
+    capability: 'host',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string, language: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
       if (!session.capabilities.voice) throw new Error('Provider does not support voice')
       await session.voiceStartRecording?.(language)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'voice:stop-recording',
-    safeHandler(async (_e: unknown, routingId: string) => {
+  handleIpc({
+    channel: 'voice:stop-recording',
+    capability: 'host',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string) => {
       const session = manager.get(routingId)
       if (!session || !session.capabilities.voice) return
       await session.voiceStopRecording?.()
     })
-  )
+  })
 
   // Proxy test connection
-  ipcMain.handle(
-    'proxy:test-connection',
-    safeHandler(async (_e: unknown, proxy: ProxySettings) => {
+  handleIpc({
+    channel: 'proxy:test-connection',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (proxy: ProxySettings) => {
       return await testProxyConnection(proxy)
     })
-  )
-
-  ipcMain.handle('session:set-model', async (_e, routingId: string, model: string) => {
-    await manager.get(routingId)?.setModel(model)
   })
 
-  ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) =>
-    setEffort(manager, routingId, effort)
-  )
-
-  ipcMain.handle('session:set-reasoning-variant', (_e, routingId: string, variant: string | null) => {
-    manager.get(routingId)?.setReasoningVariant?.(variant)
-  })
-
-  ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) =>
-    setThinkingMode(manager, routingId, mode)
-  )
-
-  ipcMain.handle('session:get-models', async () => {
-    return await fetchModels()
-  })
-
-  ipcMain.handle('session:get-engine-models', async (): Promise<EngineModelGroup[]> => {
-    // Claude models as a flat group. supportedModels() returns bare ModelInfo
-    // (no engineId/vendorId) — stamp them so the renderer can attribute a Claude
-    // pick to the 'claude' engine. Without this, picking a Claude model while on
-    // an opencode session leaves engineId undefined and the pick is mis-recorded
-    // under the session's current engine (e.g. "opencode/default").
-    const claudeModels = (await fetchModels()).map((m) => ({
-      ...m,
-      engineId: 'claude' as const,
-      vendorId: 'anthropic'
-    }))
-    const claudeGroup: EngineModelGroup = {
-      engineId: 'claude',
-      vendorId: 'anthropic',
-      vendorName: 'Anthropic',
-      models: claudeModels
+  handleIpc({
+    channel: 'session:set-model',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, model: string) => {
+      await manager.get(routingId)?.setModel(model)
     }
-    // opencode models — returns [] if binary not present or discovery fails
-    const opencodeGroups = await discoverOpencodeModels()
-    // pi models — returns [] if binary not present, no auth configured, or discovery fails
-    const piGroups = await discoverPiModels()
-    return [claudeGroup, ...opencodeGroups, ...piGroups]
+  })
+
+  handleIpc({
+    channel: 'session:set-effort',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string, effort: string) =>
+      setEffort(manager, routingId, effort)
+  })
+
+  handleIpc({
+    channel: 'session:set-reasoning-variant',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string, variant: string | null) => {
+      manager.get(routingId)?.setReasoningVariant?.(variant)
+    }
+  })
+
+  handleIpc({
+    channel: 'session:set-thinking-mode',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string, mode: string) =>
+      setThinkingMode(manager, routingId, mode)
+  })
+
+  handleIpc({
+    channel: 'session:get-models',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => {
+      return await fetchModels()
+    }
+  })
+
+  handleIpc({
+    channel: 'session:get-engine-models',
+    capability: 'config',
+    kind: 'query',
+    handler: async (): Promise<EngineModelGroup[]> => {
+      // Claude models as a flat group. supportedModels() returns bare ModelInfo
+      // (no engineId/vendorId) — stamp them so the renderer can attribute a Claude
+      // pick to the 'claude' engine. Without this, picking a Claude model while on
+      // an opencode session leaves engineId undefined and the pick is mis-recorded
+      // under the session's current engine (e.g. "opencode/default").
+      const claudeModels = (await fetchModels()).map((m) => ({
+        ...m,
+        engineId: 'claude' as const,
+        vendorId: 'anthropic'
+      }))
+      const claudeGroup: EngineModelGroup = {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        vendorName: 'Anthropic',
+        models: claudeModels
+      }
+      // opencode models — returns [] if binary not present or discovery fails
+      const opencodeGroups = await discoverOpencodeModels()
+      // pi models — returns [] if binary not present, no auth configured, or discovery fails
+      const piGroups = await discoverPiModels()
+      return [claudeGroup, ...opencodeGroups, ...piGroups]
+    }
   })
 
   // Full opencode provider catalog for the settings provider manager. Returns []
   // when opencode isn't installed or discovery fails (opencode is optional).
-  ipcMain.handle('session:get-opencode-providers', async () => {
-    if (!opencodeServerManager.isBinaryAvailable()) return []
-    const catalog = await discoverOpencodeProviderCatalog()
-    // Decorate with shared-provider ownership HERE rather than inside discovery:
-    // shared-providers/index → OpencodeSharedProviderAdapter → model-discovery,
-    // so a shared-provider import inside model-discovery would be a cycle.
-    return decorateSharedProviderClaims(catalog)
+  handleIpc({
+    channel: 'session:get-opencode-providers',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => {
+      if (!opencodeServerManager.isBinaryAvailable()) return []
+      const catalog = await discoverOpencodeProviderCatalog()
+      // Decorate with shared-provider ownership HERE rather than inside discovery:
+      // shared-providers/index → OpencodeSharedProviderAdapter → model-discovery,
+      // so a shared-provider import inside model-discovery would be a cycle.
+      return decorateSharedProviderClaims(catalog)
+    }
   })
 
   // Enable/disable is a reversible veto (opencode's disabled_providers) and is
   // deliberately NOT the same operation as removal — see provider-management.ts.
-  ipcMain.handle(
-    'session:set-opencode-provider-disabled',
-    async (_e, providerId: string, disabled: boolean) => {
+  handleIpc({
+    channel: 'session:set-opencode-provider-disabled',
+    capability: 'config',
+    kind: 'command',
+    handler: async (providerId: string, disabled: boolean) => {
       setOpencodeProviderDisabled(providerId, disabled)
     }
-  )
+  })
 
   // Destructive: deletes the credential and/or the provider declaration ClaudeUI
   // owns. `kind` must come from the entry's resolved actions — widening it here
   // would delete something the UI never warned about.
-  ipcMain.handle(
-    'session:remove-opencode-provider',
-    async (_e, providerId: string, kind: ProviderRemoveKind) => {
+  handleIpc({
+    channel: 'session:remove-opencode-provider',
+    capability: 'config',
+    kind: 'command',
+    handler: async (providerId: string, kind: ProviderRemoveKind) => {
       await removeOpencodeProvider(providerId, kind)
     }
-  )
+  })
 
   // All catalog models for one provider (drives the model-allowlist dialog).
-  ipcMain.handle(
-    'session:get-opencode-provider-models',
-    async (_e, providerId: string) => {
+  handleIpc({
+    channel: 'session:get-opencode-provider-models',
+    capability: 'config',
+    kind: 'query',
+    handler: async (providerId: string) => {
       if (!opencodeServerManager.isBinaryAvailable()) return []
       return await getOpencodeProviderModels(providerId)
     }
-  )
+  })
 
   // Unfiltered authenticated pi catalog for the model-allowlist dialog.
-  ipcMain.handle('session:get-pi-model-catalog', async () => getPiModelCatalogGroups())
-
-  ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
-    return await generateTitle(conversationText)
+  handleIpc({
+    channel: 'session:get-pi-model-catalog',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => getPiModelCatalogGroups()
   })
 
-  ipcMain.handle('session:generate-commit-message', async (_e, diff: string) => {
-    return await generateCommitMessage(diff)
+  handleIpc({
+    channel: 'session:generate-title',
+    capability: 'chat',
+    kind: 'command',
+    handler: async (conversationText: string) => {
+      return await generateTitle(conversationText)
+    }
   })
 
-  ipcMain.handle(
-    'session:write-custom-title',
-    async (_e, sessionId: string, projectKey: string, title: string) => {
+  handleIpc({
+    channel: 'session:generate-commit-message',
+    capability: 'chat',
+    kind: 'command',
+    handler: async (diff: string) => {
+      return await generateCommitMessage(diff)
+    }
+  })
+
+  handleIpc({
+    channel: 'session:write-custom-title',
+    capability: 'config',
+    kind: 'command',
+    handler: async (sessionId: string, projectKey: string, title: string) => {
       // LOW-RW3: both identifiers are caller-supplied and interpolated straight
       // into a path — a `..`/separator segment would append attacker-controlled
       // JSON to any *.jsonl on disk. Same check as deleteSessionFiles(); the
@@ -958,192 +1125,347 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       const entry = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })
       await fs.promises.appendFile(filePath, entry + '\n', { mode: 0o600 })
     }
-  )
+  })
 
-  ipcMain.handle(
-    'session:delete-session',
-    safeHandler(async (_e: unknown, sessionId: string, projectKey: string, engineId?: EngineId) => {
+  handleIpc({
+    channel: 'session:delete-session',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (sessionId: string, projectKey: string, engineId?: EngineId) => {
       await deleteSessionByEngine(sessionId, projectKey, engineId)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'session:delete-project',
-    safeHandler(async (_e: unknown, projectKey: string) => {
+  handleIpc({
+    channel: 'session:delete-project',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (projectKey: string) => {
       await deleteProjectFiles(projectKey)
     })
-  )
-
-  ipcMain.handle('session:get-plan-content', (_e, routingId: string) =>
-    getPlanContent(manager, routingId)
-  )
-
-  ipcMain.handle('session:get-session-log-path', (_e, routingId: string) =>
-    getSessionLogPath(manager, routingId)
-  )
-
-  ipcMain.handle('session:list-directories', async () => {
-    return await listDirectories()
   })
 
-  ipcMain.handle('session:list-opencode', async () => {
-    return await listOpencodeSessionsGlobal()
+  handleIpc({
+    channel: 'session:get-plan-content',
+    capability: 'chat',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string) =>
+      getPlanContent(manager, routingId)
   })
 
-  ipcMain.handle('session:load-opencode-history', async (_e, sessionId: string) => {
-    return await loadOpencodeSessionHistory(sessionId)
+  handleIpc({
+    channel: 'session:get-session-log-path',
+    capability: 'chat',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string) =>
+      getSessionLogPath(manager, routingId)
   })
 
-  ipcMain.handle('session:list-pi', async () => {
-    return await listPiSessionsGlobal()
+  handleIpc({
+    channel: 'session:list-directories',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async () => {
+      return await listDirectories()
+    }
   })
 
-  ipcMain.handle('session:load-pi-history', async (_e, sessionId: string) => {
-    return await loadPiSessionHistory(sessionId)
+  handleIpc({
+    channel: 'session:list-opencode',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async () => {
+      return await listOpencodeSessionsGlobal()
+    }
   })
 
-  ipcMain.handle('file:list-dir', async (_e, dirPath: string) => listDirEntries(dirPath))
-
-  ipcMain.handle('session:load-history', async (_e, sessionId: string, projectKey: string) => {
-    return await loadSessionHistory(sessionId, projectKey)
+  handleIpc({
+    channel: 'session:load-opencode-history',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async (sessionId: string) => {
+      return await loadOpencodeSessionHistory(sessionId)
+    }
   })
 
-  ipcMain.handle(
-    'session:load-subagent-history',
-    async (_e, sessionId: string, projectKey: string, agentId: string) => {
+  handleIpc({
+    channel: 'session:list-pi',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async () => {
+      return await listPiSessionsGlobal()
+    }
+  })
+
+  handleIpc({
+    channel: 'session:load-pi-history',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async (sessionId: string) => {
+      return await loadPiSessionHistory(sessionId)
+    }
+  })
+
+  handleIpc({
+    channel: 'file:list-dir',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async (dirPath: string) => listDirEntries(dirPath)
+  })
+
+  handleIpc({
+    channel: 'session:load-history',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async (sessionId: string, projectKey: string) => {
+      return await loadSessionHistory(sessionId, projectKey)
+    }
+  })
+
+  handleIpc({
+    channel: 'session:load-subagent-history',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async (sessionId: string, projectKey: string, agentId: string) => {
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
-  )
+  })
 
-  ipcMain.handle(
-    'session:build-subagent-file-map',
-    (_e, sessionId: string, projectKey: string, taskPrompts: Record<string, string>) => {
+  handleIpc({
+    channel: 'session:build-subagent-file-map',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: (sessionId: string, projectKey: string, taskPrompts: Record<string, string>) => {
       return buildSubagentFileMap(sessionId, projectKey, taskPrompts)
     }
-  )
+  })
 
-  ipcMain.handle(
-    'session:load-background-output',
-    (_e, projectKey: string, taskId: string, outputFile?: string) => {
+  handleIpc({
+    channel: 'session:load-background-output',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: (projectKey: string, taskId: string, outputFile?: string) => {
       return loadBackgroundOutput(projectKey, taskId, outputFile)
     }
-  )
+  })
 
-  ipcMain.handle(
-    'session:watch-session',
-    (_e, routingId: string, sessionId: string, projectKey: string) => {
+  handleIpc({
+    channel: 'session:watch-session',
+    capability: 'fs-read',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string, sessionId: string, projectKey: string) => {
       watchSession(routingId, sessionId, projectKey, win)
     }
-  )
+  })
 
-  ipcMain.handle('session:unwatch-session', (_e, routingId: string) => {
-    unwatchSession(routingId)
+  handleIpc({
+    channel: 'session:unwatch-session',
+    capability: 'fs-read',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: (routingId: string) => {
+      unwatchSession(routingId)
+    }
   })
 
   // UI config persistence (~/.claude/ui/)
-  ipcMain.handle('config:load-settings', () => loadSettings())
-  ipcMain.handle('config:save-settings', (_e, incomingSettings: UISettings) =>
-    saveUiSettings(manager, win, incomingSettings, { notifyMainWindow: false })
-  )
-  ipcMain.handle('config:load-sessions', () => loadSessionConfig())
-  ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) =>
-    saveSessions(win, config, { notifyMainWindow: false })
-  )
-  ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
-  ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) =>
-    saveSlashCommands(commands)
-  )
-  ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
-  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => loadSkillDetails(manager, cwd))
-  ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
-    loadEngineConfig(engineId)
-  )
-  ipcMain.handle('config:save-engine-config', (_e, engineId: string, cfg: EngineConfig) => {
-    saveEngineConfig(engineId, cfg)
-    // Provider enable/disable + custom-provider edits change which models the
-    // discovery server returns. Drop the cache so the next getEngineModels()
-    // re-discovers (otherwise a disabled/re-enabled provider only reflects after
-    // an app restart).
-    if (engineId === 'opencode') invalidateOpencodeModelCache()
-    if (engineId === 'pi') invalidatePiModelCache()
+  handleIpc({
+    channel: 'config:load-settings',
+    capability: 'config',
+    kind: 'query',
+    handler: () => loadSettings()
+  })
+  handleIpc({
+    channel: 'config:save-settings',
+    capability: 'config',
+    kind: 'command',
+    handler: (incomingSettings: UISettings) =>
+      saveUiSettings(manager, win, incomingSettings, { notifyMainWindow: false })
+  })
+  handleIpc({
+    channel: 'config:load-sessions',
+    capability: 'config',
+    kind: 'query',
+    handler: () => loadSessionConfig()
+  })
+  handleIpc({
+    channel: 'config:save-sessions',
+    capability: 'config',
+    kind: 'command',
+    handler: (config: UISessionConfig) =>
+      saveSessions(win, config, { notifyMainWindow: false })
+  })
+  handleIpc({
+    channel: 'config:load-slash-commands',
+    capability: 'config',
+    kind: 'query',
+    handler: () => loadSlashCommands()
+  })
+  handleIpc({
+    channel: 'config:save-slash-commands',
+    capability: 'config',
+    kind: 'command',
+    handler: (commands: SlashCommandCache[]) =>
+      saveSlashCommands(commands)
+  })
+  handleIpc({
+    channel: 'config:scan-custom-commands',
+    capability: 'config',
+    kind: 'query',
+    handler: (cwd: string) => scanCustomCommands(cwd)
+  })
+  handleIpc({
+    channel: 'config:load-skill-details',
+    capability: 'config',
+    kind: 'query',
+    handler: (cwd: string) => loadSkillDetails(manager, cwd)
+  })
+  handleIpc({
+    channel: 'config:load-engine-config',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: string) =>
+      loadEngineConfig(engineId)
+  })
+  handleIpc({
+    channel: 'config:save-engine-config',
+    capability: 'config',
+    kind: 'command',
+    handler: (engineId: string, cfg: EngineConfig) => {
+      saveEngineConfig(engineId, cfg)
+      // Provider enable/disable + custom-provider edits change which models the
+      // discovery server returns. Drop the cache so the next getEngineModels()
+      // re-discovers (otherwise a disabled/re-enabled provider only reflects after
+      // an app restart).
+      if (engineId === 'opencode') invalidateOpencodeModelCache()
+      if (engineId === 'pi') invalidatePiModelCache()
+    }
   })
   // Cheap, deterministic engine availability check. Backs the renderer's
   // "is opencode/pi installed?" gate WITHOUT spawning a server/process — a
   // transient spawn/HTTP failure can no longer masquerade as "not installed".
   // Claude is always installed (it's the bundled default engine).
-  ipcMain.handle('engine:is-installed', (_e, engineId: EngineId): boolean => {
-    if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
-    if (engineId === 'pi') return piBinaryAvailable()
-    return true
+  handleIpc({
+    channel: 'engine:is-installed',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: EngineId): boolean => {
+      if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
+      if (engineId === 'pi') return piBinaryAvailable()
+      return true
+    }
   })
   // Absolute path to the vendored pi binary, for the Settings › pi subscription
   // hint's copyable "run this command in a terminal" block. Null if not found.
-  ipcMain.handle('pi:binary-path', (): string | null => locatePiBinary())
+  handleIpc({
+    channel: 'pi:binary-path',
+    capability: 'config',
+    kind: 'query',
+    handler: (): string | null => locatePiBinary()
+  })
   // Read-only Codex (ChatGPT) auth-vault status for Settings › pi's "Connect
   // ChatGPT" UI (M6c) — mirrors 'pi:binary-path''s registration shape exactly.
   // Never returns token material; see CredentialSync.getStatus().
-  ipcMain.handle('pi:auth-status', () => credentialSync.getStatus())
-  ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
-    loadVendorConfig(vendorId)
-  )
-  ipcMain.handle('config:save-vendor-config', (_e, vendorId: string, cfg: VendorConfig) =>
-    saveVendorConfig(vendorId, cfg)
-  )
-  ipcMain.handle(
-    'shared-provider:list',
-    safeHandler(async () => sharedProviderService.listDefinitions())
-  )
-  ipcMain.handle(
-    'shared-provider:statuses',
-    safeHandler(async () => sharedProviderService.listStatuses())
-  )
-  ipcMain.handle(
-    'shared-provider:models',
-    safeHandler(async (_e, id: string) => sharedProviderService.listProviderModels(id))
-  )
-  ipcMain.handle(
-    'shared-provider:save',
-    safeHandler(async (_e, definition: SharedProviderDefinition) =>
+  handleIpc({
+    channel: 'pi:auth-status',
+    capability: 'config',
+    kind: 'query',
+    handler: () => credentialSync.getStatus()
+  })
+  handleIpc({
+    channel: 'config:load-vendor-config',
+    capability: 'config',
+    kind: 'query',
+    handler: (vendorId: string) =>
+      loadVendorConfig(vendorId)
+  })
+  handleIpc({
+    channel: 'config:save-vendor-config',
+    capability: 'config',
+    kind: 'command',
+    handler: (vendorId: string, cfg: VendorConfig) =>
+      saveVendorConfig(vendorId, cfg)
+  })
+  handleIpc({
+    channel: 'shared-provider:list',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async () => sharedProviderService.listDefinitions())
+  })
+  handleIpc({
+    channel: 'shared-provider:statuses',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async () => sharedProviderService.listStatuses())
+  })
+  handleIpc({
+    channel: 'shared-provider:models',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async (id: string) => sharedProviderService.listProviderModels(id))
+  })
+  handleIpc({
+    channel: 'shared-provider:save',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (definition: SharedProviderDefinition) =>
       sharedProviderService.saveDefinition(definition)
     )
-  )
-  ipcMain.handle(
-    'shared-provider:remove',
-    safeHandler(async (_e, id: string) => sharedProviderService.removeDefinition(id))
-  )
-  ipcMain.handle(
-    'shared-provider:set-route',
-    safeHandler(
-      async (_e, id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
+  })
+  handleIpc({
+    channel: 'shared-provider:remove',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (id: string) => sharedProviderService.removeDefinition(id))
+  })
+  handleIpc({
+    channel: 'shared-provider:set-route',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(
+      async (id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
         sharedProviderService.setRouteEnabled(id, harness, enabled)
     )
-  )
-  ipcMain.handle(
-    'shared-provider:set-key',
-    safeHandler(async (_e, id: string, key: string) => sharedProviderService.setApiKey(id, key))
-  )
-  ipcMain.handle(
-    'shared-provider:sync',
-    safeHandler(async (_e, id: string) => sharedProviderService.syncProvider(id))
-  )
-  ipcMain.handle(
-    'shared-provider:disconnect',
-    safeHandler(async (_e, id: string) => sharedProviderService.disconnectProvider(id))
-  )
-  ipcMain.handle(
-    'shared-provider:set-default',
-    safeHandler(
-      async (_e, id: string, harness: ConfigurableHarnessId, modelId?: string) =>
+  })
+  handleIpc({
+    channel: 'shared-provider:set-key',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (id: string, key: string) => sharedProviderService.setApiKey(id, key))
+  })
+  handleIpc({
+    channel: 'shared-provider:sync',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (id: string) => sharedProviderService.syncProvider(id))
+  })
+  handleIpc({
+    channel: 'shared-provider:disconnect',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (id: string) => sharedProviderService.disconnectProvider(id))
+  })
+  handleIpc({
+    channel: 'shared-provider:set-default',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(
+      async (id: string, harness: ConfigurableHarnessId, modelId?: string) =>
         sharedProviderService.setRouteDefaultModel(id, harness, modelId)
     )
-  )
+  })
 
   // opencode engine-native settings — read/write opencode's OWN config file.
   // The load handler triggers the one-time migration from the private store when
   // the opencode binary is available. modelAllowlist stays ClaudeUI-private.
-  ipcMain.handle(
-    'config:load-opencode-settings',
-    safeHandler(async () => {
+  handleIpc({
+    channel: 'config:load-opencode-settings',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async () => {
       if (opencodeServerManager.isBinaryAvailable()) {
         migrateOpencodeConfigToNative()
       }
@@ -1156,10 +1478,12 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       }
       return result
     })
-  )
-  ipcMain.handle(
-    'config:save-opencode-settings',
-    safeHandler(async (_e: unknown, settings: OpencodeConfigSettings) => {
+  })
+  handleIpc({
+    channel: 'config:save-opencode-settings',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (settings: OpencodeConfigSettings) => {
       // Write the six native fields to opencode's own config file.
       const { modelAllowlist, ...nativeFields } = settings
       writeOpencodeNativeConfig(nativeFields)
@@ -1180,149 +1504,217 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       // Provider changes affect the discoverable model set.
       invalidateOpencodeModelCache()
     })
-  )
+  })
 
   // Raw (non-lossy) opencode config access for the schema-driven settings editor.
   // Reads opencode's own config file verbatim; patches literal opencode field
   // names as jsonc leaf edits (comment-safe). Unlike save-opencode-settings this
   // never projects — it writes exactly the paths the UI names.
-  ipcMain.handle(
-    'config:read-opencode-native-raw',
-    safeHandler(async () => readOpencodeNativeRaw())
-  )
-  ipcMain.handle(
-    'config:patch-opencode-native',
-    safeHandler(async (_e: unknown, patches: RawConfigPatch[]) => {
+  handleIpc({
+    channel: 'config:read-opencode-native-raw',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async () => readOpencodeNativeRaw())
+  })
+  handleIpc({
+    channel: 'config:patch-opencode-native',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (patches: RawConfigPatch[]) => {
       patchOpencodeNativeRaw(patches)
       // Capability edits (attachment/modalities/…) change model discovery.
       invalidateOpencodeModelCache()
     })
-  )
+  })
 
   // opencode agent CRUD — list/read/save/delete/disable custom + built-in agents
-  ipcMain.handle(
-    'opencode-agents:list',
-    safeHandler(async (_e: unknown, cwd?: string) => listAgents(cwd))
-  )
-  ipcMain.handle(
-    'opencode-agents:read',
-    safeHandler(async (_e: unknown, name: string, scope: string, cwd?: string) =>
+  handleIpc({
+    channel: 'opencode-agents:list',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async (cwd?: string) => listAgents(cwd))
+  })
+  handleIpc({
+    channel: 'opencode-agents:read',
+    capability: 'config',
+    kind: 'query',
+    handler: safeHandler(async (name: string, scope: string, cwd?: string) =>
       readAgent(name, scope as 'global' | 'project', cwd)
     )
-  )
-  ipcMain.handle(
-    'opencode-agents:save',
-    safeHandler(async (_e: unknown, input: OpencodeAgentInput, cwd?: string) =>
+  })
+  handleIpc({
+    channel: 'opencode-agents:save',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (input: OpencodeAgentInput, cwd?: string) =>
       saveAgent(input, cwd)
     )
-  )
-  ipcMain.handle(
-    'opencode-agents:delete',
-    safeHandler(async (_e: unknown, name: string, scope: string, cwd?: string) =>
+  })
+  handleIpc({
+    channel: 'opencode-agents:delete',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(async (name: string, scope: string, cwd?: string) =>
       deleteAgent(name, scope as 'global' | 'project', cwd)
     )
-  )
-  ipcMain.handle(
-    'opencode-agents:set-disabled',
-    safeHandler(
-      async (_e: unknown, name: string, scope: string, cwd: string | undefined, disabled: boolean) =>
+  })
+  handleIpc({
+    channel: 'opencode-agents:set-disabled',
+    capability: 'config',
+    kind: 'command',
+    handler: safeHandler(
+      async (name: string, scope: string, cwd: string | undefined, disabled: boolean) =>
         setAgentDisabled(name, scope as 'global' | 'project', cwd, disabled)
     )
-  )
-  ipcMain.handle(
-    'opencode-agents:generate',
-    safeHandler(async (_e: unknown, description: string, cwd?: string) =>
+  })
+  handleIpc({
+    channel: 'opencode-agents:generate',
+    capability: 'chat',
+    kind: 'command',
+    handler: safeHandler(async (description: string, cwd?: string) =>
       generateAgent(description, cwd)
     )
-  )
+  })
 
   // Claude permission settings (allow/deny/ask rules)
-  ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>
-    loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
-  )
+  handleIpc({
+    channel: 'claude:load-permissions',
+    capability: 'config',
+    kind: 'query',
+    handler: (scope: string, cwd?: string) =>
+      loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
+  })
   // Hot-reload is belt-and-braces, not the only propagation path: cli.js DOES
   // run its chokidar settings watcher in ClaudeUI's child, so a disk write
   // lands on its own within ~1-1.5s (awaitWriteFinish). notifySettingsChanged
   // makes it immediate and deterministic, and covers a missed watcher event.
-  ipcMain.handle(
-    'claude:save-permissions',
-    async (_e, scope: string, permissions: unknown, cwd?: string) =>
+  handleIpc({
+    channel: 'claude:save-permissions',
+    capability: 'config',
+    kind: 'command',
+    handler: async (scope: string, permissions: unknown, cwd?: string) =>
       savePermissionsAndNotify(
         manager,
         scope as PermissionScope,
         permissions as ClaudePermissions,
         cwd
       )
-  )
+  })
 
   // Whether cli.js will honor this workspace's project/local ALLOW rules —
   // read-only surfacing of the trust gate (see isWorkspaceTrusted).
-  ipcMain.handle('claude:workspace-trust', (_e, cwd: string) => isWorkspaceTrusted(cwd))
+  handleIpc({
+    channel: 'claude:workspace-trust',
+    capability: 'config',
+    kind: 'query',
+    handler: (cwd: string) => isWorkspaceTrusted(cwd)
+  })
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
-  ipcMain.handle('claude:get-cleanup-period', () => loadCleanupPeriodDays())
-  ipcMain.handle('claude:set-cleanup-period', async (_e, days: number) =>
-    setCleanupPeriod(manager, days)
-  )
+  handleIpc({
+    channel: 'claude:get-cleanup-period',
+    capability: 'config',
+    kind: 'query',
+    handler: () => loadCleanupPeriodDays()
+  })
+  handleIpc({
+    channel: 'claude:set-cleanup-period',
+    capability: 'config',
+    kind: 'command',
+    handler: async (days: number) =>
+      setCleanupPeriod(manager, days)
+  })
 
   // MCP server management (Claude-only: capabilities.hostedMcp AND method presence —
   // opencode advertises hostedMcp:true but does not implement the MCP methods)
-  ipcMain.handle('mcp:status', async (_e, routingId: string) => mcpStatus(manager, routingId))
+  handleIpc({
+    channel: 'mcp:status',
+    capability: 'config',
+    kind: 'query',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => mcpStatus(manager, routingId)
+  })
 
-  ipcMain.handle(
-    'mcp:toggle',
-    safeHandler(async (_e: unknown, routingId: string, serverName: string, enabled: boolean) => {
+  handleIpc({
+    channel: 'mcp:toggle',
+    capability: 'config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string, serverName: string, enabled: boolean) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
       if (!session.capabilities.hostedMcp || !session.mcpToggleServer)
         throw new Error('Provider does not support hosted MCP')
       await session.mcpToggleServer(serverName, enabled)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'mcp:reconnect',
-    safeHandler(async (_e: unknown, routingId: string, serverName: string) => {
+  handleIpc({
+    channel: 'mcp:reconnect',
+    capability: 'config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string, serverName: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
       if (!session.capabilities.hostedMcp || !session.mcpReconnectServer)
         throw new Error('Provider does not support hosted MCP')
       await session.mcpReconnectServer(serverName)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'mcp:set-servers',
-    safeHandler(async (_e: unknown, routingId: string, servers: Record<string, unknown>) => {
+  handleIpc({
+    channel: 'mcp:set-servers',
+    capability: 'config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: safeHandler(async (routingId: string, servers: Record<string, unknown>) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
       if (!session.capabilities.hostedMcp || !session.mcpSetServers)
         throw new Error('Provider does not support hosted MCP')
       return await session.mcpSetServers(servers)
     })
-  )
-
-  // MCP config file read/write (direct file access, no session needed)
-  ipcMain.handle('mcp:load-servers', (_e, scope: string, cwd?: string) =>
-    loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
-  )
-  ipcMain.handle(
-    'mcp:save-servers',
-    (_e, scope: string, servers: Record<string, unknown>, cwd?: string) =>
-      saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd)
-  )
-  ipcMain.handle('mcp:remove-server', (_e, scope: string, serverName: string, cwd?: string) =>
-    removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd)
-  )
-
-  // MCP disabled state (direct ~/.claude.json access, no session needed)
-  ipcMain.handle('mcp:read-disabled', (_e, cwd: string) => {
-    return readDisabledMcpServers(cwd)
   })
 
-  ipcMain.handle(
-    'mcp:toggle-disabled',
-    async (_e, cwd: string, serverName: string, enabled: boolean) => {
+  // MCP config file read/write (direct file access, no session needed)
+  handleIpc({
+    channel: 'mcp:load-servers',
+    capability: 'config',
+    kind: 'query',
+    handler: (scope: string, cwd?: string) =>
+      loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
+  })
+  handleIpc({
+    channel: 'mcp:save-servers',
+    capability: 'config',
+    kind: 'command',
+    handler: (scope: string, servers: Record<string, unknown>, cwd?: string) =>
+      saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd)
+  })
+  handleIpc({
+    channel: 'mcp:remove-server',
+    capability: 'config',
+    kind: 'command',
+    handler: (scope: string, serverName: string, cwd?: string) =>
+      removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd)
+  })
+
+  // MCP disabled state (direct ~/.claude.json access, no session needed)
+  handleIpc({
+    channel: 'mcp:read-disabled',
+    capability: 'config',
+    kind: 'query',
+    handler: (cwd: string) => {
+      return readDisabledMcpServers(cwd)
+    }
+  })
+
+  handleIpc({
+    channel: 'mcp:toggle-disabled',
+    capability: 'config',
+    kind: 'command',
+    handler: async (cwd: string, serverName: string, enabled: boolean) => {
       const disabled = readDisabledMcpServers(cwd)
       let updated: string[]
       if (enabled) {
@@ -1332,15 +1724,17 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       }
       writeDisabledMcpServers(cwd, updated)
     }
-  )
+  })
 
   // -------------------------------------------------------------------------
   // Git integration IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle(
-    'git:check-repo',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:check-repo',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         return await svc.isGitRepo()
@@ -1348,11 +1742,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:status',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:status',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         return await svc.getStatus()
@@ -1360,11 +1756,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:branches',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:branches',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         return await svc.getBranches()
@@ -1372,11 +1770,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:checkout',
-    safeHandler(async (_e: unknown, cwd: string, branch: string) => {
+  handleIpc({
+    channel: 'git:checkout',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, branch: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.checkout(branch)
@@ -1384,11 +1784,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:create-branch',
-    safeHandler(async (_e: unknown, cwd: string, name: string) => {
+  handleIpc({
+    channel: 'git:create-branch',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, name: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.createBranch(name)
@@ -1396,13 +1798,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:file-patch',
-    safeHandler(
+  handleIpc({
+    channel: 'git:file-patch',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(
       async (
-        _e: unknown,
         cwd: string,
         filePath: string,
         staged: boolean,
@@ -1416,11 +1819,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         }
       }
     )
-  )
+  })
 
-  ipcMain.handle(
-    'git:file-contents',
-    safeHandler(async (_e: unknown, cwd: string, filePath: string, staged: boolean) => {
+  handleIpc({
+    channel: 'git:file-contents',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(async (cwd: string, filePath: string, staged: boolean) => {
       const svc = gitServiceManager.get(cwd)
       try {
         return await svc.getFileContents(filePath, staged)
@@ -1428,11 +1833,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:stage-file',
-    safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
+  handleIpc({
+    channel: 'git:stage-file',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, filePath: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.stageFile(filePath)
@@ -1440,11 +1847,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:unstage-file',
-    safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
+  handleIpc({
+    channel: 'git:unstage-file',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, filePath: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.unstageFile(filePath)
@@ -1452,11 +1861,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:discard-file',
-    safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
+  handleIpc({
+    channel: 'git:discard-file',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, filePath: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.discardFile(filePath)
@@ -1464,11 +1875,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:stage-all',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:stage-all',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.stageAll()
@@ -1476,11 +1889,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:unstage-all',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:unstage-all',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.unstageAll()
@@ -1488,11 +1903,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:commit',
-    safeHandler(async (_e: unknown, cwd: string, message: string) => {
+  handleIpc({
+    channel: 'git:commit',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, message: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         return await svc.commit(message)
@@ -1500,11 +1917,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:push',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:push',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.push()
@@ -1512,11 +1931,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:push-with-upstream',
-    safeHandler(async (_e: unknown, cwd: string, branch: string) => {
+  handleIpc({
+    channel: 'git:push-with-upstream',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, branch: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.pushWithUpstream(branch)
@@ -1524,11 +1945,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:pull',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:pull',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         return await svc.pull()
@@ -1536,11 +1959,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
-  ipcMain.handle(
-    'git:fetch',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'git:fetch',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
         await svc.fetch()
@@ -1548,7 +1973,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         gitServiceManager.release(cwd)
       }
     })
-  )
+  })
 
   // Git polling — one poller per cwd, shared with the remote path through
   // gitWatchRegistry. GitService.startPolling() holds a SINGLE callback, so two
@@ -1564,45 +1989,63 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
   })
 
-  ipcMain.handle('git:start-watching', async (_e, cwd: string) => {
-    gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
+  handleIpc({
+    channel: 'git:start-watching',
+    capability: 'git',
+    kind: 'query',
+    handler: async (cwd: string) => {
+      gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
+    }
   })
 
-  ipcMain.handle('git:stop-watching', async (_e, cwd: string) => {
-    gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
+  handleIpc({
+    channel: 'git:stop-watching',
+    capability: 'git',
+    kind: 'query',
+    handler: async (cwd: string) => {
+      gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
+    }
   })
 
   // -------------------------------------------------------------------------
   // Worktree IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle(
-    'worktree:create',
-    safeHandler(async (_e: unknown, cwd: string, name: string) => {
+  handleIpc({
+    channel: 'worktree:create',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, name: string) => {
       return await createWorktree(cwd, name)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'worktree:status',
-    safeHandler(async (_e: unknown, worktreePath: string, originalHead: string) => {
+  handleIpc({
+    channel: 'worktree:status',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(async (worktreePath: string, originalHead: string) => {
       return await getWorktreeStatus(worktreePath, originalHead)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'worktree:remove',
-    safeHandler(async (_e: unknown, worktreePath: string, branch: string, gitRoot: string) => {
+  handleIpc({
+    channel: 'worktree:remove',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (worktreePath: string, branch: string, gitRoot: string) => {
       await removeWorktree(worktreePath, branch, gitRoot)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'worktree:list',
-    safeHandler(async (_e: unknown, cwd: string) => {
+  handleIpc({
+    channel: 'worktree:list',
+    capability: 'git',
+    kind: 'query',
+    handler: safeHandler(async (cwd: string) => {
       return await listWorktrees(cwd)
     })
-  )
+  })
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher(win)
@@ -1702,47 +2145,108 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   }
 
   // IPC handlers — always registered so the renderer never gets "no handler" errors.
-  ipcMain.handle('usage:fetch', async () => {
-    return usageFetcher.fetch()
+  handleIpc({
+    channel: 'usage:fetch',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => {
+      return usageFetcher.fetch()
+    }
   })
 
-  ipcMain.handle('usage:fetch-block', async () => {
-    return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+  handleIpc({
+    channel: 'usage:fetch-block',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => {
+      return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+    }
   })
 
-  ipcMain.handle('usage:set-account-filter', async (_e, account: string | null) => {
-    blockUsageService.setAccountFilter(account)
+  handleIpc({
+    channel: 'usage:set-account-filter',
+    capability: 'config',
+    kind: 'command',
+    handler: async (account: string | null) => {
+      blockUsageService.setAccountFilter(account)
+    }
   })
 
   // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
   // (targetEngine, targetModel). Backs UsageView's "Delegated" section.
-  ipcMain.handle('usage:fetch-dispatched', async () => {
-    return dispatchedUsageSummary()
+  handleIpc({
+    channel: 'usage:fetch-dispatched',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => {
+      return dispatchedUsageSummary()
+    }
   })
 
   // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
   // Desktop-only — spawns a local opencode server; blocked from remote dispatch.
-  ipcMain.handle(
-    'usage:refresh-prices',
-    safeHandler(async () => refreshPrices())
-  )
+  handleIpc({
+    channel: 'usage:refresh-prices',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async () => refreshPrices())
+  })
 
   // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.
   // Channels and payloads are unchanged; the registry defaults to 'claude'.
   const claudeAuth = engineAuthRegistry.require('claude')
-  ipcMain.handle('auth:sign-in', async () => claudeAuth.signIn?.())
-  ipcMain.handle('auth:submit-code', async (_e, code: string) => claudeAuth.submitCode?.(code))
-  ipcMain.handle('auth:cancel', async () => claudeAuth.cancelSignIn?.())
+  handleIpc({
+    channel: 'auth:sign-in',
+    capability: 'admin',
+    kind: 'command',
+    handler: async () => claudeAuth.signIn?.()
+  })
+  handleIpc({
+    channel: 'auth:submit-code',
+    capability: 'admin',
+    kind: 'command',
+    handler: async (code: string) => claudeAuth.submitCode?.(code)
+  })
+  handleIpc({
+    channel: 'auth:cancel',
+    capability: 'admin',
+    kind: 'command',
+    handler: async () => claudeAuth.cancelSignIn?.()
+  })
 
   // Multiple-account support (ADR-015) — routed through EngineAuthProvider for
   // add/switch/delete; setEnabled stays direct on AccountManager (not on the interface).
-  ipcMain.handle('account:get', async () => accountManager.getState())
-  ipcMain.handle('account:set-enabled', async (_e, enabled: boolean) =>
-    accountManager.setEnabled(enabled)
-  )
-  ipcMain.handle('account:add', async () => claudeAuth.addAccount?.())
-  ipcMain.handle('account:switch', async (_e, id: string) => claudeAuth.switchAccount?.(id))
-  ipcMain.handle('account:delete', async (_e, id: string) => claudeAuth.deleteAccount?.(id))
+  handleIpc({
+    channel: 'account:get',
+    capability: 'config',
+    kind: 'query',
+    handler: async () => accountManager.getState()
+  })
+  handleIpc({
+    channel: 'account:set-enabled',
+    capability: 'admin',
+    kind: 'command',
+    handler: async (enabled: boolean) =>
+      accountManager.setEnabled(enabled)
+  })
+  handleIpc({
+    channel: 'account:add',
+    capability: 'admin',
+    kind: 'command',
+    handler: async () => claudeAuth.addAccount?.()
+  })
+  handleIpc({
+    channel: 'account:switch',
+    capability: 'admin',
+    kind: 'command',
+    handler: async (id: string) => claudeAuth.switchAccount?.(id)
+  })
+  handleIpc({
+    channel: 'account:delete',
+    capability: 'admin',
+    kind: 'command',
+    handler: async (id: string) => claudeAuth.deleteAccount?.(id)
+  })
 
   // -------------------------------------------------------------------------
   // Engine-routed per-vendor auth channels (opencode multi-vendor auth, Phase 5c)
@@ -1751,18 +2255,22 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Claude auth is unchanged: auth:* / account:* above stay byte-identical.
   // -------------------------------------------------------------------------
 
-  ipcMain.handle(
-    'vendor-auth:probe',
-    safeHandler(async (_e: unknown, engineId: EngineId): Promise<VendorAuthMap> => {
+  handleIpc({
+    channel: 'vendor-auth:probe',
+    capability: 'admin',
+    kind: 'query',
+    handler: safeHandler(async (engineId: EngineId): Promise<VendorAuthMap> => {
       const provider = engineAuthRegistry.require(engineId)
       return provider.probe()
     })
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:list-options',
-    safeHandler(
-      async (_e: unknown, engineId: EngineId): Promise<Record<string, VendorAuthOption[]>> => {
+  handleIpc({
+    channel: 'vendor-auth:list-options',
+    capability: 'admin',
+    kind: 'query',
+    handler: safeHandler(
+      async (engineId: EngineId): Promise<Record<string, VendorAuthOption[]>> => {
         const provider = engineAuthRegistry.require(engineId)
         if (!provider.listVendorAuthOptions) {
           throw new Error(`Engine "${engineId}" does not support listVendorAuthOptions`)
@@ -1770,12 +2278,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         return provider.listVendorAuthOptions()
       }
     )
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:list-keys',
-    safeHandler(
-      async (_e: unknown, engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
+  handleIpc({
+    channel: 'vendor-auth:list-keys',
+    capability: 'admin',
+    kind: 'query',
+    handler: safeHandler(
+      async (engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
         const provider = engineAuthRegistry.require(engineId)
         if (!provider.listVendorCredentialIds) {
           throw new Error(`Engine "${engineId}" does not support listVendorCredentialIds`)
@@ -1783,24 +2293,27 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         return provider.listVendorCredentialIds()
       }
     )
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:set-key',
-    safeHandler(async (_e: unknown, engineId: EngineId, vendorId: string, key: string): Promise<void> => {
+  handleIpc({
+    channel: 'vendor-auth:set-key',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (engineId: EngineId, vendorId: string, key: string): Promise<void> => {
       const provider = engineAuthRegistry.require(engineId)
       if (!provider.setVendorApiKey) {
         throw new Error(`Engine "${engineId}" does not support setVendorApiKey`)
       }
       return provider.setVendorApiKey(vendorId, key)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:oauth-authorize',
-    safeHandler(
+  handleIpc({
+    channel: 'vendor-auth:oauth-authorize',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(
       async (
-        _e: unknown,
         engineId: EngineId,
         vendorId: string,
         method: number,
@@ -1813,13 +2326,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         return provider.oauthAuthorize(vendorId, method, inputs)
       }
     )
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:oauth-callback',
-    safeHandler(
+  handleIpc({
+    channel: 'vendor-auth:oauth-callback',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(
       async (
-        _e: unknown,
         engineId: EngineId,
         vendorId: string,
         method: number,
@@ -1832,35 +2346,41 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         return provider.oauthCallback(vendorId, method, code)
       }
     )
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:remove',
-    safeHandler(async (_e: unknown, engineId: EngineId, vendorId: string): Promise<void> => {
+  handleIpc({
+    channel: 'vendor-auth:remove',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (engineId: EngineId, vendorId: string): Promise<void> => {
       const provider = engineAuthRegistry.require(engineId)
       if (!provider.removeVendorAuth) {
         throw new Error(`Engine "${engineId}" does not support removeVendorAuth`)
       }
       return provider.removeVendorAuth(vendorId)
     })
-  )
+  })
 
-  ipcMain.handle(
-    'vendor-auth:oauth-cancel',
-    safeHandler(async (_e: unknown, engineId: EngineId): Promise<void> => {
+  handleIpc({
+    channel: 'vendor-auth:oauth-cancel',
+    capability: 'admin',
+    kind: 'command',
+    handler: safeHandler(async (engineId: EngineId): Promise<void> => {
       const provider = engineAuthRegistry.require(engineId)
       // No-op if the engine doesn't drive OAuth flows.
       await provider.cancelVendorOauth?.()
     })
-  )
+  })
 
   // Mockup preview — read HTML from mockup directory. `cwd`/`directory` are
   // caller-supplied (and reachable remotely), so confine the read to a direct
   // child of the project's mockups root — a crafted `directory` (e.g. '../../..')
   // must not traverse out. Mirrors mockup-protocol.ts's path-traversal guard.
-  ipcMain.handle(
-    'mockup:read-html',
-    safeHandler(async (_e: unknown, cwd: string, directory: string) => {
+  handleIpc({
+    channel: 'mockup:read-html',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: safeHandler(async (cwd: string, directory: string) => {
       const mockupsRoot = path.resolve(path.join(cwd, '.claude', 'ui', 'mockups'))
       const mockupDir = path.resolve(path.join(mockupsRoot, directory))
       if (!isPathInside(mockupsRoot, mockupDir)) {
@@ -1868,7 +2388,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       }
       return fs.promises.readFile(path.join(mockupDir, 'index.html'), 'utf-8')
     })
-  )
+  })
 
   // Mockup file watcher — watches a mockup directory for changes
   const mockupWatchers = new Map<
@@ -1876,41 +2396,51 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
   >()
 
-  ipcMain.handle('mockup:watch', (_e: unknown, cwd: string, directory: string) => {
-    const key = `${cwd}:${directory}`
-    if (mockupWatchers.has(key)) return // already watching
+  handleIpc({
+    channel: 'mockup:watch',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: (cwd: string, directory: string) => {
+      const key = `${cwd}:${directory}`
+      if (mockupWatchers.has(key)) return // already watching
 
-    const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
-    if (!fs.existsSync(dirPath)) return
+      const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
+      if (!fs.existsSync(dirPath)) return
 
-    const entry = {
-      watcher: null! as fs.FSWatcher,
-      debounceTimer: null as ReturnType<typeof setTimeout> | null
+      const entry = {
+        watcher: null! as fs.FSWatcher,
+        debounceTimer: null as ReturnType<typeof setTimeout> | null
+      }
+
+      // Recursive so edits to sibling subdirs (e.g. `images/hero.png`,
+      // `components/card.css`) also trigger reloads. Debounced so editors
+      // that atomic-write via temp-file + rename don't fire multiple times.
+      entry.watcher = fs.watch(dirPath, { recursive: true }, (_event, filename) => {
+        if (!filename) return
+        if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+        entry.debounceTimer = setTimeout(() => {
+          if (!win.isDestroyed()) {
+            win.webContents.send('mockup:file-changed', directory)
+          }
+        }, 200)
+      })
+
+      mockupWatchers.set(key, entry)
     }
-
-    // Recursive so edits to sibling subdirs (e.g. `images/hero.png`,
-    // `components/card.css`) also trigger reloads. Debounced so editors
-    // that atomic-write via temp-file + rename don't fire multiple times.
-    entry.watcher = fs.watch(dirPath, { recursive: true }, (_event, filename) => {
-      if (!filename) return
-      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
-      entry.debounceTimer = setTimeout(() => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('mockup:file-changed', directory)
-        }
-      }, 200)
-    })
-
-    mockupWatchers.set(key, entry)
   })
 
-  ipcMain.handle('mockup:unwatch', (_e: unknown, cwd: string, directory: string) => {
-    const key = `${cwd}:${directory}`
-    const entry = mockupWatchers.get(key)
-    if (entry) {
-      entry.watcher.close()
-      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
-      mockupWatchers.delete(key)
+  handleIpc({
+    channel: 'mockup:unwatch',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: (cwd: string, directory: string) => {
+      const key = `${cwd}:${directory}`
+      const entry = mockupWatchers.get(key)
+      if (entry) {
+        entry.watcher.close()
+        if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+        mockupWatchers.delete(key)
+      }
     }
   })
 

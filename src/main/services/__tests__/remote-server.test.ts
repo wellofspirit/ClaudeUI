@@ -139,6 +139,7 @@ vi.mock('../tunnel-manager', () => {
 // Imported after the mocks are registered.
 import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
+import { registerCommand } from '../../ipc/command-registry'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../git-watch-registry'
 import { BaseSession } from '../../providers/BaseSession'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
@@ -596,14 +597,26 @@ describe('RemoteServer — remote git watching end-to-end', () => {
     // The live-watch pair, registered exactly as remote-handlers.ts does.
     // `registerRemoteHandlers()` itself cannot be loaded in this file — it pulls
     // the entire session/engine/auth service graph, which this file deliberately
-    // does not mock. That single hop (the `dispatcher.register` call and its owner
+    // does not mock. That single hop (the registry registration and its owner
     // id) is covered by remote-handlers.ipc.test.ts; everything DOWNSTREAM of the
     // handler here is the real production path.
-    dispatcher.register('git:start-watching', async (cwd: string) => {
-      gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+    registerCommand({
+      channel: 'git:start-watching',
+      capability: 'git',
+      kind: 'query',
+      transport: 'remote',
+      handler: async (cwd: string) => {
+        gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+      }
     })
-    dispatcher.register('git:stop-watching', async (cwd: string) => {
-      gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+    registerCommand({
+      channel: 'git:stop-watching',
+      capability: 'git',
+      kind: 'query',
+      transport: 'remote',
+      handler: async (cwd: string) => {
+        gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
+      }
     })
 
     server = new RemoteServer(dispatcher)

@@ -315,6 +315,40 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE remote_config ADD COLUMN last_serve_local_port INTEGER;
       `)
     }
+  },
+  {
+    // v9 — SyncCore phase 1 (ADR-051/052): append-only command audit log.
+    //
+    // One row per dispatched COMMAND (queries are not audited), from either
+    // transport, carrying the per-connection identity that issued it. This is
+    // the durable half of the SyncCore persistence story — the event log stays
+    // memory-only, the audit log does not (sync-core.md §Persistence).
+    //
+    // Append-only is enforced at the REPOSITORY surface (only append/list are
+    // exported below), not by SQLite triggers: the operational DB is the
+    // owner's own file, so a trigger would be theater against an attacker who
+    // already has it, while the repo boundary is what stops our own code from
+    // quietly rewriting history.
+    //
+    // Index on ts alone: every read is "the most recent N, optionally before T".
+    version: 9,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS audit_log (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts            INTEGER NOT NULL,
+          connection_id TEXT NOT NULL,
+          method        TEXT NOT NULL,
+          label         TEXT NOT NULL,
+          capability    TEXT NOT NULL,
+          kind          TEXT NOT NULL,
+          channel       TEXT NOT NULL,
+          session_id    TEXT,
+          outcome       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+      `)
+    }
   }
 ]
 
@@ -1498,4 +1532,99 @@ export function clearRemotePassword(): void {
        updated_at = ?
      WHERE id = 1`
   ).run(Date.now())
+}
+
+// ---------------------------------------------------------------------------
+// Audit log repository (SyncCore phase 1 — ADR-051/052, security.md §Audit)
+//
+// APPEND-ONLY BY CONSTRUCTION: this module exports exactly two audit functions,
+// `appendAuditLog` and `listAuditLog`. There is deliberately no update, no
+// delete and no prune here — adding one would be the change a reviewer must
+// catch, which is precisely why the surface is this small. Retention
+// ("keep-all by default, configurable") is a later phase and will need an
+// explicit, separately-reviewed accessor.
+// ---------------------------------------------------------------------------
+
+/** One audited command dispatch. `kind` is always 'command' today — queries aren't audited. */
+export interface AuditLogRow {
+  id: number
+  ts: number
+  /** Per-connection uuid (one per authenticated socket / per desktop app run). */
+  connectionId: string
+  /** 'token' | 'password' | 'tailnet-identity' | 'desktop'. */
+  method: string
+  /** Tailnet login when known, else the method name. */
+  label: string
+  capability: string
+  kind: string
+  channel: string
+  sessionId: string | null
+  outcome: 'ok' | 'error'
+}
+
+interface AuditLogDbRow {
+  id: number
+  ts: number
+  connection_id: string
+  method: string
+  label: string
+  capability: string
+  kind: string
+  channel: string
+  session_id: string | null
+  outcome: string
+}
+
+function rowToAuditLog(row: AuditLogDbRow): AuditLogRow {
+  return {
+    id: row.id,
+    ts: row.ts,
+    connectionId: row.connection_id,
+    method: row.method,
+    label: row.label,
+    capability: row.capability,
+    kind: row.kind,
+    channel: row.channel,
+    sessionId: row.session_id,
+    outcome: row.outcome === 'error' ? 'error' : 'ok'
+  }
+}
+
+/** Append one audit row (`id` auto-assigned). The ONLY write path for audit_log. */
+export function appendAuditLog(entry: Omit<AuditLogRow, 'id'>): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO audit_log (
+       ts, connection_id, method, label, capability, kind, channel, session_id, outcome
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    entry.ts,
+    entry.connectionId,
+    entry.method,
+    entry.label,
+    entry.capability,
+    entry.kind,
+    entry.channel,
+    entry.sessionId ?? null,
+    entry.outcome
+  )
+}
+
+/**
+ * Read audit rows newest-first. `before` is an EXCLUSIVE `ts` upper bound, so
+ * paging is `before = oldestReturned.ts` (ties at the same millisecond are
+ * broken by the descending id, and a page boundary landing inside a tie group
+ * is why paging should carry the id once a UI needs it — not yet).
+ */
+export function listAuditLog(opts: { limit?: number; before?: number } = {}): AuditLogRow[] {
+  const db = getDb()
+  const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000))
+  const rows = (
+    opts.before === undefined
+      ? db.prepare('SELECT * FROM audit_log ORDER BY ts DESC, id DESC LIMIT ?').all(limit)
+      : db
+          .prepare('SELECT * FROM audit_log WHERE ts < ? ORDER BY ts DESC, id DESC LIMIT ?')
+          .all(opts.before, limit)
+  ) as AuditLogDbRow[]
+  return rows.map(rowToAuditLog)
 }

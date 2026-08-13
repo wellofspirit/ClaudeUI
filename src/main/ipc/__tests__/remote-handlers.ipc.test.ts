@@ -5,8 +5,8 @@
  *
  * Verifies:
  *  - allowed channels are registered and dispatch to the underlying service
- *  - RemoteDispatcher's blocklist rejects desktop-only channels without
- *    invoking the underlying handler
+ *  - desktop-only channels are never exposed on the remote transport
+ *    (capability grants — the denylist they used to sit on is gone)
  *  - the dispatcher propagates handler errors so remote clients see them
  */
 
@@ -249,6 +249,13 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
+import {
+  CommandRegistry,
+  commandRegistry,
+  makeRemoteConnection,
+  LEGACY_REMOTE_GRANTS,
+  PINNED_CAPABILITIES
+} from '../command-registry'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../../services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
@@ -266,6 +273,15 @@ import { logger } from '../../services/logger'
 function makeRequest(channel: string, ...args: unknown[]): WsInvokeRequest {
   return { type: 'invoke', id: 'req-1', channel, args }
 }
+
+/**
+ * The connection every dispatch in this file runs as: a token-authenticated
+ * remote client holding the legacy-policy grant set — exactly what
+ * RemoteServer mints on authentication. Using the real grants (not an
+ * all-capability stand-in) is what makes these tests double as the parity
+ * check: a channel that stopped being reachable would fail here.
+ */
+const remoteConn = makeRemoteConnection('token', null)
 
 function makeFakeWindow(): any {
   return {
@@ -308,56 +324,35 @@ const sessionManagerStub: any = {
   setSessionTimeout: vi.fn()
 }
 
-describe('RemoteDispatcher', () => {
+// Routing basics run against a PRIVATE registry so they can never pollute the
+// shared one the parity pin at the bottom of this file reads. Capability gating
+// itself is covered in remote-dispatcher.test.ts.
+describe('RemoteDispatcher routing', () => {
+  let registry: CommandRegistry
   let dispatcher: RemoteDispatcher
 
   beforeEach(() => {
-    dispatcher = new RemoteDispatcher()
+    registry = new CommandRegistry()
+    dispatcher = new RemoteDispatcher(registry)
   })
 
   it('throws when dispatching to an unregistered channel', async () => {
-    await expect(dispatcher.handle(makeRequest('ghost:channel'))).rejects.toThrow(
+    await expect(dispatcher.handle(makeRequest('ghost:channel'), remoteConn)).rejects.toThrow(
       /Channel not available: ghost:channel/
     )
   })
 
   it('propagates handler errors for allowed channels', async () => {
-    dispatcher.register('test:boom', async () => {
-      throw new Error('fail')
+    registry.register({
+      channel: 'test:boom',
+      capability: 'chat',
+      kind: 'query',
+      transport: 'remote',
+      handler: async () => {
+        throw new Error('fail')
+      }
     })
-    await expect(dispatcher.handle(makeRequest('test:boom'))).rejects.toThrow('fail')
-  })
-
-  it('silently skips registration of blocklisted channels', () => {
-    const handler = vi.fn()
-    dispatcher.register('session:pick-folder', handler)
-    expect(dispatcher.has('session:pick-folder')).toBe(false)
-  })
-
-  it.each([
-    'window:minimize',
-    'window:maximize',
-    'window:close',
-    'session:pick-folder',
-    'app:quit-confirm',
-    'app:open-in-vscode',
-    'terminal:create',
-    'terminal:write',
-    'terminal:resize',
-    'terminal:kill',
-    'terminal:kill-by-cwd'
-  ])('blocks desktop-only channel: %s', async (channel) => {
-    const handler = vi.fn(async () => 'SHOULD NOT RUN')
-    dispatcher.register(channel, handler)
-
-    // Not registered.
-    expect(dispatcher.has(channel)).toBe(false)
-    // Dispatching rejects with a typed error.
-    await expect(dispatcher.handle(makeRequest(channel))).rejects.toThrow(
-      new RegExp(`Channel not available: ${channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
-    )
-    // The underlying handler was never invoked.
-    expect(handler).not.toHaveBeenCalled()
+    await expect(dispatcher.handle(makeRequest('test:boom'), remoteConn)).rejects.toThrow('fail')
   })
 })
 
@@ -387,7 +382,8 @@ describe('registerRemoteHandlers', () => {
 
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
     await dispatcher.handle(
-      makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' })
+      makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' }),
+      remoteConn
     )
     expect(crossEngineSpies.resolveApproval).toHaveBeenCalledWith(
       'xeng:perm-7',
@@ -399,7 +395,7 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('routes ordinary approval responses to the session', async () => {
-    await dispatcher.handle(makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'))
+    await dispatcher.handle(makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'), remoteConn)
     expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-1', 'allow', undefined, undefined)
     expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
   })
@@ -407,7 +403,8 @@ describe('registerRemoteHandlers', () => {
   it("routes a known dispatch toolUseId to the cross-engine dispatcher's stopDispatch, scoped by routingId (ADR-033 M3)", async () => {
     crossEngineSpies.stopDispatch.mockReturnValueOnce(true)
     const res = await dispatcher.handle(
-      makeRequest('session:stop-task', 'rid-1', 'toolu_dispatch_1')
+      makeRequest('session:stop-task', 'rid-1', 'toolu_dispatch_1'),
+      remoteConn
     )
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_dispatch_1', 'rid-1')
     expect(res).toEqual({ success: true })
@@ -415,7 +412,7 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('falls through to the session stopTask when the id is not a known dispatch', async () => {
-    const res = await dispatcher.handle(makeRequest('session:stop-task', 'rid-1', 'toolu_ordinary_1'))
+    const res = await dispatcher.handle(makeRequest('session:stop-task', 'rid-1', 'toolu_ordinary_1'), remoteConn)
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_ordinary_1', 'rid-1')
     expect(sessionStub.stopTask).toHaveBeenCalledWith('toolu_ordinary_1')
     expect(res).toEqual({ success: true })
@@ -424,7 +421,8 @@ describe('registerRemoteHandlers', () => {
   it('isDispatch=true: arms a durable stop-intent, returns success even with no live turn, never touches the session path', async () => {
     // Default stopDispatch mock returns false — the upstream race window.
     const res = await dispatcher.handle(
-      makeRequest('session:stop-task', 'rid-1', 'toolu_disp_racy', true)
+      makeRequest('session:stop-task', 'rid-1', 'toolu_disp_racy', true),
+      remoteConn
     )
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_disp_racy', 'rid-1', {
       armIfUnknown: true
@@ -464,7 +462,7 @@ describe('registerRemoteHandlers', () => {
       expect(channels).not.toContain(channel)
   })
 
-  it('does NOT register blocklisted channels', () => {
+  it('does NOT expose desktop-only channels on the remote transport', () => {
     const channels = dispatcher.channels()
     expect(channels).not.toContain('session:pick-folder')
     expect(channels).not.toContain('app:quit-confirm')
@@ -472,7 +470,7 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('session:send dispatches to session.run + broadcasts', async () => {
-    await dispatcher.handle(makeRequest('session:send', 'rid-1', 'hi'))
+    await dispatcher.handle(makeRequest('session:send', 'rid-1', 'hi'), remoteConn)
     expect(sessionStub.run).toHaveBeenCalledWith('hi', undefined)
     expect(win.webContents.send).toHaveBeenCalledWith(
       'session:user-message',
@@ -483,34 +481,34 @@ describe('registerRemoteHandlers', () => {
 
   it('session:send rejects when routingId not found', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    await expect(dispatcher.handle(makeRequest('session:send', 'missing', 'x'))).rejects.toThrow(
+    await expect(dispatcher.handle(makeRequest('session:send', 'missing', 'x'), remoteConn)).rejects.toThrow(
       /No session for routingId/
     )
   })
 
   it('session:cancel dispatches to manager.cancel', async () => {
-    await dispatcher.handle(makeRequest('session:cancel', 'rid-1'))
+    await dispatcher.handle(makeRequest('session:cancel', 'rid-1'), remoteConn)
     expect(sessionManagerStub.cancel).toHaveBeenCalledWith('rid-1')
   })
 
   it('config:load-settings returns settings', async () => {
-    const res = await dispatcher.handle(makeRequest('config:load-settings'))
+    const res = await dispatcher.handle(makeRequest('config:load-settings'), remoteConn)
     expect(res).toEqual({ theme: 'dark' })
   })
 
   it('usage:fetch dispatches to usageFetcher.fetch', async () => {
-    const res = await dispatcher.handle(makeRequest('usage:fetch'))
+    const res = await dispatcher.handle(makeRequest('usage:fetch'), remoteConn)
     expect(res).toEqual({ a: 1 })
   })
 
   it('mcp:status returns empty when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('mcp:status', 'ghost'))
+    const res = await dispatcher.handle(makeRequest('mcp:status', 'ghost'), remoteConn)
     expect(res).toEqual([])
   })
 
   it('mcp:status routes to session.mcpServerStatus when session present', async () => {
-    const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-1'))
+    const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-1'), remoteConn)
     expect(res).toEqual([{ name: 'srv', connected: true }])
     expect(sessionStub.mcpServerStatus).toHaveBeenCalled()
   })
@@ -519,7 +517,7 @@ describe('registerRemoteHandlers', () => {
   // replaced with capability checks + optional-call (`?.`) + neutral forEach.
   describe('ISession optional-member safety (Item 3)', () => {
     it('claude:set-cleanup-period triggers notifySettingsChanged via the neutral forEach', async () => {
-      await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30))
+      await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30), remoteConn)
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
 
@@ -529,7 +527,7 @@ describe('registerRemoteHandlers', () => {
         capabilities: resolveClaudeCapabilities('default')
         // No mcpServerStatus method.
       })
-      const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'))
+      const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'), remoteConn)
       expect(res).toEqual([])
     })
   })
@@ -551,7 +549,7 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('persists the rules and hot-reloads sessions for a user-scope write', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined), remoteConn)
       expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
         'user',
         PERMS,
@@ -561,12 +559,12 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('notifies user-scope writes even when a cwd is supplied (rules are global)', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'))
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'), remoteConn)
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
 
     it('scopes a project-scope write to sessions on that cwd', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'), remoteConn)
       expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
         'project',
         PERMS,
@@ -578,21 +576,21 @@ describe('registerRemoteHandlers', () => {
       sessionManagerStub.forEach.mockImplementationOnce((cb: (s: any) => void) =>
         cb({ ...sessionStub, cwd: '/repo-a' })
       )
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'), remoteConn)
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('survives a session whose notifySettingsChanged rejects', async () => {
       sessionStub.notifySettingsChanged.mockRejectedValueOnce(new Error('child is gone'))
       await expect(
-        dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+        dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined), remoteConn)
       ).resolves.toBeUndefined()
     })
   })
 
   it('claude:workspace-trust reports the trust flag for a cwd', async () => {
     claudeSettingsSpies.isWorkspaceTrusted.mockReturnValueOnce(false)
-    const res = await dispatcher.handle(makeRequest('claude:workspace-trust', '/repo-a'))
+    const res = await dispatcher.handle(makeRequest('claude:workspace-trust', '/repo-a'), remoteConn)
     expect(claudeSettingsSpies.isWorkspaceTrusted).toHaveBeenCalledWith('/repo-a')
     expect(res).toBe(false)
   })
@@ -600,7 +598,8 @@ describe('registerRemoteHandlers', () => {
   it('file:list-dir returns structured result on error (no throw)', async () => {
     // Invalid path → handler catches internally and returns default shape.
     const res: any = await dispatcher.handle(
-      makeRequest('file:list-dir', '/does/not/exist/zzzzz-unique')
+      makeRequest('file:list-dir', '/does/not/exist/zzzzz-unique'),
+      remoteConn
     )
     expect(res).toHaveProperty('entries')
     expect(res).toHaveProperty('isRoot')
@@ -610,13 +609,13 @@ describe('registerRemoteHandlers', () => {
 
   it('session:stop-task returns error shape when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('session:stop-task', 'ghost', 'tool-1'))
+    const res = await dispatcher.handle(makeRequest('session:stop-task', 'ghost', 'tool-1'), remoteConn)
     expect(res).toEqual({ success: false, error: 'No active session' })
   })
 
   it('session:dequeue-message returns {removed:0} when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('session:dequeue-message', 'ghost', 'val'))
+    const res = await dispatcher.handle(makeRequest('session:dequeue-message', 'ghost', 'val'), remoteConn)
     expect(res).toEqual({ removed: 0 })
   })
 
@@ -625,24 +624,24 @@ describe('registerRemoteHandlers', () => {
   // hit "Channel not available". They're now wired end-to-end.
   describe('newly-bridged channels', () => {
     it('session:interrupt routes to manager.interrupt', async () => {
-      await dispatcher.handle(makeRequest('session:interrupt', 'rid-1'))
+      await dispatcher.handle(makeRequest('session:interrupt', 'rid-1'), remoteConn)
       expect(sessionManagerStub.interrupt).toHaveBeenCalledWith('rid-1')
     })
 
     it('session:set-thinking-mode routes to session.setThinkingMode', async () => {
-      await dispatcher.handle(makeRequest('session:set-thinking-mode', 'rid-1', 'think'))
+      await dispatcher.handle(makeRequest('session:set-thinking-mode', 'rid-1', 'think'), remoteConn)
       expect(sessionStub.setThinkingMode).toHaveBeenCalledWith('think')
     })
 
     it('session:ask-side-question returns the session answer', async () => {
-      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'rid-1', 'q?'))
+      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'rid-1', 'q?'), remoteConn)
       expect(sessionStub.askSideQuestion).toHaveBeenCalledWith('q?')
       expect(res).toBe('answer')
     })
 
     it('session:ask-side-question returns null when session missing', async () => {
       sessionManagerStub.get.mockReturnValueOnce(undefined)
-      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'ghost', 'q?'))
+      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'ghost', 'q?'), remoteConn)
       expect(res).toBeNull()
     })
 
@@ -656,7 +655,7 @@ describe('registerRemoteHandlers', () => {
   it('registerRemoteVersionInfo exposes app:version-info on the dispatcher', async () => {
     expect(dispatcher.has('app:version-info')).toBe(false)
     registerRemoteVersionInfo({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
-    const res = await dispatcher.handle(makeRequest('app:version-info'))
+    const res = await dispatcher.handle(makeRequest('app:version-info'), remoteConn)
     expect(res).toEqual({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
   })
 
@@ -685,13 +684,13 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('mockup:read-html returns the mockup index.html contents', async () => {
-      const res = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      const res = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'), remoteConn)
       expect(res).toBe('<h1>hello</h1>')
     })
 
     it('mockup:read-html rejects for a missing mockup', async () => {
       await expect(
-        dispatcher.handle(makeRequest('mockup:read-html', cwd, 'does-not-exist'))
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, 'does-not-exist'), remoteConn)
       ).rejects.toThrow()
     })
 
@@ -702,31 +701,31 @@ describe('registerRemoteHandlers', () => {
       const outside = path.join(cwd, '.claude', 'ui', 'secret.html')
       fs.writeFileSync(outside, '<h1>secret</h1>')
       await expect(
-        dispatcher.handle(makeRequest('mockup:read-html', cwd, '../../secret'))
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, '../../secret'), remoteConn)
       ).rejects.toThrow(/Invalid mockup directory/)
       // Sanity: the in-root path still works (non-vacuous).
-      const ok = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      const ok = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'), remoteConn)
       expect(ok).toBe('<h1>hello</h1>')
     })
 
     it('mockup:watch/unwatch are idempotent and tolerate a missing directory', async () => {
       // Missing dir → no-op, no throw.
       await expect(
-        dispatcher.handle(makeRequest('mockup:watch', cwd, 'ghost'))
+        dispatcher.handle(makeRequest('mockup:watch', cwd, 'ghost'), remoteConn)
       ).resolves.toBeUndefined()
       // Real dir → watches; second call is a no-op (already watching).
-      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'))
-      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'))
+      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'), remoteConn)
+      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'), remoteConn)
       // Unwatch tears down without throwing; double-unwatch is safe.
-      await dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
+      await dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'), remoteConn)
       await expect(
-        dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
+        dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'), remoteConn)
       ).resolves.toBeUndefined()
     })
   })
 
-  // R5 — full channel parity (user decision: register every non-BLOCKED channel
-  // the web api-adapter invokes). These were previously missing from the
+  // R5 — full channel parity (user decision: register every channel the web
+  // api-adapter invokes that a remote grant covers). These were missing from the
   // dispatcher, so the web client hit "Channel not available" for git, live
   // transcript watching, multi-engine catalogs, account state, etc.
   describe('full channel parity (R5)', () => {
@@ -756,16 +755,16 @@ describe('registerRemoteHandlers', () => {
         'git:start-watching',
         'git:stop-watching'
       ]) {
-        // register() silently skips BLOCKED channels, so a channel appearing here
-        // also proves it is not on the denylist. (remote-channel-parity.test.ts
-        // asserts the denylist side independently, from source.)
+        // Exposure now means "registered for the remote transport"; that the
+        // capability is also granted is pinned by the parity block at the
+        // bottom of this file.
         expect(channels).toContain(ch)
       }
     })
 
     it('git:start-watching registers the remote owner and starts exactly one poller', async () => {
       await expect(
-        dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+        dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
       expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
@@ -773,7 +772,7 @@ describe('registerRemoteHandlers', () => {
 
       // A second remote client on the same cwd attaches; it must NOT re-start the
       // poller (that would replace the live callback).
-      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
       expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
     })
 
@@ -785,7 +784,7 @@ describe('registerRemoteHandlers', () => {
       // broadcast for every later test in this file.
       gitWatchRegistry.init((cwd, status) => pushed.push({ cwd, status }))
       try {
-        await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+        await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
         const emit = gitSvcStub.startPolling.mock.calls[0][0] as (s: unknown) => void
         emit({ files: [], branch: 'main' })
         expect(pushed).toEqual([{ cwd: '/tmp/proj', status: { files: [], branch: 'main' } }])
@@ -795,9 +794,9 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('git:stop-watching releases the remote owner and stops the poller', async () => {
-      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
       await expect(
-        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/proj'))
+        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/proj'), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitSvcStub.stopPolling).toHaveBeenCalledTimes(1)
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
@@ -806,7 +805,7 @@ describe('registerRemoteHandlers', () => {
 
     it('git:stop-watching for a cwd nobody watches is a no-op', async () => {
       await expect(
-        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/never'))
+        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/never'), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitSvcStub.stopPolling).not.toHaveBeenCalled()
     })
@@ -838,7 +837,7 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('git:commit dispatches to the service with get/release bracketing', async () => {
-      const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'))
+      const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'), remoteConn)
       expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
       expect(gitSvcStub.commit).toHaveBeenCalledWith('msg')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
@@ -847,24 +846,24 @@ describe('registerRemoteHandlers', () => {
 
     it('git service is released even when the operation throws', async () => {
       gitSvcStub.push.mockRejectedValueOnce(new Error('remote rejected'))
-      await expect(dispatcher.handle(makeRequest('git:push', '/tmp/proj'))).rejects.toThrow(
+      await expect(dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)).rejects.toThrow(
         'remote rejected'
       )
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
     })
 
     it('account:get returns the account-manager state', async () => {
-      const res = await dispatcher.handle(makeRequest('account:get'))
+      const res = await dispatcher.handle(makeRequest('account:get'), remoteConn)
       expect(res).toEqual({ enabled: false, accounts: [] })
     })
 
     it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'claude'))).toBe(true)
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'))).toBe(false)
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'))).toBe(false)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)).toBe(true)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)).toBe(false)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(false)
     })
 
-    it('does NOT register account mutations (denylist still holds)', () => {
+    it('does NOT register account mutations (they are admin-capability)', () => {
       const channels = dispatcher.channels()
       for (const ch of ['account:add', 'account:switch', 'account:delete', 'account:set-enabled']) {
         expect(channels).not.toContain(ch)
@@ -890,7 +889,8 @@ describe('registerRemoteHandlers', () => {
           undefined,
           undefined,
           'opencode'
-        )
+        ),
+        remoteConn
       )
       expect(sessionManagerStub.create).toHaveBeenCalled()
       // manager.create's 5th positional arg (index 4) is engineId.
@@ -904,7 +904,7 @@ describe('registerRemoteHandlers', () => {
         sandbox: { enabled: true, DIFFERENT: true }
       } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
 
-      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'), remoteConn)
 
       expect(sessionManagerStub.create).toHaveBeenCalled()
       // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
@@ -912,7 +912,7 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
-      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'), remoteConn)
 
       expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
       expect(resolveOpencodeSpawnModel).not.toHaveBeenCalled()
@@ -932,7 +932,8 @@ describe('registerRemoteHandlers', () => {
           undefined,
           undefined,
           'opencode'
-        )
+        ),
+        remoteConn
       )
 
       expect(resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
@@ -945,7 +946,7 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
-      await dispatcher.handle(makeRequest('session:create', 'rid-broadcast', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('session:create', 'rid-broadcast', '/tmp/proj'), remoteConn)
 
       expect(win.webContents.send).toHaveBeenCalledWith(
         'session:created',
@@ -968,7 +969,8 @@ describe('registerRemoteHandlers', () => {
           proxy: { enabled: true, marker: 'sentinel' },
           anthropicEndpoint: { enabled: true, marker: 'sentinel' },
           modelOverride: { enabled: true, marker: 'sentinel' }
-        })
+        }),
+        remoteConn
       )
 
       expect(uiConfigMocks.saveSettings).toHaveBeenCalled()
@@ -987,7 +989,7 @@ describe('registerRemoteHandlers', () => {
         modelOverride: { enabled: true, model: 'sentinel-model' }
       })
 
-      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }))
+      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }), remoteConn)
       // applyProxyEnv is fire-and-forget (`.catch(...)`) — flush the microtask queue.
       await new Promise((r) => setImmediate(r))
 
@@ -1009,7 +1011,8 @@ describe('registerRemoteHandlers', () => {
           logLevel: 'debug',
           logFilter: 'Proxy',
           sessionTimeoutMins: 5
-        })
+        }),
+        remoteConn
       )
 
       expect(usageFetcher.setIntervalSecs).toHaveBeenCalledWith(77)
@@ -1023,7 +1026,8 @@ describe('registerRemoteHandlers', () => {
         makeRequest('config:save-settings', {
           theme: 'light',
           sandbox: { enabled: true, marker: 'sentinel' }
-        })
+        }),
+        remoteConn
       )
 
       expect(win.webContents.send).toHaveBeenCalledWith(
@@ -1062,7 +1066,8 @@ describe('registerRemoteHandlers', () => {
       async (projectKey, sessionId) => {
         await expect(
           dispatcher.handle(
-            makeRequest('session:write-custom-title', sessionId, projectKey, 'pwned')
+            makeRequest('session:write-custom-title', sessionId, projectKey, 'pwned'),
+            remoteConn
           )
         ).rejects.toThrow(/Invalid (sessionId|projectKey)/)
         expect(appendSpy).not.toHaveBeenCalled()
@@ -1071,17 +1076,18 @@ describe('registerRemoteHandlers', () => {
 
     it('rejects empty identifiers without writing', async () => {
       await expect(
-        dispatcher.handle(makeRequest('session:write-custom-title', '', 'proj', 't'))
+        dispatcher.handle(makeRequest('session:write-custom-title', '', 'proj', 't'), remoteConn)
       ).rejects.toThrow(/Invalid sessionId/)
       await expect(
-        dispatcher.handle(makeRequest('session:write-custom-title', 'sess-1', '', 't'))
+        dispatcher.handle(makeRequest('session:write-custom-title', 'sess-1', '', 't'), remoteConn)
       ).rejects.toThrow(/Invalid projectKey/)
       expect(appendSpy).not.toHaveBeenCalled()
     })
 
     it('still writes for plain identifiers, under the projects root', async () => {
       await dispatcher.handle(
-        makeRequest('session:write-custom-title', 'sess-1', '-d-proj', 'My title')
+        makeRequest('session:write-custom-title', 'sess-1', '-d-proj', 'My title'),
+        remoteConn
       )
       expect(appendSpy).toHaveBeenCalledTimes(1)
       const [target, payload] = appendSpy.mock.calls[0]
@@ -1090,5 +1096,155 @@ describe('registerRemoteHandlers', () => {
       )
       expect(String(payload)).toContain('"customTitle":"My title"')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PARITY PIN — "zero change to the effective remote surface" (SyncCore phase 1).
+//
+// Encoded LITERALLY from the pre-port registrations (`dispatcher.register(...)`
+// in remote-handlers.ts) minus the then-dispatcher's BLOCKED denylist — which
+// subtracted nothing, because the denylist and the registration set never
+// overlapped: the denylist was belt-and-braces over an explicit allowlist.
+//
+// This is the review gate for the port. It runs against the REAL shared
+// registry after the real registrars, so it fails on a channel that silently
+// gained or lost remote reachability — including via a capability change,
+// since every listed channel must also resolve under the legacy grant set.
+// ---------------------------------------------------------------------------
+
+const PRE_PORT_REMOTE_CHANNELS = [
+  'account:get',
+  'app:version-info',
+  'claude:get-cleanup-period',
+  'claude:load-permissions',
+  'claude:save-permissions',
+  'claude:set-cleanup-period',
+  'claude:workspace-trust',
+  'config:load-sessions',
+  'config:load-settings',
+  'config:load-skill-details',
+  'config:load-slash-commands',
+  'config:save-sessions',
+  'config:save-settings',
+  'config:scan-custom-commands',
+  'engine:is-installed',
+  'file:list-dir',
+  'git:branches',
+  'git:check-repo',
+  'git:checkout',
+  'git:commit',
+  'git:create-branch',
+  'git:discard-file',
+  'git:fetch',
+  'git:file-contents',
+  'git:file-patch',
+  'git:pull',
+  'git:push',
+  'git:push-with-upstream',
+  'git:stage-all',
+  'git:stage-file',
+  'git:start-watching',
+  'git:status',
+  'git:stop-watching',
+  'git:unstage-all',
+  'git:unstage-file',
+  'mcp:load-servers',
+  'mcp:read-disabled',
+  'mcp:status',
+  'mockup:read-html',
+  'mockup:unwatch',
+  'mockup:watch',
+  'pi:auth-status',
+  'pi:binary-path',
+  'session:approval-response',
+  'session:ask-side-question',
+  'session:background-task',
+  'session:build-subagent-file-map',
+  'session:cancel',
+  'session:create',
+  'session:delete-project',
+  'session:delete-session',
+  'session:dequeue-message',
+  'session:generate-commit-message',
+  'session:generate-title',
+  'session:get-engine-models',
+  'session:get-models',
+  'session:get-opencode-provider-models',
+  'session:get-opencode-providers',
+  'session:get-pi-model-catalog',
+  'session:get-plan-content',
+  'session:get-session-log-path',
+  'session:interrupt',
+  'session:list-directories',
+  'session:list-opencode',
+  'session:list-pi',
+  'session:load-background-output',
+  'session:load-history',
+  'session:load-opencode-history',
+  'session:load-pi-history',
+  'session:load-subagent-history',
+  'session:read-background-range',
+  'session:rekey',
+  'session:remove-opencode-provider',
+  'session:resolve-fork-anchor',
+  'session:send',
+  'session:set-effort',
+  'session:set-model',
+  'session:set-opencode-provider-disabled',
+  'session:set-permission-mode',
+  'session:set-reasoning-variant',
+  'session:set-thinking-mode',
+  'session:stop-task',
+  'session:unwatch-background',
+  'session:unwatch-session',
+  'session:watch-background',
+  'session:watch-session',
+  'session:write-custom-title',
+  'shared-provider:list',
+  'shared-provider:models',
+  'shared-provider:statuses',
+  'usage:fetch',
+  'usage:fetch-block',
+  'usage:fetch-dispatched',
+  'usage:set-account-filter',
+] as const
+
+describe('remote surface parity (phase 1 port)', () => {
+  let win: any
+
+  beforeEach(() => {
+    win = makeFakeWindow()
+    registerRemoteHandlers(new RemoteDispatcher(), sessionManagerStub, win)
+    // Registered later in the real bootstrap, once build versions are known.
+    registerRemoteVersionInfo({ appVersion: '1', sdkVersion: '2', cliVersion: '3' })
+  })
+
+  afterEach(() => {
+    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+  })
+
+  it('exposes exactly the pre-port channel set — no additions, no removals', () => {
+    expect(commandRegistry.channels('remote')).toEqual([...PRE_PORT_REMOTE_CHANNELS].sort())
+  })
+
+  it('every exposed channel is reachable under the legacy remote grant set', () => {
+    const unreachable = commandRegistry
+      .channels('remote')
+      .map((c) => [c, commandRegistry.declaration(c)!.capability] as const)
+      .filter(([, cap]) => !LEGACY_REMOTE_GRANTS.has(cap))
+    expect(
+      unreachable,
+      `these channels declare a capability remote connections do not hold: ${unreachable
+        .map(([c, cap]) => `${c}(${cap})`)
+        .join(', ')}`
+    ).toEqual([])
+  })
+
+  it('exposes no channel whose capability the old denylist stood for', () => {
+    const exposed = new Set(commandRegistry.channels('remote'))
+    for (const channel of Object.keys(PINNED_CAPABILITIES)) {
+      expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)
+    }
   })
 })

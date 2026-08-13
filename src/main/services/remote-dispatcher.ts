@@ -1,103 +1,62 @@
 import type { WsInvokeRequest } from '../../shared/remote-protocol'
+import {
+  commandRegistry,
+  type CommandConnection,
+  type CommandRegistry
+} from '../ipc/command-registry'
 import { logger } from './logger'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Handler = (...args: any[]) => Promise<unknown>
-
 /**
- * Routes WebSocket invoke messages to handler functions.
- * Handlers are extracted from the IPC layer and registered here for dual use.
+ * Routes WebSocket invoke messages to the command registry.
  *
- * Gating model: this is a DENYLIST over an explicit registration set, NOT an
- * allowlist. A channel is reachable over remote iff (a) `registerRemoteHandlers`
- * explicitly registered it AND (b) it is not in {@link BLOCKED}. `register()`
- * silently drops any channel in the denylist, so listing a channel in BLOCKED
- * guarantees it can never be exposed even if a future edit tries to register it.
- * The web client gets full parity with the desktop surface EXCEPT the denied
- * channels (window/terminal/native-OAuth/account-mutation/pick-folder/…).
+ * Gating model (SyncCore phase 1 — ADR-051/052): an ALLOWLIST expressed as
+ * capability grants. A channel is reachable over remote iff (a)
+ * `registerRemoteHandlers` registered it for the `remote` transport AND (b) its
+ * DECLARED capability is in the connection's grant set. The old `BLOCKED`
+ * denylist is gone: it failed open (forgetting to blocklist a new channel
+ * exposed it), and its effect is now a property of the capability model —
+ * every channel it listed declares `host`, `shell` or `admin`, none of which
+ * remote connections are granted (see `PINNED_CAPABILITIES`).
+ *
+ * This class is now a thin transport adapter; registration, capability
+ * enforcement and audit all live in the registry, shared with the desktop IPC
+ * transport.
  */
 export class RemoteDispatcher {
-  private handlers = new Map<string, Handler>()
+  private registry: CommandRegistry
 
-  /** Channels explicitly blocked from remote access (the denylist). */
-  private static readonly BLOCKED = new Set([
-    'window:minimize',
-    'window:maximize',
-    'window:close',
-    'session:pick-folder',
-    'app:quit-confirm',
-    'app:open-in-vscode',
-    'terminal:create',
-    'terminal:write',
-    'terminal:resize',
-    'terminal:kill',
-    'terminal:kill-by-cwd',
-    // Native OAuth opens a local browser + loopback listener on the desktop
-    // host — meaningless (and a credential vector) over remote. See ADR-014.
-    'auth:sign-in',
-    'auth:submit-code',
-    'auth:cancel',
-    // Account mutations open local browsers / touch the local filesystem (ADR-015).
-    'account:set-enabled',
-    'account:add',
-    'account:switch',
-    'account:delete',
-    // Spawns a local opencode server — meaningless and unsafe over remote (Phase 9b).
-    'usage:refresh-prices',
-    // Remote-server config + credential (Phase 1 of remote auth). A remote
-    // client must never read/rotate its own auth credential or flip
-    // transport/autostart flags for the server it's connected through —
-    // mirrors the auth/account entries above. remote:get-config also never
-    // returns password_salt/password_hash/kdf_params even to the desktop IPC
-    // caller, but blocking it here means a compromised/rogue remote client
-    // can't even learn `passwordSet`/`passwordUpdatedAt`.
-    'remote:get-config',
-    'remote:set-config',
-    'remote:set-password',
-    'remote:clear-password',
-    // Tailscale probe (Phase 3): discloses this node's tailnet DNS name and the
-    // owner's login — local-configuration detail a remote client has no business
-    // reading, and useless to it anyway (it cannot flip tls_mode either).
-    'remote:tailscale-detect',
-    // Force re-serve (ADR-042) MUTATES this machine's `tailscale serve` config,
-    // taking over the pinned HTTPS port from whatever holds it — i.e. it can
-    // change (or break) the very transport the caller is connected through.
-    // Desktop-only, like the rest of the remote:* config surface.
-    'remote:force-reserve'
-  ])
-
-  /** Register a handler for a channel. Blocked channels are silently skipped. */
-  register(channel: string, handler: Handler): void {
-    if (RemoteDispatcher.BLOCKED.has(channel)) return
-    this.handlers.set(channel, handler)
+  constructor(registry: CommandRegistry = commandRegistry) {
+    this.registry = registry
   }
 
-  /** Check if a channel has a registered handler. */
+  /** Check if a channel is exposed on the remote transport. */
   has(channel: string): boolean {
-    return this.handlers.has(channel)
+    return this.registry.get(channel, 'remote') !== undefined
   }
 
-  /** Dispatch an invoke request and return the result. */
-  async handle(msg: WsInvokeRequest): Promise<unknown> {
-    const handler = this.handlers.get(msg.channel)
-    if (!handler) {
-      throw new Error(`Channel not available: ${msg.channel}`)
-    }
+  /**
+   * Dispatch an invoke request on behalf of an authenticated connection and
+   * return the result. Throws `Channel not available: <channel>` for anything
+   * this transport does not expose (unchanged wording — the web client's error
+   * paths depend on it) and a permission error when the channel's capability
+   * is not granted.
+   */
+  async handle(msg: WsInvokeRequest, connection: CommandConnection): Promise<unknown> {
     try {
-      return await handler(...msg.args)
+      return await this.registry.dispatch(msg.channel, 'remote', msg.args ?? [], connection)
     } catch (err) {
       logger.error('remote-dispatcher', `Error handling ${msg.channel}: ${err}`)
       throw err
     }
   }
 
-  /** Unregister a handler for a channel. */
+  /** Unregister the remote handler for a channel. */
   unregister(channel: string): void {
-    this.handlers.delete(channel)
+    this.registry.unregister(channel, 'remote')
   }
 
-  /** List all registered channels (for debugging). */
+  /** List all channels exposed on the remote transport (for debugging). */
   channels(): string[] {
-    return Array.from(this.handlers.keys())
+    return this.registry.channels('remote')
   }
 }

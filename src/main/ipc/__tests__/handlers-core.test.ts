@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
+import { CommandRegistry, makeRemoteConnection } from '../command-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 vi.mock('../../services/skill-scanner', () => ({
@@ -72,16 +73,21 @@ describe('handlers-core', () => {
   it('mcpStatus behaves identically whether called directly (desktop-style) or via RemoteDispatcher', async () => {
     const sessionStub = makeSessionStub()
     const manager = makeManager(sessionStub)
-    const dispatcher = new RemoteDispatcher()
-    dispatcher.register('mcp:status', (rid: string) => mcpStatus(manager, rid))
+    const registry = new CommandRegistry()
+    const dispatcher = new RemoteDispatcher(registry)
+    registry.register({
+      channel: 'mcp:status',
+      capability: 'config',
+      kind: 'query',
+      transport: 'remote',
+      handler: (rid: string) => mcpStatus(manager, rid)
+    })
 
     const direct = await mcpStatus(manager, 'rid-1')
-    const viaDispatcher = await dispatcher.handle({
-      type: 'invoke',
-      id: '1',
-      channel: 'mcp:status',
-      args: ['rid-1']
-    })
+    const viaDispatcher = await dispatcher.handle(
+      { type: 'invoke', id: '1', channel: 'mcp:status', args: ['rid-1'] },
+      makeRemoteConnection('token', null)
+    )
 
     expect(viaDispatcher).toEqual(direct)
     expect(direct).toEqual([{ name: 'srv', connected: true }])

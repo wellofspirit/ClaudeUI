@@ -7,6 +7,7 @@ import { logger } from './logger'
 import { SessionManager } from './session-manager'
 import { AutomationManager } from './automation-manager'
 import { RemoteDispatcher } from './remote-dispatcher'
+import { commandRegistry, desktopConnection, registerCommand } from '../ipc/command-registry'
 import { BaseSession } from '../providers/BaseSession'
 import type {
   ClaudeUIPlugin,
@@ -20,6 +21,20 @@ import type {
 const PLUGINS_DIR = path.join(os.homedir(), '.claude', 'ui', 'plugins')
 const ACTIVATION_TIMEOUT_MS = 10_000
 const LOG_SOURCE = 'plugin-manager'
+
+/**
+ * Capability/kind for every `plugin:<id>:<channel>` a plugin registers.
+ *
+ * PARITY: plugin remote handlers are reachable from a remote client today (the
+ * pre-registry dispatcher never denylisted them), so their capability has to be
+ * one a remote connection is granted — hence `config`, the extension/config
+ * bucket, and NOT `admin`, which would silently remove a working surface. The
+ * honest caveat is that plugin code runs unsandboxed in the main process, so
+ * `config` under-states the authority a plugin channel actually carries; making
+ * plugins declare their own capability is a follow-up, not a phase-1 change.
+ * `command` (never `query`) so every plugin invocation lands in the audit log.
+ */
+const PLUGIN_CHANNEL_DECLARATION = { capability: 'config', kind: 'command' } as const
 
 // ---------------------------------------------------------------------------
 // PluginBridge — virtual BrowserWindow that bridges session events to plugins
@@ -433,12 +448,21 @@ export class PluginManager {
         handler: (...args: unknown[]) => unknown
       ): Disposable => {
         const fullChannel = `plugin:${id}:${channel}`
-        ipcMain.handle(fullChannel, (_event, ...args) => handler(...args))
+        registerCommand({
+          channel: fullChannel,
+          ...PLUGIN_CHANNEL_DECLARATION,
+          transport: 'desktop',
+          handler: (...args: unknown[]) => handler(...args)
+        })
+        ipcMain.handle(fullChannel, (_event, ...args: unknown[]) =>
+          commandRegistry.dispatch(fullChannel, 'desktop', args, desktopConnection())
+        )
         pluginLogger.debug(`Registered IPC handler: ${fullChannel}`)
 
         const disposable: Disposable = {
           dispose: () => {
             ipcMain.removeHandler(fullChannel)
+            commandRegistry.unregister(fullChannel, 'desktop')
             pluginLogger.debug(`Removed IPC handler: ${fullChannel}`)
           }
         }
@@ -451,7 +475,12 @@ export class PluginManager {
         handler: (...args: unknown[]) => unknown
       ): Disposable => {
         const fullChannel = `plugin:${id}:${channel}`
-        this.remoteDispatcher.register(fullChannel, async (...args) => handler(...args))
+        registerCommand({
+          channel: fullChannel,
+          ...PLUGIN_CHANNEL_DECLARATION,
+          transport: 'remote',
+          handler: async (...args: unknown[]) => handler(...args)
+        })
         pluginLogger.debug(`Registered remote handler: ${fullChannel}`)
 
         const disposable: Disposable = {

@@ -26,7 +26,7 @@ import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 // ---------------------------------------------------------------------------
 //
 // Session-domain operations registered by BOTH `session.ipc.ts` (via
-// `ipcMain.handle`) and `remote-handlers.ts` (via `dispatcher.register`) had
+// `handleIpc`) and `remote-handlers.ts` (via `handleRemote`) had
 // byte-identical (or near-identical) bodies duplicated across the two files.
 // This module holds the ONE copy each surface delegates to, mirroring the
 // `create-session.ts` precedent for `session:create`. Every exported function

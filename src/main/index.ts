@@ -523,7 +523,7 @@ function createWindow(): void {
   })
 
   // Remote-server config + credential IPC (Phase 1 of remote auth). Desktop-
-  // renderer-only: all four channels are in RemoteDispatcher.BLOCKED and are
+  // renderer-only: all four channels are `admin`-capability and are
   // never registered on the remote dispatcher (remote-handlers.ts), so a
   // remote client can never reach them. remote:get-config NEVER returns
   // password_salt/password_hash/kdf_params — only a passwordSet boolean.
@@ -574,15 +574,15 @@ function createWindow(): void {
     remoteServer.disconnectPasswordClients()
   })
   // Pre-flight probe for the Settings TLS toggle. Returned verbatim — the failure
-  // variants carry an actionable, user-facing `message`. Desktop-only (in
-  // RemoteDispatcher.BLOCKED): it discloses the node's DNS name and the owner's
+  // variants carry an actionable, user-facing `message`. Desktop-only
+  // (`admin` capability): it discloses the node's DNS name and the owner's
   // login. The explicit return type is the compile-time link between the manager's
   // union and the shared one the renderer consumes.
   ipcMain.handle('remote:tailscale-detect', async (): Promise<TailscaleDetection> => {
     return await tailscaleManager.detect()
   })
   // Force re-serve (ADR-042): claim the pinned HTTPS port, overwriting whatever
-  // serve handler holds it. Desktop-only (in RemoteDispatcher.BLOCKED) — a
+  // serve handler holds it. Desktop-only (`admin` capability) — a
   // remote client must never mutate the serve config of the very server it is
   // connected through. Throws propagate to the renderer so the banner can show
   // why the takeover failed.
