@@ -1,5 +1,12 @@
+import { lazy, Suspense } from 'react'
 import type { TerminalTab } from '../../../../../shared/types'
-import { XTermInstance } from '../XTermInstance'
+
+// Lazy: xterm.js + addon-fit + xterm.css must not ride the eager App chunk. This
+// panel's container is always mounted (display:none preserves scrollback), so the
+// boundary has to be XTermInstance — it mounts once per tab, and tabs start at zero.
+const XTermInstance = lazy(() =>
+  import('../XTermInstance').then((m) => ({ default: m.XTermInstance }))
+)
 
 export interface TerminalPanelViewProps {
   style: React.CSSProperties
@@ -78,7 +85,15 @@ export function TerminalPanelView({
             className="absolute inset-0"
             style={{ display: tab.id === activeId ? 'block' : 'none' }}
           >
-            <XTermInstance terminalId={tab.id} isActive={tab.id === activeId} />
+            <Suspense
+              fallback={
+                <div className="h-full flex items-center justify-center text-text-muted text-xs">
+                  Loading terminal…
+                </div>
+              }
+            >
+              <XTermInstance terminalId={tab.id} isActive={tab.id === activeId} />
+            </Suspense>
           </div>
         ))}
         {visibleTabs.length === 0 && (

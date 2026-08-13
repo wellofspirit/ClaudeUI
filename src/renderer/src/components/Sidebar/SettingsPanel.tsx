@@ -1,9 +1,15 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
 import { SECTION_SCOPE_MAP, type SettingsScope } from '../SettingsDialog/settings-sections'
-import { RemoteAccessModal } from '../RemoteAccessModal'
 import { UsageRing } from './UsagePanel'
+
+// Lazy: the modal tree + qrcode must not ride the eager App chunk — the trigger below
+// is desktop-only, so on the web client these bytes are unreachable. The specifier
+// must stay '../RemoteAccessModal' for tests that mock that exact module id.
+const RemoteAccessModal = lazy(() =>
+  import('../RemoteAccessModal').then((m) => ({ default: m.RemoteAccessModal }))
+)
 
 export function SettingsPanel(): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -198,7 +204,11 @@ export function SettingsPanel(): React.JSX.Element {
           initialSection={settingsTarget.section}
         />
       )}
-      {remoteModalOpen && <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />}
+      {remoteModalOpen && (
+        <Suspense fallback={null}>
+          <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />
+        </Suspense>
+      )}
     </div>
   )
 }

@@ -3,6 +3,7 @@ import './main.css'
 import { StrictMode, useState, useEffect, useCallback, useRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RemoteConnection, type ConnectionState } from './connection'
+import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { createWebSocketApi } from './api-adapter'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
 import { PasswordLogin } from './components/PasswordLogin'
@@ -250,6 +251,11 @@ function AppContent(): React.JSX.Element {
 // when the WebSocket connection completes (see handleFullState above)
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <RemoteApp />
+    {/* Same shield as the desktop entry (M-RN2) — now that App subtrees lazy-load
+        chunks (xterm, mermaid), a failed fetch after a connection drop throws at a
+        Suspense boundary; without this it would unmount the app to a blank page. */}
+    <ErrorBoundary>
+      <RemoteApp />
+    </ErrorBoundary>
   </StrictMode>
 )
