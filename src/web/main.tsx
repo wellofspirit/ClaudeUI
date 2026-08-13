@@ -49,6 +49,26 @@ type AuthPhase =
   /** No usable way in from this browser. */
   | { kind: 'unavailable'; detail?: string }
 
+let appLoad: Promise<React.ComponentType> | null = null
+
+/**
+ * Memoized dynamic import of the renderer's App (~1.18 MB min). Fired the
+ * moment a connection attempt starts so the download overlaps the WS handshake
+ * + sync-full instead of being serialized behind it; AppContent's later call is
+ * a memo hit (and StrictMode's double-effect a no-op). A failed fetch resets
+ * the memo so the next attempt retries instead of caching the rejection.
+ */
+function loadApp(): Promise<React.ComponentType> {
+  appLoad ??= import('@renderer/App').then(
+    (m) => m.default,
+    (err) => {
+      appLoad = null
+      throw err
+    }
+  )
+  return appLoad
+}
+
 // Root app component that manages the auth flow + connection lifecycle
 function RemoteApp(): React.JSX.Element {
   const [phase, setPhase] = useState<AuthPhase>(
@@ -69,6 +89,13 @@ function RemoteApp(): React.JSX.Element {
   const handleStateChange = useCallback((state: ConnectionState, err?: string) => {
     setConnState(state)
     setError(err)
+    // Every connect path — fragment token, tailnet identity, password proof —
+    // goes through connection.connect(), which emits 'connecting' before it
+    // opens the socket, and nothing else emits it. So this starts the App
+    // download exactly when a credential is in play and never for a visitor
+    // idling on the login form. Rejection is swallowed here because AppContent's
+    // own loadApp() is the one that reports it.
+    if (state === 'connecting') void loadApp().catch(() => {})
     if (state === 'auth-rejected') {
       const params = pwParams.current
       // The proof we hold is dead — wrong password, a rotated credential
@@ -224,16 +251,18 @@ function RemoteApp(): React.JSX.Element {
   )
 }
 
-// Lazy-load the actual app content (same components as Electron renderer)
+// Lazy-load the actual app content (same components as Electron renderer).
+// Normally a memo hit: the chunk was prefetched at 'connecting' (see loadApp).
 function AppContent(): React.JSX.Element {
   const [App, setApp] = useState<React.ComponentType | null>(null)
 
   useEffect(() => {
-    // Dynamic import of the renderer's App to reuse components
-    // This works because vite.web.config.ts sets up the @renderer alias
-    import('@renderer/App').then((mod) => {
-      setApp(() => mod.default)
-    })
+    loadApp().then(
+      (Loaded) => setApp(() => Loaded),
+      // Stays on "Loading..."; the memo is already reset, so a page reload —
+      // or a re-auth's fresh connect() — retries the fetch.
+      (err) => api.logError('web-main', `App chunk failed to load: ${err}`)
+    )
   }, [])
 
   if (!App) {
