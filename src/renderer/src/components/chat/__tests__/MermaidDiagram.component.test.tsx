@@ -40,6 +40,8 @@ vi.mock('mermaid', () => {
 })
 
 import { MermaidDiagram, injectTextWeightRule, themeCanvasBackground } from '../MermaidDiagram'
+import { buildMermaidInitConfig, resolveThemeConfig, THEME_CONFIGS } from '../mermaid-themes'
+import { useSessionStore } from '../../../stores/session-store'
 
 describe('MermaidDiagram — lazy mermaid core', () => {
   it('mounts before mermaid resolves, then initializes before rendering the SVG', async () => {
@@ -65,6 +67,20 @@ describe('MermaidDiagram — lazy mermaid core', () => {
       expect.stringMatching(/^mermaid-diagram-\d+$/),
       'graph TD; A-->B'
     )
+
+    // The init payload is `buildMermaidInitConfig`'s output verbatim — not a
+    // near-copy inlined here. scripts/audit-mermaid-contrast.mjs measures
+    // contrast by initializing mermaid from that same builder, so if the
+    // component ever drifts back to its own literal, every audit result becomes
+    // a claim about a diagram the app does not render.
+    const { theme, mermaidTheme } = useSessionStore.getState().settings
+    expect(initialize).toHaveBeenCalledWith(
+      buildMermaidInitConfig(resolveThemeConfig(mermaidTheme ?? 'auto', theme))
+    )
+    // ...and it really is the audited palette, not a bare base theme.
+    const passed = initialize.mock.calls[0][0]
+    expect(passed.themeVariables).toBe(THEME_CONFIGS[theme].variables)
+    expect(passed.themeVariables.background).toBe('transparent')
   })
 })
 
