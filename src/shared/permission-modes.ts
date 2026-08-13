@@ -44,7 +44,11 @@ export const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
   plan: 'Read-only (Plan)',
   ask: 'Ask',
   autoEdit: 'Auto-edit files',
-  full: 'Full auto (default)'
+  // "Auto mode", not "Full auto": the mode is classifier-gated, not a blanket
+  // approve-everything (that would be `bypassPermissions`, which ClaudeUI has no
+  // session-level equivalent for). The `full` KEY is the AutonomyMode vocabulary
+  // and stays as-is; only the human-facing string changed.
+  full: 'Auto mode (default)'
 }
 
 /**

@@ -79,7 +79,9 @@ Two problems with that, independent of the default's value:
 ## Consequences
 
 - The Autonomy mode picker's labels change: `ask` is no longer "Ask (default)",
-  and `full` is now "Full auto (default)".
+  and `full` is now "Auto mode (default)" — deliberately NOT "Full auto", which
+  overstates a classifier-gated mode as a blanket approve-everything. The
+  AutonomyMode key stays `full`; only the label changed.
 - ClaudeUI and the bare `claude` CLI can now disagree about the startup mode.
   That is the point of decision 1, but it does mean the picker no longer doubles
   as a way to configure the CLI.
