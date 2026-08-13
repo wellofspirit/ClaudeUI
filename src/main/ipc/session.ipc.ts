@@ -54,7 +54,6 @@ import {
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import { usageReconciler } from '../services/usage-reconciler'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { dispatchedUsageSummary } from '../services/db'
 import '../auth/register-auth-providers'
@@ -1676,15 +1675,24 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     // the legacy JSON files, self-upserts its freshly-parsed JSONL into
     // usage_event, then reads SQL-sourced blocks + daily — so even if reconcile
     // is slow/fails, the Claude blocks + history are never empty.
-    usageReconciler
-      .reconcileAll()
-      .catch(() => {})
-      .finally(() => {
-        blockUsageService.recalculate().catch((err) => {
-          logger.error('BlockUsage', 'Initial recalculation failed', err)
-        })
+    //
+    // Lazy import: usage-reconciler statically imports block-usage →
+    // usage-fetcher → claude-session, so a static import from this module (which
+    // is imported by claude-session) would form a static cycle. Loaded here at
+    // IPC startup instead.
+    import('../services/usage-reconciler')
+      .then(({ usageReconciler }) => {
+        usageReconciler
+          .reconcileAll()
+          .catch(() => {})
+          .finally(() => {
+            blockUsageService.recalculate().catch((err) => {
+              logger.error('BlockUsage', 'Initial recalculation failed', err)
+            })
+          })
+        usageReconciler.start()
       })
-    usageReconciler.start()
+      .catch(() => {})
     blockUsageService.startWatching()
   } else {
     logger.info(
