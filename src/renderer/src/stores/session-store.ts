@@ -4,7 +4,13 @@ import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
-import { toPermissionMode } from '../../../shared/permission-modes'
+import {
+  AUTONOMY_TO_PERMISSION,
+  DEFAULT_AUTONOMY_MODE,
+  PERMISSION_TO_AUTONOMY,
+  autoModeAvailableForEngine
+} from '../../../shared/permission-modes'
+import type { AutonomyMode } from '../../../shared/model-capabilities'
 import {
   engineMeta,
   OPENCODE_DEFAULT_MODEL,
@@ -309,6 +315,18 @@ export interface AppSettings {
    * appears. 0 = no truncation. Default 5000.
    */
   toolOutputMaxChars: number
+  /**
+   * Autonomy mode new sessions start in, for every engine. Defaults to
+   * {@link DEFAULT_AUTONOMY_MODE} ('full' → the classifier-gated `auto`).
+   *
+   * ClaudeUI-owned on purpose. This used to be read straight from
+   * `~/.claude/settings.json permissions.defaultMode`, which meant Claude Code's
+   * config silently governed opencode and pi sessions too, and that changing the
+   * default in ClaudeUI rewrote the user's bare-CLI behaviour. Existing
+   * `defaultMode` values are still honoured — once, as the seed for this
+   * setting — but from then on the two are independent.
+   */
+  defaultAutonomyMode: AutonomyMode
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -343,7 +361,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   logFilter: '',
   mockupConnectAllowlist: '',
   mockupAllowHttp: false,
-  toolOutputMaxChars: 5000
+  toolOutputMaxChars: 5000,
+  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -455,17 +474,44 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   }
 
   const saved = savedSettings as Partial<AppSettings>
+  // Always a fresh object: the normalization below (voiceLanguage validation,
+  // defaultAutonomyMode seeding) MUTATES `settings`, and aliasing the
+  // module-level DEFAULT_SETTINGS here would write those mutations into the
+  // shared constant for the rest of the process.
   const settings: AppSettings =
     Object.keys(saved).length > 0
       ? {
           ...DEFAULT_SETTINGS,
           ...saved
         }
-      : DEFAULT_SETTINGS
+      : { ...DEFAULT_SETTINGS }
 
   // Validate voiceLanguage — unsupported codes (e.g. 'zh' removed in v0.2.97) fall back to 'en'
   if (settings.voiceLanguage && !VOICE_LANGUAGES.some((l) => l.code === settings.voiceLanguage)) {
     settings.voiceLanguage = 'en'
+  }
+
+  // One-time seed of `defaultAutonomyMode` for profiles that predate it.
+  //
+  // Upstream's rule when auto became the default was "pinned defaults are
+  // preserved", and this is where we honour it: a user who had already written
+  // `permissions.defaultMode` keeps that mode; a user who never expressed a
+  // preference adopts the new auto default. Absence of the KEY (not a falsy
+  // value) is what marks a pre-upgrade profile, so a later deliberate pick of
+  // the same mode is never mistaken for "unset" and re-seeded.
+  //
+  // A `defaultMode` we have no session-level equivalent for (`bypassPermissions`,
+  // `dontAsk`) seeds the new default instead. Every such mode is MORE permissive
+  // than classifier-gated auto, so this only ever de-escalates.
+  if (saved.defaultAutonomyMode === undefined) {
+    const pinned = userPermissions?.defaultMode
+      ? PERMISSION_TO_AUTONOMY[userPermissions.defaultMode]
+      : undefined
+    settings.defaultAutonomyMode = pinned ?? DEFAULT_AUTONOMY_MODE
+    // Persist the seed so it happens exactly once — otherwise a later change to
+    // Claude's `defaultMode` would re-seed and silently overwrite the user's
+    // ClaudeUI pick.
+    saveSettings(settings)
   }
 
   applyTheme(settings.theme)
@@ -474,7 +520,8 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
-    defaultPermissionMode: toPermissionMode(userPermissions?.defaultMode),
+    defaultPermissionMode: AUTONOMY_TO_PERMISSION[settings.defaultAutonomyMode],
+    autoModeDisabledBySettings: userPermissions?.disableAutoMode === 'disable',
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -915,12 +962,18 @@ interface SessionState {
   /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
    *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
   piDefaultModel: string
-  /** `~/.claude/settings.json#permissions.defaultMode`, mapped to a renderer
-   *  PermissionMode. A SESSION-BOOTSTRAP concern only: it seeds the mode of
-   *  sessions created from here on. Running sessions keep the mode they were
-   *  spawned with (cli.js re-derives rules on a settings change but never the
-   *  mode) — changing a live session's mode is `setPermissionMode`'s job. */
+  /** `settings.defaultAutonomyMode` mapped to a renderer PermissionMode. A
+   *  SESSION-BOOTSTRAP concern only: it seeds the mode of sessions created from
+   *  here on. Running sessions keep the mode they were spawned with (cli.js
+   *  re-derives rules on a settings change but never the mode) — changing a live
+   *  session's mode is `setPermissionMode`'s job. */
   defaultPermissionMode: PermissionMode
+  /** `~/.claude/settings.json` sets `disableAutoMode: "disable"` (nested under
+   *  `permissions` or top-level — cli.js honours both). Claude sessions must not
+   *  be spawned with `--permission-mode auto` when this is set: cli.js would
+   *  reject it. Claude-only — opencode and pi implement auto themselves and are
+   *  not governed by Claude's settings file. */
+  autoModeDisabledBySettings: boolean
   /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
    *  an opencode provider/default-model change in Settings. */
   modelReloadNonce: number
@@ -1261,7 +1314,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
   piDefaultModel: PI_DEFAULT_MODEL,
+  // Pre-hydration seed only. `hydrate()` overwrites this from
+  // `settings.defaultAutonomyMode` before any session can be created; 'default'
+  // is the conservative placeholder for the window in between.
   defaultPermissionMode: 'default' as PermissionMode,
+  autoModeDisabledBySettings: false,
   modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
@@ -1365,7 +1422,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       // Settings' autonomy-mode pick is a bootstrap default: it applies here,
       // at creation, and nowhere else.
-      const newSession = createEmptySession(cwd, state.defaultPermissionMode)
+      //
+      // Gate 'auto' before it can reach a spawn. With auto as the shipped
+      // default this is load-bearing rather than defensive: on an account or
+      // engine that cannot do auto, `--permission-mode auto` is rejected and the
+      // user watches the mode snap back mid-session. Falling back to 'default'
+      // here means the session simply starts in the mode it can actually run.
+      const autoBlocked =
+        !autoModeAvailableForEngine(engineId, state.availableModels) ||
+        (engineId === 'claude' && state.autoModeDisabledBySettings)
+      const bootstrapMode =
+        state.defaultPermissionMode === 'auto' && autoBlocked ? 'default' : state.defaultPermissionMode
+      const newSession = createEmptySession(cwd, bootstrapMode)
       newSession.selectedEngineId = engineId
       newSession.selectedModel = defaultModel
       // Seed status.engineId/capabilities to match so they're correct before spawn

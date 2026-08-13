@@ -52,11 +52,21 @@ const EMPTY_PERMISSIONS: ClaudePermissions = {
   deny: [],
   ask: [],
   additionalDirectories: [],
-  defaultMode: undefined
+  defaultMode: undefined,
+  disableAutoMode: undefined
 }
 
-function normalizePermissions(raw: unknown): ClaudePermissions {
-  if (!raw || typeof raw !== 'object') return { ...EMPTY_PERMISSIONS }
+/**
+ * @param raw the `permissions` object from a settings file
+ * @param topLevelDisableAutoMode the file's TOP-LEVEL `disableAutoMode`, which
+ *   cli.js honours equivalently to the nested one. The nested value wins when
+ *   both are present; this only fills in.
+ */
+function normalizePermissions(raw: unknown, topLevelDisableAutoMode?: unknown): ClaudePermissions {
+  const topLevel = typeof topLevelDisableAutoMode === 'string' ? topLevelDisableAutoMode : undefined
+  if (!raw || typeof raw !== 'object') {
+    return { ...EMPTY_PERMISSIONS, disableAutoMode: topLevel }
+  }
   const p = raw as Record<string, unknown>
   return {
     allow: Array.isArray(p.allow) ? (p.allow as string[]) : [],
@@ -65,7 +75,8 @@ function normalizePermissions(raw: unknown): ClaudePermissions {
     additionalDirectories: Array.isArray(p.additionalDirectories)
       ? (p.additionalDirectories as string[])
       : [],
-    defaultMode: typeof p.defaultMode === 'string' ? p.defaultMode : undefined
+    defaultMode: typeof p.defaultMode === 'string' ? p.defaultMode : undefined,
+    disableAutoMode: typeof p.disableAutoMode === 'string' ? p.disableAutoMode : topLevel
   }
 }
 
@@ -77,7 +88,7 @@ export function loadClaudePermissions(scope: PermissionScope, cwd?: string): Cla
   const filePath = settingsFilePath(scope, cwd)
   const data = readJsonSafe(filePath)
   if (!data) return { ...EMPTY_PERMISSIONS }
-  return normalizePermissions(data.permissions)
+  return normalizePermissions(data.permissions, data.disableAutoMode)
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +200,23 @@ export function saveClaudePermissions(
   if (permissions.additionalDirectories.length > 0)
     permsObj.additionalDirectories = permissions.additionalDirectories
   if (permissions.defaultMode) permsObj.defaultMode = permissions.defaultMode
+  // Write-back matters: this function rebuilds `permissions` from scratch, so a
+  // key it does not know about is silently dropped on the next permission edit.
+  // `disableAutoMode` is typically admin-authored — losing it would quietly
+  // re-enable auto mode on a machine configured to forbid it.
+  //
+  // Preserved from DISK, not from the argument: the loader normalizes a
+  // top-level `disableAutoMode` into the same field, and echoing that back here
+  // would copy an admin's top-level key down into `permissions`. The UI never
+  // edits this setting, so round-tripping the on-disk nested value verbatim is
+  // both sufficient and the least surprising thing to do to someone's file.
+  const existingPerms =
+    data.permissions && typeof data.permissions === 'object'
+      ? (data.permissions as Record<string, unknown>)
+      : {}
+  if (typeof existingPerms.disableAutoMode === 'string') {
+    permsObj.disableAutoMode = existingPerms.disableAutoMode
+  }
 
   if (Object.keys(permsObj).length === 0) {
     // No permissions at all — remove the key entirely

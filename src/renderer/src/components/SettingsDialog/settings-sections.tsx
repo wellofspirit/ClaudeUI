@@ -38,11 +38,7 @@ import {
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
-import {
-  AUTONOMY_TO_PERMISSION,
-  PERMISSION_TO_AUTONOMY,
-  AUTONOMY_LABELS
-} from '../../../../shared/permission-modes'
+import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -377,38 +373,28 @@ function AccountsSetting(): React.JSX.Element {
 // ── Autonomy mode picker ─────────────────────────────────────────────
 
 export function AutonomyModePicker(): React.JSX.Element {
-  const [perms, setPerms] = useState<ClaudePermissions | null>(null)
   const setDefaultPermissionMode = useSessionStore((s) => s.setDefaultPermissionMode)
+  const currentMode = useSessionStore((s) => s.settings.defaultAutonomyMode)
+  const updateSettings = useSessionStore((s) => s.updateSettings)
   const availableModes = CLAUDE_ENGINE_CAPABILITIES.autonomyModes
 
-  useEffect(() => {
-    window.api
-      .loadClaudePermissions('user')
-      .then(setPerms)
-      .catch(() => {})
-  }, [])
-
-  const currentMode: AutonomyMode = perms?.defaultMode
-    ? (PERMISSION_TO_AUTONOMY[perms.defaultMode] ?? 'ask')
-    : 'ask'
-
-  const handleChange = async (mode: AutonomyMode): Promise<void> => {
-    if (!perms) return
-    const permissionMode = AUTONOMY_TO_PERMISSION[mode]
-    const next: ClaudePermissions = { ...perms, defaultMode: permissionMode }
-    setPerms(next)
-    // `defaultMode` is bootstrap-only for every engine: mirror it into the store
-    // so sessions created later in this run start in it without an app restart.
-    setDefaultPermissionMode(permissionMode)
-    await window.api.saveClaudePermissions('user', next)
+  const handleChange = (mode: AutonomyMode): void => {
+    // ClaudeUI-owned, engine-neutral, and deliberately NOT written back to
+    // `~/.claude/settings.json`: this governs opencode and pi sessions too, and
+    // editing it here should not change how the user's bare `claude` CLI
+    // behaves. Claude's own `defaultMode` is read once, to seed this.
+    updateSettings({ defaultAutonomyMode: mode })
+    // Bootstrap-only for every engine: mirror into the store so sessions created
+    // later in this run start in it without an app restart.
+    setDefaultPermissionMode(AUTONOMY_TO_PERMISSION[mode])
   }
 
   return (
     <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="mb-0.5">Autonomy mode</div>
       <div className="mb-1.5 text-[11px] text-text-muted">
-        Applies to new sessions. Running sessions keep their own mode — change it from the mode
-        control next to the chat input.
+        Applies to new sessions on every engine. Running sessions keep their own mode — change it
+        from the mode control next to the chat input.
       </div>
       <div className="space-y-1">
         {availableModes.map((mode) => (
@@ -421,7 +407,7 @@ export function AutonomyModePicker(): React.JSX.Element {
               name="autonomyMode"
               value={mode}
               checked={currentMode === mode}
-              onChange={() => void handleChange(mode)}
+              onChange={() => handleChange(mode)}
               className="accent-accent"
             />
             <span className="text-[12px] text-text-secondary">{AUTONOMY_LABELS[mode]}</span>

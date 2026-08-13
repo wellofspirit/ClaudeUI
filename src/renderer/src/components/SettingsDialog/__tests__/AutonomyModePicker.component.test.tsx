@@ -1,11 +1,15 @@
 /**
  * Layer 2: Component tests for AutonomyModePicker.
  *
- * The picker writes `permissions.defaultMode` to ~/.claude/settings.json. That
+ * The picker writes the ClaudeUI-owned `settings.defaultAutonomyMode`. That
  * write alone is inert for the current app run: `createNewSession` seeds each
- * session's mode from the STORE, which is hydrated once at boot. So the picker
- * must mirror its choice into `defaultPermissionMode` — otherwise picking
- * "Read-only (Plan)" does nothing until the app is restarted.
+ * session's mode from the STORE's `defaultPermissionMode`, which is hydrated
+ * once at boot. So the picker must mirror its choice there too — otherwise
+ * picking "Read-only (Plan)" does nothing until the app is restarted.
+ *
+ * It must NOT write `~/.claude/settings.json`: this setting governs opencode and
+ * pi sessions as well, and changing it here should not alter how the user's bare
+ * `claude` CLI behaves.
  *
  * It must also not overclaim: the copy has to say this applies to NEW sessions,
  * because running sessions keep the mode they spawned with (cli.js re-derives
@@ -13,62 +17,69 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
-import type { ClaudePermissions } from '../../../../../shared/types'
 import { useSessionStore } from '../../../stores/session-store'
 import { AutonomyModePicker } from '../settings-sections'
 
 const saveClaudePermissions = vi.fn(async () => {})
-let stored: ClaudePermissions
-
-function perms(defaultMode?: string): ClaudePermissions {
-  return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode }
-}
+const saveSettings = vi.fn()
 
 beforeEach(() => {
-  stored = perms()
   saveClaudePermissions.mockClear()
+  saveSettings.mockClear()
   ;(globalThis as any).window.api = {
-    loadClaudePermissions: vi.fn(async () => stored),
-    saveClaudePermissions
+    loadClaudePermissions: vi.fn(async () => ({
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })),
+    saveClaudePermissions,
+    saveSettings
   }
-  useSessionStore.setState({ defaultPermissionMode: 'default' })
+  useSessionStore.setState({
+    defaultPermissionMode: 'default',
+    settings: { ...useSessionStore.getState().settings, defaultAutonomyMode: 'ask' }
+  })
 })
 
 afterEach(cleanup)
 
-async function renderPicker(): Promise<void> {
-  render(<AutonomyModePicker />)
-  await waitFor(() => expect(window.api.loadClaudePermissions).toHaveBeenCalled())
-}
-
 describe('AutonomyModePicker', () => {
-  it('reflects the persisted defaultMode', async () => {
-    stored = perms('acceptEdits')
-    await renderPicker()
+  it('reflects the ClaudeUI setting', () => {
+    useSessionStore.setState({
+      settings: { ...useSessionStore.getState().settings, defaultAutonomyMode: 'autoEdit' }
+    })
+    render(<AutonomyModePicker />)
+    expect(screen.getByDisplayValue('autoEdit')).toHaveProperty('checked', true)
+  })
+
+  it('persists the pick as the ClaudeUI setting', async () => {
+    render(<AutonomyModePicker />)
+    fireEvent.click(screen.getByDisplayValue('plan'))
     await waitFor(() =>
-      expect(screen.getByDisplayValue('autoEdit')).toHaveProperty('checked', true)
+      expect(useSessionStore.getState().settings.defaultAutonomyMode).toBe('plan')
+    )
+    expect(saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultAutonomyMode: 'plan' })
     )
   })
 
-  it('persists the mapped PermissionMode', async () => {
-    await renderPicker()
-    fireEvent.click(screen.getByDisplayValue('plan'))
-    await waitFor(() =>
-      expect(saveClaudePermissions).toHaveBeenCalledWith(
-        'user',
-        expect.objectContaining({ defaultMode: 'plan' })
-      )
-    )
+  it('never writes Claude settings.json', async () => {
+    render(<AutonomyModePicker />)
+    fireEvent.click(screen.getByDisplayValue('full'))
+    await waitFor(() => expect(useSessionStore.getState().defaultPermissionMode).toBe('auto'))
+    expect(saveClaudePermissions).not.toHaveBeenCalled()
   })
 
   it('mirrors the choice into the store so new sessions pick it up this run', async () => {
-    await renderPicker()
+    render(<AutonomyModePicker />)
     fireEvent.click(screen.getByDisplayValue('full'))
     await waitFor(() => expect(useSessionStore.getState().defaultPermissionMode).toBe('auto'))
   })
 
-  it('says the setting applies to new sessions only', async () => {
-    await renderPicker()
+  it('says the setting applies to new sessions only', () => {
+    render(<AutonomyModePicker />)
     const hint = screen.getByTestId('AutonomyModePicker').textContent ?? ''
     expect(hint).toContain('new sessions')
     expect(hint.toLowerCase()).toContain('running sessions')

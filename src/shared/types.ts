@@ -666,6 +666,18 @@ export interface ClaudePermissions {
   ask: string[]
   additionalDirectories: string[]
   defaultMode: string | undefined
+  /**
+   * `"disable"` when this settings scope forbids auto mode outright. cli.js
+   * honours it at both `permissions.disableAutoMode` and the top level
+   * (`disableAutoMode==="disable"||permissions?.disableAutoMode==="disable"`),
+   * so the loader normalizes both into this one field. Any other value — and
+   * absent — means auto is permitted.
+   *
+   * Optional, unlike its siblings: absent and `undefined` mean the same thing
+   * here, so requiring it would only force every construction site to spell out
+   * a value that carries no information.
+   */
+  disableAutoMode?: string | undefined
 }
 
 export type PermissionScope = 'user' | 'project' | 'local'
