@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
-import mermaid from 'mermaid'
 import DOMPurify from 'dompurify'
 import { Highlight, themes } from 'prism-react-renderer'
 import { useSessionStore } from '../../stores/session-store'
@@ -210,6 +209,29 @@ export function sanitizeMermaidSvg(svg: string): string {
 let mermaidIdCounter = 0
 function nextMermaidId(): string {
   return `mermaid-diagram-${++mermaidIdCounter}`
+}
+
+// ---------------------------------------------------------------------------
+// Lazy mermaid core loader
+// ---------------------------------------------------------------------------
+
+let mermaidLoad: Promise<(typeof import('mermaid'))['default']> | null = null
+
+/**
+ * Memoized dynamic import: mermaid core (~490 kB min) loads on the first
+ * diagram render, not at app startup. A failed fetch (flaky tunnel on the web
+ * client) resets the memo so the next diagram retries instead of caching the
+ * rejection forever.
+ */
+function loadMermaid(): Promise<(typeof import('mermaid'))['default']> {
+  mermaidLoad ??= import('mermaid').then(
+    (m) => m.default,
+    (err) => {
+      mermaidLoad = null
+      throw err
+    }
+  )
+  return mermaidLoad
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +630,9 @@ export const MermaidDiagram = memo(function MermaidDiagram({
 
     async function render(): Promise<void> {
       try {
+        const mermaid = await loadMermaid()
+        if (cancelled) return
+
         mermaid.initialize({
           startOnLoad: false,
           // 'antiscript' (not 'strict') so HTML labels render: <br/> line breaks,
