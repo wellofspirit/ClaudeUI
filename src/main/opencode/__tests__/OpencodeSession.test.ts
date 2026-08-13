@@ -186,6 +186,7 @@ import { OpencodeSession } from '../OpencodeSession'
 import { closeDb, getUsageEventByMessageId } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'
 import type { BrowserWindow } from 'electron'
+import type { QueuedItem } from '../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -859,6 +860,19 @@ describe('OpencodeSession — capabilities', () => {
 /** Resolve when the abort signal fires (or immediately if already aborted). Used
  *  to keep mocked SSE streams open for the session's lifetime, mirroring the real
  *  opencode subscription (which never spontaneously returns). */
+/**
+ * Texts of every queue item that reached `consumed` in this window's
+ * `session:queue-changed` broadcasts (ADR-053) — the delivery ack that replaced
+ * `session:steer-consumed`.
+ */
+function consumedTexts(win: MockWindow): string[] {
+  return win.webContents.send.mock.calls
+    .filter((c) => c[0] === 'session:queue-changed')
+    .flatMap((c) => (c[2] as { items: QueuedItem[] }).items)
+    .filter((item) => item.state === 'consumed')
+    .map((item) => item.text)
+}
+
 function parkUntilAborted(signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     if (signal?.aborted) return resolve()
@@ -2687,7 +2701,7 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     session.dispose()
   })
 
-  it('busy → steer: calls sendPrompt/promptAsync (coalesce), emits session:steer-consumed, does NOT call createSession again', async () => {
+  it('busy → steer: calls sendPrompt/promptAsync (coalesce), does NOT call createSession again', async () => {
     const { session, win } = await startTurn()
 
     // Clear the calls from the initial turn so we only count the steer's
@@ -2707,11 +2721,8 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     // Must NOT create a new opencode session
     expect(mockCreateSession).not.toHaveBeenCalled()
 
-    // Must emit session:steer-consumed with the exact Claude-matching payload
-    const calls = win.webContents.send.mock.calls
-    const steerCall = calls.find((c) => c[0] === 'session:steer-consumed')
-    expect(steerCall).toBeDefined()
-    expect(steerCall![2]).toEqual({ prompt: 'mid-turn steer' })
+    // The delivery ACK is the queue's `consumed` transition now (ADR-053) —
+    // covered by the "queue of record" and M-OC9 describes below.
 
     session.dispose()
   })
@@ -2727,25 +2738,26 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     session.dispose()
   })
 
-  it('two consecutive mid-turn sends → two promptAsync posts + two steer-consumed emits', async () => {
+  it('two consecutive mid-turn sends → two promptAsync posts + two consumed items', async () => {
     const { session, win } = await startTurn()
 
     mockPromptAsync.mockClear()
     win.webContents.send.mockClear()
 
+    // Queue both, then deliver them the way flushQueuedItems does. Each
+    // delivery consumes ITS OWN item — the whole point of itemization.
+    session.enqueuePrompt('steer A')
+    session.enqueuePrompt('steer B')
     await session.run('steer A')
     await session.run('steer B')
 
     expect(mockPromptAsync).toHaveBeenCalledTimes(2)
-    const steerCalls = win.webContents.send.mock.calls.filter((c) => c[0] === 'session:steer-consumed')
-    expect(steerCalls).toHaveLength(2)
-    expect(steerCalls[0]![2]).toEqual({ prompt: 'steer A' })
-    expect(steerCalls[1]![2]).toEqual({ prompt: 'steer B' })
+    expect(consumedTexts(win)).toEqual(['steer A', 'steer B'])
 
     session.dispose()
   })
 
-  it('/known-command sent mid-turn still routes via runCommand (sendPrompt reuse) and emits steer-consumed', async () => {
+  it('/known-command sent mid-turn still routes via runCommand (sendPrompt reuse) and consumes its item', async () => {
     // Seed knownCommandNames via run(null) before starting the turn
     mockListCommands.mockResolvedValue([{ name: 'review', description: 'Review', template: '/review' }])
     mockListSkills.mockResolvedValue([])
@@ -2770,6 +2782,7 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     ;(win as unknown as MockWindow).webContents.send.mockClear()
 
     // Mid-turn steer with a known slash command
+    session.enqueuePrompt('/review this pr')
     await session.run('/review this pr')
 
     expect(mockRunCommand).toHaveBeenCalledWith(
@@ -2778,11 +2791,9 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     )
     expect(mockPromptAsync).not.toHaveBeenCalled()
 
-    const steerCalls = (win as unknown as MockWindow).webContents.send.mock.calls.filter(
-      (c) => c[0] === 'session:steer-consumed'
-    )
-    expect(steerCalls).toHaveLength(1)
-    expect(steerCalls[0]![2]).toEqual({ prompt: '/review this pr' })
+    // The ack fires on the runCommand branch too — text correlation matches the
+    // raw prompt, not the parsed command.
+    expect(consumedTexts(win as unknown as MockWindow)).toEqual(['/review this pr'])
 
     session.dispose()
   })
@@ -4628,7 +4639,7 @@ describe('OpencodeSession — dead SSE recovery (H20)', () => {
 describe('OpencodeSession — steer delivery (M-OC9)', () => {
   beforeEach(setupMocks)
 
-  it('a failed steer send does NOT emit session:steer-consumed and surfaces session:error', async () => {
+  it('a failed steer send does NOT consume the queued item and surfaces session:error', async () => {
     const win = new MockWindow() as unknown as BrowserWindow
     // Parking stream keeps isProcessing=true so the second run() steers.
     mockSubscribeEvents.mockImplementation(parkingStream)
@@ -4636,14 +4647,17 @@ describe('OpencodeSession — steer delivery (M-OC9)', () => {
     await session.run('initial') // establishes client + openSessionId; isProcessing stays true
     expect(session.status.state).toBe('running')
 
+    session.enqueuePrompt('steer that never lands')
     ;(win as unknown as MockWindow).webContents.send.mockClear()
     // The steer's send fails (server gone).
     mockPromptAsync.mockRejectedValueOnce(new Error('server gone'))
     await session.run('steer that never lands')
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(false)
+    expect(consumedTexts(win as unknown as MockWindow)).toEqual([])
     expect(calls.some((c) => c[0] === 'session:error')).toBe(true)
+    // Still recallable — an undelivered item must never be silently dropped.
+    expect(session.queuedItems.map((i) => i.text)).toEqual(['steer that never lands'])
     // The undelivered message is not retained in local history.
     const userMsgs = session.getMessages().filter((m) => m.role === 'user')
     expect(userMsgs.some((m) => m.content.some((b) => b.type === 'text' && b.text === 'steer that never lands'))).toBe(false)
@@ -4651,18 +4665,140 @@ describe('OpencodeSession — steer delivery (M-OC9)', () => {
     session.dispose()
   })
 
-  it('a successful steer send DOES emit session:steer-consumed', async () => {
+  it('a successful steer send DOES consume the queued item', async () => {
     const win = new MockWindow() as unknown as BrowserWindow
     mockSubscribeEvents.mockImplementation(parkingStream)
     const session = new OpencodeSession('r_oc9_ok', win, '/tmp')
     await session.run('initial')
+    session.enqueuePrompt('steer that lands')
     ;(win as unknown as MockWindow).webContents.send.mockClear()
     await session.run('steer that lands')
 
-    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    expect(calls.some((c) => c[0] === 'session:steer-consumed')).toBe(true)
+    expect(consumedTexts(win as unknown as MockWindow)).toEqual(['steer that lands'])
+    expect(session.queuedItems).toEqual([])
 
     session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Queue of record (ADR-053 / SyncCore phase 3).
+//
+// opencode commits-on-post: a steer is unrecallable the instant it lands, so
+// pre-fix the card offered a take-back with a zero-length window. Core now
+// HOLDS the item and forwards it at the next observed sub-turn boundary, which
+// is what buys a real cancel window.
+// ---------------------------------------------------------------------------
+
+/** A stream the test drives event-by-event; parks between pushes. */
+function pushableStream(): {
+  impl: (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent>
+  push: (ev: OpencodeEvent) => void
+} {
+  const pending: OpencodeEvent[] = []
+  let wake: (() => void) | null = null
+  return {
+    impl: async function* (signal?: AbortSignal) {
+      for (;;) {
+        while (pending.length > 0) yield pending.shift()!
+        await Promise.race([
+          new Promise<void>((r) => {
+            wake = r
+          }),
+          parkUntilAborted(signal)
+        ])
+        if (signal?.aborted) return
+      }
+    },
+    push: (ev) => {
+      pending.push(ev)
+      wake?.()
+      wake = null
+    }
+  }
+}
+
+describe('OpencodeSession — queue of record (ADR-053)', () => {
+  beforeEach(setupMocks)
+
+  const SES_Q = 'ses_queue'
+
+  async function startBusy(routingId: string): Promise<{
+    session: OpencodeSession
+    win: MockWindow
+    push: (ev: OpencodeEvent) => void
+  }> {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockCreateSession.mockResolvedValue({ id: SES_Q })
+    const stream = pushableStream()
+    mockSubscribeEvents.mockImplementation(stream.impl)
+    const session = new OpencodeSession(routingId, win, '/tmp/queue-cwd')
+    await session.run('initial')
+    expect(session.willQueue).toBe(true)
+    mockPromptAsync.mockClear()
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    return { session, win: win as unknown as MockWindow, push: stream.push }
+  }
+
+  it('enqueue while busy HOLDS — nothing reaches the engine until a boundary', async () => {
+    const { session, win, push } = await startBusy('r_q_hold')
+
+    session.enqueuePrompt('held until a boundary')
+
+    // The whole point: NOT posted at keypress (pre-ADR-053 it was).
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    expect(session.queuedItems.map((i) => i.text)).toEqual(['held until a boundary'])
+
+    // Turn end is a boundary: the item forwards as the next turn's prompt.
+    push({ id: 'q1', type: 'session.idle', properties: { sessionID: SES_Q } } as OpencodeEvent)
+    await vi.waitFor(() => expect(mockPromptAsync).toHaveBeenCalledTimes(1))
+    expect(mockPromptAsync).toHaveBeenCalledWith(
+      SES_Q,
+      expect.objectContaining({
+        parts: expect.arrayContaining([{ type: 'text', text: 'held until a boundary' }])
+      })
+    )
+    await vi.waitFor(() => expect(consumedTexts(win)).toEqual(['held until a boundary']))
+    expect(session.queuedItems).toEqual([])
+
+    session.dispose()
+  })
+
+  it('recall before the boundary is guaranteed — the engine is never called', async () => {
+    const { session, win, push } = await startBusy('r_q_recall')
+
+    session.enqueuePrompt('taken back')
+    const result = await session.recallQueued()
+
+    expect(result).toEqual({ recalled: ['taken back'], notRecalled: 0 })
+    expect(session.queuedItems).toEqual([])
+    const last = win.webContents.send.mock.calls
+      .filter((c) => c[0] === 'session:queue-changed')
+      .map((c) => (c[2] as { items: QueuedItem[] }).items)
+      .at(-1)!
+    expect(last.map((i) => [i.text, i.state])).toEqual([['taken back', 'recalled']])
+
+    // The boundary arrives — a recalled item must never be forwarded.
+    push({ id: 'q1', type: 'session.idle', properties: { sessionID: SES_Q } } as OpencodeEvent)
+    await new Promise<void>((r) => setTimeout(r, 10))
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    expect(consumedTexts(win)).toEqual([])
+
+    session.dispose()
+  })
+
+  it('an engine loss recalls whatever is still held', async () => {
+    const { session, win } = await startBusy('r_q_death')
+
+    session.enqueuePrompt('orphaned')
+    session.cancel()
+
+    const last = win.webContents.send.mock.calls
+      .filter((c) => c[0] === 'session:queue-changed')
+      .map((c) => (c[2] as { items: QueuedItem[] }).items)
+      .at(-1)!
+    expect(last.map((i) => [i.text, i.state])).toEqual([['orphaned', 'recalled']])
+    expect(session.queuedItems).toEqual([])
   })
 })
 

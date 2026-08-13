@@ -95,7 +95,7 @@ beforeEach(() => {
         reasoningVariant: null,
         statusLine: null,
         metering: null,
-        queuedText: '',
+        queuedItems: [],
         draftText: '',
         draftAttachments: [],
         selectedModel: 'default',

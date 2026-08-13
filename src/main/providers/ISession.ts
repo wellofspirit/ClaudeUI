@@ -3,6 +3,7 @@ import type {
   EngineId,
   ApprovalDecision,
   PermissionSuggestion,
+  QueuedItem,
   SkillInfo,
   SandboxSettings
 } from '../../shared/types'
@@ -34,6 +35,28 @@ export interface ISession {
     prompt: string | null,
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void>
+
+  /** Queue of record (ADR-053): items still awaiting consumption, oldest first. */
+  readonly queuedItems: QueuedItem[]
+
+  /**
+   * Queue a prompt that arrived while the session was busy. Implemented once in
+   * BaseSession for every engine; the only per-engine difference is WHEN the
+   * item reaches the engine (claude pushes into cli.js's native queue
+   * immediately, opencode/pi hold until the next sub-turn boundary).
+   */
+  enqueuePrompt(
+    text: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): void
+
+  /**
+   * Take back every still-recallable queued item, oldest first. `recalled`
+   * carries their texts in queue order (the client joins them with `\n`);
+   * `notRecalled` counts items the engine had already started consuming —
+   * those are left untouched and arrive as chat messages shortly after.
+   */
+  recallQueued(): Promise<{ recalled: string[]; notRecalled: number }>
 
   /** Interrupt the current turn without killing the session. */
   interrupt(): Promise<void>
@@ -77,8 +100,10 @@ export interface ISession {
   stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
   backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
 
-  /** Message-queue dequeue. Claude-only; no capability flag gates it — the
-   *  absence of the method is the gate (opencode has no dequeue). */
+  /** Per-item dequeue against the ENGINE's own queue. Claude-only; no capability
+   *  flag gates it — the absence of the method is the gate (opencode/pi hold
+   *  their items core-side instead, so they need nothing here). Used by
+   *  ClaudeSession's `tryRecallQueuedItem`, never called directly by IPC. */
   dequeueMessage?(value: string): Promise<{ removed: number }>
 
   /** Voice input (gated by capabilities.voice). */

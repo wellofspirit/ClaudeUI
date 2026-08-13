@@ -692,7 +692,9 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     `capabilities.queue` only — `capabilities.steer` is read nowhere in the
  *     renderer, it is a pure ADR-030 honesty/documentation flag), and the
  *     renderer's queued-message UI resolves identically either way via the
- *     engine-neutral `session:steer-consumed` ack.
+ *     engine-neutral queue of record (ADR-053: core holds the item and forwards
+ *     it as a `steer` at the next sub-turn boundary, then broadcasts the
+ *     `consumed` transition on `session:queue-changed`).
  *   - slashCommands:true, skills:true → SHIPPED in M2b via `get_commands`
  *     (doStart(), once per spawn): emits `session:slash-commands` (all
  *     non-temporary-scope entries, '/'-prefixed) and `session:skills` (source

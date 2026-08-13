@@ -5,7 +5,7 @@
  * the store-side behaviors that InputBox depends on:
  *
  *   - createNewSession + markSdkActive lifecycle
- *   - setQueuedText accumulation and consumeQueuedText flush
+ *   - setQueueState accumulation and consumed-item flush (ADR-053)
  *   - setDraftText / clearance semantics
  *   - appendVoiceTranscript (final vs interim)
  *   - setBtwQuestion / setBtwResponse BTW side-question flow
@@ -20,6 +20,7 @@ import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
+import type { QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
 
 // ---------------------------------------------------------------------------
@@ -122,69 +123,84 @@ describe('session lifecycle — createNewSession + markSdkActive', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Queue text — what InputBox does for 'queue-prompt'
+// Queue of record (ADR-053) — what InputBox displays for 'queue-prompt'
 // ---------------------------------------------------------------------------
 
-describe('setQueuedText — queue-prompt accumulation', () => {
-  it('sets queued text for an idle session', () => {
+const queued = (itemId: string, text: string): QueuedItem => ({ itemId, text, state: 'queued' })
+
+describe('setQueueState — queued-item accumulation', () => {
+  it('holds a single queued item for an idle session', () => {
     setupSession()
-    useSessionStore.getState().setQueuedText(ROUTE, 'first message')
-    expect(useSessionStore.getState().sessions[ROUTE].queuedText).toBe('first message')
+    useSessionStore.getState().setQueueState(ROUTE, [queued('i1', 'first message')])
+    expect(useSessionStore.getState().sessions[ROUTE].queuedItems.map((i) => i.text)).toEqual([
+      'first message'
+    ])
   })
 
-  it('appends with newline separator when called a second time', () => {
+  it('keeps items separate and in order (the client joins them, storage never does)', () => {
     setupSession()
-    useSessionStore.getState().setQueuedText(ROUTE, 'first')
-    useSessionStore.getState().setQueuedText(ROUTE, 'second')
-    expect(useSessionStore.getState().sessions[ROUTE].queuedText).toBe('first\nsecond')
+    useSessionStore
+      .getState()
+      .setQueueState(ROUTE, [queued('i1', 'first'), queued('i2', 'second')])
+    const items = useSessionStore.getState().sessions[ROUTE].queuedItems
+    expect(items.map((i) => i.text)).toEqual(['first', 'second'])
+    expect(items.map((i) => i.text).join('\n')).toBe('first\nsecond')
   })
 
-  it('appends further messages correctly', () => {
+  it('replaces the list wholesale — the broadcast is the full queue', () => {
     setupSession()
-    useSessionStore.getState().setQueuedText(ROUTE, 'a')
-    useSessionStore.getState().setQueuedText(ROUTE, 'b')
-    useSessionStore.getState().setQueuedText(ROUTE, 'c')
-    expect(useSessionStore.getState().sessions[ROUTE].queuedText).toBe('a\nb\nc')
+    const store = useSessionStore.getState()
+    store.setQueueState(ROUTE, [queued('i1', 'a'), queued('i2', 'b'), queued('i3', 'c')])
+    store.setQueueState(ROUTE, [queued('i3', 'c')])
+    expect(useSessionStore.getState().sessions[ROUTE].queuedItems.map((i) => i.text)).toEqual(['c'])
   })
 
   it('does nothing when the routingId session does not exist', () => {
     // No session created — should not throw
-    useSessionStore.getState().setQueuedText('nonexistent', 'oops')
+    useSessionStore.getState().setQueueState('nonexistent', [queued('i1', 'oops')])
     expect(useSessionStore.getState().sessions['nonexistent']).toBeUndefined()
   })
 })
 
-describe('consumeQueuedText — flush to messages on turn end', () => {
-  it('adds a user message with queued text and clears queuedText', () => {
+describe('setQueueState — consumed items flush to messages', () => {
+  it('appends a user message for a consumed item and drops it from the card', () => {
     setupSession()
-    useSessionStore.getState().setQueuedText(ROUTE, 'queued prompt')
-    useSessionStore.getState().consumeQueuedText(ROUTE)
+    const store = useSessionStore.getState()
+    store.setQueueState(ROUTE, [queued('i1', 'queued prompt')])
+    store.setQueueState(ROUTE, [{ itemId: 'i1', text: 'queued prompt', state: 'consumed' }])
 
     const session = useSessionStore.getState().sessions[ROUTE]
-    expect(session.queuedText).toBe('')
+    expect(session.queuedItems).toEqual([])
     const lastMsg = session.messages[session.messages.length - 1]
+    expect(lastMsg.id).toBe('steer-i1')
     expect(lastMsg.role).toBe('user')
     expect(lastMsg.content[0]).toMatchObject({ type: 'text', text: 'queued prompt' })
   })
 
-  it('does nothing when queuedText is empty', () => {
+  it('does nothing when the payload holds no consumed items', () => {
     setupSession()
     const before = useSessionStore.getState().sessions[ROUTE].messages.length
-    useSessionStore.getState().consumeQueuedText(ROUTE)
+    useSessionStore.getState().setQueueState(ROUTE, [])
     const after = useSessionStore.getState().sessions[ROUTE].messages.length
     expect(after).toBe(before)
   })
 
-  it('clears queuedText even when multiple entries were accumulated', () => {
+  it('flushes multiple accumulated items as SEPARATE messages, not one blob', () => {
     setupSession()
-    useSessionStore.getState().setQueuedText(ROUTE, 'first')
-    useSessionStore.getState().setQueuedText(ROUTE, 'second')
-    useSessionStore.getState().consumeQueuedText(ROUTE)
+    const store = useSessionStore.getState()
+    store.setQueueState(ROUTE, [queued('i1', 'first'), queued('i2', 'second')])
+    store.setQueueState(ROUTE, [
+      { itemId: 'i1', text: 'first', state: 'consumed' },
+      { itemId: 'i2', text: 'second', state: 'consumed' }
+    ])
 
     const session = useSessionStore.getState().sessions[ROUTE]
-    expect(session.queuedText).toBe('')
-    const lastMsg = session.messages[session.messages.length - 1]
-    expect(lastMsg.content[0]).toMatchObject({ type: 'text', text: 'first\nsecond' })
+    expect(session.queuedItems).toEqual([])
+    const texts = session.messages.slice(-2).map((m) => m.content[0])
+    expect(texts).toEqual([
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' }
+    ])
   })
 })
 

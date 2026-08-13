@@ -469,8 +469,9 @@ export class OpencodeSession extends BaseSession {
 
     // ── Steer path: prompt arriving mid-turn coalesces into the running opencode
     // loop. We post immediately — opencode's
-    // runLoop re-reads the message list each step and picks it up — then emit
-    // session:steer-consumed so the renderer moves the queued card into chat.
+    // runLoop re-reads the message list each step and picks it up — then ack it
+    // so a queued item (ADR-053) transitions to `consumed` and the renderer
+    // moves the card into chat.
     // We do NOT touch isProcessing / startTimeMs / createSession / ensureSSEConsumer /
     // applyPermissionMode — the ongoing turn already owns all of that.
     if (this.isProcessing && this.client && this.openSessionId) {
@@ -484,10 +485,10 @@ export class OpencodeSession extends BaseSession {
       try {
         await this.sendPrompt(prompt, attachments)
       } catch (err) {
-        // The steer was NOT delivered. Emitting session:steer-consumed here
-        // (the pre-fix behavior) told the renderer the message was sent while it
-        // silently vanished (M-OC9). Roll back the optimistic history push and
-        // surface the failure instead — do NOT consume the message.
+        // The steer was NOT delivered. Acking here (the pre-fix behavior) told
+        // the renderer the message was sent while it silently vanished (M-OC9).
+        // Roll back the optimistic history push and surface the failure instead
+        // — do NOT consume the message.
         logger.warn(
           'OpencodeSession',
           `steer send failed: ${err instanceof Error ? err.message : String(err)}`
@@ -496,7 +497,7 @@ export class OpencodeSession extends BaseSession {
         this.send('session:error', err instanceof Error ? err.message : String(err))
         return
       }
-      this.send('session:steer-consumed', { prompt })
+      this.onPromptDelivered(prompt)
       return
     }
 
@@ -557,6 +558,9 @@ export class OpencodeSession extends BaseSession {
       // 6. Send prompt — route slash commands to runCommand when the name is known
       this.startTimeMs = Date.now()
       await this.sendPrompt(prompt, attachments)
+      // Reached the engine. A no-op unless this run() was a queue flush at the
+      // previous turn's end (ADR-053) — then it consumes the forwarded item.
+      this.onPromptDelivered(prompt)
     } catch (err) {
       logger.error('OpencodeSession', `run() error: ${err instanceof Error ? err.message : String(err)}`)
       this.isProcessing = false
@@ -805,6 +809,8 @@ export class OpencodeSession extends BaseSession {
       this.conn = null
       this.client = null
     }
+    // No engine left to forward held items to (ADR-053 §engine death).
+    this.recallQueuedOnEngineLoss()
     this.sendStatus()
   }
 
@@ -1034,6 +1040,9 @@ export class OpencodeSession extends BaseSession {
 
         // Check for newly completed tool parts in the accumulator
         const acc = this.accumulators.get(msg.id)
+        // ADR-053 sub-turn boundary: a tool call of THIS turn just finished, so
+        // held queue items may now be forwarded (see the flush below).
+        let toolCompleted = false
         if (acc) {
           for (const [partId, snap] of acc.parts) {
             const cacheKey = `${msg.id}:${partId}`
@@ -1041,6 +1050,7 @@ export class OpencodeSession extends BaseSession {
               const toolRes = extractToolResult(partId, snap)
               if (toolRes) {
                 this.emittedToolResults.add(cacheKey)
+                toolCompleted = true
                 // Phase 3: the classifier's `{"outcome":…}` annotation for this
                 // call. Recorded HERE rather than derived from messageHistory at
                 // classify time because live assistant messages carry no
@@ -1077,6 +1087,7 @@ export class OpencodeSession extends BaseSession {
             }
           }
         }
+        if (toolCompleted) void this.flushQueuedItems()
         break
       }
 
@@ -1143,6 +1154,10 @@ export class OpencodeSession extends BaseSession {
         this.send('session:result', { ...output.result, totalCostUsd: this.totalCostUsd })
         this.sendStatus()
         this.resetInactivityTimer()
+        // ADR-053: turn end is also a boundary — anything still held forwards
+        // now, as the next turn's prompt (isProcessing is already false, so
+        // run() takes the fresh-turn path rather than the steer path).
+        void this.flushQueuedItems()
         break
 
       case 'cost_update':
@@ -1279,6 +1294,8 @@ export class OpencodeSession extends BaseSession {
       this.conn = null
       this.client = null
     }
+    // Nothing left to serve the queue (ADR-053 §engine death).
+    this.recallQueuedOnEngineLoss()
     this.sendStatus()
   }
 

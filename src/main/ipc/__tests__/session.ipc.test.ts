@@ -60,6 +60,9 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
     dequeueMessage: vi.fn(async () => ({ removed: 0 })),
+    queuedItems: [],
+    enqueuePrompt: vi.fn(),
+    recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 })),
     askSideQuestion: vi.fn(async () => null),
     setPermissionMode: vi.fn(async () => {}),
     setModel: vi.fn(async () => {}),
@@ -425,7 +428,22 @@ describe('session.ipc', () => {
       await harness.call('session:send', 'rid-1', 'hello')
       expect(events).toHaveLength(1)
       expect(events[0][0]).toBe('rid-1')
-      expect(events[0][1]).toMatchObject({ prompt: 'hello', queued: false })
+      expect(events[0][1]).toMatchObject({ prompt: 'hello' })
+    })
+
+    // ADR-053 — a send that queues is the queue's business, not the
+    // transcript's: no session:user-message, and the item goes to the session.
+    it('session:send on a busy session enqueues instead of broadcasting', async () => {
+      const events: any[] = []
+      harness.onEvent('session:user-message', (...args) => events.push(args))
+      sessionStub.willQueue = true
+      try {
+        await harness.call('session:send', 'rid-1', 'queued one')
+      } finally {
+        sessionStub.willQueue = false
+      }
+      expect(events).toHaveLength(0)
+      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('queued one', undefined)
     })
 
     it('session:send throws when routingId not found', async () => {
@@ -786,7 +804,12 @@ describe('session.ipc', () => {
         run: vi.fn(),
         resolveApproval: vi.fn(),
         setPermissionMode: vi.fn(async () => {}),
-        setModel: vi.fn(async () => {})
+        setModel: vi.fn(async () => {}),
+        // Required ISession members (BaseSession implements them for every
+        // engine), so a "minimal" engine still has them.
+        queuedItems: [],
+        enqueuePrompt: vi.fn(),
+        recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 }))
         // Deliberately no optional members: no watchBackground, stopTask,
         // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
         // mcpToggleServer, setEffort, etc.

@@ -161,9 +161,9 @@ export function useClaudeEvents(): void {
         // An SDK session was created — mark it active
         store.markSdkActive(routingId)
       }),
-      // User message relayed by the server (the single source of truth for user messages).
-      // When queued (sent while session is running), store as queuedText instead of adding
-      // to the chat stream — the message will appear in chat when actually consumed by cli.js.
+      // User message relayed by the server (the single source of truth for user
+      // messages). Non-queued sends ONLY — a send that queues rides
+      // session:queue-changed instead (ADR-053).
       window.api.onUserMessage((routingId, data) => {
         // Resolve a possibly-stale (pre-rekey) id to the canonical session id at
         // the event boundary so every handler targets the same session across a
@@ -171,19 +171,20 @@ export function useClaudeEvents(): void {
         routingId = resolveRoutingId(routingId)
         const store = useSessionStore.getState()
         if (!store.sessions[routingId]) return
-        if (data.queued) {
-          store.setQueuedText(routingId, data.prompt)
-        } else {
-          store.addUserMessage(
-            routingId,
-            // crypto.randomUUID (not Date.now) so two user messages within the
-            // same ms can't collide into a duplicate React key (Low).
-            `msg-${crypto.randomUUID()}`,
-            data.prompt,
-            undefined,
-            data.attachments
-          )
-        }
+        store.addUserMessage(
+          routingId,
+          // crypto.randomUUID (not Date.now) so two user messages within the
+          // same ms can't collide into a duplicate React key (Low).
+          `msg-${crypto.randomUUID()}`,
+          data.prompt,
+          undefined,
+          data.attachments
+        )
+      }),
+      // Queue of record (ADR-053): the full item list for a session. Idempotent
+      // — the store keys consumed-item synthesis on `steer-${itemId}`.
+      window.api.onQueueChanged((routingId, data) => {
+        useSessionStore.getState().setQueueState(resolveRoutingId(routingId), data.items)
       }),
       window.api.onMessage((routingId, msg) => {
         routingId = resolveRoutingId(routingId)
@@ -239,30 +240,23 @@ export function useClaudeEvents(): void {
           }
         }
 
-        const priorState = useSessionStore.getState().sessions[effectiveRoutingId]?.status.state
-
         if (status.state === 'disconnected') {
           useSessionStore.getState().markSdkInactive(effectiveRoutingId)
           setStatus(effectiveRoutingId, { ...status, state: 'idle' })
           clearPendingApprovals(effectiveRoutingId)
-          if (priorState === 'running') {
-            useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
-          }
+          // No queue fallback here: queue transitions are event-driven only
+          // (ADR-053 / ADR-038). The session's own disconnect path recalls
+          // whatever it still holds and broadcasts it.
           return
         }
         setStatus(effectiveRoutingId, status)
-        if (status.state === 'idle') {
-          // Do NOT clear pending approvals here: background subagents (Task
-          // tool) outlive the parent turn's `result`, and their can_use_tool
-          // requests may arrive — or remain unresolved — after cli.js reports
-          // idle. Card removal is driven exclusively by explicit events
-          // (session:approval-dismiss, tool_result matching via
-          // removePendingApprovalByToolUse, or the user's own resolution),
-          // never inferred from turn state.
-          if (priorState === 'running') {
-            useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
-          }
-        }
+        // Nothing is inferred from the running→idle edge. Pending approvals are
+        // NOT cleared here: background subagents (Task tool) outlive the parent
+        // turn's `result`, and their can_use_tool requests may arrive — or
+        // remain unresolved — after cli.js reports idle. Queued items are NOT
+        // consumed here either (ADR-053): the old fallback painted them into
+        // the transcript whether or not the engine ever ran them. Both are
+        // driven exclusively by explicit events.
         // Clear attention when a new turn starts
         if (status.state === 'running') {
           useSessionStore.getState().setNeedsAttention(effectiveRoutingId, false)
@@ -463,9 +457,6 @@ export function useClaudeEvents(): void {
       }),
       window.api.onSandboxViolation((routingId, message) => {
         addSandboxViolation(resolveRoutingId(routingId), message)
-      }),
-      window.api.onSteerConsumed((routingId) => {
-        useSessionStore.getState().consumeQueuedText(resolveRoutingId(routingId))
       }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
         routingId = resolveRoutingId(routingId)

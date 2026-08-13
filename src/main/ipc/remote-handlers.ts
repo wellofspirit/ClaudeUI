@@ -74,6 +74,7 @@ import {
   stopTask,
   backgroundTask,
   dequeueMessage,
+  recallQueued,
   askSideQuestion,
   setPermissionMode,
   setEffort,
@@ -436,6 +437,15 @@ export function registerRemoteHandlers(
       backgroundTask(manager, routingId, toolUseId)
   })
 
+  handleRemote({
+    channel: 'session:recall-queued',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.
   handleRemote({
     channel: 'session:dequeue-message',
     capability: 'chat',

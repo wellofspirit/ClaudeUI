@@ -302,6 +302,9 @@ const sessionStub: any = {
   stopTask: vi.fn(async () => ({ success: true })),
   backgroundTask: vi.fn(async () => ({ success: true })),
   dequeueMessage: vi.fn(async () => ({ removed: 1 })),
+  queuedItems: [],
+  enqueuePrompt: vi.fn(),
+  recallQueued: vi.fn(async () => ({ recalled: ['a'], notRecalled: 0 })),
   setPermissionMode: vi.fn(async () => {}),
   setModel: vi.fn(async () => {}),
   setEffort: vi.fn(),
@@ -475,7 +478,23 @@ describe('registerRemoteHandlers', () => {
     expect(win.webContents.send).toHaveBeenCalledWith(
       'session:user-message',
       'rid-1',
-      expect.objectContaining({ prompt: 'hi', queued: false })
+      expect.objectContaining({ prompt: 'hi' })
+    )
+  })
+
+  // ADR-053 — a queued send produces a queue item, never a user-message relay.
+  it('session:send on a busy session enqueues instead of broadcasting', async () => {
+    sessionStub.willQueue = true
+    try {
+      await dispatcher.handle(makeRequest('session:send', 'rid-1', 'later'), remoteConn)
+    } finally {
+      sessionStub.willQueue = false
+    }
+    expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('later', undefined)
+    expect(win.webContents.send).not.toHaveBeenCalledWith(
+      'session:user-message',
+      'rid-1',
+      expect.anything()
     )
   })
 
@@ -1111,6 +1130,11 @@ describe('registerRemoteHandlers', () => {
 // registry after the real registrars, so it fails on a channel that silently
 // gained or lost remote reachability — including via a capability change,
 // since every listed channel must also resolve under the legacy grant set.
+//
+// Later phases add to this list ONLY with a deliberate, reviewed entry:
+//   - `session:recall-queued` (phase 3 / ADR-053) — the itemized replacement
+//     for `session:dequeue-message`, same `chat` capability as the channel it
+//     supersedes, so the effective remote surface is unchanged in substance.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1185,6 +1209,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:load-pi-history',
   'session:load-subagent-history',
   'session:read-background-range',
+  'session:recall-queued',
   'session:rekey',
   'session:remove-opencode-provider',
   'session:resolve-fork-anchor',

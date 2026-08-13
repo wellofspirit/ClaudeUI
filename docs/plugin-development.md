@@ -501,7 +501,7 @@ These events fire for every active Claude session. All handlers receive a single
 | `session:team-created`         | `{ teamName }`                                 | Team created                              |
 | `session:team-deleted`         | `{}`                                           | Team deleted                              |
 | `session:sandbox-violation`    | `string`                                       | Sandbox violation detected                |
-| `session:steer-consumed`       | `{ prompt }`                                   | Steer/queue command consumed              |
+| `session:queue-changed`        | `{ items: QueuedItem[] }`                      | Queue of record changed (ADR-053) — full list, idempotent |
 
 **Example — listening to all assistant messages:**
 

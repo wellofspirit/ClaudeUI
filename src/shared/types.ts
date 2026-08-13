@@ -733,6 +733,22 @@ export interface SentFile {
   error?: string
 }
 
+/**
+ * One prompt in a session's queue of record (ADR-053 / sync-core.md §Queue).
+ *
+ * Itemized, never a pre-joined blob: the `\n` join happens at take-back time in
+ * the client, so each item can still be correlated one-for-one with the
+ * engine's own queue entry. `consumed` and `recalled` are terminal — main
+ * broadcasts them exactly once (long enough for clients to synthesize the chat
+ * message) and then prunes them from the list.
+ */
+export interface QueuedItem {
+  itemId: string
+  text: string
+  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  state: 'queued' | 'consumed' | 'recalled'
+}
+
 export interface TaskProgress {
   toolUseId: string
   toolName: string
@@ -979,13 +995,14 @@ interface SessionAPI {
   onSessionCreated(
     cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void
   ): () => void
+  /** Relayed for NON-queued sends only. A send that queues rides
+   *  `onQueueChanged` instead (ADR-053) — the old `{queued:true}` flavor is retired. */
   onUserMessage(
     cb: (
       routingId: string,
       data: {
         prompt: string
         attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-        queued?: boolean
       }
     ) => void
   ): () => void
@@ -1050,9 +1067,22 @@ interface SessionAPI {
     routingId: string,
     toolUseId: string
   ): Promise<{ success: boolean; error?: string }>
+  /**
+   * @deprecated ADR-053 — superseded by {@link ClaudeAPI.recallQueued}. Kept so a
+   * `/remote` bundle cached in a phone browser still takes messages back; the
+   * host ignores `value` and recalls everything, reporting the count as `removed`.
+   */
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
+  /**
+   * Take back every still-recallable queued item (ADR-053). `recalled` carries
+   * their texts in queue order for the client to join with `\n`; `notRecalled`
+   * counts items the engine had already started consuming — those stay on the
+   * card until their `consumed` transition arrives.
+   */
+  recallQueued(routingId: string): Promise<{ recalled: string[]; notRecalled: number }>
   askSideQuestion(routingId: string, question: string): Promise<string | null>
-  onSteerConsumed(cb: (routingId: string, data: { prompt: string }) => void): () => void
+  /** Full queue list for a session — idempotent and replay-safe (ADR-053). */
+  onQueueChanged(cb: (routingId: string, data: { items: QueuedItem[] }) => void): () => void
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>

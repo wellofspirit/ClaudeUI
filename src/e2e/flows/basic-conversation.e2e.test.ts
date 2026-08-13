@@ -22,7 +22,8 @@ import type {
   PendingApproval,
   StreamDelta,
   TodoItem,
-  SessionStatus
+  SessionStatus,
+  QueuedItem
 } from '../../shared/types'
 
 let app: TestApp
@@ -107,14 +108,18 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
   })
 
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
-    'session:user-message'
-  )((routingId, data) => {
-    const s = store()
-    if (!s.sessions[routingId]) return
-    if (data.queued) s.setQueuedText(routingId, data.prompt)
-    else s.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt)
-  })
+  // session:user-message is relayed for NON-queued sends only (ADR-053);
+  // queued prompts arrive on session:queue-changed instead.
+  onEvent<(routingId: string, data: { prompt: string }) => void>('session:user-message')(
+    (routingId, data) => {
+      const s = store()
+      if (!s.sessions[routingId]) return
+      s.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt)
+    }
+  )
+  onEvent<(routingId: string, data: { items: QueuedItem[] }) => void>('session:queue-changed')(
+    (routingId, data) => store().setQueueState(routingId, data.items)
+  )
 
   return cleanups
 }

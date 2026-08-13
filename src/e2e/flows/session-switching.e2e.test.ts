@@ -13,7 +13,13 @@ import {
   makeSessionStatus,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type { ChatMessage, PendingApproval, StreamDelta, SessionStatus } from '../../shared/types'
+import type {
+  ChatMessage,
+  PendingApproval,
+  StreamDelta,
+  SessionStatus,
+  QueuedItem
+} from '../../shared/types'
 
 let app: TestApp
 let eventCleanups: Array<() => void>
@@ -72,14 +78,18 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
       store().removePendingApproval(routingId, requestId)
     }
   )
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
-    'session:user-message'
-  )((routingId, data) => {
-    const s = store()
-    if (!s.sessions[routingId]) return
-    if (data.queued) s.setQueuedText(routingId, data.prompt)
-    else s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
-  })
+  // session:user-message is relayed for NON-queued sends only (ADR-053);
+  // queued prompts arrive on session:queue-changed instead.
+  onEvent<(routingId: string, data: { prompt: string }) => void>('session:user-message')(
+    (routingId, data) => {
+      const s = store()
+      if (!s.sessions[routingId]) return
+      s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
+    }
+  )
+  onEvent<(routingId: string, data: { items: QueuedItem[] }) => void>('session:queue-changed')(
+    (routingId, data) => store().setQueueState(routingId, data.items)
+  )
 
   return cleanups
 }

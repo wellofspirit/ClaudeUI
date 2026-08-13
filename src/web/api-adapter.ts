@@ -204,7 +204,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onBashOutput: on('session:bash-output') as ClaudeAPI['onBashOutput'],
     onBackgroundOutput: on('session:background-output') as ClaudeAPI['onBackgroundOutput'],
     onSandboxViolation: on('session:sandbox-violation') as ClaudeAPI['onSandboxViolation'],
-    onSteerConsumed: on('session:steer-consumed') as ClaudeAPI['onSteerConsumed'],
+    onQueueChanged: on('session:queue-changed') as ClaudeAPI['onQueueChanged'],
     onSkills: on('session:skills') as ClaudeAPI['onSkills'],
     onAuthSource: on('session:auth-source') as ClaudeAPI['onAuthSource'],
     onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
@@ -258,6 +258,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     dequeueMessage: (routingId, value) =>
       connection.invoke('session:dequeue-message', routingId, value) as Promise<{
         removed: number
+      }>,
+    recallQueued: (routingId) =>
+      connection.invoke('session:recall-queued', routingId) as Promise<{
+        recalled: string[]
+        notRecalled: number
       }>,
 
     // Session settings

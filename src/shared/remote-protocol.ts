@@ -224,6 +224,7 @@ import type {
   PendingApproval,
   TodoItem,
   SentFile,
+  QueuedItem,
   TaskNotification,
   TaskProgress,
   StatusLineData,
@@ -247,6 +248,10 @@ export interface PerSessionSnapshot {
   /** Files delivered via SendUserFile. Optional so an older remote server that
    *  predates the widget still hydrates (falls back to []). */
   sentFiles?: SentFile[]
+  /** Queue of record (ADR-053) — pending items only; consumed ones are already
+   *  chat messages. Optional for the same older-server-compat reason as
+   *  `sentFiles`: without it every resync silently emptied the queue card. */
+  queue?: QueuedItem[]
   taskNotifications: TaskNotification[]
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task

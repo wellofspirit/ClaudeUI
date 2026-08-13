@@ -125,7 +125,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onBashOutput: onEvent('session:bash-output'),
     onBackgroundOutput: onEvent('session:background-output'),
     onSandboxViolation: onEvent('session:sandbox-violation'),
-    onSteerConsumed: onEvent('session:steer-consumed'),
+    onQueueChanged: onEvent('session:queue-changed'),
     onSkills: onEvent('session:skills'),
     onAuthSource: onEvent('session:auth-source'),
     onStatusLine: onEvent('session:status-line'),
@@ -166,6 +166,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:background-task', routingId, toolUseId),
     dequeueMessage: (routingId, value) =>
       ipcRenderer.invoke('session:dequeue-message', routingId, value),
+    recallQueued: (routingId) => ipcRenderer.invoke('session:recall-queued', routingId),
     askSideQuestion: (routingId, question) =>
       ipcRenderer.invoke('session:ask-side-question', routingId, question),
     setPermissionMode: (routingId, mode) =>

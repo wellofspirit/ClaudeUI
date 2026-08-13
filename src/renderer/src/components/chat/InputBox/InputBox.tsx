@@ -8,6 +8,7 @@ import {
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine } from './utils'
+import { recallQueuedInto } from './recall-queued'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
@@ -102,8 +103,7 @@ export function InputBox(): React.JSX.Element {
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
-  const queuedText = useActiveSession((s) => s.queuedText)
-  const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
+  const queuedItems = useActiveSession((s) => s.queuedItems)
 
   const isRunning = status.state === 'running'
   const isDisabled = !activeSessionId || !cwd
@@ -531,35 +531,16 @@ export function InputBox(): React.JSX.Element {
   }
 
   const handleEditQueued = useCallback(async () => {
-    const savedText = queuedText
-    if (!activeSessionId || !savedText) {
-      clearQueuedText()
-      return
-    }
-    const result = (await window.api.dequeueMessage(activeSessionId, savedText)) as
-      | { removed: number }
-      | { response?: { removed?: number } }
-      | null
-      | undefined
-    const removed =
-      (result && 'response' in result ? result.response?.removed : undefined) ??
-      (result && 'removed' in result ? result.removed : undefined) ??
-      0
-    if (removed > 0) {
-      setText(savedText)
-      clearQueuedText()
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (el) {
-          el.focus()
-          el.style.height = 'auto'
-          el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-        }
-      })
-    } else {
-      clearQueuedText()
-    }
-  }, [activeSessionId, queuedText, clearQueuedText, setText])
+    await recallQueuedInto(activeSessionId, setText)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (el) {
+        el.focus()
+        el.style.height = 'auto'
+        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+      }
+    })
+  }, [activeSessionId, setText])
 
   const handleCancel = useCallback(async () => {
     if (activeSessionId) await window.api.interruptSession(activeSessionId)
@@ -568,7 +549,7 @@ export function InputBox(): React.JSX.Element {
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     if (fileMentionHandleKeyDown(e)) return
     if (slashHandleKeyDown(e)) return
-    if (e.key === 'ArrowUp' && !text && queuedText) {
+    if (e.key === 'ArrowUp' && !text && queuedItems.length > 0) {
       e.preventDefault()
       handleEditQueued()
       return

@@ -937,26 +937,29 @@ describe('deleteProject', () => {
 // Message / queue actions
 // ---------------------------------------------------------------------------
 
-describe('consumeQueuedText', () => {
-  it('creates a user message from queuedText and clears it', () => {
+describe('setQueueState', () => {
+  it('creates a user message from a consumed item and drops it from the card', () => {
     store().createNewSession('r1', '/test')
-    store().setQueuedText('r1', 'queued prompt')
-    store().consumeQueuedText('r1')
+    store().setQueueState('r1', [{ itemId: 'q1', text: 'queued prompt', state: 'queued' }])
+    store().setQueueState('r1', [{ itemId: 'q1', text: 'queued prompt', state: 'consumed' }])
     const session = store().sessions['r1']
     expect(session.messages).toHaveLength(1)
+    expect(session.messages[0].id).toBe('steer-q1')
     expect(session.messages[0].role).toBe('user')
     expect(session.messages[0].content[0]).toMatchObject({ type: 'text', text: 'queued prompt' })
-    expect(session.queuedText).toBe('')
+    expect(session.queuedItems).toEqual([])
   })
 
-  it('is a no-op when queuedText is empty', () => {
+  it('is a no-op when the payload holds nothing consumed', () => {
     store().createNewSession('r1', '/test')
-    store().consumeQueuedText('r1')
+    store().setQueueState('r1', [])
     expect(store().sessions['r1'].messages).toHaveLength(0)
   })
 
   it('is a no-op when session does not exist', () => {
-    expect(() => store().consumeQueuedText('ghost')).not.toThrow()
+    expect(() =>
+      store().setQueueState('ghost', [{ itemId: 'q1', text: 'x', state: 'consumed' }])
+    ).not.toThrow()
   })
 })
 

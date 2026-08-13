@@ -23,11 +23,15 @@
  *   snapshot): keeps X and its local session entry (messages included).
  * - re-sync where X is absent from BOTH local and the snapshot: falls back to
  *   the snapshot's activeSessionId rather than rendering a broken view.
+ * - the queue of record survives a resync (ADR-053): pre-fix the snapshot
+ *   carried no queue at all, so every reconnect silently emptied the card while
+ *   the items were still live in main.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore } from '../session-store'
+import { useSessionStore, getRemoteStateSnapshot } from '../session-store'
 import { resetFactoryCounter, makeUserMessage } from '@test/factories/messages'
 import type { FullStateSnapshot } from '../../../../shared/remote-protocol'
+import type { QueuedItem } from '../../../../shared/types'
 
 const store = () => useSessionStore.getState()
 
@@ -240,5 +244,38 @@ describe('applyRemoteSnapshot — new-session default mode (ADR-050)', () => {
     // ...and an older host omitting it reads as "not disabled".
     store().applyRemoteSnapshot(makeSnapshot({}, null))
     expect(store().autoModeDisabledBySettings).toBe(false)
+  })
+})
+
+describe('applyRemoteSnapshot — queue of record (ADR-053)', () => {
+  const item = (itemId: string, text: string): QueuedItem => ({ itemId, text, state: 'queued' })
+
+  it('round-trips the queue through getRemoteStateSnapshot → applyRemoteSnapshot', () => {
+    store().createNewSession('X', '/test')
+    useSessionStore.setState({ activeSessionId: 'X' })
+    store().setQueueState('X', [item('q1', 'fix the bug'), item('q2', 'also update tests')])
+
+    // The desktop builds the snapshot from its own store...
+    const produced = getRemoteStateSnapshot()
+    expect(produced.sessions['X'].queue.map((i) => i.text)).toEqual([
+      'fix the bug',
+      'also update tests'
+    ])
+
+    // ...and a reconnecting client applies it.
+    store().applyRemoteSnapshot(
+      makeSnapshot({ X: { ...baseSnapshotSession('X'), queue: produced.sessions['X'].queue } }, 'X'),
+      true
+    )
+
+    expect(store().sessions['X'].queuedItems.map((i) => i.text)).toEqual([
+      'fix the bug',
+      'also update tests'
+    ])
+  })
+
+  it('an older server that omits `queue` hydrates to an empty queue, not a crash', () => {
+    store().applyRemoteSnapshot(makeSnapshot({ X: baseSnapshotSession('X') }, 'X'))
+    expect(store().sessions['X'].queuedItems).toEqual([])
   })
 })

@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
-import type { ChatMessage } from '../../../shared/types'
+import type { ChatMessage, QueuedItem } from '../../../shared/types'
 
 class MockWindow extends EventEmitter {
   webContents = { send: vi.fn() }
@@ -404,6 +404,19 @@ function pushMessage(session: PiSession, role: ChatMessage['role'], text: string
 
 function sentChannels(win: MockWindow): string[] {
   return win.webContents.send.mock.calls.map((c) => c[0])
+}
+
+/**
+ * Texts of every queue item that reached `consumed` in this window's
+ * `session:queue-changed` broadcasts (ADR-053) — the delivery ack that replaced
+ * `session:steer-consumed`.
+ */
+function consumedQueueTexts(win: MockWindow): string[] {
+  return win.webContents.send.mock.calls
+    .filter((c) => c[0] === 'session:queue-changed')
+    .flatMap((c) => (c[2] as { items: QueuedItem[] }).items)
+    .filter((item) => item.state === 'consumed')
+    .map((item) => item.text)
 }
 
 function sentPayloads(win: MockWindow, channel: string): unknown[] {
@@ -1499,14 +1512,129 @@ describe('PiSession — busy path uses streamingBehavior steer (M2b)', () => {
     // (still pending) before sending the second.
     await vi.waitFor(() => expect(session.willQueue).toBe(true))
 
+    session.enqueuePrompt('second')
     await session.run('second')
 
     expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: 'second', streamingBehavior: 'steer' })
-    // Busy-path ack so the renderer's shared queued-message UI resolves.
-    expect(sentChannels(win)).toContain('session:steer-consumed')
+    // Delivery ack: the queued item transitions to `consumed` (ADR-053 —
+    // replaces the old session:steer-consumed emit).
+    expect(consumedQueueTexts(win)).toEqual(['second'])
 
     resolveFirstPrompt({ type: 'response', command: 'prompt', success: true })
     await firstRun
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Queue of record (ADR-053 / SyncCore phase 3).
+//
+// pi's `steer` commits on post — unrecallable the instant it lands — so core
+// HOLDS the item and forwards it at the next observed sub-turn boundary
+// (tool result / turn end). That hold IS the take-back window.
+// ---------------------------------------------------------------------------
+
+describe('PiSession — queue of record (ADR-053)', () => {
+  /** A session parked mid-turn: the first `prompt` request never resolves. */
+  async function startBusy(routingId: string): Promise<{
+    session: PiSession
+    win: MockWindow
+    handler: (ev: PiEvent) => void
+    promptMessages: () => string[]
+  }> {
+    const win = new MockWindow()
+    const sent: Array<{ type: string; message?: string }> = []
+    mockRequest.mockImplementation((cmd: { type: string; message?: string }) => {
+      sent.push(cmd)
+      if (cmd.type === 'prompt') {
+        if (sent.filter((c) => c.type === 'prompt').length === 1) {
+          return new Promise(() => {}) // never resolves — turn stays in flight
+        }
+        return Promise.resolve({ type: 'response', command: 'prompt', success: true })
+      }
+      return defaultRequestImpl(cmd)
+    })
+    const session = new PiSession(routingId, win as never, '/cwd', {})
+    void session.run('first')
+    await vi.waitFor(() => expect(session.willQueue).toBe(true))
+    return {
+      session,
+      win,
+      handler: lastEventHandler(),
+      promptMessages: () =>
+        sent.filter((c) => c.type === 'prompt').map((c) => c.message as string).slice(1)
+    }
+  }
+
+  it('enqueue while busy HOLDS — nothing reaches pi until a boundary', async () => {
+    const { session, win, handler, promptMessages } = await startBusy('rid-q-hold')
+
+    session.enqueuePrompt('held until a boundary')
+
+    // NOT posted at keypress (pre-ADR-053 it was, as an instant `steer`).
+    expect(promptMessages()).toEqual([])
+    expect(session.queuedItems.map((i) => i.text)).toEqual(['held until a boundary'])
+
+    // A finished tool call is a sub-turn boundary — forward as a `steer`.
+    handler({
+      type: 'message_end',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_1',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'ok' }],
+        isError: false,
+        timestamp: 3
+      }
+    } as PiEvent)
+
+    await vi.waitFor(() => expect(promptMessages()).toEqual(['held until a boundary']))
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'prompt',
+      message: 'held until a boundary',
+      streamingBehavior: 'steer'
+    })
+    await vi.waitFor(() => expect(consumedQueueTexts(win)).toEqual(['held until a boundary']))
+    expect(session.queuedItems).toEqual([])
+  })
+
+  it('recall before the boundary is guaranteed — pi is never called', async () => {
+    const { session, win, handler, promptMessages } = await startBusy('rid-q-recall')
+
+    session.enqueuePrompt('taken back')
+    const result = await session.recallQueued()
+
+    expect(result).toEqual({ recalled: ['taken back'], notRecalled: 0 })
+    expect(session.queuedItems).toEqual([])
+
+    handler({
+      type: 'message_end',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_1',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'ok' }],
+        isError: false,
+        timestamp: 3
+      }
+    } as PiEvent)
+    await new Promise<void>((r) => setTimeout(r, 10))
+
+    expect(promptMessages()).toEqual([])
+    expect(consumedQueueTexts(win)).toEqual([])
+  })
+
+  it('an engine loss recalls whatever is still held', async () => {
+    const { session, win } = await startBusy('rid-q-death')
+
+    session.enqueuePrompt('orphaned')
+    session.cancel()
+
+    const last = win.webContents.send.mock.calls
+      .filter((c) => c[0] === 'session:queue-changed')
+      .map((c) => (c[2] as { items: QueuedItem[] }).items)
+      .at(-1)!
+    expect(last.map((i) => [i.text, i.state])).toEqual([['orphaned', 'recalled']])
+    expect(session.queuedItems).toEqual([])
   })
 })
 

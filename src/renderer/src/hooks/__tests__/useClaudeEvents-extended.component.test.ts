@@ -22,7 +22,8 @@ import type {
   PluginViewWithOwner,
   VoiceState,
   WorktreeInfo,
-  FileDiff
+  FileDiff,
+  QueuedItem
 } from '../../../../shared/types'
 
 let bridge: TestIpcBridge
@@ -127,9 +128,11 @@ function wireEventHandlers(): void {
     }
   )
 
-  onEvent<(routingId: string) => void>('session:steer-consumed')((routingId) => {
-    store().consumeQueuedText(routingId)
-  })
+  onEvent<(routingId: string, data: { items: QueuedItem[] }) => void>('session:queue-changed')(
+    (routingId, data) => {
+      store().setQueueState(routingId, data.items)
+    }
+  )
 
   onEvent<
     (data: {
@@ -838,34 +841,43 @@ describe('useClaudeEvents extended component tests', () => {
     })
   })
 
-  describe('session:steer-consumed', () => {
-    it('converts queuedText to a user message and clears queuedText', () => {
+  // ADR-053 — the queue's consumed transition replaces session:steer-consumed.
+  describe('session:queue-changed', () => {
+    it('converts a consumed item to a user message and drops it from the card', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().setQueuedText(routingId, 'steered command')
+      bridge.webContents.send('session:queue-changed', routingId, {
+        items: [{ itemId: 'q1', text: 'steered command', state: 'queued' }]
+      })
 
-      bridge.webContents.send('session:steer-consumed', routingId)
+      bridge.webContents.send('session:queue-changed', routingId, {
+        items: [{ itemId: 'q1', text: 'steered command', state: 'consumed' }]
+      })
 
       const session = useSessionStore.getState().sessions[routingId]
-      expect(session.queuedText).toBe('')
+      expect(session.queuedItems).toEqual([])
       const lastMsg = session.messages[session.messages.length - 1]
+      expect(lastMsg.id).toBe('steer-q1')
       expect(lastMsg.role).toBe('user')
       expect(lastMsg.content[0]).toEqual({ type: 'text', text: 'steered command' })
     })
 
-    it('does nothing when queuedText is empty', () => {
+    it('a recalled item leaves the card without entering the transcript', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-
-      bridge.webContents.send('session:steer-consumed', routingId)
+      bridge.webContents.send('session:queue-changed', routingId, {
+        items: [{ itemId: 'q1', text: 'taken back', state: 'recalled' }]
+      })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.messages).toHaveLength(0)
-      expect(session.queuedText).toBe('')
+      expect(session.queuedItems).toEqual([])
     })
 
     it('does nothing for unknown session', () => {
-      bridge.webContents.send('session:steer-consumed', 'nonexistent')
+      bridge.webContents.send('session:queue-changed', 'nonexistent', {
+        items: [{ itemId: 'q1', text: 'x', state: 'queued' }]
+      })
 
       expect(useSessionStore.getState().sessions['nonexistent']).toBeUndefined()
     })

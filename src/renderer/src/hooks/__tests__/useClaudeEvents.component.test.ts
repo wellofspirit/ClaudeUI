@@ -25,7 +25,8 @@ import type {
   PendingApproval,
   StreamDelta,
   TodoItem,
-  FileDiff
+  FileDiff,
+  QueuedItem
 } from '../../../../shared/types'
 
 /**
@@ -146,17 +147,20 @@ function wireEventHandlers(): void {
     }
   )
 
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
-    'session:user-message'
-  )((routingId, data) => {
-    const s = store()
-    if (!s.sessions[routingId]) return
-    if (data.queued) {
-      s.setQueuedText(routingId, data.prompt)
-    } else {
+  // Non-queued sends only (ADR-053) — queued prompts ride session:queue-changed.
+  onEvent<(routingId: string, data: { prompt: string }) => void>('session:user-message')(
+    (routingId, data) => {
+      const s = store()
+      if (!s.sessions[routingId]) return
       s.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt)
     }
-  })
+  )
+
+  onEvent<(routingId: string, data: { items: QueuedItem[] }) => void>('session:queue-changed')(
+    (routingId, data) => {
+      store().setQueueState(routingId, data.items)
+    }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -521,18 +525,17 @@ describe('useClaudeEvents component tests', () => {
       expect(session.messages[0].role).toBe('user')
     })
 
-    it('stores queued text instead of adding message when queued', () => {
+    it('a queued send rides queue-changed, not user-message (ADR-053)', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:user-message', routingId, {
-        prompt: 'queued message',
-        queued: true
+      bridge.webContents.send('session:queue-changed', routingId, {
+        items: [{ itemId: 'q1', text: 'queued message', state: 'queued' }]
       })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.messages).toHaveLength(0)
-      expect(session.queuedText).toBe('queued message')
+      expect(session.queuedItems.map((i) => i.text)).toEqual(['queued message'])
     })
   })
 

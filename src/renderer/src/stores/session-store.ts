@@ -25,6 +25,7 @@ import type {
   ContentBlock,
   TodoItem,
   SentFile,
+  QueuedItem,
   TaskProgress,
   TaskNotification,
   TaskStartedData,
@@ -631,7 +632,9 @@ export interface PerSessionState {
   statusLine: StatusLineData | null
   /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
   metering: MeteringSnapshot | null
-  queuedText: string
+  /** Queue of record, replicated from main (ADR-053). Only `queued` items live
+   *  here — a consumed item has already become a chat message. */
+  queuedItems: QueuedItem[]
   draftText: string
   /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
    *  in session A can never be sent from B, and is restored on return to A. */
@@ -724,7 +727,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   reasoningVariant: null,
   statusLine: null,
   metering: null,
-  queuedText: '',
+  queuedItems: [],
   draftText: '',
   draftAttachments: [],
   selectedModel: 'default',
@@ -871,6 +874,38 @@ let vendorOAuthFlowToken = 0
  */
 const GIT_STATUS_CACHE_MAX = 100
 const gitStatusCache = new Map<string, GitStatusData>()
+
+/**
+ * Build the ContentBlock[] for a user message: attachments first (image /
+ * document blocks), then a trailing text block. Shared by the optimistic
+ * `addUserMessage` and the queue's consumed-item synthesis so both render an
+ * attachment-carrying prompt identically.
+ */
+function buildUserContentBlocks(
+  text: string,
+  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+): ContentBlock[] {
+  const content: ContentBlock[] = []
+  for (const att of attachments ?? []) {
+    if (att.mediaType === 'application/pdf') {
+      content.push({
+        type: 'document',
+        mediaType: 'application/pdf',
+        base64Data: att.base64Data,
+        fileName: att.fileName
+      })
+    } else {
+      content.push({
+        type: 'image',
+        mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+        base64Data: att.base64Data,
+        fileName: att.fileName
+      })
+    }
+  }
+  if (text) content.push({ type: 'text', text })
+  return content
+}
 
 /** Helper to update a specific session's state */
 function updateSession(
@@ -1219,10 +1254,13 @@ interface SessionState {
   setReasoningVariant: (variant: string | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
   setMetering: (routingId: string, data: MeteringSnapshot) => void
-  appendQueuedText: (text: string) => void
-  setQueuedText: (routingId: string, text: string) => void
-  clearQueuedText: () => void
-  consumeQueuedText: (routingId: string) => void
+  /**
+   * Apply a `session:queue-changed` broadcast (ADR-053). The payload is the
+   * FULL list, so this is idempotent and replay-safe: pending items replace the
+   * card's contents wholesale, and each consumed item appends its chat message
+   * exactly once (keyed on the stable `steer-${itemId}`).
+   */
+  setQueueState: (routingId: string, items: QueuedItem[]) => void
   setDraftText: (text: string) => void
   /** Append unsent attachments to a specific session (keyed by routingId — see impl). */
   addDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
@@ -2001,29 +2039,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
 
-      const content: ContentBlock[] = []
-      if (attachments && attachments.length > 0) {
-        for (const att of attachments) {
-          if (att.mediaType === 'application/pdf') {
-            content.push({
-              type: 'document',
-              mediaType: 'application/pdf',
-              base64Data: att.base64Data,
-              fileName: att.fileName
-            })
-          } else {
-            content.push({
-              type: 'image',
-              mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-              base64Data: att.base64Data,
-              fileName: att.fileName
-            })
-          }
-        }
-      }
-      if (text) {
-        content.push({ type: 'text' as const, text })
-      }
+      const content = buildUserContentBlocks(text, attachments)
 
       return {
         sessions: {
@@ -2694,6 +2710,9 @@ export const useSessionStore = create<SessionState>((set) => ({
           pendingApprovals: snap.pendingApprovals,
           todos: snap.todos,
           sentFiles: snap.sentFiles ?? [],
+          // ADR-053 — without this a resync wiped the queue card (the snapshot
+          // had no queue field, so every reconnect reset it to empty).
+          queuedItems: snap.queue ?? [],
           taskNotifications: snap.taskNotifications,
           activeTasks: snap.activeTasks ?? {},
           taskProgressMap: snap.taskProgressMap,
@@ -2847,55 +2866,32 @@ export const useSessionStore = create<SessionState>((set) => ({
       return {}
     }),
 
-  appendQueuedText: (text) =>
-    set((state) => {
-      const id = state.activeSessionId
-      if (!id) return {}
-      return {
-        sessions: updateSession(state.sessions, id, (s) => ({
-          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
-        }))
-      }
-    }),
-
-  setQueuedText: (routingId, text) =>
-    set((state) => {
-      if (!state.sessions[routingId]) return state
-      return {
-        sessions: updateSession(state.sessions, routingId, (s) => ({
-          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
-        }))
-      }
-    }),
-
-  clearQueuedText: () =>
-    set((state) => {
-      const id = state.activeSessionId
-      if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '' })) }
-    }),
-
-  consumeQueuedText: (routingId) =>
+  setQueueState: (routingId, items) =>
     set((state) => {
       const session = state.sessions[routingId]
-      if (!session || !session.queuedText) return state
-      const userMsg = {
-        // crypto.randomUUID (not Date.now) so two steers within the same ms can't
-        // collide into a duplicate React key (Low).
-        id: `steer-${crypto.randomUUID()}`,
-        role: 'user' as const,
-        content: [{ type: 'text' as const, text: session.queuedText }],
-        timestamp: Date.now()
+      if (!session) return state
+      const seen = new Set(session.messages.map((m) => m.id))
+      const synthesized: ChatMessage[] = []
+      for (const item of items) {
+        if (item.state !== 'consumed') continue
+        // Stable across clients — every replica derives the SAME message id from
+        // the item id, so a resync or a re-delivered broadcast can never append
+        // the same steer twice (and two clients never disagree on the key).
+        const id = `steer-${item.itemId}`
+        if (seen.has(id)) continue
+        seen.add(id)
+        synthesized.push({
+          id,
+          role: 'user',
+          content: buildUserContentBlocks(item.text, item.attachments),
+          timestamp: Date.now()
+        })
       }
       return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            messages: [...session.messages, userMsg],
-            queuedText: ''
-          }
-        }
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          queuedItems: items.filter((item) => item.state === 'queued'),
+          messages: synthesized.length > 0 ? [...s.messages, ...synthesized] : s.messages
+        }))
       }
     }),
 
@@ -3652,6 +3648,7 @@ export function getRemoteStateSnapshot(): {
       pendingApprovals: PendingApproval[]
       todos: TodoItem[]
       sentFiles: SentFile[]
+      queue: QueuedItem[]
       taskNotifications: TaskNotification[]
       activeTasks: Record<string, { taskId: string; taskType: string }>
       taskProgressMap: Record<string, TaskProgress>
@@ -3697,6 +3694,7 @@ export function getRemoteStateSnapshot(): {
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
       sentFiles: s.sentFiles,
+      queue: s.queuedItems,
       taskNotifications: s.taskNotifications,
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,

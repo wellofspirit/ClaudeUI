@@ -1,31 +1,20 @@
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { recallQueuedInto } from '../InputBox/recall-queued'
 
 export function QueuedMessageCard({ isMobile }: { isMobile: boolean }): React.JSX.Element | null {
-  const queuedText = useActiveSession((s) => s.queuedText)
-  const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
+  const queuedItems = useActiveSession((s) => s.queuedItems)
   const setDraftText = useSessionStore((s) => s.setDraftText)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
 
-  if (!queuedText) return null
+  if (queuedItems.length === 0) return null
+
+  // Display parity with the pre-ADR-053 blob: the items read as one block. The
+  // join happens HERE and at take-back time — never in storage, so each item
+  // stays individually recallable (that is the whole point of the itemization).
+  const displayText = queuedItems.map((item) => item.text).join('\n')
 
   const handleEdit = async (): Promise<void> => {
-    const savedText = queuedText
-    if (activeSessionId && savedText) {
-      const result = await window.api.dequeueMessage(activeSessionId, savedText)
-      // Direct IPC returns `{ removed }`; the remote bridge wraps it as
-      // `{ response: { removed } }`. Accept either shape.
-      const r = result as { removed?: number; response?: { removed?: number } }
-      const removed = r?.response?.removed ?? r?.removed ?? 0
-      if (removed > 0) {
-        setDraftText(savedText)
-        clearQueuedText()
-      } else {
-        clearQueuedText()
-      }
-    } else {
-      setDraftText(savedText)
-      clearQueuedText()
-    }
+    await recallQueuedInto(activeSessionId, setDraftText)
   }
 
   return (
@@ -37,7 +26,7 @@ export function QueuedMessageCard({ isMobile }: { isMobile: boolean }): React.JS
               Queued
             </span>
             <div className="text-[12px] text-text-secondary whitespace-pre-wrap line-clamp-3 mt-0.5">
-              {queuedText}
+              {displayText}
             </div>
           </div>
           <button

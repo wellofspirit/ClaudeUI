@@ -94,7 +94,8 @@ import type {
   PermissionSuggestion,
   AccountRef,
   ModelCostEntry,
-  EngineId
+  EngineId,
+  QueuedItem
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
@@ -1229,7 +1230,11 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       return
     }
     if (msg.subtype === 'queued_command_consumed') {
-      this.send('session:steer-consumed', { prompt: msg.prompt || '' })
+      // cli.js has taken this text off its queue and is injecting it into the
+      // turn (docs/protocol/04-system-subtypes.md §4.10). Text correlation is
+      // all the wire gives us — ADR-053 pins first-match, duplicates being
+      // interchangeable.
+      this.onPromptDelivered(msg.prompt || '')
       return
     }
     if (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback') {
@@ -1658,6 +1663,25 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   async dequeueMessage(value: string): Promise<{ removed: number }> {
     if (!this.activeQuery) return { removed: 0 }
     return await this.activeQuery.dequeueMessage(value)
+  }
+
+  /**
+   * cli.js's own queue already has native sub-turn timing AND a real per-item
+   * dequeue, so a claude item is pushed the moment it is queued — core holds
+   * nothing (ADR-053).
+   */
+  protected override onPromptQueued(item: QueuedItem): void {
+    void this.run(item.text, item.attachments)
+  }
+
+  /**
+   * Ask cli.js to drop this exact text from its queue. `removed: 0` means the
+   * item is already being consumed, so it stays put and its
+   * `queued_command_consumed` will arrive — never a silent clear (ADR-053).
+   */
+  protected override async tryRecallQueuedItem(item: QueuedItem): Promise<boolean> {
+    const { removed } = await this.dequeueMessage(item.text)
+    return removed > 0
   }
 
   async askSideQuestion(question: string): Promise<string | null> {
@@ -2218,6 +2242,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // the disconnect.
     if (!this.disposed) {
       this.send('session:status', { ...this.status, state: 'disconnected' })
+      // cli.js's queue died with the process — nothing is left to consume these
+      // (ADR-053 §engine death). Same disposed fence as the status broadcast:
+      // a replaced object must not emit on the routingId it no longer owns.
+      this.recallQueuedOnEngineLoss()
     }
   }
 

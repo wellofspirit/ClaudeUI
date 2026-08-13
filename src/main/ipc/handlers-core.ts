@@ -61,9 +61,15 @@ import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 
 /**
  * Run a prompt turn and relay the user message back to all renderers (local +
- * remote) as the single source of truth for chat history. `queued` reflects
- * whether the session was already active when this call landed, so renderers
- * can show the message as pending (not yet in chat) until it's consumed.
+ * remote) as the single source of truth for chat history.
+ *
+ * A prompt that lands while the session is busy goes to the QUEUE instead
+ * (ADR-053): the session owns the item and broadcasts `session:queue-changed`,
+ * which replaces the old `session:user-message {queued:true}` flavor. That
+ * flavor was a lie by construction — it told every client "pending" with no id
+ * to hang a later consume/recall off, so the transitions were guessed from turn
+ * state. `session:user-message` now means exactly one thing: this text is in
+ * the transcript.
  */
 export function sendPrompt(
   manager: SessionManager,
@@ -74,10 +80,13 @@ export function sendPrompt(
 ): void {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
-  // Check before run() — if session already active, the message will be queued
-  const queued = session.willQueue
+  // Check before run() — if the session is already active this send queues.
+  if (session.willQueue) {
+    session.enqueuePrompt(prompt, attachments)
+    return
+  }
   session.run(prompt, attachments)
-  const payload = { prompt, attachments, queued }
+  const payload = { prompt, attachments }
   if (!win.isDestroyed()) {
     win.webContents.send('session:user-message', routingId, payload)
   }
@@ -190,13 +199,34 @@ export async function backgroundTask(
   )
 }
 
+/**
+ * Take back every still-recallable queued item (ADR-053). Replaces the
+ * dequeue-by-value path, which could never match once two messages were queued
+ * (the renderer coalesced them into one `\n`-joined blob, and no single engine
+ * queue entry ever carried that text).
+ */
+export async function recallQueued(
+  manager: SessionManager,
+  routingId: string
+): Promise<{ recalled: string[]; notRecalled: number }> {
+  const session = manager.get(routingId)
+  return (await session?.recallQueued()) ?? { recalled: [], notRecalled: 0 }
+}
+
+/**
+ * @deprecated ADR-053 — recall-all shim behind the old channel, kept only so a
+ * `/remote` bundle cached in a phone browser can still take messages back. It
+ * ignores `value` (the blob it would send can no longer match anything) and
+ * reports the recalled count as `removed`, which is what that client checks.
+ * Remove once cached bundles of that vintage are no longer a concern.
+ */
 export async function dequeueMessage(
   manager: SessionManager,
   routingId: string,
-  value: string
+  _value: string
 ): Promise<{ removed: number }> {
-  const session = manager.get(routingId)
-  return (await session?.dequeueMessage?.(value)) ?? { removed: 0 }
+  const { recalled } = await recallQueued(manager, routingId)
+  return { removed: recalled.length }
 }
 
 export async function askSideQuestion(

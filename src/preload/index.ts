@@ -139,7 +139,7 @@ const api: ClaudeAPI = {
   onBashOutput: onEvent('session:bash-output'),
   onBackgroundOutput: onEvent('session:background-output'),
   onSandboxViolation: onEvent('session:sandbox-violation'),
-  onSteerConsumed: onEvent('session:steer-consumed'),
+  onQueueChanged: onEvent('session:queue-changed'),
   onSkills: onEvent('session:skills'),
   onStatusLine: onEvent('session:status-line'),
   onMetering: onEvent('session:metering'),
@@ -180,6 +180,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:background-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
     ipcRenderer.invoke('session:dequeue-message', routingId, value),
+  recallQueued: (routingId: string) => ipcRenderer.invoke('session:recall-queued', routingId),
   askSideQuestion: (routingId: string, question: string) =>
     ipcRenderer.invoke('session:ask-side-question', routingId, question),
   setPermissionMode: (routingId: string, mode: string) =>

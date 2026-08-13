@@ -727,6 +727,9 @@ export class PiSession extends BaseSession {
       // Nothing left to flush to once the process is gone — a firing timer
       // after this would send() to a session whose engine is disconnected.
       this.bashStreamGate.cancelAll()
+      // Same reasoning for held queue items: no engine left to forward them to
+      // (ADR-053 §engine death).
+      this.recallQueuedOnEngineLoss()
       // Allow a later run() to respawn instead of being wedged forever.
       this.startedPromise = null
       this.sendStatus()
@@ -1115,9 +1118,10 @@ export class PiSession extends BaseSession {
         this.sendStatus()
         return
       }
-      // Busy-path ack: lets the renderer's shared queued-message UI resolve
-      // (onSteerConsumed → consumeQueuedText) exactly as Claude/opencode do.
-      if (wasBusy) this.send('session:steer-consumed', { prompt })
+      // Delivery ack (ADR-053). Fired on BOTH paths, not just the busy one: a
+      // queue flush at the previous turn's end arrives here with wasBusy=false
+      // and must still consume its item. A never-queued prompt is a no-op.
+      this.onPromptDelivered(prompt)
     } catch (err) {
       // Same wasBusy carve-out as the !resp.success branch above.
       if (!wasBusy) {
@@ -1165,6 +1169,9 @@ export class PiSession extends BaseSession {
           ...(output.fileDiffs ? { fileDiffs: output.fileDiffs } : {}),
           ...(output.images ? { images: output.images } : {})
         })
+        // ADR-053 sub-turn boundary: a tool call just finished, so held queue
+        // items may be forwarded now (as a `steer`, since the turn is running).
+        void this.flushQueuedItems()
         break
 
       case 'bash_output':
@@ -1228,6 +1235,10 @@ export class PiSession extends BaseSession {
         })
         this.sendStatus()
         this.resetInactivityTimer()
+        // ADR-053: turn end is also a boundary — anything still held forwards
+        // now as the next turn's prompt (isProcessing is already false, so
+        // run() sends a bare `prompt` rather than a `steer`).
+        void this.flushQueuedItems()
         break
 
       case 'error':
@@ -1375,6 +1386,8 @@ export class PiSession extends BaseSession {
     // once the session is torn down (mirrors OpencodeSession.cancel()'s
     // identical call).
     this.bashStreamGate.cancelAll()
+    // Nothing left to serve the queue (ADR-053 §engine death).
+    this.recallQueuedOnEngineLoss()
     this.startedPromise = null
     this.sendStatus()
   }
