@@ -22,3 +22,4 @@ bin/
 
 # pi coding agent standalone build (vendored by ensure-pi)
 /vendor/pi-cli/
+/review.md
