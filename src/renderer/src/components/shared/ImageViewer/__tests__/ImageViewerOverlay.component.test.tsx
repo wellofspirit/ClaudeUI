@@ -4,10 +4,11 @@
  * The gesture math is covered by transform.unit.test.ts (jsdom cannot produce a
  * real wheel/pinch/drag). What is testable here is everything else: the portal,
  * the counter, navigation via chevrons and arrow keys, the end stops, the tab
- * bar, the close affordances and the body scroll lock.
+ * bar, the close affordances, the body scroll lock — and that an inline-SVG
+ * entry swaps the `<img>` for live DOM while every one of those still holds.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, fireEvent, cleanup } from '@testing-library/react'
 import { ImageViewerOverlay, type ViewerTab } from '../ImageViewerOverlay'
 
@@ -326,6 +327,92 @@ describe('ImageViewerOverlay', () => {
       } finally {
         window.removeEventListener('keydown', appLevel)
       }
+    })
+  })
+
+  describe('inline SVG entries', () => {
+    // The overlay measures its viewport with a ResizeObserver to size the SVG
+    // wrapper; jsdom ships none, and the component tolerates that. Installing a
+    // noop still exercises the observe/disconnect path rather than the guard.
+    class NoopResizeObserver {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver
+    beforeEach(() => {
+      ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = NoopResizeObserver
+    })
+    afterEach(() => {
+      ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = originalResizeObserver
+    })
+
+    const DIAGRAM: ViewerTab = {
+      id: 'diagram',
+      label: 'Diagram',
+      images: [
+        {
+          svgHtml: '<svg viewBox="0 0 100 60"><rect width="10" height="10" /></svg>',
+          intrinsicWidth: 100,
+          intrinsicHeight: 60,
+          fileName: 'Flow chart'
+        }
+      ]
+    }
+
+    it('renders the injected markup as live DOM, not an <img>', () => {
+      // Live DOM rather than a rasterized <img> is the whole point: an SVG stays
+      // crisp under the composited transform: scale.
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[DIAGRAM]} onClose={vi.fn()} />
+      )
+      const wrapper = getByTestId('ImageViewerOverlay.svg')
+      expect(wrapper.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 100 60')
+      expect(wrapper.querySelector('rect')).not.toBeNull()
+      expect(queryByTestId('ImageViewerOverlay.image')).toBeNull()
+      expect(getByTestId('ImageViewerOverlay.filename').textContent).toBe('Flow chart')
+    })
+
+    it('sizes the wrapper without ever emitting a NaN box', () => {
+      // jsdom has no layout, so clientWidth is 0 and the measured fit is unusable
+      // — the wrapper must fall back to the intrinsic size, capped at 100%.
+      const { getByTestId } = render(<ImageViewerOverlay tabs={[DIAGRAM]} onClose={vi.fn()} />)
+      const style = getByTestId('ImageViewerOverlay.svg').style
+      expect(style.width).toBe('100px')
+      expect(style.height).toBe('60px')
+      expect(style.maxWidth).toBe('100%')
+      expect(style.transform).toContain('scale(1)')
+    })
+
+    it('hides the chevrons and closes on ✕ / Escape / a backdrop tap', () => {
+      const onClose = vi.fn()
+      const { getByTestId, queryByTestId } = render(
+        <ImageViewerOverlay tabs={[DIAGRAM]} onClose={onClose} />
+      )
+      expect(queryByTestId('ImageViewerOverlay.next')).toBeNull()
+
+      fireEvent.click(getByTestId('ImageViewerOverlay.close'))
+      expect(onClose).toHaveBeenCalledOnce()
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(onClose).toHaveBeenCalledTimes(2)
+
+      // The wrapper is exactly the fitted content box, so the empty area around
+      // the diagram is still the viewport element and dismissal keeps working.
+      tap(getByTestId('ImageViewerOverlay.viewport'))
+      expect(onClose).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not close on a tap on the diagram itself, and double-tap still zooms', () => {
+      const onClose = vi.fn()
+      const { getByTestId } = render(<ImageViewerOverlay tabs={[DIAGRAM]} onClose={onClose} />)
+      const wrapper = getByTestId('ImageViewerOverlay.svg')
+      const at = { x: 500, y: 400 }
+
+      tap(wrapper, at)
+      expect(onClose).not.toHaveBeenCalled()
+      tap(wrapper, at)
+      expect(wrapper.style.transform).toContain('scale(2.5)')
     })
   })
 

@@ -16,6 +16,14 @@
  *     `sealFromAncestors` for the pointer-capture retargeting that forces this)
  *   - navigation stops at the ends (no wrap); changing image or tab resets zoom
  *
+ * An entry is either a raster image (`<img src>`) or **inline SVG markup**
+ * (`ViewerSvgImage`, used by the Mermaid diagram cards). The SVG variant exists
+ * because rasterizing a diagram into an `<img>` would go blurry under the
+ * composited `transform: scale` — as live DOM it re-renders crisply at every
+ * zoom level. It is otherwise indistinguishable: the same gesture state machine
+ * drives both, with the fitted box coming from the SVG's intrinsic (viewBox)
+ * size instead of `naturalWidth/Height`.
+ *
  * All the transform math lives in `./transform` as pure functions — see the
  * header there for the coordinate model and why it is separated.
  *
@@ -48,10 +56,34 @@ import {
   type ViewerTransform
 } from './transform'
 
-export interface ViewerImage {
-  /** Anything an `<img src>` accepts — a `data:` URI for attachments, an authenticated URL for sent files. */
+/** A raster image — anything an `<img src>` accepts. */
+export interface ViewerRasterImage {
+  /** A `data:` URI for attachments, an authenticated URL for sent files. */
   src: string
   fileName?: string
+}
+
+/** Inline vector content — sanitized SVG markup rendered as DOM, not an `<img>`. */
+export interface ViewerSvgImage {
+  /**
+   * Already-sanitized SVG markup. Sanitizing is the **caller's** responsibility:
+   * this goes through `dangerouslySetInnerHTML` (see `sanitizeMermaidSvg`).
+   */
+  svgHtml: string
+  /**
+   * Intrinsic (viewBox) size. There is no `naturalWidth` to read off live DOM, so
+   * this is what the fit/clamp math is stated in — it need only be the right
+   * *aspect ratio and units*, since the wrapper is sized by `fitSize`.
+   */
+  intrinsicWidth: number
+  intrinsicHeight: number
+  fileName?: string
+}
+
+export type ViewerImage = ViewerRasterImage | ViewerSvgImage
+
+function isSvgImage(image: ViewerImage): image is ViewerSvgImage {
+  return 'svgHtml' in image
 }
 
 export interface ViewerTab {
@@ -78,11 +110,11 @@ interface GestureState {
   moved: boolean
   /** Two-finger span at the previous move, or null while single-pointer. */
   pinchSpan: number | null
-  /** The gesture began on the image (pan/zoom/double-tap). */
+  /** The gesture began on the image / diagram (pan/zoom/double-tap). */
   onImage: boolean
   /**
    * The gesture began on the viewport itself — the empty backdrop around the
-   * image, as opposed to the image or a chevron. A tap there closes.
+   * content, as opposed to the content or a chevron. A tap there closes.
    */
   onBackdrop: boolean
 }
@@ -107,7 +139,12 @@ export function ImageViewerOverlay({
   const [transform, setTransform] = useState<ViewerTransform>(FIT_TRANSFORM)
 
   const viewportRef = useRef<HTMLDivElement>(null)
-  const imageRef = useRef<HTMLImageElement>(null)
+  /**
+   * Whichever element carries the content — the `<img>` or the inline-SVG
+   * wrapper. Assigned by a ref callback rather than handed to `ref` directly
+   * because a `RefObject<HTMLElement>` is not assignable to `Ref<HTMLImageElement>`.
+   */
+  const contentRef = useRef<HTMLElement | null>(null)
   const pointers = useRef(new Map<number, Point>())
   const gesture = useRef<GestureState | null>(null)
   const lastTap = useRef<{ time: number; x: number; y: number } | null>(null)
@@ -124,6 +161,7 @@ export function ImageViewerOverlay({
   // fire after this render had already dereferenced a missing image.
   const index = Math.min(rawIndex, Math.max(0, total - 1))
   const current = images[index]
+  const currentSvg = current && isSvgImage(current) ? current : null
 
   // ── Geometry helpers (all ref reads — stable identities) ──────────────────
 
@@ -133,10 +171,21 @@ export function ImageViewerOverlay({
   }, [])
 
   const fittedSize = useCallback((): Size => {
-    const img = imageRef.current
-    if (!img) return { width: 0, height: 0 }
+    const el = contentRef.current
+    if (!el) return { width: 0, height: 0 }
+    // Inline SVG has no `naturalWidth` — its fitted box is the one this component
+    // computed from the intrinsic size, and unlike a raster image it is allowed
+    // to scale up to fill the viewport.
+    if (currentSvg) {
+      return fitSize(
+        { width: currentSvg.intrinsicWidth, height: currentSvg.intrinsicHeight },
+        viewportSize(),
+        true
+      )
+    }
+    const img = el as HTMLImageElement
     return fitSize({ width: img.naturalWidth, height: img.naturalHeight }, viewportSize())
-  }, [viewportSize])
+  }, [currentSvg, viewportSize])
 
   /** Client coords → offset from the viewport centre, the anchor space `transform.ts` uses. */
   const anchorOf = useCallback((clientX: number, clientY: number): Point => {
@@ -152,6 +201,35 @@ export function ImageViewerOverlay({
     },
     [fittedSize, viewportSize]
   )
+
+  // ── Viewport measurement (inline SVG only) ───────────────────────────────
+
+  /**
+   * The inline-SVG wrapper needs its fitted box as *explicit px*, so unlike the
+   * `<img>` (which CSS fits for free via `max-width/max-height`) the viewport
+   * size has to reach the render pass as state.
+   *
+   * Deliberately gated on the current entry being SVG: for a raster gallery this
+   * effect never runs and never sets state, so that path keeps its exact
+   * pre-existing render behaviour. `useLayoutEffect` + an immediate measure means
+   * the un-measured `{0,0}` state is never painted; the `ResizeObserver` then
+   * keeps up with window resizes and the mobile keyboard.
+   */
+  const [viewportBox, setViewportBox] = useState<Size>({ width: 0, height: 0 })
+  const hasSvgEntry = currentSvg !== null
+  useLayoutEffect(() => {
+    const el = viewportRef.current
+    if (!el || !hasSvgEntry) return
+    const measure = (): void =>
+      setViewportBox({ width: el.clientWidth, height: el.clientHeight })
+    measure()
+    // Guarded because jsdom ships no ResizeObserver: without this, every test
+    // that opens a diagram would have to stub one.
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [hasSvgEntry])
 
   // ── Navigation ───────────────────────────────────────────────────────────
 
@@ -232,7 +310,7 @@ export function ImageViewerOverlay({
   // ── Pointer gestures ─────────────────────────────────────────────────────
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    const onImage = imageRef.current?.contains(e.target as Node) ?? false
+    const onImage = contentRef.current?.contains(e.target as Node) ?? false
     // Capture only for a gesture that starts on the image: a pan must keep
     // tracking once the pointer leaves the viewport, whereas capturing a press
     // that began on a chevron would retarget its pointer events away from the
@@ -357,6 +435,31 @@ export function ImageViewerOverlay({
   const showTabs = galleries.length >= 2
   const showNav = total > 1
 
+  const contentTransform: React.CSSProperties = {
+    transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${transform.scale})`,
+    cursor: transform.scale > MIN_SCALE ? 'grab' : 'zoom-in',
+    willChange: 'transform'
+  }
+
+  /**
+   * The inline-SVG wrapper is sized to exactly the fitted content box, which is
+   * what keeps the rest of the component honest: the empty area around the
+   * diagram remains the *viewport* element, so `endPointer`'s backdrop-tap
+   * dismissal (`e.target === e.currentTarget`) needs no special case, and the
+   * flex viewport centres the wrapper just like it centres the `<img>` — the
+   * default `transform-origin: center` the maths assumes.
+   *
+   * Before the first measure (and always in jsdom, where `clientWidth` is 0) it
+   * falls back to the intrinsic size capped by `max-width/max-height: 100%`,
+   * rather than emitting a NaN or zero box.
+   */
+  const svgBox = ((): Size => {
+    if (!currentSvg) return { width: 0, height: 0 }
+    const intrinsic = { width: currentSvg.intrinsicWidth, height: currentSvg.intrinsicHeight }
+    const fitted = fitSize(intrinsic, viewportBox, true)
+    return fitted.width > 0 ? fitted : intrinsic
+  })()
+
   /**
    * The overlay is portalled to `<body>`, but React still bubbles *synthetic*
    * events up the component tree — so an ancestor of the provider would
@@ -458,21 +561,47 @@ export function ImageViewerOverlay({
         className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden"
         style={{ touchAction: 'none' }}
       >
-        <img
-          ref={imageRef}
-          data-testid="ImageViewerOverlay.image"
-          data-id={String(index)}
-          src={current.src}
-          alt={current.fileName ?? 'Image'}
-          draggable={false}
-          onDragStart={(e) => e.preventDefault()}
-          className="max-w-full max-h-full object-contain"
-          style={{
-            transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${transform.scale})`,
-            cursor: transform.scale > MIN_SCALE ? 'grab' : 'zoom-in',
-            willChange: 'transform'
-          }}
-        />
+        {isSvgImage(current) ? (
+          <div
+            ref={(el) => {
+              contentRef.current = el
+            }}
+            data-testid="ImageViewerOverlay.svg"
+            data-id={String(index)}
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            dangerouslySetInnerHTML={{ __html: current.svgHtml }}
+            style={{
+              ...contentTransform,
+              width: svgBox.width,
+              height: svgBox.height,
+              maxWidth: '100%',
+              maxHeight: '100%',
+              // Mermaid SVGs are transparent, so on the black/80 backdrop a
+              // light-theme diagram's black text and edges would be unreadable.
+              // border-box keeps the padding inside the fitted box, so the
+              // transform maths still sees the size it computed.
+              background: 'var(--color-bg-primary)',
+              borderRadius: 6,
+              padding: 12,
+              boxSizing: 'border-box'
+            }}
+          />
+        ) : (
+          <img
+            ref={(el) => {
+              contentRef.current = el
+            }}
+            data-testid="ImageViewerOverlay.image"
+            data-id={String(index)}
+            src={current.src}
+            alt={current.fileName ?? 'Image'}
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            className="max-w-full max-h-full object-contain"
+            style={contentTransform}
+          />
+        )}
 
         {showNav && (
           <>

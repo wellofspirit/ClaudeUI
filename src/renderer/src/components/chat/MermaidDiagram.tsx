@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify'
 import { Highlight, themes } from 'prism-react-renderer'
 import { useSessionStore } from '../../stores/session-store'
 import type { ThemeId } from '../../stores/session-store'
+import { ImageViewerOverlay, type ViewerSvgImage } from '../shared/ImageViewer'
 
 // ---------------------------------------------------------------------------
 // Mermaid theme configuration
@@ -266,6 +267,33 @@ export function svgElementToXml(svgEl: SVGSVGElement): string {
   return new XMLSerializer().serializeToString(clone)
 }
 
+/**
+ * Guarantee the element has a viewBox and report the intrinsic size every
+ * consumer scales against (the inline viewport, the PNG rasterizer, and the
+ * full-screen viewer's fit maths all need the same number).
+ *
+ * An existing viewBox wins and is left untouched — it may carry a non-zero
+ * min-x/min-y, and rewriting it as `0 0 w h` would shift the whole diagram.
+ * Otherwise the width/height attributes are promoted into one, falling back to
+ * 800x600 when they are missing or unusable (a NaN would propagate into a NaN
+ * canvas or a NaN CSS box).
+ */
+function ensureViewBox(svgEl: SVGSVGElement): { width: number; height: number } {
+  const viewBox = svgEl.getAttribute('viewBox')
+  if (viewBox) {
+    const parts = viewBox.split(/\s+|,/).map(Number)
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+      return { width: parts[2], height: parts[3] }
+    }
+    return { width: 800, height: 600 }
+  }
+  const w = parseFloat(svgEl.getAttribute('width') || '800')
+  const h = parseFloat(svgEl.getAttribute('height') || '600')
+  const size = { width: w > 0 ? w : 800, height: h > 0 ? h : 600 }
+  svgEl.setAttribute('viewBox', `0 0 ${size.width} ${size.height}`)
+  return size
+}
+
 // ---------------------------------------------------------------------------
 // SVG → PNG conversion (used by both export and copy)
 // ---------------------------------------------------------------------------
@@ -274,21 +302,7 @@ async function svgToPngBlob(svgString: string): Promise<Blob | null> {
   const svgEl = parseSvgElement(svgString)
   if (!svgEl) return null
 
-  const viewBox = svgEl.getAttribute('viewBox')
-  let width = 800
-  let height = 600
-  if (viewBox) {
-    const parts = viewBox.split(/\s+|,/).map(Number)
-    if (parts.length === 4) {
-      width = parts[2]
-      height = parts[3]
-    }
-  } else {
-    const w = parseFloat(svgEl.getAttribute('width') || '800')
-    const h = parseFloat(svgEl.getAttribute('height') || '600')
-    if (w > 0) width = w
-    if (h > 0) height = h
-  }
+  const { width, height } = ensureViewBox(svgEl)
 
   // 2x for retina clarity
   const scale = 2
@@ -356,6 +370,7 @@ interface DiagramToolbarProps {
   onZoomOut: () => void
   onZoomReset: () => void
   onFitToView: () => void
+  onExpand: () => void
 }
 
 function DiagramToolbar({
@@ -364,7 +379,8 @@ function DiagramToolbar({
   onZoomIn,
   onZoomOut,
   onZoomReset,
-  onFitToView
+  onFitToView,
+  onExpand
 }: DiagramToolbarProps): React.JSX.Element {
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied'>('idle')
 
@@ -410,6 +426,14 @@ function DiagramToolbar({
       </button>
       <button onClick={onFitToView} className={btnClass} title="Fit to width">
         Fit
+      </button>
+      <button
+        data-testid="MermaidDiagram.expand"
+        onClick={onExpand}
+        className={btnClass}
+        title="Expand (full screen)"
+      >
+        Expand
       </button>
 
       <div className="w-px h-3 bg-border mx-0.5" />
@@ -473,15 +497,22 @@ function SourceView({ source }: { source: string }): React.JSX.Element {
 
 interface DiagramViewportProps {
   svgString: string
+  title: string
 }
 
-function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element {
+/** Movement (px) since mousedown that still counts as a click rather than a pan. */
+const CLICK_SLOP_PX = 4
+
+function DiagramViewport({ svgString, title }: DiagramViewportProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [fullscreen, setFullscreen] = useState(false)
   const isDragging = useRef(false)
   const lastMouse = useRef({ x: 0, y: 0 })
+  /** Path length travelled since mousedown — a pan must not also read as a click. */
+  const dragDistance = useRef(0)
 
   // Normalize SVG: ensure it has a viewBox so it scales properly,
   // then remove fixed width/height so it fills the container at zoom=1.
@@ -489,22 +520,49 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
     const svg = parseSvgElement(svgString)
     if (!svg) return svgString
 
-    // If no viewBox, create one from width/height attributes
-    if (!svg.getAttribute('viewBox')) {
-      const w = parseFloat(svg.getAttribute('width') || '800')
-      const h = parseFloat(svg.getAttribute('height') || '600')
-      svg.setAttribute('viewBox', `0 0 ${w} ${h}`)
-    }
+    ensureViewBox(svg)
 
-    // Remove fixed dimensions — let CSS handle sizing
+    // Remove fixed dimensions — let CSS handle sizing. (An attribute value of
+    // "auto" is not a valid SVG length and Chromium logs an error for it; the
+    // style.height below is what actually sizes the element.)
     svg.removeAttribute('width')
-    svg.setAttribute('height', 'auto')
+    svg.removeAttribute('height')
     svg.style.width = '100%'
     svg.style.height = 'auto'
     svg.style.maxWidth = 'none'
 
     return svg.outerHTML
   }, [svgString])
+
+  /**
+   * The same SVG prepared for `ImageViewerOverlay`, which sizes the wrapper
+   * itself: both axes are `100%` here (the inline viewport instead wants
+   * `height:auto`, since it scrolls/overflows rather than fitting a box), and the
+   * intrinsic viewBox size rides along because live DOM has no `naturalWidth` for
+   * the overlay to measure.
+   *
+   * Computed only once the viewer is actually open — it is a second full
+   * parse+serialize of markup that can be hundreds of kB, and most diagrams are
+   * never expanded. Null if the markup has no <svg> at all, in which case there
+   * is nothing to expand.
+   */
+  const fullscreenEntry = useMemo<ViewerSvgImage | null>(() => {
+    if (!fullscreen) return null
+    const svg = parseSvgElement(svgString)
+    if (!svg) return null
+    const { width, height } = ensureViewBox(svg)
+    svg.removeAttribute('width')
+    svg.removeAttribute('height')
+    svg.style.width = '100%'
+    svg.style.height = '100%'
+    svg.style.maxWidth = 'none'
+    return {
+      svgHtml: svg.outerHTML,
+      intrinsicWidth: width,
+      intrinsicHeight: height,
+      fileName: title
+    }
+  }, [fullscreen, svgString, title])
 
   const fitToWidth = useCallback(() => {
     setZoom(1)
@@ -518,11 +576,13 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
     setPan({ x: 0, y: 0 })
   }, [])
 
-  // Mouse drag to pan
+  // Mouse drag to pan — and, when the press did not actually move, a click that
+  // opens the full-screen viewer.
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     // Only left button
     if (e.button !== 0) return
     isDragging.current = true
+    dragDistance.current = 0
     lastMouse.current = { x: e.clientX, y: e.clientY }
     e.preventDefault()
   }, [])
@@ -532,10 +592,25 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
     const dx = e.clientX - lastMouse.current.x
     const dy = e.clientY - lastMouse.current.y
     lastMouse.current = { x: e.clientX, y: e.clientY }
+    // Path length, not displacement: a drag that wanders back to where it
+    // started is still a pan, and must not fall through to the click.
+    dragDistance.current += Math.hypot(dx, dy)
     setPan((p) => ({ x: p.x + dx, y: p.y + dy }))
   }, [])
 
   const handleMouseUp = useCallback(() => {
+    const wasPressed = isDragging.current
+    isDragging.current = false
+    if (wasPressed && dragDistance.current <= CLICK_SLOP_PX) setFullscreen(true)
+  }, [])
+
+  /**
+   * Leaving the container only cancels the press. Deliberately *not*
+   * `handleMouseUp`: the pointer can leave in one jump that produces no
+   * intervening mousemove, which would otherwise register as a zero-movement
+   * click and pop the viewer open.
+   */
+  const handleMouseLeave = useCallback(() => {
     isDragging.current = false
   }, [])
 
@@ -566,19 +641,21 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
         onZoomOut={handleZoomOut}
         onZoomReset={handleZoomReset}
         onFitToView={fitToWidth}
+        onExpand={() => setFullscreen(true)}
       />
       <div
         ref={containerRef}
+        data-testid="MermaidDiagram.canvas"
         className="rounded-md border border-border overflow-hidden p-3"
         style={{
           background: 'var(--color-bg-primary)',
-          cursor: isDragging.current ? 'grabbing' : 'grab',
+          cursor: isDragging.current ? 'grabbing' : 'zoom-in',
           minHeight: 120
         }}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
       >
         <style>{`.mermaid-content text:not([font-weight]) { font-weight: 500; }`}</style>
         <div
@@ -595,6 +672,12 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
           dangerouslySetInnerHTML={{ __html: normalizedSvg }}
         />
       </div>
+      {fullscreen && fullscreenEntry && (
+        <ImageViewerOverlay
+          tabs={[{ id: 'diagram', label: 'Diagram', images: [fullscreenEntry] }]}
+          onClose={() => setFullscreen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -605,11 +688,13 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
 
 interface MermaidDiagramProps {
   source: string
+  /** Tool-call title; shown as the name of the diagram in the full-screen viewer. */
   title?: string
 }
 
 export const MermaidDiagram = memo(function MermaidDiagram({
-  source
+  source,
+  title
 }: MermaidDiagramProps): React.JSX.Element {
   const [tab, setTab] = useState<'rendered' | 'source'>('rendered')
   const [svgString, setSvgString] = useState<string | null>(null)
@@ -698,7 +783,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
       {/* Content */}
       {tab === 'rendered' ? (
         svgString ? (
-          <DiagramViewport svgString={svgString} />
+          <DiagramViewport svgString={svgString} title={title || 'Mermaid diagram'} />
         ) : error ? (
           <div
             className="rounded-md border border-danger/30 p-3"

@@ -12,7 +12,7 @@
  */
 
 import type { ChatMessage, ContentBlock, ToolResultImage } from '../../../../../shared/types'
-import type { ViewerImage } from './ImageViewerOverlay'
+import type { ViewerRasterImage } from './ImageViewerOverlay'
 
 export const ATTACHMENTS_TAB_ID = 'attachments'
 export const TOOL_RESULTS_TAB_ID = 'toolResults'
@@ -20,7 +20,7 @@ export const ATTACHMENTS_TAB_LABEL = 'Attachments'
 export const TOOL_RESULTS_TAB_LABEL = 'Tool results'
 
 /** A gallery entry plus the identity a thumbnail uses to find its own index. */
-export interface GalleryEntry extends ViewerImage {
+export interface GalleryEntry extends ViewerRasterImage {
   key: string
   /**
    * Tool-results gallery only: the tool call that returned this image, and the

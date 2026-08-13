@@ -177,6 +177,42 @@ describe('fitSize', () => {
       height: 0
     })
   })
+
+  describe('allowUpscale (vector content)', () => {
+    it('grows small content to fill the viewport on the tighter axis', () => {
+      // 125x50 is 5:2, the viewport 5:4 — so width is the binding constraint.
+      expect(fitSize({ width: 125, height: 50 }, VIEWPORT, true)).toEqual({
+        width: 1000,
+        height: 400
+      })
+      // Portrait content binds on height instead.
+      expect(fitSize({ width: 100, height: 200 }, VIEWPORT, true)).toEqual({
+        width: 400,
+        height: 800
+      })
+    })
+
+    it('downscales oversized content exactly as the default does', () => {
+      expect(fitSize({ width: 2000, height: 1000 }, VIEWPORT, true)).toEqual(
+        fitSize({ width: 2000, height: 1000 }, VIEWPORT)
+      )
+    })
+
+    it('still returns a zero size when either dimension is unknown', () => {
+      expect(fitSize({ width: 0, height: 60 }, VIEWPORT, true)).toEqual({ width: 0, height: 0 })
+      expect(fitSize({ width: 120, height: 60 }, { width: 1000, height: 0 }, true)).toEqual({
+        width: 0,
+        height: 0
+      })
+    })
+
+    it('is opt-in — the default is unchanged', () => {
+      expect(fitSize({ width: 120, height: 60 }, VIEWPORT, false)).toEqual({
+        width: 120,
+        height: 60
+      })
+    })
+  })
 })
 
 describe('pinchFactor', () => {

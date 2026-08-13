@@ -1,5 +1,11 @@
 export { ImageViewerOverlay } from './ImageViewerOverlay'
-export type { ImageViewerOverlayProps, ViewerImage, ViewerTab } from './ImageViewerOverlay'
+export type {
+  ImageViewerOverlayProps,
+  ViewerImage,
+  ViewerRasterImage,
+  ViewerSvgImage,
+  ViewerTab
+} from './ImageViewerOverlay'
 export { ImageGalleryProvider, useImageGallery } from './ImageGalleryProvider'
 export type { ImageGalleryContextValue } from './ImageGalleryProvider'
 export {
