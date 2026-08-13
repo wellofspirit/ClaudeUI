@@ -61,63 +61,114 @@ if (src.includes(PATCH_MARKER)) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Find the LR4 function (returns kh8 — parsed header utilization)
+// Step 2+3: Find the utilization getter (LR4) and the header-ingest fn (pF1)
 // ---------------------------------------------------------------------------
-// LR4 is a tiny getter: function <name>(){return <kh8>}
-// We find it by its nearby context: it's defined right before hR4 which
-// parses "anthropic-ratelimit-unified-" headers.
+// We need two names:
+//   lr4Fn — a nullary getter returning the parsed header utilization; the
+//           injected stdout write calls it as `lr4Fn()`.
+//   pf1Fn — the function the stream loop calls with the response headers; its
+//           call site is where we inject.
+//
+// v2.1.231 restructured this whole area from module-level state into a class:
+//
+//   ≤2.1.220  module var:  function LR4(){return kh8}function hR4(hdrs){...}
+//             ingest fn:   function pF1(e,t,r=!1,n=Date.now()){...if(kh8={}...
+//
+//   ≥2.1.231  class field: class Wap{ rawUtilization={}; extractQuotaStatusFromHeaders(...){...} }
+//             singleton:   var bne=new Wap
+//             getter:      function lCn(){return bne.rawUtilization}
+//             ingest fn:   function usa(e,t,r=!1,n=Date.now(),o){bne.extractQuotaStatusFromHeaders(e,t,r,n,o)}
+//
+// The class-shape anchors are STRONGER than the ones they replace: the property
+// names (`rawUtilization`, `extractQuotaStatusFromHeaders`) survive minification,
+// so we bind to those and let the minified function/singleton names fall out.
+// Both shapes are tried so a rolled-back `claudeCliVersion` still builds.
 // ---------------------------------------------------------------------------
 
-console.log('\n--- Locating header utilization getter (LR4) ---')
+console.log('\n--- Locating header utilization getter + header-ingest fn ---')
 
-// Pattern: function <LR4>(){return <kh8>}function <hR4>
-// v2.1.119+ appended ["overage","overage"] (and may add further bucket pairs)
-// to the for-loop array. Allow any number of trailing ["str","str"] entries.
-const lr4Re = new RegExp(
-  `function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\](?:,\\["[\\w_]+","[\\w_]+"\\])*\\]\\)`
-)
-const lr4Match = lr4Re.exec(src)
-if (!lr4Match) {
-  console.error('ERROR: Cannot locate LR4 (header utilization getter) via hR4 context.')
-  process.exit(1)
+let lr4Fn
+let pf1Fn
+
+// --- Shape A (v2.1.231+): class-backed singleton ---
+const getterRe = new RegExp(`function (${V})\\(\\)\\{return (${V})\\.rawUtilization\\}`)
+const getterMatch = getterRe.exec(src)
+
+if (getterMatch) {
+  lr4Fn = getterMatch[1]
+  const singleton = getterMatch[2]
+  if (getterRe.exec(src.slice(getterMatch.index + 1))) {
+    console.error('ERROR: rawUtilization getter matched more than once. Aborting.')
+    process.exit(1)
+  }
+  console.log(`  Header utilization getter: ${lr4Fn} (returns ${singleton}.rawUtilization)`)
+
+  // The module-level wrapper delegating to the singleton's ingest method. Bound
+  // to the SAME singleton the getter reads, so the two can't drift apart.
+  const wrapperRe = new RegExp(
+    `function (${V})\\(${V},${V},${V}=!1,${V}=Date\\.now\\(\\),${V}\\)\\{` +
+      `${singleton.replace(/[$]/g, '\\$&')}\\.extractQuotaStatusFromHeaders\\(`
+  )
+  const wrapperMatch = wrapperRe.exec(src)
+  if (!wrapperMatch) {
+    console.error(
+      `ERROR: Found the rawUtilization getter but no module-level wrapper calling ` +
+        `${singleton}.extractQuotaStatusFromHeaders(). Cannot locate the ingest fn.`
+    )
+    process.exit(1)
+  }
+  pf1Fn = wrapperMatch[1]
+  console.log(`  Header-ingest fn: ${pf1Fn} (→ ${singleton}.extractQuotaStatusFromHeaders)`)
+} else {
+  // --- Shape B (≤2.1.220): module-level var + getter ---
+  //
+  // Pattern: function <LR4>(){return <kh8>}function <hR4>
+  // v2.1.119+ appended ["overage","overage"] (and may add further bucket pairs)
+  // to the for-loop array. Allow any number of trailing ["str","str"] entries.
+  const lr4Re = new RegExp(
+    `function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\](?:,\\["[\\w_]+","[\\w_]+"\\])*\\]\\)`
+  )
+  const lr4Match = lr4Re.exec(src)
+  if (!lr4Match) {
+    console.error(
+      'ERROR: Cannot locate the header utilization getter in either shape ' +
+        '(v2.1.231+ `function F(){return S.rawUtilization}`, or ' +
+        '≤2.1.220 `function F(){return V}function P(h){...["five_hour","5h"]...}`).'
+    )
+    process.exit(1)
+  }
+
+  lr4Fn = lr4Match[1]
+  const kh8Var = lr4Match[2]
+  console.log(`  Header utilization getter: ${lr4Fn} (returns ${kh8Var})`)
+
+  // v2.1.97 signature:  function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>)){if(<kh8>={} ...
+  // v2.1.197 signature: function <pF1>(<e>,<t>,<n>=!1,<r>=Date.now()){let <o>=<Eo>();if(!<ndt>(<o>)){if(<kh8>={} ...
+  // The function grew from 1 param to 4 (with two defaulted), and the guard var
+  // is now called inline instead of assigned first. We match by the 4-param+defaults
+  // signature, then anchor on the kh8 reset inside the falsy-scope guard.
+  const escapedKh8 = kh8Var.replace(/\$/g, '\\$')
+  const pf1DefRe = new RegExp(
+    `function (${V})\\(${V},${V},${V}=!1,${V}=Date\\.now\\(\\)\\)\\{let ${V}=${V}\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${escapedKh8}=\\{\\}`
+  )
+  const pf1DefMatch = pf1DefRe.exec(src)
+  if (!pf1DefMatch) {
+    console.error('ERROR: Cannot locate pF1 function definition.')
+    process.exit(1)
+  }
+  pf1Fn = pf1DefMatch[1]
+  console.log(`  Header-ingest fn: ${pf1Fn}`)
 }
 
-const lr4Fn = lr4Match[1]
-const kh8Var = lr4Match[2]
-console.log(`  Header utilization getter: ${lr4Fn} (returns ${kh8Var})`)
-
 // ---------------------------------------------------------------------------
-// Step 3: Find the pF1(U1.headers) call site in the stream loop
+// Step 4: Find the pF1(<resp>.headers, ...) call site in the stream loop
 // ---------------------------------------------------------------------------
 // After successful streaming, the code does:
 //   let U1 = l; if (U1) pF1(U1.headers), k8 = U1.headers
-// We need to find this pattern dynamically — pF1, U1, l, k8 are all minified.
-// Stable anchor: the pattern `pF1(<var>.headers),<var>=<var>.headers` right
-// after an `if(<var>)` guard. The pF1 function name we can find from its
-// unique definition that calls hR4 and SR4.
+// U1/k8 are minified, so anchor on the call + its trailing headers assignment.
 // ---------------------------------------------------------------------------
 
 console.log('\n--- Locating pF1 call in stream loop ---')
-
-// Find pF1 function name dynamically: it's the function that calls hR4 and
-// contains "anthropic-ratelimit-unified-status" via SR4.
-//
-// v2.1.97 signature:  function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>)){if(<kh8>={} ...
-// v2.1.197 signature: function <pF1>(<e>,<t>,<n>=!1,<r>=Date.now()){let <o>=<Eo>();if(!<ndt>(<o>)){if(<kh8>={} ...
-// The function grew from 1 param to 4 (with two defaulted), and the guard var
-// is now called inline instead of assigned first. We match by the 4-param+defaults
-// signature, then anchor on the kh8 reset inside the falsy-scope guard.
-const escapedKh8 = kh8Var.replace(/\$/g, '\\$')
-const pf1DefRe = new RegExp(
-  `function (${V})\\(${V},${V},${V}=!1,${V}=Date\\.now\\(\\)\\)\\{let ${V}=${V}\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${escapedKh8}=\\{\\}`
-)
-const pf1DefMatch = pf1DefRe.exec(src)
-if (!pf1DefMatch) {
-  console.error('ERROR: Cannot locate pF1 function definition.')
-  process.exit(1)
-}
-const pf1Fn = pf1DefMatch[1]
-console.log(`  pF1 function name: ${pf1Fn}`)
 
 // Now find the call site: if(<var>)<pF1>(<var>.headers,<args...>),<var>=<var>.headers
 //

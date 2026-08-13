@@ -103,32 +103,63 @@ if (!skipA1) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  // Window extended from 5000→8000: in 2.1.197 the stop_task handler (which contains the
-  // success-response-helper anchor) moved to 6578 chars before the fallback, outside 5000.
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 8000), anchorIdx + 2000)
+  // Window history: 5000 → 8000 (2.1.197 moved the stop_task handler holding the
+  // success-response-helper anchor to 6578 chars before the fallback) → 16000
+  // (2.1.231 pushed it to 8479, outside 8000 again).
+  const NEARBY_BACK = 16000
+  const nearbyCtx = src.slice(Math.max(0, anchorIdx - NEARBY_BACK), anchorIdx + 2000)
 
   // --- Success response helper ---
-  const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
-  const successMatch = successRe.exec(nearbyCtx)
-  if (!successMatch) {
-    console.error('ERROR: Cannot find success response helper pattern')
+  //
+  // The window only bounds the search; it does not identify the helper. Since
+  // the anchor keeps drifting, widening it blindly would eventually let an
+  // unrelated `FN(msg,{})}catch` be picked up as "the" helper. So take EVERY
+  // match in the window and require them to name the same function — with
+  // several sibling control handlers all replying through the one helper, unanimity
+  // is a far stronger signal than "whatever matched first".
+  const successRe = new RegExp(
+    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
+    'g'
+  )
+  const successNames = [...nearbyCtx.matchAll(successRe)].map((m) => m[1])
+  if (successNames.length === 0) {
+    console.error(
+      `ERROR: Cannot find success response helper pattern within ${NEARBY_BACK} chars ` +
+        'before the control-request fallback anchor.'
+    )
     process.exit(1)
   }
-  const successFn = successMatch[1]
-  console.log(`  Success response helper: ${successFn}`)
+  const successFn = successNames[0]
+  if (successNames.some((n) => n !== successFn)) {
+    console.error(
+      `ERROR: success response helper is ambiguous — candidates disagree: ${[...new Set(successNames)].join(', ')}. Aborting.`
+    )
+    process.exit(1)
+  }
+  console.log(`  Success response helper: ${successFn} (${successNames.length}/${successNames.length} call sites agree)`)
 
   // --- Queue push function (found by structural content pattern) ---
-  // The push function pushes to an array with priority??"next":
-  //   function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
-  // We search for the priority??"next" literal and extract the surrounding function.
+  // The push function pushes to an array with priority??"next". Shape history:
+  //   ≤2.1.196  function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
+  //   2.1.197+  ...same, plus a trailing `timestamp:` field
+  //   2.1.231   function X(ae){if(!q(ae))return;e.push({...xDd(ae),priority:ae.priority??"next",timestamp:...
+  //             — gained an admission guard, and the spread is now a NORMALIZER
+  //             CALL on the param rather than the bare param.
+  // So both the guard and the normalizer are optional, and `priority:` is
+  // pinned to the function's own parameter (the part that actually identifies
+  // this as the enqueue path). The "next" literal keeps us off its `"later"`
+  // sibling, which is otherwise identical.
   const pushDefRe = new RegExp(
-    // 2.1.197+: push call now includes a trailing `timestamp:` field after priority??"next"
-    // Old: {...A,priority:A.priority??"next"}   New: {...A,priority:A.priority??"next",timestamp:...}
-    `function (${V})\\((${V})\\)\\{(${V})\\.push\\(\\{\\.\\.\\.(${V}),priority:\\4\\.priority\\?\\?"next",timestamp:`
+    `function (${V})\\((${V})\\)\\{(?:if\\(!${V}\\(\\2\\)\\)return;)?` +
+      `(${V})\\.push\\(\\{\\.\\.\\.(?:\\2|${V}\\(\\2\\)),priority:\\2\\.priority\\?\\?"next",timestamp:`
   )
   const pushDefMatch = pushDefRe.exec(src)
   if (!pushDefMatch) {
     console.error('ERROR: Cannot find queue push function by priority??"next" pattern')
+    process.exit(1)
+  }
+  if (pushDefRe.exec(src.slice(pushDefMatch.index + 1))) {
+    console.error('ERROR: queue push function pattern matched more than once. Aborting.')
     process.exit(1)
   }
   const pushFn = pushDefMatch[1]

@@ -48,6 +48,7 @@ import {
 import { get as httpsGet } from 'node:https'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isCliEntrypointName } from './lib/bun-entrypoint.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -323,7 +324,7 @@ function extractWrappedAssets(buf) {
     const cLen = blob.readUInt32LE(e + 12)
     const bytes = Buffer.from(blob.subarray(data_start + cOff, data_start + cOff + cLen))
 
-    if (name.endsWith('/cli.js') || name.endsWith('\\cli.js')) {
+    if (isCliEntrypointName(name)) {
       assets.cliName = name
       assets.cliBytes = bytes
     } else if (name.endsWith('.node')) {

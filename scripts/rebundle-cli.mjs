@@ -33,6 +33,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isCliEntrypointName } from './lib/bun-entrypoint.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -524,8 +525,7 @@ function rewritePE(buf, pe, newBlob) {
 // ---------------------------------------------------------------------------
 
 function findCliModule(modules) {
-  // cli.js names look like "B:/~BUN/root/src/entrypoints/cli.js"
-  const cli = modules.find((m) => m.name.toString('utf8').endsWith('/cli.js'))
+  const cli = modules.find((m) => isCliEntrypointName(m.name.toString('utf8')))
   if (!cli) die('cli.js module not found in blob')
   return cli
 }

@@ -75,8 +75,15 @@ const upstreamRedirectRe = new RegExp(
 
 // Pattern: VAR.parentUuid&&VAR.has(VAR.parentUuid))VAR.parentUuid=VAR.get(VAR.parentUuid)??null
 // This is the redirect map application for non-progress messages.
+//
+// 2.1.231 inserted a telemetry call into the `if` body ahead of the assignment:
+//   ...F.has(ee.parentUuid))mOf("rewrote"),ee.parentUuid=F.get(ee.parentUuid)??null
+// Tolerate one such leading call. Getting this wrong is expensive in a way the
+// other patches are not: a missed detection here does not fail loudly, it falls
+// through to the LEGACY path and re-applies a fix upstream already shipped.
 const upstreamApplyRe = new RegExp(
-  `(${V})\\.parentUuid&&(${V})\\.has\\(\\1\\.parentUuid\\)\\)\\1\\.parentUuid=\\2\\.get\\(\\1\\.parentUuid\\)\\?\\?null`
+  `(${V})\\.parentUuid&&(${V})\\.has\\(\\1\\.parentUuid\\)\\)(?:${V}\\([^()]*\\),)?` +
+    `\\1\\.parentUuid=\\2\\.get\\(\\1\\.parentUuid\\)\\?\\?null`
 )
 
 const hasRedirectBuild = upstreamRedirectRe.test(src)

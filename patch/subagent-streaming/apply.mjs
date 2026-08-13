@@ -760,23 +760,60 @@ if (src.includes(patchEMarker)) {
   //   - arr var (h) = collection array
   //   - p() = shouldNotifyOwner callback — returns Fe (true when backgrounded)
   //   - toolUseContext param (.toolUseId = parent_tool_use_id)
-  const bveAnchorRe = new RegExp(
-    `if\\((${V})\\(\\),(${V})\\.type==="system"&&\\2\\.subtype==="api_error"\\)continue;(${V})\\.push\\(\\2\\)`
+  //
+  // The anchor is matched in TWO parts. Up to v2.1.220 the api_error `continue`
+  // was immediately followed by `ARR.push(MSG)`, so one regex covered both. In
+  // v2.1.231 upstream interposed a model-refusal branch between them:
+  //
+  //   if(Z(),_e.type==="system"&&_e.subtype==="api_error")continue;
+  //   if(_e.type==="system"&&_e.subtype==="model_refusal_fallback")s.update(...);
+  //   y.push(_e),...
+  //
+  // A single contiguous regex is therefore too brittle — any future statement
+  // spliced into the same gap breaks it again. Match the (unique) api_error
+  // head, then find the collection push for the SAME message var within a
+  // bounded window after it. The window keeps the search local to this loop
+  // body rather than letting it run into unrelated code.
+  const bveHeadRe = new RegExp(
+    `if\\((${V})\\(\\),(${V})\\.type==="system"&&\\2\\.subtype==="api_error"\\)continue;`
   )
-  const bveAnchorMatch = src.match(bveAnchorRe)
+  const bveHeadMatch = src.match(bveHeadRe)
+
+  /** Chars after the api_error `continue;` to search for `ARR.push(MSG)`. */
+  const BVE_PUSH_WINDOW = 800
+
+  let bveAnchorMatch = null
+  if (bveHeadMatch) {
+    const headIdx = src.indexOf(bveHeadMatch[0])
+    if (src.indexOf(bveHeadMatch[0], headIdx + 1) !== -1) {
+      console.error('ERROR: BVe anchor head matches more than once. Aborting.')
+      process.exit(1)
+    }
+    // Minified names can contain `$`, which is a regex metacharacter.
+    const msgVarLit = bveHeadMatch[2].replace(/[$]/g, '\\$&')
+    const windowStart = headIdx + bveHeadMatch[0].length
+    const window = src.slice(windowStart, windowStart + BVE_PUSH_WINDOW)
+    const pushMatch = window.match(new RegExp(`(${V})\\.push\\(${msgVarLit}\\)`))
+    if (!pushMatch) {
+      console.error(
+        `ERROR: BVe anchor head found, but no \`ARR.push(${bveHeadMatch[2]})\` within ` +
+          `${BVE_PUSH_WINDOW} chars after it. The collection loop body has changed shape.`
+      )
+      process.exit(1)
+    }
+    bveAnchorMatch = {
+      headIdx,
+      watchdogFn: bveHeadMatch[1],
+      msgVar: bveHeadMatch[2],
+      arrVar: pushMatch[1],
+      pushGap: pushMatch.index
+    }
+  }
 
   if (bveAnchorMatch) {
     // v2.1.197+ BVe path
-    const anchorStr = bveAnchorMatch[0]
-    const watchdogFn = bveAnchorMatch[1]
-    const msgVar = bveAnchorMatch[2]
-    const arrVar = bveAnchorMatch[3]
-    const anchorIdx = src.indexOf(anchorStr)
-
-    if (src.indexOf(anchorStr, anchorIdx + 1) !== -1) {
-      console.error('ERROR: BVe anchor matches more than once. Aborting.')
-      process.exit(1)
-    }
+    const { watchdogFn, msgVar, arrVar, pushGap } = bveAnchorMatch
+    const anchorIdx = bveAnchorMatch.headIdx
 
     // Detect the toolUseContext variable by binding structurally to the
     // BVe function's destructured parameter. The minified name changes
@@ -841,7 +878,10 @@ if (src.includes(patchEMarker)) {
     const hasNativeRelay = notifyMatches[0][0].includes('onRunSettled:')
     console.log(`  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`)
 
-    console.log(`Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, arr=${arrVar})`)
+    console.log(
+      `Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, ` +
+        `arr=${arrVar}, push gap=${pushGap} chars)`
+    )
 
     // Inject before the full `if(WATCHDOG(),...api_error...)continue;ARR.push(MSG)` sequence.
     // We insert our check BEFORE the watchdog call so the anchor remains intact after insertion.

@@ -156,11 +156,19 @@ if (src.includes(patchAMarker)) {
     const [, emitterName] = emitterMatch
     console.log(`Found no-validator emitter: ${emitterName}(taskId, status, opts)`)
 
+    // Minified identifiers may contain `$`, which is a regex metacharacter
+    // (end-of-input anchor). v2.1.231 renamed this emitter to `$m`, which made
+    // BOTH checks below unmatchable: check 1 then failed loudly, but check 2 is
+    // a NEGATIVE assertion — an unescaped name would have silently "passed" it
+    // while a real unmapped "killed" leak sat right there in the source. Escape
+    // before interpolating, always.
+    const emitterLit = emitterName.replace(/[$]/g, '\\$&')
+
     // Behavioral check 1: at least one kill-site call must translate the
     // internal "killed" registry status into a literal "stopped" argument
     // to the emitter, right after setting status:"killed" in the registry.
     const translationAtCallSiteRe = new RegExp(
-      `status:"killed",[\\s\\S]{1,400}?${emitterName}\\([^,]+,"stopped"`
+      `status:"killed",[\\s\\S]{1,400}?${emitterLit}\\([^,]+,"stopped"`
     )
     if (!src.match(translationAtCallSiteRe)) {
       console.error(
@@ -173,7 +181,7 @@ if (src.includes(patchAMarker)) {
 
     // Behavioral check 2: no call site should ever hand the emitter the raw
     // "killed" status directly (that would mean an unmapped leak).
-    const rawKilledToEmitterRe = new RegExp(`${emitterName}\\([^,]+,"killed"`)
+    const rawKilledToEmitterRe = new RegExp(`${emitterLit}\\([^,]+,"killed"`)
     if (src.match(rawKilledToEmitterRe)) {
       console.error(
         `ERROR: Found a call site passing "killed" directly to ${emitterName}() — ` +
@@ -367,12 +375,15 @@ const noValidatorEmitterRe = new RegExp(
     `tool_use_id:\\4\\?\\.toolUseId,status:\\3,`
 )
 const noValidatorEmitterMatch = verify.match(noValidatorEmitterRe)
+// Escape `$` in the captured emitter name — see the identical note at the
+// detection site. Unescaped, the negative check below inverts to a false PASS.
+const noValidatorEmitterLit = noValidatorEmitterMatch?.[1].replace(/[$]/g, '\\$&')
 const noValidatorUpstreamed =
   !!noValidatorEmitterMatch &&
   new RegExp(
-    `status:"killed",[\\s\\S]{1,400}?${noValidatorEmitterMatch[1]}\\([^,]+,"stopped"`
+    `status:"killed",[\\s\\S]{1,400}?${noValidatorEmitterLit}\\([^,]+,"stopped"`
   ).test(verify) &&
-  !new RegExp(`${noValidatorEmitterMatch[1]}\\([^,]+,"killed"`).test(verify)
+  !new RegExp(`${noValidatorEmitterLit}\\([^,]+,"killed"`).test(verify)
 const partAOk =
   verify.includes(patchAMarker) || legacyPatchedShapeRe.test(verify) || noValidatorUpstreamed
 

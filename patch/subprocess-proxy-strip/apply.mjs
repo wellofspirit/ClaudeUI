@@ -654,6 +654,105 @@ const stripHelperDecl =
 
 let match, full, newFn, shape
 
+// ---------------------------------------------------------------------------
+// Generic path (preferred) — locate the function structurally, rewrite returns
+// ---------------------------------------------------------------------------
+// The ten `fnReV*` ladders below each transcribe one version's ENTIRE function
+// body verbatim, so any upstream edit anywhere inside it — even one irrelevant
+// to us — forces a new rung. 2.1.231 rewrote the body substantially (module-level
+// deny-list array, OAuth/OTEL stripping), which would have meant an eleventh.
+//
+// But the patch only ever needed one thing: every `return <env>` in this
+// function must become `return __cuPS(<env>)`. That does not require knowing
+// the body at all. So: find the function by the ONE marker that has survived
+// every version (the `INPUT_${...}` deletion loop, unique in all 24 MB), take
+// its body by brace matching, and rewrite the returns mechanically.
+//
+// Guard rails, because rewriting returns blind would be reckless:
+//   - the anchor must be unique;
+//   - the enclosing function must brace-match cleanly;
+//   - the body must contain NO nested function declaration (a nested `return`
+//     is not an env return, and wrapping it would corrupt unrelated logic —
+//     arrow callbacks are fine, they are expression-bodied here);
+//   - every return operand must be a bare identifier or `process.env`;
+//   - at least two returns must be rewritten (the early bail + the final one).
+// Any of these failing falls through to the version ladder rather than guessing.
+const genericAnchor = 'INPUT_${'
+const anchorCount = src.split(genericAnchor).length - 1
+
+if (anchorCount === 1) {
+  const anchorIdx = src.indexOf(genericAnchor)
+
+  // Innermost enclosing `function NAME(...){`: walk candidate `function`
+  // keywords backwards until one's brace-matched body contains the anchor.
+  let fnStart = -1
+  let bodyOpen = -1
+  let bodyEnd = -1
+  for (let i = src.lastIndexOf('function ', anchorIdx); i >= 0; i = src.lastIndexOf('function ', i - 1)) {
+    const parenIdx = src.indexOf('(', i)
+    const braceIdx = src.indexOf('{', parenIdx)
+    if (parenIdx === -1 || braceIdx === -1 || braceIdx > anchorIdx) continue
+    let depth = 0
+    let end = -1
+    for (let j = braceIdx; j < src.length; j++) {
+      const ch = src[j]
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          end = j
+          break
+        }
+      }
+    }
+    if (end > anchorIdx) {
+      fnStart = i
+      bodyOpen = braceIdx
+      bodyEnd = end
+      break
+    }
+  }
+
+  if (fnStart !== -1) {
+    const header = src.slice(fnStart, bodyOpen + 1)
+    const body = src.slice(bodyOpen + 1, bodyEnd)
+    const fnName = header.match(new RegExp(`function (${V})`))?.[1] ?? '<anonymous>'
+
+    if (/function\s*[\w$]*\s*\(/.test(body)) {
+      console.log(
+        `  [generic] ${fnName}() contains a nested function declaration — ` +
+          'not safe to rewrite returns blind. Falling back to version shapes.'
+      )
+    } else {
+      const returnRe = new RegExp(`return (process\\.env|${V})(?=[;}]|$)`, 'g')
+      const returnCount = [...body.matchAll(returnRe)].length
+      // Total `return` keywords, so a return we CAN'T classify is caught rather
+      // than silently left unwrapped (an unwrapped return leaks the proxy vars).
+      const allReturns = [...body.matchAll(/\breturn\b/g)].length
+
+      if (returnCount < 2 || returnCount !== allReturns) {
+        console.log(
+          `  [generic] ${fnName}() has ${allReturns} return(s), ${returnCount} of a rewritable ` +
+            'shape — refusing to partially wrap. Falling back to version shapes.'
+        )
+      } else {
+        shape = 'generic'
+        full = src.slice(fnStart, bodyEnd + 1)
+        newFn =
+          MARKER +
+          header +
+          stripHelperDecl +
+          body.replace(returnRe, `return ${stripHelperName}($1)`) +
+          '}'
+        console.log(`Found ${fnName}() [generic shape] at char ${fnStart}`)
+        console.log(`  Wrapped ${returnCount} return(s) with ${stripHelperName}()`)
+      }
+    }
+  }
+}
+
+// Version ladder — only consulted when the generic path declined above.
+if (!shape) {
 match = fnReV198.exec(src)
 if (match) {
   shape = 'v198'
@@ -1353,6 +1452,7 @@ if (match) {
   console.error('The function may have been refactored by upstream. Re-run bundle-analyzer.')
   process.exit(1)
 }
+} // end version ladder
 
 src = src.replace(full, newFn)
 console.log(`Wrapped every return with proxy-strip helper (${shape} shape)`)
