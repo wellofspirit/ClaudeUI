@@ -3708,11 +3708,36 @@ export const SECTIONS: Section[] = [
         label: 'Global permissions',
         keywords: 'allow deny ask rules tools bash edit read write permissions security',
         render: () => <GlobalPermissionsSummary />
-      },
+      }
+    ]
+  },
+  {
+    // Its own COMMON-scope section, not an item under Claude → Permissions
+    // (where it originally lived): the setting is engine-neutral (ADR-050) and
+    // parking it inside the Claude tab read as Claude-only — the exact
+    // confusion it was built to remove.
+    id: 'autonomy',
+    label: 'Autonomy',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
       {
         key: 'autonomyMode',
         label: 'Autonomy mode',
-        keywords: 'autonomy mode plan ask auto edit full permission mode default',
+        keywords: 'autonomy mode plan ask auto edit full permission mode default all engines',
         render: () => <AutonomyModePicker />
       }
     ]
@@ -4686,7 +4711,7 @@ export const SECTIONS: Section[] = [
 
 /** Section ids that belong to the App group (flat, directly visible) */
 const APP_SECTION_IDS = new Set([
-  'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
+  'appearance', 'chat', 'session', 'autonomy', 'shared-providers', 'tool-output', 'diff', 'git',
   'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
 ])
 
@@ -4764,8 +4789,8 @@ export const SCOPES: ScopeDef[] = [
         id: 'common-app',
         label: undefined,
         sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
-          'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+          'appearance', 'chat', 'session', 'autonomy', 'shared-providers', 'tool-output', 'diff',
+          'git', 'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
         ])
       }
     ]

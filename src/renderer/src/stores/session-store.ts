@@ -754,10 +754,40 @@ const EMPTY_SESSION_STATE: PerSessionState = {
 }
 
 /**
+ * The PermissionMode a fresh RUN of a session should start in: the configured
+ * default (`settings.defaultAutonomyMode` → `defaultPermissionMode`), degraded
+ * to 'default' when this engine or account cannot actually run auto — either
+ * the launch-time model fetch says no Claude model supports it, or Claude
+ * settings carry `disableAutoMode: "disable"`. Gating here (before spawn)
+ * beats letting cli.js reject `--permission-mode auto` and snap the mode back
+ * mid-session.
+ *
+ * Used by every path that starts a NEW RUN: createNewSession, reopening a
+ * historical session, forking, and clearConversation. That set is deliberate —
+ * cli.js applies `permissions.defaultMode` to resumed sessions too, so a
+ * reopened session starting in the configured default is upstream parity, not
+ * scope creep. Placeholder-entry paths (ensureSession's event bootstrap) stay
+ * on plain 'default': they exist to catch stray events, and the real mode
+ * arrives with the session's own sync.
+ */
+export function bootstrapPermissionMode(
+  state: Pick<
+    SessionState,
+    'defaultPermissionMode' | 'availableModels' | 'autoModeDisabledBySettings'
+  >,
+  engineId: EngineId
+): PermissionMode {
+  if (state.defaultPermissionMode !== 'auto') return state.defaultPermissionMode
+  const autoBlocked =
+    !autoModeAvailableForEngine(engineId, state.availableModels) ||
+    (engineId === 'claude' && state.autoModeDisabledBySettings)
+  return autoBlocked ? 'default' : 'auto'
+}
+
+/**
  * `permissionMode` defaults to 'default' rather than reading the store, so the
- * paths that only need a placeholder entry (event bootstrap, transcript
- * re-hydration, clearConversation) are unaffected. Genuine session CREATION
- * passes the store's `defaultPermissionMode` — see createNewSession.
+ * paths that only need a placeholder entry (event bootstrap) are unaffected.
+ * Paths that start a genuine fresh RUN pass `bootstrapPermissionMode(...)`.
  */
 function createEmptySession(
   cwd: string,
@@ -1420,20 +1450,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(defaultModel) }
       }
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
-      // Settings' autonomy-mode pick is a bootstrap default: it applies here,
-      // at creation, and nowhere else.
-      //
-      // Gate 'auto' before it can reach a spawn. With auto as the shipped
-      // default this is load-bearing rather than defensive: on an account or
-      // engine that cannot do auto, `--permission-mode auto` is rejected and the
-      // user watches the mode snap back mid-session. Falling back to 'default'
-      // here means the session simply starts in the mode it can actually run.
-      const autoBlocked =
-        !autoModeAvailableForEngine(engineId, state.availableModels) ||
-        (engineId === 'claude' && state.autoModeDisabledBySettings)
-      const bootstrapMode =
-        state.defaultPermissionMode === 'auto' && autoBlocked ? 'default' : state.defaultPermissionMode
-      const newSession = createEmptySession(cwd, bootstrapMode)
+      const newSession = createEmptySession(cwd, bootstrapPermissionMode(state, engineId))
       newSession.selectedEngineId = engineId
       newSession.selectedModel = defaultModel
       // Seed status.engineId/capabilities to match so they're correct before spawn
@@ -1519,11 +1536,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     warnings?
   ) =>
     set((state) => {
-      // Re-hydrating an evicted entry: start from the resident (lightweight)
-      // entry so draft / effort / thinking / permission mode survive the round
-      // trip. A genuinely fresh load starts from a blank session.
-      const prior = state.sessions[routingId]
-      const base = prior?.evicted ? prior : createEmptySession(cwd)
       // Per-session model memory: restore the persisted model when present, so
       // reopening a session brings back the model you last used in it. The engine
       // is restored too (an opencode session reopens as opencode). When NO model
@@ -1531,6 +1543,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       // engine-aware, never Claude's "default" on an opencode session (the bug).
       const persistedEntry = state.sessionEngines[routingId]
       const persistedEngineId = persistedEntry?.engineId ?? 'claude'
+      // Re-hydrating an evicted entry: start from the resident (lightweight)
+      // entry so draft / effort / thinking / permission mode survive the round
+      // trip. A genuinely FRESH load is a new run of the session, and a new run
+      // starts in the configured default mode — same rule cli.js applies to
+      // `--resume` (`permissions.defaultMode` is read at every bootstrap, not
+      // only for brand-new conversations). Without this, only never-before-seen
+      // sessions got the auto default; every session reopened from the sidebar
+      // silently started in 'default'.
+      const prior = state.sessions[routingId]
+      const base = prior?.evicted
+        ? prior
+        : createEmptySession(cwd, bootstrapPermissionMode(state, persistedEngineId))
       const persistedModelRef = persistedEntry?.model
       // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
       const persistedModel: string | undefined = persistedModelRef
@@ -1651,7 +1675,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
       saveSessionConfig(s, { recentSessionIds, sessionEngines })
-      const baseSession = createEmptySession(src.cwd)
+      // A fork is a new run: it starts in the configured default mode, gated
+      // per the FORK's engine, not in whatever mode the source session held.
+      const baseSession = createEmptySession(src.cwd, bootstrapPermissionMode(s, forkEngineId))
       return {
         sessions: {
           ...s.sessions,
@@ -3152,7 +3178,15 @@ export const useSessionStore = create<SessionState>((set) => ({
       return {
         sessions: {
           ...state.sessions,
-          [routingId]: { ...createEmptySession(session.cwd), sdkActive: session.sdkActive }
+          [routingId]: {
+            // A cleared conversation's next message spawns a fresh process —
+            // it's a new run, so it starts in the configured default mode.
+            ...createEmptySession(
+              session.cwd,
+              bootstrapPermissionMode(state, session.selectedEngineId)
+            ),
+            sdkActive: session.sdkActive
+          }
         }
       }
     }),

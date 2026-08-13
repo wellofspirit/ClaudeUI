@@ -47,12 +47,19 @@ describe('SCOPES structure', () => {
       expect(common.subgroups[0].label).toBeUndefined()
     })
 
-    it('contains the 13 app sections in order', () => {
+    it('contains the 14 app sections in order', () => {
       const ids = common.subgroups.flatMap((sg) => sg.sections.map((s) => s.id))
       expect(ids).toEqual([
-        'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
-        'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+        'appearance', 'chat', 'session', 'autonomy', 'shared-providers', 'tool-output', 'diff',
+        'git', 'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
       ])
+    })
+
+    // ADR-050: the autonomy default is engine-neutral, so its picker lives in
+    // the Common scope — parking it under Claude read as Claude-only.
+    it('owns the autonomy section (not the Claude scope)', () => {
+      const ids = common.subgroups.flatMap((sg) => sg.sections.map((s) => s.id))
+      expect(ids).toContain('autonomy')
     })
 
     it('does NOT contain sandbox or proxy', () => {

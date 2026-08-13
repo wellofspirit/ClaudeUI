@@ -164,6 +164,45 @@ describe('createNewSession seeds permissionMode from defaultPermissionMode', () 
   })
 })
 
+describe('every fresh-run path seeds the default, not only createNewSession', () => {
+  // cli.js applies `permissions.defaultMode` on `--resume` too, so a reopened
+  // session starting in the configured default is upstream parity. Pre-fix,
+  // only brand-new sessions got the auto default: reopening from the sidebar,
+  // forking, and clearing all silently produced 'default'-mode sessions —
+  // which is exactly "I made auto the default and my session isn't in auto".
+  it('reopening a historical session starts a fresh run in the default mode', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().loadHistoricalSession('rid-hist', [], '/repo')
+    expect(store().sessions['rid-hist'].permissionMode).toBe('auto')
+  })
+
+  it('re-hydrating an EVICTED entry keeps its own mode (not a fresh run)', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().createNewSession('rid-evict', '/repo')
+    useSessionStore.setState({
+      sessions: {
+        ...store().sessions,
+        'rid-evict': { ...store().sessions['rid-evict'], evicted: true, permissionMode: 'plan' }
+      }
+    })
+    store().loadHistoricalSession('rid-evict', [], '/repo')
+    expect(store().sessions['rid-evict'].permissionMode).toBe('plan')
+  })
+
+  it('clearConversation resets to the default mode', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().createNewSession('rid-clear', '/repo')
+    useSessionStore.setState({
+      sessions: {
+        ...store().sessions,
+        'rid-clear': { ...store().sessions['rid-clear'], permissionMode: 'plan' }
+      }
+    })
+    store().clearConversation('rid-clear')
+    expect(store().sessions['rid-clear'].permissionMode).toBe('auto')
+  })
+})
+
 describe('createNewSession gates an unavailable auto', () => {
   /** A Claude model list that affirmatively reports no auto-mode support. */
   const noAutoModels = [

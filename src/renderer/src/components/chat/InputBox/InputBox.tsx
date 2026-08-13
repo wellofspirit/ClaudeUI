@@ -2,7 +2,8 @@ import { useRef, useCallback, useEffect, useMemo } from 'react'
 import {
   useSessionStore,
   useActiveSession,
-  resolveOpencodeModel
+  resolveOpencodeModel,
+  bootstrapPermissionMode
 } from '../../../stores/session-store'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
@@ -107,7 +108,17 @@ export function InputBox(): React.JSX.Element {
   const isRunning = status.state === 'running'
   const isDisabled = !activeSessionId || !cwd
 
-  const permissionMode = useActiveSession((s) => s.permissionMode)
+  // With a live session, its own mode. On welcome (no session yet), the mode
+  // the session created from this input WILL start in — the same
+  // bootstrapPermissionMode(state, engine) call createNewSession makes, keyed
+  // by the engine the welcome picker has selected. Without this the input sat
+  // unlabeled pre-session and then sprouted an "Auto ⏵⏵" tab the moment a
+  // folder was picked, which read as the mode changing out from under you.
+  const permissionMode = useSessionStore((s) => {
+    const id = s.activeSessionId
+    if (id && s.sessions[id]) return s.sessions[id].permissionMode
+    return bootstrapPermissionMode(s, s.lastSelectedEngineId)
+  })
 
   // Attachments live per-session in the store (mirrors draftText) so a file
   // attached in session A can never be sent from B, and is restored on return
