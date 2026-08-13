@@ -1,7 +1,11 @@
 # ADR-039 — Remote-access auth modes: token, password, and tailnet identity
 
 **Status:** Accepted — serve port selection and teardown amended by ADR-042 (pinned HTTPS port,
-persisted-record startup reconciliation; the 443→8443→10000 candidate walk is retired)
+persisted-record startup reconciliation; the 443→8443→10000 candidate walk is retired).
+Auth **methods & policy superseded in part by ADR-052** (WebAuthn passkeys primary, capability
+grants with decay, policy modes incl. audited no-auth switch — `docs/architecture/security.md`);
+the transport hardening here (Host allowlist, throttling, funnel reject, identity-header trust
+predicate) carries forward unchanged and remains authoritative.
 **Relates to:** ADR-007 (two settings stores — remote config lives in the operational DB, not
 UISettings), ADR-027 (`data-testid` conventions for the Settings/modal surfaces), ADR-030
 (capability honesty — the status must not claim a path that does not work), ADR-042

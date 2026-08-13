@@ -1,6 +1,6 @@
 # ADR-041 — Remote re-sync merges into local view state instead of replacing it
 
-**Status:** Accepted
+**Status:** Accepted — **superseded in part by ADR-051 (SyncCore)**: the desktop-renderer snapshot source and the resync merge model are replaced by main-process canonical state (`docs/architecture/sync-core.md`). This ADR remains the accurate as-built record until SyncCore phase 4 lands; the per-client-view-state lesson it encodes (selection/drafts never replicated) is carried forward into SyncCore's state classification.
 **Relates to:** ADR-039 (the remote server this rides on), ADR-008 (the web client is typed against
 `ClaudeAPI` — `applyRemoteSnapshot` is part of that contract), ADR-040 (`activeTasks` is one of the
 per-session fields the snapshot carries)

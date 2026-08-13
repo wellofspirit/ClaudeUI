@@ -1,6 +1,6 @@
 # ADR-043: SendUserFile client integration — Files widget, preview, remote download
 
-**Status:** Accepted (2026-07-30)
+**Status:** Accepted (2026-07-30) — the "renderer store is the single source of truth; main stays a pure relay" doctrine (Decision 5's rationale) is **superseded by ADR-051 (SyncCore)**, which inverts it; the sent-file mechanism itself remains as-built until SyncCore phase 4.
 
 ## Context
 

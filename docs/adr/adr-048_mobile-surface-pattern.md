@@ -1,6 +1,6 @@
 # ADR-048 — Mobile surface pattern: content-slot takeover, selection-as-navigation, keyboard-safe input placement
 
-**Status:** Accepted (2026-08-04)
+**Status:** Accepted (2026-08-04) — Decision 5 (terminal-on-mobile declined) **superseded by ADR-052**: remote terminal is now planned behind a desktop-side opt-in, capability grants, and passkey step-up (`docs/architecture/security.md`). The UI surface patterns here are unaffected.
 **Relates to:** ADR-027 (test ids), ADR-046 (remote directory browser — Decision 3 partially fulfilled here), ADR-049 (bounds this pattern: transient modal chrome like the image viewer is a portalled overlay, not a content-slot takeover), the audit remediation's remote denylist posture
 
 ## Context
