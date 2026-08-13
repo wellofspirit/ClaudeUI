@@ -1,5 +1,6 @@
 import { E2ECrypto } from '../shared/e2e-crypto'
 import { SyncClient, type SyncListener } from '../shared/sync/sync-client'
+import { base64ToText, textToBase64 } from '../shared/base64-text'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -7,6 +8,11 @@ import type {
   WsSyncCatchup,
   WsSyncFull,
   WsInvokeResponse,
+  WsStepUpResponse,
+  WsTermData,
+  WsTermExit,
+  WsTermDetached,
+  TermDetachReason,
   FullStateSnapshot
 } from '../shared/remote-protocol'
 
@@ -50,6 +56,23 @@ interface PendingInvoke {
   timer: ReturnType<typeof setTimeout>
 }
 
+/**
+ * A step-up in flight. The frame carries no request id (there is at most one
+ * ceremony per connection at a time — it is driven by a modal), so responses
+ * are matched FIFO.
+ */
+interface PendingStepUp {
+  resolve: (response: WsStepUpResponse) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+export type TerminalDataListener = (payload: { terminalId: string; data: string }) => void
+export type TerminalExitListener = (payload: { terminalId: string; code: number }) => void
+export type TerminalDetachedListener = (payload: {
+  terminalId: string
+  reason: TermDetachReason
+}) => void
+
 const INVOKE_TIMEOUT_MS = 30_000
 const PING_INTERVAL_MS = 15_000
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
@@ -79,6 +102,16 @@ export class RemoteConnection {
   private readonly sync = new SyncClient({ requestResync: () => this.sendSync() })
   private reqId = 0
   private pendingInvokes = new Map<string, PendingInvoke>()
+  private pendingStepUps: PendingStepUp[] = []
+  /**
+   * Terminal frames are the VOLATILE lane: they never enter the event log, so
+   * they are NOT SyncClient channels (no seq, no ack, no replay). Plain local
+   * listener sets — a dropped frame is a dropped frame, exactly like a byte the
+   * screen never showed.
+   */
+  private termDataListeners = new Set<TerminalDataListener>()
+  private termExitListeners = new Set<TerminalExitListener>()
+  private termDetachedListeners = new Set<TerminalDetachedListener>()
   private reconnectAttempt = 0
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
@@ -222,6 +255,63 @@ export class RemoteConnection {
     })
   }
 
+  // ---------------------------------------------------------------------------
+  // Terminal (SyncCore phase 2)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run the step-up ceremony: prove human presence with a fresh password proof
+   * so the server arms this connection's decaying `shell` grant.
+   *
+   * Resolves with the server's verdict rather than rejecting on refusal — the
+   * caller renders `error`/`code` inline in the prompt.
+   */
+  stepUp(pwProof: string): Promise<WsStepUpResponse> {
+    return new Promise((resolve) => {
+      if (this.ws?.readyState !== WebSocket.OPEN || this.state !== 'connected') {
+        resolve({
+          type: 'step-up-response',
+          ok: false,
+          error: 'Not connected',
+          retryable: true
+        })
+        return
+      }
+      const timer = setTimeout(() => {
+        const index = this.pendingStepUps.findIndex((p) => p.timer === timer)
+        if (index >= 0) this.pendingStepUps.splice(index, 1)
+        resolve({ type: 'step-up-response', ok: false, error: 'Timed out', retryable: true })
+      }, INVOKE_TIMEOUT_MS)
+      this.pendingStepUps.push({ resolve, timer })
+      this.send({ type: 'step-up', pwProof })
+    })
+  }
+
+  /** Keystrokes for an attached terminal. Fire-and-forget, like a keypress. */
+  sendTerminalInput(terminalId: string, data: string): void {
+    this.send({ type: 'term-input', termId: terminalId, dataB64: textToBase64(data) })
+  }
+
+  /** Viewport size for an attached terminal. */
+  sendTerminalResize(terminalId: string, cols: number, rows: number): void {
+    this.send({ type: 'term-resize', termId: terminalId, cols, rows })
+  }
+
+  onTerminalData(cb: TerminalDataListener): () => void {
+    this.termDataListeners.add(cb)
+    return () => this.termDataListeners.delete(cb)
+  }
+
+  onTerminalExit(cb: TerminalExitListener): () => void {
+    this.termExitListeners.add(cb)
+    return () => this.termExitListeners.delete(cb)
+  }
+
+  onTerminalDetached(cb: TerminalDetachedListener): () => void {
+    this.termDetachedListeners.add(cb)
+    return () => this.termDetachedListeners.delete(cb)
+  }
+
   /** Cleanly disconnect and stop reconnecting. */
   destroy(): void {
     this.destroyed = true
@@ -245,6 +335,16 @@ export class RemoteConnection {
       pending.reject(new Error('Connection destroyed'))
     }
     this.pendingInvokes.clear()
+    for (const pending of this.pendingStepUps) {
+      clearTimeout(pending.timer)
+      pending.resolve({
+        type: 'step-up-response',
+        ok: false,
+        error: 'Connection destroyed',
+        retryable: true
+      })
+    }
+    this.pendingStepUps.length = 0
   }
 
   /** Get the current last sequence number (for debugging). */
@@ -423,6 +523,40 @@ export class RemoteConnection {
               pending.reject(new Error(resp.error || 'Invoke failed'))
             }
           }
+        }
+        break
+
+      case 'step-up-response':
+        {
+          const pending = this.pendingStepUps.shift()
+          if (pending) {
+            clearTimeout(pending.timer)
+            pending.resolve(msg as WsStepUpResponse)
+          }
+        }
+        break
+
+      case 'term-data':
+        {
+          const frame = msg as WsTermData
+          const payload = { terminalId: frame.termId, data: base64ToText(frame.dataB64) }
+          for (const cb of this.termDataListeners) cb(payload)
+        }
+        break
+
+      case 'term-exit':
+        {
+          const frame = msg as WsTermExit
+          const payload = { terminalId: frame.termId, code: frame.exitCode }
+          for (const cb of this.termExitListeners) cb(payload)
+        }
+        break
+
+      case 'term-detached':
+        {
+          const frame = msg as WsTermDetached
+          const payload = { terminalId: frame.termId, reason: frame.reason }
+          for (const cb of this.termDetachedListeners) cb(payload)
         }
         break
 

@@ -44,6 +44,8 @@ function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     tlsHttpsPort: 443,
     lastServeHttpsPort: null,
     lastServeLocalPort: null,
+    allowTerminal: false,
+    shellGrantIdleMinutes: 10,
     passwordSalt: 'aa'.repeat(16),
     passwordHash: 'bb'.repeat(32),
     kdfParams: KDF_JSON,

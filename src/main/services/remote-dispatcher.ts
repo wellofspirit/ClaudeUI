@@ -1,6 +1,7 @@
 import type { WsInvokeRequest } from '../../shared/remote-protocol'
 import {
   commandRegistry,
+  type Capability,
   type CommandConnection,
   type CommandRegistry
 } from '../ipc/command-registry'
@@ -32,6 +33,16 @@ export class RemoteDispatcher {
   /** Check if a channel is exposed on the remote transport. */
   has(channel: string): boolean {
     return this.registry.get(channel, 'remote') !== undefined
+  }
+
+  /**
+   * Declared capability for a channel, or undefined when it is not registered
+   * at all. The transport needs this to run the phase-2 `shell` decay check
+   * BEFORE dispatch — expired grants must answer `needs-step-up`, which is a
+   * different (and actionable) refusal from the registry's permission error.
+   */
+  capabilityOf(channel: string): Capability | undefined {
+    return this.registry.declaration(channel)?.capability
   }
 
   /**

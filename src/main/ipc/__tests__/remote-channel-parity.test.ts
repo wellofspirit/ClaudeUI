@@ -27,6 +27,18 @@ import { LEGACY_REMOTE_GRANTS, type Capability } from '../command-registry'
 const REPO = process.cwd()
 const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf-8')
 
+/**
+ * Remote channels whose capability (`shell`) is deliberately NOT in the base
+ * grant set — they are reachable only after the step-up ceremony. Sorted, and
+ * kept in sync with the registrations in remote-handlers.ts.
+ */
+const SHELL_GATED_REMOTE_CHANNELS = [
+  'terminal:attach',
+  'terminal:create',
+  'terminal:detach',
+  'terminal:kill'
+]
+
 /** Channels the web client invokes over the WS (connection.invoke / unwrap). */
 function invokedChannels(): Set<string> {
   const src = read('src/web/api-adapter.ts')
@@ -74,9 +86,14 @@ describe('remote channel parity (R5)', () => {
     const ungranted = [...invoked]
       .filter((c) => declared.has(c) && !LEGACY_REMOTE_GRANTS.has(declared.get(c)!))
       .sort()
+    // The terminal channels are the ONE deliberate exception (SyncCore phase 2,
+    // ADR-052 decision 6): they declare `shell`, which authentication alone
+    // never grants. The web client invokes them only after
+    // `terminal:availability` says the toggle is on and a step-up has armed the
+    // grant — "not grantable at connect time" is the point, not a gap.
     expect(
       ungranted,
       `invoked but not grantable: ${ungranted.map((c) => `${c}(${declared.get(c)})`).join(', ')}`
-    ).toEqual([])
+    ).toEqual(SHELL_GATED_REMOTE_CHANNELS)
   })
 })

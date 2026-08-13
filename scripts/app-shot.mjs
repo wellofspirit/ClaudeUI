@@ -6,8 +6,15 @@
 //
 // Usage:
 //   node scripts/app-shot.mjs [--out <path>] [--needle <text>] [--settle <ms>]
-//                             [--click <selector>] [--keep] [--with-remote]
+//                             [--click <selector>] [--press <key>] [--type <text>]
+//                             [--keep] [--with-remote]
 //                             [--headed] [--testids] [--assert-testid <id>]...
+//
+// --click/--press/--type are ORDERED with respect to each other and replayed in
+// the order they appear on the command line, so a flow like "open a panel with
+// its keyboard shortcut, then type into it" is expressible. `--press` takes
+// Playwright key syntax (e.g. `Control+Backquote`); `--type` sends literal text
+// to the focused element (use `\n` for Enter).
 //
 // --testids              dump the sorted set of [data-testid] values present in the
 //                        live DOM (with counts) — the rendered-component inventory
@@ -50,11 +57,13 @@ const has = (name) => args.includes(`--${name}`)
 const outPath = arg('out', join(root, '.cache', 'screenshots', 'app.png'))
 const needle = arg('needle', 'Codex')
 const settle = parseInt(arg('settle', '3000'), 10)
-// Collect every --click <selector> in order; clicked sequentially before the shot.
-// Selectors accept Playwright syntax incl. `text=...` and `[title="..."]`.
-const clicks = []
+// Collect every --click/--press/--type in COMMAND-LINE order; replayed
+// sequentially before the shot. Selectors accept Playwright syntax incl.
+// `text=...` and `[title="..."]`; keys use Playwright key names.
+const actions = []
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--click' && args[i + 1]) clicks.push(args[i + 1])
+  const kind = args[i] === '--click' ? 'click' : args[i] === '--press' ? 'press' : args[i] === '--type' ? 'type' : null
+  if (kind && args[i + 1]) actions.push({ kind, value: args[i + 1] })
 }
 // Collect every --assert-testid <id> (repeatable). Presence is asserted after the
 // shot; any missing id fails the run (exit 3). Asserting implies dumping testids.
@@ -96,8 +105,11 @@ try {
   await win.waitForLoadState('domcontentloaded')
   await win.waitForTimeout(settle) // let React mount + first IPC round-trips settle
 
-  for (const sel of clicks) {
-    await win.click(sel, { timeout: 10_000 })
+  for (const action of actions) {
+    if (action.kind === 'click') await win.click(action.value, { timeout: 10_000 })
+    else if (action.kind === 'press') await win.keyboard.press(action.value)
+    // `\n` in a --type payload is Enter: shells need the newline to run anything.
+    else await win.keyboard.type(action.value.replace(/\\n/g, '\n'))
     await win.waitForTimeout(1200)
   }
 

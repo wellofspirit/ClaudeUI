@@ -79,6 +79,34 @@ export interface CommandConnection {
   connectionId: string
   identity: ConnectionIdentity
   grants: ReadonlySet<Capability>
+  /**
+   * Phase 2 (ADR-052 decision 5): expiry of a DECAYING `shell` grant.
+   *
+   *  - `undefined` — this connection's grants never decay (the desktop
+   *    renderer: it *is* the host surface, so sudo semantics are meaningless);
+   *  - `null`      — decaying-grant connection with no grant armed;
+   *  - `number`    — epoch ms after which the grant is stale and the next
+   *    shell-bearing command must be answered with `needs-step-up`.
+   *
+   * Enforced server-side (remote-server.ts) and refreshed by every shell
+   * dispatch and every `term-input` frame. Client caching is irrelevant.
+   */
+  shellGrantExpiresAt?: number | null
+}
+
+/**
+ * Is `conn`'s `shell` grant stale? Only meaningful for decaying connections —
+ * a connection whose `shellGrantExpiresAt` is `undefined` never decays.
+ */
+export function shellGrantExpired(conn: CommandConnection, now = Date.now()): boolean {
+  const expiresAt = conn.shellGrantExpiresAt
+  if (expiresAt === undefined) return false
+  return expiresAt === null || expiresAt <= now
+}
+
+/** Does `conn` hold a `shell` grant that is both present and unexpired? */
+export function hasLiveShellGrant(conn: CommandConnection, now = Date.now()): boolean {
+  return conn.grants.has('shell') && !shellGrantExpired(conn, now)
 }
 
 /** Every capability — the desktop renderer's grant set. */
@@ -128,7 +156,10 @@ export function makeRemoteConnection(
   return {
     connectionId: randomUUID(),
     identity: { method, label: login ?? method, connectedAt: Date.now() },
-    grants
+    grants,
+    // Decaying-grant connection with nothing armed: `shell` arrives only via
+    // the step-up ceremony (ADR-052 decision 5), never at authentication.
+    shellGrantExpiresAt: null
   }
 }
 
@@ -152,6 +183,20 @@ export interface CommandRegistration {
    * so the audit row's `session_id` is trustworthy.
    */
   sessionIdArg?: 0 | null
+  /**
+   * Phase 2: prepend the calling {@link CommandConnection} to the handler's
+   * arguments (`handler(connection, ...args)`).
+   *
+   * FIRST, never last: `args` is attacker-controlled (a remote client picks the
+   * array length), so a trailing position could be shifted by padding the call
+   * with junk arguments and the handler would read an attacker value as the
+   * identity. The leading position is fixed regardless of arity.
+   *
+   * Used by the terminal commands, which are per-connection by nature (attach
+   * binds to the caller, availability answers about the caller, and the audit
+   * row for a PTY's exit must name the identity that spawned it).
+   */
+  withConnection?: boolean
 }
 
 /** What {@link CommandRegistry.get} returns. */
@@ -161,6 +206,7 @@ export interface CommandEntry {
   kind: CommandKind
   handler: CommandHandler
   sessionIdArg: 0 | null
+  withConnection: boolean
 }
 
 /** The channel-global declaration, shared by every transport's handler. */
@@ -168,6 +214,7 @@ interface Declaration {
   capability: Capability
   kind: CommandKind
   sessionIdArg: 0 | null
+  withConnection: boolean
 }
 
 /**
@@ -196,12 +243,17 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'app:quit-confirm': 'host',
   'app:quit-cancel': 'host',
   'app:open-in-vscode': 'host',
-  // Raw shell — unblocked in phase 2 behind opt-in + step-up (ADR-052).
+  // Raw shell — reachable over remote as of phase 2, but ONLY behind the
+  // desktop opt-in toggle + a stepped-up, decaying `shell` grant (ADR-052
+  // decision 6). The pin still does its job: `shell` is not in
+  // LEGACY_REMOTE_GRANTS, so authenticating never suffices on its own.
   'terminal:create': 'shell',
   'terminal:write': 'shell',
   'terminal:resize': 'shell',
   'terminal:kill': 'shell',
   'terminal:kill-by-cwd': 'shell',
+  'terminal:attach': 'shell',
+  'terminal:detach': 'shell',
   // Native OAuth: local browser + loopback listener (ADR-014).
   'auth:sign-in': 'admin',
   'auth:submit-code': 'admin',
@@ -274,22 +326,25 @@ export class CommandRegistry {
       )
     }
     const sessionIdArg = reg.sessionIdArg ?? null
+    const withConnection = reg.withConnection === true
 
     const existing = this.declarations.get(channel)
     if (existing) {
       if (
         existing.capability !== capability ||
         existing.kind !== kind ||
-        existing.sessionIdArg !== sessionIdArg
+        existing.sessionIdArg !== sessionIdArg ||
+        existing.withConnection !== withConnection
       ) {
         throw new Error(
           `registerCommand("${channel}"): declaration conflicts with the existing one ` +
-            `(${existing.capability}/${existing.kind}/sessionIdArg=${existing.sessionIdArg} vs ` +
-            `${capability}/${kind}/sessionIdArg=${sessionIdArg})`
+            `(${existing.capability}/${existing.kind}/sessionIdArg=${existing.sessionIdArg}/` +
+            `withConnection=${existing.withConnection} vs ` +
+            `${capability}/${kind}/sessionIdArg=${sessionIdArg}/withConnection=${withConnection})`
         )
       }
     } else {
-      this.declarations.set(channel, { capability, kind, sessionIdArg })
+      this.declarations.set(channel, { capability, kind, sessionIdArg, withConnection })
     }
 
     this.handlers.set(CommandRegistry.key(transport, channel), handler)
@@ -352,17 +407,23 @@ export class CommandRegistry {
       )
     }
 
+    // The connection rides in FRONT of the wire args — see
+    // `CommandRegistration.withConnection` for why the position matters.
+    const callArgs = entry.withConnection ? [connection, ...args] : args
+
     // Queries are not audited (sync-core.md: reads have no state effect, and a
     // per-read row would bury the commands that matter).
-    if (entry.kind === 'query') return await entry.handler(...args)
+    if (entry.kind === 'query') return await entry.handler(...callArgs)
 
+    // Indexed against the WIRE args, never `callArgs` — `sessionIdArg: 0` means
+    // "the first argument the caller sent", independent of `withConnection`.
     const sessionId =
       entry.sessionIdArg !== null && typeof args[entry.sessionIdArg] === 'string'
         ? (args[entry.sessionIdArg] as string)
         : null
 
     try {
-      const result = await entry.handler(...args)
+      const result = await entry.handler(...callArgs)
       this.audit(entry, connection, sessionId, outcomeOf(result))
       return result
     } catch (err) {

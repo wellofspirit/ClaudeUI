@@ -1235,6 +1235,40 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'usage:set-account-filter',
 ] as const
 
+/**
+ * THE ONE SANCTIONED SURFACE CHANGE since the phase-1 port (SyncCore phase 2,
+ * ADR-052 decision 6 / security.md §"Terminal posture").
+ *
+ * Why this is not the failure mode the pin above exists to catch: every channel
+ * here declares `shell`, which is NOT in {@link LEGACY_REMOTE_GRANTS}, so
+ * registering them changes nothing about what an authenticated connection can
+ * do. Reaching them requires all three gates, all enforced server-side —
+ * (1) the desktop-only `allow_terminal` toggle (persisted in `remote_config`,
+ * never in remotely-writable settings), (2) a step-up ceremony that verifies a
+ * fresh password proof against the same failure budget as auth, and (3) an idle
+ * decay on the grant that ceremony arms.
+ *
+ * `terminal:availability` is the exception's exception: `config`-capability
+ * (hence reachable) because a client must be able to ask "may I?" WITHOUT
+ * already holding the answer. It returns three booleans and nothing else.
+ *
+ * `terminal:kill-by-cwd` is deliberately absent — that lifecycle sweep belongs
+ * to the desktop's own cold-session cleanup, and a remote client has no reason
+ * to mass-kill the operator's shells.
+ */
+const PHASE2_TERMINAL_CHANNELS = [
+  'terminal:attach',
+  'terminal:availability',
+  'terminal:create',
+  'terminal:detach',
+  'terminal:kill',
+  'terminal:resize',
+  'terminal:write'
+] as const
+
+/** Of those, the ones gated behind the `shell` capability (i.e. all but availability). */
+const PHASE2_SHELL_CHANNELS = PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability')
+
 describe('remote surface parity (phase 1 port)', () => {
   let win: any
 
@@ -1249,11 +1283,13 @@ describe('remote surface parity (phase 1 port)', () => {
     gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
   })
 
-  it('exposes exactly the pre-port channel set — no additions, no removals', () => {
-    expect(commandRegistry.channels('remote')).toEqual([...PRE_PORT_REMOTE_CHANNELS].sort())
+  it('exposes exactly the pre-port channel set plus the phase-2 terminal channels', () => {
+    expect(commandRegistry.channels('remote')).toEqual(
+      [...PRE_PORT_REMOTE_CHANNELS, ...PHASE2_TERMINAL_CHANNELS].sort()
+    )
   })
 
-  it('every exposed channel is reachable under the legacy remote grant set', () => {
+  it('every exposed channel except the shell-gated terminal ones is reachable under the legacy grant set', () => {
     const unreachable = commandRegistry
       .channels('remote')
       .map((c) => [c, commandRegistry.declaration(c)!.capability] as const)
@@ -1263,12 +1299,30 @@ describe('remote surface parity (phase 1 port)', () => {
       `these channels declare a capability remote connections do not hold: ${unreachable
         .map(([c, cap]) => `${c}(${cap})`)
         .join(', ')}`
-    ).toEqual([])
+    ).toEqual(PHASE2_SHELL_CHANNELS.map((c) => [c, 'shell'] as const))
   })
 
-  it('exposes no channel whose capability the old denylist stood for', () => {
+  it('the phase-2 terminal channels are unreachable WITHOUT a step-up grant', async () => {
+    // The registration is not the gate — the grant set is. A connection holding
+    // the standard remote grants is refused by the registry itself.
+    const conn = makeRemoteConnection('token', null)
+    for (const channel of PHASE2_SHELL_CHANNELS) {
+      await expect(
+        commandRegistry.dispatch(channel, 'remote', ['x'], conn),
+        `${channel} must require the shell capability`
+      ).rejects.toThrow(/Permission denied/)
+    }
+    // …and the honesty query stays answerable without it.
+    await expect(
+      commandRegistry.dispatch('terminal:availability', 'remote', [], conn)
+    ).resolves.toMatchObject({ allowed: false, granted: false })
+  })
+
+  it('exposes no channel whose capability the old denylist stood for, except the terminal ones', () => {
     const exposed = new Set(commandRegistry.channels('remote'))
+    const sanctioned = new Set<string>(PHASE2_SHELL_CHANNELS)
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
+      if (sanctioned.has(channel)) continue
       expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)
     }
   })

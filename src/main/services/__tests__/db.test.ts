@@ -134,7 +134,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v8)', () => {
+  it('applies the real production migration set (v1–v10)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -142,8 +142,8 @@ describe('migration framework — user_version guard', () => {
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
       // v5: daily_usage, v6: dispatched_usage, v7: remote_config,
       // v8: remote_config pinned HTTPS port + serve cleanup record,
-      // v9: audit_log
-      expect(userVersion(db)).toBe(9)
+      // v9: audit_log, v10: remote-terminal posture columns
+      expect(userVersion(db)).toBe(10)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -222,7 +222,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(9)
+      expect(userVersion(db)).toBe(10)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -231,7 +231,10 @@ describe('migration framework — user_version guard', () => {
         password_hash: 'deadbeef',
         tls_https_port: 443,
         last_serve_https_port: null,
-        last_serve_local_port: null
+        last_serve_local_port: null,
+        // v10 backfills the terminal posture at its (closed) defaults.
+        allow_terminal: 0,
+        shell_grant_idle_minutes: 10
       })
     } finally {
       db.close()
@@ -592,6 +595,39 @@ describe('remote_config repository', () => {
     expect(config?.port).toBe(5000)
     expect(config?.bindHost).toBe('10.0.0.1')
     expect(config?.autostart).toBe(true)
+  })
+
+  // v10 — the remote-terminal posture (ADR-052 decision 6).
+  it('defaults the terminal posture to OFF with a 10-minute grant window', () => {
+    setRemoteConfig({ port: 4568 })
+    const config = getRemoteConfig()
+    expect(config?.allowTerminal).toBe(false)
+    expect(config?.shellGrantIdleMinutes).toBe(10)
+  })
+
+  it('round-trips allowTerminal + shellGrantIdleMinutes and preserves them on partial writes', () => {
+    setRemoteConfig({ allowTerminal: true, shellGrantIdleMinutes: 25 })
+    expect(getRemoteConfig()?.allowTerminal).toBe(true)
+    expect(getRemoteConfig()?.shellGrantIdleMinutes).toBe(25)
+
+    // An unrelated config write must not silently re-arm or disarm the shell.
+    setRemoteConfig({ port: 9999 })
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(9999)
+    expect(config?.allowTerminal).toBe(true)
+    expect(config?.shellGrantIdleMinutes).toBe(25)
+
+    setRemoteConfig({ allowTerminal: false })
+    expect(getRemoteConfig()?.allowTerminal).toBe(false)
+    expect(getRemoteConfig()?.shellGrantIdleMinutes).toBe(25)
+  })
+
+  it('setRemotePassword leaves the terminal posture untouched', () => {
+    setRemoteConfig({ allowTerminal: true, shellGrantIdleMinutes: 3 })
+    setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
+    const config = getRemoteConfig()
+    expect(config?.allowTerminal).toBe(true)
+    expect(config?.shellGrantIdleMinutes).toBe(3)
   })
 
   it('setRemoteConfig accepts bindHost: null to mean "all interfaces"', () => {

@@ -225,6 +225,16 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('terminal:resize', id, cols, rows),
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
   killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
+  terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
+  // Step-up and multi-attach are REMOTE concepts (SyncCore phase 2). The
+  // desktop renderer is the host surface: it already holds a non-decaying
+  // `shell` grant, and its PTY output arrives on `terminal:data` rather than by
+  // subscribing. Local no-ops, deliberately not IPC round-trips — the channels
+  // do not exist on this transport.
+  terminalStepUp: async () => ({ ok: true }),
+  attachTerminal: async () => true,
+  detachTerminal: async () => {},
+  onTerminalDetached: () => () => {},
 
   // Worktree operations — all use safeHandler
   createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),

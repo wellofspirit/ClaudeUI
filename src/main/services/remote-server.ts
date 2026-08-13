@@ -8,7 +8,15 @@ import type { BrowserWindow } from 'electron'
 import { app } from 'electron'
 import { EventLog } from './event-log'
 import { RemoteDispatcher } from './remote-dispatcher'
-import { makeRemoteConnection, type CommandConnection } from '../ipc/command-registry'
+import {
+  hasLiveShellGrant,
+  makeRemoteConnection,
+  type Capability,
+  type CommandConnection
+} from '../ipc/command-registry'
+import { terminalService, readTerminalPolicy, shellGrantIdleMs } from './terminal-service'
+import type { PtyRemoteSink } from './pty-manager'
+import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { RemoteBridge } from './remote-bridge'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from './git-watch-registry'
 import { BaseSession } from '../providers/BaseSession'
@@ -29,14 +37,21 @@ import {
   getRemoteConfig,
   setLastServeRecord
 } from './db'
-import type {
-  WsClientMessage,
-  WsServerMessage,
-  WsInvokeRequest,
-  RemoteStatus,
-  RemoteAuthInfo,
-  RemoteAuthMethod,
-  RemoteKdfParams
+import {
+  NEEDS_STEP_UP_ERROR,
+  TERMINAL_DISABLED_ERROR,
+  type WsClientMessage,
+  type WsServerMessage,
+  type WsInvokeRequest,
+  type WsStepUpRequest,
+  type WsStepUpResponse,
+  type WsTermInput,
+  type WsTermResize,
+  type TermDetachReason,
+  type RemoteStatus,
+  type RemoteAuthInfo,
+  type RemoteAuthMethod,
+  type RemoteKdfParams
 } from '../../shared/remote-protocol'
 import type {
   NetworkInterfaceInfo,
@@ -634,6 +649,10 @@ export class RemoteServer {
     // Disconnect all clients
     for (const [ws, client] of this.clients) {
       if (client.pingTimer) clearInterval(client.pingTimer)
+      // Drop PTY attachments here rather than leaving it to each socket's async
+      // `close` handler: `this.clients` is cleared on the next line, so by the
+      // time those run there is no connection id left to release.
+      terminalService.detachConnection(client.connection.connectionId)
       ws.close(1001, 'Server stopping')
     }
     this.clients.clear()
@@ -1816,6 +1835,15 @@ export class RemoteServer {
         case 'sync':
           await this.handleSync(ws, msg.lastSeq, msg.epoch)
           break
+        case 'step-up':
+          this.handleStepUp(ws, ip, msg)
+          break
+        case 'term-input':
+          this.handleTermInput(ws, msg)
+          break
+        case 'term-resize':
+          this.handleTermResize(ws, msg)
+          break
         case 'pong':
           // Keepalive response, nothing to do
           break
@@ -1844,6 +1872,10 @@ export class RemoteServer {
       clearPending()
       const client = this.clients.get(ws)
       if (client?.pingTimer) clearInterval(client.pingTimer)
+      // Release every PTY attachment this socket held — a phone that sleeps or
+      // a closed tab never sends terminal:detach, and a leaked attachment would
+      // keep measuring a dead socket for backpressure.
+      if (client) terminalService.detachConnection(client.connection.connectionId)
       this.clients.delete(ws)
       if (authenticated) {
         logger.info(
@@ -1873,11 +1905,248 @@ export class RemoteServer {
       // dispatching with a synthesized identity.
       const client = this.clients.get(ws)
       if (!client) throw new Error('Not authenticated')
+      // Shell-capability commands run the phase-2 gate BEFORE dispatch: the
+      // registry would only say "permission denied", which tells the client
+      // nothing about how to recover.
+      //
+      // Gated on `has()` as well because declarations are channel-GLOBAL: a
+      // shell channel registered for the desktop only (`terminal:kill-by-cwd`)
+      // must still answer with the historical "Channel not available", not with
+      // a step-up prompt for something this transport does not expose.
+      if (this.dispatcher.has(msg.channel) && this.dispatcher.capabilityOf(msg.channel) === 'shell') {
+        this.assertShellGrant(client)
+      }
       const result = await this.dispatcher.handle(msg, client.connection)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: true, data: result })
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: false, error: errorMsg })
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Terminal: step-up, grant decay, volatile stream (SyncCore phase 2)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The three gates in series (ADR-052 decision 6), plus the decay refresh.
+   *
+   * Throws {@link TERMINAL_DISABLED_ERROR} while the desktop toggle is OFF —
+   * checked FIRST and independently of the grant, so a grant obtained before
+   * the flip (or a client that cached one) buys nothing. Throws
+   * {@link NEEDS_STEP_UP_ERROR} when the grant is absent or decayed, and strips
+   * `shell` from the connection on the way out so every later layer (registry
+   * included) also refuses. Otherwise slides the deadline forward: "idle" means
+   * no shell-bearing traffic, not wall-clock age.
+   */
+  private assertShellGrant(client: AuthenticatedClient): void {
+    const policy = readTerminalPolicy()
+    if (!policy.allowTerminal) {
+      this.revokeShellGrant(client, 'policy-off')
+      throw new Error(TERMINAL_DISABLED_ERROR)
+    }
+    if (!hasLiveShellGrant(client.connection)) {
+      this.revokeShellGrant(client, 'grant-expired')
+      throw new Error(NEEDS_STEP_UP_ERROR)
+    }
+    client.connection.shellGrantExpiresAt = Date.now() + shellGrantIdleMs(policy)
+  }
+
+  /** Drop the `shell` grant (and any attachments) from one connection. */
+  private revokeShellGrant(client: AuthenticatedClient, reason?: TermDetachReason): void {
+    const grants = client.connection.grants
+    if (grants.has('shell')) {
+      const next = new Set<Capability>(grants)
+      next.delete('shell')
+      client.connection.grants = next
+    }
+    client.connection.shellGrantExpiresAt = null
+    terminalService.detachConnection(client.connection.connectionId, reason)
+  }
+
+  /**
+   * `step-up` — the ceremony that arms the decaying `shell` grant.
+   *
+   * Refusals are deliberately specific: the owner needs to know whether to flip
+   * a desktop toggle, set a password, or just retype it. The proof is verified
+   * through the SAME password provider the auth handshake uses, and a failure
+   * consumes the SAME per-key password budget — a step-up brute force must not
+   * get a fresh allowance just because it arrives on an authenticated socket.
+   */
+  private handleStepUp(ws: WebSocket, ip: string, msg: WsStepUpRequest): void {
+    const respond = (response: Omit<WsStepUpResponse, 'type'>): void => {
+      this.sendTo(ws, { type: 'step-up-response', ...response })
+    }
+    const client = this.clients.get(ws)
+    if (!client) return
+
+    const policy = readTerminalPolicy()
+    if (!policy.allowTerminal) {
+      this.revokeShellGrant(client, 'policy-off')
+      respond({
+        ok: false,
+        code: 'terminal-disabled',
+        error: 'Remote terminal is turned off. Enable it in Settings › Remote on the desktop app.',
+        retryable: false
+      })
+      return
+    }
+    if (!this.passwordParams()) {
+      // Tunnel mode deliberately refuses password auth (an E2E session needs the
+      // fragment key a password client does not have), which also removes this
+      // phase's only step-up factor. Say THAT rather than "set a password" —
+      // the owner may well have one set and would be sent in circles.
+      const inTunnelMode = this.e2eKey !== null && this.passwordAuth.params() !== null
+      respond({
+        ok: false,
+        code: 'no-password',
+        error: inTunnelMode
+          ? 'The terminal cannot be unlocked over the tunnel yet — connect over your LAN or Tailscale instead.'
+          : 'Set a remote-access password in Settings › Remote on the desktop app — the terminal needs it to confirm it is you.',
+        retryable: false
+      })
+      return
+    }
+    if (this.isAuthThrottled(ip)) {
+      logger.warn('remote-server', `Refusing step-up for ${ip}: too many failed attempts`)
+      respond({
+        ok: false,
+        code: 'throttled',
+        error: 'Too many attempts — wait a few minutes and try again.',
+        retryable: false
+      })
+      return
+    }
+    if (typeof msg.pwProof !== 'string' || !this.passwordAuth.verify(msg.pwProof)) {
+      // Shape failures and wrong proofs are the same event to the budget: both
+      // are "this socket presented something that is not the password".
+      this.recordFailedAuth(ip, 'password')
+      respond({
+        ok: false,
+        code: typeof msg.pwProof === 'string' ? 'invalid-proof' : 'malformed',
+        error: 'That password did not match.',
+        retryable: true
+      })
+      return
+    }
+
+    const expiresAt = Date.now() + shellGrantIdleMs(policy)
+    client.connection.grants = new Set<Capability>([...client.connection.grants, 'shell'])
+    client.connection.shellGrantExpiresAt = expiresAt
+    logger.info(
+      'remote-server',
+      `Shell grant armed for ${client.ip} via step-up (expires in ${policy.shellGrantIdleMinutes}m)`
+    )
+    respond({ ok: true, expiresAt })
+  }
+
+  /**
+   * Accept keystrokes ONLY from a socket that currently holds a live grant AND
+   * is attached to the terminal. Both halves matter: the grant is authority,
+   * the attachment is scope. A refused frame is dropped (and logged) — never
+   * answered with an error the sender could use as an oracle for which
+   * terminals exist.
+   */
+  private handleTermInput(ws: WebSocket, msg: WsTermInput): void {
+    const client = this.gateTerminalFrame(ws, msg.termId, 'term-input')
+    if (!client) return
+    // Only `term-input` refreshes the deadline: output the user is merely
+    // watching is not evidence of a human at the keyboard.
+    client.connection.shellGrantExpiresAt = Date.now() + shellGrantIdleMs()
+    try {
+      terminalService.write(client.connection, msg.termId, base64ToText(msg.dataB64))
+    } catch (err) {
+      logger.warn('remote-server', `term-input dropped: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+
+  private handleTermResize(ws: WebSocket, msg: WsTermResize): void {
+    const client = this.gateTerminalFrame(ws, msg.termId, 'term-resize')
+    if (!client) return
+    if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows)) return
+    if (msg.cols <= 0 || msg.rows <= 0) return
+    try {
+      terminalService.resize(client.connection, msg.termId, msg.cols, msg.rows)
+    } catch (err) {
+      logger.warn(
+        'remote-server',
+        `term-resize dropped: ${err instanceof Error ? err.message : err}`
+      )
+    }
+  }
+
+  /** Shared gate for the client→server terminal frames. Returns null on refusal. */
+  private gateTerminalFrame(
+    ws: WebSocket,
+    termId: string,
+    frame: string
+  ): AuthenticatedClient | null {
+    const client = this.clients.get(ws)
+    if (!client) return null
+    if (typeof termId !== 'string' || termId === '') return null
+    if (!readTerminalPolicy().allowTerminal) {
+      logger.warn('remote-server', `Refused ${frame} from ${client.ip}: remote terminal is off`)
+      this.revokeShellGrant(client, 'policy-off')
+      return null
+    }
+    if (!hasLiveShellGrant(client.connection)) {
+      logger.warn('remote-server', `Refused ${frame} from ${client.ip}: no live shell grant`)
+      this.revokeShellGrant(client, 'grant-expired')
+      return null
+    }
+    if (!terminalService.ptyManager().isAttached(termId, client.connection.connectionId)) {
+      logger.warn('remote-server', `Refused ${frame} from ${client.ip}: not attached to ${termId}`)
+      return null
+    }
+    return client
+  }
+
+  /**
+   * The sink the pty manager delivers attached-terminal frames through. Every
+   * frame goes out via {@link sendTo}, so terminal traffic is E2E-encrypted and
+   * ordered exactly like every other server message — no forked send path.
+   */
+  terminalSink(): PtyRemoteSink {
+    const socketFor = (connectionId: string): WebSocket | null => {
+      for (const [ws, client] of this.clients) {
+        if (client.connection.connectionId === connectionId) return ws
+      }
+      return null
+    }
+    return {
+      data: (connectionId, termId, data) => {
+        const ws = socketFor(connectionId)
+        if (ws) this.sendTo(ws, { type: 'term-data', termId, dataB64: textToBase64(data) })
+      },
+      exit: (connectionId, termId, exitCode) => {
+        const ws = socketFor(connectionId)
+        if (ws) this.sendTo(ws, { type: 'term-exit', termId, exitCode })
+      },
+      detached: (connectionId, termId, reason) => {
+        const ws = socketFor(connectionId)
+        if (ws) this.sendTo(ws, { type: 'term-detached', termId, reason })
+      },
+      bufferedAmount: (connectionId) => {
+        const ws = socketFor(connectionId)
+        if (!ws || ws.readyState !== WebSocket.OPEN) return null
+        return ws.bufferedAmount
+      }
+    }
+  }
+
+  /**
+   * Re-apply the desktop-side terminal posture to every LIVE connection.
+   *
+   * Called after `remote:set-config` writes the toggle. Turning it OFF must
+   * take effect immediately — a grant already armed is worthless the moment the
+   * owner revokes the policy — so every connection loses `shell` and every
+   * remote attachment is dropped with a `policy-off` notice. Desktop
+   * attachments are untouched: the local shell was never gated by this switch.
+   */
+  applyTerminalPolicy(): void {
+    if (readTerminalPolicy().allowTerminal) return
+    for (const client of this.clients.values()) {
+      this.revokeShellGrant(client, 'policy-off')
     }
   }
 

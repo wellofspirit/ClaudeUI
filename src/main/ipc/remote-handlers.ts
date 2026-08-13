@@ -65,7 +65,12 @@ import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
 import { prepareAndCreateSession } from './create-session'
-import { registerCommand, type CommandRegistration } from './command-registry'
+import { terminalService } from '../services/terminal-service'
+import {
+  registerCommand,
+  type CommandConnection,
+  type CommandRegistration
+} from './command-registry'
 import {
   sendPrompt,
   watchBackground,
@@ -1219,6 +1224,95 @@ export function registerRemoteHandlers(
     handler: async (cwd: string, directory: string) => {
       closeMockupWatcher(`${cwd}:${directory}`)
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // Terminal (SyncCore phase 2 — ADR-052 decision 6, security.md §Terminal posture)
+  //
+  // The first channels on this surface whose capability is NOT in
+  // LEGACY_REMOTE_GRANTS. Registering them does not expose them: `shell` is
+  // granted only by the step-up ceremony (a transport frame — see
+  // remote-server.ts), only while the desktop-side "Allow remote terminal"
+  // toggle is ON, and only until the grant decays. Three gates in series, all
+  // server-side.
+  // -------------------------------------------------------------------------
+
+  handleRemote({
+    channel: 'terminal:create',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, cwd: string) =>
+      terminalService.create(connection, cwd)
+  })
+
+  // `terminal:write` stays registered even though the web client prefers the
+  // `term-input` FRAME (no invoke bookkeeping per keystroke): it keeps the two
+  // surfaces symmetrical, and it is the same gates either way.
+  handleRemote({
+    channel: 'terminal:write',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, id: string, data: string) => {
+      terminalService.write(connection, id, data)
+    }
+  })
+
+  handleRemote({
+    channel: 'terminal:resize',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, id: string, cols: number, rows: number) => {
+      terminalService.resize(connection, id, cols, rows)
+    }
+  })
+
+  handleRemote({
+    channel: 'terminal:kill',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, id: string) => {
+      terminalService.kill(connection, id)
+    }
+  })
+
+  // DELIBERATE EXCEPTION to "subscriptions are queries": attach/detach are
+  // subscription toggles with no domain effect, which would normally make them
+  // `query` (and therefore unaudited). security.md §Audit requires terminal
+  // lifecycle — spawn/attach/detach/exit with identity — in the audit trail, so
+  // they are declared `command` purely to be audited. They still carry no PTY
+  // content; only who attached to which terminal, and when.
+  handleRemote({
+    channel: 'terminal:attach',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, id: string) =>
+      terminalService.attach(connection, id)
+  })
+  handleRemote({
+    channel: 'terminal:detach',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, id: string) => {
+      terminalService.detach(connection, id)
+    }
+  })
+
+  // Capability honesty: the ONLY thing a web client needs to decide whether to
+  // render the terminal affordance, and whether to prompt for step-up first.
+  // `config` (not `shell`) on purpose — asking "may I?" must be answerable
+  // without already holding the grant.
+  handleRemote({
+    channel: 'terminal:availability',
+    capability: 'config',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => terminalService.availability(connection)
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)

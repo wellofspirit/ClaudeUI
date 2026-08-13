@@ -186,6 +186,144 @@ export interface WsE2EAck {
   type: 'e2e-ack'
 }
 
+// ---------------------------------------------------------------------------
+// Step-up ceremony (SyncCore phase 2 — ADR-052 decision 5, security.md §Grant decay)
+// ---------------------------------------------------------------------------
+
+/**
+ * Client → Server: prove human presence to obtain the decaying `shell` grant.
+ *
+ * Deliberately a TRANSPORT frame rather than a registry channel: a channel
+ * would need a capability the caller already holds, which is the wrong layer
+ * for "give me a capability I do not have". `pwProof` is the same
+ * `hex(scrypt(...))` value {@link WsAuthRequest} carries — this phase's factor
+ * is a fresh password proof; passkeys replace it later (security.md keeps the
+ * password as the fallback path).
+ */
+export interface WsStepUpRequest {
+  type: 'step-up'
+  pwProof?: string
+}
+
+/** Machine-readable reason a step-up was refused (the client maps it to copy). */
+export type StepUpFailureCode =
+  /** The desktop-side "Allow remote terminal" toggle is OFF. */
+  | 'terminal-disabled'
+  /** No password credential is provisioned, so there is no step-up factor. */
+  | 'no-password'
+  /** The proof did not verify (consumes the password-failure budget). */
+  | 'invalid-proof'
+  /** The key is over the shared password-failure budget. */
+  | 'throttled'
+  /** Malformed frame / no proof presented. */
+  | 'malformed'
+
+/** Server → Client: step-up outcome. */
+export interface WsStepUpResponse {
+  type: 'step-up-response'
+  ok: boolean
+  /** Human-readable copy, safe to render inline. */
+  error?: string
+  code?: StepUpFailureCode
+  /** `false` ⇒ the client must stop retrying as-is (throttled / disabled). */
+  retryable?: boolean
+  /** Success only: epoch-ms deadline of the grant just armed. */
+  expiresAt?: number
+}
+
+/**
+ * Error string a shell-capability dispatch throws when the connection holds no
+ * live `shell` grant. Pinned here (not a free-form message) because the web
+ * client matches on it to raise the step-up prompt — see
+ * {@link isNeedsStepUpError}.
+ */
+export const NEEDS_STEP_UP_ERROR = 'needs-step-up'
+
+/**
+ * Error string a shell-capability dispatch throws when the desktop-side
+ * "Allow remote terminal" toggle is OFF. Distinct from
+ * {@link NEEDS_STEP_UP_ERROR} on purpose: no ceremony can fix it, so the client
+ * must NOT prompt for a password.
+ */
+export const TERMINAL_DISABLED_ERROR = 'terminal-disabled'
+
+function messageIncludes(message: unknown, needle: string): boolean {
+  const text =
+    typeof message === 'string'
+      ? message
+      : message instanceof Error
+        ? message.message
+        : String(message ?? '')
+  return text.includes(needle)
+}
+
+/** True for the error a shell dispatch throws when a step-up is required. */
+export function isNeedsStepUpError(message: unknown): boolean {
+  return messageIncludes(message, NEEDS_STEP_UP_ERROR)
+}
+
+/** True for the error a shell dispatch throws while the terminal toggle is OFF. */
+export function isTerminalDisabledError(message: unknown): boolean {
+  return messageIncludes(message, TERMINAL_DISABLED_ERROR)
+}
+
+// ---------------------------------------------------------------------------
+// Terminal stream (SyncCore phase 2 — the VOLATILE lane)
+// ---------------------------------------------------------------------------
+//
+// These frames never enter the EventLog and never reach the audit log: PTY
+// content and keystrokes capture secrets (security.md §Audit). They are
+// transport frames rather than invokes so a keystroke costs no request/response
+// bookkeeping — and they are accepted ONLY from a connection that currently
+// holds an unexpired `shell` grant AND is attached to the terminal.
+//
+// `dataB64` is UTF-8-then-base64 (see shared/base64-text.ts).
+
+/** Client → Server: keystrokes for an attached terminal. Refreshes grant decay. */
+export interface WsTermInput {
+  type: 'term-input'
+  termId: string
+  dataB64: string
+}
+
+/** Client → Server: viewport size for an attached terminal. */
+export interface WsTermResize {
+  type: 'term-resize'
+  termId: string
+  cols: number
+  rows: number
+}
+
+/** Server → Client: PTY output, sent only to attached sockets. */
+export interface WsTermData {
+  type: 'term-data'
+  termId: string
+  dataB64: string
+}
+
+/** Server → Client: the PTY exited, sent only to attached sockets. */
+export interface WsTermExit {
+  type: 'term-exit'
+  termId: string
+  exitCode: number
+}
+
+/** Why the server dropped a remote attachment. */
+export type TermDetachReason =
+  /** The desktop-side terminal toggle was turned OFF. */
+  | 'policy-off'
+  /** The socket could not keep up and was dropped instead of buffered. */
+  | 'backpressure'
+  /** The connection's `shell` grant decayed. */
+  | 'grant-expired'
+
+/** Server → Client: this socket is no longer attached to `termId`. */
+export interface WsTermDetached {
+  type: 'term-detached'
+  termId: string
+  reason: TermDetachReason
+}
+
 export type WsClientMessage =
   | WsAuthRequest
   | WsInvokeRequest
@@ -193,6 +331,9 @@ export type WsClientMessage =
   | WsPing
   | WsPong
   | WsE2EActivate
+  | WsStepUpRequest
+  | WsTermInput
+  | WsTermResize
 export type WsServerMessage =
   | WsAuthResponse
   | WsInvokeResponse
@@ -202,6 +343,10 @@ export type WsServerMessage =
   | WsPing
   | WsPong
   | WsE2EAck
+  | WsStepUpResponse
+  | WsTermData
+  | WsTermExit
+  | WsTermDetached
 
 // ---------------------------------------------------------------------------
 // Event Log

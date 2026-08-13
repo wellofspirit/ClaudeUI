@@ -207,6 +207,13 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     resizeTerminal: (id, cols, rows) => ipcRenderer.invoke('terminal:resize', id, cols, rows),
     killTerminal: (id) => ipcRenderer.invoke('terminal:kill', id),
     killTerminalsByCwd: (cwd) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
+    terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
+    // Desktop-shaped stubs, mirroring preload: step-up and multi-attach are
+    // remote-only concepts (SyncCore phase 2).
+    terminalStepUp: async () => ({ ok: true }),
+    attachTerminal: async () => true,
+    detachTerminal: async () => {},
+    onTerminalDetached: () => () => {},
 
     // Worktree
     createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   useSessionStore,
@@ -6,10 +6,25 @@ import {
   selectActiveTerminalId,
   selectAllTerminalTabs
 } from '../../../stores/session-store'
+import { isNeedsStepUpError } from '../../../../../shared/remote-protocol'
+import type { TerminalAvailability } from '../../../../../shared/types'
+import { TerminalStepUpPrompt } from '../TerminalStepUpPrompt'
 import { TerminalPanelView } from './View'
 
 interface Props {
   style: React.CSSProperties
+}
+
+/**
+ * The desktop renderer IS the host surface: it holds a non-decaying `shell`
+ * grant, so it never consults `terminal:availability` and never sees a step-up
+ * prompt. Pinning that as a constant (rather than awaiting the same query)
+ * keeps the desktop panel's behavior byte-identical to pre-phase-2.
+ */
+const DESKTOP_AVAILABILITY: TerminalAvailability = {
+  allowed: true,
+  granted: true,
+  needsStepUp: false
 }
 
 export function TerminalPanel({ style }: Props): React.JSX.Element {
@@ -22,14 +37,57 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
   const setActiveTerminal = useSessionStore((s) => s.setActiveTerminal)
   const setTerminalPanelOpen = useSessionStore((s) => s.setTerminalPanelOpen)
 
+  // Optional chaining, like every other platform probe in the renderer: a
+  // re-render can be flushed after a test harness (or a teardown path) has
+  // dropped `window.api`, and "no api" is never "web".
+  const isWeb = window.api?.platform === 'web'
+  const [availability, setAvailability] = useState<TerminalAvailability | null>(
+    isWeb ? null : DESKTOP_AVAILABILITY
+  )
+
   const cwd = useSessionStore((s) => {
     const id = s.activeSessionId
     return id ? (s.sessions[id]?.cwd ?? '') : ''
   })
 
+  /** Capability honesty: the affordance is driven by the server's answer only. */
+  const refreshAvailability = useCallback(async (): Promise<void> => {
+    if (!isWeb) return
+    try {
+      setAvailability(await window.api.terminalAvailability())
+    } catch {
+      // An older host (or a dropped connection) means "no terminal here" —
+      // never optimistically render a shell we cannot actually drive.
+      setAvailability({ allowed: false, granted: false, needsStepUp: false })
+    }
+  }, [isWeb])
+
+  useEffect(() => {
+    void refreshAvailability()
+  }, [refreshAvailability])
+
+  // The server can revoke under us: the owner flips the toggle off, or the
+  // grant decays while the panel sits open. Re-ask rather than leaving a dead
+  // terminal that silently stops echoing.
+  useEffect(() => {
+    if (!isWeb) return
+    return window.api.onTerminalDetached(() => {
+      void refreshAvailability()
+    })
+  }, [isWeb, refreshAvailability])
+
   const handleNewTab = async (): Promise<void> => {
-    const terminalId = await window.api.createTerminal(cwd || '.')
-    addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
+    try {
+      const terminalId = await window.api.createTerminal(cwd || '.')
+      addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
+    } catch (err) {
+      // The grant decayed between the availability check and the click.
+      if (isWeb && isNeedsStepUpError(err)) {
+        setAvailability({ allowed: true, granted: false, needsStepUp: true })
+        return
+      }
+      throw err
+    }
   }
 
   // Listen for PTY exit events
@@ -39,6 +97,50 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
     })
     return unsub
   }, [removeTerminalTab])
+
+  if (isWeb && (!availability || !availability.allowed || availability.needsStepUp)) {
+    return (
+      <div
+        data-testid="TerminalPanel"
+        style={style}
+        className="flex flex-col bg-bg-primary border-t border-border overflow-hidden"
+      >
+        <div className="flex items-center gap-0.5 px-2 py-1 bg-bg-secondary border-b border-border shrink-0">
+          <button
+            data-testid="TerminalPanel.close"
+            onClick={() => setTerminalPanelOpen(false)}
+            className="ml-auto w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary hover:bg-bg-hover text-[10px]"
+            title="Close terminal panel"
+          >
+            &times;
+          </button>
+        </div>
+        <div className="flex-1 min-h-0">
+          {!availability ? (
+            <div
+              data-testid="TerminalPanel.checking"
+              className="h-full flex items-center justify-center text-text-muted text-xs"
+            >
+              Checking terminal access…
+            </div>
+          ) : !availability.allowed ? (
+            <div
+              data-testid="TerminalPanel.unavailable"
+              className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center text-text-muted text-xs"
+            >
+              <div>Remote terminal is turned off.</div>
+              <div className="text-[10px] text-text-muted/70 max-w-[380px] leading-snug">
+                Turn on “Allow remote terminal” in Settings › Remote on the desktop app to open a
+                shell from here.
+              </div>
+            </div>
+          ) : (
+            <TerminalStepUpPrompt onGranted={() => void refreshAvailability()} />
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <TerminalPanelView

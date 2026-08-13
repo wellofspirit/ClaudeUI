@@ -36,8 +36,9 @@ describe('DB migration — v6 dispatched_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v9 (audit_log, ADR-051/052).
-      expect(userVersion(db)).toBe(9)
+      // Bump alongside MIGRATIONS in db.ts — currently v10 (remote-terminal
+      // posture columns, ADR-052).
+      expect(userVersion(db)).toBe(10)
     } finally {
       db.close()
     }

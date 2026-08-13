@@ -1266,6 +1266,31 @@ interface TerminalAPI {
   killTerminalsByCwd(cwd: string): Promise<string[]>
   onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
   onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
+  /**
+   * May this client open a terminal, and does it need a step-up first?
+   * (SyncCore phase 2.) Desktop answers a constant; the web client gates its
+   * whole terminal affordance on it.
+   */
+  terminalAvailability(): Promise<TerminalAvailability>
+  /**
+   * Run the step-up ceremony with the operator's remote-access password.
+   * Desktop resolves `{ok:true}` without a ceremony — there is nothing to step
+   * up to when you are already at the machine.
+   */
+  terminalStepUp(password: string): Promise<TerminalStepUpResult>
+  /**
+   * Subscribe this client to a live PTY (server-side scrollback replays first).
+   * No-op on desktop, whose output arrives over its own IPC channel.
+   */
+  attachTerminal(id: string): Promise<boolean>
+  detachTerminal(id: string): Promise<void>
+  /**
+   * The server dropped this client's attachment (toggle turned off, grant
+   * decayed, or the socket fell too far behind). Never fires on desktop.
+   */
+  onTerminalDetached(
+    cb: (data: { terminalId: string; reason: string }) => void
+  ): () => void
 }
 
 interface AutomationAPI {
@@ -1429,8 +1454,41 @@ export interface RemoteConfig {
    * bookkeeping for the startup reconciliation.
    */
   tlsHttpsPort: number
+  /**
+   * Desktop-side master switch for remote terminals (ADR-052 decision 6), OFF
+   * by default. It lives in `remote_config` — NOT in UISettings — because
+   * `config:save-settings` is remotely reachable, and a settings-blob flag
+   * would let a remote client arm its own `shell` capability.
+   */
+  allowTerminal: boolean
+  /** Idle window before a stepped-up `shell` grant decays, in minutes. */
+  shellGrantIdleMinutes: number
   passwordSet: boolean
   passwordUpdatedAt: number | null
+}
+
+/**
+ * What the terminal affordance may do on THIS client right now
+ * (`terminal:availability`).
+ *
+ * - `allowed`     — the host permits a terminal for this connection at all
+ *                   (always true on desktop; the opt-in toggle over remote);
+ * - `granted`     — a live `shell` grant is held, so commands will run;
+ * - `needsStepUp` — allowed but not granted: run the step-up ceremony.
+ */
+export interface TerminalAvailability {
+  allowed: boolean
+  granted: boolean
+  needsStepUp: boolean
+}
+
+/** Outcome of a step-up ceremony (see `WsStepUpResponse`). */
+export interface TerminalStepUpResult {
+  ok: boolean
+  error?: string
+  code?: string
+  retryable?: boolean
+  expiresAt?: number
 }
 
 interface RemoteAPI {
@@ -1454,6 +1512,8 @@ interface RemoteAPI {
     autostart?: boolean
     tlsMode?: number
     tlsHttpsPort?: number
+    allowTerminal?: boolean
+    shellGrantIdleMinutes?: number
   }): Promise<RemoteConfig>
   /**
    * Re-run `tailscale serve` enablement for the running server with

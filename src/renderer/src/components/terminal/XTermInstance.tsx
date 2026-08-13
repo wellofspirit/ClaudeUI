@@ -127,6 +127,19 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
       if (id === terminalId) term.write(data)
     })
 
+    // Multi-attach (SyncCore phase 2): subscribe this client to the live PTY.
+    // Registered AFTER the data listener on purpose — attaching replays the
+    // server-side scrollback ring as the first `term-data` frame, so a listener
+    // installed afterwards would miss the history it exists to deliver. No-op on
+    // desktop, whose output has always arrived on its own IPC channel.
+    //
+    // The api handle is captured, not re-read on cleanup: detach must go through
+    // the same surface the attach did (and `window.api` can be gone by teardown).
+    const api = window.api
+    void api.attachTerminal(terminalId).catch(() => {
+      /* stale tab / grant decayed — the panel re-checks availability */
+    })
+
     // Fit on resize
     const ro = new ResizeObserver(() => {
       if (containerRef.current?.offsetWidth === 0) return // hidden tab
@@ -140,6 +153,9 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
       dataDisposable.dispose()
       ro.disconnect()
       term.dispose()
+      void api.detachTerminal(terminalId).catch(() => {
+        /* the connection is already gone; the server detaches on close anyway */
+      })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terminalId])

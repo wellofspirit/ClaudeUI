@@ -349,6 +349,26 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
       `)
     }
+  },
+  {
+    // v10 — SyncCore phase 2 (ADR-052 decision 6): remote-terminal posture.
+    //
+    // `allow_terminal` is the desktop-side master switch for the `shell`
+    // capability, OFF by default. It lives HERE and not in settings.json
+    // because `config:save-settings` is remotely reachable (capability
+    // `config`) — a settings-blob flag would let a remote client self-grant
+    // shell. This table is only ever written through the desktop-only
+    // `remote:set-config` IPC (pinned `admin`, never registered remote).
+    //
+    // `shell_grant_idle_minutes` is the decay window for a stepped-up `shell`
+    // grant (security.md §"Grant decay"; default 10).
+    version: 10,
+    up(db) {
+      db.exec(`
+        ALTER TABLE remote_config ADD COLUMN allow_terminal INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE remote_config ADD COLUMN shell_grant_idle_minutes INTEGER NOT NULL DEFAULT 10;
+      `)
+    }
   }
 ]
 
@@ -1339,6 +1359,12 @@ export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string
  */
 export const DEFAULT_TLS_HTTPS_PORT = 443
 
+/**
+ * Default idle window for a stepped-up `shell` grant, in minutes (ADR-052
+ * decision 5 / security.md §"Grant decay"). Mirrors the v10 column default.
+ */
+export const DEFAULT_SHELL_GRANT_IDLE_MINUTES = 10
+
 interface RemoteConfigDbRow {
   id: number
   port: number
@@ -1348,6 +1374,8 @@ interface RemoteConfigDbRow {
   tls_https_port: number
   last_serve_https_port: number | null
   last_serve_local_port: number | null
+  allow_terminal: number
+  shell_grant_idle_minutes: number
   password_salt: string | null
   password_hash: string | null
   kdf_params: string | null
@@ -1366,6 +1394,10 @@ export interface RemoteConfigRow {
   lastServeHttpsPort: number | null
   /** Loopback port that entry proxied to — the proof it is ours. */
   lastServeLocalPort: number | null
+  /** Desktop-side master switch for remote terminals (ADR-052). Default OFF. */
+  allowTerminal: boolean
+  /** Idle decay window for a stepped-up `shell` grant, in minutes. */
+  shellGrantIdleMinutes: number
   passwordSalt: string | null
   passwordHash: string | null
   kdfParams: string | null
@@ -1384,6 +1416,11 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
     tlsHttpsPort: row.tls_https_port ?? DEFAULT_TLS_HTTPS_PORT,
     lastServeHttpsPort: row.last_serve_https_port ?? null,
     lastServeLocalPort: row.last_serve_local_port ?? null,
+    // Same in-code COALESCE reasoning as tlsHttpsPort: a row written by a build
+    // that predates v10 must read as "terminal off, default decay", never as
+    // `undefined` (which would be falsy for the toggle but NaN-ish for the window).
+    allowTerminal: row.allow_terminal === 1,
+    shellGrantIdleMinutes: row.shell_grant_idle_minutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
     passwordSalt: row.password_salt,
     passwordHash: row.password_hash,
     kdfParams: row.kdf_params,
@@ -1420,6 +1457,8 @@ export function setRemoteConfig(partial: {
   autostart?: boolean
   tlsMode?: number
   tlsHttpsPort?: number
+  allowTerminal?: boolean
+  shellGrantIdleMinutes?: number
 }): void {
   const db = getDb()
   const existing = getRemoteConfigDbRow(db)
@@ -1429,18 +1468,42 @@ export function setRemoteConfig(partial: {
     partial.autostart !== undefined ? (partial.autostart ? 1 : 0) : (existing?.autostart ?? 0)
   const tlsMode = partial.tlsMode ?? existing?.tls_mode ?? 0
   const tlsHttpsPort = partial.tlsHttpsPort ?? existing?.tls_https_port ?? DEFAULT_TLS_HTTPS_PORT
+  const allowTerminal =
+    partial.allowTerminal !== undefined
+      ? partial.allowTerminal
+        ? 1
+        : 0
+      : (existing?.allow_terminal ?? 0)
+  const shellGrantIdleMinutes =
+    partial.shellGrantIdleMinutes ??
+    existing?.shell_grant_idle_minutes ??
+    DEFAULT_SHELL_GRANT_IDLE_MINUTES
 
   db.prepare(
-    `INSERT INTO remote_config (id, port, bind_host, autostart, tls_mode, tls_https_port, updated_at)
-     VALUES (1, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO remote_config (
+       id, port, bind_host, autostart, tls_mode, tls_https_port,
+       allow_terminal, shell_grant_idle_minutes, updated_at
+     )
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       port           = excluded.port,
-       bind_host      = excluded.bind_host,
-       autostart      = excluded.autostart,
-       tls_mode       = excluded.tls_mode,
-       tls_https_port = excluded.tls_https_port,
-       updated_at     = excluded.updated_at`
-  ).run(port, bindHost, autostart, tlsMode, tlsHttpsPort, Date.now())
+       port                     = excluded.port,
+       bind_host                = excluded.bind_host,
+       autostart                = excluded.autostart,
+       tls_mode                 = excluded.tls_mode,
+       tls_https_port           = excluded.tls_https_port,
+       allow_terminal           = excluded.allow_terminal,
+       shell_grant_idle_minutes = excluded.shell_grant_idle_minutes,
+       updated_at               = excluded.updated_at`
+  ).run(
+    port,
+    bindHost,
+    autostart,
+    tlsMode,
+    tlsHttpsPort,
+    allowTerminal,
+    shellGrantIdleMinutes,
+    Date.now()
+  )
 }
 
 /**

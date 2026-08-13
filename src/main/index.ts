@@ -43,6 +43,7 @@ const optimizer = {
 }
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
+import { terminalService } from './services/terminal-service'
 import { registerAutomationIpc } from './ipc/automation.ipc'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-handlers'
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
@@ -51,6 +52,7 @@ import { TailscaleManager } from './services/tailscale-manager'
 import type { RemoteConfig, TailscaleDetection } from '../shared/types'
 import {
   DEFAULT_TLS_HTTPS_PORT,
+  DEFAULT_SHELL_GRANT_IDLE_MINUTES,
   getRemoteConfig,
   setRemoteConfig as dbSetRemoteConfig,
   clearRemotePassword
@@ -256,6 +258,8 @@ function sanitizedRemoteConfig(): RemoteConfig {
     // NOT exposed: last_serve_https_port / last_serve_local_port. They are
     // internal bookkeeping for the startup serve reconciliation (ADR-042), not
     // user-facing configuration.
+    allowTerminal: config?.allowTerminal ?? false,
+    shellGrantIdleMinutes: config?.shellGrantIdleMinutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
     passwordSet: config?.passwordHash != null,
     passwordUpdatedAt: config?.passwordUpdatedAt ?? null
   }
@@ -435,6 +439,10 @@ function createWindow(): void {
   const remoteServer = new RemoteServer(remoteDispatcher, undefined, tailscaleManager)
   currentRemoteServer = remoteServer
   remoteServer.setWindow(mainWindow)
+  // Multi-attach delivery path (SyncCore phase 2): the pty manager hands frames
+  // for attached remote connections to THIS server's sink. Re-pointed here on a
+  // macOS window re-create so the sink never addresses the stopped server.
+  terminalService.setRemoteSink(remoteServer.terminalSink())
   registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
 
   // Log viewer (standalone debug window) — init early so renderer console
@@ -538,11 +546,25 @@ function createWindow(): void {
         autostart?: boolean
         tlsMode?: number
         tlsHttpsPort?: number
+        allowTerminal?: boolean
+        shellGrantIdleMinutes?: number
       }
     ) => {
       if (partial.port !== undefined && partial.port !== 0) {
         if (partial.port < 1024 || partial.port > 65535) {
           throw new Error('Port must be 0 (random) or between 1024 and 65535')
+        }
+      }
+      // Grant decay is the whole point of the window (ADR-052 decision 5), so 0
+      // ("never expires") is not offered; a day is the outer bound before the
+      // ceremony stops meaning anything.
+      if (partial.shellGrantIdleMinutes !== undefined) {
+        if (
+          !Number.isInteger(partial.shellGrantIdleMinutes) ||
+          partial.shellGrantIdleMinutes < 1 ||
+          partial.shellGrantIdleMinutes > 1440
+        ) {
+          throw new Error('Terminal grant timeout must be between 1 and 1440 minutes')
         }
       }
       // Unlike the local listen port, 0 is NOT allowed: `tailscale serve` binds
@@ -559,6 +581,10 @@ function createWindow(): void {
         }
       }
       dbSetRemoteConfig(partial)
+      // Turning the terminal toggle OFF must bite NOW, not at the next
+      // reconnect: every live connection loses its `shell` grant and every
+      // remote attachment is dropped (ADR-052 decision 6).
+      if (partial.allowTerminal !== undefined) remoteServer.applyTerminalPolicy()
       return sanitizedRemoteConfig()
     }
   )

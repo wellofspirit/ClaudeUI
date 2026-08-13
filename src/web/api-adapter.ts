@@ -10,6 +10,8 @@
 import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
+import type { RemoteAuthInfo } from '../shared/remote-protocol'
+import { derivePasswordProof } from './password-proof'
 import type { RemoteConnection } from './connection'
 
 declare global {
@@ -221,8 +223,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onSessionConfigChanged: on('config:sessions-changed') as ClaudeAPI['onSessionConfigChanged'],
     onAccountUsage: on('usage:data') as ClaudeAPI['onAccountUsage'],
     onBlockUsage: on('usage:block-data') as ClaudeAPI['onBlockUsage'],
-    onTerminalData: on('terminal:data') as ClaudeAPI['onTerminalData'],
-    onTerminalExit: on('terminal:exit') as ClaudeAPI['onTerminalExit'],
+    // Terminal output is the VOLATILE lane (SyncCore phase 2): `term-data` /
+    // `term-exit` frames targeted at attached sockets, never event-log channels
+    // — PTY bytes must not be replayable from a ring buffer.
+    onTerminalData: ((cb: Parameters<ClaudeAPI['onTerminalData']>[0]) =>
+      connection.onTerminalData(cb)) as ClaudeAPI['onTerminalData'],
+    onTerminalExit: ((cb: Parameters<ClaudeAPI['onTerminalExit']>[0]) =>
+      connection.onTerminalExit(cb)) as ClaudeAPI['onTerminalExit'],
     onAutomationRunUpdate: on('automation:run-update') as ClaudeAPI['onAutomationRunUpdate'],
     onAutomationsChanged: on('automation:changed') as ClaudeAPI['onAutomationsChanged'],
     onAutomationRunMessage: on('automation:run-message') as ClaudeAPI['onAutomationRunMessage'],
@@ -351,12 +358,66 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     unwatchSession: (routingId) =>
       connection.invoke('session:unwatch-session', routingId) as Promise<void>,
 
-    // Terminal — not available on web, return no-ops/empty
-    createTerminal: async () => '',
-    writeTerminal: async () => {},
-    resizeTerminal: async () => {},
-    killTerminal: async () => {},
+    // Terminal (SyncCore phase 2 — ADR-052). Reachable over remote behind three
+    // server-side gates: the desktop opt-in toggle, a stepped-up `shell` grant,
+    // and that grant's idle decay. Everything here is refused server-side until
+    // all three hold, so the client never has to be trusted about them.
+    createTerminal: (cwd) => connection.invoke('terminal:create', cwd) as Promise<string>,
+    // Keystrokes ride the `term-input` FRAME rather than an invoke: one
+    // request/response round trip per keypress is pure overhead, and the frame
+    // is what refreshes the grant's idle deadline.
+    writeTerminal: async (id, data) => {
+      connection.sendTerminalInput(id, data)
+    },
+    resizeTerminal: async (id, cols, rows) => {
+      connection.sendTerminalResize(id, cols, rows)
+    },
+    killTerminal: (id) => connection.invoke('terminal:kill', id) as Promise<void>,
+    // Desktop-only lifecycle sweep (cold-session cleanup); not on the remote
+    // surface, so a web client never mass-kills the operator's shells.
     killTerminalsByCwd: async () => [],
+    terminalAvailability: () =>
+      connection.invoke('terminal:availability') as ReturnType<ClaudeAPI['terminalAvailability']>,
+    terminalStepUp: async (password) => {
+      let info: RemoteAuthInfo
+      try {
+        const res = await fetch(new URL('/remote/auth-info', window.location.origin).toString(), {
+          cache: 'no-store'
+        })
+        if (!res.ok) throw new Error(`auth-info returned HTTP ${res.status}`)
+        info = (await res.json()) as RemoteAuthInfo
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          retryable: true
+        }
+      }
+      if (!info.password) {
+        // No credential provisioned ⇒ no step-up factor exists. Same verdict the
+        // server would give, minus a pointless round trip.
+        return {
+          ok: false,
+          code: 'no-password',
+          error:
+            'Set a remote-access password in Settings › Remote on the desktop app — the terminal needs it to confirm it is you.',
+          retryable: false
+        }
+      }
+      const proof = await derivePasswordProof(password, info.password.saltHex, info.password.kdf)
+      const response = await connection.stepUp(proof)
+      return {
+        ok: response.ok,
+        error: response.error,
+        code: response.code,
+        retryable: response.retryable,
+        expiresAt: response.expiresAt
+      }
+    },
+    attachTerminal: (id) => connection.invoke('terminal:attach', id) as Promise<boolean>,
+    detachTerminal: (id) => connection.invoke('terminal:detach', id) as Promise<void>,
+    onTerminalDetached: ((cb: Parameters<ClaudeAPI['onTerminalDetached']>[0]) =>
+      connection.onTerminalDetached(cb)) as ClaudeAPI['onTerminalDetached'],
 
     // Worktree — not available on web
     createWorktree: async () => {

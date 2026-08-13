@@ -13,6 +13,8 @@ const baseConfig: RemoteConfig = {
   autostart: false,
   tlsMode: 0,
   tlsHttpsPort: 443,
+  allowTerminal: false,
+  shellGrantIdleMinutes: 10,
   passwordSet: false,
   passwordUpdatedAt: null
 }
