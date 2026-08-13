@@ -16,6 +16,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import * as zlib from 'node:zlib'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 import { E2ECrypto } from '../../../shared/e2e-crypto'
 import { buildSentFileUrl } from '../../../shared/sent-file-url'
@@ -160,21 +161,29 @@ beforeEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * `raw` is the undecoded body — node:http never decompresses, so a
+ * `Content-Encoding: br` response arrives verbatim and `body` is only
+ * meaningful for identity responses.
+ */
 async function httpGet(
-  url: string
-): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<{ status: number; body: string; raw: Buffer; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     http
-      .get(url, (res) => {
+      .get(url, { headers }, (res) => {
         const chunks: Buffer[] = []
         res.on('data', (c) => chunks.push(c))
-        res.on('end', () =>
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks)
           resolve({
             status: res.statusCode ?? 0,
-            body: Buffer.concat(chunks).toString('utf-8'),
+            body: raw.toString('utf-8'),
+            raw,
             headers: res.headers
           })
-        )
+        })
       })
       .on('error', reject)
   })
@@ -833,6 +842,131 @@ describe('RemoteServer — mockup HTTP route', () => {
     expect(got.body).toContain('remote mockup')
     // The serve-time bridge must be injected.
     expect(got.body).toContain('data-omelette="1"')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Static assets — `Accept-Encoding` negotiation against the precompressed
+// siblings `scripts/compress-web-assets.mjs` writes at build time, plus the
+// cache policy that makes a repeat phone visit free. The siblings here are
+// produced with the same node:zlib codecs the script uses, so every body is
+// round-tripped rather than compared to a fixture.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — static asset encoding + caching', () => {
+  let server: RemoteServer
+  let port: number
+  let appDir: string
+  let webDir: string
+  /** Repetitive on purpose: each sibling must be clearly smaller than the
+   *  original, so a `Content-Length` assertion tells the two apart. */
+  const PAYLOAD = `/* bundle */\n${'export const pad = "aaaaaaaaaaaaaaaaaaaa"\n'.repeat(64)}`
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'static-rs-'))
+    appPathRef.current = appDir
+    webDir = path.join(appDir, 'out', 'web')
+    fs.mkdirSync(path.join(webDir, 'assets'), { recursive: true })
+    fs.writeFileSync(path.join(webDir, 'index.html'), '<html><body>web client</body></html>')
+    fs.writeFileSync(path.join(webDir, 'assets', 'app.js'), PAYLOAD)
+    fs.writeFileSync(
+      path.join(webDir, 'assets', 'app.js.br'),
+      zlib.brotliCompressSync(Buffer.from(PAYLOAD, 'utf-8'))
+    )
+    fs.writeFileSync(
+      path.join(webDir, 'assets', 'app.js.gz'),
+      zlib.gzipSync(Buffer.from(PAYLOAD, 'utf-8'), { level: 9 })
+    )
+    // Deliberately sibling-less: the identity fallback must still be complete.
+    fs.writeFileSync(path.join(webDir, 'assets', 'only-raw.js'), PAYLOAD)
+    await server.start(port, '127.0.0.1')
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+    fs.rmSync(appDir, { recursive: true, force: true })
+    appPathRef.current = ''
+  })
+
+  it('serves the brotli sibling when the client accepts br', async () => {
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js`, {
+      'Accept-Encoding': 'gzip, br'
+    })
+    expect(got.status).toBe(200)
+    expect(got.headers['content-encoding']).toBe('br')
+    // The media type is the ORIGINAL's, never the sibling's extension.
+    expect(got.headers['content-type']).toBe('application/javascript')
+    expect(got.headers['vary']).toBe('Accept-Encoding')
+    expect(zlib.brotliDecompressSync(got.raw).toString('utf-8')).toBe(PAYLOAD)
+    expect(got.headers['content-length']).toBe(
+      String(fs.statSync(path.join(webDir, 'assets', 'app.js.br')).size)
+    )
+  })
+
+  it('falls back to the gzip sibling when br is not accepted', async () => {
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js`, {
+      'Accept-Encoding': 'gzip'
+    })
+    expect(got.status).toBe(200)
+    expect(got.headers['content-encoding']).toBe('gzip')
+    expect(got.headers['content-type']).toBe('application/javascript')
+    expect(zlib.gunzipSync(got.raw).toString('utf-8')).toBe(PAYLOAD)
+    expect(got.headers['content-length']).toBe(
+      String(fs.statSync(path.join(webDir, 'assets', 'app.js.gz')).size)
+    )
+  })
+
+  it('serves the original when the client sends no Accept-Encoding', async () => {
+    // node:http adds no Accept-Encoding of its own, so this really is identity.
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js`)
+    expect(got.status).toBe(200)
+    expect(got.headers['content-encoding']).toBeUndefined()
+    expect(got.body).toBe(PAYLOAD)
+    expect(got.headers['content-length']).toBe(String(Buffer.byteLength(PAYLOAD)))
+  })
+
+  it('serves identity (with Vary) for a file that has no siblings', async () => {
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/only-raw.js`, {
+      'Accept-Encoding': 'gzip, br'
+    })
+    expect(got.status).toBe(200)
+    expect(got.headers['content-encoding']).toBeUndefined()
+    expect(got.body).toBe(PAYLOAD)
+    // Still required — a shared cache must not key this URL on the URL alone.
+    expect(got.headers['vary']).toBe('Accept-Encoding')
+  })
+
+  it('caches hashed assets forever and revalidates the HTML', async () => {
+    const asset = await httpGet(`http://127.0.0.1:${port}/assets/app.js`)
+    expect(asset.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    const html = await httpGet(`http://127.0.0.1:${port}/remote`)
+    expect(html.status).toBe(200)
+    expect(html.headers['cache-control']).toBe('no-cache')
+  })
+
+  it('never serves a sibling whose original is gone', async () => {
+    fs.rmSync(path.join(webDir, 'assets', 'app.js'))
+    const got = await httpGet(`http://127.0.0.1:${port}/assets/app.js`, {
+      'Accept-Encoding': 'gzip, br'
+    })
+    expect(got.status).toBe(404)
+  })
+
+  it('refuses a traversal request', async () => {
+    fs.writeFileSync(path.join(appDir, 'secret.js'), 'TOP_SECRET')
+    // Raw socket: `http.get` would collapse the dot segments client-side and
+    // never put them on the wire. The server's own URL parse collapses them too,
+    // so this lands on a non-existent in-dir path rather than reaching the
+    // `startsWith(webDir)` guard — either way nothing outside the dir is served.
+    const got = await rawHttpGet(port, '/assets/../../secret.js', `127.0.0.1:${port}`)
+    expect([403, 404]).toContain(got.status)
+    expect(got.raw).not.toContain('TOP_SECRET')
   })
 })
 

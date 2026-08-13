@@ -62,7 +62,13 @@ const electronViteBuild = [
   { label: 'electron-vite build', steps: [['bunx', ['electron-vite', 'build', ...LL]]] }
 ]
 const webBuild = [
-  { label: 'web build', steps: [['bunx', ['vite', 'build', '--config', 'vite.web.config.ts', ...LL]]] }
+  {
+    label: 'web build',
+    steps: [
+      ['bunx', ['vite', 'build', '--config', 'vite.web.config.ts', ...LL]],
+      ['node', ['scripts/compress-web-assets.mjs', ...Q]]
+    ]
+  }
 ]
 
 const ensureCli = (update) => [

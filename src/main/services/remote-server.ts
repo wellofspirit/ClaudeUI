@@ -1055,7 +1055,7 @@ export class RemoteServer {
       url.pathname.endsWith('.css')
     ) {
       // Serve static assets
-      this.serveStatic(url.pathname, res)
+      this.serveStatic(req, url.pathname, res)
     } else {
       res.writeHead(404)
       res.end('Not found')
@@ -1449,6 +1449,10 @@ export class RemoteServer {
       const html = fs.readFileSync(indexPath, 'utf-8')
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
+        // Must be revalidated on every load: the HTML names content-hashed
+        // chunks that a desktop-app upgrade deletes, so a cached copy would
+        // point a returning phone at 404s.
+        'Cache-Control': 'no-cache',
         ...this.securityHeaders(true)
       })
       res.end(html)
@@ -1456,6 +1460,7 @@ export class RemoteServer {
       // Web client not built yet — serve a placeholder
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache',
         ...this.securityHeaders(true)
       })
       res.end(`<!DOCTYPE html>
@@ -1469,7 +1474,7 @@ export class RemoteServer {
     }
   }
 
-  private serveStatic(pathname: string, res: http.ServerResponse): void {
+  private serveStatic(req: http.IncomingMessage, pathname: string, res: http.ServerResponse): void {
     const webDir = this.getWebClientDir()
     const safePath = path.normalize(pathname).replace(/^(\.\.[/\\])+/, '')
     const filePath = path.join(webDir, safePath)
@@ -1499,13 +1504,59 @@ export class RemoteServer {
       '.woff': 'font/woff'
     }
 
+    // Precompressed siblings written at build time by
+    // scripts/compress-web-assets.mjs. The existence check above deliberately
+    // ran against the ORIGINAL: an orphaned sibling whose source is gone must
+    // 404, never be served. Token presence is matched without q-values on
+    // purpose — the only clients are our own web client and a phone browser,
+    // neither of which sends `br;q=0`.
+    const accept = String(req.headers['accept-encoding'] ?? '')
+    let servePath = filePath
+    let encoding: 'br' | 'gzip' | null = null
+    if (/\bbr\b/.test(accept) && fs.existsSync(`${filePath}.br`)) {
+      servePath = `${filePath}.br`
+      encoding = 'br'
+    } else if (/\bgzip\b/.test(accept) && fs.existsSync(`${filePath}.gz`)) {
+      servePath = `${filePath}.gz`
+      encoding = 'gzip'
+    }
+
+    // The existsSync check above races anything that swaps out/web (an app
+    // upgrade replacing resources/web) — a vanished file must be a 404, not an
+    // uncaughtException dialog from the stat below.
+    let size: number
+    try {
+      size = fs.statSync(servePath).size
+    } catch {
+      res.writeHead(404)
+      res.end('Not found')
+      return
+    }
+
     // Static assets (hashed JS/CSS/fonts/images). `nosniff` in particular stops
     // a browser MIME-sniffing a served file into an executable type.
-    res.writeHead(200, {
+    const headers: Record<string, string> = {
+      // Always the ORIGINAL extension's type — a `.br` sibling is the same
+      // resource in a different encoding, not a different media type.
       'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+      // A cache keyed on URL alone would hand a br body to an identity client.
+      Vary: 'Accept-Encoding',
+      // vite content-hashes everything under /assets/, so those URLs can never
+      // change meaning; anything else keeps a stable name and must revalidate.
+      'Cache-Control': pathname.startsWith('/assets/')
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache',
+      'Content-Length': String(size),
       ...this.securityHeaders(false)
-    })
-    fs.createReadStream(filePath).pipe(res)
+    }
+    if (encoding) headers['Content-Encoding'] = encoding
+
+    res.writeHead(200, headers)
+    const stream = fs.createReadStream(servePath)
+    // Headers are already sent once the stream errors mid-flight; destroying
+    // the socket is the only honest signal left to the client.
+    stream.on('error', () => res.destroy())
+    stream.pipe(res)
   }
 
   private getWebClientDir(): string {
