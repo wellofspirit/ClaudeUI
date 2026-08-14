@@ -60,13 +60,9 @@ describe('web api-adapter — git live watching', () => {
     await expect(api.gitStartWatching('/repo/app')).rejects.toThrow('not a repo')
   })
 
-  it('delivers git:status-update pushes to onGitStatusUpdate subscribers', () => {
-    const seen: unknown[] = []
-    const off = api.onGitStatusUpdate((data) => seen.push(data))
-    connection.push('git:status-update', { cwd: '/repo/app', status: { files: [] } })
-    expect(seen).toEqual([{ cwd: '/repo/app', status: { files: [] } }])
-    off()
-    connection.push('git:status-update', { cwd: '/repo/app', status: { files: [] } })
-    expect(seen).toHaveLength(1)
-  })
+  // The `git:status-update` DELIVERY test moved out of this file with SyncCore
+  // phase 4c: the adapter no longer subscribes to replicated channels at all
+  // (`shared/sync/client-registry` does, for both clients), so asserting it here
+  // would only be re-testing `SyncClient.on`. What remains in this file is the
+  // INVOKE surface, which 4c did not touch.
 })

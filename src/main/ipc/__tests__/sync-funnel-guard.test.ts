@@ -24,19 +24,21 @@ const REPO = process.cwd()
 const DELIVERY_ADAPTER = 'src/main/services/sync-host.ts'
 
 /**
- * The remote bridge keeps a `webContents.send` shim because `extraWindows` is
- * typed `Set<BrowserWindow>`; `remote-server.ts` wires it to a loud no-op. Both
- * are named 4c deletion targets, not funnel bypasses.
+ * No shim files as of SyncCore phase 4c. 4a had one — `remote-bridge.ts` kept a
+ * `webContents.send` entry point because the extras registry was typed
+ * `Set<BrowserWindow>` and a WebSocket broadcaster had to masquerade as a window.
+ * The registry, the bridge and the masquerade are all deleted; a client is a
+ * plain `(seq, channel, args)` subscriber. An empty exemption set is the point.
  */
-const SHIM_FILES = new Set(['src/main/services/remote-bridge.ts'])
+const SHIM_FILES = new Set<string>()
 
-function walk(dir: string, out: string[] = []): string[] {
+function walk(dir: string, out: string[] = [], exts: string[] = ['.ts']): string[] {
   for (const entry of fs.readdirSync(path.join(REPO, dir), { withFileTypes: true })) {
     const rel = `${dir}/${entry.name}`
     if (entry.isDirectory()) {
       if (entry.name === '__tests__' || entry.name === 'node_modules') continue
-      walk(rel, out)
-    } else if (entry.name.endsWith('.ts')) {
+      walk(rel, out, exts)
+    } else if (exts.some((ext) => entry.name.endsWith(ext))) {
       out.push(rel)
     }
   }
@@ -49,6 +51,21 @@ function read(rel: string): string {
   return fs.readFileSync(path.join(REPO, rel), 'utf-8')
 }
 
+/**
+ * Source with comments removed.
+ *
+ * Every identifier scan below has to run on CODE only: 4c's doc comments name the
+ * things they deleted (`addExtraWindow`, `RemoteBridge`, `webContents.send`) on
+ * purpose — that prose is how a future reader learns what the shape used to be —
+ * and a scan that counted it would either fail forever or force the explanation
+ * out of the tree.
+ */
+function readCode(rel: string): string {
+  return read(rel)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
 describe('emission funnel (item 2)', () => {
   it('the scan sees the tree it thinks it sees (non-vacuity)', () => {
     expect(MAIN_SOURCES.length).toBeGreaterThan(50)
@@ -56,28 +73,62 @@ describe('emission funnel (item 2)', () => {
     expect(MAIN_SOURCES).toContain('src/main/providers/BaseSession.ts')
   })
 
-  it('no hand-rolled getExtraWindows() fan-out loop survives outside the adapter', () => {
-    const offenders = MAIN_SOURCES.filter((rel) => {
-      if (rel === DELIVERY_ADAPTER) return false
-      const src = read(rel)
-      // A `for (… of …getExtraWindows())` loop is the shape every funneled site
-      // used. The accessor itself is still allowed (BaseSession re-exports it).
-      return /for\s*\([^)]*of\s+[A-Za-z.]*getExtraWindows\(\)/.test(src)
-    })
+  it('the extra-window registry is GONE from the tree (4c)', () => {
+    // `getExtraWindows` was the SHAPE of the delivery privilege: a set of
+    // fake-`BrowserWindow` objects that every non-desktop client had to disguise
+    // itself as. 4a allowed the accessor and banned only hand-rolled loops over
+    // it; 4c bans the identifier outright, everywhere, including the adapter.
+    const offenders = MAIN_SOURCES.filter((rel) =>
+      /getExtraWindows|addExtraWindow|removeExtraWindow|addExtraSink|extraSinks/.test(
+        readCode(rel)
+      )
+    )
     expect(
       offenders,
-      `these still fan out by hand instead of calling emitEvent(): ${offenders.join(', ')}`
+      `these still reference the deleted extra-window registry: ${offenders.join(', ')}`
     ).toEqual([])
   })
 
-  it('no replicated/volatile channel is sent by a direct webContents.send', () => {
+  it('the fake-BrowserWindow remote bridge is gone', () => {
+    expect(fs.existsSync(path.join(REPO, 'src/main/services/remote-bridge.ts'))).toBe(false)
+    const offenders = MAIN_SOURCES.filter((rel) =>
+      /RemoteBridge|deliverSequenced/.test(readCode(rel))
+    )
+    expect(offenders, `these still reference RemoteBridge: ${offenders.join(', ')}`).toEqual([])
+  })
+
+  it('no delivery TARGET survives at any call site (delivery follows class)', () => {
+    // A call site that could pick `'extras-only'` could choose which clients see a
+    // replicated event — the asymmetry `notifyMainWindow` encoded. Delivery is a
+    // function of the channel's class now, so neither the literals nor the flag may
+    // reappear.
+    const offenders: string[] = []
+    for (const rel of MAIN_SOURCES) {
+      const src = readCode(rel)
+      if (/'extras-only'|"extras-only"/.test(src)) offenders.push(`${rel}: extras-only`)
+      // `notifyMainWindow` appears in doc comments recording its death; only a
+      // CODE reference (an identifier followed by `:`/`?`/`)`) is a violation.
+      if (/notifyMainWindow\s*[:?)]/.test(src)) offenders.push(`${rel}: notifyMainWindow`)
+    }
+    expect(
+      offenders,
+      `these still choose a delivery target per call site: ${offenders.join(', ')}`
+    ).toEqual([])
+  })
+
+  it('no replicated/volatile channel is sent by a direct webContents.send — including the adapter', () => {
     // The whole point of the funnel: an event that replicates MUST be appended to
     // the ring and applied to canonical state before anyone sees it. A direct
     // send skips both, which is defect 5 in docs/architecture/remote.md.
+    //
+    // 4c tightened this to cover the DELIVERY ADAPTER too. In 4a the adapter was
+    // the one legitimate `webContents.send` of a replicated channel (the desktop
+    // window was a fan-out target); now its only `send` is the host-local lane, so
+    // a replicated channel appearing there would be the privilege growing back.
     const offenders: string[] = []
     for (const rel of MAIN_SOURCES) {
-      if (rel === DELIVERY_ADAPTER || SHIM_FILES.has(rel)) continue
-      const src = read(rel)
+      if (SHIM_FILES.has(rel)) continue
+      const src = readCode(rel)
       const re = /webContents\s*\.\s*send\(\s*['"]([^'"]+)['"]/g
       for (let m = re.exec(src); m; m = re.exec(src)) {
         const spec = channelSpec(m[1])
@@ -86,14 +137,84 @@ describe('emission funnel (item 2)', () => {
     }
     expect(
       offenders,
-      `replicated channels sent outside the delivery adapter: ${offenders.join(', ')}`
+      `replicated channels sent by a targeted webContents.send: ${offenders.join(', ')}`
     ).toEqual([])
+  })
+
+  it('a VARIABLE-channel webContents.send exists only where it is host-local by construction', () => {
+    // The scan above matches a channel LITERAL, so `wc.send(channel, ...args)`
+    // slipped straight past it — and that is not hypothetical: `VoiceClient.send`
+    // was routing the REPLICATED `voice:error` through a targeted window send, which
+    // 4c made invisible to the renderer (it subscribes to that channel now). Caught
+    // by reading the tree, not by this test, so the test exists to make the next one
+    // cheaper.
+    //
+    // The allowlist is per-file and each entry must be host-local BY CONSTRUCTION —
+    // i.e. every channel that reaches the helper is classified `host-local`.
+    const ALLOWED = new Set([
+      // Only `voice:state` / `voice:transcript` (microphone capture belongs to the
+      // machine with the microphone). `voice:error` goes through the funnel.
+      'src/main/services/voice-client.ts',
+      // The separate log-viewer BrowserWindow: `log-viewer:*`, host diagnostics.
+      'src/main/services/log-viewer.ts',
+      // `plugin:<id>:<event>` (ADR-005) — matched by the `plugin:` PREFIX spec,
+      // which is host-local. Plugin-declared capabilities are the follow-up that
+      // decides whether plugin surfaces may ever replicate.
+      'src/main/services/plugin-manager.ts'
+    ])
+    const offenders: string[] = []
+    for (const rel of MAIN_SOURCES) {
+      if (rel === DELIVERY_ADAPTER || ALLOWED.has(rel)) continue
+      const src = readCode(rel)
+      // A `webContents.send(` / `wc.send(` whose first argument is not a string
+      // literal. Anchored on the RECEIVER so `this.send(channel, …)` (BaseSession,
+      // which funnels) and `ws.send(…)` (the WebSocket) are not false positives.
+      if (/(?:webContents|\bwc)\s*\.\s*send\(\s*(?!['"`])[A-Za-z_$]/.test(src)) {
+        offenders.push(rel)
+      }
+    }
+    expect(
+      offenders,
+      `these send an event on a computed channel — prove it is host-local and allowlist it, ` +
+        `or route it through emitEvent(): ${offenders.join(', ')}`
+    ).toEqual([])
+
+    // The allowlist has to EARN itself, or it is just an exemption that decays.
+    // For each allowlisted file, every literal channel handed to its own `send`
+    // helper must be host-local: that is what makes the computed-channel path
+    // host-local by construction, and it is the check that would have caught
+    // `voice:error` being routed through `VoiceClient.send`.
+    const notHostLocal: string[] = []
+    for (const rel of ALLOWED) {
+      const src = readCode(rel)
+      const re = /\.send\(\s*['"]([^'"]+)['"]/g
+      for (let m = re.exec(src); m; m = re.exec(src)) {
+        const spec = channelSpec(m[1])
+        if (spec && spec.cls !== 'host-local') notHostLocal.push(`${rel}: ${m[1]}`)
+      }
+    }
+    expect(
+      notHostLocal,
+      `an allowlisted computed-channel sender also carries NON-host-local channels, so its ` +
+        `exemption is unsound: ${notHostLocal.join(', ')}`
+    ).toEqual([])
+  })
+
+  it('the delivery adapter routes by channel CLASS, not by a per-call target', () => {
+    const src = readCode(DELIVERY_ADAPTER)
+    expect(src).toMatch(/delivery\.cls === 'host-local'/)
+    expect(src).toMatch(/for \(const sink of \[\.\.\.subscribers\]\)/)
+    // Only ONE `webContents.send` in the adapter, and it is the host-local lane.
+    expect(src.match(/webContents\.send/g) ?? []).toHaveLength(1)
   })
 
   it('BaseSession.send delegates to the funnel rather than sending directly', () => {
     const src = read('src/main/providers/BaseSession.ts')
     expect(src).toMatch(/protected send\([\s\S]{0,400}?emitEvent\(/)
     expect(src).not.toMatch(/this\.win\.webContents\.send\(/)
+    // 4c: a session emission names no window at all — every channel it emits is
+    // replicated or volatile, so the per-session `win` is not a delivery target.
+    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, this\.trackThinkingSpan\(channel, data\)\]\)/)
   })
 })
 
@@ -123,11 +244,15 @@ describe('snapshot path is synchronous (phase 4b, invariant 2)', () => {
     // not the word — the doc comments explain what was removed.)
     expect(src).not.toMatch(/\.executeJavaScript\(/)
     expect(src).not.toMatch(/window\.__getRemoteState/)
-    expect(src).toMatch(/type: 'sync-full', state/)
-    const syncFulls = src.match(/this\.core\.getSnapshot\(\)/g) ?? []
-    // Two sync-full branches (fresh/stale-epoch, ring-evicted) + the sent-file
-    // allowlist.
-    expect(syncFulls.length).toBe(3)
+    expect(src).toMatch(/type: 'sync-full',[\s\S]{0,60}?state: decision\.state/)
+    // Since 4c the full/catchup branching lives in `shared/sync/sync-decision.ts`
+    // (one decision, two transports), so remote-server reads a snapshot exactly
+    // ONCE on its own: the `/sent-file` allowlist. The sync answer's snapshot comes
+    // from `answerSync`, which is where the same-tick seq+serialize property is
+    // enforced now.
+    const ownSnapshots = src.match(/this\.core\.getSnapshot\(\)/g) ?? []
+    expect(ownSnapshots.length).toBe(1)
+    expect(src).toMatch(/this\.core\.answerSync\(lastSeq, epoch\)/)
   })
 })
 
@@ -173,43 +298,93 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     ).toEqual([])
   })
 
-  it('every preload `onEvent` channel is classified', () => {
-    // The renderer's subscription surface is the other end of the same contract:
-    // a channel a client listens for but nothing classifies would silently never
-    // arrive once the funnel became fail-closed.
-    const src = read('src/preload/index.ts')
+  it('the preload subscribes to HOST-LOCAL channels only (4c)', () => {
+    // The per-channel preload surface used to carry every replicated channel — it
+    // was the desktop's whole subscription mechanism, and its parity with the web
+    // adapter was hand-maintained. 4c moved those to the sync client, so anything
+    // still here that replicates is a channel the desktop would receive by a
+    // privileged path no other client has.
+    const src = readCode('src/preload/index.ts')
     const re = /onEvent\(\s*['"]([^'"]+)['"]\s*\)/g
     const channels: string[] = []
     for (let m = re.exec(src); m; m = re.exec(src)) channels.push(m[1])
-    expect(channels.length).toBeGreaterThan(40)
+    expect(channels.length).toBeGreaterThan(5)
     const unclassified = channels.filter((c) => !channelSpec(c)).sort()
     expect(unclassified, `preload listens for unclassified: ${unclassified.join(', ')}`).toEqual([])
+    const replicated = channels.filter((c) => channelSpec(c)?.cls !== 'host-local').sort()
+    expect(
+      replicated,
+      `preload still takes these off a privileged targeted send: ${replicated.join(', ')}`
+    ).toEqual([])
   })
 
-  it('the web client subscribes only to classified channels', () => {
-    const src = read('src/web/api-adapter.ts')
+  it('the web adapter subscribes to HOST-LOCAL channels only (4c)', () => {
+    const src = readCode('src/web/api-adapter.ts')
     const re = /\bon\(\s*['"]([^'"]+)['"]\s*\)/g
     const channels: string[] = []
     for (let m = re.exec(src); m; m = re.exec(src)) channels.push(m[1])
-    expect(channels.length).toBeGreaterThan(30)
     const unclassified = channels.filter((c) => !channelSpec(c)).sort()
     expect(
       unclassified,
       `api-adapter listens for unclassified: ${unclassified.join(', ')}`
     ).toEqual([])
+    const replicated = channels.filter((c) => channelSpec(c)?.cls !== 'host-local').sort()
+    expect(
+      replicated,
+      `api-adapter still mirrors replicated channels (4c deleted that): ${replicated.join(', ')}`
+    ).toEqual([])
+  })
+
+  it('every channel a CLIENT subscribes to through the sync transport is classified', () => {
+    // The other end of the fail-closed contract. Two surfaces are scanned: the
+    // typed `SyncEventMap` (the declaration) and every `onSyncEvent('…')` call in
+    // the renderer + web trees (the usage). A channel in either that nothing
+    // classifies would silently never arrive.
+    const declared = [...read('src/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
+      (m) => m[1]
+    )
+    expect(declared.length).toBeGreaterThan(30)
+
+    const subscribed = new Set<string>()
+    for (const dir of ['src/renderer', 'src/web']) {
+      for (const rel of walk(dir, [], ['.ts', '.tsx'])) {
+        const code = readCode(rel)
+        const re = /onSyncEvent\(\s*['"]([^'"]+)['"]/g
+        for (let m = re.exec(code); m; m = re.exec(code)) subscribed.add(m[1])
+      }
+    }
+    expect(subscribed.size).toBeGreaterThan(30)
+
+    const all = [...new Set([...declared, ...subscribed])]
+    const unclassified = all.filter((c) => !channelSpec(c)).sort()
+    expect(
+      unclassified,
+      `clients subscribe to unclassified channels: ${unclassified.join(', ')}`
+    ).toEqual([])
+    const hostLocal = all.filter((c) => channelSpec(c)?.cls === 'host-local').sort()
+    expect(
+      hostLocal,
+      `host-local channels cannot arrive on the sync transport: ${hostLocal.join(', ')}`
+    ).toEqual([])
+
+    // Every channel a client subscribes to must be DECLARED in the typed map, or
+    // it is subscribed to untyped and the map has stopped being the contract.
+    const undeclared = [...subscribed].filter((c) => !declared.includes(c)).sort()
+    expect(
+      undeclared,
+      `subscribed but missing from SyncEventMap: ${undeclared.join(', ')}`
+    ).toEqual([])
   })
 
   it('a host-local channel never rings and never touches canonical state', () => {
-    // Rule 2: host-local means the desktop window only. A ringed host-local
-    // channel would be replayed to remote clients on catchup.
+    // host-local means the owning window only, so a ringed host-local channel
+    // would be replayed to remote clients on catchup. (The old companion check —
+    // `delivery === 'main-only'` — is gone with the column: delivery IS the class
+    // now, so the two can no longer disagree.)
     const violations = Object.entries(CHANNEL_SPECS)
       .filter(([, s]) => s.cls === 'host-local' && (s.ring || s.canonical))
       .map(([c]) => c)
     expect(violations).toEqual([])
-    const misdelivered = Object.entries(CHANNEL_SPECS)
-      .filter(([, s]) => s.cls === 'host-local' && s.delivery !== 'main-only')
-      .map(([c]) => c)
-    expect(misdelivered).toEqual([])
   })
 
   it('the delivery-delta column holds EXACTLY the 4a-sanctioned rows', () => {

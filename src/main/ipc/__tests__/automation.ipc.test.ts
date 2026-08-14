@@ -98,7 +98,7 @@ describe('automation.ipc', () => {
   })
 
   it('registers all 10 channels after registerAutomationIpc', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     // Every channel must resolve without "no handler" errors.
     await expect(harness.call('automation:list')).resolves.toBeDefined()
     await expect(harness.call('automation:save', { id: 'x' })).resolves.toBeUndefined()
@@ -114,21 +114,21 @@ describe('automation.ipc', () => {
 
   it('automation:list returns manager.list() result', async () => {
     managerSpies.list.mockReturnValueOnce([{ id: 'custom' }] as any)
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     const result = await harness.call<Array<{ id: string }>>('automation:list')
     expect(result).toEqual([{ id: 'custom' }])
     expect(managerSpies.list).toHaveBeenCalledTimes(1)
   })
 
   it('automation:save calls manager.upsert with automation', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     const auto = { id: 'a1', prompt: 'Deploy', enabled: true } as any
     await harness.call('automation:save', auto)
     expect(managerSpies.upsert).toHaveBeenCalledWith(auto)
   })
 
   it('automation:delete calls manager.delete with id', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     await harness.call('automation:delete', 'auto-123')
     expect(managerSpies.delete).toHaveBeenCalledWith('auto-123')
   })
@@ -144,7 +144,7 @@ describe('automation.ipc', () => {
           resolveRun = resolve
         })
     )
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
 
     const start = Date.now()
     await harness.call('automation:run-now', 'auto-1')
@@ -159,13 +159,13 @@ describe('automation.ipc', () => {
 
   it('automation:run-now swallows runNow rejections (no unhandled)', async () => {
     managerSpies.runNow.mockRejectedValueOnce(new Error('boom'))
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     // IPC call itself must not reject.
     await expect(harness.call('automation:run-now', 'auto-1')).resolves.toBeUndefined()
   })
 
   it('automation:toggle calls manager.toggle with id and enabled flag', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     await harness.call('automation:toggle', 'auto-1', true)
     await harness.call('automation:toggle', 'auto-1', false)
     expect(managerSpies.toggle).toHaveBeenNthCalledWith(1, 'auto-1', true)
@@ -173,19 +173,19 @@ describe('automation.ipc', () => {
   })
 
   it('automation:cancel calls manager.cancelRun with id', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     await harness.call('automation:cancel', 'auto-1')
     expect(managerSpies.cancelRun).toHaveBeenCalledWith('auto-1')
   })
 
   it('automation:send-message calls manager.sendMessage with id and prompt', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     await harness.call('automation:send-message', 'auto-1', 'Add tests')
     expect(managerSpies.sendMessage).toHaveBeenCalledWith('auto-1', 'Add tests')
   })
 
   it('M-AU3: rejects a traversal automation id before reaching the manager', async () => {
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     // Every id-bearing channel must reject `../..` and never call the manager.
     await expect(harness.call('automation:delete', '../..')).rejects.toThrow(/invalid automation id/i)
     await expect(harness.call('automation:save', { id: '../evil' })).rejects.toThrow(
@@ -220,7 +220,7 @@ describe('automation.ipc', () => {
   it('dev mode (isPackaged=false) skips auto-start but still loads', () => {
     // automation.ipc.ts captures `is.dev` at module load time from app.isPackaged.
     // Our mock defaults to isPackaged=false, so the module sees dev=true.
-    registerAutomationIpc(harness.win)
+    registerAutomationIpc()
     expect(managerSpies.load).toHaveBeenCalledTimes(1)
     expect(managerSpies.startAll).not.toHaveBeenCalled()
   })

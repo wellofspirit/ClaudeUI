@@ -114,7 +114,12 @@ describe('remote channel parity (R5)', () => {
     const re = /\bon\(\s*['"]([^'"]+)['"]\s*\)/g
     const listened: string[] = []
     for (let m = re.exec(src); m; m = re.exec(src)) listened.push(m[1])
-    expect(listened.length).toBeGreaterThan(30)
+    // SyncCore phase 4c shrank this surface by design: the adapter's replicated
+    // subscriptions moved to the shared sync client, so what is left here is
+    // host-local only. `sync-funnel-guard.test.ts` owns the full EVENT-surface scan
+    // (both clients, plus the typed `SyncEventMap`); this file stays on the invoke
+    // half.
+    expect(listened.length).toBeGreaterThan(2)
     const unclassified = listened.filter((c) => !channelSpec(c)).sort()
     expect(
       unclassified,

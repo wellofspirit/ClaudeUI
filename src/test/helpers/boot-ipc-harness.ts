@@ -15,6 +15,8 @@
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
+import { addSyncSubscriber, clearSyncSubscribersForTests } from '../../main/services/sync-host'
+import { channelSpec } from '../../shared/sync/channels'
 
 export interface IpcHarness {
   bridge: TestIpcBridge
@@ -27,7 +29,14 @@ export interface IpcHarness {
    * Throws with the error message if `ok: false`.
    */
   callSafe: <T = unknown>(channel: string, ...args: unknown[]) => Promise<T>
-  /** Listen for an event fired via `win.webContents.send` */
+  /**
+   * Listen for one emitted event, on whichever lane it actually travels.
+   *
+   * Routes by channel CLASS since SyncCore phase 4c, mirroring the production
+   * delivery adapter: `host-local` off `win.webContents.send`, everything else
+   * off the funnel's subscriber registry. Keeping ONE method means every existing
+   * call site is unchanged even though half of them moved lane.
+   */
   onEvent: (channel: string, handler: (...args: unknown[]) => void) => () => void
   /** Observe the next emission of a channel as a promise. Resolves with args array. */
   waitForEvent: (channel: string, timeoutMs?: number) => Promise<unknown[]>
@@ -55,6 +64,11 @@ export function bootIpcHarness(): IpcHarness {
     return res as T
   }
   const onEvent = (channel: string, handler: (...args: unknown[]) => void): (() => void) => {
+    if (channelSpec(channel)?.cls !== 'host-local') {
+      return addSyncSubscriber((_seq, emitted, args) => {
+        if (emitted === channel) handler(...args)
+      })
+    }
     const wrap = (_: unknown, ...args: unknown[]): void => handler(...args)
     bridge.ipcRenderer.on(channel, wrap)
     return () => bridge.ipcRenderer.removeListener(channel, wrap)
@@ -80,6 +94,11 @@ export function bootIpcHarness(): IpcHarness {
     callSafe,
     onEvent,
     waitForEvent,
-    teardown: () => bridge.reset()
+    teardown: () => {
+      // Subscribers are a module singleton on the funnel; leaking one would fan
+      // the next test's ring out into this test's closures.
+      clearSyncSubscribersForTests()
+      bridge.reset()
+    }
   }
 }

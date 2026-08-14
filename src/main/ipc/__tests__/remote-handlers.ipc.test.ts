@@ -11,6 +11,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -193,23 +195,11 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
-vi.mock('../../services/claude-session', () => {
-  const extraWindows = new Set<any>()
-  return {
-    ClaudeSession: class {
-      static addExtraWindow(w: any): void {
-        extraWindows.add(w)
-      }
-      static removeExtraWindow(w: any): void {
-        extraWindows.delete(w)
-      }
-      static getExtraWindows(): Set<any> {
-        return extraWindows
-      }
-    },
-    getSdkExecutableOpts: vi.fn(() => ({}))
-  }
-})
+vi.mock('../../services/claude-session', () => ({
+  // 4c: no static extra-window registry to stub — clients are subscribers.
+  ClaudeSession: class {},
+  getSdkExecutableOpts: vi.fn(() => ({}))
+}))
 
 vi.mock('../../sdk', () => ({
   query: vi.fn(() => {
@@ -283,11 +273,22 @@ function makeRequest(channel: string, ...args: unknown[]): WsInvokeRequest {
  */
 const remoteConn = makeRemoteConnection('token', null)
 
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A remote-originated broadcast used to be asserted by watching the DESKTOP
+ * window's `webContents.send` — the remote handler passed `notifyMainWindow: true`
+ * so the desktop, uniquely, got a targeted send. 4c deleted that: every client
+ * (desktop included) is a subscriber, so the stub subscribes and the assertions
+ * below keep reading the same `send(channel, ...args)` shape.
+ */
 function makeFakeWindow(): any {
-  return {
+  const win = {
     webContents: { send: vi.fn() },
     isDestroyed: () => false
   }
+  subscribeWindowToSync(win)
+  return win
 }
 
 const sessionStub: any = {
@@ -380,6 +381,7 @@ describe('registerRemoteHandlers', () => {
     // gitWatchRegistry is a module singleton shared with the desktop IPC path —
     // unwind the remote owner so watch state can't leak between tests.
     gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+    clearSyncSubscribersForTests()
     vi.clearAllMocks()
   })
 

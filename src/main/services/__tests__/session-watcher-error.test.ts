@@ -44,12 +44,6 @@ vi.mock('../logger', () => ({
 
 import { watchSession, unwatchSession } from '../session-watcher'
 
-function fakeWin(): Electron.BrowserWindow {
-  return {
-    isDestroyed: () => false,
-    webContents: { send: vi.fn() }
-  } as unknown as Electron.BrowserWindow
-}
 
 describe('session-watcher fs.watch error handling (M-CL5)', () => {
   beforeEach(() => {
@@ -63,7 +57,7 @@ describe('session-watcher fs.watch error handling (M-CL5)', () => {
   })
 
   it("removes the dead watcher on 'error' so re-watch succeeds and error does not throw", () => {
-    watchSession('r-err', 'sess', '-proj', fakeWin())
+    watchSession('r-err', 'sess', '-proj')
     expect(watchMock).toHaveBeenCalledTimes(1)
     const first = created[0]
 
@@ -74,17 +68,17 @@ describe('session-watcher fs.watch error handling (M-CL5)', () => {
 
     // Re-watch the SAME routingId — the has() guard no longer blocks, so a new
     // fs.watch is established.
-    watchSession('r-err', 'sess', '-proj', fakeWin())
+    watchSession('r-err', 'sess', '-proj')
     expect(watchMock).toHaveBeenCalledTimes(2)
 
     unwatchSession('r-err')
   })
 
   it('a stale error from an already-replaced watcher does not evict the live one', () => {
-    watchSession('r-stale', 'sess', '-proj', fakeWin())
+    watchSession('r-stale', 'sess', '-proj')
     const first = created[0]
     first.emit('error', new Error('boom')) // evicts entry
-    watchSession('r-stale', 'sess', '-proj', fakeWin()) // installs a fresh watcher
+    watchSession('r-stale', 'sess', '-proj') // installs a fresh watcher
     const second = created[1]
 
     // A late error from the first (already-closed) watcher must not remove the

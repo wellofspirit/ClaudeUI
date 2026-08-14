@@ -14,7 +14,11 @@
  * Mock scaffold mirrors claude-session-collab-gating.component.test.ts —
  * everything touching disk/processes is stubbed; only construction is driven.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import {
+  subscribeWindowToSync
+} from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../sync-host'
 import type { StatusLineData } from '../../../shared/types'
 
 const { mockComputeTokenMetrics } = vi.hoisted(() => ({
@@ -72,6 +76,19 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 import { ClaudeSession } from '../claude-session'
 import type { BrowserWindow } from 'electron'
 
+// Every `makeWin()` registers a funnel subscriber; drop them per test so a long
+// file does not fan every event out to hundreds of dead stubs.
+afterEach(() => {
+  clearSyncSubscribersForTests()
+})
+
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A session's events reach every SUBSCRIBER now, not a privileged window, so the
+ * stub subscribes to the funnel and replays each delivery into `sent` — the same
+ * `[channel, routingId, data]` shape every assertion below already reads.
+ */
 function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]> } {
   const sent: Array<[string, string, unknown]> = []
   const win = {
@@ -82,6 +99,7 @@ function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]>
       }
     }
   } as unknown as BrowserWindow
+  subscribeWindowToSync(win as unknown as { webContents: { send: (c: string, ...a: unknown[]) => void } })
   return { win, sent }
 }
 

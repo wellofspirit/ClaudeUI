@@ -17,7 +17,8 @@ import { describe, it, expect, vi } from 'vitest'
 import { SyncCore, type Delivery } from '../sync-core'
 import type { SessionStatus } from '../../../shared/types'
 
-const ALL: Delivery = { target: 'all' }
+/** Delivery no longer selects targets (4c) — the class does. */
+const ALL: Delivery = {}
 
 function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
   return {
@@ -36,12 +37,14 @@ function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
 /** Records every delivery in order, with the seq the funnel assigned. */
 function recordingCore(options?: { onUnclassified?: (c: string) => void }): {
   core: SyncCore
-  delivered: Array<{ seq: number; channel: string; args: unknown[]; delivery: Delivery }>
+  delivered: Array<{ seq: number; channel: string; args: unknown[]; cls: string }>
 } {
   const core = new SyncCore(options)
-  const delivered: Array<{ seq: number; channel: string; args: unknown[]; delivery: Delivery }> = []
+  const delivered: Array<{ seq: number; channel: string; args: unknown[]; cls: string }> = []
+  // The host adapter routes on `delivery.cls` (SyncCore phase 4c), so that is what
+  // the funnel has to hand it — recorded here instead of a per-call target.
   core.setDelivery((seq, channel, args, delivery) =>
-    delivered.push({ seq, channel, args, delivery })
+    delivered.push({ seq, channel, args, cls: delivery.cls })
   )
   return { core, delivered }
 }
@@ -59,14 +62,14 @@ describe('SyncCore.emit — ring single-append (invariant 2)', () => {
 
   it('does NOT append a host-local channel, and reports seq 0 for it', () => {
     const { core, delivered } = recordingCore()
-    core.emit('auth:state', [{ status: 'success' }], { target: 'main-only' })
+    core.emit('auth:state', [{ status: 'success' }])
     expect(core.currentSeq()).toBe(0)
     expect(delivered).toEqual([
       {
         seq: 0,
         channel: 'auth:state',
         args: [{ status: 'success' }],
-        delivery: { target: 'main-only' }
+        cls: 'host-local'
       }
     ])
   })

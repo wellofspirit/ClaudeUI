@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { emitEvent, clearSyncSubscribersForTests } from '../sync-host'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -55,23 +56,11 @@ vi.mock('../../sdk', () => ({
   query: vi.fn()
 }))
 
-// claude-session imports the SDK and Electron app internals. Replace with a
-// minimal surface that exposes the static addExtraWindow/removeExtraWindow
-// methods plugin-manager calls on construction/shutdown.
-vi.mock('../claude-session', () => {
-  const extraWindows = new Set<unknown>()
-  return {
-    ClaudeSession: {
-      addExtraWindow: (w: unknown) => {
-        extraWindows.add(w)
-      },
-      removeExtraWindow: (w: unknown) => {
-        extraWindows.delete(w)
-      },
-      getExtraWindows: () => extraWindows
-    }
-  }
-})
+// claude-session imports the SDK and Electron app internals. A bare stub is
+// enough since SyncCore phase 4c: the plugin bridge registers itself with the
+// FUNNEL (`addSyncSubscriber`), not as a static "extra window" on ClaudeSession,
+// so there are no statics left to fake.
+vi.mock('../claude-session', () => ({ ClaudeSession: {} }))
 
 // Silence logger chatter and capture warn/error calls for assertions.
 // The factory runs at hoisted-time before any top-level bindings exist, so we
@@ -198,17 +187,21 @@ function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }
   }
 }
 
-/** Fire a session event through the bridge the same way ClaudeSession.send() would. */
+/**
+ * Fire a session event the way `BaseSession.send()` does — through the funnel.
+ *
+ * 4c: no reaching into a private bridge object any more. The manager is a plain
+ * subscriber, so driving `emitEvent` exercises the real chain (ring → canonical →
+ * every subscriber → `fireEvent`) instead of poking a fake window's shim. The
+ * `manager` argument is kept so every call site reads unchanged.
+ */
 function fireSessionEventViaBridge(
-  manager: PluginManager,
+  _manager: PluginManager,
   channel: string,
   routingId: string,
   data: unknown
 ): void {
-  // Grab the bridge instance by reaching into the manager. The bridge registers
-  // itself as an ExtraWindow on ClaudeSession via addExtraWindow().
-  const bridge: any = (manager as any).bridge
-  bridge.webContents.send(channel, routingId, data)
+  emitEvent(channel, [routingId, data])
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +219,9 @@ describe('PluginManager', () => {
 
   afterEach(() => {
     s.manager.stopAll()
+    // The manager subscribed to the funnel on construction; a leaked subscription
+    // would fan the next test's events into a shut-down manager.
+    clearSyncSubscribersForTests()
     clearPluginsDir()
   })
 

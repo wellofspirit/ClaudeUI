@@ -42,8 +42,7 @@ import {
   listDirEntries,
   setPermissionMode
 } from '../handlers-core'
-import { BaseSession } from '../../providers/BaseSession'
-import { syncCore } from '../../services/sync-host'
+import { syncCore, addSyncSubscriber } from '../../services/sync-host'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -127,39 +126,39 @@ describe('handlers-core', () => {
     expect(res).toEqual({ removed: 0 })
   })
 
-  it('saveSessions only broadcasts to the main window when notifyMainWindow is true', () => {
+  it('saveSessions broadcasts to every subscriber, whoever saved (4c)', () => {
+    // 4a split this by origin: a desktop save delivered `extras-only` because the
+    // saving renderer "already knew". 4c deleted that — the saver is a subscriber
+    // like everyone else, and the payload is a whole-config replace, so its own
+    // echo is idempotent while remaining authoritative for every other client.
     const win = makeFakeWindow()
     const config = { sessions: [] } as any
-
-    saveSessions(win, config, { notifyMainWindow: false })
-    expect(win.webContents.send).not.toHaveBeenCalled()
-
-    saveSessions(win, config, { notifyMainWindow: true })
-    expect(win.webContents.send).toHaveBeenCalledWith('config:sessions-changed', config)
+    const sink = vi.fn()
+    const off = addSyncSubscriber(sink)
+    try {
+      saveSessions(config)
+      expect(sink).toHaveBeenCalledWith(expect.any(Number), 'config:sessions-changed', [config])
+      // Never a targeted window send for a replicated channel.
+      expect(win.webContents.send).not.toHaveBeenCalled()
+    } finally {
+      off()
+    }
   })
 
   it('a DESKTOP-originated saveSessions is visible in the next getSnapshot (phase 4b)', () => {
-    // The desktop path delivers `extras-only` (the originating renderer already
-    // knows), and before the cutover that was fine because the snapshot came from
-    // that renderer. Now the snapshot comes from canonical state, so the APPLY has
-    // to happen regardless of delivery target — otherwise a phone that resynced
-    // after a desktop pin/rename would read the pre-save registry until the file
-    // watcher happened to fire. SyncCore applies before it delivers, which is what
-    // makes this hold; this test is the thing that would notice if that changed.
+    // The apply has to happen regardless of who saved — otherwise a phone that
+    // resynced after a desktop pin/rename would read the pre-save registry until
+    // the file watcher happened to fire. SyncCore applies before it delivers,
+    // which is what makes this hold; this test is the thing that would notice if
+    // that changed.
     syncCore.resetCanonicalForTests()
-    const win = makeFakeWindow()
-    saveSessions(
-      win,
-      {
-        recentSessions: ['rid-a'],
-        pinnedSessions: ['rid-a'],
-        customTitles: { 'rid-a': 'Renamed' }
-      } as any,
-      { notifyMainWindow: false }
-    )
+    saveSessions({
+      recentSessions: ['rid-a'],
+      pinnedSessions: ['rid-a'],
+      customTitles: { 'rid-a': 'Renamed' }
+    } as any)
 
     const snap = syncCore.getSnapshot()
-    expect(win.webContents.send).not.toHaveBeenCalled() // still extras-only
     expect(snap.recentSessionIds).toEqual(['rid-a'])
     expect(snap.pinnedSessionIds).toEqual(['rid-a'])
     expect(snap.customTitles).toEqual({ 'rid-a': 'Renamed' })
@@ -176,49 +175,45 @@ describe('handlers-core', () => {
       const manager = makeManager(sessionStub)
       const win = makeFakeWindow()
 
-      await setPermissionMode(manager, win, 'rid-1', 'acceptEdits')
+      await setPermissionMode(manager, 'rid-1', 'acceptEdits')
 
       expect(sessionStub.setPermissionMode).toHaveBeenCalledWith('acceptEdits')
       expect(win.webContents.send).not.toHaveBeenCalled()
     })
 
-    it('echoes session:permission-mode to the window and every extra window when no session exists (pre-spawn)', async () => {
+    it('echoes session:permission-mode to every subscriber when no session exists (pre-spawn)', async () => {
       const manager = makeManager(undefined)
       const win = makeFakeWindow()
-      const extraWin = makeFakeWindow()
-      BaseSession.addExtraWindow(extraWin)
+      const sink = vi.fn()
+      const off = addSyncSubscriber(sink)
       try {
-        await setPermissionMode(manager, win, 'rid-pre-spawn', 'plan')
+        await setPermissionMode(manager, 'rid-pre-spawn', 'plan')
 
-        expect(win.webContents.send).toHaveBeenCalledWith(
-          'session:permission-mode',
+        expect(sink).toHaveBeenCalledWith(expect.any(Number), 'session:permission-mode', [
           'rid-pre-spawn',
           'plan'
-        )
-        expect(extraWin.webContents.send).toHaveBeenCalledWith(
-          'session:permission-mode',
-          'rid-pre-spawn',
-          'plan'
-        )
+        ])
+        expect(win.webContents.send).not.toHaveBeenCalled()
       } finally {
-        BaseSession.removeExtraWindow(extraWin)
+        off()
       }
     })
 
     it('does not throw and sends nothing for an invalid mode string', async () => {
       const manager = makeManager(undefined)
-      const win = makeFakeWindow()
+      const sink = vi.fn()
+      const off = addSyncSubscriber(sink)
 
-      await expect(setPermissionMode(manager, win, 'rid-1', 'not-a-real-mode')).resolves.not.toThrow()
-      expect(win.webContents.send).not.toHaveBeenCalled()
+      await expect(setPermissionMode(manager, 'rid-1', 'not-a-real-mode')).resolves.not.toThrow()
+      expect(sink).not.toHaveBeenCalled()
+      off()
     })
 
     it('does not throw and does not call session.setPermissionMode for an invalid mode on a live session', async () => {
       const sessionStub = makeSessionStub({ setPermissionMode: vi.fn(async () => {}) })
       const manager = makeManager(sessionStub)
-      const win = makeFakeWindow()
 
-      await setPermissionMode(manager, win, 'rid-1', 'bogus')
+      await setPermissionMode(manager, 'rid-1', 'bogus')
 
       expect(sessionStub.setPermissionMode).not.toHaveBeenCalled()
     })

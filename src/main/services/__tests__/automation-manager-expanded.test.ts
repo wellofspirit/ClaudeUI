@@ -144,7 +144,7 @@ async function freshManager(): Promise<{
     isDestroyed: () => false,
     webContents: { send: vi.fn() }
   }
-  const mgr = new AutomationManager(win as any)
+  const mgr = new AutomationManager()
   const automationDir = () => nodePath.join(TEMP_HOME, '.claude', 'ui', 'automation')
   const runsIndexFile = (id: string) => nodePath.join(automationDir(), 'runs', id, 'runs.json')
   return { mgr, win, automationDir, runsIndexFile }

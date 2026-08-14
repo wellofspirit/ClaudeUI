@@ -27,11 +27,10 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
 
   function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
     return (cb: T) => {
-      const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
-      app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => {
-        app.bridge.ipcRenderer.removeListener(channel, handler)
-      }
+      // Replicated + volatile channels arrive on the SYNC CLIENT since SyncCore
+      // phase 4c, not the IPC bridge: `app.emit` feeds `SyncClient.receiveEvent`
+      // with a ring seq, exactly as the MessagePort / WebSocket transports do.
+      const cleanup = app.onSync(channel, cb as unknown as (...args: unknown[]) => void)
       cleanups.push(cleanup)
       return cleanup
     }

@@ -92,8 +92,9 @@ describe('GitChangesPill — populated by git:status-update', () => {
     useSessionStore.setState({ activeSessionId: WATCH_ROUTE })
     useSessionStore.getState().setIsGitRepo(WATCH_ROUTE, true)
 
-    // Same wiring useClaudeEvents installs for this channel.
-    app.api.onGitStatusUpdate(({ cwd: eventCwd, status }) => {
+    // Same wiring useClaudeEvents installs for this channel — through the sync
+    // client, which is where replicated channels arrive since SyncCore phase 4c.
+    app.onSync('git:status-update', ({ cwd: eventCwd, status }) => {
       const s = useSessionStore.getState()
       for (const [routingId, session] of Object.entries(s.sessions)) {
         if (session.cwd === eventCwd) s.setGitStatus(routingId, status)

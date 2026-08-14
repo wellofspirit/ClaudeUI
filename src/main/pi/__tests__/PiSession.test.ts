@@ -5,18 +5,38 @@
  * accounting — against a MOCKED PiRpcClient (no real pi binary spawned).
  * Mirrors the style of src/main/opencode/__tests__/OpencodeSession.test.ts.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
 import type { ChatMessage, QueuedItem } from '../../../shared/types'
 
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A session's events reach every SUBSCRIBER now — no window is a delivery target
+ * for replicated state — so the stub subscribes to the funnel and replays each
+ * delivery into its own `webContents.send` mock. Every assertion below keeps
+ * reading the events a client receives, which is what it was always testing.
+ */
 class MockWindow extends EventEmitter {
   webContents = { send: vi.fn() }
+  constructor() {
+    super()
+    subscribeWindowToSync(this)
+  }
   isDestroyed(): boolean {
     return false
   }
 }
+
+// Each MockWindow registers a funnel subscriber; drop them per test so a long file
+// does not fan every event out to hundreds of dead stubs.
+afterEach(() => {
+  clearSyncSubscribersForTests()
+})
 
 const {
   mockStart,

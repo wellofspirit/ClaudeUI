@@ -632,7 +632,7 @@ describe('RemoteServer — remote git watching end-to-end', () => {
     // server directly would bypass it and prove nothing, so this stays the ONLY
     // wiring the test does. `win` is omitted: there is no desktop window here.
     gitWatchRegistry.init((cwd, status) => {
-      emitEvent('git:status-update', [{ cwd, status }], 'all')
+      emitEvent('git:status-update', [{ cwd, status }])
     })
 
     // A committed file, then a real uncommitted modification to it.
@@ -1010,7 +1010,7 @@ describe('RemoteServer — /sent-file route', () => {
    */
   function seedDeliveredFiles(files: Array<{ path: string }>): void {
     syncCore.resetCanonicalForTests()
-    emitEvent('session:created', [SESSION, { cwd }], 'all')
+    emitEvent('session:created', [SESSION, { cwd }])
     if (files.length === 0) return
     emitEvent(
       'session:message',
@@ -1027,9 +1027,7 @@ describe('RemoteServer — /sent-file route', () => {
             toolInput: { files: [f.path], display: 'attach' }
           }))
         }
-      ],
-      'all'
-    )
+      ])
   }
 
   /** Pull the file token from a WS full-sync (its only authenticated home). */
@@ -1512,7 +1510,7 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
 
   it('serves state built from the event stream, with no renderer involved', async () => {
     const res = await server.start(port, '127.0.0.1')
-    emitEvent('session:created', ['canon-1', { cwd: '/repo' }], 'all')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
     emitEvent(
       'session:message',
       [
@@ -1523,9 +1521,7 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
           content: [{ type: 'text', text: 'from canonical' }],
           timestamp: 0
         }
-      ],
-      'all'
-    )
+      ])
     emitEvent(
       'session:metering',
       [
@@ -1538,9 +1534,7 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
           equivalentCostUsd: 0.05,
           contextWindow: { used: 10, size: 200000 }
         }
-      ],
-      'all'
-    )
+      ])
 
     const msg = await firstSyncFull(res.token)
     const state = msg.state as {
@@ -1558,7 +1552,7 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
 
   it('claims the watermark EXACTLY — the catchup from it is empty', async () => {
     const res = await server.start(port, '127.0.0.1')
-    emitEvent('session:created', ['canon-1', { cwd: '/repo' }], 'all')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
     const msg = await firstSyncFull(res.token)
     const state = msg.state as { seq: number }
     // Same tick capture ⇒ the snapshot contains everything through `seq` and
@@ -1569,9 +1563,9 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
 
   it('a resync mid-stream carries the accumulated streaming buffers', async () => {
     const res = await server.start(port, '127.0.0.1')
-    emitEvent('session:created', ['canon-1', { cwd: '/repo' }], 'all')
-    emitEvent('session:stream', ['canon-1', { type: 'thinking', text: 'weighing' }], 'all')
-    emitEvent('session:stream', ['canon-1', { type: 'text', text: 'partial ' }], 'all')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
+    emitEvent('session:stream', ['canon-1', { type: 'thinking', text: 'weighing' }])
+    emitEvent('session:stream', ['canon-1', { type: 'text', text: 'partial ' }])
 
     const msg = await firstSyncFull(res.token)
     const state = msg.state as {

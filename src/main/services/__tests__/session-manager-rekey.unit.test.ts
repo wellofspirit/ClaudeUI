@@ -53,10 +53,10 @@ describe('SessionManager — core-owned rekey', () => {
 
   it('re-keys the registry when core rekeys canonical state', () => {
     const manager = new SessionManager()
-    emitEvent('session:created', ['temp-1', { cwd: '/x' }], 'extras-only')
+    emitEvent('session:created', ['temp-1', { cwd: '/x' }])
     const stub = seat(manager, 'temp-1')
 
-    emitEvent('session:status', ['temp-1', status('uuid-9')], 'extras-only')
+    emitEvent('session:status', ['temp-1', status('uuid-9')])
 
     expect(manager.has('temp-1')).toBe(false)
     expect(manager.get('uuid-9')).toBe(stub)
@@ -71,10 +71,10 @@ describe('SessionManager — core-owned rekey', () => {
     const firstStub = seat(first, 'temp-1')
     // macOS dock re-open: registerSessionIpc runs again with a fresh manager.
     const second = new SessionManager()
-    emitEvent('session:created', ['temp-1', { cwd: '/x' }], 'extras-only')
+    emitEvent('session:created', ['temp-1', { cwd: '/x' }])
     const secondStub = seat(second, 'temp-1')
 
-    emitEvent('session:status', ['temp-1', status('uuid-9')], 'extras-only')
+    emitEvent('session:status', ['temp-1', status('uuid-9')])
 
     expect(second.get('uuid-9')).toBe(secondStub)
     // The abandoned manager is untouched — its objects are nobody's business now.
@@ -85,11 +85,11 @@ describe('SessionManager — core-owned rekey', () => {
 
   it('an unrelated status (no new sessionId) does not re-key', () => {
     const manager = new SessionManager()
-    emitEvent('session:created', ['uuid-9', { cwd: '/x' }], 'extras-only')
+    emitEvent('session:created', ['uuid-9', { cwd: '/x' }])
     seat(manager, 'uuid-9')
 
-    emitEvent('session:status', ['uuid-9', status('uuid-9')], 'extras-only')
-    emitEvent('session:status', ['uuid-9', status(null)], 'extras-only')
+    emitEvent('session:status', ['uuid-9', status('uuid-9')])
+    emitEvent('session:status', ['uuid-9', status(null)])
 
     expect(manager.has('uuid-9')).toBe(true)
     manager.disposeRekeyObserver()
@@ -97,11 +97,11 @@ describe('SessionManager — core-owned rekey', () => {
 
   it('disposeRekeyObserver detaches the manager', () => {
     const manager = new SessionManager()
-    emitEvent('session:created', ['temp-1', { cwd: '/x' }], 'extras-only')
+    emitEvent('session:created', ['temp-1', { cwd: '/x' }])
     seat(manager, 'temp-1')
     manager.disposeRekeyObserver()
 
-    emitEvent('session:status', ['temp-1', status('uuid-9')], 'extras-only')
+    emitEvent('session:status', ['temp-1', status('uuid-9')])
 
     // Canonical still rekeyed (it always does); the detached registry did not.
     expect(Object.keys(syncCore.getCanonicalState().sessions)).toEqual(['uuid-9'])

@@ -27,6 +27,10 @@
  * exercised end to end.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import {
+  subscribeWindowToSync
+} from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../sync-host'
 
 const { mockQuery } = vi.hoisted(() => ({
   mockQuery: vi.fn()
@@ -85,6 +89,12 @@ import { insertDispatchedUsage } from '../db'
 import type { BrowserWindow } from 'electron'
 import type { StatusLineData } from '../../../shared/types'
 
+// Every `makeWin()` registers a funnel subscriber; drop them per test so a long
+// file does not fan every event out to hundreds of dead stubs.
+afterEach(() => {
+  clearSyncSubscribersForTests()
+})
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -103,6 +113,13 @@ function makeFakeQueryHandle(
   }
 }
 
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A session's events reach every SUBSCRIBER now, not a privileged window, so the
+ * stub subscribes to the funnel and replays each delivery into `sent` — the same
+ * `[channel, routingId, data]` shape every assertion below already reads.
+ */
 function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]> } {
   const sent: Array<[string, string, unknown]> = []
   const win = {
@@ -113,6 +130,7 @@ function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]>
       }
     }
   } as unknown as BrowserWindow
+  subscribeWindowToSync(win as unknown as { webContents: { send: (c: string, ...a: unknown[]) => void } })
   return { win, sent }
 }
 

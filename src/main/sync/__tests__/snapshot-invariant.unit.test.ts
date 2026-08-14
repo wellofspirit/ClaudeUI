@@ -34,7 +34,8 @@ import { applyEvent, auxFromCanonical, checkDerivedFields } from '../../../share
 import { fromSnapshot, type CanonicalState } from '../../../shared/sync/state'
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 
-const ALL: Delivery = { target: 'all' }
+/** Delivery no longer selects targets (4c) — the class does. */
+const ALL: Delivery = {}
 
 interface PoolEvent {
   channel: string

@@ -17,6 +17,15 @@
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
+import { SyncClient } from '../../shared/sync/sync-client'
+import {
+  setSyncClient,
+  resetSyncClientForTests,
+  onSyncEvent
+} from '../../shared/sync/client-registry'
+import { channelSpec } from '../../shared/sync/channels'
+import type { SyncEventMap } from '../../shared/sync/events'
+import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import type { ClaudeAPI } from '../../shared/types'
 
 // Build a ClaudeAPI object backed by the bridge.
@@ -24,6 +33,11 @@ import type { ClaudeAPI } from '../../shared/types'
 function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
   const { ipcRenderer } = bridge
 
+  /**
+   * HOST-LOCAL channels only — mirrors `src/preload/index.ts` since SyncCore
+   * phase 4c. Replicated / volatile events reach the renderer through the
+   * harness's `SyncClient` instead (see {@link TestApp.emit}).
+   */
   function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
@@ -99,60 +113,17 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadBackgroundOutput: (projectKey, taskId, outputFile?) =>
       ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
-    // Routed session events
-    onSessionCreated: onEvent('session:created'),
-    onUserMessage: onEvent('session:user-message'),
-    onMessage: onEvent('session:message'),
-    onStreamEvent: onEvent('session:stream'),
-    onApprovalRequest: onEvent('session:approval-request'),
-    onApprovalDismiss: onEvent('session:approval-dismiss'),
-    onStatus: onEvent('session:status'),
-    onResult: onEvent('session:result'),
-    onError: onEvent('session:error'),
-    onVendorAuthRequired: onEvent('session:vendor-auth-required'),
-    onWarning: onEvent('session:warning'),
-    onMessagesRetracted: onEvent('session:messages-retracted'),
-    onToolResult: onEvent('session:tool-result'),
-    onTaskProgress: onEvent('session:task-progress'),
-    onTaskNotification: onEvent('session:task-notification'),
-    onTaskStarted: onEvent('session:task-started'),
-    onSubagentStream: onEvent('session:subagent-stream'),
-    onSubagentMessage: onEvent('session:subagent-message'),
-    onSubagentMessageBatch: onEvent('session:subagent-message-batch'),
-    onSubagentToolResult: onEvent('session:subagent-tool-result'),
-    onSlashCommands: onEvent('session:slash-commands'),
-    onPermissionMode: onEvent('session:permission-mode'),
-    onBashOutput: onEvent('session:bash-output'),
-    onBackgroundOutput: onEvent('session:background-output'),
-    onSandboxViolation: onEvent('session:sandbox-violation'),
-    onQueueChanged: onEvent('session:queue-changed'),
-    onSkills: onEvent('session:skills'),
-    onAuthSource: onEvent('session:auth-source'),
-    onStatusLine: onEvent('session:status-line'),
-    onMetering: onEvent('session:metering'),
-    onMcpServers: onEvent('session:mcp-servers'),
-    onPlanSteps: onEvent('session:plan'),
+    // The sync transport is installed by bootTestApp itself, so there is no port
+    // to acquire (mirrors the web adapter).
+    acquireSyncPort: () => {},
 
-    // Non-routed events
+    // Host-local events only — see the `onEvent` note.
     onMaximizeChange: onEvent('window:maximized-change'),
-    onWatchUpdate: onEvent('session:watch-update'),
-    onDirectoriesChanged: onEvent('session:directories-changed'),
-    onGitStatusUpdate: onEvent('git:status-update'),
-    onSettingsChanged: onEvent('config:settings-changed'),
-    onSessionConfigChanged: onEvent('config:sessions-changed'),
-    onPerSessionConfig: onEvent('session:config-changed'),
-    onAccountUsage: onEvent('usage:data'),
-    onBlockUsage: onEvent('usage:block-data'),
     onAuthState: onEvent('auth:state'),
     onAccountsChanged: onEvent('account:changed'),
     onAccountRespawnSessions: onEvent('account:respawn-sessions'),
     onTerminalData: onEvent('terminal:data'),
     onTerminalExit: onEvent('terminal:exit'),
-    onAutomationRunUpdate: onEvent('automation:run-update'),
-    onAutomationsChanged: onEvent('automation:changed'),
-    onAutomationRunMessage: onEvent('automation:run-message'),
-    onAutomationStreamEvent: onEvent('automation:stream-event'),
-    onAutomationProcessing: onEvent('automation:processing'),
     onBeforeQuit: onEvent('app:before-quit'),
 
     watchBackground: (routingId, toolUseId) =>
@@ -370,7 +341,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     voiceStopRecording: (routingId) => unwrap('voice:stop-recording', routingId),
     onVoiceTranscript: onEvent('voice:transcript'),
     onVoiceState: onEvent('voice:state'),
-    onVoiceError: onEvent('voice:error'),
 
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
@@ -399,7 +369,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
     watchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:watch', cwd, directory),
     unwatchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
-    onMockupFileChanged: onEvent('mockup:file-changed'),
     getMockupPreviewUrl: (cwd, directory) => `mockup-asset://test.m/${cwd}/${directory}`
   } as ClaudeAPI
 }
@@ -407,8 +376,45 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 export interface TestApp {
   bridge: TestIpcBridge
   api: ClaudeAPI
-  /** Emit an event from main to renderer (simulates webContents.send) */
+  /**
+   * Deliver one event from main to the renderer.
+   *
+   * Routes by channel CLASS, exactly as the production delivery adapter does
+   * (`services/sync-host.ts`) — which is what makes this a seam rather than a
+   * parallel universe:
+   *
+   *  - `host-local` → `bridge.webContents.send`, the targeted lane the preload's
+   *    surviving `onEvent` listeners read;
+   *  - replicated / volatile → the harness's real {@link SyncClient}, with an
+   *    auto-incrementing seq, through the same `receiveEvent` path the MessagePort
+   *    and WebSocket transports use.
+   *
+   * The signature is unchanged from before SyncCore phase 4c, so existing
+   * `app.emit('session:message', rid, msg)` call sites keep working — only the
+   * plumbing underneath moved.
+   */
   emit: (channel: string, ...args: any[]) => void
+  /** The seq the next {@link TestApp.emit} of a ringed channel will carry. */
+  nextSeq: () => number
+  /**
+   * Subscribe to a replicated / volatile channel, the way the renderer does.
+   *
+   * Tests that hand-wire handlers (the e2e flows mirror `useClaudeEvents`) use
+   * this instead of `bridge.ipcRenderer.on`: those channels no longer travel on
+   * the bridge at all.
+   *
+   * Overloaded: a literal channel name gets the typed `SyncEventMap` callback; a
+   * `string` channel (an e2e harness building its own handler table in a loop)
+   * falls through to the loose form.
+   */
+  onSync: {
+    <K extends keyof SyncEventMap>(channel: K, cb: SyncEventMap[K]): () => void
+    (channel: string, cb: (...args: any[]) => void): () => void
+  }
+  /** Hydrate the renderer from a full snapshot, as a `sync-full` frame would. */
+  syncFull: (state: FullStateSnapshot, epoch?: string) => void
+  /** The harness's sync client — installed in the shared registry at boot. */
+  syncClient: SyncClient
   /** Cleanup — call in afterEach() */
   teardown: () => void
 }
@@ -457,14 +463,46 @@ export async function bootTestApp(): Promise<TestApp> {
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = api
 
+  // 4. Install the sync transport seam (SyncCore phase 4c).
+  //
+  // A REAL SyncClient, not a stub: cursor discipline, gap detection and the
+  // readiness gate are the properties phase 0 exists to guarantee, and a harness
+  // that faked them would let a regression in any of the three pass every test.
+  // The gate is opened immediately — a test asserting on state after `emit()`
+  // cannot wait for a React effect to call `markSyncReady()`, and the ordering
+  // that gate protects (listeners before ready) is covered by the sync-client
+  // unit tests instead.
+  resetSyncClientForTests()
+  let seq = 0
+  const syncClient = new SyncClient({
+    // A gap in a test means the test emitted out of order; asking the harness for
+    // a resync it cannot answer would hide that, so leave it loud-by-absence.
+    requestResync: () => {}
+  })
+  setSyncClient(syncClient)
+  syncClient.markReady()
+
   return {
     bridge,
     api,
+    syncClient,
+    nextSeq: () => seq + 1,
     emit: (channel: string, ...args: any[]) => {
-      bridge.webContents.send(channel, ...args)
+      if (channelSpec(channel)?.cls === 'host-local') {
+        bridge.webContents.send(channel, ...args)
+        return
+      }
+      syncClient.receiveEvent({ seq: ++seq, channel, args })
+    },
+    onSync: ((channel: string, cb: (...args: any[]) => void) =>
+      onSyncEvent(channel as keyof SyncEventMap, cb as never)) as TestApp['onSync'],
+    syncFull: (state: FullStateSnapshot, epoch = 'test-epoch') => {
+      seq = Math.max(seq, state.seq)
+      syncClient.applyFullState(state, epoch, state.seq)
     },
     teardown: () => {
       bridge.reset()
+      resetSyncClientForTests()
       delete (globalThis as any).window.api
     }
   }

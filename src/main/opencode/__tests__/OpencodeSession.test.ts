@@ -8,6 +8,8 @@
  * process spawning occurs. The tests exercise OpencodeSession directly.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 
 // The fetch stub in setupMocks must never leak into other files sharing this
@@ -18,14 +20,30 @@ afterEach(() => vi.unstubAllGlobals())
 // Stub BrowserWindow (Electron is unavailable in vitest node env)
 // ---------------------------------------------------------------------------
 
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A session's events reach every SUBSCRIBER now — no window is a delivery target
+ * for replicated state — so the stub subscribes to the funnel and replays each
+ * delivery into its own `webContents.send` mock. Every assertion below keeps
+ * reading the events a client receives, which is what it was always testing.
+ */
 class MockWindow extends EventEmitter {
-  webContents = {
-    send: vi.fn()
+  webContents = { send: vi.fn() }
+  constructor() {
+    super()
+    subscribeWindowToSync(this)
   }
   isDestroyed(): boolean {
     return false
   }
 }
+
+// Each MockWindow registers a funnel subscriber; drop them per test so a long file
+// does not fan every event out to hundreds of dead stubs.
+afterEach(() => {
+  clearSyncSubscribersForTests()
+})
 
 // ---------------------------------------------------------------------------
 // Hoist mock functions BEFORE vi.mock() calls so they're initialized by the

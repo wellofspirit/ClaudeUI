@@ -13,6 +13,8 @@
  *   at our per-test temp dir.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../sync-host'
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -82,12 +84,18 @@ interface FakeWin {
   _destroyed: boolean
 }
 
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c): `session:watch-update`
+ * is replicated, so it reaches SUBSCRIBERS, not a privileged window. Subscribing
+ * the stub keeps every `win.webContents.send` assertion below meaningful.
+ */
 function makeFakeWindow(): FakeWin {
   const win: FakeWin = {
     _destroyed: false,
     isDestroyed: () => win._destroyed,
     webContents: { send: vi.fn() }
   }
+  subscribeWindowToSync(win as unknown as Parameters<typeof subscribeWindowToSync>[0])
   return win
 }
 
@@ -135,17 +143,13 @@ describe('session-watcher', () => {
   })
 
   afterEach(async () => {
+    clearSyncSubscribersForTests()
     await cleanupCtx(ctx)
   })
 
   it('emits session:watch-update via webContents.send when the JSONL file grows', async () => {
     const win = makeFakeWindow()
-    watchSession(
-      'routing-1',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-1', ctx.sessionId, ctx.projectKey)
 
     // Cause a change on the watched file.
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
@@ -165,12 +169,7 @@ describe('session-watcher', () => {
 
   it('coalesces multiple rapid writes into a single debounced update', async () => {
     const win = makeFakeWindow()
-    watchSession(
-      'routing-burst',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-burst', ctx.sessionId, ctx.projectKey)
 
     // Burst of writes within the 100ms debounce window.
     for (let i = 0; i < 5; i++) {
@@ -200,12 +199,7 @@ describe('session-watcher', () => {
 
   it('unwatchSession stops further updates', async () => {
     const win = makeFakeWindow()
-    watchSession(
-      'routing-stop',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-stop', ctx.sessionId, ctx.projectKey)
 
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
     await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalled(), { timeout: 3000 })
@@ -226,12 +220,7 @@ describe('session-watcher', () => {
     const missingSessionId = 'never-created-session'
 
     expect(() =>
-      watchSession(
-        'routing-missing',
-        missingSessionId,
-        ctx.projectKey,
-        win as unknown as Electron.BrowserWindow
-      )
+      watchSession('routing-missing', missingSessionId, ctx.projectKey)
     ).not.toThrow()
 
     // No watcher was registered, so calling unwatch on it is also safe.
@@ -250,24 +239,14 @@ describe('session-watcher', () => {
     const win = makeFakeWindow()
 
     // First lifecycle: watch → event → unwatch.
-    watchSession(
-      'routing-recycle',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-recycle', ctx.sessionId, ctx.projectKey)
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 1 }) + '\n')
     await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalled(), { timeout: 3000 })
     const firstCycleCalls = win.webContents.send.mock.calls.length
     unwatchSession('routing-recycle')
 
     // Second lifecycle: watch again on the same routingId.
-    watchSession(
-      'routing-recycle',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-recycle', ctx.sessionId, ctx.projectKey)
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 2 }) + '\n')
 
     await vi.waitFor(

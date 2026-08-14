@@ -299,7 +299,7 @@ import {
   GIT_WATCH_OWNER_DESKTOP,
   GIT_WATCH_OWNER_REMOTE
 } from '../../services/git-watch-registry'
-import { BaseSession } from '../../providers/BaseSession'
+import { addSyncSubscriber } from '../../services/sync-host'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // Fill in the stub's capabilities now that the top-level import is available
@@ -580,12 +580,17 @@ describe('session.ipc', () => {
       // both owners so state can't leak into the next test.
       gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_DESKTOP)
       gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
-      for (const w of BaseSession.getExtraWindows()) BaseSession.removeExtraWindow(w)
     })
 
-    it('git:start-watching starts one poller and broadcasts to the main window AND extra windows', async () => {
-      const extra: any = { webContents: { send: vi.fn() }, isDestroyed: () => false }
-      BaseSession.addExtraWindow(extra)
+    it('git:start-watching starts one poller and broadcasts to every subscriber', async () => {
+      // 4c: `git:status-update` is replicated, so it reaches SUBSCRIBERS — there is
+      // no "main window AND extras" any more, just clients. A second subscriber
+      // stands in for the WebSocket broadcaster, which is the hop that carries this
+      // channel to web clients.
+      const other: unknown[][] = []
+      const offOther = addSyncSubscriber((_seq, channel, args) => {
+        if (channel === 'git:status-update') other.push(args)
+      })
 
       await harness.call('git:start-watching', CWD)
       expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
@@ -598,13 +603,9 @@ describe('session.ipc', () => {
       emit(status)
       off()
 
+      offOther()
       expect(received).toEqual([[{ cwd: CWD, status }]])
-      // The remote bridge is registered as an extra window — this is the hop that
-      // carries git:status-update to web clients.
-      expect(extra.webContents.send).toHaveBeenCalledWith('git:status-update', {
-        cwd: CWD,
-        status
-      })
+      expect(other).toEqual([[{ cwd: CWD, status }]])
     })
 
     it('a remote owner attaches to the desktop poller instead of clobbering it (CLOBBER GUARD)', async () => {
