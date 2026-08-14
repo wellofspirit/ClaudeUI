@@ -185,6 +185,39 @@ describe('BaseSession — thinking-span timing', () => {
     }
   })
 
+  it('abandons an ALREADY-SEALED span at a turn boundary (SyncCore phase 4c)', () => {
+    // The half 4b left in place. A text delta seals the span and PARKS its elapsed
+    // time for the message that will carry the block; when that message never
+    // arrives — interrupt, refusal retraction, engine death — the parked value used
+    // to survive the boundary and stamp the NEXT turn's first thinking block with
+    // the previous turn's duration.
+    //
+    // It was deliberate in 4b: the renderer's `pendingThinkingDurationMs` leaked the
+    // same value the same way, so the two sides agreed and the shadow comparator
+    // stayed quiet. 4c deleted the renderer's clock, so there is no mirror left to
+    // preserve.
+    for (const abandon of [
+      (s: ProbeSession) => s.emitAs('session:status', status('idle')),
+      (s: ProbeSession) => s.emitAs('session:status', status('disconnected')),
+      (s: ProbeSession) => s.emitAs('session:messages-retracted', { messageIds: ['m0'] })
+    ]) {
+      emitted.length = 0
+      vi.useFakeTimers()
+      vi.setSystemTime(0)
+      const session = probe()
+      session.emitAs('session:stream', { type: 'thinking', text: 'first turn' })
+      vi.setSystemTime(5_000)
+      // Seals the span and parks 5000ms...
+      session.emitAs('session:stream', { type: 'text', text: 'x' })
+      // ...but the message that would carry it never comes; the turn just ends.
+      abandon(session)
+
+      // Next turn: a message with no thinking of its own must carry NO duration.
+      session.emitAs('session:message', assistant('m1', [{ type: 'text', text: 'next turn' }]))
+      expect(messagePayloads()[0].thinkingDurationMs).toBeUndefined()
+    }
+  })
+
   it('degrades on a malformed payload instead of throwing', () => {
     const session = probe()
     session.emitAs('session:stream', null)

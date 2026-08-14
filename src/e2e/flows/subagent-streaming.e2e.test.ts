@@ -14,65 +14,14 @@ import {
   makeToolUseBlock,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type { ChatMessage, SubagentStreamDelta } from '../../shared/types'
 
 let app: TestApp
-let eventCleanups: Array<() => void>
 
-function wireEventHandlers(app: TestApp): Array<() => void> {
-  const cleanups: Array<() => void> = []
-  const store = useSessionStore.getState
-
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      // Replicated + volatile channels arrive on the SYNC CLIENT since SyncCore
-      // phase 4c, not the IPC bridge: `app.emit` feeds `SyncClient.receiveEvent`
-      // with a ring seq, exactly as the MessagePort / WebSocket transports do.
-      const cleanup = app.onSync(channel, cb as unknown as (...args: unknown[]) => void)
-      cleanups.push(cleanup)
-      return cleanup
-    }
-  }
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-  })
-  onEvent<(routingId: string, data: SubagentStreamDelta) => void>('session:subagent-stream')(
-    (routingId, data) => {
-      if (data.type === 'thinking') {
-        store().appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
-      } else {
-        store().appendSubagentStreamingText(routingId, data.toolUseId, data.text)
-      }
-    }
-  )
-  onEvent<(routingId: string, data: { toolUseId: string; message: ChatMessage }) => void>(
-    'session:subagent-message'
-  )((routingId, data) => {
-    store().addSubagentMessage(routingId, data.toolUseId, data.message)
-  })
-  onEvent<(routingId: string, data: { toolUseId: string; messages: ChatMessage[] }) => void>(
-    'session:subagent-message-batch'
-  )((routingId, data) => {
-    store().appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
-  })
-  onEvent<
-    (
-      routingId: string,
-      data: { toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
-    ) => void
-  >('session:subagent-tool-result')((routingId, data) => {
-    store().appendSubagentToolResult(
-      routingId,
-      data.toolUseId,
-      data.toolResultToolUseId,
-      data.result,
-      data.isError
-    )
-  })
-
-  return cleanups
-}
+// SyncCore phase 4c: the ~20-handler `wireEventHandlers` table this file used to
+// carry — a hand-maintained copy of useClaudeEvents, itself a copy of the reducer —
+// is DELETED. `app.emit` feeds the harness SyncClient, whose raw-event tap folds
+// `applyEvent` and projects the result into the store (boot-test-app §5), so these
+// flows now exercise the real interpretation instead of a third one.
 
 beforeEach(async () => {
   resetFactoryCounter()
@@ -85,11 +34,9 @@ beforeEach(async () => {
     pinnedSessionIds: [],
     customTitles: {}
   })
-  eventCleanups = wireEventHandlers(app)
 })
 
 afterEach(() => {
-  eventCleanups.forEach((fn) => fn())
   app.teardown()
 })
 

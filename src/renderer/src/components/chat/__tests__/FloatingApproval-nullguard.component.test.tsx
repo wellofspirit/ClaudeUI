@@ -9,10 +9,15 @@ import { render } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import type { PendingApproval } from '../../../../../shared/types'
 import { FloatingApproval } from '../FloatingApproval'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-nullguard'
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     respondApproval: () => Promise.resolve(),
@@ -29,6 +34,7 @@ beforeEach(() => {
     pinnedSessionIds: [],
     customTitles: {}
   })
+  mirrorStoreIntoReplica()
 })
 
 describe('FloatingApproval — malformed AskUserQuestion approval', () => {
@@ -43,7 +49,7 @@ describe('FloatingApproval — malformed AskUserQuestion approval', () => {
       toolName: 'AskUserQuestion',
       toolUseId: 'child_call_x'
     } as unknown as PendingApproval
-    useSessionStore.getState().addPendingApproval(ROUTE, malformed)
+    seed.approvalRequest(ROUTE, malformed)
 
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(() => render(<FloatingApproval />)).not.toThrow()

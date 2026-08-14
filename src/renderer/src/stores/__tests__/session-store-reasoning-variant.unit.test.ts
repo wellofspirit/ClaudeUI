@@ -4,14 +4,17 @@
  * Covers:
  * - setReasoningVariant sets the per-session field + calls the IPC
  * - setSelectedModel (model change) resets reasoningVariant to null
- * - getRemoteStateSnapshot includes reasoningVariant in the session snapshot
- * - applyRemoteSnapshot restores reasoningVariant from the snapshot
+ * - the replica projected to a wire snapshot includes reasoningVariant in the session snapshot
+ * - hydrateReplica (the replica's snapshot path) restores reasoningVariant from the snapshot
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
-import { getRemoteStateSnapshot } from '../session-store'
+import { getReplicaState } from '../replica'
+import { toSnapshot } from '../../../../shared/sync/state'
 import { resetFactoryCounter } from '@test/factories/messages'
+import { hydrateReplica } from '@renderer/stores/replica'
+import { resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const store = () => useSessionStore.getState()
 
@@ -22,6 +25,10 @@ const mockSetReasoningVariant = vi.fn()
 const mockSaveSessionConfig = vi.fn()
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   resetFactoryCounter()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
@@ -40,6 +47,7 @@ beforeEach(() => {
     recentSessionIds: [],
     availableModels: []
   })
+  mirrorStoreIntoReplica()
 })
 
 function setupSession(routingId = ROUTE): void {
@@ -113,6 +121,7 @@ describe('reasoningVariant resets on model change', () => {
         }
       }
     })
+    mirrorStoreIntoReplica()
     expect(store().sessions[ROUTE].reasoningVariant).toBe('high')
 
     // Switching to another opencode model should still reset
@@ -125,12 +134,12 @@ describe('reasoningVariant resets on model change', () => {
 // Remote snapshot includes reasoningVariant
 // ---------------------------------------------------------------------------
 
-describe('getRemoteStateSnapshot', () => {
+describe('replica → wire snapshot', () => {
   it('includes reasoningVariant in the session snapshot', () => {
     setupSession()
     store().setReasoningVariant('xhigh')
 
-    const snapshot = getRemoteStateSnapshot()
+    const snapshot = toSnapshot(getReplicaState(), 0)
     expect(snapshot.sessions[ROUTE]).toBeDefined()
     expect(snapshot.sessions[ROUTE].reasoningVariant).toBe('xhigh')
   })
@@ -138,16 +147,16 @@ describe('getRemoteStateSnapshot', () => {
   it('includes null reasoningVariant when default', () => {
     setupSession()
 
-    const snapshot = getRemoteStateSnapshot()
+    const snapshot = toSnapshot(getReplicaState(), 0)
     expect(snapshot.sessions[ROUTE].reasoningVariant).toBeNull()
   })
 })
 
 // ---------------------------------------------------------------------------
-// applyRemoteSnapshot restores reasoningVariant
+// hydrateReplica restores reasoningVariant
 // ---------------------------------------------------------------------------
 
-describe('applyRemoteSnapshot', () => {
+describe('hydrateReplica', () => {
   it('restores a non-null reasoningVariant from a remote snapshot', () => {
     setupSession()
 
@@ -186,7 +195,7 @@ describe('applyRemoteSnapshot', () => {
       worktreeInfoMap: {}
     }
 
-    store().applyRemoteSnapshot(snapshot as any)
+    hydrateReplica(snapshot as any)
     expect(store().sessions[ROUTE]?.reasoningVariant).toBe('thinking')
   })
 
@@ -228,7 +237,7 @@ describe('applyRemoteSnapshot', () => {
       worktreeInfoMap: {}
     }
 
-    store().applyRemoteSnapshot(snapshot as any)
+    hydrateReplica(snapshot as any)
     expect(store().sessions[ROUTE]?.reasoningVariant).toBeNull()
   })
 })

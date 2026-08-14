@@ -24,6 +24,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
 import type { ToolCardProps } from '../../tool-registry/ToolCard'
 import type { ContentBlock, PermissionSuggestion } from '../../../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let viewProps: ToolCardProps
 vi.mock('../../tool-registry/ToolCard', () => ({
@@ -117,6 +118,7 @@ describe('ToolCallBlock FC', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   async function renderFC(props: {
@@ -131,7 +133,7 @@ describe('ToolCallBlock FC', () => {
 
   it('onApproval allow calls respondApproval IPC and removes pending', async () => {
     const approval = makePendingApproval({ requestId: 'req-1' })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
 
     await renderFC({ block: makeToolUseBlock(), approval })
 
@@ -147,7 +149,7 @@ describe('ToolCallBlock FC', () => {
 
   it('onApproval deny calls respondApproval IPC and removes pending', async () => {
     const approval = makePendingApproval({ requestId: 'req-2' })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
 
     await renderFC({ block: makeToolUseBlock(), approval })
 
@@ -161,7 +163,7 @@ describe('ToolCallBlock FC', () => {
 
   it('onApproval forwards permission suggestions when provided', async () => {
     const approval = makePendingApproval({ requestId: 'req-3' })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
 
     await renderFC({ block: makeToolUseBlock(), approval })
 
@@ -321,6 +323,7 @@ describe('ToolCallBlock FC', () => {
         [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true }
       }
     }))
+    mirrorStoreIntoReplica()
 
     const block = makeToolUseBlock({
       toolInput: { command: 'sleep 10', run_in_background: true },

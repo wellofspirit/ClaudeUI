@@ -24,6 +24,7 @@ vi.mock('../../chat/SubagentMessages', () => ({
 }))
 
 import { TaskEntry } from '../TaskEntry'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
@@ -60,15 +61,17 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
         [ROUTE]: { ...state.sessions[ROUTE], messages: [taskMessage()] }
       }
     }))
+    mirrorStoreIntoReplica()
   })
 
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {}, settings: defaultSettings })
+    mirrorStoreIntoReplica()
   })
 
   it('renders the message list, then live thinking, then live streamed text, in that DOM order', () => {
-    useSessionStore.getState().addSubagentMessage(ROUTE, TOOL_USE_ID, {
+    seed.subagentMessage(ROUTE, TOOL_USE_ID, {
       id: 'm1',
       role: 'assistant',
       content: [{ type: 'text', text: 'partial result' }],
@@ -96,6 +99,7 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
         }
       }
     })
+    mirrorStoreIntoReplica()
 
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
 
@@ -115,7 +119,7 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
   it('expandThinking=false: live thinking starts collapsed (tail preview only)', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
-    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, TOOL_USE_ID, longText)
+    seed.subagentStreamThinking(ROUTE, TOOL_USE_ID, longText)
 
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
 
@@ -126,7 +130,7 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
   it('expandThinking=false: clicking the live-thinking toggle reveals the full buffer', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
-    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, TOOL_USE_ID, longText)
+    seed.subagentStreamThinking(ROUTE, TOOL_USE_ID, longText)
 
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
     fireEvent.click(screen.getByTestId('SubagentOutputBody.liveThinking.toggle'))
@@ -137,7 +141,7 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
   it('expandThinking=true: live thinking starts expanded (full buffer visible immediately)', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: true } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
-    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, TOOL_USE_ID, longText)
+    seed.subagentStreamThinking(ROUTE, TOOL_USE_ID, longText)
 
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
 

@@ -18,12 +18,20 @@
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
 import { SyncClient } from '../../shared/sync/sync-client'
+import { resetSyncClientForTests, onSyncEvent } from '../../shared/sync/client-registry'
 import {
-  setSyncClient,
-  resetSyncClientForTests,
-  onSyncEvent
-} from '../../shared/sync/client-registry'
+  installSyncSeam,
+  resetSyncSeam,
+  emitSync,
+  nextSeq,
+  advanceSeqTo
+} from './replica-seed'
 import { channelSpec } from '../../shared/sync/channels'
+import {
+  startReplica,
+  hydrateReplica,
+  resetReplicaForTests
+} from '../../renderer/src/stores/replica'
 import type { SyncEventMap } from '../../shared/sync/events'
 import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import type { ClaudeAPI } from '../../shared/types'
@@ -79,7 +87,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         model,
         thinkingMode
       ),
-    rekeySession: (oldId, newId) => ipcRenderer.invoke('session:rekey', oldId, newId),
     resolveForkAnchor: (sessionId, cwd, messageId) =>
       ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
     loadOpencodeHistory: (sessionId) =>
@@ -427,6 +434,9 @@ export interface TestApp {
  * BEFORE calling this function, since module mocks must be hoisted.
  */
 export async function bootTestApp(): Promise<TestApp> {
+  /** Re-broadcast a config save as its `config:*-changed` echo (assigned below). */
+  let echo: (channel: string, args: unknown[]) => void = () => {}
+
   // 1. Create bridge and wire to electron shim
   const bridge = new TestIpcBridge()
   setIpcBridge(bridge)
@@ -434,9 +444,13 @@ export async function bootTestApp(): Promise<TestApp> {
   // 2. Register stub IPC handlers for channels the store uses internally.
   // These prevent "no handler registered" errors when store actions
   // call window.api.saveSessionConfig(), etc.
+  //
+  // The two config SAVES are not inert stubs: production echoes the saved payload
+  // back as `config:sessions-changed` / `config:settings-changed`, and since
+  // SyncCore phase 4c that echo reaches the client that saved (it is what makes
+  // an optimistic registry write correctable). A harness that swallowed the echo
+  // would let a regression in the echo path pass every test.
   const stubChannels = [
-    'config:save-sessions',
-    'config:save-settings',
     'config:load-settings',
     'config:load-sessions',
     'config:save-slash-commands',
@@ -455,6 +469,14 @@ export async function bootTestApp(): Promise<TestApp> {
   for (const channel of stubChannels) {
     bridge.ipcMain.handle(channel, async () => null)
   }
+  bridge.ipcMain.handle('config:save-sessions', async (_e: unknown, config: unknown) => {
+    echo('config:sessions-changed', [config])
+    return null
+  })
+  bridge.ipcMain.handle('config:save-settings', async (_e: unknown, settings: unknown) => {
+    echo('config:settings-changed', [settings])
+    return null
+  })
 
   // 3. Build window.api backed by bridge
   const api = buildTestApi(bridge)
@@ -473,36 +495,54 @@ export async function bootTestApp(): Promise<TestApp> {
   // that gate protects (listeners before ready) is covered by the sync-client
   // unit tests instead.
   resetSyncClientForTests()
-  let seq = 0
   const syncClient = new SyncClient({
     // A gap in a test means the test emitted out of order; asking the harness for
     // a resync it cannot answer would hide that, so leave it loud-by-absence.
     requestResync: () => {}
   })
-  setSyncClient(syncClient)
-  syncClient.markReady()
+  // ONE seq counter for the harness and for `replica-seed`'s direct emitters: two
+  // would manufacture gaps and trip the client's resync detection.
+  installSyncSeam(syncClient)
+  echo = emitSync
+
+  // 5. Install the REPLICA (SyncCore phase 4c). The store's replicated slices are
+  // the shared reducer's output now, so a harness that skipped this would show an
+  // empty transcript for every `emit`. Reset first: the module holds a canonical
+  // mirror for the page's lifetime and a test must not inherit the previous one.
+  resetReplicaForTests()
+  startReplica()
+  let hasHydrated = false
+  syncClient.setFullStateHandler((state) => {
+    const isResync = hasHydrated
+    hasHydrated = true
+    hydrateReplica(state, isResync)
+  })
 
   return {
     bridge,
     api,
     syncClient,
-    nextSeq: () => seq + 1,
+    nextSeq,
     emit: (channel: string, ...args: any[]) => {
       if (channelSpec(channel)?.cls === 'host-local') {
         bridge.webContents.send(channel, ...args)
         return
       }
-      syncClient.receiveEvent({ seq: ++seq, channel, args })
+      emitSync(channel, args)
     },
     onSync: ((channel: string, cb: (...args: any[]) => void) =>
       onSyncEvent(channel as keyof SyncEventMap, cb as never)) as TestApp['onSync'],
     syncFull: (state: FullStateSnapshot, epoch = 'test-epoch') => {
-      seq = Math.max(seq, state.seq)
+      // Keep the seam's cursor at or past the snapshot watermark, or the next
+      // `emit` would look like a replay and be dropped.
+      advanceSeqTo(state.seq)
       syncClient.applyFullState(state, epoch, state.seq)
     },
     teardown: () => {
       bridge.reset()
       resetSyncClientForTests()
+      resetReplicaForTests()
+      resetSyncSeam()
       delete (globalThis as any).window.api
     }
   }

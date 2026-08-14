@@ -27,6 +27,7 @@ import type {
   WorktreeInfo,
   GitStatusData
 } from '../../../../shared/types'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,6 +96,10 @@ function makeWorktreeInfo(overrides?: Partial<WorktreeInfo>): WorktreeInfo {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   resetFactoryCounter()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
@@ -121,6 +126,7 @@ beforeEach(() => {
     hiddenProjectKeys: [],
     terminalGroups: {}
   })
+  mirrorStoreIntoReplica()
 })
 
 // ---------------------------------------------------------------------------
@@ -207,7 +213,7 @@ describe('switchSession', () => {
 
   it('preserves current session when it has messages', () => {
     store().createNewSession('r1', '/a')
-    store().addUserMessage('r1', 'msg-1', 'hello')
+    seed.userMessage('r1', { id: 'msg-1', prompt: 'hello' })
     store().createNewSession('r2', '/b', false)
     store().switchSession('r2')
     expect(store().sessions['r1']).toBeDefined()
@@ -230,7 +236,7 @@ describe('showWelcome', () => {
 
   it('preserves session with messages when returning to welcome', () => {
     store().createNewSession('r1', '/a')
-    store().addUserMessage('r1', 'msg-1', 'hi')
+    seed.userMessage('r1', { id: 'msg-1', prompt: 'hi' })
     store().showWelcome()
     expect(store().sessions['r1']).toBeDefined()
   })
@@ -343,6 +349,7 @@ describe('forkFromMessage', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'a1' })
 
     await store().forkFromMessage('routing-temp', 'msg_1')
@@ -369,6 +376,7 @@ describe('forkFromMessage', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     const anchorSpy = vi.fn().mockResolvedValue({ anchorUuid: 'pi:clone-latest' })
     ;(window.api as any).resolveForkAnchor = anchorSpy
 
@@ -408,6 +416,7 @@ describe('forkFromMessage', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     const anchorSpy = vi.fn()
     ;(window.api as any).resolveForkAnchor = anchorSpy
 
@@ -422,7 +431,7 @@ describe('forkFromMessage', () => {
 describe('rekeySession', () => {
   it('renames the session key in sessions', () => {
     store().createNewSession('old-id', '/test')
-    store().rekeySession('old-id', 'new-id')
+    seed.rekey('old-id', 'new-id')
     expect(store().sessions['new-id']).toBeDefined()
     expect(store().sessions['old-id']).toBeUndefined()
   })
@@ -430,13 +439,13 @@ describe('rekeySession', () => {
   it('updates activeSessionId when rekeying active session', () => {
     store().createNewSession('old-id', '/test')
     expect(store().activeSessionId).toBe('old-id')
-    store().rekeySession('old-id', 'new-id')
+    seed.rekey('old-id', 'new-id')
     expect(store().activeSessionId).toBe('new-id')
   })
 
   it('updates recentSessionIds', () => {
     store().createNewSession('old-id', '/test')
-    store().rekeySession('old-id', 'new-id')
+    seed.rekey('old-id', 'new-id')
     expect(store().recentSessionIds).toContain('new-id')
     expect(store().recentSessionIds).not.toContain('old-id')
   })
@@ -444,7 +453,7 @@ describe('rekeySession', () => {
   it('updates pinnedSessionIds', () => {
     store().createNewSession('old-id', '/test')
     store().pinSession('old-id')
-    store().rekeySession('old-id', 'new-id')
+    seed.rekey('old-id', 'new-id')
     expect(store().pinnedSessionIds).toContain('new-id')
     expect(store().pinnedSessionIds).not.toContain('old-id')
   })
@@ -452,7 +461,7 @@ describe('rekeySession', () => {
   it('migrates customTitles to new id', () => {
     store().createNewSession('old-id', '/test')
     store().setCustomTitle('old-id', 'My Session')
-    store().rekeySession('old-id', 'new-id')
+    seed.rekey('old-id', 'new-id')
     expect(store().customTitles['new-id']).toBe('My Session')
     expect(store().customTitles['old-id']).toBeUndefined()
   })
@@ -462,7 +471,8 @@ describe('rekeySession', () => {
     useSessionStore.setState({
       worktreeInfoMap: { 'old-id': makeWorktreeInfo() }
     })
-    store().rekeySession('old-id', 'new-id')
+    mirrorStoreIntoReplica()
+    seed.rekey('old-id', 'new-id')
     expect(store().worktreeInfoMap['new-id']).toBeDefined()
     expect(store().worktreeInfoMap['old-id']).toBeUndefined()
   })
@@ -470,12 +480,17 @@ describe('rekeySession', () => {
   it('is a no-op when oldId === newId', () => {
     store().createNewSession('r1', '/test')
     const before = store().sessions['r1']
-    store().rekeySession('r1', 'r1')
-    expect(store().sessions['r1']).toBe(before)
+    seed.rekey('r1', 'r1')
+    // `rekeyCanonical` returns the state untouched for an identical id. The STATUS
+    // the seed carries still applies (that is the event), so compare the fields a
+    // rekey would have moved rather than the whole entry.
+    expect(Object.keys(store().sessions)).toEqual(['r1'])
+    expect(store().sessions['r1'].messages).toBe(before.messages)
+    expect(store().sessions['r1'].cwd).toBe(before.cwd)
   })
 
   it('is a no-op when old session does not exist', () => {
-    store().rekeySession('ghost', 'new-id')
+    seed.rekey('ghost', 'new-id')
     expect(store().sessions['new-id']).toBeUndefined()
   })
 })
@@ -651,6 +666,7 @@ describe('deleteSession', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
 
     await store().deleteSession('s1', 'proj-key')
 
@@ -680,6 +696,7 @@ describe('deleteSession', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
 
     await store().deleteSession('s1', 'proj-key')
 
@@ -765,6 +782,7 @@ describe('deleteProject', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
     store().createNewSession('s1', '/test')
     store().createNewSession('s2', '/test')
     store().createNewSession('s3', '/other')
@@ -824,6 +842,7 @@ describe('deleteProject', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
 
     await store().deleteProject('proj-key')
 
@@ -862,6 +881,7 @@ describe('deleteProject', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
     ;(window.api.saveSessionConfig as any).mockClear()
 
     await store().deleteProject('proj-key')
@@ -898,6 +918,7 @@ describe('deleteProject', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
 
     await store().deleteProject('proj-key')
 
@@ -925,6 +946,7 @@ describe('deleteProject', () => {
         }
       ]
     })
+    mirrorStoreIntoReplica()
     store().createNewSession('s1', '/test')
     const recentBefore = [...store().recentSessionIds]
 
@@ -940,8 +962,8 @@ describe('deleteProject', () => {
 describe('setQueueState', () => {
   it('creates a user message from a consumed item and drops it from the card', () => {
     store().createNewSession('r1', '/test')
-    store().setQueueState('r1', [{ itemId: 'q1', text: 'queued prompt', state: 'queued' }])
-    store().setQueueState('r1', [{ itemId: 'q1', text: 'queued prompt', state: 'consumed' }])
+    seed.queue('r1', [{ itemId: 'q1', text: 'queued prompt', state: 'queued' }])
+    seed.queue('r1', [{ itemId: 'q1', text: 'queued prompt', state: 'consumed' }])
     const session = store().sessions['r1']
     expect(session.messages).toHaveLength(1)
     expect(session.messages[0].id).toBe('steer-q1')
@@ -952,74 +974,68 @@ describe('setQueueState', () => {
 
   it('is a no-op when the payload holds nothing consumed', () => {
     store().createNewSession('r1', '/test')
-    store().setQueueState('r1', [])
+    seed.queue('r1', [])
     expect(store().sessions['r1'].messages).toHaveLength(0)
   })
 
   it('is a no-op when session does not exist', () => {
     expect(() =>
-      store().setQueueState('ghost', [{ itemId: 'q1', text: 'x', state: 'consumed' }])
+      seed.queue('ghost', [{ itemId: 'q1', text: 'x', state: 'consumed' }])
     ).not.toThrow()
   })
 })
 
-describe('addUserMessage', () => {
-  it('appends a user message with text content', () => {
+describe('session:user-message (the reducer builds the transcript row)', () => {
+  // `addUserMessage` is DELETED. The row is the reducer's — identity included, so
+  // every replica agrees on the id (SyncCore phase 4b) — and the attachment
+  // ordering these tests pin lives in `shared/sync/reducer.ts`'s
+  // `buildUserContentBlocks`.
+  //
+  // Two assertions did NOT move here, deliberately:
+  //  - `planContent`: no channel carries it, and nothing has minted a local user
+  //    message since the ExitPlanMode flow started relaying through the server.
+  //  - the `recentSessionIds` bump: a SIDE EFFECT of the row arriving, so it is a
+  //    post-apply observer in useClaudeEvents and is pinned by that hook's test.
+  beforeEach(() => {
     store().createNewSession('r1', '/test')
-    store().addUserMessage('r1', 'msg-1', 'hello world')
-    const session = store().sessions['r1']
-    expect(session.messages).toHaveLength(1)
-    expect(session.messages[0]).toMatchObject({
-      id: 'msg-1',
-      role: 'user',
-      content: [{ type: 'text', text: 'hello world' }]
-    })
   })
 
   it('places image attachments before text', () => {
-    store().createNewSession('r1', '/test')
-    store().addUserMessage('r1', 'msg-1', 'look at this', undefined, [
-      { mediaType: 'image/png', base64Data: 'abc123', fileName: 'pic.png' }
-    ])
+    seed.userMessage('r1', {
+      id: 'u1',
+      prompt: 'look at this',
+      attachments: [{ mediaType: 'image/png', base64Data: 'AAA', fileName: 'shot.png' }]
+    })
     const content = store().sessions['r1'].messages[0].content
     expect(content[0].type).toBe('image')
     expect(content[1].type).toBe('text')
   })
 
   it('places PDF attachments as document blocks before text', () => {
-    store().createNewSession('r1', '/test')
-    store().addUserMessage('r1', 'msg-1', 'here is a doc', undefined, [
-      { mediaType: 'application/pdf', base64Data: 'pdfdata', fileName: 'doc.pdf' }
-    ])
+    seed.userMessage('r1', {
+      id: 'u1',
+      prompt: 'read this',
+      attachments: [{ mediaType: 'application/pdf', base64Data: 'AAA', fileName: 'doc.pdf' }]
+    })
     const content = store().sessions['r1'].messages[0].content
     expect(content[0].type).toBe('document')
     expect(content[1].type).toBe('text')
   })
 
-  it('stores planContent when provided', () => {
-    store().createNewSession('r1', '/test')
-    store().addUserMessage('r1', 'msg-1', 'run plan', 'the plan content')
-    expect(store().sessions['r1'].messages[0].planContent).toBe('the plan content')
-  })
-
-  it('updates recentSessionIds', () => {
-    store().createNewSession('r1', '/a', false)
-    store().createNewSession('r2', '/b', false)
-    store().addUserMessage('r1', 'msg-1', 'hello')
-    expect(store().recentSessionIds[0]).toBe('r1')
-  })
-
-  it('is a no-op when session does not exist', () => {
-    expect(() => store().addUserMessage('ghost', 'msg-1', 'hello')).not.toThrow()
+  it('uses the id the emitter minted, so a resync cannot renumber the transcript', () => {
+    seed.userMessage('r1', { id: 'msg-from-emitter', timestamp: 42, prompt: 'hi' })
+    const msg = store().sessions['r1'].messages[0]
+    expect(msg.id).toBe('msg-from-emitter')
+    expect(msg.timestamp).toBe(42)
   })
 })
 
 describe('removePendingApproval', () => {
   it('removes the approval matching the requestId', () => {
     store().createNewSession('r1', '/test')
-    store().addPendingApproval('r1', { requestId: 'req-1', toolName: 'Bash', input: {} })
-    store().addPendingApproval('r1', { requestId: 'req-2', toolName: 'Read', input: {} })
-    store().removePendingApproval('r1', 'req-1')
+    seed.approvalRequest('r1', { requestId: 'req-1', toolName: 'Bash', input: {} })
+    seed.approvalRequest('r1', { requestId: 'req-2', toolName: 'Read', input: {} })
+    seed.approvalDismiss('r1', 'req-1')
     const approvals = store().sessions['r1'].pendingApprovals
     expect(approvals).toHaveLength(1)
     expect(approvals[0].requestId).toBe('req-2')
@@ -1027,8 +1043,8 @@ describe('removePendingApproval', () => {
 
   it('leaves approvals unchanged when requestId not found', () => {
     store().createNewSession('r1', '/test')
-    store().addPendingApproval('r1', { requestId: 'req-1', toolName: 'Bash', input: {} })
-    store().removePendingApproval('r1', 'ghost-req')
+    seed.approvalRequest('r1', { requestId: 'req-1', toolName: 'Bash', input: {} })
+    seed.approvalDismiss('r1', 'ghost-req')
     expect(store().sessions['r1'].pendingApprovals).toHaveLength(1)
   })
 })
@@ -1046,7 +1062,7 @@ describe('removePendingApproval', () => {
 describe('setTaskStarted', () => {
   it('records an activeTasks entry keyed by toolUseId', () => {
     store().createNewSession('r1', '/test')
-    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
+    seed.taskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
     expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
       taskId: 'task-abc',
       taskType: 'local_agent'
@@ -1055,8 +1071,8 @@ describe('setTaskStarted', () => {
 
   it('does not affect other in-flight tasks', () => {
     store().createNewSession('r1', '/test')
-    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
-    store().setTaskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_bash' })
+    seed.taskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    seed.taskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_bash' })
     expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
       taskId: 'task-a',
       taskType: 'local_agent'
@@ -1072,50 +1088,39 @@ describe('addTaskNotification', () => {
   it('appends notification to taskNotifications', () => {
     store().createNewSession('r1', '/test')
     const notification = makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' })
-    store().addTaskNotification('r1', notification)
+    seed.taskNotification('r1', notification)
     expect(store().sessions['r1'].taskNotifications).toHaveLength(1)
     expect(store().sessions['r1'].taskNotifications[0]).toEqual(notification)
   })
 
-  it('clears stoppingTaskIds for the toolUseId', () => {
-    store().createNewSession('r1', '/test')
-    store().setTaskStopping('r1', 'tool-1')
-    expect(store().sessions['r1'].stoppingTaskIds).toContain('tool-1')
-    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1' }))
-    expect(store().sessions['r1'].stoppingTaskIds).not.toContain('tool-1')
-  })
-
-  it('clears bashOutputs for the toolUseId', () => {
-    store().createNewSession('r1', '/test')
-    store().setBashOutput('r1', 'tool-1', 'some output', 3, 100)
-    expect(store().sessions['r1'].bashOutputs['tool-1']).toBeDefined()
-    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1' }))
-    expect(store().sessions['r1'].bashOutputs['tool-1']).toBeUndefined()
-  })
+  // The stop spinner and the live bash tail are per-client VIEW state, so clearing
+  // them on a terminal notification is a post-apply observer in useClaudeEvents now
+  // (SyncCore phase 4c) rather than part of the fold. Pinned by that hook's test —
+  // a store-level test cannot see it, because the hook is not mounted here.
 
   it('does not modify stoppingTaskIds when toolUseId is null', () => {
     store().createNewSession('r1', '/test')
     store().setTaskStopping('r1', 'tool-1')
-    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
+    seed.taskNotification('r1', makeTaskNotification({ toolUseId: null }))
     expect(store().sessions['r1'].stoppingTaskIds).toContain('tool-1')
   })
 
   it('clears the matching activeTasks entry (task_started -> task_notification lifecycle)', () => {
     store().createNewSession('r1', '/test')
-    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
+    seed.taskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-abc', taskType: 'local_agent' })
     expect(store().sessions['r1'].activeTasks['tool-1']).toBeDefined()
 
-    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
+    seed.taskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
 
     expect(store().sessions['r1'].activeTasks['tool-1']).toBeUndefined()
   })
 
   it('leaves other activeTasks entries untouched', () => {
     store().createNewSession('r1', '/test')
-    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
-    store().setTaskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_agent' })
+    seed.taskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    seed.taskStarted('r1', { toolUseId: 'tool-2', taskId: 'task-b', taskType: 'local_agent' })
 
-    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
+    seed.taskNotification('r1', makeTaskNotification({ toolUseId: 'tool-1', status: 'completed' }))
 
     expect(store().sessions['r1'].activeTasks['tool-1']).toBeUndefined()
     expect(store().sessions['r1'].activeTasks['tool-2']).toEqual({
@@ -1126,8 +1131,8 @@ describe('addTaskNotification', () => {
 
   it('does not modify activeTasks when toolUseId is null', () => {
     store().createNewSession('r1', '/test')
-    store().setTaskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
-    store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
+    seed.taskStarted('r1', { toolUseId: 'tool-1', taskId: 'task-a', taskType: 'local_agent' })
+    seed.taskNotification('r1', makeTaskNotification({ toolUseId: null }))
     expect(store().sessions['r1'].activeTasks['tool-1']).toEqual({
       taskId: 'task-a',
       taskType: 'local_agent'
@@ -1138,75 +1143,29 @@ describe('addTaskNotification', () => {
 describe('setStatus', () => {
   it('updates status fields', () => {
     store().createNewSession('r1', '/test')
-    store().setStatus('r1', makeSessionStatus({ state: 'running', model: claudeModel('claude-opus-4-7') }))
+    seed.status('r1', makeSessionStatus({ state: 'running', model: claudeModel('claude-opus-4-7') }))
     expect(store().sessions['r1'].status.state).toBe('running')
     expect(store().sessions['r1'].status.model?.modelId).toBe('claude-opus-4-7')
   })
 
   it('mirrors a new cwd into the top-level session cwd', () => {
     store().createNewSession('r1', '/test/old')
-    store().setStatus('r1', makeSessionStatus({ state: 'running', cwd: '/test/new' }))
+    seed.status('r1', makeSessionStatus({ state: 'running', cwd: '/test/new' }))
     expect(store().sessions['r1'].cwd).toBe('/test/new')
   })
 
-  it('finalizes in-flight thinking when transitioning to idle (interrupt path)', () => {
-    store().createNewSession('r1', '/test')
-    const startedAt = Date.now() - 1500
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        r1: {
-          ...state.sessions.r1,
-          streamingThinking: 'half-finished thought...',
-          thinkingStartedAt: startedAt
-        }
-      }
-    }))
-    expect(store().sessions['r1'].thinkingStartedAt).toBe(startedAt)
+  // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
+  // is deleted (4c) — see base-session-thinking-span.test.ts.
 
-    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+  // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
+  // is deleted (4c) — see base-session-thinking-span.test.ts.
 
-    const s = store().sessions['r1']
-    expect(s.thinkingStartedAt).toBeNull()
-    expect(s.streamingThinking).toBe('')
-    expect(s.thinkingDurationMs).not.toBeNull()
-    expect(s.thinkingDurationMs!).toBeGreaterThanOrEqual(1500)
-  })
-
-  it('does not touch thinking state when transitioning to running', () => {
-    store().createNewSession('r1', '/test')
-    const startedAt = Date.now() - 200
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        r1: {
-          ...state.sessions.r1,
-          streamingThinking: 'mid-thought...',
-          thinkingStartedAt: startedAt
-        }
-      }
-    }))
-
-    store().setStatus('r1', makeSessionStatus({ state: 'running' }))
-
-    const s = store().sessions['r1']
-    expect(s.thinkingStartedAt).toBe(startedAt)
-    expect(s.streamingThinking).toBe('mid-thought...')
-    expect(s.thinkingDurationMs).toBeNull()
-  })
-
-  it('is a no-op for thinking state on idle when nothing is in-flight', () => {
-    store().createNewSession('r1', '/test')
-    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
-    const s = store().sessions['r1']
-    expect(s.thinkingStartedAt).toBeNull()
-    expect(s.streamingThinking).toBe('')
-    expect(s.thinkingDurationMs).toBeNull()
-  })
+  // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
+  // is deleted (4c) — see base-session-thinking-span.test.ts.
 
   it('clears foreground subagent streaming buffers on idle', () => {
     store().createNewSession('r1', '/test')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'asst-1',
@@ -1214,10 +1173,10 @@ describe('setStatus', () => {
         content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')]
       })
     )
-    store().appendSubagentStreamingThinking('r1', 'tool-fg', 'subagent thinking...')
-    store().appendSubagentStreamingText('r1', 'tool-fg', 'subagent answering...')
+    seed.subagentStreamThinking('r1', 'tool-fg', 'subagent thinking...')
+    seed.subagentStreamText('r1', 'tool-fg', 'subagent answering...')
 
-    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+    seed.status('r1', makeSessionStatus({ state: 'idle' }))
 
     const s = store().sessions['r1']
     expect(s.subagentStreamingThinking['tool-fg']).toBe('')
@@ -1226,7 +1185,7 @@ describe('setStatus', () => {
 
   it('preserves background subagent streaming buffers on idle', () => {
     store().createNewSession('r1', '/test')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'asst-1',
@@ -1248,8 +1207,9 @@ describe('setStatus', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
 
-    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+    seed.status('r1', makeSessionStatus({ state: 'idle' }))
 
     const s = store().sessions['r1']
     expect(s.subagentStreamingThinking['tool-bg']).toBe('still thinking...')
@@ -1258,7 +1218,7 @@ describe('setStatus', () => {
 
   it('clears foreground but not background subagent buffers when both are present', () => {
     store().createNewSession('r1', '/test')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'asst-1',
@@ -1269,10 +1229,10 @@ describe('setStatus', () => {
         ]
       })
     )
-    store().appendSubagentStreamingThinking('r1', 'tool-fg', 'fg thinking')
-    store().appendSubagentStreamingThinking('r1', 'tool-bg', 'bg thinking')
+    seed.subagentStreamThinking('r1', 'tool-fg', 'fg thinking')
+    seed.subagentStreamThinking('r1', 'tool-bg', 'bg thinking')
 
-    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+    seed.status('r1', makeSessionStatus({ state: 'idle' }))
 
     const s = store().sessions['r1']
     expect(s.subagentStreamingThinking['tool-fg']).toBe('')
@@ -1289,19 +1249,19 @@ describe('updateTaskProgress', () => {
       parentToolUseId: null,
       elapsedTimeSeconds: 5
     }
-    store().updateTaskProgress('r1', progress)
+    seed.taskProgress('r1', progress)
     expect(store().sessions['r1'].taskProgressMap['tool-1']).toEqual(progress)
   })
 
   it('updates existing progress entry', () => {
     store().createNewSession('r1', '/test')
-    store().updateTaskProgress('r1', {
+    seed.taskProgress('r1', {
       toolUseId: 'tool-1',
       toolName: 'Bash',
       parentToolUseId: null,
       elapsedTimeSeconds: 5
     })
-    store().updateTaskProgress('r1', {
+    seed.taskProgress('r1', {
       toolUseId: 'tool-1',
       toolName: 'Bash',
       parentToolUseId: null,
@@ -1315,7 +1275,7 @@ describe('addSubagentMessage', () => {
   it('appends new message to subagentMessages[toolUseId]', () => {
     store().createNewSession('r1', '/test')
     const msg = makeAssistantMessage('step 1')
-    store().addSubagentMessage('r1', 'tool-1', msg)
+    seed.subagentMessage('r1', 'tool-1', msg)
     expect(store().sessions['r1'].subagentMessages['tool-1']).toHaveLength(1)
   })
 
@@ -1326,28 +1286,23 @@ describe('addSubagentMessage', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'v1' }]
     })
-    store().addSubagentMessage('r1', 'tool-1', msg)
+    seed.subagentMessage('r1', 'tool-1', msg)
     const updated = makeChatMessage({
       id: 'shared-id',
       role: 'assistant',
       content: [{ type: 'text', text: 'v2' }]
     })
-    store().addSubagentMessage('r1', 'tool-1', updated)
+    seed.subagentMessage('r1', 'tool-1', updated)
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     expect(msgs).toHaveLength(1)
     expect(msgs[0].content[0]).toMatchObject({ text: 'v2' })
   })
 
-  it('clears streaming text and thinking for the toolUseId', () => {
-    store().createNewSession('r1', '/test')
-    store().appendSubagentStreamingText('r1', 'tool-1', 'partial...')
-    store().addSubagentMessage('r1', 'tool-1', makeAssistantMessage('done'))
-    expect(store().sessions['r1'].subagentStreamingText['tool-1']).toBe('')
-    expect(store().sessions['r1'].subagentStreamingThinking['tool-1']).toBe('')
-  })
+  // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
+  // is deleted (4c) — see base-session-thinking-span.test.ts.
 
   it('bootstraps session if it does not exist', () => {
-    store().addSubagentMessage('ghost', 'tool-1', makeAssistantMessage('hi'))
+    seed.subagentMessage('ghost', 'tool-1', makeAssistantMessage('hi'))
     expect(store().sessions['ghost']).toBeDefined()
   })
 })
@@ -1356,7 +1311,7 @@ describe('appendSubagentMessageBatch', () => {
   it('appends multiple messages in order', () => {
     store().createNewSession('r1', '/test')
     const msgs = [makeAssistantMessage('a'), makeAssistantMessage('b')]
-    store().appendSubagentMessageBatch('r1', 'tool-1', msgs)
+    seed.subagentMessageBatch('r1', 'tool-1', msgs)
     expect(store().sessions['r1'].subagentMessages['tool-1']).toHaveLength(2)
   })
 
@@ -1367,13 +1322,13 @@ describe('appendSubagentMessageBatch', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'old' }]
     })
-    store().addSubagentMessage('r1', 'tool-1', m1)
+    seed.subagentMessage('r1', 'tool-1', m1)
     const m2 = makeChatMessage({
       id: 'x',
       role: 'assistant',
       content: [{ type: 'text', text: 'new' }]
     })
-    store().appendSubagentMessageBatch('r1', 'tool-1', [m2])
+    seed.subagentMessageBatch('r1', 'tool-1', [m2])
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     expect(msgs).toHaveLength(1)
     expect(msgs[0].content[0]).toMatchObject({ text: 'new' })
@@ -1381,8 +1336,8 @@ describe('appendSubagentMessageBatch', () => {
 
   it('clears streaming text and thinking', () => {
     store().createNewSession('r1', '/test')
-    store().appendSubagentStreamingText('r1', 'tool-1', 'partial...')
-    store().appendSubagentMessageBatch('r1', 'tool-1', [makeAssistantMessage('done')])
+    seed.subagentStreamText('r1', 'tool-1', 'partial...')
+    seed.subagentMessageBatch('r1', 'tool-1', [makeAssistantMessage('done')])
     expect(store().sessions['r1'].subagentStreamingText['tool-1']).toBe('')
   })
 })
@@ -1395,8 +1350,8 @@ describe('appendSubagentToolResult', () => {
       role: 'assistant',
       content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-abc')]
     })
-    store().addSubagentMessage('r1', 'tool-1', toolMsg)
-    store().appendSubagentToolResult('r1', 'tool-1', 'tu-abc', 'file1\nfile2', false)
+    seed.subagentMessage('r1', 'tool-1', toolMsg)
+    seed.subagentToolResult('r1', 'tool-1', 'tu-abc', 'file1\nfile2', false)
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     const result = msgs[0].content.find((b) => b.type === 'tool_result')
     expect(result).toBeDefined()
@@ -1414,8 +1369,8 @@ describe('appendSubagentToolResult', () => {
       role: 'assistant',
       content: [makeToolUseBlock('Bash', {}, 'tu-xyz')]
     })
-    store().addSubagentMessage('r1', 'tool-1', toolMsg)
-    store().appendSubagentToolResult('r1', 'tool-1', 'tu-xyz', 'error: permission denied', true)
+    seed.subagentMessage('r1', 'tool-1', toolMsg)
+    seed.subagentToolResult('r1', 'tool-1', 'tu-xyz', 'error: permission denied', true)
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     const result = msgs[0].content.find((b) => b.type === 'tool_result')
     expect(result).toMatchObject({ isError: true })
@@ -1423,7 +1378,7 @@ describe('appendSubagentToolResult', () => {
 
   it('is a no-op when session does not exist', () => {
     expect(() =>
-      store().appendSubagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)
+      seed.subagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)
     ).not.toThrow()
   })
 })
@@ -1441,6 +1396,7 @@ describe('appendVoiceTranscript', () => {
         r1: { ...store().sessions['r1'], draftText: 'existing text' }
       }
     })
+    mirrorStoreIntoReplica()
     store().appendVoiceTranscript('r1', 'new words', true)
     expect(store().sessions['r1'].draftText).toBe('existing text new words')
   })
@@ -1453,6 +1409,7 @@ describe('appendVoiceTranscript', () => {
         r1: { ...store().sessions['r1'], draftText: 'existing text ' }
       }
     })
+    mirrorStoreIntoReplica()
     store().appendVoiceTranscript('r1', 'new words', true)
     expect(store().sessions['r1'].draftText).toBe('existing text new words')
   })
@@ -1484,6 +1441,7 @@ describe('appendVoiceTranscript', () => {
         r1: { ...store().sessions['r1'], draftText: 'typed so far' }
       }
     })
+    mirrorStoreIntoReplica()
     store().appendVoiceTranscript('r1', 'partial...', false)
     expect(store().sessions['r1'].draftText).toBe('typed so far')
   })
@@ -1827,47 +1785,47 @@ describe('clearWorktreeInfo', () => {
 
 describe('applyExternalSettings', () => {
   it('merges incoming settings with DEFAULT_SETTINGS', () => {
-    store().applyExternalSettings({ theme: 'light', expandToolCalls: false })
+    seed.settings({ theme: 'light', expandToolCalls: false })
     expect(store().settings.theme).toBe('light')
     expect(store().settings.expandToolCalls).toBe(false)
   })
 
   it('fills missing fields from DEFAULT_SETTINGS', () => {
-    store().applyExternalSettings({ theme: 'monokai' })
+    seed.settings({ theme: 'monokai' })
     // maxRecentSessions should still be the default value (5)
     expect(store().settings.maxRecentSessions).toBe(5)
   })
 
   it('does not call saveSettings (no disk write)', () => {
-    store().applyExternalSettings({ theme: 'light' })
+    seed.settings({ theme: 'light' })
     expect((window.api as any).saveSettings).not.toHaveBeenCalled()
   })
 })
 
 describe('applyExternalSessionConfig', () => {
   it('replaces recentSessionIds', () => {
-    store().applyExternalSessionConfig({ recentSessions: ['r1', 'r2'] })
+    seed.sessionsConfig({ recentSessions: ['r1', 'r2'] })
     expect(store().recentSessionIds).toEqual(['r1', 'r2'])
   })
 
   it('replaces pinnedSessionIds', () => {
-    store().applyExternalSessionConfig({ pinnedSessions: ['pinned-1'] })
+    seed.sessionsConfig({ pinnedSessions: ['pinned-1'] })
     expect(store().pinnedSessionIds).toEqual(['pinned-1'])
   })
 
   it('replaces customTitles', () => {
-    store().applyExternalSessionConfig({ customTitles: { r1: 'My Session' } })
+    seed.sessionsConfig({ customTitles: { r1: 'My Session' } })
     expect(store().customTitles['r1']).toBe('My Session')
   })
 
   it('replaces worktreeInfoMap', () => {
     const info = makeWorktreeInfo()
-    store().applyExternalSessionConfig({ worktreeInfoMap: { r1: info } })
+    seed.sessionsConfig({ worktreeInfoMap: { r1: info } })
     expect(store().worktreeInfoMap['r1']).toEqual(info)
   })
 
   it('uses empty defaults when fields are missing', () => {
-    store().applyExternalSessionConfig({})
+    seed.sessionsConfig({})
     expect(store().recentSessionIds).toEqual([])
     expect(store().pinnedSessionIds).toEqual([])
     expect(store().customTitles).toEqual({})
@@ -1875,7 +1833,7 @@ describe('applyExternalSessionConfig', () => {
   })
 
   it('does not call saveSessionConfig (no disk write)', () => {
-    store().applyExternalSessionConfig({ recentSessions: ['r1'] })
+    seed.sessionsConfig({ recentSessions: ['r1'] })
     expect((window.api as any).saveSessionConfig).not.toHaveBeenCalled()
   })
 })

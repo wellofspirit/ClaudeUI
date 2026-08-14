@@ -15,7 +15,6 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   useSessionStore,
   useActiveSession,
-  resolveRoutingId,
   type PerSessionState
 } from '../session-store'
 import {
@@ -28,10 +27,15 @@ import {
 } from '@test/factories/messages'
 import { claudeModel, type GitStatusData } from '../../../../shared/types'
 import { renderHook } from '@testing-library/react'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const store = () => useSessionStore.getState()
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   resetFactoryCounter()
 
   // Minimal window.api stub — some actions persist via saveSessionConfig, which
@@ -63,6 +67,7 @@ beforeEach(() => {
     terminalGroups: {},
     activeView: { type: 'chat' }
   })
+  mirrorStoreIntoReplica()
 })
 
 // ---------------------------------------------------------------------------
@@ -73,7 +78,7 @@ describe('addMessage', () => {
   it('appends a new message when the id has never been seen', () => {
     store().createNewSession('r1', '/p')
     const msg = makeChatMessage({ id: 'a-1', content: [{ type: 'text', text: 'hello' }] })
-    store().addMessage('r1', msg)
+    seed.message('r1', msg)
     expect(store().sessions['r1'].messages).toHaveLength(1)
     expect(store().sessions['r1'].messages[0].id).toBe('a-1')
   })
@@ -84,12 +89,12 @@ describe('addMessage', () => {
       id: 'a-1',
       content: [{ type: 'text', text: 'partial' }]
     })
-    store().addMessage('r1', first)
+    seed.message('r1', first)
     const second = makeChatMessage({
       id: 'a-1',
       content: [{ type: 'text', text: 'complete response' }]
     })
-    store().addMessage('r1', second)
+    seed.message('r1', second)
 
     const { messages } = store().sessions['r1']
     expect(messages).toHaveLength(1)
@@ -107,14 +112,14 @@ describe('addMessage', () => {
         makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1')
       ]
     })
-    store().addMessage('r1', partial)
+    seed.message('r1', partial)
 
     // Second partial replaces text but omits the tool_use — mergeContentBlocks should preserve it
     const nextChunk = makeChatMessage({
       id: 'a-1',
       content: [{ type: 'text', text: 'thinking through the problem' }]
     })
-    store().addMessage('r1', nextChunk)
+    seed.message('r1', nextChunk)
 
     const msg = store().sessions['r1'].messages[0]
     expect(store().sessions['r1'].messages).toHaveLength(1)
@@ -127,14 +132,14 @@ describe('addMessage', () => {
 
   it('clears streamingText on the target session when message is committed', () => {
     store().createNewSession('r1', '/p')
-    store().appendStreamingText('r1', 'streaming tokens...')
+    seed.streamText('r1', 'streaming tokens...')
     expect(store().sessions['r1'].streamingText).toBe('streaming tokens...')
-    store().addMessage('r1', makeAssistantMessage('final'))
+    seed.message('r1', makeAssistantMessage('final'))
     expect(store().sessions['r1'].streamingText).toBe('')
   })
 
   it('bootstraps a session when routingId is unknown (cross-window IPC scenario)', () => {
-    store().addMessage('ghost-session', makeAssistantMessage('hello'))
+    seed.message('ghost-session', makeAssistantMessage('hello'))
     expect(store().sessions['ghost-session']).toBeDefined()
     expect(store().sessions['ghost-session'].messages).toHaveLength(1)
   })
@@ -148,36 +153,32 @@ describe('appendStreamingText', () => {
   it('initializes streamingText from empty when first chunk arrives', () => {
     store().createNewSession('r1', '/p')
     expect(store().sessions['r1'].streamingText).toBe('')
-    store().appendStreamingText('r1', 'first chunk')
+    seed.streamText('r1', 'first chunk')
     expect(store().sessions['r1'].streamingText).toBe('first chunk')
   })
 
   it('appends subsequent chunks to the accumulator', () => {
     store().createNewSession('r1', '/p')
-    store().appendStreamingText('r1', 'hello ')
-    store().appendStreamingText('r1', 'world')
+    seed.streamText('r1', 'hello ')
+    seed.streamText('r1', 'world')
     expect(store().sessions['r1'].streamingText).toBe('hello world')
   })
 
-  it('closes any in-progress thinking block and records duration when text starts arriving', () => {
-    store().createNewSession('r1', '/p')
-    store().appendStreamingThinking('r1', 'pondering...')
-    expect(store().sessions['r1'].thinkingStartedAt).not.toBeNull()
-    store().appendStreamingText('r1', 'answer')
-    expect(store().sessions['r1'].streamingThinking).toBe('')
-    expect(store().sessions['r1'].thinkingStartedAt).toBeNull()
-    expect(store().sessions['r1'].thinkingDurationMs).toBeTypeOf('number')
-  })
+  // The thinking-span CLOCK moved to the emitter in 4b and the renderer's copy was
+  // deleted in 4c: durations arrive on the block (BaseSession.send stamps
+  // ChatMessage.thinkingDurationMs, the reducer moves it onto the block), so the
+  // behavior is pinned by main/providers/__tests__/base-session-thinking-span.test.ts
+  // and shared/sync/__tests__/reducer.unit.test.ts instead.
 })
 
 describe('appendStreamingThinking', () => {
   it('accumulates thinking text and stamps thinkingStartedAt on first chunk', () => {
     store().createNewSession('r1', '/p')
     const before = Date.now()
-    store().appendStreamingThinking('r1', 'step 1 ')
+    seed.streamThinking('r1', 'step 1 ')
     const startedAt = store().sessions['r1'].thinkingStartedAt!
     expect(startedAt).toBeGreaterThanOrEqual(before)
-    store().appendStreamingThinking('r1', 'step 2')
+    seed.streamThinking('r1', 'step 2')
     expect(store().sessions['r1'].streamingThinking).toBe('step 1 step 2')
     // Does not overwrite startedAt on subsequent chunks
     expect(store().sessions['r1'].thinkingStartedAt).toBe(startedAt)
@@ -196,9 +197,9 @@ describe('appendToolResult', () => {
       role: 'assistant',
       content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1')]
     })
-    store().addMessage('r1', msg)
+    seed.message('r1', msg)
 
-    store().appendToolResult('r1', 'tu-1', 'file1\nfile2', false)
+    seed.toolResult('r1', 'tu-1', 'file1\nfile2', false)
     const updated = store().sessions['r1'].messages[0]
     const results = updated.content.filter((b) => b.type === 'tool_result')
     expect(results).toHaveLength(1)
@@ -211,7 +212,7 @@ describe('appendToolResult', () => {
 
   it('attaches to the most recent assistant message when multiple tool_uses exist across messages', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'a-1',
@@ -219,7 +220,7 @@ describe('appendToolResult', () => {
         content: [makeToolUseBlock('Bash', {}, 'tu-old')]
       })
     )
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'a-2',
@@ -227,7 +228,7 @@ describe('appendToolResult', () => {
         content: [makeToolUseBlock('Read', {}, 'tu-new')]
       })
     )
-    store().appendToolResult('r1', 'tu-new', 'contents', false)
+    seed.toolResult('r1', 'tu-new', 'contents', false)
     // Only the newer message should have the tool_result
     expect(store().sessions['r1'].messages[0].content.some((b) => b.type === 'tool_result')).toBe(
       false
@@ -239,7 +240,7 @@ describe('appendToolResult', () => {
 
   it('marks isError=true when flagged', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'a-1',
@@ -247,14 +248,14 @@ describe('appendToolResult', () => {
         content: [makeToolUseBlock('Bash', {}, 'tu-err')]
       })
     )
-    store().appendToolResult('r1', 'tu-err', 'permission denied', true)
+    seed.toolResult('r1', 'tu-err', 'permission denied', true)
     const result = store().sessions['r1'].messages[0].content.find((b) => b.type === 'tool_result')
     expect(result).toMatchObject({ isError: true })
   })
 
   it('is a no-op when the toolUseId does not match any tool_use (does not throw, does not mutate)', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'a-1',
@@ -263,12 +264,12 @@ describe('appendToolResult', () => {
       })
     )
     const before = store().sessions['r1'].messages[0].content.length
-    expect(() => store().appendToolResult('r1', 'tu-ghost', 'x', false)).not.toThrow()
+    expect(() => seed.toolResult('r1', 'tu-ghost', 'x', false)).not.toThrow()
     expect(store().sessions['r1'].messages[0].content).toHaveLength(before)
   })
 
   it('is a no-op when the session does not exist', () => {
-    expect(() => store().appendToolResult('ghost', 'tu-1', 'r', false)).not.toThrow()
+    expect(() => seed.toolResult('ghost', 'tu-1', 'r', false)).not.toThrow()
     expect(store().sessions['ghost']).toBeUndefined()
   })
 
@@ -277,7 +278,7 @@ describe('appendToolResult', () => {
   // shows the first, so the duplicates grew the message invisibly.
   it('is idempotent: a replayed result for the same toolUseId does not duplicate the block', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'a-1',
@@ -286,11 +287,11 @@ describe('appendToolResult', () => {
       })
     )
 
-    store().appendToolResult('r1', 'tu-1', 'first', false)
+    seed.toolResult('r1', 'tu-1', 'first', false)
     const afterFirst = store().sessions['r1'].messages[0]
     // Replay of the very same event, plus a differing-payload replay.
-    store().appendToolResult('r1', 'tu-1', 'first', false)
-    store().appendToolResult('r1', 'tu-1', 'second', true)
+    seed.toolResult('r1', 'tu-1', 'first', false)
+    seed.toolResult('r1', 'tu-1', 'second', true)
 
     const msg = store().sessions['r1'].messages[0]
     const results = msg.content.filter((b) => b.type === 'tool_result')
@@ -303,7 +304,7 @@ describe('appendToolResult', () => {
 
   it('still attaches results for a DIFFERENT toolUseId in the same message', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage(
+    seed.message(
       'r1',
       makeChatMessage({
         id: 'a-1',
@@ -311,8 +312,8 @@ describe('appendToolResult', () => {
         content: [makeToolUseBlock('Bash', {}, 'tu-1'), makeToolUseBlock('Read', {}, 'tu-2')]
       })
     )
-    store().appendToolResult('r1', 'tu-1', 'one', false)
-    store().appendToolResult('r1', 'tu-2', 'two', false)
+    seed.toolResult('r1', 'tu-1', 'one', false)
+    seed.toolResult('r1', 'tu-2', 'two', false)
     const results = store().sessions['r1'].messages[0].content.filter(
       (b) => b.type === 'tool_result'
     )
@@ -326,18 +327,11 @@ describe('appendToolResult', () => {
 // ---------------------------------------------------------------------------
 
 describe('bounded module caches (RN8)', () => {
-  it('rekeyMap evicts the oldest mapping past its 200-entry cap', () => {
-    // Both targets exist as live sessions, so resolveRoutingId would happily
-    // resolve either — the ONLY reason the oldest fails to resolve is eviction.
-    store().createNewSession('new-0', '/p', false)
-    store().createNewSession('new-200', '/p', false)
-
-    // 201 distinct mappings → the first one falls off a 200-entry cap.
-    for (let i = 0; i <= 200; i++) store().rekeySession(`old-${i}`, `new-${i}`)
-
-    expect(resolveRoutingId('old-0')).toBe('old-0') // evicted → passthrough
-    expect(resolveRoutingId('old-200')).toBe('new-200') // newest → still mapped
-  })
+  // SyncCore phase 4c: the bounded `rekeyMap` + `resolveRoutingId` are DELETED. Core
+  // owns the rekey and re-keys its own registry in the same tick it emits the
+  // `session:status` that implies one, so every LATER event already carries the new
+  // id and there is no stale id left to resolve. The move itself is pinned by
+  // shared/sync/__tests__/reducer.unit.test.ts (rekeyCanonical).
 
   it('gitStatusCache evicts the oldest cwd past its 100-entry cap', () => {
     const status = (branch: string): GitStatusData => ({
@@ -377,55 +371,55 @@ describe('bounded module caches (RN8)', () => {
 describe('addPendingApproval / clearPendingApprovals', () => {
   it('addPendingApproval appends approvals keyed by requestId', () => {
     store().createNewSession('r1', '/p')
-    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-a' }))
-    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-b' }))
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-a' }))
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-b' }))
     const ids = store().sessions['r1'].pendingApprovals.map((a) => a.requestId)
     expect(ids).toEqual(['req-a', 'req-b'])
   })
 
   it('clearPendingApprovals empties the list for the targeted session', () => {
     store().createNewSession('r1', '/p')
-    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-1' }))
-    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-2' }))
-    store().clearPendingApprovals('r1')
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-1' }))
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-2' }))
+    seed.status('r1', { ...useSessionStore.getState().sessions['r1'].status, state: 'disconnected' })
     expect(store().sessions['r1'].pendingApprovals).toEqual([])
   })
 
   it('clearPendingApprovals on session A does not affect session B', () => {
     store().createNewSession('r1', '/p')
     store().createNewSession('r2', '/p2', false)
-    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-1' }))
-    store().addPendingApproval('r2', makePendingApproval({ requestId: 'req-2' }))
-    store().clearPendingApprovals('r1')
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-1' }))
+    seed.approvalRequest('r2', makePendingApproval({ requestId: 'req-2' }))
+    seed.status('r1', { ...useSessionStore.getState().sessions['r1'].status, state: 'disconnected' })
     expect(store().sessions['r1'].pendingApprovals).toEqual([])
     expect(store().sessions['r2'].pendingApprovals).toHaveLength(1)
   })
 
   it('removePendingApprovalByToolUse removes only the approval with the matching tool_use_id', () => {
     store().createNewSession('r1', '/p')
-    store().addPendingApproval(
+    seed.approvalRequest(
       'r1',
       makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' })
     )
-    store().addPendingApproval(
+    seed.approvalRequest(
       'r1',
       makePendingApproval({ requestId: 'req-2', toolUseId: 'toolu_b' })
     )
     // An older-style approval with no toolUseId should be unaffected.
-    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-3' }))
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-3' }))
 
-    store().removePendingApprovalByToolUse('r1', 'toolu_a')
+    seed.toolResult('r1', 'toolu_a', '')
     const remaining = store().sessions['r1'].pendingApprovals.map((a) => a.requestId)
     expect(remaining).toEqual(['req-2', 'req-3'])
   })
 
   it('removePendingApprovalByToolUse is a no-op when no approval carries that id', () => {
     store().createNewSession('r1', '/p')
-    store().addPendingApproval(
+    seed.approvalRequest(
       'r1',
       makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' })
     )
-    store().removePendingApprovalByToolUse('r1', 'toolu_unknown')
+    seed.toolResult('r1', 'toolu_unknown', '')
     expect(store().sessions['r1'].pendingApprovals.map((a) => a.requestId)).toEqual(['req-1'])
   })
 })
@@ -436,32 +430,42 @@ describe('addPendingApproval / clearPendingApprovals', () => {
 
 describe('rekeySession (unit-level)', () => {
   it('is a no-op when the old routingId does not exist (does not create a ghost entry)', () => {
-    store().rekeySession('missing', 'new-id')
+    seed.rekey('missing', 'new-id')
     expect(store().sessions['new-id']).toBeUndefined()
     expect(store().sessions['missing']).toBeUndefined()
   })
 
-  it('preserves session data byte-for-byte under the new id', () => {
+  it('preserves session data under the new id', () => {
     store().createNewSession('old', '/cwd-x')
-    store().addMessage('old', makeAssistantMessage('hi'))
+    seed.message('old', makeAssistantMessage('hi'))
     const before = store().sessions['old']
-    store().rekeySession('old', 'new')
+    seed.rekey('old', 'new')
     expect(store().sessions['old']).toBeUndefined()
-    // Same reference — no deep copying
-    expect(store().sessions['new']).toBe(before)
+    // Deep equality, not identity: the reducer moves the CANONICAL entry and the
+    // projection rebuilds the store one from it, so the reference changes. What
+    // must not change is the content — the old action's "same reference" was an
+    // implementation detail, and the property it stood for is this.
+    // Field-wise, not whole-object: the status event that CAUSES the rekey also
+    // lands (that is what a rekey is), so `status.sessionId` legitimately differs.
+    const after = store().sessions['new']
+    expect(after.messages).toEqual(before.messages)
+    expect(after.cwd).toBe(before.cwd)
+    expect(after.selectedEngineId).toBe(before.selectedEngineId)
+    expect(after.selectedModel).toBe(before.selectedModel)
+    expect(after.permissionMode).toBe(before.permissionMode)
   })
 
   it('updates activeSessionId when the rekeyed session was active', () => {
     store().createNewSession('old', '/p')
     expect(store().activeSessionId).toBe('old')
-    store().rekeySession('old', 'new')
+    seed.rekey('old', 'new')
     expect(store().activeSessionId).toBe('new')
   })
 
   it('does not touch activeSessionId when a non-active session is rekeyed', () => {
     store().createNewSession('active-one', '/p')
     store().createNewSession('background', '/q', false)
-    store().rekeySession('background', 'background-new')
+    seed.rekey('background', 'background-new')
     expect(store().activeSessionId).toBe('active-one')
   })
 })
@@ -475,7 +479,7 @@ describe('multi-session isolation', () => {
     store().createNewSession('A', '/a')
     store().createNewSession('B', '/b', false)
     const bBefore = store().sessions['B']
-    store().addMessage('A', makeAssistantMessage('for A'))
+    seed.message('A', makeAssistantMessage('for A'))
     expect(store().sessions['B']).toBe(bBefore) // same reference
     expect(store().sessions['A'].messages).toHaveLength(1)
     expect(store().sessions['B'].messages).toHaveLength(0)
@@ -484,8 +488,8 @@ describe('multi-session isolation', () => {
   it('appendStreamingText on A does not leak into B', () => {
     store().createNewSession('A', '/a')
     store().createNewSession('B', '/b', false)
-    store().appendStreamingText('A', 'a tokens')
-    store().appendStreamingText('B', 'b tokens')
+    seed.streamText('A', 'a tokens')
+    seed.streamText('B', 'b tokens')
     expect(store().sessions['A'].streamingText).toBe('a tokens')
     expect(store().sessions['B'].streamingText).toBe('b tokens')
   })
@@ -623,11 +627,11 @@ describe('retractMessages', () => {
 
   it('removes exactly the listed messages and clears streaming state', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage('r1', msg('m1'))
-    store().addMessage('r1', msg('m2'))
-    store().appendStreamingText('r1', 'refused partial text')
+    seed.message('r1', msg('m1'))
+    seed.message('r1', msg('m2'))
+    seed.streamText('r1', 'refused partial text')
 
-    store().retractMessages('r1', ['m1'])
+    seed.retract('r1', ['m1'])
 
     const s = store().sessions['r1']
     expect(s.messages.map((m) => m.id)).toEqual(['m2'])
@@ -637,10 +641,10 @@ describe('retractMessages', () => {
 
   it('unknown ids are a no-op for messages but still clear streaming', () => {
     store().createNewSession('r1', '/p')
-    store().addMessage('r1', msg('m1'))
-    store().appendStreamingText('r1', 'stale partial')
+    seed.message('r1', msg('m1'))
+    seed.streamText('r1', 'stale partial')
 
-    store().retractMessages('r1', [])
+    seed.retract('r1', [])
 
     const s = store().sessions['r1']
     expect(s.messages.map((m) => m.id)).toEqual(['m1'])
@@ -683,12 +687,14 @@ describe('derived selector safety', () => {
 
   it('useActiveSession returns EMPTY_SESSION_STATE slice when activeSessionId is null', () => {
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
     const { result } = renderHook(() => useActiveSession((s: PerSessionState) => s.messages))
     expect(result.current).toEqual([])
   })
 
   it('useActiveSession returns EMPTY_SESSION_STATE slice when activeSessionId points at a deleted session', () => {
     useSessionStore.setState({ activeSessionId: 'ghost', sessions: {} })
+    mirrorStoreIntoReplica()
     const { result } = renderHook(() => useActiveSession((s: PerSessionState) => s.streamingText))
     expect(result.current).toBe('')
   })
@@ -699,7 +705,7 @@ describe('derived selector safety', () => {
       useActiveSession((s: PerSessionState) => s.streamingText)
     )
     expect(result.current).toBe('')
-    store().appendStreamingText('r1', 'stream')
+    seed.streamText('r1', 'stream')
     rerender()
     expect(result.current).toBe('stream')
   })
@@ -734,7 +740,7 @@ describe('createNewSession defaults', () => {
 describe('clearConversation', () => {
   it('resets per-session state but preserves cwd and sdkActive', () => {
     store().createNewSession('r1', '/kept')
-    store().addMessage('r1', makeAssistantMessage('hi'))
+    seed.message('r1', makeAssistantMessage('hi'))
     store().addError('r1', 'e')
     useSessionStore.setState((st) => ({
       sessions: {
@@ -742,6 +748,7 @@ describe('clearConversation', () => {
         r1: { ...st.sessions['r1'], sdkActive: true }
       }
     }))
+    mirrorStoreIntoReplica()
     store().clearConversation('r1')
     const s = store().sessions['r1']
     expect(s.cwd).toBe('/kept')
@@ -762,54 +769,37 @@ describe('clearConversation', () => {
 // ---------------------------------------------------------------------------
 
 describe('changePermissionMode', () => {
-  it('pre-spawn: optimistically updates the store AND calls the api for auto', async () => {
+  // SyncCore phase 4c deleted BOTH halves of the optimism: the pre-spawn "update
+  // the store directly" and the `.catch` revert. They existed because the mode the
+  // pill showed was this client's guess — skipped for the one case a live session
+  // could reject (`auto`), un-guessed when the invoke failed. `permissionMode` is
+  // SEALED now and every path emits `session:permission-mode`: the live session's
+  // own setter (including the reverted mode the engine chose) and, pre-spawn where
+  // there is no session object, `handlers-core.setPermissionMode`'s echo.
+  it('is invoke-only: the pill does not move until the event says so', () => {
     store().createNewSession('r1', '/p')
-    expect(store().sessions['r1'].sdkActive).toBe(false)
-
-    store().changePermissionMode('r1', 'auto')
-
-    expect(store().sessions['r1'].permissionMode).toBe('auto')
-    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'auto')
-  })
-
-  it('live session: does NOT optimistically update for auto, but still calls the api', async () => {
-    store().createNewSession('r1', '/p')
-    useSessionStore.setState((st) => ({
-      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
-    }))
-
-    store().changePermissionMode('r1', 'auto')
-
-    // Main process owns the broadcast for a live session's auto rejection —
-    // the store must NOT jump ahead of it.
     expect(store().sessions['r1'].permissionMode).toBe('default')
-    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'auto')
-  })
-
-  it('live session: DOES optimistically update for a non-auto mode', () => {
-    store().createNewSession('r1', '/p')
-    useSessionStore.setState((st) => ({
-      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
-    }))
 
     store().changePermissionMode('r1', 'acceptEdits')
 
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'acceptEdits')
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+
+    // ...and the echo is what moves it.
+    seed.permissionMode('r1', 'acceptEdits')
     expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
   })
 
-  it('reverts to the previous mode when the api call rejects', async () => {
+  it('a rejected invoke leaves the mode exactly where the engine last put it', async () => {
     store().createNewSession('r1', '/p')
-    expect(store().sessions['r1'].permissionMode).toBe('default')
+    seed.permissionMode('r1', 'plan')
     ;(window.api.setPermissionMode as any).mockRejectedValueOnce(new Error('rejected by SDK'))
 
-    store().changePermissionMode('r1', 'acceptEdits')
-    // Optimistic update applies immediately (non-auto mode).
-    expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
-
-    // Let the rejected promise's .catch() handler run.
+    store().changePermissionMode('r1', 'auto')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(store().sessions['r1'].permissionMode).toBe('default')
+    // No local revert to undo, because there was no local apply to begin with.
+    expect(store().sessions['r1'].permissionMode).toBe('plan')
   })
 })
 
@@ -821,19 +811,21 @@ describe('changePermissionMode', () => {
 describe('setStatus cwd follow-through', () => {
   it('updates session.cwd when status.cwd differs from current', () => {
     store().createNewSession('r1', '/original')
-    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/worktree/branch' }))
-    expect(store().sessions['r1'].cwd).toBe('/worktree/branch')
+    // The status carries a stable sessionId, so the reducer ALSO rekeys — the
+    // entry moves to 'sdk-id' in the same fold (SyncCore phase 4c).
+    seed.status('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/worktree/branch' }))
+    expect(store().sessions['sdk-id'].cwd).toBe('/worktree/branch')
   })
 
   it('leaves cwd untouched when status.cwd matches current', () => {
     store().createNewSession('r1', '/same')
-    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/same' }))
-    expect(store().sessions['r1'].cwd).toBe('/same')
+    seed.status('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/same' }))
+    expect(store().sessions['sdk-id'].cwd).toBe('/same')
   })
 
   it('leaves cwd untouched when status.cwd is null', () => {
     store().createNewSession('r1', '/keep')
-    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }))
+    seed.status('r1', makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }))
     expect(store().sessions['r1'].cwd).toBe('/keep')
   })
 })

@@ -1,235 +1,120 @@
 /**
- * Layer 3: E2E — SyncCore phase 4a shadow parity.
+ * Layer 3: E2E - SyncCore phase 4c hydration parity.
  *
- * ONE event stream, TWO interpretations: the main-process emission funnel
- * (`emitEvent` → ring → `applyEvent` → canonical) and the renderer's Zustand
- * store, wired exactly as `useClaudeEvents` wires it. At idle they must agree.
+ * ONE event stream, ONE interpretation. Until 4c this file compared the main
+ * process's fold (`emitEvent` -> ring -> `applyEvent` -> canonical) against the
+ * renderer's own ~40 handlers, and the SHADOW COMPARATOR (`main/sync/shadow.ts`)
+ * existed to measure the gap between two implementations of one contract. The
+ * renderer folds the same reducer now, so there is no second implementation left
+ * to diff -- the comparator, `CLIENT_WRITTEN_FIELDS` and `__getRemoteState` are all
+ * deleted, and what this file asserts instead is the property that actually
+ * matters after the cutover:
  *
- * This is the test the whole shadow stage exists to make possible. 4a duplicates
- * the event-handling logic on purpose; without a parity check the duplication is
- * just two chances to be wrong, and 4b's cutover (canonical becomes the state of
- * record for `sync-full`) would change what every client sees with no warning.
+ *   a client that CRASHES and re-hydrates from `core.getSnapshot()` holds exactly
+ *   the state a client that watched the whole stream holds.
  *
- * The fields the comparator is told to ignore are listed — with reasons — in
- * {@link IGNORED_FIELDS}: each is state the renderer still WRITES locally rather
- * than deriving from the stream, which is 4c's problem, not a parity bug.
+ * That is the client-side half of the phase-4 snapshot invariant (its server-side
+ * half lives in `main/sync/__tests__/snapshot-invariant.unit.test.ts`), and it is
+ * checked here through the REAL chain: `emitEvent` -> funnel -> subscriber -> the
+ * renderer's `SyncClient` -> the replica's tap -> the store.
+ *
+ * The non-vacuity checks are kept deliberately: the 4b bug this file caught was a
+ * snapshot field (`metering`) that nothing read back on hydration, and a test that
+ * compares two empty objects would have passed.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import {
-  useSessionStore,
-  getRemoteStateSnapshot,
-  buildTodosFromMessages,
-  buildSentFilesFromMessages,
-  resolveRoutingId
-} from '../../renderer/src/stores/session-store'
+import { useSessionStore } from '../../renderer/src/stores/session-store'
+import { getReplicaState, hydrateReplica } from '@renderer/stores/replica'
 import { syncCore, emitEvent, addSyncSubscriber } from '../../main/services/sync-host'
 import { rekeyShim } from '../../main/ipc/handlers-core'
-import { compareShadow, formatShadowDiff, CLIENT_WRITTEN_FIELDS } from '../../main/sync/shadow'
+import { toSnapshot, type CanonicalState } from '../../shared/sync/state'
 import type { FullStateSnapshot } from '../../shared/remote-protocol'
-import type {
-  ChatMessage,
-  PendingApproval,
-  SessionStatus,
-  StreamDelta,
-  QueuedItem,
-  TaskNotification,
-  StatusLineData,
-  MeteringSnapshot
-} from '../../shared/types'
+import type { ChatMessage, SessionStatus, QueuedItem } from '../../shared/types'
+import { mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let app: TestApp
-let cleanups: Array<() => void>
 /** Unsubscribes the renderer replica from the funnel's fan-out. */
 let unsubscribeSync: (() => void) | null = null
 
 /**
- * Divergences 4a deliberately does not close. Every one is state the RENDERER
- * writes from a local action rather than from the event stream, so canonical
- * cannot match it at an arbitrary instant:
+ * App-level fields the replica legitimately holds a different value for.
  *
- *  - `activeSessionId` — selection is per-client view state (ADR-041).
- *  - `recentSessionIds` / `pinnedSessionIds` / `customTitles` / `sessionEngines` /
- *    `hiddenSessions` / `hiddenProjects` — written by `createNewSession`,
- *    `addUserMessage`, `setCustomTitle`, … and reaching core only through the
- *    `config:sessions-changed` file-watcher loop.
- *  - `worktreeInfoMap` — the renderer PARSES a tool_result to derive it
- *    (`useClaudeEvents`), which is derive-and-store in a client: the very pattern
- *    item 11(e)'s rule bans. Moving it into the reducer is 4b/4c work.
- *  - `directories` — sourced from a query, not the stream.
+ * `activeSessionId` is per-client VIEW state (ADR-041) - core serves `null` on
+ * purpose and the client resolves its own. The registry-config fields are
+ * client-ORIGINATED: `createNewSession` applies them to the replica and persists
+ * through `config:save-sessions`, whose echo reaches every client - but in this
+ * harness that echo is injected straight into the renderer's `SyncClient` rather
+ * than through `syncCore`, so canonical never sees it. In production it does (the
+ * desktop save path emits through the funnel, `handlers-core.saveSessions`), which
+ * is why these are masked here and NOT a recorded product gap. `directories` is a
+ * query result core refreshes out-of-band (`SyncCore.setDirectories`).
  */
-// ONE definition, shared with the dev shadow watch — see CLIENT_WRITTEN_FIELDS's
-// doc comment in main/sync/shadow.ts for why the sets must not be able to drift.
-const IGNORED_FIELDS = CLIENT_WRITTEN_FIELDS
+const VIEW_OR_CLIENT_ORIGINATED = new Set<string>([
+  'activeSessionId',
+  'recentSessionIds',
+  'pinnedSessionIds',
+  'customTitles',
+  'sessionEngines',
+  'hiddenSessions',
+  'hiddenProjects',
+  'worktreeInfoMap',
+  'directories',
+  'settings',
+  'autoModeDisabledBySettings'
+])
+
 
 /**
- * The renderer half of the comparison: `useClaudeEvents`'s handlers, verbatim in
- * behavior (including the derived-state rebuild triggers and the client-side
- * rekey), reading from the bridge the delivery adapter writes to.
+ * Diff canonical state against the replica's, field by field.
+ *
+ * Deep JSON equality over the WHOLE `CanonicalState`, with no normalization: the
+ * retired comparator had to strip thinking-block durations and user-message
+ * identity because the renderer minted its own, and it no longer does.
  */
-function wireRendererHandlers(app: TestApp): Array<() => void> {
-  const list: Array<() => void> = []
-  const store = useSessionStore.getState
+function parityDiff(): string[] {
+  const canonical = syncCore.getCanonicalState()
+  const replica = getReplicaState()
+  const diffs: string[] = []
 
-  function on<T extends (...args: never[]) => void>(channel: string, cb: T): void {
-    // The sync client, not the IPC bridge (SyncCore phase 4c): `emitEvent` →
-    // funnel → subscriber → this client is the SAME chain production uses, which
-    // is what keeps this an end-to-end parity check rather than two hand-fed
-    // state machines.
-    list.push(app.onSync(channel, cb as unknown as (...args: unknown[]) => void))
+  const appKeys = new Set([...Object.keys(canonical), ...Object.keys(replica)])
+  for (const key of appKeys) {
+    if (key === 'sessions' || VIEW_OR_CLIENT_ORIGINATED.has(key)) continue
+    const k = key as keyof CanonicalState
+    if (!jsonEq(canonical[k], replica[k])) diffs.push(key)
   }
 
-  const rebuildTodos = (routingId: string): void => {
-    const session = store().sessions[routingId]
-    if (!session) return
-    const todos = buildTodosFromMessages(session.messages)
-    if (todos) store().setTodos(routingId, todos)
+  const ids = new Set([...Object.keys(canonical.sessions), ...Object.keys(replica.sessions)])
+  for (const id of ids) {
+    const c = canonical.sessions[id]
+    const r = replica.sessions[id]
+    if (!c || !r) {
+      diffs.push(`${id}: ${c ? 'missing-in-replica' : 'missing-in-canonical'}`)
+      continue
+    }
+    // The renderer strips a cold session's transcript to bound its heap; canonical
+    // deliberately does not evict (docs/architecture/sync-channels.md §Eviction).
+    // A cache decision, not drift - a reselect re-hydrates it from disk.
+    if (r.messages.length === 0 && c.messages.length > 0) continue
+    for (const key of Object.keys(c)) {
+      // `seeded` is core-internal and not on the wire; the catalogs live app-level
+      // on both sides and are compared above.
+      if (key === 'seeded' || key === 'slashCommands' || key === 'sdkSkillNames') continue
+      const k = key as keyof typeof c
+      if (!jsonEq(c[k], r[k])) diffs.push(`${id}.${key}`)
+    }
   }
-  const rebuildSentFiles = (routingId: string): void => {
-    const session = store().sessions[routingId]
-    if (!session) return
-    const sentFiles = buildSentFilesFromMessages(session.messages)
-    if (sentFiles) store().setSentFiles(routingId, sentFiles)
-  }
-  const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
-
-  on('session:created', (routingId: string, data: { cwd: string }) => {
-    if (!store().sessions[routingId]) store().createNewSession(routingId, data.cwd, false)
-    store().markSdkActive(routingId)
-  })
-
-  on('session:user-message', (routingId: string, data: { prompt: string }) => {
-    const id = resolveRoutingId(routingId)
-    if (!store().sessions[id]) return
-    store().addUserMessage(id, `msg-${Math.random().toString(16).slice(2)}`, data.prompt)
-  })
-
-  on('session:message', (routingId: string, msg: ChatMessage) => {
-    const id = resolveRoutingId(routingId)
-    store().addMessage(id, msg)
-    if (msg.content.some((b) => b.type === 'tool_use' && TASK_TOOLS.has(b.toolName))) {
-      rebuildTodos(id)
-    }
-    if (msg.content.some((b) => b.type === 'tool_use' && b.toolName === 'SendUserFile')) {
-      rebuildSentFiles(id)
-    }
-  })
-
-  on('session:stream', (routingId: string, data: StreamDelta) => {
-    const id = resolveRoutingId(routingId)
-    if (data.type === 'thinking') store().appendStreamingThinking(id, data.text)
-    else store().appendStreamingText(id, data.text)
-  })
-
-  on(
-    'session:tool-result',
-    (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => {
-      const id = resolveRoutingId(routingId)
-      store().appendToolResult(id, data.toolUseId, data.result, data.isError)
-      if (data.toolUseId) store().removePendingApprovalByToolUse(id, data.toolUseId)
-      if (!data.isError) rebuildTodos(id)
-      if (store().sessions[id]?.sentFiles.some((f) => f.toolUseId === data.toolUseId)) {
-        rebuildSentFiles(id)
-      }
-    }
-  )
-
-  on('session:approval-request', (routingId: string, approval: PendingApproval) => {
-    store().addPendingApproval(resolveRoutingId(routingId), approval)
-  })
-  on('session:approval-dismiss', (routingId: string, data: { requestId: string }) => {
-    store().removePendingApproval(resolveRoutingId(routingId), data.requestId)
-  })
-
-  on('session:status', (routingId: string, status: SessionStatus) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      if (store().sessions[routingId]) {
-        store().rekeySession(routingId, status.sessionId)
-        effective = status.sessionId
-      }
-    }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-  })
-
-  on('session:result', (routingId: string) => {
-    const id = resolveRoutingId(routingId)
-    const session = store().sessions[id]
-    if (
-      session &&
-      session.todos.length > 0 &&
-      session.todos.every((t) => t.status === 'completed')
-    ) {
-      store().setTodos(id, [])
-    }
-  })
-
-  on('session:queue-changed', (routingId: string, data: { items: QueuedItem[] }) => {
-    store().setQueueState(resolveRoutingId(routingId), data.items)
-  })
-  on('session:permission-mode', (routingId: string, mode: string) => {
-    store().setPermissionMode(mode as never, resolveRoutingId(routingId))
-  })
-  on(
-    'session:config-changed',
-    (
-      routingId: string,
-      patch: {
-        model?: string
-        effort?: string
-        thinkingMode?: string
-        reasoningVariant?: string | null
-      }
-    ) => {
-      store().applyRemoteSessionConfig(resolveRoutingId(routingId), patch)
-    }
-  )
-  on('session:status-line', (routingId: string, data: StatusLineData) => {
-    store().setStatusLine(resolveRoutingId(routingId), data)
-  })
-  on('session:metering', (routingId: string, data: MeteringSnapshot) => {
-    store().setMetering(resolveRoutingId(routingId), data)
-  })
-  on(
-    'session:task-started',
-    (routingId: string, data: { toolUseId: string; taskId: string; taskType: string }) => {
-      store().setTaskStarted(resolveRoutingId(routingId), data as never)
-    }
-  )
-  on('session:task-notification', (routingId: string, data: TaskNotification) => {
-    store().addTaskNotification(resolveRoutingId(routingId), data)
-  })
-  // Cross-instance registry config (useClaudeEvents.onSessionConfigChanged).
-  on('config:sessions-changed', (config: Record<string, unknown>) => {
-    store().applyExternalSessionConfig(config as never)
-  })
-
-  return list
+  return diffs
 }
 
-/** The canonical/renderer diff, with the 4a-sanctioned masks applied. */
-function parityDiff(): ReturnType<typeof compareShadow> {
-  const canonical = syncCore.getSnapshot()
-  const renderer = getRemoteStateSnapshot() as unknown as FullStateSnapshot
-  const state = syncCore.getCanonicalState()
-  const unseeded = new Set(
-    Object.entries(state.sessions)
-      .filter(([, s]) => !s.seeded)
-      .map(([id]) => id)
-  )
-  return compareShadow(canonical, renderer, { unseeded, ignoreFields: IGNORED_FIELDS })
+function jsonEq(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 }
 
 function expectParity(): void {
   const diffs = parityDiff()
-  expect(diffs.length, `shadow divergence:\n${formatShadowDiff(diffs).join('\n')}`).toBe(0)
+  expect(diffs, `canonical/replica divergence: ${diffs.join(', ')}`).toEqual([])
 }
 
 function makeStatus(overrides: Partial<SessionStatus> = {}): SessionStatus {
@@ -258,11 +143,12 @@ beforeEach(async () => {
     sessionEngines: {},
     slashCommands: [],
     sdkSkillNames: [],
-    // `applyRemoteSnapshot` derives this from the snapshot's settings (ADR-050),
+    // The replica derives this from the snapshot's settings (ADR-050),
     // and `createNewSession` seeds a new session's mode from it — so a test that
     // hydrates a snapshot would otherwise change the NEXT test's baseline mode.
     defaultPermissionMode: 'default'
   })
+  mirrorStoreIntoReplica()
   syncCore.resetCanonicalForTests()
   // The renderer replica registers as a SUBSCRIBER (SyncCore phase 4c), so
   // `emitEvent` drives the SAME chain production uses — funnel → ring + canonical
@@ -272,17 +158,15 @@ beforeEach(async () => {
   unsubscribeSync = addSyncSubscriber((seq, channel, args) => {
     app.syncClient.receiveEvent({ seq, channel, args })
   })
-  cleanups = wireRendererHandlers(app)
 })
 
 afterEach(() => {
-  cleanups.forEach((fn) => fn())
   unsubscribeSync?.()
   unsubscribeSync = null
   app.teardown()
 })
 
-describe('E2E: SyncCore shadow parity', () => {
+describe('E2E: SyncCore hydration parity', () => {
   it('a full turn (stream → tools → todos → result) folds identically on both sides', () => {
     emitEvent('session:created', ['rid-1', { cwd: '/project' }])
     emitEvent('session:status', ['rid-1', makeStatus({ sessionId: 'rid-1' })])
@@ -357,29 +241,28 @@ describe('E2E: SyncCore shadow parity', () => {
 
     expect(syncCore.getSnapshot().sessions['rid-1'].metering).toEqual(metering)
     expect(
-      (getRemoteStateSnapshot() as unknown as FullStateSnapshot).sessions['rid-1'].metering
+      toSnapshot(getReplicaState(), syncCore.currentSeq()).sessions['rid-1'].metering
     ).toEqual(metering)
     expectParity()
   })
 
   it('a mid-stream rekey with duplicate client rekey invokes stays in parity', async () => {
-    // Core owns the rekey (item 7). Every client STILL invokes `session:rekey`
-    // until 4c removes those call sites, so the shim has to absorb N duplicates
-    // as no-ops. The registry it consults has already been re-keyed by core in the
-    // same tick as the append, which is why `get(oldId)` misses.
+    // Core owns the rekey (item 7), and as of 4c NO client invokes `session:rekey`
+    // any more - the handler survives only as a shim for cached phone bundles. It
+    // still has to absorb N duplicates as no-ops: the registry it consults has
+    // already been re-keyed by core in the same tick as the append, which is why
+    // `get(oldId)` misses.
     const shimResults: Array<{ ok: true; applied: boolean }> = []
-    app.bridge.ipcMain.handle('session:rekey', (_e: unknown, oldId: string, newId: string) => {
-      const result = rekeyShim({ get: () => undefined } as never, oldId, newId)
-      shimResults.push(result)
-      return result
-    })
 
     emitEvent('session:created', ['temp-1', { cwd: '/project' }])
     emitEvent('session:stream', ['temp-1', { type: 'text', text: 'Partial ' }])
 
     emitEvent('session:status', ['temp-1', makeStatus({ sessionId: 'sdk-9' })])
-    await app.api.rekeySession('temp-1', 'sdk-9')
-    await app.api.rekeySession('temp-1', 'sdk-9')
+    // The CLIENT no longer invokes `session:rekey` at all (4c) - core owns the
+    // move. The shim stays reachable for cached phone bundles, so drive it
+    // directly, twice, to prove the duplicate is a no-op.
+    shimResults.push(rekeyShim({ get: () => undefined } as never, 'temp-1', 'sdk-9'))
+    shimResults.push(rekeyShim({ get: () => undefined } as never, 'temp-1', 'sdk-9'))
     // Two invokes, ZERO extra applications — the duplicates are absorbed.
     expect(shimResults).toEqual([
       { ok: true, applied: false },
@@ -441,6 +324,7 @@ describe('E2E: SyncCore shadow parity', () => {
         'rid-1': { ...s.sessions['rid-1'], evicted: true, isHistorical: true, messages: [] }
       }
     }))
+    mirrorStoreIntoReplica()
     expectParity()
 
     // Rehydrate from disk (what loadHistoricalSession does) → strictly compared again.
@@ -456,6 +340,7 @@ describe('E2E: SyncCore shadow parity', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     expectParity()
   })
 
@@ -478,7 +363,7 @@ describe('E2E: SyncCore shadow parity', () => {
 
   it('a FRESH store hydrated from core.getSnapshot() matches the live renderer store', () => {
     // This is the cutover itself, end to end. The web client's only hydration
-    // path is `applyRemoteSnapshot(sync-full.state)`, and `sync-full.state` is now
+    // path is `hydrateReplica(sync-full.state)`, and `sync-full.state` is now
     // `core.getSnapshot()`. So: drive a full turn, then throw the store away and
     // rebuild it from canonical alone — the way a phone that reconnects does —
     // and require the rebuild to match what the client that stayed connected has.
@@ -489,6 +374,7 @@ describe('E2E: SyncCore shadow parity', () => {
     // it because `sync-full` carries it (SyncCore.setDirectories, phase 4b A3).
     syncCore.setDirectories(DIRECTORIES as never)
     useSessionStore.setState({ directories: DIRECTORIES as never })
+    mirrorStoreIntoReplica()
 
     emitEvent('session:created', ['rid-1', { cwd: '/project' }])
     emitEvent('session:status', ['rid-1', makeStatus({ sessionId: 'rid-1' })])
@@ -564,7 +450,7 @@ describe('E2E: SyncCore shadow parity', () => {
       [{ recentSessions: ['rid-1'], pinnedSessions: [], customTitles: { 'rid-1': 'Shipping' } }])
     expectParity()
 
-    const live = getRemoteStateSnapshot() as unknown as FullStateSnapshot
+    const live = toSnapshot(getReplicaState(), syncCore.currentSeq())
     const canonical = syncCore.getSnapshot()
 
     // Throw the replica away and rebuild it from the snapshot alone.
@@ -580,22 +466,23 @@ describe('E2E: SyncCore shadow parity', () => {
       hiddenSessionIds: [],
       hiddenProjectKeys: []
     })
-    useSessionStore.getState().applyRemoteSnapshot(canonical, false)
-    const hydrated = getRemoteStateSnapshot() as unknown as FullStateSnapshot
+    mirrorStoreIntoReplica()
+    hydrateReplica(canonical, false)
+    const hydrated = toSnapshot(getReplicaState(), syncCore.currentSeq())
 
-    // Almost nothing is masked here — NOT the whole client-written set: canonical
-    // is authoritative for the registry config now, so recents/titles must match.
-    // The two exceptions are genuinely per-client:
-    //  - `activeSessionId` — selection (ADR-041); core serves null and the client
-    //    picks its own landing session from recents.
-    //  - `sessionEngines` — `createNewSession` writes it LOCALLY on the client
-    //    that spawned the session, and it reaches core only through a
-    //    `config:sessions-changed` save (4c makes that write a command).
-    const diffs = compareShadow(hydrated, live, {
-      ignoreFields: new Set(['activeSessionId', 'sessionEngines']),
-      compareStreamingAlways: true
-    })
-    expect(diffs.length, `resync divergence:\n${formatShadowDiff(diffs).join('\n')}`).toBe(0)
+    // Whole-snapshot equality, not a masked field walk. Two exceptions, both
+    // genuinely per-client:
+    //  - `activeSessionId` - selection (ADR-041); core serves null and the client
+    //    picks its own landing session from recents, so the fresh replica resolves
+    //    it independently.
+    //  - `sessionEngines` - `createNewSession` writes it LOCALLY on the client that
+    //    spawned the session, reaching core through a `config:sessions-changed`
+    //    save the harness routes around (see VIEW_OR_CLIENT_ORIGINATED).
+    const strip = (snap: FullStateSnapshot): unknown => {
+      const { activeSessionId: _sel, sessionEngines: _eng, seq: _seq, ...rest } = snap
+      return rest
+    }
+    expect(strip(hydrated)).toEqual(strip(live))
 
     // Non-vacuity: every field a resync used to silently drop is populated.
     const session = hydrated.sessions['rid-1']
@@ -622,7 +509,7 @@ describe('E2E: SyncCore shadow parity', () => {
     expect(thinking?.type === 'thinking' ? thinking.durationMs : null).toBe(1234)
   })
 
-  it('the comparator would CATCH a divergence (guard against a vacuous pass)', () => {
+  it('the parity check would CATCH a divergence (guard against a vacuous pass)', () => {
     emitEvent('session:created', ['rid-1', { cwd: '/project' }])
     emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })])
     expectParity()
@@ -631,6 +518,7 @@ describe('E2E: SyncCore shadow parity', () => {
     useSessionStore.setState((s) => ({
       sessions: { ...s.sessions, 'rid-1': { ...s.sessions['rid-1'], permissionMode: 'plan' } }
     }))
-    expect(parityDiff().map((d) => d.field)).toEqual(['permissionMode'])
+    mirrorStoreIntoReplica()
+    expect(parityDiff()).toEqual(['rid-1.permissionMode'])
   })
 })

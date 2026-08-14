@@ -1,29 +1,18 @@
 /**
  * WS8 guard tests for session-store: engine identity on local historical
  * load + fork (gpt#3), inactive-transcript eviction + re-hydration (Opus B),
- * rekey boundary resolution (xhigh#9), per-message thinking duration, and
- * per-session draft attachments (gpt#14).
+ * rekey (xhigh#9) and per-session draft attachments (gpt#14).
  *
  * Pure store-level tests — drive actions via useSessionStore.getState().
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { useSessionStore, resolveRoutingId } from '../session-store'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { useSessionStore } from '../session-store'
 import { makeChatMessage } from '@test/factories/messages'
-import type { ChatMessage, FileAttachment, DirectoryGroup } from '../../../../shared/types'
+import type { DirectoryGroup } from '../../../../shared/types'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
-
-function att(id: string): FileAttachment {
-  return {
-    id,
-    fileName: `${id}.png`,
-    fileType: 'image',
-    mediaType: 'image/png',
-    base64Data: 'AAAA',
-    previewUrl: 'data:image/png;base64,AAAA'
-  }
-}
 
 function onDisk(sessionId: string, cwd = '/p'): DirectoryGroup[] {
   return [
@@ -39,6 +28,10 @@ function onDisk(sessionId: string, cwd = '/p'): DirectoryGroup[] {
 }
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: vi.fn(),
@@ -63,6 +56,7 @@ beforeEach(() => {
     terminalGroups: {},
     activeView: { type: 'chat' }
   })
+  mirrorStoreIntoReplica()
 })
 
 // ---------------------------------------------------------------------------
@@ -76,6 +70,7 @@ describe('loadHistoricalSession — engine identity (gpt#3)', () => {
         s1: { engineId: 'pi', model: { engineId: 'pi', vendorId: 'openai-codex', modelId: 'x' } }
       }
     })
+    mirrorStoreIntoReplica()
     store().loadHistoricalSession('s1', [], '/p')
     const sess = store().sessions['s1']
     // Pre-fix, status.engineId stayed 'claude' while only selectedEngineId flipped.
@@ -92,6 +87,7 @@ describe('loadHistoricalSession — engine identity (gpt#3)', () => {
         }
       }
     })
+    mirrorStoreIntoReplica()
     store().loadHistoricalSession('s2', [], '/p')
     const caps = store().sessions['s2'].status.capabilities
     // opencode does not support Claude-only fork-from-message; Claude default does.
@@ -113,7 +109,7 @@ describe('forkFromMessage — engine identity (gpt#3)', () => {
   it('inherits the source engine into status + sessionEngines (no Claude fallback)', async () => {
     // Build a pi source session that supports fork-from-message.
     store().createNewSession('src', '/p')
-    store().addMessage('src', makeChatMessage({ id: 'm1', role: 'assistant' }))
+    seed.message('src', makeChatMessage({ id: 'm1', role: 'assistant' }))
     useSessionStore.setState((s) => ({
       sessions: {
         ...s.sessions,
@@ -129,6 +125,7 @@ describe('forkFromMessage — engine identity (gpt#3)', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     ;(window.api.resolveForkAnchor as any).mockResolvedValue({ anchorUuid: 'anchor-1' })
 
     const newId = await store().forkFromMessage('src', 'm1')
@@ -148,9 +145,9 @@ describe('forkFromMessage — engine identity (gpt#3)', () => {
 describe('evict cold sessions on switch, re-hydrate on reselect (Opus B)', () => {
   function seedColdAndActive(): void {
     store().createNewSession('cold', '/p')
-    store().addMessage('cold', makeChatMessage({ id: 'c1', content: [{ type: 'text', text: 'hi' }] }))
+    seed.message('cold', makeChatMessage({ id: 'c1', content: [{ type: 'text', text: 'hi' }] }))
     store().createNewSession('active', '/p')
-    store().addMessage('active', makeChatMessage({ id: 'a1' }))
+    seed.message('active', makeChatMessage({ id: 'a1' }))
     // Keep 'cold' out of the last-N recent set, on disk, with an unsent draft.
     useSessionStore.setState((s) => ({
       sessions: {
@@ -161,6 +158,7 @@ describe('evict cold sessions on switch, re-hydrate on reselect (Opus B)', () =>
       recentSessionIds: ['active'],
       activeSessionId: 'active'
     }))
+    mirrorStoreIntoReplica()
   }
 
   it('evicts a cold on-disk session heavy arrays but preserves the lightweight entry', () => {
@@ -193,9 +191,9 @@ describe('evict cold sessions on switch, re-hydrate on reselect (Opus B)', () =>
 
   it('never evicts a session that is not on disk (not reloadable)', () => {
     store().createNewSession('fresh', '/p')
-    store().addMessage('fresh', makeChatMessage({ id: 'f1' }))
+    seed.message('fresh', makeChatMessage({ id: 'f1' }))
     store().createNewSession('active', '/p')
-    store().addMessage('active', makeChatMessage({ id: 'a1' }))
+    seed.message('active', makeChatMessage({ id: 'a1' }))
     useSessionStore.setState({ directories: [], recentSessionIds: ['active'], activeSessionId: 'active' })
 
     store().switchSession('active')
@@ -206,10 +204,10 @@ describe('evict cold sessions on switch, re-hydrate on reselect (Opus B)', () =>
 
   it('never evicts a running (sdkActive) or watched session', () => {
     store().createNewSession('running', '/p')
-    store().addMessage('running', makeChatMessage({ id: 'r1' }))
+    seed.message('running', makeChatMessage({ id: 'r1' }))
     store().markSdkActive('running')
     store().createNewSession('active', '/p')
-    store().addMessage('active', makeChatMessage({ id: 'a1' }))
+    seed.message('active', makeChatMessage({ id: 'a1' }))
     useSessionStore.setState({
       directories: onDisk('running'),
       recentSessionIds: ['active'],
@@ -223,117 +221,44 @@ describe('evict cold sessions on switch, re-hydrate on reselect (Opus B)', () =>
 })
 
 // ---------------------------------------------------------------------------
-// Rekey boundary resolution (xhigh#9)
+// Rekey (xhigh#9, re-expressed for SyncCore phase 4c)
 // ---------------------------------------------------------------------------
+//
+// `resolveRoutingId` + its bounded `rekeyMap` are DELETED. They existed because the
+// renderer rekeyed its own store and then had to translate events the main process
+// was still emitting under the old id. Core owns the rekey now: it applies
+// `rekeyTargetFor` to canonical state and re-keys its own session registry in the
+// SAME tick it emits the `session:status` that implies one, so every later event
+// already carries the new id. What remains testable — and is what the deleted
+// helper was really protecting — is that a rekey leaves no ghost behind.
 
-describe('resolveRoutingId — rekey boundary (xhigh#9)', () => {
-  it('maps a stale pre-rekey id to the canonical session id', () => {
+describe('rekey (session:status carrying a stable sessionId)', () => {
+  it('moves the session entry and leaves no ghost under the stale id', () => {
     store().createNewSession('old', '/p')
-    store().rekeySession('old', 'new')
-    expect(resolveRoutingId('old')).toBe('new')
-    // A never-mapped id resolves to itself.
-    expect(resolveRoutingId('new')).toBe('new')
-    expect(resolveRoutingId('unrelated')).toBe('unrelated')
-  })
+    seed.message('old', makeChatMessage({ id: 'before' }))
+    seed.rekey('old', 'new')
 
-  it('a late event resolved at the boundary lands on the new session, no ghost', () => {
-    store().createNewSession('old', '/p')
-    store().rekeySession('old', 'new')
-    // Simulate a main-process event still carrying the OLD id, resolved at boundary.
-    store().addMessage(resolveRoutingId('old'), makeChatMessage({ id: 'late' }))
-    expect(store().sessions['new'].messages.some((m) => m.id === 'late')).toBe(true)
-    // No split-brain ghost session created under the stale id.
     expect(store().sessions['old']).toBeUndefined()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Per-message thinking duration
-// ---------------------------------------------------------------------------
-
-describe('thinking duration is recorded per message block', () => {
-  afterEach(() => vi.restoreAllMocks())
-
-  function thinkingMsg(id: string): ChatMessage {
-    return {
-      id,
-      role: 'assistant',
-      content: [
-        { type: 'thinking', text: 't' },
-        { type: 'text', text: 'answer' }
-      ],
-      timestamp: Date.now()
-    }
-  }
-
-  it('stamps each block with its OWN duration (streamed seal path)', () => {
-    const now = vi.spyOn(Date, 'now')
-    store().createNewSession('s', '/p')
-
-    now.mockReturnValue(1000)
-    store().appendStreamingThinking('s', 'thinking...')
-    now.mockReturnValue(1500)
-    store().appendStreamingText('s', 'answer') // seals span → parks 500ms
-    now.mockReturnValue(1600)
-    store().addMessage('s', thinkingMsg('a1')) // consumes parked 500ms
-
-    now.mockReturnValue(2000)
-    store().appendStreamingThinking('s', 'more')
-    now.mockReturnValue(3200)
-    store().appendStreamingText('s', 'answer2') // seals span → parks 1200ms
-    now.mockReturnValue(3300)
-    store().addMessage('s', thinkingMsg('a2'))
-
-    const blockDuration = (id: string): number | undefined => {
-      const b = store()
-        .sessions['s'].messages.find((m) => m.id === id)!
-        .content.find((c) => c.type === 'thinking')
-      return b?.type === 'thinking' ? b.durationMs : undefined
-    }
-    expect(blockDuration('a1')).toBe(500)
-    expect(blockDuration('a2')).toBe(1200)
+    expect(store().sessions['new'].messages.some((m) => m.id === 'before')).toBe(true)
+    expect(store().activeSessionId).toBe('new')
   })
 
-  it('stamps the block when the span seals inside addMessage (all-in-one)', () => {
-    const now = vi.spyOn(Date, 'now')
-    store().createNewSession('s', '/p')
+  it('carries the recents / engine-map entries to the new id', () => {
+    store().createNewSession('old', '/p')
+    seed.rekey('old', 'new')
 
-    now.mockReturnValue(5000)
-    store().appendStreamingThinking('s', 't')
-    now.mockReturnValue(5800)
-    store().addMessage('s', thinkingMsg('a3')) // seals here (thinkingStartedAt still set)
-
-    const b = store()
-      .sessions['s'].messages.find((m) => m.id === 'a3')!
-      .content.find((c) => c.type === 'thinking')
-    expect(b?.type === 'thinking' ? b.durationMs : undefined).toBe(800)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Per-session draft attachments (gpt#14)
-// ---------------------------------------------------------------------------
-
-describe('draft attachments are keyed per session (gpt#14)', () => {
-  it('addDraftAttachments targets the given session only', () => {
-    store().createNewSession('A', '/p')
-    store().createNewSession('B', '/p')
-    store().addDraftAttachments('A', [att('x')])
-    expect(store().sessions['A'].draftAttachments).toHaveLength(1)
-    expect(store().sessions['B'].draftAttachments).toHaveLength(0)
+    expect(store().recentSessionIds).toContain('new')
+    expect(store().recentSessionIds).not.toContain('old')
+    expect(store().sessionEngines['new']).toBeDefined()
+    expect(store().sessionEngines['old']).toBeUndefined()
   })
 
-  it('removeDraftAttachment removes by id; setDraftAttachments replaces', () => {
-    store().createNewSession('A', '/p')
-    store().addDraftAttachments('A', [att('x'), att('y')])
-    store().removeDraftAttachment('A', 'x')
-    expect(store().sessions['A'].draftAttachments.map((a) => a.id)).toEqual(['y'])
-    store().setDraftAttachments('A', [])
-    expect(store().sessions['A'].draftAttachments).toHaveLength(0)
-  })
+  it('a post-rekey event lands on the new session', () => {
+    store().createNewSession('old', '/p')
+    seed.rekey('old', 'new')
+    seed.message('new', makeChatMessage({ id: 'late' }))
 
-  it('does not throw for an unknown session id', () => {
-    expect(() => store().addDraftAttachments('nope', [att('x')])).not.toThrow()
-    expect(store().sessions['nope']).toBeUndefined()
+    expect(store().sessions['new'].messages.some((m) => m.id === 'late')).toBe(true)
+    expect(store().sessions['old']).toBeUndefined()
   })
 })

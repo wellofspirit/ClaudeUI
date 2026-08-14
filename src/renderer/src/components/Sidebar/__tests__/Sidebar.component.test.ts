@@ -24,6 +24,7 @@ import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { SidebarViewProps } from '../View'
 import type { SessionInfo, DirectoryGroup } from '../../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // Mock the View to capture props (no DOM render)
@@ -119,6 +120,7 @@ describe('Sidebar FC', () => {
       worktreeInfoMap: {},
       pluginViews: []
     })
+    mirrorStoreIntoReplica()
   })
 
   afterEach(() => {
@@ -299,7 +301,7 @@ describe('Sidebar FC', () => {
 
     // Session must exist with some text content for the FC to build conversationText
     useSessionStore.getState().createNewSession('auto-sess', CWD)
-    useSessionStore.getState().addMessage('auto-sess', {
+    seed.message('auto-sess', {
       id: 'u1',
       role: 'user',
       content: [{ type: 'text', text: 'Hello world'.repeat(40) }],
@@ -501,6 +503,7 @@ describe('Sidebar FC', () => {
         } as any
       }
     })
+    mirrorStoreIntoReplica()
 
     await act(async () => {
       await renderFC()
@@ -525,6 +528,7 @@ describe('Sidebar FC', () => {
         } as any
       }
     })
+    mirrorStoreIntoReplica()
 
     await act(async () => {
       await renderFC()
@@ -554,6 +558,7 @@ describe('Sidebar FC', () => {
         } as any
       }
     })
+    mirrorStoreIntoReplica()
 
     await act(async () => {
       await renderFC()
@@ -585,6 +590,7 @@ describe('Sidebar FC', () => {
         } as any
       }
     })
+    mirrorStoreIntoReplica()
 
     await act(async () => {
       await renderFC()
@@ -611,7 +617,7 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:list-directories', async () => [group])
 
     useSessionStore.getState().createNewSession('auto-sess', CWD)
-    useSessionStore.getState().addMessage('auto-sess', {
+    seed.message('auto-sess', {
       id: 'u1',
       role: 'user',
       content: [{ type: 'text', text: 'Refactor the login screen flow' }],
@@ -645,7 +651,7 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:list-directories', async () => [group])
 
     useSessionStore.getState().createNewSession('auto-err', CWD)
-    useSessionStore.getState().addMessage('auto-err', {
+    seed.message('auto-err', {
       id: 'u1',
       role: 'user',
       content: [{ type: 'text', text: 'Hello'.repeat(40) }],

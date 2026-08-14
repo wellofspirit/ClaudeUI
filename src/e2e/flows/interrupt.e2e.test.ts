@@ -11,63 +11,16 @@ import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { makeSessionStatus, resetFactoryCounter } from '@test/factories/messages'
 import { createSdkStub } from '@test/stubs/sdk-stub'
 import { textResponseSequence } from '@test/factories/sdk-events'
-import type { ChatMessage, SessionStatus, StreamDelta } from '../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let app: TestApp
-let eventCleanups: Array<() => void>
 let interruptCalls: string[]
 
-function wireEventHandlers(app: TestApp): Array<() => void> {
-  const cleanups: Array<() => void> = []
-  const store = useSessionStore.getState
-
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      // Replicated + volatile channels arrive on the SYNC CLIENT since SyncCore
-      // phase 4c, not the IPC bridge: `app.emit` feeds `SyncClient.receiveEvent`
-      // with a ring seq, exactly as the MessagePort / WebSocket transports do.
-      const cleanup = app.onSync(channel, cb as unknown as (...args: unknown[]) => void)
-      cleanups.push(cleanup)
-      return cleanup
-    }
-  }
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-  })
-  onEvent<(routingId: string, data: StreamDelta) => void>('session:stream')((routingId, data) => {
-    if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
-    else store().appendStreamingText(routingId, data.text)
-  })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
-    (routingId, status) => {
-      let effective = routingId
-      if (status.sessionId && status.sessionId !== routingId) {
-        const s = store()
-        if (s.sessions[routingId]) {
-          s.rekeySession(routingId, status.sessionId)
-          effective = status.sessionId
-        }
-      }
-      if (status.state === 'disconnected') {
-        store().markSdkInactive(effective)
-        store().setStatus(effective, { ...status, state: 'idle' })
-        store().clearPendingApprovals(effective)
-        return
-      }
-      store().setStatus(effective, status)
-      // Do NOT clear pending approvals on idle — background subagents outlive
-      // the parent turn's result. See useClaudeEvents.ts's onStatus.
-    }
-  )
-  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
-    (routingId, { requestId }) => {
-      store().removePendingApproval(routingId, requestId)
-    }
-  )
-
-  return cleanups
-}
+// SyncCore phase 4c: the ~20-handler `wireEventHandlers` table this file used to
+// carry — a hand-maintained copy of useClaudeEvents, itself a copy of the reducer —
+// is DELETED. `app.emit` feeds the harness SyncClient, whose raw-event tap folds
+// `applyEvent` and projects the result into the store (boot-test-app §5), so these
+// flows now exercise the real interpretation instead of a third one.
 
 beforeEach(async () => {
   resetFactoryCounter()
@@ -98,11 +51,10 @@ beforeEach(async () => {
     pinnedSessionIds: [],
     customTitles: {}
   })
-  eventCleanups = wireEventHandlers(app)
+  mirrorStoreIntoReplica()
 })
 
 afterEach(() => {
-  eventCleanups.forEach((fn) => fn())
   app.teardown()
 })
 
@@ -178,7 +130,7 @@ describe('E2E: interrupt', () => {
     )
 
     // Pending approval in-flight
-    useSessionStore.getState().addPendingApproval(routingId, {
+    seed.approvalRequest(routingId, {
       requestId: 'req-pending',
       toolName: 'Bash',
       input: {}
@@ -210,7 +162,7 @@ describe('E2E: interrupt', () => {
       makeSessionStatus({ state: 'running', sessionId: routingId })
     )
 
-    useSessionStore.getState().addPendingApproval(routingId, {
+    seed.approvalRequest(routingId, {
       requestId: 'req-orphan',
       toolName: 'Bash',
       input: {}

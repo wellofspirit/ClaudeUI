@@ -340,6 +340,15 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     // typed `SyncEventMap` (the declaration) and every `onSyncEvent('…')` call in
     // the renderer + web trees (the usage). A channel in either that nothing
     // classifies would silently never arrive.
+    //
+    // SyncCore phase 4c shrank the per-channel usage surface on purpose: the
+    // replica subscribes ONCE, channel-agnostically (`SyncClient.onAnyEvent`), and
+    // folds every `canonical: true` channel through `applyEvent`. What is left as an
+    // explicit `onSyncEvent(...)` is exactly the `canonical: false` set — the
+    // transient toast/banner channels with no snapshot field. So the count below
+    // dropped from >30 to the size of that set, and the coverage that used to come
+    // from counting call sites now comes from the classification itself: every
+    // canonical channel has a reducer branch, pinned by the reducer-coverage test.
     const declared = [...read('src/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
       (m) => m[1]
     )
@@ -353,7 +362,7 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
         for (let m = re.exec(code); m; m = re.exec(code)) subscribed.add(m[1])
       }
     }
-    expect(subscribed.size).toBeGreaterThan(30)
+    expect(subscribed.size).toBeGreaterThan(10)
 
     const all = [...new Set([...declared, ...subscribed])]
     const unclassified = all.filter((c) => !channelSpec(c)).sort()

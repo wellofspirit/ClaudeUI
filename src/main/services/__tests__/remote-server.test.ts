@@ -1546,7 +1546,7 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
     // Metering had no snapshot field before 4a and no canonical source before 4b.
     expect(state.sessions['canon-1'].metering?.equivalentCostUsd).toBe(0.05)
     // Selection is per-client (ADR-041): core has no opinion, and the web client
-    // resolves its own landing session from recents (`applyRemoteSnapshot`).
+    // resolves its own landing session from recents (`hydrateReplica`).
     expect(state.activeSessionId).toBeNull()
   })
 

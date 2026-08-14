@@ -28,6 +28,7 @@ vi.mock('../SubagentMessages', () => ({
 }))
 
 import { TaskCard } from '../TaskCard'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
@@ -76,6 +77,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   const asyncResult = {
@@ -86,7 +88,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   }
 
   it('(a) tool_result present + activeTasks record → still shows running + Stop (must fail pre-fix)', () => {
-    useSessionStore.getState().setTaskStarted(ROUTE, {
+    seed.taskStarted(ROUTE, {
       toolUseId: 'call_task_1',
       taskId: 'task-abc123',
       taskType: 'local_agent'
@@ -98,7 +100,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   })
 
   it('(a cont.) "Send to background" is suppressed for an already-async task', () => {
-    useSessionStore.getState().setTaskStarted(ROUTE, {
+    seed.taskStarted(ROUTE, {
       toolUseId: 'call_task_1',
       taskId: 'task-abc123',
       taskType: 'local_agent'
@@ -110,7 +112,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   })
 
   it('(b) task-notification arrives → completed, Stop button gone', () => {
-    useSessionStore.getState().setTaskStarted(ROUTE, {
+    seed.taskStarted(ROUTE, {
       toolUseId: 'call_task_1',
       taskId: 'task-abc123',
       taskType: 'local_agent'
@@ -121,7 +123,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
     )
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
 
-    useSessionStore.getState().addTaskNotification(ROUTE, {
+    seed.taskNotification(ROUTE, {
       taskId: 'task-abc123',
       toolUseId: 'call_task_1',
       status: 'completed',
@@ -143,7 +145,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   })
 
   it('(d) historical session → never running, even with an activeTasks record', () => {
-    useSessionStore.getState().setTaskStarted(ROUTE, {
+    seed.taskStarted(ROUTE, {
       toolUseId: 'call_task_1',
       taskId: 'task-abc123',
       taskType: 'local_agent'
@@ -154,6 +156,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
         [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true }
       }
     }))
+    mirrorStoreIntoReplica()
 
     // No tool_result at all — historical transcripts can render a task with no result.
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
@@ -162,7 +165,7 @@ describe('TaskCard — async-launched task lifecycle (activeTasks)', () => {
   })
 
   it('activeTasks record with NO tool_result yet also shows running + Stop (spawn-to-first-result gap)', () => {
-    useSessionStore.getState().setTaskStarted(ROUTE, {
+    seed.taskStarted(ROUTE, {
       toolUseId: 'call_task_1',
       taskId: 'task-abc123',
       taskType: 'local_agent'
@@ -196,6 +199,7 @@ describe('TaskCard — "Open in panel" (mobile takeover entry point)', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   const completedResult = {
@@ -241,11 +245,12 @@ describe('TaskCard — inline task approval', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('renders Allow/Deny when an approval is pending for the task tool', () => {
     const approval = makePendingApproval({ requestId: 'per-1', toolUseId: 'call_task_1', toolName: 'task' })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
 
@@ -261,7 +266,7 @@ describe('TaskCard — inline task approval', () => {
 
   it('Allow → respondApproval IPC with allow + clears the pending approval', async () => {
     const approval = makePendingApproval({ requestId: 'per-2', toolUseId: 'call_task_1', toolName: 'task' })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
 
@@ -275,7 +280,7 @@ describe('TaskCard — inline task approval', () => {
 
   it('Deny → respondApproval IPC with deny', async () => {
     const approval = makePendingApproval({ requestId: 'per-3', toolUseId: 'call_task_1', toolName: 'task' })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
 
@@ -311,6 +316,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   const dispatchBlock = makeTaskBlock({
@@ -326,7 +332,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
   }
 
   it('shows the "<engine> · <model>" badge in the subagent slot while running', () => {
-    useSessionStore.getState().appendSubagentStreamingText(ROUTE, 'toolu_dispatch_1', 'Working on it')
+    seed.subagentStreamText(ROUTE, 'toolu_dispatch_1', 'Working on it')
     render(<TaskCard block={dispatchBlock} view={dispatchView} />)
 
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
@@ -334,9 +340,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
   })
 
   it('renders live-streamed text forwarded from the dispatch target', () => {
-    useSessionStore
-      .getState()
-      .appendSubagentStreamingText(ROUTE, 'toolu_dispatch_1', 'Here is my analysis...')
+    seed.subagentStreamText(ROUTE, 'toolu_dispatch_1', 'Here is my analysis...')
     render(<TaskCard block={dispatchBlock} view={dispatchView} />)
 
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
@@ -344,7 +348,7 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
   })
 
   it('renders forwarded subagent messages via SubagentMessages', () => {
-    useSessionStore.getState().addSubagentMessage(ROUTE, 'toolu_dispatch_1', {
+    seed.subagentMessage(ROUTE, 'toolu_dispatch_1', {
       id: 'm1',
       role: 'assistant',
       content: [{ type: 'text', text: 'partial answer' }],
@@ -472,10 +476,11 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {}, settings: defaultSettings })
+    mirrorStoreIntoReplica()
   })
 
   it('renders the message list, then live thinking, then live streamed text, in that DOM order', () => {
-    useSessionStore.getState().addSubagentMessage(ROUTE, 'call_task_1', {
+    seed.subagentMessage(ROUTE, 'call_task_1', {
       id: 'm1',
       role: 'assistant',
       content: [{ type: 'text', text: 'partial result' }],
@@ -503,6 +508,7 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
         }
       }
     })
+    mirrorStoreIntoReplica()
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
@@ -523,7 +529,7 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
   it('expandThinking=false: live thinking starts collapsed (tail preview only)', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
-    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+    seed.subagentStreamThinking(ROUTE, 'call_task_1', longText)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
@@ -536,7 +542,7 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
   it('expandThinking=false: clicking the live-thinking toggle reveals the full buffer', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
-    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+    seed.subagentStreamThinking(ROUTE, 'call_task_1', longText)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
@@ -548,7 +554,7 @@ describe('TaskCard — subagent output ordering + thinking toggle', () => {
   it('expandThinking=true: live thinking starts expanded (full buffer visible immediately)', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: true } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
-    useSessionStore.getState().appendSubagentStreamingThinking(ROUTE, 'call_task_1', longText)
+    seed.subagentStreamThinking(ROUTE, 'call_task_1', longText)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     fireEvent.click(screen.getByTestId('TaskCard.expand'))

@@ -66,8 +66,6 @@ beforeEach(() => {
         streamingText: '',
         streamingThinking: '',
         thinkingStartedAt: null,
-        thinkingDurationMs: null,
-        pendingThinkingDurationMs: null,
         evicted: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],

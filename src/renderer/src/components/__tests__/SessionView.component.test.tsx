@@ -25,6 +25,7 @@ import React from 'react'
 import { render, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // Mobile flag — mutated per-test, read lazily by the mocked hook
@@ -116,7 +117,7 @@ describe('SessionView — mobile task takeover', () => {
     useSessionStore.setState({ activeSessionId: ROUTE })
     // Give the session a Task tool_use so TaskDetailPanel's real FC (wrapped
     // by the stubbed View) has something to classify.
-    useSessionStore.getState().addMessage(ROUTE, {
+    seed.message(ROUTE, {
       id: 'm1',
       role: 'assistant',
       content: [
@@ -139,6 +140,7 @@ describe('SessionView — mobile task takeover', () => {
     cleanup()
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   async function renderSessionView(): Promise<void> {

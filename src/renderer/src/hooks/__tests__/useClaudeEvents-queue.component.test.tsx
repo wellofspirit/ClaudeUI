@@ -7,6 +7,7 @@ import { makeAssistantMessage, makeSessionStatus } from '@test/factories/message
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore } from '../../stores/session-store'
 import { useClaudeEvents } from '../useClaudeEvents'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 function EventHarness(): null {
   useClaudeEvents()
@@ -18,6 +19,7 @@ let app: TestApp
 beforeEach(async () => {
   app = await bootTestApp()
   useSessionStore.setState({ sessions: {}, activeSessionId: null })
+  mirrorStoreIntoReplica()
 })
 
 afterEach(() => {
@@ -39,7 +41,7 @@ describe('queue state is never inferred from turn status', () => {
     const store = useSessionStore.getState()
     store.createNewSession('session-a', '/project-a')
     store.createNewSession('session-b', '/project-b', false)
-    store.addMessage('session-a', makeAssistantMessage('Working on it'))
+    seed.message('session-a', makeAssistantMessage('Working on it'))
 
     act(() => {
       app.emit(

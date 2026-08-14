@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../../../../stores/session-store'
 import { recallQueuedInto } from '../recall-queued'
 import type { QueuedItem } from '../../../../../../shared/types'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'r-recall'
 const recallQueued = vi.fn()
@@ -19,6 +20,10 @@ const recallQueued = vi.fn()
 const queued = (itemId: string, text: string): QueuedItem => ({ itemId, text, state: 'queued' })
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   recallQueued.mockReset()
   ;(globalThis as unknown as { window: unknown }).window = globalThis.window || {}
   ;(globalThis.window as unknown as { api: unknown }).api = {
@@ -28,9 +33,10 @@ beforeEach(() => {
     recallQueued
   }
   useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  mirrorStoreIntoReplica()
   useSessionStore.getState().createNewSession(ROUTE, '/test')
   useSessionStore.setState({ activeSessionId: ROUTE })
-  useSessionStore.getState().setQueueState(ROUTE, [queued('q1', 'first'), queued('q2', 'second')])
+  seed.queue(ROUTE, [queued('q1', 'first'), queued('q2', 'second')])
 })
 
 describe('recallQueuedInto', () => {

@@ -16,6 +16,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
 import type { PlanReviewBarViewProps } from '../View'
 import type { PlanComment } from '../../../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let viewProps: PlanReviewBarViewProps
 vi.mock('../View', () => ({
@@ -59,14 +60,13 @@ describe('PlanReviewBar FC', () => {
     useSessionStore.setState({ activeSessionId: ROUTE })
     useSessionStore.getState().openPlanPanel(ROUTE, 'plan', 'req-1')
     // Put the approval in pendingApprovals so approvalStillPending=true
-    useSessionStore
-      .getState()
-      .addPendingApproval(ROUTE, makePendingApproval({ requestId: 'req-1' }))
+    seed.approvalRequest(ROUTE, makePendingApproval({ requestId: 'req-1' }))
   })
 
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   async function renderFC(comments: PlanComment[]): Promise<void> {
@@ -102,7 +102,7 @@ describe('PlanReviewBar FC', () => {
   })
 
   it('onSend is a no-op when the approval is no longer pending', async () => {
-    useSessionStore.getState().removePendingApproval(ROUTE, 'req-1')
+    seed.approvalDismiss(ROUTE, 'req-1')
     await renderFC([makeComment()])
 
     await act(async () => {

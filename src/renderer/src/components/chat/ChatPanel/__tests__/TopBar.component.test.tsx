@@ -21,6 +21,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { SidebarContext } from '../../../SessionView'
 import type { GitStatusData, StatusLineData } from '../../../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-topbar'
 
@@ -53,12 +54,11 @@ describe('TopBar — Session time / API time', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('renders Session time and API time from a completed (idle) status line', () => {
-    useSessionStore
-      .getState()
-      .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 65_000, totalApiDurationMs: 40_000 }))
+    seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 65_000, totalApiDurationMs: 40_000 }))
 
     const { unmount } = render(<TopBar hasContent />)
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -70,9 +70,7 @@ describe('TopBar — Session time / API time', () => {
 
   it('formats hour-scale durations as "Nh Nm" (seconds dropped as noise)', () => {
     // 1415m 20s of active time reads terribly — the hours tier kicks in at 1h.
-    useSessionStore
-      .getState()
-      .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 84_920_000 }))
+    seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 84_920_000 }))
 
     const { unmount } = render(<TopBar hasContent />)
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -82,7 +80,7 @@ describe('TopBar — Session time / API time', () => {
   })
 
   it('hides API time when totalApiDurationMs is 0 (e.g. opencode, or a reloaded Claude session)', () => {
-    useSessionStore.getState().setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 5_000 }))
+    seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 5_000 }))
 
     const { unmount } = render(<TopBar hasContent />)
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -99,9 +97,7 @@ describe('TopBar — Session time / API time', () => {
     vi.useFakeTimers()
     try {
       const turnStartedAtMs = Date.now()
-      useSessionStore
-        .getState()
-        .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 10_000, turnStartedAtMs }))
+      seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 10_000, turnStartedAtMs }))
 
       const { unmount } = render(<TopBar hasContent />)
       fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -126,7 +122,7 @@ describe('TopBar — Session time / API time', () => {
   it('does not tick when idle (turnStartedAtMs null) even with the tooltip open', () => {
     vi.useFakeTimers()
     try {
-      useSessionStore.getState().setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 20_000 }))
+      seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 20_000 }))
 
       const { unmount } = render(<TopBar hasContent />)
       fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -160,10 +156,11 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('hides the breakdown for a single-model session', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.23,
@@ -179,7 +176,7 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
   })
 
   it('shows the breakdown sorted by cost desc for a multi-model session', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.68,
@@ -211,7 +208,7 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
   })
 
   it('shows the breakdown for a single dispatched (cross-engine) row even with just one entry', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 0.02,
@@ -247,10 +244,11 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('marks a dispatched row with data-dispatched + a "· dispatched" suffix, own-engine rows unmarked', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.0,
@@ -280,7 +278,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   })
 
   it('strips the "provider/" prefix for a dispatched opencode-style model id shortModelName cannot shorten', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 0,
@@ -301,7 +299,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   })
 
   it('renders "Total incl. dispatched" as headline cost + dispatched sum when a dispatched row exists', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.0,
@@ -325,7 +323,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   })
 
   it('hides "Total incl. dispatched" when there are no dispatched rows', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.68,
@@ -403,6 +401,7 @@ describe('TopBar — mobile web fullscreen control removed', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
 
     window.matchMedia = originalMatchMedia
     document.documentElement.requestFullscreen = originalRequestFullscreen
@@ -493,6 +492,7 @@ describe('TopBar — mobile entry points', () => {
     cleanup()
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('renders GitChangesPill on mobile once the session is a git repo with status', () => {
@@ -618,6 +618,7 @@ describe('TopBar — terminal toggle button', () => {
       terminalGroups: {},
       terminalPanelOpen: false
     })
+    mirrorStoreIntoReplica()
   })
 
   it('renders on desktop without ever asking the host about availability', () => {

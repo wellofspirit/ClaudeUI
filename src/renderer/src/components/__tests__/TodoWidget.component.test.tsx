@@ -11,6 +11,7 @@ import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TodoWidget } from '../TodoWidget'
 import type { TodoItem } from '../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-todo'
 
@@ -30,6 +31,7 @@ describe('TodoWidget', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('renders nothing when no todos', () => {
@@ -38,15 +40,13 @@ describe('TodoWidget', () => {
   })
 
   it('renders nothing when all todos are completed', () => {
-    useSessionStore.getState().setTodos(ROUTE, [makeTodo({ status: 'completed' })])
+    seed.plan(ROUTE, [makeTodo({ status: 'completed' })])
     const { container } = render(<TodoWidget />)
     expect(container.firstChild).toBeNull()
   })
 
   it('renders counts correctly and expands on click', () => {
-    useSessionStore
-      .getState()
-      .setTodos(ROUTE, [
+    seed.plan(ROUTE, [
         makeTodo({ content: 'A', status: 'completed' }),
         makeTodo({ content: 'B', status: 'pending' })
       ])

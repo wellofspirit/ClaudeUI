@@ -62,6 +62,7 @@ beforeEach(() => {
     sessions: {},
     recentSessionIds: []
   })
+  mirrorStoreIntoReplica()
   useSessionStore.getState().createNewSession(ROUTE, '/test')
 })
 
@@ -83,25 +84,25 @@ describe('waitForModeChange', () => {
     const promise = waitForModeChange()
 
     // Simulate the SDK sending back a permissionMode status change
-    useSessionStore.getState().setPermissionMode('plan')
+    seed.permissionMode(useSessionStore.getState().activeSessionId!, 'plan')
 
     await expect(promise).resolves.toBeUndefined()
   })
 
   it('resolves when permissionMode changes from plan back to default', async () => {
     // Start from 'plan' mode
-    useSessionStore.getState().setPermissionMode('plan')
+    seed.permissionMode(useSessionStore.getState().activeSessionId!, 'plan')
 
     const promise = waitForModeChange()
 
-    useSessionStore.getState().setPermissionMode('default')
+    seed.permissionMode(useSessionStore.getState().activeSessionId!, 'default')
 
     await expect(promise).resolves.toBeUndefined()
   })
 
   it('does not resolve prematurely when permissionMode is set to the same value', async () => {
     // Ensure the mode stays at 'default'
-    useSessionStore.getState().setPermissionMode('default')
+    seed.permissionMode(useSessionStore.getState().activeSessionId!, 'default')
 
     let resolved = false
     void waitForModeChange().then(() => {
@@ -175,7 +176,7 @@ describe('waitForModeChange', () => {
     const subscribespy = vi.spyOn(useSessionStore, 'subscribe')
 
     const promise = waitForModeChange()
-    useSessionStore.getState().setPermissionMode('plan')
+    seed.permissionMode(useSessionStore.getState().activeSessionId!, 'plan')
     await promise
 
     // Count active subscriptions added by waitForModeChange.
@@ -183,7 +184,7 @@ describe('waitForModeChange', () => {
     // function returned by subscribe was called by confirming subsequent
     // store mutations do not cause an already-resolved promise to fire again.
     // We do this by confirming promise is settled and no errors thrown.
-    useSessionStore.getState().setPermissionMode('default')
+    seed.permissionMode(useSessionStore.getState().activeSessionId!, 'default')
     // If still subscribed this would cause issues; no assertion failure means clean.
 
     subscribespy.mockRestore()
@@ -198,7 +199,7 @@ describe('waitForModeChange', () => {
 
       // After timeout the subscription should be cleaned up.
       // Subsequent mode changes must not throw or cause issues.
-      useSessionStore.getState().setPermissionMode('plan')
+      seed.permissionMode(useSessionStore.getState().activeSessionId!, 'plan')
       await Promise.resolve()
       // Reaching here without errors confirms the subscription is gone.
     } finally {
@@ -240,7 +241,7 @@ describe('waitForModeChange', () => {
       })
 
       // Change mode on the other session — should not trigger ROUTE's subscription
-      useSessionStore.getState().setPermissionMode('plan', 'other-session')
+      seed.permissionMode('other-session', 'plan')
       await vi.advanceTimersByTimeAsync(0)
       expect(resolved).toBe(false)
 
@@ -258,6 +259,7 @@ describe('waitForModeChange', () => {
 // ---------------------------------------------------------------------------
 
 import { ExitPlanModeCard } from '../ExitPlanModeCard/ExitPlanModeCard'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const planText = 'Step 1: Do X\nStep 2: Do Y'
 const block = {
@@ -323,8 +325,9 @@ describe('ExitPlanModeCard FC', () => {
       sessions: {},
       recentSessionIds: []
     })
+    mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(ROUTE_FC, '/workspace')
-    useSessionStore.getState().addPendingApproval(ROUTE_FC, approval)
+    seed.approvalRequest(ROUTE_FC, approval)
   })
 
   afterEach(() => {
@@ -368,10 +371,12 @@ describe('ExitPlanModeCard FC', () => {
     expect(sendArgs[1]).toContain('Implement the following plan:')
     expect(sendArgs[1]).toContain(planText)
 
-    // Store: conversation cleared then sdk marked active + permission mode set
+    // Store: conversation cleared then sdk marked active. The MODE is not written
+    // locally any more (SyncCore phase 4c): the fresh spawn's own init emits
+    // `session:permission-mode` with the mode it was created in, which is visible
+    // right here in the createSession args asserted above.
     const session = useSessionStore.getState().sessions[ROUTE_FC]
     expect(session.sdkActive).toBe(true)
-    expect(session.permissionMode).toBe('acceptEdits')
 
     unmount()
   })
@@ -388,6 +393,7 @@ describe('ExitPlanModeCard FC', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     const { unmount } = renderFC()
 
     await act(async () => {
@@ -438,8 +444,8 @@ describe('ExitPlanModeCard FC', () => {
     // IPC setPermissionMode called with acceptEdits
     expect(lastCall('session:set-permission-mode')).toEqual([ROUTE_FC, 'acceptEdits'])
 
-    // Store: permissionMode updated
-    expect(useSessionStore.getState().sessions[ROUTE_FC].permissionMode).toBe('acceptEdits')
+    // Invoke-only since SyncCore phase 4c — the pill follows the event, asserted
+    // by the IPC call above, so there is no optimistic store write to check.
 
     // Approval removed from store
     expect(useSessionStore.getState().sessions[ROUTE_FC].pendingApprovals).toHaveLength(0)
@@ -465,8 +471,6 @@ describe('ExitPlanModeCard FC', () => {
     expect(vi.mocked(waitForModeChange)).toHaveBeenCalled()
 
     expect(lastCall('session:set-permission-mode')).toEqual([ROUTE_FC, 'default'])
-
-    expect(useSessionStore.getState().sessions[ROUTE_FC].permissionMode).toBe('default')
 
     expect(useSessionStore.getState().sessions[ROUTE_FC].pendingApprovals).toHaveLength(0)
 

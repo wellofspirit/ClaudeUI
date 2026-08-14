@@ -15,6 +15,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
 import type { AskUserQuestionBlockViewProps } from '../View'
 import type { ContentBlock } from '../../../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let viewProps: AskUserQuestionBlockViewProps
 vi.mock('../View', () => ({
@@ -68,10 +69,11 @@ describe('AskUserQuestionBlock FC', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   async function renderFC(approval = makePendingApproval({ requestId: 'req-1' })): Promise<void> {
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
     const { AskUserQuestionBlock } = await import('../AskUserQuestionBlock')
     const questionView = {
       kind: 'question' as const,

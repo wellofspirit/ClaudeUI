@@ -22,6 +22,7 @@ import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
 import type { QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
+import { seed, mirrorStoreIntoReplica, resetReplicaSeam } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // View mock — captures whatever props the FC passes to InputBoxView
@@ -75,6 +76,9 @@ function setupSession(routingId = ROUTE, cwd = '/test'): void {
 }
 
 beforeEach(() => {
+  // The replica is a module singleton: without this the previous test's folded
+  // transcript (steer- messages included) carries into this one (SyncCore 4c).
+  resetReplicaSeam()
   resetFactoryCounter()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
@@ -88,6 +92,7 @@ beforeEach(() => {
     sessions: {},
     recentSessionIds: []
   })
+  mirrorStoreIntoReplica()
 })
 
 // ---------------------------------------------------------------------------
@@ -131,7 +136,7 @@ const queued = (itemId: string, text: string): QueuedItem => ({ itemId, text, st
 describe('setQueueState — queued-item accumulation', () => {
   it('holds a single queued item for an idle session', () => {
     setupSession()
-    useSessionStore.getState().setQueueState(ROUTE, [queued('i1', 'first message')])
+    seed.queue(ROUTE, [queued('i1', 'first message')])
     expect(useSessionStore.getState().sessions[ROUTE].queuedItems.map((i) => i.text)).toEqual([
       'first message'
     ])
@@ -139,9 +144,7 @@ describe('setQueueState — queued-item accumulation', () => {
 
   it('keeps items separate and in order (the client joins them, storage never does)', () => {
     setupSession()
-    useSessionStore
-      .getState()
-      .setQueueState(ROUTE, [queued('i1', 'first'), queued('i2', 'second')])
+    seed.queue(ROUTE, [queued('i1', 'first'), queued('i2', 'second')])
     const items = useSessionStore.getState().sessions[ROUTE].queuedItems
     expect(items.map((i) => i.text)).toEqual(['first', 'second'])
     expect(items.map((i) => i.text).join('\n')).toBe('first\nsecond')
@@ -149,15 +152,14 @@ describe('setQueueState — queued-item accumulation', () => {
 
   it('replaces the list wholesale — the broadcast is the full queue', () => {
     setupSession()
-    const store = useSessionStore.getState()
-    store.setQueueState(ROUTE, [queued('i1', 'a'), queued('i2', 'b'), queued('i3', 'c')])
-    store.setQueueState(ROUTE, [queued('i3', 'c')])
+    seed.queue(ROUTE, [queued('i1', 'a'), queued('i2', 'b'), queued('i3', 'c')])
+    seed.queue(ROUTE, [queued('i3', 'c')])
     expect(useSessionStore.getState().sessions[ROUTE].queuedItems.map((i) => i.text)).toEqual(['c'])
   })
 
   it('does nothing when the routingId session does not exist', () => {
     // No session created — should not throw
-    useSessionStore.getState().setQueueState('nonexistent', [queued('i1', 'oops')])
+    seed.queue('nonexistent', [queued('i1', 'oops')])
     expect(useSessionStore.getState().sessions['nonexistent']).toBeUndefined()
   })
 })
@@ -165,9 +167,8 @@ describe('setQueueState — queued-item accumulation', () => {
 describe('setQueueState — consumed items flush to messages', () => {
   it('appends a user message for a consumed item and drops it from the card', () => {
     setupSession()
-    const store = useSessionStore.getState()
-    store.setQueueState(ROUTE, [queued('i1', 'queued prompt')])
-    store.setQueueState(ROUTE, [{ itemId: 'i1', text: 'queued prompt', state: 'consumed' }])
+    seed.queue(ROUTE, [queued('i1', 'queued prompt')])
+    seed.queue(ROUTE, [{ itemId: 'i1', text: 'queued prompt', state: 'consumed' }])
 
     const session = useSessionStore.getState().sessions[ROUTE]
     expect(session.queuedItems).toEqual([])
@@ -180,16 +181,15 @@ describe('setQueueState — consumed items flush to messages', () => {
   it('does nothing when the payload holds no consumed items', () => {
     setupSession()
     const before = useSessionStore.getState().sessions[ROUTE].messages.length
-    useSessionStore.getState().setQueueState(ROUTE, [])
+    seed.queue(ROUTE, [])
     const after = useSessionStore.getState().sessions[ROUTE].messages.length
     expect(after).toBe(before)
   })
 
   it('flushes multiple accumulated items as SEPARATE messages, not one blob', () => {
     setupSession()
-    const store = useSessionStore.getState()
-    store.setQueueState(ROUTE, [queued('i1', 'first'), queued('i2', 'second')])
-    store.setQueueState(ROUTE, [
+    seed.queue(ROUTE, [queued('i1', 'first'), queued('i2', 'second')])
+    seed.queue(ROUTE, [
       { itemId: 'i1', text: 'first', state: 'consumed' },
       { itemId: 'i2', text: 'second', state: 'consumed' }
     ])
@@ -437,6 +437,7 @@ describe('InputBox FC — rendered', () => {
       lastSelectedEngineId: 'claude',
       availableModels: []
     })
+    mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: FC_ROUTE })
   })
@@ -545,6 +546,7 @@ describe('InputBox FC — rendered', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
 
     viewProps.onSelectModel('claude-opus-4-5')
 
@@ -593,6 +595,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
     renderFC()
     expect(viewProps.models).toEqual([
       expect.objectContaining({ engineId: 'pi', value: 'openai/foo' })
@@ -609,6 +612,7 @@ describe('InputBox FC — rendered', () => {
         [FC_ROUTE]: { ...state.sessions[FC_ROUTE], sdkActive: true }
       }
     }))
+    mirrorStoreIntoReplica()
     renderFC()
     expect(viewProps.engineLocked).toBe(true)
     expect(viewProps.showEnginePicker).toBe(false)
@@ -675,6 +679,7 @@ describe('InputBox FC — rendered', () => {
         [FC_ROUTE]: { ...state.sessions[FC_ROUTE], ...change(state) }
       }
     }))
+    mirrorStoreIntoReplica()
     renderFC()
     expect(viewProps.engineLocked).toBe(true)
     expect(viewProps.showEnginePicker).toBe(false)
@@ -706,6 +711,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -768,6 +774,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -803,6 +810,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -833,6 +841,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -862,6 +871,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -879,6 +889,7 @@ describe('InputBox FC — rendered', () => {
         { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: 'Opus 4.7' }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -897,6 +908,7 @@ describe('InputBox FC — rendered', () => {
         { value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5', description: 'Sonnet 4.5' }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -915,6 +927,7 @@ describe('InputBox FC — rendered', () => {
         { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Sonnet 4.6' }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1003,6 +1016,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1044,6 +1058,7 @@ describe('InputBox FC — rendered', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1092,6 +1107,7 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
       sessions: {},
       recentSessionIds: []
     })
+    mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(BT_ROUTE, '/tmp/bt')
     useSessionStore.setState({ activeSessionId: BT_ROUTE })
   })
@@ -1126,6 +1142,7 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
         }
       }
     })
+    mirrorStoreIntoReplica()
   }
 
   it('billingType undefined (no account) → showCostInStatusLine=true (Claude-safe default)', () => {
@@ -1225,6 +1242,7 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
       sessions: {},
       recentSessionIds: []
     })
+    mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(RV_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: RV_ROUTE })
   })
@@ -1258,6 +1276,7 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
       },
       availableModels: [MINIMAX_MODEL]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1276,6 +1295,7 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
       },
       availableModels: [MINIMAX_MODEL]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1294,6 +1314,7 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
       },
       availableModels: [MINIMAX_MODEL]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1318,6 +1339,7 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
       },
       availableModels: [MINIMAX_MODEL]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1350,6 +1372,7 @@ describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => 
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1391,6 +1414,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
       sessions: {},
       recentSessionIds: []
     })
+    mirrorStoreIntoReplica()
     useSessionStore.getState().createNewSession(PI_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: PI_ROUTE })
   })
@@ -1412,6 +1436,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
       },
       availableModels: []
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1444,6 +1469,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1480,6 +1506,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
         }
       ]
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
@@ -1499,6 +1526,7 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
       },
       availableModels: []
     }))
+    mirrorStoreIntoReplica()
 
     renderFC()
 
