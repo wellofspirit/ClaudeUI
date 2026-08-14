@@ -9,6 +9,7 @@ import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { toggleTerminalPanel } from '../../terminal/toggle-terminal'
 import { shortModelName } from '../../usage/usage-utils'
 
 /** Format a millisecond duration as "Ns", "Nm Ns", or "Nh Nm" — seconds drop
@@ -462,6 +463,34 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               </g>
             </svg>
             <span>VSCode</span>
+          </button>
+        )}
+        {/* The only *visible* way into the terminal panel. The Ctrl/Cmd+`
+            keybinding stays, but it's unreachable in a browser (macOS owns
+            Cmd+`, Edge swallows Ctrl+`), so web needs a button. Deliberately
+            ungated beyond mobile — the panel renders its own availability /
+            step-up gate on web (ADR-048: terminal is desktop-web only). */}
+        {!isMobileCtx && (
+          <button
+            data-testid="TopBar.terminal"
+            onClick={toggleTerminalPanel}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="Terminal (Ctrl+`)"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0"
+            >
+              <path d="M4 17l6-6-6-6" />
+              <path d="M12 19h8" />
+            </svg>
           </button>
         )}
         {!isMobileCtx && cwd && capSkills && (

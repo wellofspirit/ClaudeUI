@@ -561,3 +561,128 @@ describe('TopBar — mobile entry points', () => {
     expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Terminal toggle button. The Ctrl/Cmd+` keybinding is unreachable in a browser
+// (macOS owns Cmd+`, Edge swallows Ctrl+`), so the bar carries the only visible
+// entry point. Both it and the keydown handler call the SAME helper
+// (components/terminal/toggle-terminal.ts) — this block is that helper's
+// behavioral coverage; SessionView's keydown path is not re-tested.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — terminal toggle button', () => {
+  let app: TestApp
+  let createTerminal: ReturnType<typeof vi.fn>
+
+  const TERM_CWD = '/d/repo-topbar-term'
+
+  function renderTopBar(isMobile: boolean) {
+    return render(
+      <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile }}>
+        <TopBar hasContent />
+      </SidebarContext.Provider>
+    )
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    createTerminal = vi.fn(async () => 'term-topbar-1')
+    ;(window.api as unknown as { createTerminal: unknown }).createTerminal = createTerminal
+    useSessionStore.getState().createNewSession(ROUTE, TERM_CWD)
+    useSessionStore.setState({
+      activeSessionId: ROUTE,
+      terminalGroups: {},
+      terminalPanelOpen: false
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    app.teardown()
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      terminalGroups: {},
+      terminalPanelOpen: false
+    })
+  })
+
+  it('renders on desktop', () => {
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+  })
+
+  it('renders on web (the panel, not the button, owns the availability gate)', () => {
+    app.api.platform = 'web'
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+  })
+
+  it('is hidden on mobile (terminal is desktop-web only — ADR-048)', () => {
+    renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('opens the panel and auto-creates the first tab for the active cwd', async () => {
+    renderTopBar(false)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).toHaveBeenCalledWith(TERM_CWD)
+    const group = useSessionStore.getState().terminalGroups[TERM_CWD]
+    expect(group?.tabs).toHaveLength(1)
+    expect(group?.tabs[0]).toMatchObject({ id: 'term-topbar-1', title: 'Terminal', cwd: TERM_CWD })
+  })
+
+  it('closes on a second click without spawning another terminal', async () => {
+    renderTopBar(false)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(false)
+    expect(createTerminal).toHaveBeenCalledTimes(1)
+  })
+
+  it('with no active session cwd: opens the panel but spawns NOTHING (no orphan PTY)', async () => {
+    // Pre-fix, the '.'-fallback spawned a real shell into group '.', which no
+    // view ever shows (selectVisibleTerminalTabs bails on an empty cwd) — an
+    // invisible orphan the visible button would have made easy to hit from the
+    // welcome screen. The panel's own empty state is the affordance instead.
+    useSessionStore.setState({ activeSessionId: null })
+
+    renderTopBar(false)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().terminalGroups['.']).toBeUndefined()
+  })
+
+  it('reuses an existing tab group for the cwd instead of spawning a duplicate', async () => {
+    useSessionStore.getState().addTerminalTab({ id: 'term-existing', title: 'A', cwd: TERM_CWD })
+
+    renderTopBar(false)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().terminalGroups[TERM_CWD]?.tabs).toHaveLength(1)
+  })
+})

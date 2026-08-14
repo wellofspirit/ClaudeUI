@@ -11,12 +11,8 @@ import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
 import { PluginWebView } from './plugin/PluginWebView'
 import { TerminalPanel } from './terminal/TerminalPanel'
-import {
-  useActiveSession,
-  useSessionStore,
-  applyTheme,
-  normalizeCwd
-} from '../stores/session-store'
+import { toggleTerminalPanel } from './terminal/toggle-terminal'
+import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
@@ -252,23 +248,7 @@ export function SessionView(): React.JSX.Element {
     const handler = (e: KeyboardEvent): void => {
       if (e.key === '`' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault()
-        const state = useSessionStore.getState()
-        const willOpen = !state.terminalPanelOpen
-        state.setTerminalPanelOpen(willOpen)
-
-        // Auto-create first terminal if opening and no tabs for this cwd
-        if (willOpen) {
-          const cwd = state.activeSessionId
-            ? (state.sessions[state.activeSessionId]?.cwd ?? '.')
-            : '.'
-          const key = normalizeCwd(cwd || '.')
-          const group = state.terminalGroups[key]
-          if (!group || group.tabs.length === 0) {
-            window.api.createTerminal(cwd || '.').then((terminalId) => {
-              state.addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
-            })
-          }
-        }
+        toggleTerminalPanel()
       }
     }
     document.addEventListener('keydown', handler)
