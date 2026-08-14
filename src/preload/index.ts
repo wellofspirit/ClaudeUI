@@ -100,7 +100,6 @@ const api: ClaudeAPI = {
       forkSession,
       engineId
     ),
-  rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
   resolveForkAnchor: (
     sessionId: string,
     cwd: string,
@@ -488,8 +487,10 @@ const api: ClaudeAPI = {
 if (process.contextIsolated) {
   contextBridge.exposeInMainWorld('api', api)
 } else {
-  // @ts-expect-error global augmentation
-  window.api = api
+  // The augmentation now loads in this project too (src/shared/window-api.d.ts),
+  // so the assignment typechecks and the suppression it needed is gone. The cast
+  // is what remains necessary: `api` is a structural superset of `ClaudeAPI`.
+  window.api = api as unknown as Window['api']
 }
 
 // Prime the main process with the markdown source of whatever was right-

@@ -62,7 +62,7 @@ export async function seedCanonicalAppState(): Promise<void> {
   try {
     // Raw on-disk settings, exactly as the `config:settings-changed` payload
     // carries them — every client merges its own defaults over the top
-    // (`applyRemoteSnapshot`), so shipping the merged copy would bake THIS
+    // (the client replica's hydration path), so shipping the merged copy would bake THIS
     // process's defaults into another client's state.
     syncCore.setAppState({ settings: loadSettings() as Record<string, unknown> })
   } catch (err) {

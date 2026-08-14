@@ -936,7 +936,14 @@ interface SessionAPI {
     forkSession?: boolean,
     engineId?: EngineId
   ): Promise<void>
-  rekeySession(oldId: string, newId: string): Promise<void>
+  /**
+   * `rekeySession` was DELETED in SyncCore phase 4c. Core owns the rekey: it
+   * applies `rekeyTargetFor` to canonical state and re-keys its own session
+   * registry in the same tick it emits the `session:status` that implies one, so a
+   * client telling main to rekey was a client racing the authority. The main-side
+   * `session:rekey` handler SURVIVES as a shim for cached phone bundles that still
+   * invoke it (it logs and applies a rekey core did not own).
+   */
   /** Resolve the fork ("branch off") anchor for an engine session. Claude:
    *  `messageId` (the renderer's ChatMessage.id) resolves to a JSONL line
    *  uuid; `messageIndex` is unused. pi: no stable id exists, so `messageIndex`

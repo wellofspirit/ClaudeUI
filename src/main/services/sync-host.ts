@@ -38,9 +38,13 @@
 
 import type { BrowserWindow } from 'electron'
 import { SyncCore, type Delivery } from '../sync/sync-core'
-import { compareShadow, formatShadowDiff, CLIENT_WRITTEN_FIELDS } from '../sync/shadow'
-import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import { logger } from './logger'
+import {
+  detectEnteredWorktree,
+  deriveWorktreeName,
+  recordWorktreeEntry,
+  WORKTREE_ENTER_TOOL_NAMES
+} from './worktree-detect'
 
 const LOG_SOURCE = 'sync-core'
 
@@ -123,6 +127,10 @@ function hostDelivery(
     sendToWindow((delivery.window as BrowserWindow | undefined) ?? primaryWindow, channel, args)
     return
   }
+  // Main-side observers run BEFORE the fan-out: their own emissions are queued by
+  // SyncCore's reentrancy guard, so they land after this event and never take a
+  // lower seq than the event that caused them.
+  observeWorktreeEntry(channel, args)
   for (const sink of [...subscribers]) {
     try {
       sink(seq, channel, args)
@@ -170,79 +178,68 @@ export function emitEvent(channel: string, args: unknown[], win?: BrowserWindow 
 }
 
 // ---------------------------------------------------------------------------
-// Shadow watch (dev only — SyncCore phase 4a item 9, inverted by 4b)
+// Funnel observers (SyncCore phase 4c)
 // ---------------------------------------------------------------------------
-
-/** How often the dev shadow watch diffs the renderer replica against canonical. */
-const SHADOW_INTERVAL_MS = 15_000
-
-/** Env flag that arms the watch. Absent in every production build path. */
-export const SHADOW_ENV_FLAG = 'CLAUDEUI_SYNC_SHADOW'
-
-let shadowTimer: ReturnType<typeof setInterval> | null = null
+//
+// The shadow comparator that lived here is DELETED. It existed because the
+// renderer interpreted the replicated stream with its own ~40 handlers while
+// canonical interpreted it with `applyEvent`, and something had to measure the gap
+// between two implementations of one contract. With the renderer folding the same
+// reducer (`renderer/src/stores/replica.ts`) there is no second implementation to
+// diff, so the instrument has nothing to measure — its remaining value moved into
+// the hydration-parity assertions in `e2e/flows/sync-hydration-parity.e2e.test.ts`.
+// Gone with it: `main/sync/shadow.ts`, `CLIENT_WRITTEN_FIELDS`, the renderer's
+// `__getRemoteState` / `getRemoteStateSnapshot`, and the CLAUDEUI_SYNC_SHADOW flag.
 
 /**
- * Periodically diff the renderer's replica against canonical state and log a
- * BOUNDED summary when they disagree.
+ * Detect an entered worktree from an `EnterWorktree` tool result and persist it
+ * (SyncCore phase 4c — the last client-computation violation, moved to main).
  *
- * The direction of suspicion flipped in 4b: canonical is now the state of record
- * (`sync-full` serves it), so what this watch surfaces is the DESKTOP store
- * showing something no reconnecting client would see. It survives 4c — the
- * renderer's store still interprets the event stream with its own handlers, so
- * the duplication the comparator measures is still there; it retires with the
- * renderer's adoption of the shared reducer.
- *
- * Off unless `CLAUDEUI_SYNC_SHADOW=1` — a development instrument, not a product
- * feature: no telemetry, no user-facing surface, and no cost at all when the flag
- * is absent.
- *
- * Deliberately tolerant: the renderer round-trip can fail (not yet mounted, page
- * reloading) and a failed compare must never be louder than a real divergence.
+ * Runs on DELIVERY, which is after append + apply, so canonical already carries
+ * the tool_result attached to its tool_use: the `EnterWorktree` gate can be
+ * checked against real state rather than against a regex over the tool NAME.
  */
-export function startShadowWatch(win: BrowserWindow): void {
-  if (process.env[SHADOW_ENV_FLAG] !== '1') return
-  if (shadowTimer) return
-  logger.info(LOG_SOURCE, `shadow watch armed (${SHADOW_ENV_FLAG}=1)`)
-  shadowTimer = setInterval(() => {
-    void runShadowCompare(win)
-  }, SHADOW_INTERVAL_MS)
-}
-
-export function stopShadowWatch(): void {
-  if (!shadowTimer) return
-  clearInterval(shadowTimer)
-  shadowTimer = null
-}
-
-async function runShadowCompare(win: BrowserWindow): Promise<void> {
-  if (win.isDestroyed()) return
-  // Capture canonical FIRST and remember its seq: the renderer pull is async, so
-  // events landing mid-round-trip would otherwise read as divergence.
-  const canonical = syncCore.getSnapshot()
-  let renderer: FullStateSnapshot | null = null
-  try {
-    renderer = (await win.webContents.executeJavaScript(
-      'window.__getRemoteState ? window.__getRemoteState() : null'
-    )) as FullStateSnapshot | null
-  } catch {
-    return // renderer not ready — not a divergence
-  }
-  if (!renderer) return
-  if (syncCore.currentSeq() !== canonical.seq) return // raced; try again next tick
-
+function observeWorktreeEntry(channel: string, args: unknown[]): void {
+  if (channel !== 'session:tool-result') return
+  const routingId = args[0]
+  const data = args[1] as
+    | { toolUseId?: string; result?: string; isError?: boolean }
+    | undefined
+  if (typeof routingId !== 'string' || !data?.toolUseId || !data.result || data.isError) return
   const state = syncCore.getCanonicalState()
-  const unseeded = new Set(
-    Object.entries(state.sessions)
-      .filter(([, s]) => !s.seeded)
-      .map(([id]) => id)
+  if (state.worktreeInfoMap[routingId]) return
+  const session = state.sessions[routingId]
+  if (!session) return
+  const isEnterWorktree = session.messages.some((msg) =>
+    msg.content.some(
+      (b) =>
+        b.type === 'tool_use' &&
+        b.toolUseId === data.toolUseId &&
+        WORKTREE_ENTER_TOOL_NAMES.has(b.toolName)
+    )
   )
-  // Skip the client-written fields (sync-channels.md §"Client-written state") —
-  // known divergence, not signal. Without this the watch logs noise every tick.
-  const diffs = compareShadow(canonical, renderer, { unseeded, ignoreFields: CLIENT_WRITTEN_FIELDS })
-  if (diffs.length === 0) return
-  logger.warn(
-    LOG_SOURCE,
-    `shadow divergence (${diffs.length} field(s) at seq ${canonical.seq}):\n` +
-      formatShadowDiff(diffs).join('\n')
-  )
+  if (!isEnterWorktree) return
+  const detected = detectEnteredWorktree(data.result)
+  if (!detected) return
+  try {
+    recordWorktreeEntry(
+      routingId,
+      {
+        worktreePath: detected.worktreePath,
+        worktreeBranch: detected.worktreeBranch,
+        worktreeName: deriveWorktreeName(detected.worktreePath, detected.worktreeBranch),
+        originalCwd: session.cwd,
+        gitRoot: session.cwd,
+        originalHeadCommit: '',
+        createdAt: Date.now()
+      },
+      emitEvent
+    )
+  } catch (err) {
+    logger.warn(
+      LOG_SOURCE,
+      `worktree detection failed for ${routingId}: ` +
+        `${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }

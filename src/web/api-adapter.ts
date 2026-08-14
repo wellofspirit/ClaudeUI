@@ -90,9 +90,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         engineId
       ) as Promise<void>,
 
-    rekeySession: (oldId, newId) =>
-      connection.invoke('session:rekey', oldId, newId) as Promise<void>,
-
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
       unwrap('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
 

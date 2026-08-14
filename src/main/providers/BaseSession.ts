@@ -392,8 +392,18 @@ export abstract class BaseSession implements ISession {
    *    and carries either that elapsed time or the parked one, ONCE (the reducer
    *    owns it from there — re-sending would stamp a later span with a stale
    *    duration);
-   *  - `idle`/`disconnected` status and a retraction abandon an open span with no
-   *    stamp, exactly as the renderer's safety nets do.
+   *  - `idle`/`disconnected` status and a retraction abandon the span with no
+   *    stamp — BOTH the open clock and an already-parked duration.
+   *
+   * **Phase 4c fixed the parked half.** Until 4c only `thinkingStartedAt` was
+   * cleared at a turn boundary, so a span sealed by a text delta whose message
+   * never arrived (interrupt, refusal retraction, engine death) left
+   * `sealedThinkingMs` parked — and the NEXT turn's first message shipped it,
+   * stamping a fresh thinking block with the previous turn's elapsed time. It was
+   * left in place deliberately in 4b: the renderer's own
+   * `pendingThinkingDurationMs` leaked the same value the same way, so the two
+   * sides agreed and the shadow comparator stayed quiet. 4c deleted the renderer's
+   * clock, so there is no mirror left to preserve and the leak is just a leak.
    *
    * Returns the payload to emit — a shallow copy when a duration is attached, so
    * the caller's object (which engines also keep in their own message history) is
@@ -427,11 +437,13 @@ export abstract class BaseSession implements ISession {
         const status = data as SessionStatus | null
         if (status?.state === 'idle' || status?.state === 'disconnected') {
           this.thinkingStartedAt = null
+          this.sealedThinkingMs = null
         }
         return data
       }
       case 'session:messages-retracted':
         this.thinkingStartedAt = null
+        this.sealedThinkingMs = null
         return data
       default:
         return data

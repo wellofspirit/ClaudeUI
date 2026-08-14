@@ -42,7 +42,7 @@ const optimizer = {
   }
 }
 import { registerSessionIpc } from './ipc/session.ipc'
-import { setSyncWindow, startShadowWatch } from './services/sync-host'
+import { setSyncWindow } from './services/sync-host'
 import { attachSyncPort } from './services/sync-port'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { terminalService } from './services/terminal-service'
@@ -310,9 +310,6 @@ function createWindow(): void {
   // every load and answers its `sync` frames from the ring/canonical state,
   // exactly as the WebSocket server answers a phone's.
   attachSyncPort(mainWindow)
-  // Dev-only drift detector for the shadow duplication (no-op unless
-  // CLAUDEUI_SYNC_SHADOW=1).
-  startShadowWatch(mainWindow)
 
   // Navigation guard (H4). The main window runs a full-privilege preload
   // (`window.api`) with sandbox:false. Without this, any top-frame navigation —
