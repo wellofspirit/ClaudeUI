@@ -10,6 +10,7 @@ import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
 import { toggleTerminalPanel } from '../../terminal/toggle-terminal'
+import { useTerminalAvailability } from '../../terminal/terminal-availability'
 import { shortModelName } from '../../usage/usage-utils'
 
 /** Format a millisecond duration as "Ns", "Nm Ns", or "Nh Nm" — seconds drop
@@ -63,6 +64,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const isMac = window.api.platform === 'darwin'
   const leftPadding = isMobileCtx ? 8 : sidebarCollapsed && isMac ? 148 / uiFontScale : 13
+  const terminalAvailability = useTerminalAvailability()
+  // Tooltip text only. `window.api.platform` is 'web' for every host OS, so the
+  // UA hint is the only signal a browser client has about its keyboard. Both
+  // bindings work everywhere regardless — this just names the reachable one.
+  const isMacKeyboard =
+    isMac || (window.api.platform === 'web' && /mac/i.test(navigator.platform ?? ''))
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [infoHover, setInfoHover] = useState(false)
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -465,17 +472,23 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             <span>VSCode</span>
           </button>
         )}
-        {/* The only *visible* way into the terminal panel. The Ctrl/Cmd+`
-            keybinding stays, but it's unreachable in a browser (macOS owns
-            Cmd+`, Edge swallows Ctrl+`), so web needs a button. Deliberately
-            ungated beyond mobile — the panel renders its own availability /
-            step-up gate on web (ADR-048: terminal is desktop-web only). */}
-        {!isMobileCtx && (
+        {/* The only *visible* way into the terminal panel. The Ctrl/Cmd+` and
+            Alt+` keybindings stay, but Ctrl/Cmd+` is unreachable in a browser
+            (macOS owns Cmd+`, Edge swallows Ctrl+`), so web needs a button.
+            Gated on the host's own answer: on desktop the hook resolves
+            "allowed" synchronously with no IPC (the remote toggle governs
+            remote access, never the local shell), while on web the button only
+            appears once `terminal:availability` says yes — no affordance for a
+            shell this client cannot get. Null (web, first query in flight)
+            renders nothing: appearing a beat late beats flashing out. The panel
+            re-asks the same question itself — defense in depth (ADR-048:
+            terminal is desktop-web only). */}
+        {!isMobileCtx && terminalAvailability?.allowed === true && (
           <button
             data-testid="TopBar.terminal"
             onClick={toggleTerminalPanel}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title="Terminal (Ctrl+`)"
+            title={isMacKeyboard ? 'Terminal (⌥`)' : 'Terminal (Ctrl+`)'}
           >
             <svg
               width="13"

@@ -11,7 +11,7 @@ import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
 import { PluginWebView } from './plugin/PluginWebView'
 import { TerminalPanel } from './terminal/TerminalPanel'
-import { toggleTerminalPanel } from './terminal/toggle-terminal'
+import { toggleTerminalPanel, isTerminalToggleShortcut } from './terminal/toggle-terminal'
 import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 import { useAutomationEvents } from '../hooks/useAutomationEvents'
@@ -243,10 +243,10 @@ export function SessionView(): React.JSX.Element {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
-  // Ctrl+` to toggle terminal panel
+  // Ctrl/Cmd+` or Alt+` to toggle terminal panel (predicate owns both bindings)
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
-      if (e.key === '`' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+      if (isTerminalToggleShortcut(e)) {
         e.preventDefault()
         toggleTerminalPanel()
       }

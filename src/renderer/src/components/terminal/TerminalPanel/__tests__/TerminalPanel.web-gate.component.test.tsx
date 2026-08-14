@@ -3,7 +3,7 @@
  * `terminal:availability` (SyncCore phase 2, capability honesty).
  *
  * Desktop is deliberately not re-tested here — it never consults availability
- * (see DESKTOP_AVAILABILITY in TerminalPanel.tsx), which is what keeps its
+ * (see DESKTOP_AVAILABILITY in terminal-availability.ts), which is what keeps its
  * behavior identical to pre-phase-2. `TerminalPanel.component.test.ts` covers
  * that path unchanged.
  */

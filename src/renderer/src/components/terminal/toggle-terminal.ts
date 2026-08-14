@@ -1,13 +1,34 @@
 import { useSessionStore, normalizeCwd } from '../../stores/session-store'
 
 /**
+ * Does this keydown mean "toggle the terminal panel"?
+ *
+ * Two bindings, both live on every platform:
+ *
+ *  - Ctrl/Cmd+` — the original. Unreachable in a browser (macOS owns Cmd+`,
+ *    Edge swallows Ctrl+`), which is why the TopBar button exists at all.
+ *  - Alt+` — the escape hatch for exactly those hosts.
+ *
+ * The alt arm matches on `e.code`, NOT `e.key`: in most macOS layouts Option+`
+ * is a DEAD KEY (it starts a grave-accent composition), so the keydown arrives
+ * with `e.key === 'Dead'` while `e.code` still names the physical key. Matching
+ * on `key` would make the new binding a no-op on precisely the platform whose
+ * Cmd+` was stolen in the first place.
+ */
+export function isTerminalToggleShortcut(e: KeyboardEvent): boolean {
+  const ctrlOrCmdBackquote = e.key === '`' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
+  const altBackquote = e.code === 'Backquote' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+  return ctrlOrCmdBackquote || altBackquote
+}
+
+/**
  * Flip the bottom terminal panel open/closed, auto-creating the first tab for
  * the active session's cwd when opening into an empty group.
  *
- * Single source of truth for the affordance: the Ctrl/Cmd+` keydown handler in
- * SessionView and the TopBar button both call this, so the two can never drift.
- * The keybinding alone was unreachable on web (macOS eats Cmd+`, Edge swallows
- * Ctrl+`), which is why the button exists at all.
+ * Single source of truth for the affordance: SessionView's keydown handler (via
+ * {@link isTerminalToggleShortcut}) and the TopBar button both call this, so the
+ * two can never drift. The keybinding alone was unreachable on web (macOS eats
+ * Cmd+`, Edge swallows Ctrl+`), which is why the button exists at all.
  *
  * Deliberately dumb about availability — the panel itself renders the remote
  * gate / step-up prompt (TerminalPanel), so this never needs to know whether

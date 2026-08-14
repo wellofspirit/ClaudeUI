@@ -15,7 +15,7 @@
  * down the shared jsdom `window.api` out from under this one.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, fireEvent, screen, act, cleanup } from '@testing-library/react'
+import { render, fireEvent, screen, act, cleanup, waitFor } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
@@ -568,11 +568,16 @@ describe('TopBar — mobile entry points', () => {
 // entry point. Both it and the keydown handler call the SAME helper
 // (components/terminal/toggle-terminal.ts) — this block is that helper's
 // behavioral coverage; SessionView's keydown path is not re-tested.
+//
+// Visibility is gated on the host's own `terminal:availability` answer, but
+// ONLY on web: desktop resolves "allowed" synchronously with no IPC at all
+// (the remote toggle governs remote access, never the local shell).
 // ---------------------------------------------------------------------------
 
 describe('TopBar — terminal toggle button', () => {
   let app: TestApp
   let createTerminal: ReturnType<typeof vi.fn>
+  let terminalAvailability: ReturnType<typeof vi.fn>
 
   const TERM_CWD = '/d/repo-topbar-term'
 
@@ -588,6 +593,14 @@ describe('TopBar — terminal toggle button', () => {
     app = await bootTestApp()
     createTerminal = vi.fn(async () => 'term-topbar-1')
     ;(window.api as unknown as { createTerminal: unknown }).createTerminal = createTerminal
+    terminalAvailability = vi.fn(async () => ({
+      allowed: true,
+      granted: true,
+      needsStepUp: false,
+      stepUp: null
+    }))
+    ;(window.api as unknown as { terminalAvailability: unknown }).terminalAvailability =
+      terminalAvailability
     useSessionStore.getState().createNewSession(ROUTE, TERM_CWD)
     useSessionStore.setState({
       activeSessionId: ROUTE,
@@ -607,20 +620,80 @@ describe('TopBar — terminal toggle button', () => {
     })
   })
 
-  it('renders on desktop', () => {
+  it('renders on desktop without ever asking the host about availability', () => {
     renderTopBar(false)
     expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+    expect(terminalAvailability).not.toHaveBeenCalled()
   })
 
-  it('renders on web (the panel, not the button, owns the availability gate)', () => {
+  it('renders on web once the host says the remote terminal is allowed', async () => {
     app.api.platform = 'web'
     renderTopBar(false)
-    expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+
+    await waitFor(() => expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument())
+    expect(terminalAvailability).toHaveBeenCalled()
+  })
+
+  it('stays hidden on web when the owner has the remote terminal turned off', async () => {
+    app.api.platform = 'web'
+    terminalAvailability.mockResolvedValue({
+      allowed: false,
+      granted: false,
+      needsStepUp: false,
+      stepUp: null
+    })
+    renderTopBar(false)
+
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    // Flush the resolved-promise state update before asserting absence.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('stays hidden on web while the first availability query is still in flight', async () => {
+    app.api.platform = 'web'
+    // Never resolves: an affordance that flashes in and back out is worse than
+    // one that appears a beat late.
+    terminalAvailability.mockReturnValue(new Promise(() => {}))
+    renderTopBar(false)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(terminalAvailability).toHaveBeenCalled()
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('stays hidden on web when the availability query fails outright', async () => {
+    app.api.platform = 'web'
+    terminalAvailability.mockRejectedValue(new Error('no handler'))
+    renderTopBar(false)
+
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
   })
 
   it('is hidden on mobile (terminal is desktop-web only — ADR-048)', () => {
     renderTopBar(true)
     expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('names the reachable binding per platform in the tooltip', () => {
+    // Pinned rather than inherited from process.platform, so the assertion
+    // means the same thing on a macOS dev box as it does in CI.
+    app.api.platform = 'win32'
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toHaveAttribute('title', 'Terminal (Ctrl+`)')
+    cleanup()
+
+    app.api.platform = 'darwin'
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toHaveAttribute('title', 'Terminal (⌥`)')
   })
 
   it('opens the panel and auto-creates the first tab for the active cwd', async () => {

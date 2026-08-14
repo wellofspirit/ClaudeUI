@@ -9,24 +9,11 @@ import {
 import { isNeedsStepUpError } from '../../../../../shared/remote-protocol'
 import type { TerminalAvailability } from '../../../../../shared/types'
 import { TerminalStepUpPrompt } from '../TerminalStepUpPrompt'
+import { DESKTOP_AVAILABILITY } from '../terminal-availability'
 import { TerminalPanelView } from './View'
 
 interface Props {
   style: React.CSSProperties
-}
-
-/**
- * The desktop renderer IS the host surface: it holds a non-decaying `shell`
- * grant, so it never consults `terminal:availability` and never sees a step-up
- * prompt. Pinning that as a constant (rather than awaiting the same query)
- * keeps the desktop panel's behavior byte-identical to pre-phase-2.
- */
-const DESKTOP_AVAILABILITY: TerminalAvailability = {
-  allowed: true,
-  granted: true,
-  needsStepUp: false,
-  // No ceremony on desktop, so no proof params to carry.
-  stepUp: null
 }
 
 export function TerminalPanel({ style }: Props): React.JSX.Element {
