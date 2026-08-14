@@ -265,6 +265,36 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'account:delete': 'admin',
   // Spawns a local opencode server.
   'usage:refresh-prices': 'admin',
+  // Host diagnostics surface: a SEPARATE BrowserWindow with its own preload,
+  // reading the process log ring. Pinned to `admin` ahead of the port (SyncCore
+  // phase 4a item 3 closed the EVENT side of this residual — `log-viewer:*`
+  // events are classified `host-local` in shared/sync/channels.ts — but the
+  // invoke side is still raw `ipcMain.handle` in services/log-viewer.ts).
+  'log-viewer:open': 'admin',
+  'log-viewer:ready': 'admin',
+  'log-viewer:get-theme': 'admin',
+  'log-viewer:set-theme': 'admin',
+  'log-viewer:minimize': 'admin',
+  'log-viewer:maximize': 'admin',
+  'log-viewer:close': 'admin',
+  // Scheduled automations run arbitrary prompts against the host on a timer, so
+  // every MUTATING channel is `admin`. Same situation as `log-viewer:*`: the event
+  // side is classified now (`automation:*` in shared/sync/channels.ts), the invoke
+  // side still lives on raw `ipcMain.handle` in ipc/automation.ipc.ts. Pinning
+  // here means the port cannot silently widen the remote surface when it happens.
+  //
+  // The read channels (`automation:list`, `-list-runs`, `-load-run-history`) are
+  // deliberately NOT pinned: they would declare `config`, which IS in
+  // LEGACY_REMOTE_GRANTS, and a pin whose capability is grantable would break
+  // this table's one guarantee (see the doc comment). Whether reads are exposed
+  // is a policy decision for the port, not something to freeze in advance.
+  'automation:save': 'admin',
+  'automation:delete': 'admin',
+  'automation:run-now': 'admin',
+  'automation:toggle': 'admin',
+  'automation:cancel': 'admin',
+  'automation:dismiss-run': 'admin',
+  'automation:send-message': 'admin',
   // The remote server's own config + credential. A remote client must never
   // read/rotate the credential it authenticated with, nor flip the transport
   // it is connected through (ADR-039/042).

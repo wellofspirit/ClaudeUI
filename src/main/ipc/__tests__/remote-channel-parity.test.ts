@@ -17,12 +17,20 @@
  * of denylist membership — the capability is what can now silently make a
  * channel unreachable. (The behavioral twin of this file, running against the
  * real registry, is the parity pin in remote-handlers.ipc.test.ts.)
+ *
+ * Since SyncCore phase 4a there is a matching pin for the OTHER direction — the
+ * EVENT surface — in `sync-funnel-guard.test.ts`: every channel the main process
+ * emits, and every channel either client subscribes to, must be classified in
+ * `src/shared/sync/channels.ts`. The two together cover both halves of the
+ * contract: what a client may call, and what a client may be told. The last test
+ * here ties the knot so neither pin can be recut without the other in view.
  */
 
 import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import { LEGACY_REMOTE_GRANTS, type Capability } from '../command-registry'
+import { channelSpec } from '../../../shared/sync/channels'
 
 const REPO = process.cwd()
 const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf-8')
@@ -95,5 +103,22 @@ describe('remote channel parity (R5)', () => {
       ungranted,
       `invoked but not grantable: ${ungranted.map((c) => `${c}(${declared.get(c)})`).join(', ')}`
     ).toEqual(SHELL_GATED_REMOTE_CHANNELS)
+  })
+
+  it('the web client subscribes only to CLASSIFIED event channels (4a)', () => {
+    // The invoke surface and the event surface are the two halves of the client
+    // contract. A channel the web client listens for that nothing classifies can
+    // never arrive, because the funnel is fail-closed — the same class of silent
+    // gap this file was written to catch on the invoke side.
+    const src = read('src/web/api-adapter.ts')
+    const re = /\bon\(\s*['"]([^'"]+)['"]\s*\)/g
+    const listened: string[] = []
+    for (let m = re.exec(src); m; m = re.exec(src)) listened.push(m[1])
+    expect(listened.length).toBeGreaterThan(30)
+    const unclassified = listened.filter((c) => !channelSpec(c)).sort()
+    expect(
+      unclassified,
+      `api-adapter listens for channels with no entry in shared/sync/channels.ts: ${unclassified.join(', ')}`
+    ).toEqual([])
   })
 })

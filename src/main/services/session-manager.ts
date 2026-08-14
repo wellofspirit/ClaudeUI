@@ -8,10 +8,50 @@ import { loadSessionHistory } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { renameDispatchedUsage } from './db'
 import { logger } from './logger'
+import { syncCore } from './sync-host'
+
+/**
+ * Unsubscribe for whichever SessionManager currently owns core's rekeys.
+ *
+ * Module-level because the ownership is exclusive: `registerSessionIpc` builds a
+ * fresh manager, and it re-runs when macOS re-creates the window after every
+ * window has been closed. Without superseding, each new manager would STACK a
+ * subscription and every rekey would also be applied to the abandoned managers —
+ * which still hold their own session objects, so it would re-key state nothing
+ * owns any more.
+ */
+let activeRekeyUnsubscribe: (() => void) | null = null
 
 export class SessionManager {
   private sessions = new Map<string, ISession>()
   private _sessionTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
+  /** Unsubscribes this manager from core's rekey notifications. */
+  private readonly unsubscribeRekey: () => void
+
+  constructor() {
+    // SyncCore phase 4a item 7 — REKEY OWNERSHIP MOVED INTO CORE.
+    //
+    // Before this, every client reacted to `session:status` by invoking
+    // `session:rekey` (useClaudeEvents.ts; web via api-adapter): N clients firing
+    // N duplicate invokes at the main process, correct only because
+    // {@link rekey} happens to be idempotent. Core now applies the SAME
+    // status-driven rule to its canonical state and tells the registry, in the
+    // same tick, right after the append — so the ordering invariant holds: no
+    // event carrying the NEW routingId can enter the ring before the
+    // `session:status` event that introduces it, which is what lets every
+    // replica rekey purely from the stream.
+    //
+    // The `session:rekey` channel survives as an idempotent no-op shim; removing
+    // its client call sites is 4c.
+    activeRekeyUnsubscribe?.()
+    this.unsubscribeRekey = syncCore.onRekey((oldId, newId) => this.rekey(oldId, newId))
+    activeRekeyUnsubscribe = this.unsubscribeRekey
+  }
+
+  /** Detach from core's rekey notifications (test teardown / app shutdown). */
+  disposeRekeyObserver(): void {
+    this.unsubscribeRekey()
+  }
 
   /** Update the idle timeout for all current and future sessions. */
   setSessionTimeout(ms: number): void {

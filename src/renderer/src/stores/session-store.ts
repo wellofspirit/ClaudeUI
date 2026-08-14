@@ -137,138 +137,13 @@ function resolveEngineDefaultModel(
   return engineMeta(engineId).defaultModelValue()
 }
 
-const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
-
 /**
- * Scan messages for TaskCreate/TaskUpdate/TodoWrite tool calls and build the
- * final TodoItem[] state. Returns null if no relevant tool calls found.
+ * Derived-state scanners moved to `shared/derive-session.ts` (SyncCore phase 4a):
+ * todos / sentFiles are derived inside the shared reducer now, and core plus every
+ * client replica must derive identically. Re-exported so existing import sites
+ * (useClaudeEvents, tests) are unchanged.
  */
-export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | null {
-  const tasks = new Map<string, TodoItem>()
-  let hasTaskCalls = false
-
-  for (const msg of messages) {
-    if (msg.role !== 'assistant') continue
-    for (const block of msg.content) {
-      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName))
-        continue
-      const input = block.toolInput || {}
-
-      if (block.toolName === 'TodoWrite') {
-        hasTaskCalls = true
-        tasks.clear()
-        if (Array.isArray(input.todos)) {
-          ;(input.todos as Record<string, unknown>[]).forEach((t, i) => {
-            tasks.set(String(i), {
-              content: String(t.content || ''),
-              status: (t.status as TodoItem['status']) || 'pending',
-              activeForm: String(t.activeForm || '')
-            })
-          })
-        }
-      } else if (block.toolName === 'TaskCreate') {
-        hasTaskCalls = true
-        // New batch: if all existing tasks are completed/empty, start fresh
-        if (tasks.size > 0) {
-          const allDone = Array.from(tasks.values()).every((t) => t.status === 'completed')
-          if (allDone) tasks.clear()
-        }
-        // Extract ID from the tool_result in the same message
-        const resultBlock = msg.content.find(
-          (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
-        )
-        const idMatch =
-          resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
-        const id = idMatch ? idMatch[1] : block.toolUseId || String(tasks.size)
-        tasks.set(id, {
-          content: String(input.subject || ''),
-          status: 'pending',
-          activeForm: String(input.activeForm || '')
-        })
-      } else if (block.toolName === 'TaskUpdate') {
-        hasTaskCalls = true
-        const id = String(input.taskId || '')
-        const existing = tasks.get(id)
-        if (existing) {
-          if (input.status === 'deleted') {
-            tasks.delete(id)
-          } else if (input.status) {
-            existing.status = input.status as TodoItem['status']
-          }
-          if (input.subject) existing.content = String(input.subject)
-          if (input.activeForm) existing.activeForm = String(input.activeForm)
-        }
-      }
-    }
-  }
-
-  if (!hasTaskCalls) return null
-  return Array.from(tasks.values())
-}
-
-/** Max chars of a SendUserFile error result kept for display. */
-const SENT_FILE_ERROR_MAX = 500
-
-/**
- * Scan messages for Claude Code `SendUserFile` tool calls and build the list of
- * files the agent has handed to the user. Returns null if there are none —
- * mirroring {@link buildTodosFromMessages}'s contract, so a rebuild never
- * clobbers existing state when the transcript has nothing to say.
- *
- * Semantics that differ from todos:
- *  - the list is cumulative for the whole session and is NEVER cleared;
- *  - a re-send of the same path replaces the earlier entry and moves it to the
- *    end (latest send wins — its caption/display/error are the current truth);
- *  - a call whose tool_result hasn't landed yet is still included (in-flight),
- *    and the rebuild triggered by the result later fills in `error`.
- */
-export function buildSentFilesFromMessages(messages: ChatMessage[]): SentFile[] | null {
-  const byPath = new Map<string, SentFile>()
-  let hasSendCalls = false
-
-  for (const msg of messages) {
-    if (msg.role !== 'assistant') continue
-    for (const block of msg.content) {
-      if (block.type !== 'tool_use' || block.toolName !== 'SendUserFile') continue
-      hasSendCalls = true
-      const input = block.toolInput || {}
-
-      // cli.js coerces a bare string to [string]; accept both shapes.
-      const raw = input.files
-      const paths = (Array.isArray(raw) ? raw : [raw]).filter(
-        (p): p is string => typeof p === 'string' && p.trim().length > 0
-      )
-      if (paths.length === 0) continue
-
-      const resultBlock = msg.content.find(
-        (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
-      )
-      const error =
-        resultBlock?.type === 'tool_result' && resultBlock.isError
-          ? resultBlock.toolResult.trim().slice(0, SENT_FILE_ERROR_MAX)
-          : undefined
-
-      const caption = typeof input.caption === 'string' ? input.caption : undefined
-      const display =
-        input.display === 'render' || input.display === 'attach' ? input.display : undefined
-
-      for (const p of paths) {
-        // Delete first so a re-sent path moves to the end of the insertion order.
-        byPath.delete(p)
-        byPath.set(p, {
-          path: p,
-          ...(caption ? { caption } : {}),
-          ...(display ? { display } : {}),
-          toolUseId: block.toolUseId,
-          ...(error ? { error } : {})
-        })
-      }
-    }
-  }
-
-  if (!hasSendCalls) return null
-  return Array.from(byPath.values())
-}
+export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -1270,6 +1145,15 @@ interface SessionState {
   setDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Set the active session's model picker value within its selected engine. */
   setSelectedModel: (model: string) => void
+  applyRemoteSessionConfig: (
+    routingId: string,
+    patch: {
+      model?: string
+      effort?: string
+      thinkingMode?: string
+      reasoningVariant?: string | null
+    }
+  ) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setSdkSkillNames: (names: string[]) => void
@@ -2962,6 +2846,30 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
+  // Per-session config replicated from another client (SyncCore phase 4a
+  // `session:config-changed`). Per-field REPLACE, so re-applying this client's
+  // own echo is a no-op. Deliberately does NOT save back to disk — an externally
+  // originated change must not round-trip a write (same rule as
+  // applyExternalSettings) — and deliberately does NOT reuse setSelectedModel,
+  // whose sessionEngines persistence and reasoningVariant reset are picker
+  // behavior, not replica behavior (the emitter sends reasoningVariant
+  // explicitly when a model change invalidates it).
+  applyRemoteSessionConfig: (routingId, patch) =>
+    set((state) => {
+      if (!state.sessions[routingId]) return {}
+      const fields: Partial<PerSessionState> = {}
+      if (patch.model !== undefined) fields.selectedModel = patch.model
+      if (patch.effort !== undefined) {
+        fields.effort = patch.effort as PerSessionState['effort']
+      }
+      if (patch.thinkingMode !== undefined) {
+        fields.thinkingMode = patch.thinkingMode as PerSessionState['thinkingMode']
+      }
+      if (patch.reasoningVariant !== undefined) fields.reasoningVariant = patch.reasoningVariant
+      if (Object.keys(fields).length === 0) return {}
+      return { sessions: updateSession(state.sessions, routingId, () => fields) }
+    }),
+
   setSlashCommands: (commands) => set({ slashCommands: commands }),
   setCustomCommands: (commands) => set({ customCommands: commands }),
   setSdkSkillNames: (names) => set({ sdkSkillNames: names }),
@@ -3660,6 +3568,7 @@ export function getRemoteStateSnapshot(): {
       thinkingMode: string
       reasoningVariant: string | null
       statusLine: StatusLineData | null
+      metering: MeteringSnapshot | null
       slashCommands: SlashCommandInfo[]
       customCommands: SlashCommandInfo[]
       sdkSkillNames: string[]
@@ -3706,6 +3615,9 @@ export function getRemoteStateSnapshot(): {
       thinkingMode: s.thinkingMode,
       reasoningVariant: s.reasoningVariant,
       statusLine: s.statusLine,
+      // SyncCore phase 4a item 8 — without this every resync blanked the TopBar
+      // metering breakdown on remote clients (the snapshot simply had no field).
+      metering: s.metering,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,
       sdkSkillNames: state.sdkSkillNames,

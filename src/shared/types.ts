@@ -1131,6 +1131,27 @@ interface SessionAPI {
   onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
+  /**
+   * Per-session config replication (SyncCore phase 4a). A PARTIAL patch: only
+   * the fields the setter changed are present, and each is a replace. Emitted by
+   * the `session:set-model` / `-effort` / `-thinking-mode` / `-reasoning-variant`
+   * handlers, pre-spawn included — before this, a model pick on one client was
+   * invisible to every other (docs/architecture/remote.md defect 1).
+   *
+   * Distinct from {@link ClaudeAPI.onSessionConfigChanged}, which carries the
+   * app-level `sessions.json` (`config:sessions-changed`).
+   */
+  onPerSessionConfig(
+    cb: (
+      routingId: string,
+      patch: {
+        model?: string
+        effort?: string
+        thinkingMode?: string
+        reasoningVariant?: string | null
+      }
+    ) => void
+  ): () => void
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>

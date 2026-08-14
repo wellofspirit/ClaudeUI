@@ -488,6 +488,14 @@ export function useClaudeEvents(): void {
       window.api.onSessionConfigChanged((config) => {
         useSessionStore.getState().applyExternalSessionConfig(config)
       }),
+      // Per-session config picked on ANOTHER client (SyncCore phase 4a). A
+      // partial patch, applied per-field as a REPLACE — idempotent, so the echo
+      // of this client's own pick is a no-op. The picker's local optimistic write
+      // stays until 4c, when the store adopts the reducer and the replace
+      // becomes the only writer.
+      window.api.onPerSessionConfig((routingId, patch) => {
+        useSessionStore.getState().applyRemoteSessionConfig(resolveRoutingId(routingId), patch)
+      }),
       // Account usage (5hr / 7-day rate limits)
       window.api.onAccountUsage((data) => {
         useSessionStore.getState().setAccountUsage(data)

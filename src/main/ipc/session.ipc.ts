@@ -6,7 +6,7 @@ import { query as sdkQuery } from '../sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from '../services/sync-host'
 import {
   listDirectories,
   loadSessionHistory,
@@ -150,6 +150,9 @@ import {
   setPermissionMode,
   setEffort,
   setThinkingMode,
+  setModel,
+  setReasoningVariant,
+  rekeyShim,
   getPlanContent,
   getSessionLogPath,
   mcpStatus,
@@ -724,7 +727,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: (oldId: string, newId: string) => {
-      manager.rekey(oldId, newId)
+      rekeyShim(manager, oldId, newId)
     }
   })
 
@@ -966,9 +969,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, model: string) => {
-      await manager.get(routingId)?.setModel(model)
-    }
+    handler: async (routingId: string, model: string) => setModel(manager, win, routingId, model)
   })
 
   handleIpc({
@@ -976,8 +977,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (routingId: string, effort: string) =>
-      setEffort(manager, routingId, effort)
+    handler: (routingId: string, effort: string) => setEffort(manager, win, routingId, effort)
   })
 
   handleIpc({
@@ -985,9 +985,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (routingId: string, variant: string | null) => {
-      manager.get(routingId)?.setReasoningVariant?.(variant)
-    }
+    handler: (routingId: string, variant: string | null) =>
+      setReasoningVariant(manager, win, routingId, variant)
   })
 
   handleIpc({
@@ -995,8 +994,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (routingId: string, mode: string) =>
-      setThinkingMode(manager, routingId, mode)
+    handler: (routingId: string, mode: string) => setThinkingMode(manager, win, routingId, mode)
   })
 
   handleIpc({
@@ -1991,12 +1989,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // registry is what keeps desktop and remote owners coexisting. This is also
   // the only place that knows the window fan-out, so it installs it.
   gitWatchRegistry.init((cwd, status) => {
-    if (!win.isDestroyed()) {
-      win.webContents.send('git:status-update', { cwd, status })
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
-    }
+    emitEvent('git:status-update', [{ cwd, status }], 'all', win)
   })
 
   handleIpc({
@@ -2060,8 +2053,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher(win)
 
-  // Watch ~/.claude/ui/ config files for cross-instance sync
-  startConfigWatcher(win, () => BaseSession.getExtraWindows())
+  // Watch ~/.claude/ui/ config files for cross-instance sync. The watcher emits
+  // through the funnel now, so it no longer needs an extra-window accessor.
+  startConfigWatcher(win)
 
   const savedSettings = loadSettings() as Record<string, unknown>
 
@@ -2429,9 +2423,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         if (!filename) return
         if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
         entry.debounceTimer = setTimeout(() => {
-          if (!win.isDestroyed()) {
-            win.webContents.send('mockup:file-changed', directory)
-          }
+          // main-only, verbatim: the DESKTOP mockup watcher never fanned out to
+          // extras (the remote-registered watcher in remote-handlers.ts does).
+          emitEvent('mockup:file-changed', [directory], 'main-only', win)
         }, 200)
       })
 
@@ -2466,12 +2460,7 @@ function startProjectsWatcher(win: BrowserWindow): void {
   const notify = (): void => {
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('session:directories-changed')
-      }
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('session:directories-changed')
-      }
+      emitEvent('session:directories-changed', [], 'all', win)
     }, 500)
   }
 

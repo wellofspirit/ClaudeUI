@@ -140,6 +140,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onGitStatusUpdate: onEvent('git:status-update'),
     onSettingsChanged: onEvent('config:settings-changed'),
     onSessionConfigChanged: onEvent('config:sessions-changed'),
+    onPerSessionConfig: onEvent('session:config-changed'),
     onAccountUsage: onEvent('usage:data'),
     onBlockUsage: onEvent('usage:block-data'),
     onAuthState: onEvent('auth:state'),

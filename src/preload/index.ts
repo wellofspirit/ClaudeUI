@@ -153,6 +153,7 @@ const api: ClaudeAPI = {
   onGitStatusUpdate: onEvent('git:status-update'),
   onSettingsChanged: onEvent('config:settings-changed'),
   onSessionConfigChanged: onEvent('config:sessions-changed'),
+  onPerSessionConfig: onEvent('session:config-changed'),
   onAccountUsage: onEvent('usage:data'),
   onAuthState: onEvent('auth:state'),
   onAuthSource: onEvent('session:auth-source'),

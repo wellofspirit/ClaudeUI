@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
 import { logger } from './logger'
+import { emitEvent } from './sync-host'
 import { writeFileAtomicSync } from './write-json-atomic'
 import {
   allSessionMeta,
@@ -306,10 +307,7 @@ export function saveVendorConfig(
  * Polling interval is 500ms — a good balance between responsiveness and CPU.
  * For just 2 small config files, the stat overhead is negligible.
  */
-export function startConfigWatcher(
-  win: BrowserWindow,
-  getExtraWindows?: () => Set<BrowserWindow>
-): () => void {
+export function startConfigWatcher(win: BrowserWindow): () => void {
   ensureDir()
 
   const watched = [
@@ -337,15 +335,7 @@ export function startConfigWatcher(
 
       try {
         const data = JSON.parse(content)
-        if (!win.isDestroyed()) {
-          win.webContents.send(entry.channel, data)
-        }
-        // Also forward to extra windows (remote bridge, etc.)
-        if (getExtraWindows) {
-          for (const w of getExtraWindows()) {
-            if (!w.isDestroyed()) w.webContents.send(entry.channel, data)
-          }
-        }
+        emitEvent(entry.channel, [data], 'all', win)
       } catch (err) {
         logger.warn('UIConfig', `Malformed JSON in ${path.basename(entry.filePath)}`, err)
       }

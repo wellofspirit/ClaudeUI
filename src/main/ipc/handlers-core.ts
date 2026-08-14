@@ -16,9 +16,9 @@ import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import { logger } from '../services/logger'
+import { emitEvent } from '../services/sync-host'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
-import { BaseSession } from '../providers/BaseSession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 
 // ---------------------------------------------------------------------------
@@ -86,13 +86,7 @@ export function sendPrompt(
     return
   }
   session.run(prompt, attachments)
-  const payload = { prompt, attachments }
-  if (!win.isDestroyed()) {
-    win.webContents.send('session:user-message', routingId, payload)
-  }
-  for (const w of BaseSession.getExtraWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
-  }
+  emitEvent('session:user-message', [routingId, { prompt, attachments }], 'all', win)
 }
 
 /**
@@ -126,12 +120,7 @@ export async function setPermissionMode(
     await session.setPermissionMode(mode)
     return
   }
-  if (!win.isDestroyed()) {
-    win.webContents.send('session:permission-mode', routingId, mode)
-  }
-  for (const w of BaseSession.getExtraWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('session:permission-mode', routingId, mode)
-  }
+  emitEvent('session:permission-mode', [routingId, mode], 'all', win)
 }
 
 export function watchBackground(
@@ -240,14 +229,119 @@ export async function askSideQuestion(
   return await session.askSideQuestion(question)
 }
 
-export function setEffort(manager: SessionManager, routingId: string, effort: string): void {
-  const s = manager.get(routingId)
-  if (s?.capabilities.reasoning.effort != null) s.setEffort?.(effort)
+/**
+ * `session:rekey` — an idempotent no-op shim (SyncCore phase 4a item 7).
+ *
+ * Core owns the rekey now: it applies the status-driven rule to canonical state
+ * and re-keys the SessionManager in the same tick as the append
+ * (`SessionManager`'s constructor subscribes to `syncCore.onRekey`). By the time
+ * a client's `session:rekey` invoke lands, the old key is already gone — which is
+ * exactly the state this shim reports success for.
+ *
+ * The channel stays because every client still invokes it (desktop
+ * `useClaudeEvents`, web `api-adapter`) and a cached `/remote` bundle in a phone
+ * browser will keep doing so for a while. Removing those call sites is 4c.
+ *
+ * `already-applied` is NOT an error: N clients each firing one invoke is the
+ * as-built behavior, and the whole point of moving ownership into core is that
+ * their duplicates now converge on one application instead of N.
+ */
+export function rekeyShim(
+  manager: SessionManager,
+  oldId: string,
+  newId: string
+): { ok: true; applied: boolean } {
+  if (!manager.get(oldId)) {
+    logger.debug('IPC', `session:rekey ${oldId} -> ${newId}: already applied by core (no-op)`)
+    return { ok: true, applied: false }
+  }
+  // Reachable only if core did not own this transition (a client-invented rekey,
+  // or a session created outside the funnel). Apply it rather than diverge.
+  logger.warn(
+    'IPC',
+    `session:rekey ${oldId} -> ${newId}: applying a client-driven rekey core did not own`
+  )
+  manager.rekey(oldId, newId)
+  return { ok: true, applied: true }
 }
 
-export function setThinkingMode(manager: SessionManager, routingId: string, mode: string): void {
+// ---------------------------------------------------------------------------
+// Per-session config (SyncCore phase 4a item 6 — `session:config-changed`)
+// ---------------------------------------------------------------------------
+//
+// Before 4a, `set-model` / `set-effort` / `set-thinking-mode` /
+// `set-reasoning-variant` emitted nothing any client could map back into picker
+// state (docs/architecture/remote.md defect 1): a model pick on a phone was
+// invisible to the desktop, and a resync clobbered it with the desktop's
+// ignorance. Each setter now emits ONE partial patch on the new replicated
+// channel, mirroring the pre-spawn permission-mode echo pattern (ADR-050 path):
+//
+//  - emitted PRE-SPAWN too, because multiple clients can be looking at the same
+//    not-yet-spawned session and the pick must reach all of them;
+//  - `'all'` delivery, exactly like `setPermissionMode`'s echo — the originating
+//    client's own optimistic write makes it idempotent there, and the reducer
+//    applies a per-field REPLACE, so re-applying converges;
+//  - only when the change was actually accepted: an engine without the
+//    capability silently ignores the setter today, and announcing a value the
+//    engine rejected would be the same lie the old `user-message {queued:true}`
+//    flavor was.
+
+/** One field of a session's config changed — emit the partial patch. */
+function emitConfigChanged(
+  win: BrowserWindow,
+  routingId: string,
+  patch: { model?: string; effort?: string; thinkingMode?: string; reasoningVariant?: string | null }
+): void {
+  emitEvent('session:config-changed', [routingId, patch], 'all', win)
+}
+
+export async function setModel(
+  manager: SessionManager,
+  win: BrowserWindow,
+  routingId: string,
+  model: string
+): Promise<void> {
+  const session = manager.get(routingId)
+  await session?.setModel(model)
+  // `reasoningVariant: null` rides along because a model change genuinely
+  // invalidates the variant (different models expose different variants) — the
+  // desktop picker already resets it locally, so emitting only `model` would
+  // leave every OTHER replica holding a variant that no longer exists.
+  emitConfigChanged(win, routingId, { model, reasoningVariant: null })
+}
+
+export function setEffort(
+  manager: SessionManager,
+  win: BrowserWindow,
+  routingId: string,
+  effort: string
+): void {
   const s = manager.get(routingId)
-  if (s?.capabilities.reasoning.thinking != null) s.setThinkingMode?.(mode)
+  if (s && s.capabilities.reasoning.effort == null) return
+  s?.setEffort?.(effort)
+  emitConfigChanged(win, routingId, { effort })
+}
+
+export function setThinkingMode(
+  manager: SessionManager,
+  win: BrowserWindow,
+  routingId: string,
+  mode: string
+): void {
+  const s = manager.get(routingId)
+  if (s && s.capabilities.reasoning.thinking == null) return
+  s?.setThinkingMode?.(mode)
+  emitConfigChanged(win, routingId, { thinkingMode: mode })
+}
+
+export function setReasoningVariant(
+  manager: SessionManager,
+  win: BrowserWindow,
+  routingId: string,
+  variant: string | null
+): void {
+  manager.get(routingId)?.setReasoningVariant?.(variant)
+  emitConfigChanged(win, routingId, { reasoningVariant: variant })
 }
 
 export function getPlanContent(manager: SessionManager, routingId: string): string | null {
@@ -332,12 +426,12 @@ export function saveSessions(
   opts: { notifyMainWindow: boolean }
 ): void {
   saveSessionConfig(config)
-  if (opts.notifyMainWindow && !win.isDestroyed()) {
-    win.webContents.send('config:sessions-changed', config)
-  }
-  for (const w of BaseSession.getExtraWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('config:sessions-changed', config)
-  }
+  emitEvent(
+    'config:sessions-changed',
+    [config],
+    opts.notifyMainWindow ? 'all' : 'extras-only',
+    win
+  )
 }
 
 /**
@@ -405,12 +499,12 @@ export function saveUiSettings(
   if (typeof timeoutMins === 'number') {
     manager.setSessionTimeout(timeoutMins * 60 * 1000)
   }
-  if (opts.notifyMainWindow && !win.isDestroyed()) {
-    win.webContents.send('config:settings-changed', settings)
-  }
-  for (const w of BaseSession.getExtraWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
-  }
+  emitEvent(
+    'config:settings-changed',
+    [settings],
+    opts.notifyMainWindow ? 'all' : 'extras-only',
+    win
+  )
 }
 
 // ---------------------------------------------------------------------------

@@ -59,7 +59,7 @@ import type { BrowserWindow } from 'electron'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { dispatchedUsageSummary } from '../services/db'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from '../services/sync-host'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
@@ -84,6 +84,9 @@ import {
   setPermissionMode,
   setEffort,
   setThinkingMode,
+  setModel,
+  setReasoningVariant,
+  rekeyShim,
   getPlanContent,
   getSessionLogPath,
   mcpStatus,
@@ -315,7 +318,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (oldId: string, newId: string) => {
-      manager.rekey(oldId, newId)
+      rekeyShim(manager, oldId, newId)
     }
   })
 
@@ -474,9 +477,7 @@ export function registerRemoteHandlers(
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, model: string) => {
-      await manager.get(routingId)?.setModel(model)
-    }
+    handler: async (routingId: string, model: string) => setModel(manager, win, routingId, model)
   })
 
   handleRemote({
@@ -485,7 +486,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, effort: string) =>
-      setEffort(manager, routingId, effort)
+      setEffort(manager, win, routingId, effort)
   })
 
   handleRemote({
@@ -494,7 +495,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, mode: string) =>
-      setThinkingMode(manager, routingId, mode)
+      setThinkingMode(manager, win, routingId, mode)
   })
 
   handleRemote({
@@ -593,9 +594,8 @@ export function registerRemoteHandlers(
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, variant: string | null) => {
-      manager.get(routingId)?.setReasoningVariant?.(variant)
-    }
+    handler: async (routingId: string, variant: string | null) =>
+      setReasoningVariant(manager, win, routingId, variant)
   })
 
   handleRemote({
@@ -1200,10 +1200,7 @@ export function registerRemoteHandlers(
         if (!filename) return
         if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
         entry.debounceTimer = setTimeout(() => {
-          if (!win.isDestroyed()) win.webContents.send('mockup:file-changed', directory)
-          for (const w of BaseSession.getExtraWindows()) {
-            if (!w.isDestroyed()) w.webContents.send('mockup:file-changed', directory)
-          }
+          emitEvent('mockup:file-changed', [directory], 'all', win)
         }, 200)
       })
 

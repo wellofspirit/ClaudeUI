@@ -225,6 +225,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onGitStatusUpdate: on('git:status-update') as ClaudeAPI['onGitStatusUpdate'],
     onSettingsChanged: on('config:settings-changed') as ClaudeAPI['onSettingsChanged'],
     onSessionConfigChanged: on('config:sessions-changed') as ClaudeAPI['onSessionConfigChanged'],
+    onPerSessionConfig: on('session:config-changed') as ClaudeAPI['onPerSessionConfig'],
     onAccountUsage: on('usage:data') as ClaudeAPI['onAccountUsage'],
     onBlockUsage: on('usage:block-data') as ClaudeAPI['onBlockUsage'],
     // Terminal output is the VOLATILE lane (SyncCore phase 2): `term-data` /

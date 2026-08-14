@@ -1,6 +1,11 @@
 import type { BrowserWindow } from 'electron'
 import type { SessionManager } from '../services/session-manager'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from '../services/sync-host'
+import { syncCore } from '../services/sync-host'
+import { loadSessionHistory } from '../services/session-history'
+import { cwdToProjectKey } from '../../shared/project-key'
+import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../shared/derive-session'
+import { logger } from '../services/logger'
 import { loadEngineConfig } from '../services/ui-config'
 import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // Side-effect: guarantees the spawn-prep + session-factory registries are
@@ -25,6 +30,44 @@ export interface CreateSessionArgs {
   resumeSessionAt?: string
   forkSession?: boolean
   engineId?: EngineId
+}
+
+/**
+ * Read a resumed session's on-disk transcript into canonical state.
+ *
+ * Uses `loadSessionHistory` — the SAME source the renderer's own resume path
+ * uses (`useClaudeEvents`'s `session:created` handler) — so canonical and the
+ * renderer replica start from identical content and the shadow comparator is
+ * comparing interpretations, not inputs.
+ */
+async function seedCanonicalTranscript(
+  routingId: string,
+  resumeSessionId: string,
+  cwd: string
+): Promise<void> {
+  try {
+    const { messages, taskNotifications, statusLine } = await loadSessionHistory(
+      resumeSessionId,
+      cwdToProjectKey(cwd)
+    )
+    syncCore.seedSession(routingId, {
+      cwd,
+      messages,
+      taskNotifications,
+      ...(statusLine ? { statusLine } : {}),
+      // Derived fields follow from the transcript, so derive them here rather
+      // than leaving canonical to wait for the next live message.
+      todos: buildTodosFromMessages(messages) ?? [],
+      sentFiles: buildSentFilesFromMessages(messages) ?? []
+    })
+  } catch (err) {
+    logger.warn(
+      'create-session',
+      `canonical seed failed for ${routingId} (shadow state starts empty): ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+  }
 }
 
 /**
@@ -74,10 +117,26 @@ export async function prepareAndCreateSession(
   // Desktop (notifyMainWindow=false) notifies only extra windows: the initiating
   // renderer already knows locally. Remote (notifyMainWindow=true) also notifies
   // the main window because the request arrived over WebSocket, not IPC.
-  if (opts.notifyMainWindow && !win.isDestroyed()) {
-    win.webContents.send('session:created', routingId, { cwd, resumeSessionId })
-  }
-  for (const w of BaseSession.getExtraWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
+  //
+  // That asymmetry is preserved VERBATIM by SyncCore phase 4a — it is a named 4c
+  // deletion target (once the desktop renderer is just client #1 there is no
+  // "already knows locally"), not something 4a is allowed to quietly fix.
+  emitEvent(
+    'session:created',
+    [routingId, { cwd, resumeSessionId }],
+    opts.notifyMainWindow ? 'all' : 'extras-only',
+    win
+  )
+  // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript
+  // lives on disk, so canonical state has to read it from the same source the
+  // renderer does (`loadSessionHistory`) or 4b's snapshot would hand every client
+  // an empty conversation. A fresh session has nothing to seed — the
+  // `session:created` apply already marks it seeded.
+  //
+  // Fire-and-forget and best-effort: this is SHADOW state in 4a, so a failed read
+  // must never break session creation. `seedSession` only fills an EMPTY
+  // transcript, so live events that arrive first always win.
+  if (resumeSessionId) {
+    void seedCanonicalTranscript(routingId, resumeSessionId, cwd)
   }
 }
