@@ -10,6 +10,13 @@ import { buildMockupUrl } from '../shared/mockup-url'
 /**
  * Factory for IPC event handler registration.
  * Forwards all arguments from ipcRenderer.on (after the IpcRendererEvent) to the callback.
+ *
+ * **HOST-LOCAL channels only, as of SyncCore phase 4c.** Replicated and volatile
+ * events no longer ride `webContents.send`: they arrive on the sync port and are
+ * subscribed to in the renderer via `shared/sync/client-registry.onSyncEvent`.
+ * What is left here is the host talking to its own shell — window chrome, the
+ * native OAuth flow, voice capture, desktop PTY bytes, the log-viewer window,
+ * plugin views, quit handshake — none of which a remote client has or wants.
  */
 function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
   return (cb: T) => {
@@ -19,6 +26,38 @@ function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T)
     return () => ipcRenderer.removeListener(channel, handler)
   }
 }
+
+// ---------------------------------------------------------------------------
+// Sync port hand-off (SyncCore phase 4c)
+// ---------------------------------------------------------------------------
+//
+// `MessagePort` is not a type `contextBridge` can marshal, so the preload takes
+// delivery of the port and forwards it into the main world with
+// `window.postMessage(..., [port])` — the transfer path Electron's own
+// message-ports guide prescribes for exactly this. The renderer installs its
+// `message` listener first and then calls `acquireSyncPort()`, so we hold the port
+// until it is asked for: main can (and does) post it before the renderer's
+// bundle has finished evaluating.
+
+/** Must match `renderer/src/sync/desktop-transport.ts`. */
+const SYNC_PORT_MESSAGE = 'claudeui:sync-port'
+
+let heldSyncPort: Electron.MessagePortMain | MessagePort | null = null
+let syncPortRequested = false
+
+function forwardSyncPort(): void {
+  if (!heldSyncPort || !syncPortRequested) return
+  const port = heldSyncPort
+  heldSyncPort = null
+  window.postMessage(SYNC_PORT_MESSAGE, '*', [port as unknown as MessagePort])
+}
+
+ipcRenderer.on('sync-port', (event) => {
+  // A reload gets a brand-new channel from main; if one was held un-acquired
+  // (renderer never asked), it belongs to a document that is gone.
+  heldSyncPort = event.ports[0] ?? null
+  forwardSyncPort()
+})
 
 /**
  * Unwrap safeHandler's { ok, data, error } envelope.
@@ -113,60 +152,20 @@ const api: ClaudeAPI = {
   loadBackgroundOutput: (projectKey: string, taskId: string, outputFile?: string) =>
     ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
-  // Routed session events — each passes (routingId, data) as separate args
-  onSessionCreated: onEvent('session:created'),
-  onUserMessage: onEvent('session:user-message'),
-  onMessage: onEvent('session:message'),
-  onStreamEvent: onEvent('session:stream'),
-  onApprovalRequest: onEvent('session:approval-request'),
-  onApprovalDismiss: onEvent('session:approval-dismiss'),
-  onStatus: onEvent('session:status'),
-  onResult: onEvent('session:result'),
-  onError: onEvent('session:error'),
-  onVendorAuthRequired: onEvent('session:vendor-auth-required'),
-  onWarning: onEvent('session:warning'),
-  onMessagesRetracted: onEvent('session:messages-retracted'),
-  onToolResult: onEvent('session:tool-result'),
-  onTaskProgress: onEvent('session:task-progress'),
-  onTaskNotification: onEvent('session:task-notification'),
-  onTaskStarted: onEvent('session:task-started'),
-  onSubagentStream: onEvent('session:subagent-stream'),
-  onSubagentMessage: onEvent('session:subagent-message'),
-  onSubagentMessageBatch: onEvent('session:subagent-message-batch'),
-  onSubagentToolResult: onEvent('session:subagent-tool-result'),
-  onSlashCommands: onEvent('session:slash-commands'),
-  onPermissionMode: onEvent('session:permission-mode'),
-  onBashOutput: onEvent('session:bash-output'),
-  onBackgroundOutput: onEvent('session:background-output'),
-  onSandboxViolation: onEvent('session:sandbox-violation'),
-  onQueueChanged: onEvent('session:queue-changed'),
-  onSkills: onEvent('session:skills'),
-  onStatusLine: onEvent('session:status-line'),
-  onMetering: onEvent('session:metering'),
-  onPlanSteps: onEvent('session:plan'),
-  onMcpServers: onEvent('session:mcp-servers'),
+  // Sync transport (SyncCore phase 4c). Every replicated / volatile channel
+  // arrives on the port, not here — see the `onEvent` doc comment.
+  acquireSyncPort: () => {
+    syncPortRequested = true
+    forwardSyncPort()
+  },
 
-  // Non-routed events (no routingId prefix)
+  // Host-local events: the host process talking to its own shell.
   onMaximizeChange: onEvent('window:maximized-change'),
-  onWatchUpdate: onEvent('session:watch-update'),
-  onDirectoriesChanged: onEvent('session:directories-changed'),
-  onGitStatusUpdate: onEvent('git:status-update'),
-  onSettingsChanged: onEvent('config:settings-changed'),
-  onSessionConfigChanged: onEvent('config:sessions-changed'),
-  onPerSessionConfig: onEvent('session:config-changed'),
-  onAccountUsage: onEvent('usage:data'),
   onAuthState: onEvent('auth:state'),
-  onAuthSource: onEvent('session:auth-source'),
   onAccountsChanged: onEvent('account:changed'),
   onAccountRespawnSessions: onEvent('account:respawn-sessions'),
-  onBlockUsage: onEvent('usage:block-data'),
   onTerminalData: onEvent('terminal:data'),
   onTerminalExit: onEvent('terminal:exit'),
-  onAutomationRunUpdate: onEvent('automation:run-update'),
-  onAutomationsChanged: onEvent('automation:changed'),
-  onAutomationRunMessage: onEvent('automation:run-message'),
-  onAutomationStreamEvent: onEvent('automation:stream-event'),
-  onAutomationProcessing: onEvent('automation:processing'),
   onBeforeQuit: onEvent('app:before-quit'),
 
   watchBackground: (routingId: string, toolUseId: string) =>
@@ -455,7 +454,6 @@ const api: ClaudeAPI = {
   voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
-  onVoiceError: onEvent('voice:error'),
 
   // Renderer → main process log relay
   logRelay: (level: string, source: string, message: string) =>
@@ -483,7 +481,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mockup:watch', cwd, directory),
   unwatchMockup: (cwd: string, directory: string) =>
     ipcRenderer.invoke('mockup:unwatch', cwd, directory),
-  onMockupFileChanged: onEvent('mockup:file-changed'),
   getMockupPreviewUrl: (cwd: string, directory: string, opts?: { dark?: boolean }) =>
     buildMockupUrl(cwd, directory, { dark: opts?.dark, parentOrigin: window.location.origin })
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { onSyncEvent } from '../../../../shared/sync/client-registry'
 import { v4 as uuid } from 'uuid'
 import {
   useSessionStore,
@@ -403,7 +404,7 @@ export function Sidebar({
       if (!cancelled) void refreshDirectories()
     }
     run()
-    const cleanup = window.api.onDirectoriesChanged(run)
+    const cleanup = onSyncEvent('session:directories-changed', run)
     const interval = setInterval(run, 30_000)
     return () => {
       cancelled = true

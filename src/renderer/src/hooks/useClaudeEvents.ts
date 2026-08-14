@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { onSyncEvent, markSyncReady } from '../../../shared/sync/client-registry'
 import {
   useSessionStore,
   buildTodosFromMessages,
@@ -118,7 +119,7 @@ export function useClaudeEvents(): void {
 
     const cleanups = [
       // Session lifecycle: another client (local or remote) created a session
-      window.api.onSessionCreated((routingId, data) => {
+      onSyncEvent('session:created', (routingId, data) => {
         const store = useSessionStore.getState()
         // Only act if this session doesn't already exist in our store
         // (the initiating client already called createNewSession locally)
@@ -164,7 +165,7 @@ export function useClaudeEvents(): void {
       // User message relayed by the server (the single source of truth for user
       // messages). Non-queued sends ONLY — a send that queues rides
       // session:queue-changed instead (ADR-053).
-      window.api.onUserMessage((routingId, data) => {
+      onSyncEvent('session:user-message', (routingId, data) => {
         // Resolve a possibly-stale (pre-rekey) id to the canonical session id at
         // the event boundary so every handler targets the same session across a
         // rekey (xhigh#9). No-op when no rekey mapping applies.
@@ -183,10 +184,10 @@ export function useClaudeEvents(): void {
       }),
       // Queue of record (ADR-053): the full item list for a session. Idempotent
       // — the store keys consumed-item synthesis on `steer-${itemId}`.
-      window.api.onQueueChanged((routingId, data) => {
+      onSyncEvent('session:queue-changed', (routingId, data) => {
         useSessionStore.getState().setQueueState(resolveRoutingId(routingId), data.items)
       }),
-      window.api.onMessage((routingId, msg) => {
+      onSyncEvent('session:message', (routingId, msg) => {
         routingId = resolveRoutingId(routingId)
         addMessage(routingId, msg)
 
@@ -202,7 +203,7 @@ export function useClaudeEvents(): void {
         )
         if (hasSendUserFile) rebuildSentFiles(routingId)
       }),
-      window.api.onStreamEvent((routingId, data) => {
+      onSyncEvent('session:stream', (routingId, data) => {
         routingId = resolveRoutingId(routingId)
         if (data.type === 'thinking') {
           appendStreamingThinking(routingId, data.text)
@@ -210,7 +211,7 @@ export function useClaudeEvents(): void {
           appendStreamingText(routingId, data.text)
         }
       }),
-      window.api.onApprovalRequest((routingId, approval) => {
+      onSyncEvent('session:approval-request', (routingId, approval) => {
         routingId = resolveRoutingId(routingId)
         addPendingApproval(routingId, approval)
         const state = useSessionStore.getState()
@@ -225,10 +226,10 @@ export function useClaudeEvents(): void {
       }),
       // Externally-resolved approval (e.g. opencode's deny-cascade on a
       // dispatch target, ADR-033) — remove the stale card.
-      window.api.onApprovalDismiss((routingId, { requestId }) => {
+      onSyncEvent('session:approval-dismiss', (routingId, { requestId }) => {
         removePendingApproval(resolveRoutingId(routingId), requestId)
       }),
-      window.api.onStatus((routingId, status) => {
+      onSyncEvent('session:status', (routingId, status) => {
         // Re-key session when SDK provides its stable session ID
         let effectiveRoutingId = routingId
         if (status.sessionId && status.sessionId !== routingId) {
@@ -270,7 +271,7 @@ export function useClaudeEvents(): void {
           }
         }
       }),
-      window.api.onResult((routingId) => {
+      onSyncEvent('session:result', (routingId) => {
         routingId = resolveRoutingId(routingId)
         // Dismiss completed task list when turn ends
         const state = useSessionStore.getState()
@@ -289,21 +290,21 @@ export function useClaudeEvents(): void {
           notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
         }
       }),
-      window.api.onVendorAuthRequired((routingId, data) => {
+      onSyncEvent('session:vendor-auth-required', (routingId, data) => {
         useSessionStore.getState().setVendorAuthRequired(resolveRoutingId(routingId), data)
       }),
-      window.api.onError((routingId, error) => {
+      onSyncEvent('session:error', (routingId, error) => {
         routingId = resolveRoutingId(routingId)
         addError(routingId, error)
         window.api.logError('session', `[routingId=${routingId}] ${error}`)
       }),
-      window.api.onWarning((routingId, warning) => {
+      onSyncEvent('session:warning', (routingId, warning) => {
         addWarning(resolveRoutingId(routingId), warning)
       }),
-      window.api.onMessagesRetracted((routingId, { messageIds }) => {
+      onSyncEvent('session:messages-retracted', (routingId, { messageIds }) => {
         retractMessages(resolveRoutingId(routingId), messageIds)
       }),
-      window.api.onToolResult((routingId, { toolUseId, result, isError, fileDiffs, images }) => {
+      onSyncEvent('session:tool-result', (routingId, { toolUseId, result, isError, fileDiffs, images }) => {
         routingId = resolveRoutingId(routingId)
         appendToolResult(routingId, toolUseId, result, isError, fileDiffs, images)
         // Belt-and-suspenders: when cli.js has produced a result for this
@@ -375,16 +376,16 @@ export function useClaudeEvents(): void {
           }
         }
       }),
-      window.api.onTaskProgress((routingId, data) => {
+      onSyncEvent('session:task-progress', (routingId, data) => {
         updateTaskProgress(resolveRoutingId(routingId), data)
       }),
-      window.api.onTaskStarted((routingId, data) => {
+      onSyncEvent('session:task-started', (routingId, data) => {
         setTaskStarted(resolveRoutingId(routingId), data)
       }),
-      window.api.onTaskNotification((routingId, data) => {
+      onSyncEvent('session:task-notification', (routingId, data) => {
         addTaskNotification(resolveRoutingId(routingId), data)
       }),
-      window.api.onSubagentStream((routingId, data) => {
+      onSyncEvent('session:subagent-stream', (routingId, data) => {
         routingId = resolveRoutingId(routingId)
         if (data.type === 'thinking') {
           appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
@@ -392,13 +393,13 @@ export function useClaudeEvents(): void {
           appendSubagentStreamingText(routingId, data.toolUseId, data.text)
         }
       }),
-      window.api.onSubagentMessage((routingId, data) => {
+      onSyncEvent('session:subagent-message', (routingId, data) => {
         addSubagentMessage(resolveRoutingId(routingId), data.toolUseId, data.message)
       }),
-      window.api.onSubagentMessageBatch((routingId, data) => {
+      onSyncEvent('session:subagent-message-batch', (routingId, data) => {
         appendSubagentMessageBatch(resolveRoutingId(routingId), data.toolUseId, data.messages)
       }),
-      window.api.onSubagentToolResult((routingId, data) => {
+      onSyncEvent('session:subagent-tool-result', (routingId, data) => {
         appendSubagentToolResult(
           resolveRoutingId(routingId),
           data.toolUseId,
@@ -409,7 +410,7 @@ export function useClaudeEvents(): void {
           data.images
         )
       }),
-      window.api.onBashOutput((routingId, data) => {
+      onSyncEvent('session:bash-output', (routingId, data) => {
         setBashOutput(
           resolveRoutingId(routingId),
           data.toolUseId,
@@ -418,22 +419,22 @@ export function useClaudeEvents(): void {
           data.totalBytes
         )
       }),
-      window.api.onBackgroundOutput((routingId, data) => {
+      onSyncEvent('session:background-output', (routingId, data) => {
         setBackgroundOutput(resolveRoutingId(routingId), data.toolUseId, data.tail, data.totalSize)
       }),
-      window.api.onStatusLine((routingId, data) => {
+      onSyncEvent('session:status-line', (routingId, data) => {
         setStatusLine(resolveRoutingId(routingId), data)
       }),
-      window.api.onMetering((routingId, data) => {
+      onSyncEvent('session:metering', (routingId, data) => {
         useSessionStore.getState().setMetering(resolveRoutingId(routingId), data)
       }),
-      window.api.onPlanSteps((routingId, todos) => {
+      onSyncEvent('session:plan', (routingId, todos) => {
         useSessionStore.getState().setTodos(resolveRoutingId(routingId), todos)
       }),
-      window.api.onPermissionMode((routingId, mode) => {
+      onSyncEvent('session:permission-mode', (routingId, mode) => {
         setPermissionMode(mode, resolveRoutingId(routingId))
       }),
-      window.api.onSlashCommands((routingId, commands) => {
+      onSyncEvent('session:slash-commands', (routingId, commands) => {
         setSlashCommands(commands)
         // The filesystem list is NOT cleared here: mergeSlashCommands already
         // gives the engine list precedence by name, so the scan can only fill
@@ -452,13 +453,13 @@ export function useClaudeEvents(): void {
         }
         window.api.saveSlashCommands(commands)
       }),
-      window.api.onSkills((_routingId, names) => {
+      onSyncEvent('session:skills', (_routingId, names) => {
         setSdkSkillNames(names)
       }),
-      window.api.onSandboxViolation((routingId, message) => {
+      onSyncEvent('session:sandbox-violation', (routingId, message) => {
         addSandboxViolation(resolveRoutingId(routingId), message)
       }),
-      window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
+      onSyncEvent('session:watch-update', ({ routingId, messages, taskNotifications, statusLine }) => {
         routingId = resolveRoutingId(routingId)
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
         if (statusLine) setStatusLine(routingId, statusLine)
@@ -472,7 +473,7 @@ export function useClaudeEvents(): void {
         }
       }),
       // Git status updates from polling
-      window.api.onGitStatusUpdate(({ cwd, status }) => {
+      onSyncEvent('git:status-update', ({ cwd, status }) => {
         const store = useSessionStore.getState()
         // Find all sessions with this cwd and update them
         for (const [routingId, session] of Object.entries(store.sessions)) {
@@ -482,10 +483,10 @@ export function useClaudeEvents(): void {
         }
       }),
       // Cross-instance config sync
-      window.api.onSettingsChanged((settings) => {
+      onSyncEvent('config:settings-changed', (settings) => {
         useSessionStore.getState().applyExternalSettings(settings)
       }),
-      window.api.onSessionConfigChanged((config) => {
+      onSyncEvent('config:sessions-changed', (config) => {
         useSessionStore.getState().applyExternalSessionConfig(config)
       }),
       // Per-session config picked on ANOTHER client (SyncCore phase 4a). A
@@ -493,15 +494,15 @@ export function useClaudeEvents(): void {
       // of this client's own pick is a no-op. The picker's local optimistic write
       // stays until 4c, when the store adopts the reducer and the replace
       // becomes the only writer.
-      window.api.onPerSessionConfig((routingId, patch) => {
+      onSyncEvent('session:config-changed', (routingId, patch) => {
         useSessionStore.getState().applyRemoteSessionConfig(resolveRoutingId(routingId), patch)
       }),
       // Account usage (5hr / 7-day rate limits)
-      window.api.onAccountUsage((data) => {
+      onSyncEvent('usage:data', (data) => {
         useSessionStore.getState().setAccountUsage(data)
       }),
       // Block usage analytics
-      window.api.onBlockUsage((data) => {
+      onSyncEvent('usage:block-data', (data) => {
         useSessionStore.getState().setBlockUsage(data)
       }),
       // Native OAuth login-flow transitions (ADR-014)
@@ -517,7 +518,7 @@ export function useClaudeEvents(): void {
       }),
       // Auth source from session init ('none' = logged out) — drives the banner
       // Also updates the vendorAuth probe so AuthBanner reads from the probe.
-      window.api.onAuthSource((_routingId, source) => {
+      onSyncEvent('session:auth-source', (_routingId, source) => {
         const store = useSessionStore.getState()
         store.setAuthSource(source)
         // Mirror the auth-source into vendorAuth so AuthBanner can consume the probe
@@ -557,7 +558,7 @@ export function useClaudeEvents(): void {
       window.api.onVoiceState((routingId, state) => {
         setVoiceState(resolveRoutingId(routingId), state)
       }),
-      window.api.onVoiceError((routingId, error) => {
+      onSyncEvent('voice:error', (routingId, error) => {
         addError(resolveRoutingId(routingId), error)
       }),
       // Plugin views
@@ -595,6 +596,14 @@ export function useClaudeEvents(): void {
       .catch((err) => {
         window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`)
       })
+
+    // Every replicated listener above is now mounted: open the readiness gate and
+    // flush whatever the host pushed while it was closed (SyncCore phase 0's
+    // pre-mount buffer — docs/architecture/remote.md defect 4). One call for BOTH
+    // clients: the web entry mounts this hook only after its first `sync-full`,
+    // the desktop mounts it after `hydrateConfigFromDisk`, and the gate is a
+    // one-way latch so a reconnect never re-arms it.
+    markSyncReady()
 
     return () => cleanups.forEach((fn) => fn())
   }, [

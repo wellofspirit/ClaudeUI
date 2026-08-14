@@ -1006,69 +1006,24 @@ interface SessionAPI {
     taskId: string,
     outputFile?: string
   ): Promise<{ content: string | null; purged: boolean }>
-  onSessionCreated(
-    cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void
-  ): () => void
   /**
-   * Relayed for NON-queued sends only. A send that queues rides
-   * `onQueueChanged` instead (ADR-053) — the old `{queued:true}` flavor is retired.
+   * Ask the host for this client's sync transport (SyncCore phase 4c).
    *
-   * `id`/`timestamp` are minted by the EMITTER (SyncCore phase 4b) so every
-   * replica agrees on the transcript's identity; they are optional because a
-   * client may still be running against an older host that omits them, in which
-   * case the receiver falls back to minting its own.
+   * Desktop: the preload is holding a `MessagePort` from main and forwards it into
+   * the main world with `window.postMessage` (a port is not a type
+   * `contextBridge` can marshal). Call it AFTER installing the `message` listener
+   * — see `renderer/src/sync/desktop-transport.ts`.
+   *
+   * Web: a no-op. The WebSocket connection is constructed before `window.api`
+   * exists and installs its own client, so there is nothing to acquire. Present on
+   * both transports so the renderer has one call site.
+   *
+   * Replicated and volatile events arrive on that transport, subscribed to with
+   * `shared/sync/client-registry.onSyncEvent` and typed by `SyncEventMap`. The
+   * `onFoo` members that remain on this interface are HOST-LOCAL only.
    */
-  onUserMessage(
-    cb: (
-      routingId: string,
-      data: {
-        id?: string
-        timestamp?: number
-        prompt: string
-        attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-      }
-    ) => void
-  ): () => void
-  onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
-  onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
-  onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void
-  /** Externally-resolved approval (e.g. opencode's deny-cascade on a dispatch target, ADR-033) — remove the card. */
-  onApprovalDismiss(cb: (routingId: string, data: { requestId: string }) => void): () => void
-  onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
-  onResult(cb: (routingId: string, result: SessionResult) => void): () => void
-  onError(cb: (routingId: string, error: string) => void): () => void
-  onVendorAuthRequired(cb: (routingId: string, data: { vendorId: string; message: string }) => void): () => void
-  onWarning(cb: (routingId: string, warning: string) => void): () => void
-  /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
-  onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
-  onToolResult(
-    cb: (
-      routingId: string,
-      data: {
-        toolUseId: string
-        result: string
-        isError: boolean
-        fileDiffs?: FileDiff[]
-        /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
-        images?: ToolResultImage[]
-      }
-    ) => void
-  ): () => void
+  acquireSyncPort(): void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
-  onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
-  onTaskNotification(cb: (routingId: string, data: TaskNotification) => void): () => void
-  /** Task exists and is running — see TaskStartedData for why this is needed. */
-  onTaskStarted(cb: (routingId: string, data: TaskStartedData) => void): () => void
-  onSubagentStream(cb: (routingId: string, data: SubagentStreamDelta) => void): () => void
-  onSubagentMessage(cb: (routingId: string, data: SubagentMessageData) => void): () => void
-  onSubagentMessageBatch(
-    cb: (routingId: string, data: SubagentMessageBatchData) => void
-  ): () => void
-  onSubagentToolResult(cb: (routingId: string, data: SubagentToolResultData) => void): () => void
-  onPermissionMode(cb: (routingId: string, mode: PermissionMode) => void): () => void
-  onSandboxViolation(cb: (routingId: string, message: string) => void): () => void
-  onBashOutput(cb: (routingId: string, data: BashOutputData) => void): () => void
-  onBackgroundOutput(cb: (routingId: string, data: BackgroundOutput) => void): () => void
   watchBackground(routingId: string, toolUseId: string): Promise<void>
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>
   readBackgroundRange(
@@ -1104,8 +1059,6 @@ interface SessionAPI {
    */
   recallQueued(routingId: string): Promise<{ recalled: string[]; notRecalled: number }>
   askSideQuestion(routingId: string, question: string): Promise<string | null>
-  /** Full queue list for a session — idempotent and replay-safe (ADR-053). */
-  onQueueChanged(cb: (routingId: string, data: { items: QueuedItem[] }) => void): () => void
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
@@ -1138,42 +1091,6 @@ interface SessionAPI {
   getSessionLogPath(routingId: string): Promise<string | null>
   watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
   unwatchSession(routingId: string): Promise<void>
-  onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
-  onDirectoriesChanged(cb: () => void): () => void
-  onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
-  onSkills(cb: (routingId: string, names: string[]) => void): () => void
-  /** Login status from session init: 'authenticated' | 'none' (logged-in vs not).
-   *  The oauth-vs-api-key distinction now lives only in the auth probe's
-   *  billingType (via OAuthAccount). See ADR-014 / Phase 4 (ADR-021). */
-  onAuthSource(cb: (routingId: string, source: string) => void): () => void
-  onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
-  /** Engine-neutral metering snapshot (Phase 7 Pass 2). Emitted alongside
-   *  onStatusLine; both engines send it. The status line itself is unchanged. */
-  onMetering(cb: (routingId: string, data: MeteringSnapshot) => void): () => void
-  onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
-  onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
-  onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
-  /**
-   * Per-session config replication (SyncCore phase 4a). A PARTIAL patch: only
-   * the fields the setter changed are present, and each is a replace. Emitted by
-   * the `session:set-model` / `-effort` / `-thinking-mode` / `-reasoning-variant`
-   * handlers, pre-spawn included — before this, a model pick on one client was
-   * invisible to every other (docs/architecture/remote.md defect 1).
-   *
-   * Distinct from {@link ClaudeAPI.onSessionConfigChanged}, which carries the
-   * app-level `sessions.json` (`config:sessions-changed`).
-   */
-  onPerSessionConfig(
-    cb: (
-      routingId: string,
-      patch: {
-        model?: string
-        effort?: string
-        thinkingMode?: string
-        reasoningVariant?: string | null
-      }
-    ) => void
-  ): () => void
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
@@ -1264,7 +1181,6 @@ interface GitAPI {
   gitFetch(cwd: string): Promise<void>
   gitStartWatching(cwd: string): Promise<void>
   gitStopWatching(cwd: string): Promise<void>
-  onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
 }
 
 interface McpAPI {
@@ -1284,9 +1200,6 @@ interface McpAPI {
   removeMcpServer(scope: McpServerScope, serverName: string, cwd?: string): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
-  onMcpServers(
-    cb: (routingId: string, servers: Array<{ name: string; status: string }>) => void
-  ): () => void
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
   saveClaudePermissions(
     scope: PermissionScope,
@@ -1348,19 +1261,6 @@ interface AutomationAPI {
   cancelAutomationRun(automationId: string): Promise<void>
   dismissAutomationRun(automationId: string, runId: string): Promise<void>
   sendAutomationMessage(automationId: string, prompt: string): Promise<void>
-  onAutomationRunUpdate(
-    cb: (data: { automationId: string; run: AutomationRun }) => void
-  ): () => void
-  onAutomationsChanged(cb: (automations: Automation[]) => void): () => void
-  onAutomationRunMessage(
-    cb: (data: { automationId: string; message: ChatMessage }) => void
-  ): () => void
-  onAutomationStreamEvent(
-    cb: (data: { automationId: string; type: string; text: string }) => void
-  ): () => void
-  onAutomationProcessing(
-    cb: (data: { automationId: string; isProcessing: boolean }) => void
-  ): () => void
 }
 
 interface FileAPI {
@@ -1435,9 +1335,7 @@ interface VendorAuthAPI {
 
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
-  onAccountUsage(cb: (data: AccountUsage) => void): () => void
   fetchBlockUsage(): Promise<BlockUsageData>
-  onBlockUsage(cb: (data: BlockUsageData) => void): () => void
   /** Filter usage analytics to one account email (null = all accounts) */
   setUsageAccountFilter(account: string | null): Promise<void>
   // --- Native Anthropic OAuth (ADR-014) ---
@@ -1818,7 +1716,6 @@ interface VoiceAPI {
   voiceStopRecording(routingId: string): Promise<void>
   onVoiceTranscript(cb: (routingId: string, data: VoiceTranscript) => void): () => void
   onVoiceState(cb: (routingId: string, state: VoiceState) => void): () => void
-  onVoiceError(cb: (routingId: string, error: string) => void): () => void
 }
 
 export interface ClaudeAPI
@@ -2478,7 +2375,6 @@ interface PluginAPI {
   readMockupHtml(cwd: string, directory: string): Promise<string>
   watchMockup(cwd: string, directory: string): Promise<void>
   unwatchMockup(cwd: string, directory: string): Promise<void>
-  onMockupFileChanged(cb: (directory: string) => void): () => void
   /**
    * The iframe `src` for a mockup preview. Platform-specific transport:
    * desktop returns a `mockup-asset://` URL (privileged Electron protocol);

@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { onSyncEvent } from '../../../../../shared/sync/client-registry'
 import { useSessionStore } from '../../../stores/session-store'
 import { useMockupBridge } from '../../../hooks/useMockupBridge'
 import {
@@ -58,7 +59,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
 
     window.api.watchMockup(cwd, directory)
 
-    const unsub = window.api.onMockupFileChanged((changedDir: string) => {
+    const unsub = onSyncEvent('mockup:file-changed', (changedDir: string) => {
       if (changedDir === directory) {
         loadHtml()
         setVersion((v) => v + 1)

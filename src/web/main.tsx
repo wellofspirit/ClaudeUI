@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { RemoteConnection, type ConnectionState } from './connection'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { createWebSocketApi } from './api-adapter'
+import { setSyncClient } from '../shared/sync/client-registry'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
 import { PasswordLogin } from './components/PasswordLogin'
 import { MissingCredential } from './components/MissingCredential'
@@ -30,6 +31,11 @@ const connection = new RemoteConnection(
 )
 const api = createWebSocketApi(connection)
 ;(window as unknown as { api: typeof api }).api = api
+// SyncCore phase 4c: install the transport's SyncClient in the shared registry
+// BEFORE React mounts, so every replicated-channel listener in the renderer
+// subscribes to it. The desktop entry does the same with its MessagePort client —
+// one subscription surface, two transports.
+setSyncClient(connection.getSyncClient())
 
 /** Discovery endpoint. Absolute path — the server matches `/remote/auth-info`
  *  exactly, and `/remote` (no trailing slash) would resolve a relative

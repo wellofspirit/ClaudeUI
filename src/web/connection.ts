@@ -174,9 +174,25 @@ export class RemoteConnection {
    * Subscribe to a server-pushed channel. Returns the registration function
    * (the api-adapter exposes it as `onFoo(cb)`); calling it returns the
    * unsubscribe.
+   *
+   * Host-local channels only as of SyncCore phase 4c — replicated and volatile
+   * subscriptions go through {@link getSyncClient} + the shared client registry,
+   * which is the same surface the desktop renderer uses.
    */
   on(channel: string): (cb: SyncListener) => () => void {
     return this.sync.on(channel)
+  }
+
+  /**
+   * The protocol core this transport feeds (SyncCore phase 4c).
+   *
+   * `web/main.tsx` installs it in `shared/sync/client-registry` before React
+   * mounts, so every replicated-channel listener in the app — the same code the
+   * desktop runs — subscribes to THIS client. That is what makes parity by
+   * construction rather than by a mirrored adapter.
+   */
+  getSyncClient(): SyncClient {
+    return this.sync
   }
 
   /**

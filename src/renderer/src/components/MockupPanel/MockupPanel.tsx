@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { onSyncEvent } from '../../../../shared/sync/client-registry'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useMockupBridge } from '../../hooks/useMockupBridge'
 import {
@@ -55,7 +56,7 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
 
     window.api.watchMockup(cwd, mockupDir)
 
-    const unsub = window.api.onMockupFileChanged((changedDir: string) => {
+    const unsub = onSyncEvent('mockup:file-changed', (changedDir: string) => {
       if (changedDir === mockupDir) {
         loadHtml()
         setVersion((v) => v + 1)

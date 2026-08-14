@@ -182,52 +182,22 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       unwrap('session:delete-session', sessionId, projectKey, engineId),
     deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
 
-    // Routed session events
-    onSessionCreated: on('session:created') as ClaudeAPI['onSessionCreated'],
-    onUserMessage: on('session:user-message') as ClaudeAPI['onUserMessage'],
-    onMessage: on('session:message') as ClaudeAPI['onMessage'],
-    onStreamEvent: on('session:stream') as ClaudeAPI['onStreamEvent'],
-    onApprovalRequest: on('session:approval-request') as ClaudeAPI['onApprovalRequest'],
-    onApprovalDismiss: on('session:approval-dismiss') as ClaudeAPI['onApprovalDismiss'],
-    onStatus: on('session:status') as ClaudeAPI['onStatus'],
-    onResult: on('session:result') as ClaudeAPI['onResult'],
-    onError: on('session:error') as ClaudeAPI['onError'],
-    onVendorAuthRequired: on('session:vendor-auth-required') as ClaudeAPI['onVendorAuthRequired'],
-    onWarning: on('session:warning') as ClaudeAPI['onWarning'],
-    onMessagesRetracted: on('session:messages-retracted') as ClaudeAPI['onMessagesRetracted'],
-    onToolResult: on('session:tool-result') as ClaudeAPI['onToolResult'],
-    onTaskProgress: on('session:task-progress') as ClaudeAPI['onTaskProgress'],
-    onTaskNotification: on('session:task-notification') as ClaudeAPI['onTaskNotification'],
-    onTaskStarted: on('session:task-started') as ClaudeAPI['onTaskStarted'],
-    onSubagentStream: on('session:subagent-stream') as ClaudeAPI['onSubagentStream'],
-    onSubagentMessage: on('session:subagent-message') as ClaudeAPI['onSubagentMessage'],
-    onSubagentMessageBatch: on(
-      'session:subagent-message-batch'
-    ) as ClaudeAPI['onSubagentMessageBatch'],
-    onSubagentToolResult: on('session:subagent-tool-result') as ClaudeAPI['onSubagentToolResult'],
-    onSlashCommands: on('session:slash-commands') as ClaudeAPI['onSlashCommands'],
-    onPermissionMode: on('session:permission-mode') as ClaudeAPI['onPermissionMode'],
-    onBashOutput: on('session:bash-output') as ClaudeAPI['onBashOutput'],
-    onBackgroundOutput: on('session:background-output') as ClaudeAPI['onBackgroundOutput'],
-    onSandboxViolation: on('session:sandbox-violation') as ClaudeAPI['onSandboxViolation'],
-    onQueueChanged: on('session:queue-changed') as ClaudeAPI['onQueueChanged'],
-    onSkills: on('session:skills') as ClaudeAPI['onSkills'],
-    onAuthSource: on('session:auth-source') as ClaudeAPI['onAuthSource'],
-    onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
-    onMetering: on('session:metering') as ClaudeAPI['onMetering'],
-    onMcpServers: on('session:mcp-servers') as ClaudeAPI['onMcpServers'],
-    onPlanSteps: on('session:plan') as ClaudeAPI['onPlanSteps'],
+    // Every replicated / volatile subscription is GONE from this adapter
+    // (SyncCore phase 4c). It was the hand-maintained mirror of the preload's
+    // per-channel surface — ADR-008's typecheck could only ever compare the
+    // signatures, never the behavior. Both clients now subscribe through the one
+    // `SyncClient` this connection already owned, typed by `SyncEventMap`:
+    // `shared/sync/client-registry.onSyncEvent`. The INVOKE side of this adapter
+    // is untouched.
+    //
+    // A web client has no port to acquire — the connection installed its client
+    // before `window.api` existed (see web/main.tsx).
+    acquireSyncPort: () => {},
 
-    // Non-routed events
+    // Host-local channels. A remote client mostly has no such surface, so these
+    // are either dead subscriptions kept for signature parity or genuinely
+    // per-transport implementations (terminal bytes ride the volatile WS lane).
     onMaximizeChange: on('window:maximized-change') as ClaudeAPI['onMaximizeChange'],
-    onWatchUpdate: on('session:watch-update') as ClaudeAPI['onWatchUpdate'],
-    onDirectoriesChanged: on('session:directories-changed') as ClaudeAPI['onDirectoriesChanged'],
-    onGitStatusUpdate: on('git:status-update') as ClaudeAPI['onGitStatusUpdate'],
-    onSettingsChanged: on('config:settings-changed') as ClaudeAPI['onSettingsChanged'],
-    onSessionConfigChanged: on('config:sessions-changed') as ClaudeAPI['onSessionConfigChanged'],
-    onPerSessionConfig: on('session:config-changed') as ClaudeAPI['onPerSessionConfig'],
-    onAccountUsage: on('usage:data') as ClaudeAPI['onAccountUsage'],
-    onBlockUsage: on('usage:block-data') as ClaudeAPI['onBlockUsage'],
     // Terminal output is the VOLATILE lane (SyncCore phase 2): `term-data` /
     // `term-exit` frames targeted at attached sockets, never event-log channels
     // — PTY bytes must not be replayable from a ring buffer.
@@ -235,11 +205,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.onTerminalData(cb)) as ClaudeAPI['onTerminalData'],
     onTerminalExit: ((cb: Parameters<ClaudeAPI['onTerminalExit']>[0]) =>
       connection.onTerminalExit(cb)) as ClaudeAPI['onTerminalExit'],
-    onAutomationRunUpdate: on('automation:run-update') as ClaudeAPI['onAutomationRunUpdate'],
-    onAutomationsChanged: on('automation:changed') as ClaudeAPI['onAutomationsChanged'],
-    onAutomationRunMessage: on('automation:run-message') as ClaudeAPI['onAutomationRunMessage'],
-    onAutomationStreamEvent: on('automation:stream-event') as ClaudeAPI['onAutomationStreamEvent'],
-    onAutomationProcessing: on('automation:processing') as ClaudeAPI['onAutomationProcessing'],
     onBeforeQuit: on('app:before-quit') as ClaudeAPI['onBeforeQuit'],
 
     // Background task control
@@ -497,7 +462,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('mockup:watch', cwd, directory) as Promise<void>,
     unwatchMockup: (cwd, directory) =>
       connection.invoke('mockup:unwatch', cwd, directory) as Promise<void>,
-    onMockupFileChanged: on('mockup:file-changed') as ClaudeAPI['onMockupFileChanged'],
     getMockupPreviewUrl: (cwd, directory, opts) =>
       buildMockupHttpUrl(window.location.origin, cwd, directory, {
         token: window.__MOCKUP_TOKEN__ ?? '',
@@ -669,7 +633,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     voiceStopRecording: async () => {},
     onVoiceTranscript: on('voice:transcript') as ClaudeAPI['onVoiceTranscript'],
     onVoiceState: on('voice:state') as ClaudeAPI['onVoiceState'],
-    onVoiceError: on('voice:error') as ClaudeAPI['onVoiceError'],
 
     // Error logging — send to server
     logError: (source, message) => {
