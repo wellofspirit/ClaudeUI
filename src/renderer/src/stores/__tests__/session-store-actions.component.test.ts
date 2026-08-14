@@ -1528,11 +1528,14 @@ describe('addTerminalTab', () => {
 })
 
 describe('closeTerminalTab', () => {
-  it('removes the tab and calls killTerminal', () => {
+  // Terminals are a shared per-cwd POOL: the shell behind a tab may also be open
+  // on another surface, so closing a viewer must NOT kill it. The detach rides
+  // the XTermInstance unmount; this action is pure tab state.
+  it('removes the tab WITHOUT killing the pty (pool semantics)', () => {
     store().addTerminalTab({ id: 'term-1', title: 'bash', cwd: '/project' })
     store().closeTerminalTab('term-1')
     expect(store().terminalGroups['/project'].tabs).toHaveLength(0)
-    expect((window.api as any).killTerminal).toHaveBeenCalledWith('term-1')
+    expect((window.api as any).killTerminal).not.toHaveBeenCalled()
   })
 
   it('updates activeTabId to last remaining tab', () => {

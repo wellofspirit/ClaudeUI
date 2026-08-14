@@ -19,11 +19,12 @@ export function useTerminalColdCleanup(): void {
         if (session.cwd) activeCwds.add(normalizeCwd(session.cwd))
       }
 
-      // Compute terminal cwds that have at least one tab
-      const terminalCwds = new Set<string>()
-      for (const [cwd, group] of Object.entries(state.terminalGroups)) {
-        if (group.tabs.length > 0) terminalCwds.add(cwd)
-      }
+      // Every cwd that has a terminal group, INCLUDING one whose tabs are all
+      // closed: closing a tab now only detaches this surface (terminals are a
+      // shared per-cwd pool), so a tabless group can still have live shells
+      // behind it. Dropping the `tabs.length > 0` filter is what keeps this the
+      // reaper for exactly those.
+      const terminalCwds = new Set(Object.keys(state.terminalGroups))
 
       // Start timers for newly orphaned cwds
       for (const cwd of terminalCwds) {

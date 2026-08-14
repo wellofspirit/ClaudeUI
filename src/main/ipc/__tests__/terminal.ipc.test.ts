@@ -76,9 +76,71 @@ describe('terminal.ipc', () => {
   })
 
   afterEach(() => {
+    // `terminalService` is a process singleton and its pty POOL outlives a test:
+    // without this, `terminal:create(cwd, 0)` in the next case would resolve the
+    // previous case's still-live shell instead of spawning.
+    terminalService.killAll()
     terminalService.setWindow(null)
     harness.teardown()
     vi.clearAllMocks()
+  })
+
+  // -------------------------------------------------------------------------
+  // Per-cwd terminal pool (`cwd#0`, `cwd#1`, …) over the DESKTOP transport
+  // -------------------------------------------------------------------------
+
+  it('resolves the same pool slot of one cwd to ONE pty', async () => {
+    const first = await harness.call<string>('terminal:create', '/tmp/proj', 0)
+    const again = await harness.call<string>('terminal:create', '/tmp/proj', 0)
+
+    expect(again).toBe(first)
+    expect(ptyStub.spawned).toHaveLength(1)
+
+    // A different slot is a different shell; a different cwd likewise.
+    const second = await harness.call<string>('terminal:create', '/tmp/proj', 1)
+    const elsewhere = await harness.call<string>('terminal:create', '/tmp/other', 0)
+    expect(new Set([first, second, elsewhere]).size).toBe(3)
+    expect(ptyStub.spawned).toHaveLength(3)
+  })
+
+  it('terminal:create with no index still spawns a fresh pty (old-client compat)', async () => {
+    const first = await harness.call<string>('terminal:create', '/tmp/proj')
+    const second = await harness.call<string>('terminal:create', '/tmp/proj')
+    expect(second).not.toBe(first)
+    expect(ptyStub.spawned).toHaveLength(2)
+  })
+
+  it('terminal:attach replays the scrollback on terminal:data, BEFORE live bytes', async () => {
+    const events: Array<{ terminalId: string; data: string; replay?: boolean }> = []
+    harness.onEvent('terminal:data', (payload: any) => events.push(payload))
+
+    const id = await harness.call<string>('terminal:create', '/tmp/proj', 0)
+    ptyStub.spawned[0].emitData('$ ls\r\nfile1\r\n')
+    await new Promise((r) => setTimeout(r, 25))
+    expect(events).toHaveLength(1)
+
+    // A second surface (or a remounted tab) opening slot 0 gets the same pty and
+    // attaches; the ring is delivered on the SAME host-local lane, flagged as a
+    // replay so the client resets instead of appending to what it already drew.
+    const same = await harness.call<string>('terminal:create', '/tmp/proj', 0)
+    expect(same).toBe(id)
+    await expect(harness.call('terminal:attach', id)).resolves.toBe(true)
+
+    expect(events[1]).toEqual({ terminalId: id, data: '$ ls\r\nfile1\r\n', replay: true })
+
+    ptyStub.spawned[0].emitData('more\r\n')
+    await new Promise((r) => setTimeout(r, 25))
+    // Replay then live, never interleaved.
+    expect(events.map((e) => [e.data, e.replay === true])).toEqual([
+      ['$ ls\r\nfile1\r\n', false],
+      ['$ ls\r\nfile1\r\n', true],
+      ['more\r\n', false]
+    ])
+  })
+
+  it('terminal:attach reports a stale tab instead of throwing; detach is a no-op', async () => {
+    await expect(harness.call('terminal:attach', 'no-such-terminal')).resolves.toBe(false)
+    await expect(harness.call('terminal:detach', 'no-such-terminal')).resolves.toBeUndefined()
   })
 
   it('registers all 5 channels after registerTerminalIpc', async () => {

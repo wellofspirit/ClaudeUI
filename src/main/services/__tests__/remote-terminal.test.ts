@@ -102,7 +102,7 @@ import { RemoteDispatcher } from '../remote-dispatcher'
 import { terminalService } from '../terminal-service'
 import { registerRemoteHandlers } from '../../ipc/remote-handlers'
 import { registerTerminalIpc } from '../../ipc/terminal.ipc'
-import { commandRegistry } from '../../ipc/command-registry'
+import { commandRegistry, desktopConnection } from '../../ipc/command-registry'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -193,6 +193,8 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
   let clients: RemoteClient[]
   let clockOffset: number
   let realNow: () => number
+  /** Stands in for the desktop renderer: `terminal:data` / `terminal:exit` land here. */
+  let desktopSink: ReturnType<typeof vi.fn>
 
   beforeEach(async () => {
     ptyStub.reset()
@@ -205,9 +207,10 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
 
     commandRegistry.reset()
     const dispatcher = new RemoteDispatcher()
+    desktopSink = vi.fn()
     const fakeWin = {
       isDestroyed: () => false,
-      webContents: { send: vi.fn(), executeJavaScript: vi.fn(async () => ({})) },
+      webContents: { send: desktopSink, executeJavaScript: vi.fn(async () => ({})) },
       on: vi.fn()
     }
     registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never)
@@ -363,6 +366,100 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     ptyStub.spawned[0].emitData('still alive')
     await flushPtyBatch()
     expect(ptyStub.spawned[0].dataListeners.length).toBeGreaterThan(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // Test 1b — the per-cwd terminal POOL across BOTH surfaces
+  // -------------------------------------------------------------------------
+
+  /** The text of every `terminal:data` push to the desktop for one terminal. */
+  function desktopData(termId: string): Array<{ data: string; replay: boolean }> {
+    return desktopSink.mock.calls
+      .filter(
+        ([channel, payload]) =>
+          channel === 'terminal:data' &&
+          (payload as { terminalId: string }).terminalId === termId
+      )
+      .map(([, payload]) => {
+        const p = payload as { data: string; replay?: boolean }
+        return { data: p.data, replay: p.replay === true }
+      })
+  }
+
+  it('a remote client opening slot 0 shares the DESKTOP’s pty, and both sinks see the bytes', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    // The desktop opens terminal 0 of this repo first.
+    const desktopId = terminalService.create(desktopConnection(), '/repo', 0)
+    expect(ptyStub.spawned).toHaveLength(1)
+
+    const client = await connect()
+    await stepUp(client)
+    const collector = frameCollector(client)
+
+    // The phone asks for terminal 0 of the SAME cwd: one pty, two viewers.
+    const remoteId = await client.invoke<string>('terminal:create', '/repo', 0)
+    expect(remoteId).toBe(desktopId)
+    expect(ptyStub.spawned).toHaveLength(1)
+    await client.invoke('terminal:attach', remoteId)
+
+    ptyStub.spawned[0].emitData('shared bytes')
+    await flushPtyBatch()
+
+    const frame = await collector.waitFor('term-data')
+    expect(Buffer.from((frame as { dataB64: string }).dataB64, 'base64').toString('utf8')).toBe(
+      'shared bytes'
+    )
+    expect(desktopData(desktopId)).toEqual([{ data: 'shared bytes', replay: false }])
+
+    // Keystrokes from the phone reach the shell the desktop is watching.
+    await client.send({
+      type: 'term-input',
+      termId: remoteId,
+      dataB64: Buffer.from('whoami\r', 'utf8').toString('base64')
+    })
+    await flushPtyBatch()
+    expect(ptyStub.spawned[0].writes).toEqual(['whoami\r'])
+  })
+
+  it('the DESKTOP attaching to a remote-spawned pty replays its scrollback, then live', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const client = await connect()
+    await stepUp(client)
+    const remoteId = await client.invoke<string>('terminal:create', '/repo', 0)
+    await client.invoke('terminal:attach', remoteId)
+
+    ptyStub.spawned[0].emitData('history\r\n')
+    await flushPtyBatch()
+
+    // Desktop opens the same slot — same pty — and attaches. Its lane is a
+    // broadcast, so it already saw the live chunk; the replay is flagged so the
+    // client resets rather than appending.
+    expect(terminalService.create(desktopConnection(), '/repo', 0)).toBe(remoteId)
+    expect(terminalService.attach(desktopConnection(), remoteId)).toBe(true)
+
+    ptyStub.spawned[0].emitData('after\r\n')
+    await flushPtyBatch()
+
+    expect(desktopData(remoteId)).toEqual([
+      { data: 'history\r\n', replay: false },
+      { data: 'history\r\n', replay: true },
+      { data: 'after\r\n', replay: false }
+    ])
+    expect(ptyStub.spawned).toHaveLength(1)
+  })
+
+  it('still refuses an INDEXED create without a live grant (the pool changes what, not who)', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    // A shell the operator has open on the desktop — precisely what an
+    // unauthorized client must not be able to reach by naming its slot.
+    const desktopId = terminalService.create(desktopConnection(), '/repo', 0)
+
+    const client = await connect()
+    await expect(client.invoke('terminal:create', '/repo', 0)).rejects.toThrow('needs-step-up')
+    await expect(client.invoke('terminal:attach', desktopId)).rejects.toThrow('needs-step-up')
+
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: false })
+    await expect(client.invoke('terminal:create', '/repo', 0)).rejects.toThrow('terminal-disabled')
   })
 
   // -------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import { isNeedsStepUpError } from '../../../../../shared/remote-protocol'
 import type { TerminalAvailability } from '../../../../../shared/types'
 import { TerminalStepUpPrompt } from '../TerminalStepUpPrompt'
 import { DESKTOP_AVAILABILITY } from '../terminal-availability'
+import { nextFreeSlot } from '../pool-slot'
 import { TerminalPanelView } from './View'
 
 interface Props {
@@ -66,9 +67,22 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
   }, [isWeb, refreshAvailability])
 
   const handleNewTab = async (): Promise<void> => {
+    const target = cwd || '.'
+    // Terminals are an ordered per-cwd POOL shared by every surface: this asks
+    // for the lowest slot this surface is not already showing. If another
+    // surface (a phone, the desktop) already holds that slot, we ATTACH to its
+    // pty and replay its scrollback instead of spawning a second shell.
+    const index = nextFreeSlot(visibleTabs)
     try {
-      const terminalId = await window.api.createTerminal(cwd || '.')
-      addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
+      const terminalId = await window.api.createTerminal(target, index)
+      // Defensive: a slot we believed free resolving to a pty we already show
+      // (possible if another surface reshuffled the pool between render and
+      // click) must select that tab, never duplicate it.
+      if (allTabs.some((t) => t.id === terminalId)) {
+        setActiveTerminal(terminalId, target)
+        return
+      }
+      addTerminalTab({ id: terminalId, title: 'Terminal', cwd: target, poolIndex: index })
     } catch (err) {
       // The grant decayed between the availability check and the click. Keep
       // whatever step-up params the last query returned — only the grant died.

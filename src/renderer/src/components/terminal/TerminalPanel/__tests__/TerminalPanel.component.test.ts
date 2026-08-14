@@ -29,15 +29,25 @@ const CWD = '/d/repo'
 
 describe('TerminalPanel FC', () => {
   let app: TestApp
-  let createCalls: string[]
+  let createCalls: Array<{ cwd: string; index?: number }>
+  /** Stands in for the main-process terminal pool: `cwd#index` → pty id. */
+  let pool: Map<string, string>
+  let spawnCount: number
 
   beforeEach(async () => {
     app = await bootTestApp()
     createCalls = []
+    pool = new Map()
+    spawnCount = 0
 
-    app.bridge.ipcMain.handle('terminal:create', async (_e, cwd: string) => {
-      createCalls.push(cwd)
-      return `term-${createCalls.length}`
+    app.bridge.ipcMain.handle('terminal:create', async (_e, cwd: string, index?: number) => {
+      createCalls.push({ cwd, index })
+      const key = `${cwd}#${index ?? pool.size}`
+      const existing = pool.get(key)
+      if (existing) return existing
+      const id = `term-${++spawnCount}`
+      pool.set(key, id)
+      return id
     })
     app.bridge.ipcMain.handle('terminal:kill', async () => {})
 
@@ -69,10 +79,62 @@ describe('TerminalPanel FC', () => {
       await new Promise((r) => setTimeout(r, 0))
     })
 
-    expect(createCalls).toEqual([CWD])
+    // Slot 0 of this cwd's pool — not "a new terminal": if another surface
+    // already holds slot 0, this resolves to THAT pty.
+    expect(createCalls).toEqual([{ cwd: CWD, index: 0 }])
     const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
     expect(tabs).toHaveLength(1)
-    expect(tabs[0].id).toBe('term-1')
+    expect(tabs[0]).toMatchObject({ id: 'term-1', poolIndex: 0 })
+  })
+
+  it('asks for successive pool slots, and reuses a freed slot after a close', async () => {
+    await renderFC()
+
+    await act(async () => {
+      await viewProps.onNewTab()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      await viewProps.onNewTab()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(createCalls.map((c) => c.index)).toEqual([0, 1])
+    expect(spawnCount).toBe(2)
+
+    // Close the FIRST tab: this surface detaches from slot 0 — the pty lives on
+    // (it may still be open elsewhere), so pressing + asks for slot 0 again and
+    // gets the very same terminal back.
+    act(() => {
+      viewProps.onCloseTab('term-1')
+    })
+    await act(async () => {
+      await viewProps.onNewTab()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(createCalls.map((c) => c.index)).toEqual([0, 1, 0])
+    expect(spawnCount).toBe(2)
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs.map((t) => t.id).sort()).toEqual(['term-1', 'term-2'])
+  })
+
+  it('selects the existing tab instead of duplicating when a slot resolves to it', async () => {
+    useSessionStore
+      .getState()
+      .addTerminalTab({ id: 'term-9', title: 'A', cwd: CWD, poolIndex: 1 })
+    // Slot 0 is free from this surface's point of view, but the host answers
+    // with a terminal this surface is already showing.
+    pool.set(`${CWD}#0`, 'term-9')
+    await renderFC()
+
+    await act(async () => {
+      await viewProps.onNewTab()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs).toHaveLength(1)
+    expect(useSessionStore.getState().terminalGroups[CWD].activeTabId).toBe('term-9')
   })
 
   it('onCloseTab closes the terminal tab', async () => {

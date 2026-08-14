@@ -706,10 +706,17 @@ describe('TopBar — terminal toggle button', () => {
     })
 
     expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
-    expect(createTerminal).toHaveBeenCalledWith(TERM_CWD)
+    // Slot 0 of this cwd's terminal POOL — which attaches to an existing shell
+    // there (another surface's) rather than always spawning a second one.
+    expect(createTerminal).toHaveBeenCalledWith(TERM_CWD, 0)
     const group = useSessionStore.getState().terminalGroups[TERM_CWD]
     expect(group?.tabs).toHaveLength(1)
-    expect(group?.tabs[0]).toMatchObject({ id: 'term-topbar-1', title: 'Terminal', cwd: TERM_CWD })
+    expect(group?.tabs[0]).toMatchObject({
+      id: 'term-topbar-1',
+      title: 'Terminal',
+      cwd: TERM_CWD,
+      poolIndex: 0
+    })
   })
 
   it('closes on a second click without spawning another terminal', async () => {

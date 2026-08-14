@@ -181,17 +181,18 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     unwatchSession: (routingId) => ipcRenderer.invoke('session:unwatch-session', routingId),
 
     // Terminal
-    createTerminal: (cwd) => ipcRenderer.invoke('terminal:create', cwd),
+    createTerminal: (cwd, index) => ipcRenderer.invoke('terminal:create', cwd, index),
     writeTerminal: (id, data) => ipcRenderer.invoke('terminal:write', id, data),
     resizeTerminal: (id, cols, rows) => ipcRenderer.invoke('terminal:resize', id, cols, rows),
     killTerminal: (id) => ipcRenderer.invoke('terminal:kill', id),
     killTerminalsByCwd: (cwd) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
     terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
-    // Desktop-shaped stubs, mirroring preload: step-up and multi-attach are
-    // remote-only concepts (SyncCore phase 2).
+    // Mirrors preload: step-up is remote-only, but attach/detach are real on the
+    // desktop transport too (the terminal pool means a tab can resolve to a pty
+    // this surface never spawned, and attach is what replays its scrollback).
     terminalStepUp: async () => ({ ok: true }),
-    attachTerminal: async () => true,
-    detachTerminal: async () => {},
+    attachTerminal: (id) => ipcRenderer.invoke('terminal:attach', id),
+    detachTerminal: (id) => ipcRenderer.invoke('terminal:detach', id),
     onTerminalDetached: () => () => {},
 
     // Worktree

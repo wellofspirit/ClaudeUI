@@ -1241,13 +1241,17 @@ export function registerRemoteHandlers(
   // server-side.
   // -------------------------------------------------------------------------
 
+  // `index` (optional) selects the slot in this cwd's terminal POOL, so a phone
+  // opening "terminal 0" of a repo lands on the same pty the desktop has open.
+  // An older web bundle sends no index and still gets a fresh pty in the next
+  // free slot — the pre-pool behavior, unchanged.
   handleRemote({
     channel: 'terminal:create',
     capability: 'shell',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection, cwd: string) =>
-      terminalService.create(connection, cwd)
+    handler: async (connection: CommandConnection, cwd: string, index?: number) =>
+      terminalService.create(connection, cwd, index)
   })
 
   // `terminal:write` stays registered even though the web client prefers the

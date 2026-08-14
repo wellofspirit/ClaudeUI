@@ -46,6 +46,34 @@ export interface PtyEntry {
 }
 
 /**
+ * The per-cwd terminal POOL key.
+ *
+ * Terminals are an ordered pool per working directory (`cwd#0`, `cwd#1`, …), so
+ * "open terminal N for this cwd" resolves to the SAME pty from every surface.
+ * Both surfaces derive `cwd` from the same replicated session record, so the
+ * strings normally match verbatim; the normalization here only removes the
+ * accidental ways one string can differ from another naming the same directory
+ * (separator flavour, a trailing slash, and — on Windows only — case).
+ *
+ * Deliberately NOT applied to {@link PtyManager.killByCwd}, whose exact-match
+ * semantics are load-bearing for the cold-session sweep and unchanged here.
+ */
+function poolKeyFor(cwd: string): string {
+  let key = cwd.replace(/\\/g, '/')
+  while (key.length > 1 && key.endsWith('/')) key = key.slice(0, -1)
+  return os.platform() === 'win32' ? key.toLowerCase() : key
+}
+
+/** What {@link PtyManager.open} resolved to. */
+export interface PtyOpenResult {
+  id: string
+  /** The pool slot this terminal occupies for its cwd. */
+  index: number
+  /** True when a pty was spawned; false when a live one was resolved. */
+  created: boolean
+}
+
+/**
  * How the remote transport receives PTY frames for the connections attached to
  * a terminal (SyncCore phase 2). Injected — the pty manager knows nothing about
  * WebSockets, and with no sink installed it behaves exactly as it did before
@@ -91,6 +119,10 @@ interface PtyEntryInternal extends PtyEntry {
   /** Server-side scrollback ring (see {@link SCROLLBACK_MAX_BYTES}). */
   scrollback: string[]
   scrollbackBytes: number
+  /** Normalized cwd this terminal is pooled under ({@link poolKeyFor}). */
+  poolKey: string
+  /** This terminal's slot in that pool. */
+  index: number
 }
 
 type DataCallback = (id: string, data: string) => void
@@ -135,6 +167,13 @@ const REMOTE_DRAIN_POLL_MS = 50
 export class PtyManager {
   private ptys = new Map<string, PtyEntryInternal>()
   private remoteSink: PtyRemoteSink | null = null
+  /**
+   * poolKey → ordered slots. A slot holds the id of the terminal occupying it,
+   * or `null` for a slot whose terminal has died (which is what makes "open
+   * terminal 1" spawn a fresh shell after the old one exited). Trailing nulls
+   * are trimmed so `pool.length` is always "one past the last live slot".
+   */
+  private pools = new Map<string, Array<string | null>>()
 
   /**
    * Install (or clear) the remote delivery sink. Without one, `attach()` is
@@ -144,7 +183,47 @@ export class PtyManager {
     this.remoteSink = sink
   }
 
+  /**
+   * Resolve terminal `index` of `cwd`'s pool: attach to the live pty in that
+   * slot, or spawn one there.
+   *
+   * `index === null` (or absent) means "the next free slot", which always
+   * spawns — that is the backward-compatible path for a caller that cannot
+   * express an index (an older remote bundle), and it reproduces the
+   * pre-pool behavior of `create()` exactly: every call gets SOME terminal.
+   */
+  open(
+    cwd: string,
+    index: number | null,
+    onData: DataCallback,
+    onExit: ExitCallback
+  ): PtyOpenResult {
+    const poolKey = poolKeyFor(cwd)
+    const pool = this.pools.get(poolKey) ?? []
+    if (index !== null && index !== undefined) {
+      if (!Number.isInteger(index) || index < 0) {
+        throw new Error(`A terminal index must be a non-negative integer (got ${String(index)})`)
+      }
+      const existing = pool[index]
+      // Attach-to-existing: the caller gets the id of a pty it did not spawn,
+      // and reads its history from the scrollback ring like any late attach.
+      if (existing && this.ptys.has(existing)) return { id: existing, index, created: false }
+    }
+    const slot = index ?? this.nextFreeSlot(pool)
+    return { id: this.spawn(cwd, poolKey, slot, onData, onExit), index: slot, created: true }
+  }
+
   create(cwd: string, onData: DataCallback, onExit: ExitCallback): string {
+    return this.open(cwd, null, onData, onExit).id
+  }
+
+  private spawn(
+    cwd: string,
+    poolKey: string,
+    index: number,
+    onData: DataCallback,
+    onExit: ExitCallback
+  ): string {
     const id = uuid()
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const nodePty = require('node-pty')
@@ -173,7 +252,9 @@ export class PtyManager {
       drainTimer: null,
       attachments: new Set(),
       scrollback: [],
-      scrollbackBytes: 0
+      scrollbackBytes: 0,
+      poolKey,
+      index
     }
 
     const flush = (): void => {
@@ -230,10 +311,14 @@ export class PtyManager {
       }
       entry.attachments.clear()
       this.ptys.delete(id)
+      // A dead terminal releases its pool slot, so the next "open terminal N"
+      // for this cwd spawns a fresh shell there instead of resolving a corpse.
+      this.freeSlot(entry)
       onExit(id, e.exitCode)
     })
 
     this.ptys.set(id, entry)
+    this.claimSlot(poolKey, index, id)
     return id
   }
 
@@ -268,6 +353,7 @@ export class PtyManager {
     // notifies attached sockets, so a killed terminal and a naturally-exited one
     // look identical on the wire.
     this.ptys.delete(id)
+    this.freeSlot(entry)
   }
 
   /** Kill all PTYs spawned with a given cwd. Returns the killed terminal IDs. */
@@ -295,6 +381,72 @@ export class PtyManager {
   /** The cwd a terminal was spawned in, or undefined when it is gone. */
   cwdOf(id: string): string | undefined {
     return this.ptys.get(id)?.cwd
+  }
+
+  // ---------------------------------------------------------------------------
+  // The per-cwd pool
+  // ---------------------------------------------------------------------------
+
+  /** The live terminal in slot `index` of `cwd`'s pool, if any. */
+  terminalAt(cwd: string, index: number): string | undefined {
+    const id = this.pools.get(poolKeyFor(cwd))?.[index]
+    return id && this.ptys.has(id) ? id : undefined
+  }
+
+  /** Which slot a terminal occupies, or undefined when it is gone. */
+  indexOf(id: string): number | undefined {
+    return this.ptys.get(id)?.index
+  }
+
+  /** Live terminals of one cwd, by slot. Inspection seam (and future listing). */
+  poolOf(cwd: string): Array<{ index: number; id: string }> {
+    const pool = this.pools.get(poolKeyFor(cwd)) ?? []
+    const out: Array<{ index: number; id: string }> = []
+    pool.forEach((id, index) => {
+      if (id && this.ptys.has(id)) out.push({ index, id })
+    })
+    return out
+  }
+
+  /**
+   * The scrollback ring as one string — what an attaching surface replays.
+   *
+   * The remote path gets this pushed through the sink inside {@link attach};
+   * the desktop path PULLS it, because its bytes ride a broadcast IPC channel
+   * that predates attachment and has no per-connection addressing.
+   */
+  scrollbackOf(id: string): string {
+    const entry = this.ptys.get(id)
+    return entry ? entry.scrollback.join('') : ''
+  }
+
+  /** First slot with no live terminal (a hole, or one past the end). */
+  private nextFreeSlot(pool: ReadonlyArray<string | null>): number {
+    for (let i = 0; i < pool.length; i++) {
+      const id = pool[i]
+      if (!id || !this.ptys.has(id)) return i
+    }
+    return pool.length
+  }
+
+  private claimSlot(poolKey: string, index: number, id: string): void {
+    const pool = this.pools.get(poolKey) ?? []
+    while (pool.length < index) pool.push(null)
+    pool[index] = id
+    this.pools.set(poolKey, pool)
+  }
+
+  /**
+   * Release a slot — idempotent, and guarded on identity so a kill's late
+   * `onExit` can never evict the terminal that has since taken the slot.
+   */
+  private freeSlot(entry: PtyEntryInternal): void {
+    const pool = this.pools.get(entry.poolKey)
+    if (!pool) return
+    if (pool[entry.index] !== entry.id) return
+    pool[entry.index] = null
+    while (pool.length > 0 && pool[pool.length - 1] === null) pool.pop()
+    if (pool.length === 0) this.pools.delete(entry.poolKey)
   }
 
   // ---------------------------------------------------------------------------

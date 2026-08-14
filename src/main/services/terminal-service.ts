@@ -10,7 +10,10 @@
  *
  * What lives here (and not in `pty-manager.ts`): the POLICY — the desktop
  * opt-in toggle, the decaying `shell` grant check, and the audit rows for the
- * terminal lifecycle. The pty manager stays a dumb process/stream owner.
+ * terminal lifecycle. The pty manager stays a dumb process/stream owner, and it
+ * is also where the per-cwd terminal POOL lives (`cwd#0`, `cwd#1`, …): clients
+ * ask for "terminal N of this cwd" and the resolution attach-or-spawn is made
+ * here in main, never client-side.
  *
  * Audit records METADATA ONLY (security.md §Audit): spawn/attach/detach/kill
  * are `command`-kind registry dispatches and are audited by the registry
@@ -149,28 +152,57 @@ export class TerminalService {
     if (!hasLiveShellGrant(connection)) throw new Error(NEEDS_STEP_UP_ERROR)
   }
 
-  create(connection: CommandConnection, cwd: string): string {
+  /**
+   * Open terminal `index` of `cwd`'s pool — attach to the live one if that slot
+   * is taken, else spawn it there (SyncCore phase 2 follow-through: terminals
+   * are a per-cwd ORDERED POOL, shared by every surface, tmux-style).
+   *
+   * `index` is optional on the wire so an older remote bundle that only knows
+   * `terminal:create(cwd)` keeps working: no index means "next free slot", i.e.
+   * always a fresh pty, which is exactly what it used to get.
+   *
+   * Returns the terminal ID (a bare string, not an envelope) — also for
+   * backward compatibility: that is what every existing client awaits.
+   */
+  create(connection: CommandConnection, cwd: string, index?: number | null): string {
     this.assertAllowed(connection)
     if (typeof cwd !== 'string' || cwd.trim() === '') {
       throw new Error('A working directory is required to open a terminal')
     }
+    if (index !== undefined && index !== null && !Number.isInteger(index)) {
+      throw new Error('A terminal index must be an integer')
+    }
     // Captured at spawn time: the exit row is attributed to whoever SPAWNED the
     // pty, not to whoever happened to be attached when it died.
     const spawner = connection
-    return this.manager.create(
+    return this.manager.open(
       cwd,
+      index ?? null,
       (terminalId, data) => {
-        if (this.win && !this.win.isDestroyed()) {
-          this.win.webContents.send('terminal:data', { terminalId, data })
-        }
+        this.sendData(terminalId, data)
       },
       (terminalId, exitCode) => {
-        if (this.win && !this.win.isDestroyed()) {
-          this.win.webContents.send('terminal:exit', { terminalId, code: exitCode })
+        if (this.hasLocalSink()) {
+          this.win!.webContents.send('terminal:exit', { terminalId, code: exitCode })
         }
         this.auditLifecycle(spawner, 'terminal:exit')
       }
-    )
+    ).id
+  }
+
+  /** Is there a desktop renderer to deliver to? (A headless boot has none.) */
+  private hasLocalSink(): boolean {
+    return this.win !== null && !this.win.isDestroyed()
+  }
+
+  /**
+   * Host-local PTY delivery. The channel is a LITERAL on purpose — the funnel
+   * guard refuses a computed `webContents.send` channel unless the whole file is
+   * allowlisted as host-local by construction.
+   */
+  private sendData(terminalId: string, data: string, replay?: true): void {
+    if (!this.hasLocalSink()) return
+    this.win!.webContents.send('terminal:data', { terminalId, data, replay })
   }
 
   write(connection: CommandConnection, id: string, data: string): void {
@@ -199,10 +231,30 @@ export class TerminalService {
    * Deliberately a `command`, not a query, at the registration site — see the
    * comment there. Returns false when the terminal is gone (a stale tab in the
    * client), which the caller surfaces rather than throwing.
+   *
+   * TWO LANES, one ring. A remote connection is registered in the pty manager's
+   * attachment set and has the replay PUSHED to its socket. The desktop has no
+   * attachment set to join — its bytes ride a broadcast `terminal:data` channel
+   * that predates multi-attach — so its attach only pulls the ring and delivers
+   * it on that same channel, flagged `replay`.
+   *
+   * The flag matters because the desktop lane is NOT attachment-gated: between a
+   * renderer installing its `terminal:data` listener and this call landing, live
+   * bytes may already have been written to the xterm — and they are in the ring
+   * too (the ring is fed in the same statement that sends them). `replay: true`
+   * therefore means "reset, then take this as the whole history", which is
+   * idempotent no matter how much of it the client already saw. Live bytes that
+   * arrive afterwards are sent on a later turn of the loop, so ordering is
+   * replay-then-live with no interleave.
    */
   attach(connection: CommandConnection, id: string): boolean {
     this.assertAllowed(connection)
-    return this.manager.attach(id, connection.connectionId)
+    if (connection.identity.method !== 'desktop') {
+      return this.manager.attach(id, connection.connectionId)
+    }
+    if (!this.manager.has(id)) return false
+    this.sendData(id, this.manager.scrollbackOf(id), true)
+    return true
   }
 
   detach(connection: CommandConnection, id: string): void {

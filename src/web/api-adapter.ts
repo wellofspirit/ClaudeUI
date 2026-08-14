@@ -329,7 +329,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // server-side gates: the desktop opt-in toggle, a stepped-up `shell` grant,
     // and that grant's idle decay. Everything here is refused server-side until
     // all three hold, so the client never has to be trusted about them.
-    createTerminal: (cwd) => connection.invoke('terminal:create', cwd) as Promise<string>,
+    // `index` is the pool slot: asking for terminal 0 of a cwd the desktop
+    // already has a shell open in attaches to THAT pty (tmux-style) instead of
+    // spawning a second one. A host that predates the pool ignores the extra
+    // argument and answers exactly as before.
+    createTerminal: (cwd, index) =>
+      connection.invoke('terminal:create', cwd, index) as Promise<string>,
     // Keystrokes ride the `term-input` FRAME rather than an invoke: one
     // request/response round trip per keypress is pure overhead, and the frame
     // is what refreshes the grant's idle deadline.

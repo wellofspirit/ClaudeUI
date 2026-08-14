@@ -122,16 +122,20 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
       window.api.writeTerminal(terminalId, data)
     })
 
-    // PTY output -> terminal
-    const unsub = window.api.onTerminalData(({ terminalId: id, data }) => {
-      if (id === terminalId) term.write(data)
+    // PTY output -> terminal. A `replay` chunk is the scrollback ring, i.e. the
+    // terminal's ENTIRE history: reset first so it is never appended to bytes
+    // the broadcast desktop lane may already have delivered for this pty.
+    const unsub = window.api.onTerminalData(({ terminalId: id, data, replay }) => {
+      if (id !== terminalId) return
+      if (replay) term.reset()
+      term.write(data)
     })
 
-    // Multi-attach (SyncCore phase 2): subscribe this client to the live PTY.
-    // Registered AFTER the data listener on purpose — attaching replays the
-    // server-side scrollback ring as the first `term-data` frame, so a listener
-    // installed afterwards would miss the history it exists to deliver. No-op on
-    // desktop, whose output has always arrived on its own IPC channel.
+    // Multi-attach: subscribe this client to the live PTY. Registered AFTER the
+    // data listener on purpose — attaching replays the server-side scrollback
+    // ring first, so a listener installed afterwards would miss the history it
+    // exists to deliver. Real on both surfaces now that terminals are a per-cwd
+    // pool: this tab may have resolved to a pty another surface spawned.
     //
     // The api handle is captured, not re-read on cleanup: detach must go through
     // the same surface the attach did (and `window.api` can be gone by teardown).

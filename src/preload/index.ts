@@ -218,21 +218,25 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
   unwatchSession: (routingId: string) => ipcRenderer.invoke('session:unwatch-session', routingId),
   // Terminal (PTY) operations
-  createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
+  createTerminal: (cwd: string, index?: number) =>
+    ipcRenderer.invoke('terminal:create', cwd, index),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
   resizeTerminal: (id: string, cols: number, rows: number) =>
     ipcRenderer.invoke('terminal:resize', id, cols, rows),
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
   killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
   terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
-  // Step-up and multi-attach are REMOTE concepts (SyncCore phase 2). The
-  // desktop renderer is the host surface: it already holds a non-decaying
-  // `shell` grant, and its PTY output arrives on `terminal:data` rather than by
-  // subscribing. Local no-ops, deliberately not IPC round-trips — the channels
-  // do not exist on this transport.
+  // Step-up is a REMOTE concept (SyncCore phase 2): the desktop renderer is the
+  // host surface, already holding a non-decaying `shell` grant, so there is
+  // nothing to step up to. Local no-op, deliberately not an IPC round trip.
   terminalStepUp: async () => ({ ok: true }),
-  attachTerminal: async () => true,
-  detachTerminal: async () => {},
+  // Attach/detach, by contrast, are REAL here now that terminals are a per-cwd
+  // pool: a desktop tab can resolve to a pty another surface spawned, and the
+  // attach is what replays that terminal's scrollback onto `terminal:data`.
+  attachTerminal: (id: string) => ipcRenderer.invoke('terminal:attach', id),
+  detachTerminal: (id: string) => ipcRenderer.invoke('terminal:detach', id),
+  // Only the server drops attachments (policy flip, decay, backpressure), and
+  // none of those apply to the host surface.
   onTerminalDetached: () => () => {},
 
   // Worktree operations — all use safeHandler

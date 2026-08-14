@@ -62,7 +62,7 @@ Append-only SQLite (typed repo enforces append-only):
 
 ## Terminal posture
 
-Off by default; a desktop-side "Allow remote terminal" toggle arms the `shell` capability at all. Using it requires the (decaying) `shell` grant + step-up per above. Multi-attach doubles as an audit feature — the owner can watch any remote shell live from the desktop. This supersedes the audit-era `terminal:*` denylist and ADR-048 Decision 5 (terminal-on-mobile declined), both of which were scoped to the pre-SyncCore trust model.
+Off by default; a desktop-side "Allow remote terminal" toggle arms the `shell` capability at all. Using it requires the (decaying) `shell` grant + step-up per above. Multi-attach doubles as an audit feature — the owner can watch any remote shell live from the desktop. Terminals are an ordered per-cwd pool ([sync-core.md](sync-core.md) §Terminal), so an open names a SLOT and may resolve to a pty another surface spawned: that changes which pty an open lands on, never who may open one. Naming a slot is not a capability — `terminal:create`/`attach` run the same three gates either way, so an unauthenticated or un-stepped-up client cannot reach the operator's shell by guessing an index. `terminal:attach` is registered for the desktop transport too (it is how a desktop tab replays a pty it did not spawn) and is audited there on the same `command`-kind dispatch. This supersedes the audit-era `terminal:*` denylist and ADR-048 Decision 5 (terminal-on-mobile declined), both of which were scoped to the pre-SyncCore trust model.
 
 ## Enrollment & recovery
 

@@ -78,6 +78,28 @@ export function normalizeCwd(cwd: string): string {
   return cwd || '.'
 }
 
+type TerminalGroups = Record<string, { tabs: TerminalTab[]; activeTabId: string | null }>
+
+/**
+ * Drop one tab from whichever cwd group holds it, promoting the last remaining
+ * tab when the active one goes. Shared by `closeTerminalTab` (the user closing
+ * a viewer) and `removeTerminalTab` (the pty exited) — since terminals became a
+ * shared pool the two do exactly the same thing to tab state, and the pty's
+ * lifetime is no longer coupled to either.
+ */
+function dropTerminalTab(groups: TerminalGroups, id: string): { terminalGroups: TerminalGroups } {
+  const next = { ...groups }
+  for (const [key, group] of Object.entries(next)) {
+    if (!group.tabs.some((t) => t.id === id)) continue
+    const tabs = group.tabs.filter((t) => t.id !== id)
+    const activeTabId =
+      group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
+    next[key] = { tabs, activeTabId }
+    break
+  }
+  return { terminalGroups: next }
+}
+
 /**
  * Resolve a usable opencode picker VALUE against the currently-available
  * (discovered, provider-filtered) models. Mirrors the main-process
@@ -2608,37 +2630,20 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  closeTerminalTab: (id) => {
-    window.api.killTerminal(id)
-    set((state) => {
-      const groups = { ...state.terminalGroups }
-      for (const [key, group] of Object.entries(groups)) {
-        const idx = group.tabs.findIndex((t) => t.id === id)
-        if (idx === -1) continue
-        const tabs = group.tabs.filter((t) => t.id !== id)
-        const activeTabId =
-          group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
-        groups[key] = { tabs, activeTabId }
-        break
-      }
-      return { terminalGroups: groups }
-    })
-  },
+  /**
+   * Closing a tab DETACHES this surface; it no longer kills the pty.
+   *
+   * Terminals are a shared per-cwd pool — the shell behind this tab may also be
+   * open on a phone, and closing a viewer must never take it away from another
+   * viewer. The detach itself rides the XTermInstance unmount (which is the
+   * thing that actually holds the attachment), so this action is now pure tab
+   * state, identical to {@link removeTerminalTab}. A pty still dies on its own
+   * `exit`, on an explicit `terminal:kill`, on the cold-session sweep
+   * (`killTerminalsByCwd`), and with the window.
+   */
+  closeTerminalTab: (id) => set((state) => dropTerminalTab(state.terminalGroups, id)),
 
-  removeTerminalTab: (id) =>
-    set((state) => {
-      const groups = { ...state.terminalGroups }
-      for (const [key, group] of Object.entries(groups)) {
-        const idx = group.tabs.findIndex((t) => t.id === id)
-        if (idx === -1) continue
-        const tabs = group.tabs.filter((t) => t.id !== id)
-        const activeTabId =
-          group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
-        groups[key] = { tabs, activeTabId }
-        break
-      }
-      return { terminalGroups: groups }
-    }),
+  removeTerminalTab: (id) => set((state) => dropTerminalTab(state.terminalGroups, id)),
 
   setActiveTerminal: (id, cwd) =>
     set((state) => {

@@ -14,7 +14,9 @@ const TERMINAL_IPC_CHANNELS = [
   'terminal:resize',
   'terminal:kill',
   'terminal:kill-by-cwd',
-  'terminal:availability'
+  'terminal:availability',
+  'terminal:attach',
+  'terminal:detach'
 ]
 
 /**
@@ -43,12 +45,15 @@ export function registerTerminalIpc(): void {
     ipcMain.removeHandler(channel)
   }
 
+  // `index` is the pool slot (`cwd#0`, `cwd#1`, …). Omitted ⇒ next free slot,
+  // which is what a caller that predates the pool always got: a fresh pty.
   handleIpc({
     channel: 'terminal:create',
     capability: 'shell',
     kind: 'command',
     withConnection: true,
-    handler: (connection: CommandConnection, cwd: string) => terminalService.create(connection, cwd)
+    handler: (connection: CommandConnection, cwd: string, index?: number) =>
+      terminalService.create(connection, cwd, index)
   })
 
   handleIpc({
@@ -88,6 +93,31 @@ export function registerTerminalIpc(): void {
     withConnection: true,
     handler: (connection: CommandConnection, cwd: string) =>
       terminalService.killByCwd(connection, cwd)
+  })
+
+  // Attach/detach exist on the DESKTOP transport too as of the terminal-pool
+  // work. They used to be remote-only (and stubbed as local no-ops in the
+  // preload) because desktop output has always been broadcast on `terminal:data`
+  // — but a desktop tab can now resolve to a pty someone else spawned, and
+  // without an attach it would render a blank screen instead of the history the
+  // scrollback ring already holds. Same `command`-kind declaration as the remote
+  // side, so the lifecycle is audited identically on both surfaces.
+  handleIpc({
+    channel: 'terminal:attach',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string) => terminalService.attach(connection, id)
+  })
+
+  handleIpc({
+    channel: 'terminal:detach',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string) => {
+      terminalService.detach(connection, id)
+    }
   })
 
   // Same channel the web client gates its terminal affordance on. On desktop it

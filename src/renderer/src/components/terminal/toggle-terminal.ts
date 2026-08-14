@@ -1,4 +1,5 @@
 import { useSessionStore, normalizeCwd } from '../../stores/session-store'
+import { nextFreeSlot } from './pool-slot'
 
 /**
  * Does this keydown mean "toggle the terminal panel"?
@@ -51,8 +52,11 @@ export function toggleTerminalPanel(): void {
     const key = normalizeCwd(cwd)
     const group = state.terminalGroups[key]
     if (!group || group.tabs.length === 0) {
-      window.api.createTerminal(cwd).then((terminalId) => {
-        state.addTerminalTab({ id: terminalId, title: 'Terminal', cwd })
+      // Slot 0 of this cwd's pool: if another surface already has a shell open
+      // here, this ATTACHES to it (history replays) instead of spawning a second.
+      const index = nextFreeSlot(group?.tabs ?? [])
+      window.api.createTerminal(cwd, index).then((terminalId) => {
+        state.addTerminalTab({ id: terminalId, title: 'Terminal', cwd, poolIndex: index })
       })
     }
   }

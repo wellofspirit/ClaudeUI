@@ -104,6 +104,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'Session registry. 4c deleted the notifyMainWindow asymmetry in create-session.ts, so the originating client receives its own `session:created` like every other subscriber.'
   },
+  'session:removed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'The other half of the registry: an explicit delete (session or whole project). Deleting the FILES was never replicated, so canonical and every non-deleting client kept the entry forever and a late engine event re-minted a ghost.'
+  },
   'session:user-message': {
     cls: 'replicated',
     ring: true,
@@ -464,7 +470,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'host-local',
     ring: false,
     canonical: false,
-    why: 'Desktop PTY bytes. Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit.'
+    why: 'Desktop PTY bytes, plus the scrollback replay a desktop `terminal:attach` pulls (`replay: true` = reset and take this as the whole history). Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit.'
   },
   'terminal:exit': {
     cls: 'host-local',

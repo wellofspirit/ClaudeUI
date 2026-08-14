@@ -1223,12 +1223,29 @@ interface McpAPI {
 }
 
 interface TerminalAPI {
-  createTerminal(cwd: string): Promise<string>
+  /**
+   * Open terminal `index` of this cwd's POOL (`cwd#0`, `cwd#1`, …) and get its
+   * id back. The slot resolves attach-or-spawn in main: if that slot already
+   * holds a live pty — one this surface never spawned, e.g. the desktop's
+   * terminal 0 seen from a phone — the same id comes back and its history
+   * arrives on the next `attachTerminal`. Omitting the index means "next free
+   * slot", i.e. always a fresh shell (the pre-pool behavior).
+   */
+  createTerminal(cwd: string, index?: number): Promise<string>
   writeTerminal(id: string, data: string): Promise<void>
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>
   killTerminal(id: string): Promise<void>
   killTerminalsByCwd(cwd: string): Promise<string[]>
-  onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
+  /**
+   * PTY bytes. `replay: true` marks a scrollback replay delivered on attach:
+   * it is the terminal's whole history, so the receiver must RESET and write it
+   * rather than append (the desktop lane is a broadcast, so some of those bytes
+   * may already have been rendered). Live chunks always follow a replay, never
+   * interleave with it.
+   */
+  onTerminalData(
+    cb: (data: { terminalId: string; data: string; replay?: boolean }) => void
+  ): () => void
   onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
   /**
    * May this client open a terminal, and does it need a step-up first?
@@ -1244,7 +1261,9 @@ interface TerminalAPI {
   terminalStepUp(password: string): Promise<TerminalStepUpResult>
   /**
    * Subscribe this client to a live PTY (server-side scrollback replays first).
-   * No-op on desktop, whose output arrives over its own IPC channel.
+   * Real on BOTH surfaces since the terminal pool landed: a desktop tab can
+   * resolve to a pty it did not spawn, and the replay is how it renders that
+   * terminal's history. False means the terminal is gone (a stale tab).
    */
   attachTerminal(id: string): Promise<boolean>
   detachTerminal(id: string): Promise<void>
@@ -2239,6 +2258,12 @@ export interface TerminalTab {
   id: string
   title: string
   cwd: string
+  /**
+   * Slot this tab occupies in the cwd's terminal pool. Optional so a tab can be
+   * constructed without one (tests, older state); when absent the panel falls
+   * back to the tab's position when it needs to pick the next free slot.
+   */
+  poolIndex?: number
 }
 
 // ---------------------------------------------------------------------------
