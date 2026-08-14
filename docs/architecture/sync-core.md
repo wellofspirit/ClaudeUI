@@ -1,6 +1,6 @@
 # SyncCore — target sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phase 4a landed** (SyncCore + emission funnel + shared reducer, canonical state in shadow) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phases 4a-4b landed** (SyncCore + emission funnel + shared reducer; canonical state is now the `sync-full` state of record) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
 
 **Design intent (owner):** every interaction's effect is an event broadcast to all clients equally; the backend (non-UI) maintains the event store and the state; a reconnecting client replays from its last seq or receives a full state sync; no client is privileged. SyncCore realizes that design and extends it to headless operation and remote terminals. **Single-operator is a standing assumption** — one human, many devices; multi-user is a non-goal.
 
@@ -33,7 +33,7 @@ the extraction stays a move rather than a rewrite. The vendor-OAuth-on-a-browser
 server design session moves with that follow-on phase, since it only becomes
 answerable once there is a server to provision.
 
-A hung or absent renderer must never degrade sync (today it silently yields an empty snapshot): after phase 4 no snapshot path touches a window, and "no window exists" is a tested mode, not an edge case.
+A hung or absent renderer must never degrade sync (before 4b it silently yielded an empty snapshot). **As of 4b no snapshot path touches a window** — `handleSync` and the `/sent-file` allowlist both read canonical state in-process. What 4d still owes is the other direction: proving the app BOOTS and serves with no `BrowserWindow` at all, so "no window exists" is a tested mode rather than an inference.
 
 ## The four wire contracts (closed set)
 
@@ -127,7 +127,7 @@ One `sync-client` library, two transports: MessagePort/IPC (desktop renderer) an
 | 1 | Command registry: schemas, capabilities, per-connection identity, audit log | M | Every mutating channel registered with a declared capability; fail-closed test | **landed** (`48b4f72`, 2026-08-14) — plugin channels ride `config` pending plugin-declared capabilities; `automation:*`/`log-viewer:*` not yet ported |
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
-| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **4a landed** — see below |
+| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **4a + 4b landed** — invariant test green; see below |
 | 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | not started |
 
 Phase 4 lands as a strangler in four stages:
@@ -135,17 +135,56 @@ Phase 4 lands as a strangler in four stages:
 | Stage | Content | Status |
 | - | ------- | ------ |
 | 4a | SyncCore module (ring + canonical state + one emission funnel), shared reducer, channel classification, `session:config-changed`, metering in the snapshot, rekey ownership in core, shadow harness, no-Electron lint fence | **landed** — canonical state runs in SHADOW; the renderer snapshot is still the state of record |
-| 4b | Snapshot cutover: `SyncCore.getSnapshot()` becomes the `sync-full` source; `__getRemoteState` / `EventLog` deleted | not started |
+| 4b | Snapshot cutover: `SyncCore.getSnapshot()` is the `sync-full` source; `EventLog` deleted; event-carried user identity + emitter-timed thinking spans; canonical directories/boot seeds; snapshot-invariant test | **landed** — `__getRemoteState` itself survives as the SHADOW comparator's input only (4c deletes it with the store rewiring) |
 | 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | not started |
 | 4d | Windowless smoke, sent-file inversion | not started |
 
 **Exit-criteria precision.** Defect 2 (privileged desktop renderer) has two halves and
-they die in different stages: **4b** kills the *state-of-record* half (a hung or absent
-renderer can no longer yield an empty snapshot), while the *delivery privilege* half —
-the desktop window being a distinguished fan-out target, and the `extras-only`
-asymmetry that goes with it — dies in **4c**, when every client becomes a uniform
-subscriber. 4a intentionally changes neither: it preserves today's delivery targets
-verbatim so the funnel can be reviewed as a pure refactor.
+they die in different stages: **4b** killed the *state-of-record* half (a hung or absent
+renderer can no longer yield an empty snapshot — `handleSync` reads canonical state
+synchronously and touches no window), while the *delivery privilege* half — the desktop
+window being a distinguished fan-out target, and the `extras-only` asymmetry that goes
+with it — dies in **4c**, when every client becomes a uniform subscriber. 4a intentionally
+changed neither: it preserved today's delivery targets verbatim so the funnel could be
+reviewed as a pure refactor.
+
+**What 4b had to fix before it could flip (canonical freshness).** A snapshot built from
+the event stream is only as complete as the stream. Four snapshot fields had no event
+behind them, and the renderer had been covering for that by reading them itself during
+hydration:
+
+- **`directories`** — a query result (`session:directories-changed` is a payload-less
+  "refetch now"). Core now holds it: refreshed at boot and on that same watcher trigger
+  via `SyncCore.setDirectories`. It is no longer client-written.
+- **`settings`, the session registry (`recentSessionIds`/`pinnedSessionIds`/
+  `customTitles`/`worktreeInfoMap`/`hiddenSessions`/`hiddenProjects`/`sessionEngines`),
+  `autoModeDisabledBySettings`, `slashCommands`** — files every client used to read for
+  itself. `services/sync-seed.ts` seeds them from the same readers the renderer store
+  uses, at the same point in boot. Without it, a phone connecting to a freshly-booted
+  desktop got an empty sidebar, default theme and no recents until the first config save
+  of the session happened to fire a watcher.
+- **User-message `id`/`timestamp`** — minted by `sendPrompt` into the event payload, so
+  every replica agrees on the transcript's ids instead of inventing its own.
+- **Thinking-span `durationMs`** — timed by the emitter (`BaseSession.send` stamps
+  `ChatMessage.thinkingDurationMs` on the sealing message; the reducer moves it onto the
+  block). The reducer stays clock-free, which is what makes replay-equals-live true.
+
+Seeds are **not** events: they are refreshes of query-shaped state
+(`SyncCore.setAppState`), so nothing enters the ring and nothing is broadcast — no
+client's state changes, because every client either read the file itself or will receive
+it in its next snapshot.
+
+**The invariant that certifies the cutover.** `restore(snapshot@N) + fold(events N+1 …
+head) === canonical@head`, over seeded random interleavings drawn from the committed
+golden fixtures (`src/main/sync/__tests__/snapshot-invariant.unit.test.ts`). It replaces
+the deleted `event-log.test.ts`, which pinned a workaround rather than a property: the old
+snapshot came from an async renderer round-trip, so the server deliberately UNDER-claimed
+the watermark; `getSnapshot()` reads the seq and serializes in one synchronous tick, so
+the claim is exact and the race is unrepresentable. `shared/sync/state.ts` gained
+`fromSnapshot` (the restore half, and 4c's client-replica hydration path) and
+`reducer.ts` gained `auxFromCanonical` — the open-thinking-span flag is not on the wire
+but IS derivable from `streamingThinking`, so a client restored mid-span still recognises
+the next text delta as a seal.
 
 Interim relief (no longer optional — landed in 4a): `session:config-changed` + a
 pre-spawn echo for model/effort/thinking/reasoning-variant, mirroring the

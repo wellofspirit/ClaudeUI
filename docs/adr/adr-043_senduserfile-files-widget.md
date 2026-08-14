@@ -77,12 +77,20 @@ mockup-preview precedent:
   to the web client, and passed as a query parameter. The primary WS token is
   never placed in URLs; a URL-borne token stays low-privilege and independently
   revocable.
-- **Allowlist, not just path validation:** on each request the server calls
-  `EventLog.getFullState()` (the existing renderer round-trip) and requires the
-  requested path to match an entry in that session's `sentFiles` (resolved
-  against the session cwd). The renderer store is the single source of truth;
-  main stays a pure relay (no parallel ledger to drift). Downloads are
-  user-click-frequency, so the round-trip cost is irrelevant.
+- **Allowlist, not just path validation:** on each request the server takes a full
+  state snapshot and requires the requested path to match an entry in that
+  session's `sentFiles` (resolved against the session cwd). One source of truth,
+  no parallel ledger to drift.
+
+  *Superseded in mechanism by SyncCore phase 4b (ADR-051), not in intent:* the
+  snapshot is now `SyncCore.getSnapshot()` — canonical state in the main process,
+  read in-process — instead of `EventLog.getFullState()`'s `executeJavaScript`
+  round-trip into the renderer store. The allowlist is still derived from the
+  transcript by the SAME `buildSentFilesFromMessages` scanner (it moved into the
+  shared reducer), so the security property is unchanged; what changes is that the
+  route no longer depends on a live, responsive `BrowserWindow`. ADR-043's "the
+  renderer store is the single source of truth; main stays a pure relay" framing is
+  the part ADR-051 inverts.
 - `validateLocalFilePath` still applies on top, plus the existing Host allowlist,
   security headers, and constant-time token compare. Responses stream with a
   correct Content-Type, `nosniff`, and `Content-Disposition: attachment` unless

@@ -83,7 +83,8 @@ Key modules in `src/main/services/`:
 | `ui-config.ts`              | Plain-text config: settings.json, engines/vendors JSON, sessions, slash commands                        |
 | `claude-settings.ts` / `claude-mcp.ts` | Claude's own settings.json / .mcp.json edited in place (plane ②, ADR-009)                    |
 | `skill-scanner.ts`          | Scans project/user/plugin skill directories                                                             |
-| `event-log.ts`              | Ring buffer of events for remote-client catchup (see [remote.md](remote.md))                            |
+| `sync-host.ts`              | SyncCore's host adapter: the process-wide core, the extra-window registry, the ONE `webContents.send` fan-out for a replicated event, the dev shadow watch (ADR-051; the core itself is `src/main/sync/`, Electron-free) |
+| `sync-seed.ts`              | Seeds canonical state's file/query-sourced fields at boot (settings, session registry, slash commands, sidebar directories) so a `sync-full` is complete before any client connects (phase 4b) |
 | `logger.ts` / `log-viewer.ts` | File + ring-buffer logging; debug window                                                              |
 | `mermaid-tool.ts` / `mockup-tool.ts` | Hosted MCP tools for diagram + UI-mockup rendering (ADR-007)                                   |
 | `tunnel-manager.ts` / `socks-bridge.ts` | Cloudflare tunnel; HTTP CONNECT bridge for SOCKS5 proxies                                   |

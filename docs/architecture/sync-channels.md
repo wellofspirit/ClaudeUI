@@ -1,9 +1,10 @@
-# Event-channel classification — as of SyncCore phase 4a
+# Event-channel classification — as of SyncCore phase 4b
 
-Part of [architecture/](README.md). **Status:** landed with SyncCore phase 4a. The
-machine-readable source of truth is `src/shared/sync/channels.ts`; this file is its
-prose twin, and `sync-funnel-guard.test.ts` fails if any emitted channel — or any
-channel either client subscribes to — is missing from the table.
+Part of [architecture/](README.md). **Status:** landed with SyncCore phase 4a, updated
+by 4b (snapshot cutover). The machine-readable source of truth is
+`src/shared/sync/channels.ts`; this file is its prose twin, and
+`sync-funnel-guard.test.ts` fails if any emitted channel — or any channel either client
+subscribes to — is missing from the table.
 
 Companions: [sync-core.md](sync-core.md) (target design + phases),
 [remote.md](remote.md) (as-built record), [security.md](security.md) (capabilities),
@@ -51,8 +52,12 @@ decision. Three columns record the consequences of that decision:
 
 Consequence worth stating plainly: several rows read `replicated / canonical: no`.
 Those channels reach every client live but are absent from the snapshot, so a
-resync drops them. That is the as-built behavior, faithfully preserved — the fix
-belongs with 4b (snapshot cutover) or with the surface's own phase.
+resync drops them. That is the as-built behavior, faithfully preserved. **4b did not
+change it** — the cutover changed WHERE the snapshot comes from, not which fields
+`FullStateSnapshot` has, so a channel with no snapshot field still vanishes on resync
+(errors, warnings, git summaries, usage, automation). Each of those belongs to its own
+surface's phase; `session:directories-changed` is the one 4b did close, by making core
+maintain the listing the notify tells clients to refetch.
 
 **Catchup caveat on mixed-target channels.** Ring membership is per CHANNEL;
 delivery is per CALL SITE. Two `main-only` emission sites ride channels that ring
@@ -74,6 +79,20 @@ Nothing else in the table changes what any client can see. `session:metering`'s
 delta is a **snapshot field**, not a delivery change: `PerSessionSnapshot.metering`
 did not exist, so every resync silently blanked the TopBar breakdown.
 
+The `Delta` column tracks DELIVERY only, and `sync-funnel-guard.test.ts` asserts it
+holds exactly those two rows — which is why 4b's two payload additions below are
+recorded in the Notes column instead of flipping it.
+
+## Payload additions in 4b — the only wire changes in the cutover
+
+| Channel                | Addition                    | Why it could not stay client-side                                                                                                                                                                                                                     |
+| ---------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session:user-message` | `{id, timestamp}`           | Minted by `sendPrompt`. Each client used to invent its own `msg-<uuid>`/`Date.now()`, so one user turn had a different id in every replica and canonical could only mint a positional `user-<seq>`. With the snapshot authoritative, that renumbers a client's transcript on every resync. |
+| `session:message`      | `thinkingDurationMs?`       | Timed by `BaseSession.send` (one implementation, all three engines) and moved onto the sealed thinking block by the reducer. `applyEvent` is clock-free by contract, so elapsed time can only come from the process that watched the clock.               |
+
+`FullStateSnapshot` itself is UNCHANGED by 4b: the cutover moved where the snapshot
+comes from, not what it contains, so the web client works unmodified.
+
 ## The table
 
 | Channel                          | Class                    | Ring | Canonical | Delivery    | Delta | Notes                                                                                                                                                                                                  |
@@ -91,10 +110,10 @@ did not exist, so every resync silently blanked the TopBar breakdown.
 | `session:auth-source`            | replicated               | yes  | no        | `all`       | —     | App-level auth banner input; no snapshot field.                                                                                                                                                        |
 | `session:config-changed`         | replicated               | yes  | yes       | `all`       | yes   | Per-session config parity — the interim relief sync-core.md flagged, landed as part of phase 4.                                                                                                        |
 | `session:created`                | replicated               | yes  | yes       | `all`       | —     | Session registry. The desktop-originated call site delivers extras-only (create-session.ts notifyMainWindow=false) — preserved verbatim, 4c deletion target.                                           |
-| `session:directories-changed`    | replicated               | yes  | no        | `all`       | —     | A payload-less notify — the sidebar refetches via a query. Nothing to apply.                                                                                                                           |
+| `session:directories-changed`    | replicated               | yes  | no        | `all`       | —     | A payload-less notify — the sidebar refetches via a query, so there is nothing to apply. **4b:** the same trigger also refreshes canonical's `directories` field (`SyncCore.setDirectories`, core-internal, NOT an event), so a resyncing client gets the same listing a live one refetches. |
 | `session:error`                  | replicated               | yes  | no        | `all`       | —     | Rings and fans out today, but FullStateSnapshot carries no error list — per-client transient. Known 4b/5 gap, recorded not fixed.                                                                      |
 | `session:mcp-servers`            | replicated               | yes  | no        | `all`       | —     | MCP status list; no snapshot field (clients refetch via `session:mcp-status`).                                                                                                                         |
-| `session:message`                | replicated               | yes  | yes       | `all`       | —     | Assistant messages, upsert-by-id. Also the trigger for the derived todos / sentFiles fields (reducer-internal).                                                                                        |
+| `session:message`                | replicated               | yes  | yes       | `all`       | —     | Assistant messages, upsert-by-id. Also the trigger for the derived todos / sentFiles fields (reducer-internal). **4b payload addition:** an optional `thinkingDurationMs` — the elapsed thinking span this message seals, timed by the emitter and moved onto the block by the reducer. |
 | `session:messages-retracted`     | replicated               | yes  | yes       | `all`       | —     | Removes messages by id and clears in-flight streaming buffers.                                                                                                                                         |
 | `session:metering`               | replicated               | yes  | yes       | `all`       | yes   | Engine-neutral metering snapshot, applied as a replace.                                                                                                                                                |
 | `session:permission-mode`        | replicated               | yes  | yes       | `all`       | —     | Per-session config. The pre-spawn echo (handlers-core.setPermissionMode) delivers `all` — the pattern session:config-changed mirrors.                                                                  |
@@ -113,7 +132,7 @@ did not exist, so every resync silently blanked the TopBar breakdown.
 | `session:task-progress`          | replicated               | yes  | yes       | `all`       | —     | taskProgressMap, keyed by toolUseId.                                                                                                                                                                   |
 | `session:task-started`           | replicated               | yes  | yes       | `all`       | —     | activeTasks — without it a client that syncs mid-task reads an async Task as complete.                                                                                                                 |
 | `session:tool-result`            | replicated               | yes  | yes       | `all`       | —     | Attaches a tool_result block to its tool_use (first result wins) and re-derives todos / sentFiles.                                                                                                     |
-| `session:user-message`           | replicated               | yes  | yes       | `all`       | —     | The single source of truth for a non-queued user turn entering the transcript.                                                                                                                         |
+| `session:user-message`           | replicated               | yes  | yes       | `all`       | —     | The single source of truth for a non-queued user turn entering the transcript. **4b payload addition:** `{id, timestamp}` are minted by `sendPrompt`, so every replica agrees on the id (the reducer keeps a positional `user-<seq>` fallback for old-shape events). |
 | `session:vendor-auth-required`   | replicated               | yes  | no        | `all`       | —     | Rings and fans out; no snapshot field (the card is re-derived from the next turn).                                                                                                                     |
 | `session:warning`                | replicated               | yes  | no        | `all`       | —     | Same as session:error — no snapshot field.                                                                                                                                                             |
 | `session:watch-update`           | replicated               | yes  | yes       | `all`       | —     | Payload-heavy (a full re-read of the watched transcript). Funneled in 4a so canonical holds watched sessions — without that, 4b would drop them. Phase-5 target: replace with notify + refetch.        |
@@ -149,32 +168,62 @@ are the follow-up that decides whether plugin surfaces may replicate.
 `applyEvent` is pure — no clock, no randomness (`reducer.unit.test.ts` spies on
 `Date.now`/`Math.random` to prove it). A reducer that read wall-clock time would
 fold a different state on every replay, so replay-equals-live would be false and
-catchup could not be trusted. Two as-built consequences follow, and the shadow
-comparator masks both:
+catchup could not be trusted. Two as-built consequences followed from that; **4b
+closed both by moving the impure part into the emitter**, the only place it can
+honestly live:
 
-| Divergence                      | Why it exists                                                                                                                                | What 4b needs                                  |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| Thinking-block `durationMs`     | the renderer measures it with wall-clock deltas; core tracks only "is a span open"                                                           | the EMITTER must put elapsed time in the event |
-| User-message `id` / `timestamp` | `session:user-message` carries `{prompt, attachments}` only, so the renderer mints `msg-<uuid>`/`Date.now()` and core mints `user-<seq>`/`0` | the id must move into the event payload        |
+| Divergence                      | Why it existed                                                                                                                                 | Closed in 4b by                                                                                                                          |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Thinking-block `durationMs`     | the renderer measured it with wall-clock deltas; core tracks only "is a span open"                                                              | `BaseSession.send` times the span and stamps `ChatMessage.thinkingDurationMs` on the sealing message; the reducer moves it onto the block   |
+| User-message `id` / `timestamp` | `session:user-message` carried `{prompt, attachments}` only, so the renderer minted `msg-<uuid>`/`Date.now()` and core minted `user-<seq>`/`0`  | `sendPrompt` mints both into the payload; the reducer prefers them, keeping the positional fallback for old-shape events                    |
+
+**The comparator still masks both**, and that is not a leftover: the desktop renderer
+keeps computing its own duration and minting its own user id until 4c rewires its
+store, so the two sides genuinely differ (by scheduling jitter, and by construction).
+What changed is which value is authoritative — canonical now carries real durations and
+stable ids, so a snapshot-fed client renders them.
 
 ## Client-written state (not classified, and that is the finding)
 
 These fields are in the snapshot but are written by **client actions**, so canonical
-cannot match them at an arbitrary instant. Both 4a shadow flows — the dev watch and
-the parity e2e — skip them via the single shared definition
-(`CLIENT_WRITTEN_FIELDS` in `src/main/sync/shadow.ts`):
+cannot match them at an arbitrary instant. Both shadow flows — the dev watch and the
+parity e2e — skip them via the single shared definition (`CLIENT_WRITTEN_FIELDS` in
+`src/main/sync/shadow.ts`):
 
-| Field                                                                                                        | Written by                                                       | Reaches core via                                                 |
-| ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `activeSessionId`                                                                                            | `switchSession` / `createNewSession`                             | nothing — selection is per-client view state (ADR-041)           |
-| `recentSessionIds`, `pinnedSessionIds`, `customTitles`, `hiddenSessions`, `hiddenProjects`, `sessionEngines` | store actions that then save `sessions.json`                     | the `config:sessions-changed` file-watcher loop (slow, indirect) |
-| `worktreeInfoMap`                                                                                            | `useClaudeEvents` **parses a tool_result** and stores the result | same file-watcher loop                                           |
-| `directories`                                                                                                | `session:list-directories` query                                 | nothing — query-sourced                                          |
+| Field                                                                                                        | Written by                                                       | Reaches core via                                        |
+| ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------------------------------------- |
+| `activeSessionId`                                                                                            | `switchSession` / `createNewSession`                             | nothing — selection is per-client view state (ADR-041)   |
+| `recentSessionIds`, `pinnedSessionIds`, `customTitles`, `hiddenSessions`, `hiddenProjects`, `sessionEngines` | store actions that then save `sessions.json`                     | the `config:sessions-changed` save + file-watcher loop   |
+| `worktreeInfoMap`                                                                                            | `useClaudeEvents` **parses a tool_result** and stores the result | same loop                                                |
 
 `worktreeInfoMap` is the sharp one: deriving state from a tool result inside a
 client and storing it is precisely the pattern sync-core.md's client-computation
-rule bans. It survives 4a only because moving it means moving an emitter, which is
-4b/4c work.
+rule bans. It survives because moving it means moving an emitter — 4c work.
+
+**`directories` LEFT this table in 4b.** Core maintains it now (seeded at boot,
+refreshed on the `session:directories-changed` trigger — `SyncCore.setDirectories`), so
+it is core-written, compared strictly by the shadow, and a mismatch is real drift between
+the sidebar a live client sees and the one a reconnecting client gets.
+
+The registry-config row is also fresher than it reads: the apply happens inside
+`SyncCore.emit` on every save regardless of delivery target, so a desktop-originated
+`extras-only` save is already in the next `getSnapshot()` (pinned by
+`handlers-core.test.ts`). The file watcher is now just the cross-INSTANCE path.
+
+### `activeSessionId` is served as `null` — deliberate, with a UX consequence
+
+Core has no opinion about which session is "active": a host-wide selection is not
+something a shared state can have (ADR-041). `toSnapshot` therefore always emits `null`,
+and `applyRemoteSnapshot` resolves the selection locally — this client's own selection on
+a re-sync, else the server's if an older host still sends one, else the most recent
+session the snapshot knows about.
+
+The delta a phone user feels: **a fresh connection no longer lands on whatever session
+the desktop happens to be looking at.** It lands on the most recent session instead (and
+on the welcome screen when there are none). That is the honest behavior for one operator
+with many devices — the previous one silently overwrote a phone's navigation with the
+desktop's on every resync — and the `recentSessionIds` fallback is what keeps it from
+being a blank screen.
 
 ## Eviction
 
