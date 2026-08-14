@@ -1,6 +1,6 @@
 # SyncCore — target sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Implementation not started — phase status at the bottom. Until phases land, [remote.md](remote.md) describes the running system.
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phase 4a landed** (SyncCore + emission funnel + shared reducer, canonical state in shadow) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
 
 **Design intent (owner):** every interaction's effect is an event broadcast to all clients equally; the backend (non-UI) maintains the event store and the state; a reconnecting client replays from its last seq or receives a full state sync; no client is privileged. SyncCore realizes that design and extends it to headless operation and remote terminals. **Single-operator is a standing assumption** — one human, many devices; multi-user is a non-goal.
 
@@ -22,6 +22,17 @@ claudeui-server — headless entrypoint (bun) booting core alone: systemd unit, 
                   files/env, `tailscale serve` in front for TLS + identity (ADR-039/042 stack).
 ```
 
+**Headless rescope (4a).** The physical `src/core` extraction and the `claudeui-server`
+entrypoint are a **named follow-on phase**, not part of phase 4. Phase 4's exit is a
+**windowless-Electron smoke test** — the app boots, syncs and serves with no
+`BrowserWindow` — which is what actually proves "a hung or absent renderer never
+degrades sync"; moving files proves nothing on its own and would collide with 4b/4c's
+edits to the very modules involved. The Electron-free constraint is enforced NOW,
+by lint, on `src/main/sync/**` and `src/shared/sync/**` (the future `src/core`), so
+the extraction stays a move rather than a rewrite. The vendor-OAuth-on-a-browserless-
+server design session moves with that follow-on phase, since it only becomes
+answerable once there is a server to provision.
+
 A hung or absent renderer must never degrade sync (today it silently yields an empty snapshot): after phase 4 no snapshot path touches a window, and "no window exists" is a tested mode, not an edge case.
 
 ## The four wire contracts (closed set)
@@ -30,6 +41,8 @@ Every feature must express each interaction as exactly one of these. There is no
 
 1. **Commands** (client → core): `{cmdId, type, payload}`. Schema-validated, capability-checked ([security.md](security.md)), identity-attached, audited. Executed against engines/services; acked with `{ok, seqs?, error}`. Commands never mutate client state — not even the originator's.
 2. **Domain events** (core → all clients): `{seq, type, sessionId?, payload, causedBy?}`. The **only** way replicated state changes. Order: append to log → apply to canonical state → broadcast — so any snapshot taken at seq N provably contains every event through N (kills the as-built watermark race).
+
+   **Wire encoding (as realized in 4a).** Contract 2 is transported as `{seq, channel, args}` — the as-built frame shape, kept byte-identical so no client needed a change. The mapping: `channel ≡ type`, and session scoping is **positional** (`args[0]` is the routing id for every session-scoped channel, which is what `BaseSession.send` has always sent) rather than a named `sessionId` field. `causedBy` is **not** added yet: it exists for optimistic-apply reconciliation, and nothing opts into optimistic apply until that lands, so adding the field now would be an unused wire change. `src/shared/sync/channels.ts` is the closed, fail-closed set of legal `channel` values.
 3. **Volatile streams** (core → subscribers): streaming text/thinking deltas, PTY bytes, background bash output, log batches. Subscription-scoped, **never logged** — a delta stream is fully summarized by its accumulation, which lives in canonical state, so replay is pointless and buffer-poisoning (as-built, stream deltas flush the ring and force sync-fulls). Frames carry `{streamId, turnId, offset, chunk}`; a client whose local length ≠ offset refetches the coalesced value and continues — the snapshot↔stream seam is self-healing by construction.
 4. **Queries** (client ↔ core, RPC): reads — history loads, git reads, catalogs, directory listings. No state effects.
 
@@ -49,6 +62,27 @@ Every feature must express each interaction as exactly one of these. There is no
 | **Replicated** | messages, coalesced streaming text/thinking, status, approvals, todos, **queue items**, tasks, sentFiles, per-session config (`selectedModel`, `effort`, `thinkingMode`, `reasoningVariant`, `permissionMode`, engine), session registry, pins/titles/hidden, settings, sessionEngines, worktree map, git status summaries | Domain events + snapshot |
 | **Per-client** | active session selection, draft text/attachments, panel layout, scroll, gallery state | View store; never synced (deliberate — ADR-041) |
 | **Host-local** | window controls, native folder picker, voice capture, OAuth browser flows | `host`-capability commands, desktop shell only |
+
+Per-channel classification of every event, with its ring/canonical/delivery
+consequences: [sync-channels.md](sync-channels.md).
+
+### Clients never compute state
+
+Any computation whose **output is state** runs in the shared reducer or in core.
+Client-side computation is legitimate in exactly two places:
+
+1. **Per-client view state** (ADR-041) — selection, drafts, layout, scroll. The
+   ADR-053 take-back's `\n` join belongs here: its output is the draft.
+2. **Render-time presentation** recomputed from the replica and never stored — e.g.
+   `deriveWorktreeName` turning a path into a label.
+
+**Litmus:** *if this client crashed and resynced from a snapshot, would anything it
+computed be lost?* Yes ⇒ core/reducer. No ⇒ presentation. Derive-and-render is fine;
+derive-and-**store** is banned outside the reducer, which is what 4c's type-brand +
+lint enforce. Derived per-session state (`todos`, `sentFiles`) moved inside
+`applyEvent` in 4a for exactly this reason; the surviving violation —
+`useClaudeEvents` parsing a tool result into `worktreeInfoMap` — is recorded in
+[sync-channels.md](sync-channels.md) §"Client-written state".
 
 ## Queue subsystem — Claude Code parity (owner-ratified 2026-08-13)
 
@@ -93,10 +127,29 @@ One `sync-client` library, two transports: MessagePort/IPC (desktop renderer) an
 | 1 | Command registry: schemas, capabilities, per-connection identity, audit log | M | Every mutating channel registered with a declared capability; fail-closed test | **landed** (`48b4f72`, 2026-08-14) — plugin channels ride `config` pending plugin-declared capabilities; `automation:*`/`log-viewer:*` not yet ported |
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
-| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (headless smoke) | not started |
+| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **4a landed** — see below |
 | 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | not started |
 
-Interim relief (optional, absorbed by phase 4): a `session:config-changed` event + pre-spawn echo for model/effort/thinking, mirroring the permission-mode pattern, if per-session-config drift needs fixing before phase 4 lands.
+Phase 4 lands as a strangler in four stages:
+
+| Stage | Content | Status |
+| - | ------- | ------ |
+| 4a | SyncCore module (ring + canonical state + one emission funnel), shared reducer, channel classification, `session:config-changed`, metering in the snapshot, rekey ownership in core, shadow harness, no-Electron lint fence | **landed** — canonical state runs in SHADOW; the renderer snapshot is still the state of record |
+| 4b | Snapshot cutover: `SyncCore.getSnapshot()` becomes the `sync-full` source; `__getRemoteState` / `EventLog` deleted | not started |
+| 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | not started |
+| 4d | Windowless smoke, sent-file inversion | not started |
+
+**Exit-criteria precision.** Defect 2 (privileged desktop renderer) has two halves and
+they die in different stages: **4b** kills the *state-of-record* half (a hung or absent
+renderer can no longer yield an empty snapshot), while the *delivery privilege* half —
+the desktop window being a distinguished fan-out target, and the `extras-only`
+asymmetry that goes with it — dies in **4c**, when every client becomes a uniform
+subscriber. 4a intentionally changes neither: it preserves today's delivery targets
+verbatim so the funnel can be reviewed as a pure refactor.
+
+Interim relief (no longer optional — landed in 4a): `session:config-changed` + a
+pre-spawn echo for model/effort/thinking/reasoning-variant, mirroring the
+permission-mode pattern.
 
 ## Relations
 

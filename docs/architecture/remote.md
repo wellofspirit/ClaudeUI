@@ -8,8 +8,8 @@ Part of [architecture/](README.md). **Status:** this documents the system as it 
 | ----- | ---- | ---- |
 | Remote server | `src/main/services/remote-server.ts` | HTTP + WS listener; auth (ADR-039/042), E2E (tunnel), mockup/sent-file routes (ADR-007/043) |
 | Dispatcher | `src/main/services/remote-dispatcher.ts` | Routes WS `invoke` frames to the same handler functions as desktop IPC; **denylist** (`BLOCKED`) removes desktop-only channels |
-| Bridge | `src/main/services/remote-bridge.ts` | A fake `BrowserWindow` registered via `BaseSession.addExtraWindow()`; every `webContents.send` aimed at it is forwarded to the event log + broadcast |
-| Event log | `src/main/services/event-log.ts` | In-memory ring buffer (5000 entries) with monotonic `seq` + per-process `epoch`; serves `sync-catchup` |
+| Bridge | `src/main/services/remote-bridge.ts` | A fake `BrowserWindow` registered as an extra sink; the funnel hands it `(seq, channel, args)` via `deliverSequenced` and it broadcasts THAT seq — it no longer appends (one emission ⇒ one ring entry). Its legacy `webContents.send` shim is wired to a loud no-op |
+| Event log | `src/main/sync/event-ring.ts` | In-memory ring buffer (5000 entries) with monotonic `seq` + per-process `epoch`; serves `sync-catchup`. Owned by `SyncCore` (`src/main/sync/sync-core.ts`), whose `emit()` is its ONLY writer — phase 4a. `services/event-log.ts` is now just the renderer-snapshot pull, pending 4b |
 | Web client | `src/web/` (`connection.ts`, `api-adapter.ts`, `main.tsx`) | Dynamically imports the renderer's own `App`/stores; `api-adapter` is a hand-maintained `ClaudeAPI` mirror (typechecked per ADR-008) |
 
 ## Wire protocol (`src/shared/remote-protocol.ts`)
@@ -27,10 +27,22 @@ Remote clients are RPC callers plus consumers of a *mirror of main→desktop-ren
 > **Status update (2026-08-14):** defects 3 and 4 are fixed by SyncCore phase 0
 > (`bf6aa1b` — snapshot watermark under-claims; events buffer until the app
 > mounts, `lastSeq` advances only after dispatch). Defect 6 is fixed by phase 3
-> (`1349ec9` — itemized queue of record per ADR-053). Defect 1 is narrowed by
-> phases 1+3 (single dispatch choke point; queue transitions are broadcast
-> events) but per-session config events still wait on phase 4; defects 2 and 5
-> remain as-built until phase 4.
+> (`1349ec9` — itemized queue of record per ADR-053).
+>
+> **Phase 4a** closes **defect 5**: every emission now goes through ONE funnel
+> (`emitEvent` → ring → `applyEvent` → delivery, `src/main/services/sync-host.ts`),
+> the hand-rolled `getExtraWindows()` loops are gone, and every channel is
+> classified with its ring/canonical/delivery consequences in
+> [sync-channels.md](sync-channels.md) — fail-closed, so an unclassified channel is
+> refused rather than silently desktop-only. `pushNonSessionEvent` is a funnel
+> delegation. 4a also closes the per-session-config half of **defect 1** (a new
+> replicated `session:config-changed`) and the metering resync hole.
+>
+> **Defect 2 still stands as-built:** canonical state runs in SHADOW in 4a, so
+> `sync-full` is still `window.__getRemoteState()`. Its two halves die separately —
+> the state-of-record half in 4b, the delivery-privilege half in 4c (see
+> sync-core.md's stage table). What 4a does add is a comparator that proves the two
+> interpretations agree before the switch.
 
 1. **Interactions are RPCs, not events.** Whether other clients learn of a mutation depends on the handler: `sendPrompt` fans out; `dequeueMessage` broadcasts nothing (`handlers-core.ts`); `set-model`/`set-effort`/`set-thinking-mode` emit nothing any client maps back into picker state; `setPermissionMode` is the only per-session config with a full bidirectional path.
 2. **Privileged desktop renderer.** Snapshot = `window.__getRemoteState()`; a busy/hung/missing renderer silently yields an **empty** snapshot; a remote client's own state (model pick, queued display) is clobbered by the desktop's ignorance on resync (ADR-041 merge: snapshot wins per known session).

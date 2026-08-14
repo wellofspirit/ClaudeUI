@@ -12,6 +12,7 @@ How ClaudeUI is put together. This directory splits the architecture by concern 
 | [remote.md](remote.md) | The remote-access layer **as built today** — components, wire protocol, known structural defects |
 | [sync-core.md](sync-core.md) | **SyncCore** — the accepted target design for state sync, replication, queueing, terminal, and headless operation (ADR-051/053) |
 | [security.md](security.md) | The accepted target security model for remote access — passkeys, capability grants, decay, audit (ADR-052) |
+| [sync-channels.md](sync-channels.md) | Every event channel classified — ring / canonical / delivery, plus the recorded gaps (SyncCore phase 4a) |
 
 ## Overview
 
