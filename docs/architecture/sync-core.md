@@ -1,6 +1,6 @@
 # SyncCore — target sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phases 4a-4b landed** (SyncCore + emission funnel + shared reducer; canonical state is now the `sync-full` state of record) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phases 4a-4b landed, and 4c's transport half landed** (SyncCore + emission funnel + shared reducer; canonical state is the `sync-full` state of record; the desktop renderer is a MessagePort subscriber and the delivery privilege is deleted) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
 
 **Design intent (owner):** every interaction's effect is an event broadcast to all clients equally; the backend (non-UI) maintains the event store and the state; a reconnecting client replays from its last seq or receives a full state sync; no client is privileged. SyncCore realizes that design and extends it to headless operation and remote terminals. **Single-operator is a standing assumption** — one human, many devices; multi-user is a non-goal.
 
@@ -106,7 +106,11 @@ Details and supersessions: ADR-053.
 
 ## Client library
 
-One `sync-client` library, two transports: MessagePort/IPC (desktop renderer) and WebSocket+E2E (web). Parity is by construction — the hand-maintained `api-adapter` mirror is retired; ADR-008's typecheck remains as a belt. The preload surface shrinks to the transport plus host-local commands.
+One `sync-client` library, two transports: MessagePort/IPC (desktop renderer) and WebSocket+E2E (web). **Landed in 4c** — `src/shared/sync/client-registry.ts` is the single subscription surface, typed by `src/shared/sync/events.ts` (`SyncEventMap`), and both entry points install their transport's `SyncClient` in it before React mounts.
+
+What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by the preload with `ipcRenderer.on` and by `api-adapter` with `connection.on`. ADR-008's typecheck could compare only the signatures, so "parity" meant two implementations that agreed about types. The signatures moved into `SyncEventMap`; the `api-adapter` mirror survives for the **invoke** surface only (untouched by 4c), and the preload's per-channel surface shrank to host-local channels plus `acquireSyncPort`.
+
+**Port hand-off mechanics.** A `MessagePort` is not a type `contextBridge` can marshal, so the preload takes delivery from `ipcRenderer.on('sync-port')` and forwards it into the main world with `window.postMessage(tag, '*', [port])` — the transfer path Electron's own message-ports guide prescribes. The renderer installs its `message` listener first and then calls `acquireSyncPort()`, so the preload holds the port until asked: main posts it on `did-finish-load`, which can precede the renderer bundle finishing evaluation.
 
 ## Persistence
 
@@ -136,17 +140,64 @@ Phase 4 lands as a strangler in four stages:
 | - | ------- | ------ |
 | 4a | SyncCore module (ring + canonical state + one emission funnel), shared reducer, channel classification, `session:config-changed`, metering in the snapshot, rekey ownership in core, shadow harness, no-Electron lint fence | **landed** — canonical state runs in SHADOW; the renderer snapshot is still the state of record |
 | 4b | Snapshot cutover: `SyncCore.getSnapshot()` is the `sync-full` source; `EventLog` deleted; event-carried user identity + emitter-timed thinking spans; canonical directories/boot seeds; snapshot-invariant test | **landed** — `__getRemoteState` itself survives as the SHADOW comparator's input only (4c deletes it with the store rewiring) |
-| 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | not started |
+| 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | **transport + delivery landed**; reducer adoption (store split) NOT started — see below |
 | 4d | Windowless smoke, sent-file inversion | not started |
 
 **Exit-criteria precision.** Defect 2 (privileged desktop renderer) has two halves and
-they die in different stages: **4b** killed the *state-of-record* half (a hung or absent
-renderer can no longer yield an empty snapshot — `handleSync` reads canonical state
-synchronously and touches no window), while the *delivery privilege* half — the desktop
-window being a distinguished fan-out target, and the `extras-only` asymmetry that goes
-with it — dies in **4c**, when every client becomes a uniform subscriber. 4a intentionally
-changed neither: it preserved today's delivery targets verbatim so the funnel could be
-reviewed as a pure refactor.
+they died in different stages: **4b** killed the *state-of-record* half (a hung or absent
+renderer can no longer yield an empty snapshot — the sync answer reads canonical state
+synchronously and touches no window), and **4c** killed the *delivery privilege* half.
+4a intentionally changed neither: it preserved today's delivery targets verbatim so the
+funnel could be reviewed as a pure refactor. **Defect 2 is now fully dead.**
+
+### 4c as landed: the transport half, not the reducer half
+
+4c was specified as one stage with two independent halves. The **transport + delivery**
+half landed; the **reducer adoption** half did not, and the split is deliberate — the
+second half rewrites ~3,700 lines of store, ~630 lines of `useClaudeEvents` and ~14,000
+lines of tests that assert on store actions, and a half-applied version of it is worse
+than none.
+
+**Landed:**
+
+- **The desktop renderer is client #1.** `services/sync-port.ts` gives it a
+  `MessagePortMain` on every load and answers its `sync` frames; the renderer
+  (`renderer/src/sync/desktop-transport.ts`) feeds the phase-0 `SyncClient` verbatim, so
+  it inherits the cursor, the epoch, gap detection and the pre-mount buffer that phases 0
+  and 4b built for phones. It hydrates from `sync-full` at boot — which means a RELOAD now
+  recovers live session state instead of rebuilding from disk.
+- **Delivery follows the channel's CLASS, and nothing else.** `host-local` → the owning
+  window by targeted send; everything else → every subscriber. `Delivery.target`, the
+  per-channel `delivery` column, `extraWindows` / `addExtraSink`, `BaseSession`'s static
+  extras accessors, the fake-`BrowserWindow` `RemoteBridge` and `notifyMainWindow` are all
+  deleted. `BaseSession.send` no longer names a window at all.
+- **One subscription surface for both clients** — see §"Client library".
+- **The emitters stopped needing windows.** `AutomationManager`, `UsageFetcher`,
+  `BlockUsageService`, `session-watcher`, `ui-config`'s watcher and the projects watcher
+  all held a `BrowserWindow` purely to pass to `emitEvent`; those fields and the
+  `setWindow` methods are gone. That is the concrete prerequisite 4d's windowless smoke
+  test needs.
+
+**NOT landed (the reducer half):**
+
+- `useClaudeEvents` still interprets each replicated channel with its own handler, and the
+  store still owns ~40 direct writers of replicated slices. `applyEvent` and the renderer
+  remain two interpretations of one stream, so the **shadow comparator survives** (it was
+  slated to retire here) along with `__getRemoteState` / `getRemoteStateSnapshot` and the
+  parity e2e that consumes them.
+- The §3 round-trip items that only make sense once the reducer owns the field:
+  `sendPrompt`'s local user-message mint, the permission-mode optimistic write + revert,
+  the renderer's own thinking-span clock, the `worktreeInfoMap` tool-result parser (the
+  one surviving client-computation violation), and the client-side `session:rekey` invoke.
+- The type-brand + lint rule sealing replicated slices, and deleting the store actions
+  the reducer subsumes.
+
+**One thing 4c's delivery change fixed that was not on anyone's list.** `VoiceClient` was
+raising the REPLICATED `voice:error` through a targeted `webContents.send` on a computed
+channel, which the funnel guard's channel-literal scan could not see. Under uniform
+delivery the desktop subscribes to that channel, so the targeted send would have landed
+nowhere and voice errors would have gone silent. Routed through `emitEvent`, and the guard
+grew a check for computed-channel sends whose allowlist has to prove itself host-local.
 
 **What 4b had to fix before it could flip (canonical freshness).** A snapshot built from
 the event stream is only as complete as the stream. Four snapshot fields had no event

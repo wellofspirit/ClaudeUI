@@ -1,10 +1,10 @@
-# Event-channel classification — as of SyncCore phase 4b
+# Event-channel classification — as of SyncCore phase 4c
 
 Part of [architecture/](README.md). **Status:** landed with SyncCore phase 4a, updated
-by 4b (snapshot cutover). The machine-readable source of truth is
-`src/shared/sync/channels.ts`; this file is its prose twin, and
+by 4b (snapshot cutover) and 4c (uniform delivery). The machine-readable source of truth
+is `src/shared/sync/channels.ts`; this file is its prose twin, and
 `sync-funnel-guard.test.ts` fails if any emitted channel — or any channel either client
-subscribes to — is missing from the table.
+subscribes to, on either surface — is missing from the table.
 
 Companions: [sync-core.md](sync-core.md) (target design + phases),
 [remote.md](remote.md) (as-built record), [security.md](security.md) (capabilities),
@@ -24,9 +24,20 @@ decision. Three columns record the consequences of that decision:
 
 | Column        | Meaning                                                                                                                            |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| **Ring**      | does the emission enter the 5000-entry event ring a reconnecting client replays from?                                              |
+| **Ring**      | does the emission enter the 5000-entry event ring a reconnecting client replays from?                                               |
 | **Canonical** | does `applyEvent` change canonical state? `no` means the payload has no field in `FullStateSnapshot` — a recorded gap, not a claim |
-| **Delivery**  | `all` = primary window + every extra sink (⇒ every WS client); `extras-only` = extras only; `main-only` = the host window          |
+
+**The `Delivery` column is gone (4c).** It recorded a per-CALL-SITE target — `all` /
+`extras-only` / `main-only` — because that is what delivery was: the desktop window was a
+distinguished fan-out target, other clients had to masquerade as fake `BrowserWindow`
+"extra sinks", and three call sites deliberately skipped the renderer they assumed already
+knew. Delivery is now a function of the channel's **class** and nothing else:
+
+- `host-local` ⇒ the owning `BrowserWindow` only, by targeted `webContents.send`;
+- `replicated` / `volatile-pending-phase-5` ⇒ **every subscriber, always**.
+
+A column that can only ever restate the class is a column that can only ever drift, so it
+was deleted rather than pinned.
 
 ## Classes
 
@@ -38,17 +49,19 @@ decision. Three columns record the consequences of that decision:
 - **`host-local`** — the owning desktop window only: window chrome, native pickers,
   voice capture, OAuth browser flows, PTY bytes, the log-viewer window.
 
-## The two rules 4a binds itself to
+## The rules, and which one 4c retired
 
-1. **Never reduce ring membership.** A channel that rings today still rings, even
-   where that is clearly wrong (`session:stream`). Removing entries is phase-5 work
-   with its own migration; doing it early would break catchup for clients that are
+1. **Never reduce ring membership.** (Still binding.) A channel that rings today still
+   rings, even where that is clearly wrong (`session:stream`). Removing entries is phase-5
+   work with its own migration; doing it early would break catchup for clients that are
    mid-reconnect across the upgrade.
-2. **Never widen delivery.** A channel whose fan-out is main-window-only today is
-   `host-local` here even when its payload is conceptually app state
-   (`auth:state`, `account:changed`, `plugin:views-changed`). Promoting one is a
-   deliberate later step behind the `admin`/`host` capabilities, not a side effect
-   of moving the emission.
+2. ~~**Never widen delivery.**~~ **Retired by 4c**, deliberately and in a bounded way. 4a
+   bound itself to today's targets so the funnel could be reviewed as a pure refactor; 4c's
+   whole purpose was to delete the privilege those targets encoded. The classes did not
+   move — `auth:state`, `account:changed`, `plugin:views-changed` and friends are still
+   `host-local`, and promoting one is still a deliberate step behind the `admin`/`host`
+   capabilities. What changed is that a CALL SITE can no longer pick a narrower target than
+   its channel's class. The two visible consequences are named below.
 
 Consequence worth stating plainly: several rows read `replicated / canonical: no`.
 Those channels reach every client live but are absent from the snapshot, so a
@@ -59,21 +72,34 @@ change it** — the cutover changed WHERE the snapshot comes from, not which fie
 surface's phase; `session:directories-changed` is the one 4b did close, by making core
 maintain the listing the notify tells clients to refetch.
 
-**Catchup caveat on mixed-target channels.** Ring membership is per CHANNEL;
-delivery is per CALL SITE. Two `main-only` emission sites ride channels that ring
+**The catchup leak is dead (4c).** 4a recorded this wrinkle: ring membership is per
+CHANNEL but delivery was per CALL SITE, so two `main-only` sites rode channels that ring
 (`auth-manager`'s `session:auth-source`, the desktop mockup watcher's
-`mockup:file-changed`), so their events never reach a remote client live but DO
-reach one replaying a catchup after reconnect. Both payloads are benign
-(an auth-banner state, a mockup-reload notify), so 4a records the wrinkle rather
-than special-casing per-site ring flags for it; it dies in 4c when delivery
-becomes uniform per channel.
+`mockup:file-changed`) — their events never reached a remote client LIVE but did reach one
+replaying a catchup after reconnect. A client's state therefore depended on whether it had
+disconnected. Uniform delivery closes it: both now reach every subscriber live, which is
+what the ring was already going to replay. Both payloads are benign (an auth-banner state,
+a mockup-reload notify), which is why widening them was the right fix rather than adding
+per-site ring flags.
 
-## Delivery delta — the only visibility changes in 4a
+**The other 4c visibility change.** The three `extras-only` sites — `create-session`'s
+`notifyMainWindow=false`, the desktop `config:settings-changed` / `config:sessions-changed`
+saves, and the pre-spawn `session:permission-mode` echo — now echo back to the client that
+originated them. Every one of those payloads is a REPLACE, so the echo is idempotent for
+the writer; what it buys is that the one client whose optimistic write might be wrong is no
+longer the only one the broadcast cannot correct.
+
+## Delivery delta — the sanctioned 4a visibility changes
 
 | Channel                  | Change                                                                                                                                                                                                            |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `session:config-changed` | NEW channel (sanctioned 4a addition). model / effort / thinkingMode / reasoningVariant picks were previously invisible to other clients (remote.md defect 1); they now replicate as a partial, per-field replace. |
 | `session:metering`       | Delivery UNCHANGED. The 4a change is a snapshot FIELD (PerSessionSnapshot.metering) — before it, every resync silently dropped metering.                                                                          |
+
+4c's own visibility changes are the two structural ones described above (the catchup leak
+and the `extras-only` echoes), not per-channel additions, so they are recorded in prose
+rather than in this table — and `sync-funnel-guard.test.ts` still pins the table to exactly
+these two rows.
 
 Nothing else in the table changes what any client can see. `session:metering`'s
 delta is a **snapshot field**, not a delivery change: `PerSessionSnapshot.metering`
@@ -95,73 +121,77 @@ comes from, not what it contains, so the web client works unmodified.
 
 ## The table
 
-| Channel                          | Class                    | Ring | Canonical | Delivery    | Delta | Notes                                                                                                                                                                                                  |
-| -------------------------------- | ------------------------ | ---- | --------- | ----------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `automation:changed`             | replicated               | yes  | no        | `all`       | —     | Automation list. Fans out to extras today; no snapshot field, so a remote client sees live changes but resyncs empty until the automation surface gets snapshot coverage.                              |
-| `automation:processing`          | replicated               | yes  | no        | `all`       | —     | Per-automation busy flag; no snapshot field.                                                                                                                                                           |
-| `automation:run-message`         | replicated               | yes  | no        | `all`       | —     | Run transcript message; no snapshot field.                                                                                                                                                             |
-| `automation:run-update`          | replicated               | yes  | no        | `all`       | —     | Run lifecycle; no snapshot field.                                                                                                                                                                      |
-| `config:sessions-changed`        | replicated               | yes  | yes       | `all`       | —     | Session registry config (recent / pinned / titles / worktrees / hidden / sessionEngines). Per-key presence semantics (H15) are honored by the reducer.                                                 |
-| `config:settings-changed`        | replicated               | yes  | yes       | `all`       | —     | App settings. The desktop save path delivers extras-only (handlers-core.saveUiSettings) — preserved verbatim.                                                                                          |
-| `git:status-update`              | replicated               | yes  | no        | `all`       | —     | Per-cwd git summary. Fans out today; FullStateSnapshot carries no git summaries in 4a, so canonical does not hold them (recorded gap — sync-core.md lists them as replicated state for a later stage). |
-| `mockup:file-changed`            | replicated               | yes  | no        | `all`       | —     | Mockup live-reload notify. The desktop-registered watcher is main-only (session.ipc.ts); the remote-registered one is all — both preserved verbatim.                                                   |
-| `session:approval-dismiss`       | replicated               | yes  | yes       | `all`       | —     | The other half of the event-driven approval lifecycle (externally resolved approvals).                                                                                                                 |
-| `session:approval-request`       | replicated               | yes  | yes       | `all`       | —     | Approval lifecycle is event-driven ONLY (ADR-038) — never inferred from turn state.                                                                                                                    |
-| `session:auth-source`            | replicated               | yes  | no        | `all`       | —     | App-level auth banner input; no snapshot field.                                                                                                                                                        |
-| `session:config-changed`         | replicated               | yes  | yes       | `all`       | yes   | Per-session config parity — the interim relief sync-core.md flagged, landed as part of phase 4.                                                                                                        |
-| `session:created`                | replicated               | yes  | yes       | `all`       | —     | Session registry. The desktop-originated call site delivers extras-only (create-session.ts notifyMainWindow=false) — preserved verbatim, 4c deletion target.                                           |
-| `session:directories-changed`    | replicated               | yes  | no        | `all`       | —     | A payload-less notify — the sidebar refetches via a query, so there is nothing to apply. **4b:** the same trigger also refreshes canonical's `directories` field (`SyncCore.setDirectories`, core-internal, NOT an event), so a resyncing client gets the same listing a live one refetches. |
-| `session:error`                  | replicated               | yes  | no        | `all`       | —     | Rings and fans out today, but FullStateSnapshot carries no error list — per-client transient. Known 4b/5 gap, recorded not fixed.                                                                      |
-| `session:mcp-servers`            | replicated               | yes  | no        | `all`       | —     | MCP status list; no snapshot field (clients refetch via `session:mcp-status`).                                                                                                                         |
-| `session:message`                | replicated               | yes  | yes       | `all`       | —     | Assistant messages, upsert-by-id. Also the trigger for the derived todos / sentFiles fields (reducer-internal). **4b payload addition:** an optional `thinkingDurationMs` — the elapsed thinking span this message seals, timed by the emitter and moved onto the block by the reducer. |
-| `session:messages-retracted`     | replicated               | yes  | yes       | `all`       | —     | Removes messages by id and clears in-flight streaming buffers.                                                                                                                                         |
-| `session:metering`               | replicated               | yes  | yes       | `all`       | yes   | Engine-neutral metering snapshot, applied as a replace.                                                                                                                                                |
-| `session:permission-mode`        | replicated               | yes  | yes       | `all`       | —     | Per-session config. The pre-spawn echo (handlers-core.setPermissionMode) delivers `all` — the pattern session:config-changed mirrors.                                                                  |
-| `session:plan`                   | replicated               | yes  | yes       | `all`       | —     | Plan steps arrive as an explicit todo list (pi) — replaces the derived todos.                                                                                                                          |
-| `session:queue-changed`          | replicated               | yes  | yes       | `all`       | —     | Queue of record (ADR-053): the FULL item list, applied as a replace; consumed items synthesize a `steer-<itemId>` transcript message.                                                                  |
-| `session:result`                 | replicated               | yes  | yes       | `all`       | —     | Turn boundary. Canonical effect is the completed-todo-list dismissal only; nothing else is inferred from the running→idle edge.                                                                        |
-| `session:sandbox-violation`      | replicated               | yes  | no        | `all`       | —     | Same as session:error — no snapshot field.                                                                                                                                                             |
-| `session:skills`                 | replicated               | yes  | yes       | `all`       | —     | App-level sdkSkillNames, same shape as slash-commands.                                                                                                                                                 |
-| `session:slash-commands`         | replicated               | yes  | yes       | `all`       | —     | App-level slashCommands list (the snapshot carries it per session, sourced from one app-level list).                                                                                                   |
-| `session:status`                 | replicated               | yes  | yes       | `all`       | —     | Status + the status-driven rekey rule. Core owns the rekey as of 4a (item 7); clients rekey on this event in stream order.                                                                             |
-| `session:status-line`            | replicated               | yes  | yes       | `all`       | —     | statusLine replace. Cost fields inside it are cumulative-per-process snapshots — replace, never accumulate.                                                                                            |
-| `session:subagent-message`       | replicated               | yes  | yes       | `all`       | —     | subagentMessages map, upsert-by-id; clears that subagent                                                                                                                                               |
-| `session:subagent-message-batch` | replicated               | yes  | yes       | `all`       | —     | Batched form of the same upsert (subagent-watcher coalescing).                                                                                                                                         |
-| `session:subagent-tool-result`   | replicated               | yes  | yes       | `all`       | —     | Tool results inside a subagent transcript.                                                                                                                                                             |
-| `session:task-notification`      | replicated               | yes  | yes       | `all`       | —     | Terminal task state (ADR-040): appends the notification and drops the task from activeTasks.                                                                                                           |
-| `session:task-progress`          | replicated               | yes  | yes       | `all`       | —     | taskProgressMap, keyed by toolUseId.                                                                                                                                                                   |
-| `session:task-started`           | replicated               | yes  | yes       | `all`       | —     | activeTasks — without it a client that syncs mid-task reads an async Task as complete.                                                                                                                 |
-| `session:tool-result`            | replicated               | yes  | yes       | `all`       | —     | Attaches a tool_result block to its tool_use (first result wins) and re-derives todos / sentFiles.                                                                                                     |
-| `session:user-message`           | replicated               | yes  | yes       | `all`       | —     | The single source of truth for a non-queued user turn entering the transcript. **4b payload addition:** `{id, timestamp}` are minted by `sendPrompt`, so every replica agrees on the id (the reducer keeps a positional `user-<seq>` fallback for old-shape events). |
-| `session:vendor-auth-required`   | replicated               | yes  | no        | `all`       | —     | Rings and fans out; no snapshot field (the card is re-derived from the next turn).                                                                                                                     |
-| `session:warning`                | replicated               | yes  | no        | `all`       | —     | Same as session:error — no snapshot field.                                                                                                                                                             |
-| `session:watch-update`           | replicated               | yes  | yes       | `all`       | —     | Payload-heavy (a full re-read of the watched transcript). Funneled in 4a so canonical holds watched sessions — without that, 4b would drop them. Phase-5 target: replace with notify + refetch.        |
-| `usage:block-data`               | replicated               | yes  | no        | `all`       | —     | Block analytics. Fans out today; no snapshot field.                                                                                                                                                    |
-| `usage:data`                     | replicated               | yes  | no        | `all`       | —     | Account rate-limit usage. Fans out today; no snapshot field.                                                                                                                                           |
-| `voice:error`                    | replicated               | yes  | no        | `all`       | —     | Mixed emitters: VoiceClient sends it main-only, but ClaudeSession sends it through BaseSession.send (rings + all). Widest behavior recorded verbatim; no snapshot field.                               |
-| `automation:stream-event`        | volatile-pending-phase-5 | yes  | no        | `all`       | —     | Run streaming deltas — same volatile shape as session:stream, same phase-5 destination.                                                                                                                |
-| `session:background-output`      | volatile-pending-phase-5 | yes  | no        | `all`       | —     | Background-task tail. Same as bash-output.                                                                                                                                                             |
-| `session:bash-output`            | volatile-pending-phase-5 | yes  | no        | `all`       | —     | Live bash tail. Rings today; no snapshot field, so canonical stays out of it.                                                                                                                          |
-| `session:stream`                 | volatile-pending-phase-5 | yes  | yes       | `all`       | —     | Text/thinking deltas. Rings today (which is exactly the buffer-poisoning phase 5 fixes) — canonical accumulates because streamingText/streamingThinking are snapshot fields.                           |
-| `session:subagent-stream`        | volatile-pending-phase-5 | yes  | yes       | `all`       | —     | Per-subagent deltas; the subagentStreaming* maps are snapshot fields.                                                                                                                                  |
-| `account:changed`                | host-local               | no   | no        | `main-only` | —     | Main-window-only today (remote.md defect 5). Promoting it is a deliberate later step, not a 4a side effect.                                                                                            |
-| `account:respawn-sessions`       | host-local               | no   | no        | `main-only` | —     | A command to the hosting renderer, not state.                                                                                                                                                          |
-| `app:before-quit`                | host-local               | no   | no        | `main-only` | —     | Host lifecycle handshake with the owning renderer.                                                                                                                                                     |
-| `auth:state`                     | host-local               | no   | no        | `main-only` | —     | Native OAuth flow transitions (ADR-014): a local browser + loopback listener, meaningless to a remote client.                                                                                          |
-| `log-viewer:batch`               | host-local               | no   | no        | `main-only` | —     | Full ring dump on log-viewer open.                                                                                                                                                                     |
-| `log-viewer:entry`               | host-local               | no   | no        | `main-only` | —     | Feeds the separate log-viewer BrowserWindow. Host diagnostics; an `admin`-capability surface later, never ringed.                                                                                      |
-| `log-viewer:entry-batch`         | host-local               | no   | no        | `main-only` | —     | Coalesced form of log-viewer:entry.                                                                                                                                                                    |
-| `plugin:views-changed`           | host-local               | no   | no        | `main-only` | —     | Main-window-only today; plugin-declared capabilities decide later whether plugin surfaces replicate.                                                                                                   |
-| `remote:status`                  | host-local               | no   | no        | `main-only` | —     | The remote server describing itself to its host. A remote client learns its own connectivity from the socket.                                                                                          |
-| `terminal:data`                  | host-local               | no   | no        | `main-only` | —     | Desktop PTY bytes. Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit.                                                                     |
-| `terminal:exit`                  | host-local               | no   | no        | `main-only` | —     | Desktop PTY lifecycle; the remote lane has its own `term-exit` frame.                                                                                                                                  |
-| `voice:state`                    | host-local               | no   | no        | `main-only` | —     | Host microphone capture (security.md §Host-local).                                                                                                                                                     |
-| `voice:transcript`               | host-local               | no   | no        | `main-only` | —     | Host microphone capture.                                                                                                                                                                               |
-| `window:maximized-change`        | host-local               | no   | no        | `main-only` | —     | Window chrome (`host` capability).                                                                                                                                                                     |
+| Channel                          | Class                    | Ring | Canonical | Delta | Notes                                                                                                                                                                                                  |
+| -------------------------------- | ------------------------ | ---- | --------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `automation:changed`             | replicated               | yes  | no        | —     | Automation list. Reaches every subscriber; no snapshot field, so a client sees live changes but resyncs empty until the automation surface gets snapshot coverage.                              |
+| `automation:processing`          | replicated               | yes  | no        | —     | Per-automation busy flag; no snapshot field.                                                                                                                                                           |
+| `automation:run-message`         | replicated               | yes  | no        | —     | Run transcript message; no snapshot field.                                                                                                                                                             |
+| `automation:run-update`          | replicated               | yes  | no        | —     | Run lifecycle; no snapshot field.                                                                                                                                                                      |
+| `config:sessions-changed`        | replicated               | yes  | yes       | —     | Session registry config (recent / pinned / titles / worktrees / hidden / sessionEngines). Per-key presence semantics (H15) are honored by the reducer.                                                 |
+| `config:settings-changed`        | replicated               | yes  | yes       | —     | App settings. 4c made the desktop save path echo back to the saver too (uniform delivery); the reducer applies a replace, so the echo is a no-op there.                                                                                          |
+| `git:status-update`              | replicated               | yes  | no        | —     | Per-cwd git summary. Fans out today; FullStateSnapshot carries no git summaries in 4a, so canonical does not hold them (recorded gap — sync-core.md lists them as replicated state for a later stage). |
+| `mockup:file-changed`            | replicated               | yes  | no        | —     | Mockup live-reload notify. 4c made both watchers (desktop in session.ipc.ts, remote in remote-handlers.ts) reach every subscriber — the notify a reconnecting client already replayed from the ring.                                                   |
+| `session:approval-dismiss`       | replicated               | yes  | yes       | —     | The other half of the event-driven approval lifecycle (externally resolved approvals).                                                                                                                 |
+| `session:approval-request`       | replicated               | yes  | yes       | —     | Approval lifecycle is event-driven ONLY (ADR-038) — never inferred from turn state.                                                                                                                    |
+| `session:auth-source`            | replicated               | yes  | no        | —     | App-level auth banner input; no snapshot field.                                                                                                                                                        |
+| `session:config-changed`         | replicated               | yes  | yes       | yes   | Per-session config parity — the interim relief sync-core.md flagged, landed as part of phase 4.                                                                                                        |
+| `session:created`                | replicated               | yes  | yes       | —     | Session registry. 4c deleted the notifyMainWindow asymmetry in create-session.ts, so the originating client receives its own session:created like every other subscriber.                                           |
+| `session:directories-changed`    | replicated               | yes  | no        | —     | A payload-less notify — the sidebar refetches via a query, so there is nothing to apply. **4b:** the same trigger also refreshes canonical's `directories` field (`SyncCore.setDirectories`, core-internal, NOT an event), so a resyncing client gets the same listing a live one refetches. |
+| `session:error`                  | replicated               | yes  | no        | —     | Rings and fans out today, but FullStateSnapshot carries no error list — per-client transient. Known 4b/5 gap, recorded not fixed.                                                                      |
+| `session:mcp-servers`            | replicated               | yes  | no        | —     | MCP status list; no snapshot field (clients refetch via `session:mcp-status`).                                                                                                                         |
+| `session:message`                | replicated               | yes  | yes       | —     | Assistant messages, upsert-by-id. Also the trigger for the derived todos / sentFiles fields (reducer-internal). **4b payload addition:** an optional `thinkingDurationMs` — the elapsed thinking span this message seals, timed by the emitter and moved onto the block by the reducer. |
+| `session:messages-retracted`     | replicated               | yes  | yes       | —     | Removes messages by id and clears in-flight streaming buffers.                                                                                                                                         |
+| `session:metering`               | replicated               | yes  | yes       | yes   | Engine-neutral metering snapshot, applied as a replace.                                                                                                                                                |
+| `session:permission-mode`        | replicated               | yes  | yes       | —     | Per-session config. The pre-spawn echo (handlers-core.setPermissionMode) delivers `all` — the pattern session:config-changed mirrors.                                                                  |
+| `session:plan`                   | replicated               | yes  | yes       | —     | Plan steps arrive as an explicit todo list (pi) — replaces the derived todos.                                                                                                                          |
+| `session:queue-changed`          | replicated               | yes  | yes       | —     | Queue of record (ADR-053): the FULL item list, applied as a replace; consumed items synthesize a `steer-<itemId>` transcript message.                                                                  |
+| `session:result`                 | replicated               | yes  | yes       | —     | Turn boundary. Canonical effect is the completed-todo-list dismissal only; nothing else is inferred from the running→idle edge.                                                                        |
+| `session:sandbox-violation`      | replicated               | yes  | no        | —     | Same as session:error — no snapshot field.                                                                                                                                                             |
+| `session:skills`                 | replicated               | yes  | yes       | —     | App-level sdkSkillNames, same shape as slash-commands.                                                                                                                                                 |
+| `session:slash-commands`         | replicated               | yes  | yes       | —     | App-level slashCommands list (the snapshot carries it per session, sourced from one app-level list).                                                                                                   |
+| `session:status`                 | replicated               | yes  | yes       | —     | Status + the status-driven rekey rule. Core owns the rekey as of 4a (item 7); clients rekey on this event in stream order.                                                                             |
+| `session:status-line`            | replicated               | yes  | yes       | —     | statusLine replace. Cost fields inside it are cumulative-per-process snapshots — replace, never accumulate.                                                                                            |
+| `session:subagent-message`       | replicated               | yes  | yes       | —     | subagentMessages map, upsert-by-id; clears that subagent                                                                                                                                               |
+| `session:subagent-message-batch` | replicated               | yes  | yes       | —     | Batched form of the same upsert (subagent-watcher coalescing).                                                                                                                                         |
+| `session:subagent-tool-result`   | replicated               | yes  | yes       | —     | Tool results inside a subagent transcript.                                                                                                                                                             |
+| `session:task-notification`      | replicated               | yes  | yes       | —     | Terminal task state (ADR-040): appends the notification and drops the task from activeTasks.                                                                                                           |
+| `session:task-progress`          | replicated               | yes  | yes       | —     | taskProgressMap, keyed by toolUseId.                                                                                                                                                                   |
+| `session:task-started`           | replicated               | yes  | yes       | —     | activeTasks — without it a client that syncs mid-task reads an async Task as complete.                                                                                                                 |
+| `session:tool-result`            | replicated               | yes  | yes       | —     | Attaches a tool_result block to its tool_use (first result wins) and re-derives todos / sentFiles.                                                                                                     |
+| `session:user-message`           | replicated               | yes  | yes       | —     | The single source of truth for a non-queued user turn entering the transcript. **4b payload addition:** `{id, timestamp}` are minted by `sendPrompt`, so every replica agrees on the id (the reducer keeps a positional `user-<seq>` fallback for old-shape events). |
+| `session:vendor-auth-required`   | replicated               | yes  | no        | —     | Rings and fans out; no snapshot field (the card is re-derived from the next turn).                                                                                                                     |
+| `session:warning`                | replicated               | yes  | no        | —     | Same as session:error — no snapshot field.                                                                                                                                                             |
+| `session:watch-update`           | replicated               | yes  | yes       | —     | Payload-heavy (a full re-read of the watched transcript). Funneled in 4a so canonical holds watched sessions — without that, 4b would drop them. Phase-5 target: replace with notify + refetch.        |
+| `usage:block-data`               | replicated               | yes  | no        | —     | Block analytics. Fans out today; no snapshot field.                                                                                                                                                    |
+| `usage:data`                     | replicated               | yes  | no        | —     | Account rate-limit usage. Fans out today; no snapshot field.                                                                                                                                           |
+| `voice:error`                    | replicated               | yes  | no        | —     | Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. 4c had to route VoiceClient's through emitEvent — its targeted send would have landed nowhere. The lane split belongs to the phase-5 work on the voice surface.                               |
+| `automation:stream-event`        | volatile-pending-phase-5 | yes  | no        | —     | Run streaming deltas — same volatile shape as session:stream, same phase-5 destination.                                                                                                                |
+| `session:background-output`      | volatile-pending-phase-5 | yes  | no        | —     | Background-task tail. Same as bash-output.                                                                                                                                                             |
+| `session:bash-output`            | volatile-pending-phase-5 | yes  | no        | —     | Live bash tail. Rings today; no snapshot field, so canonical stays out of it.                                                                                                                          |
+| `session:stream`                 | volatile-pending-phase-5 | yes  | yes       | —     | Text/thinking deltas. Rings today (which is exactly the buffer-poisoning phase 5 fixes) — canonical accumulates because streamingText/streamingThinking are snapshot fields.                           |
+| `session:subagent-stream`        | volatile-pending-phase-5 | yes  | yes       | —     | Per-subagent deltas; the subagentStreaming* maps are snapshot fields.                                                                                                                                  |
+| `account:changed`                | host-local               | no   | no        | —     | Main-window-only today (remote.md defect 5). Promoting it is a deliberate later step, not a 4a side effect.                                                                                            |
+| `account:respawn-sessions`       | host-local               | no   | no        | —     | A command to the hosting renderer, not state.                                                                                                                                                          |
+| `app:before-quit`                | host-local               | no   | no        | —     | Host lifecycle handshake with the owning renderer.                                                                                                                                                     |
+| `auth:state`                     | host-local               | no   | no        | —     | Native OAuth flow transitions (ADR-014): a local browser + loopback listener, meaningless to a remote client.                                                                                          |
+| `log-viewer:batch`               | host-local               | no   | no        | —     | Full ring dump on log-viewer open.                                                                                                                                                                     |
+| `log-viewer:entry`               | host-local               | no   | no        | —     | Feeds the separate log-viewer BrowserWindow. Host diagnostics; an `admin`-capability surface later, never ringed.                                                                                      |
+| `log-viewer:entry-batch`         | host-local               | no   | no        | —     | Coalesced form of log-viewer:entry.                                                                                                                                                                    |
+| `plugin:views-changed`           | host-local               | no   | no        | —     | Main-window-only today; plugin-declared capabilities decide later whether plugin surfaces replicate.                                                                                                   |
+| `remote:status`                  | host-local               | no   | no        | —     | The remote server describing itself to its host. A remote client learns its own connectivity from the socket.                                                                                          |
+| `terminal:data`                  | host-local               | no   | no        | —     | Desktop PTY bytes. Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit.                                                                     |
+| `terminal:exit`                  | host-local               | no   | no        | —     | Desktop PTY lifecycle; the remote lane has its own `term-exit` frame.                                                                                                                                  |
+| `voice:state`                    | host-local               | no   | no        | —     | Host microphone capture (security.md §Host-local).                                                                                                                                                     |
+| `voice:transcript`               | host-local               | no   | no        | —     | Host microphone capture.                                                                                                                                                                               |
+| `window:maximized-change`        | host-local               | no   | no        | —     | Window chrome (`host` capability).                                                                                                                                                                     |
 
 `plugin:<id>:<event>` (ADR-005) is matched by PREFIX, since the names are generated
-at runtime: `host-local`, no ring, main-window-only. Plugin-declared capabilities
-are the follow-up that decides whether plugin surfaces may replicate.
+at runtime: `host-local`, no ring, owning-window only. Plugin-declared capabilities
+are the follow-up that decides whether plugin surfaces may replicate. The plugin bridge
+itself is a plain funnel SUBSCRIBER as of 4c (the fake `BrowserWindow` it used to be is
+deleted); the event SET it receives is unchanged, because extras always got every
+replicated + volatile channel and never a host-local one — which is exactly what a
+subscriber gets.
 
 ## Reducer purity deltas
 
@@ -198,17 +228,24 @@ parity e2e — skip them via the single shared definition (`CLIENT_WRITTEN_FIELD
 
 `worktreeInfoMap` is the sharp one: deriving state from a tool result inside a
 client and storing it is precisely the pattern sync-core.md's client-computation
-rule bans. It survives because moving it means moving an emitter — 4c work.
+rule bans. It survives because moving it means moving an emitter — and it survived 4c's
+transport half too, since it belongs to the reducer-adoption half that did not land.
+
+**What 4c changed for this whole table:** the save's echo now reaches the client that
+saved. These fields are still client-WRITTEN (the store writes them optimistically, then
+invokes the save), but the desktop no longer skips its own `config:sessions-changed` /
+`config:settings-changed` broadcast, so an optimistic write that disagrees with what
+actually got persisted is corrected on the round trip instead of standing unopposed.
 
 **`directories` LEFT this table in 4b.** Core maintains it now (seeded at boot,
 refreshed on the `session:directories-changed` trigger — `SyncCore.setDirectories`), so
 it is core-written, compared strictly by the shadow, and a mismatch is real drift between
 the sidebar a live client sees and the one a reconnecting client gets.
 
-The registry-config row is also fresher than it reads: the apply happens inside
-`SyncCore.emit` on every save regardless of delivery target, so a desktop-originated
-`extras-only` save is already in the next `getSnapshot()` (pinned by
-`handlers-core.test.ts`). The file watcher is now just the cross-INSTANCE path.
+The registry-config row is fresher than it reads: the apply happens inside `SyncCore.emit`
+on every save, so a desktop-originated save is already in the next `getSnapshot()` (pinned
+by `handlers-core.test.ts`) — that was true even in 4a, when the desktop save deliberately
+skipped its own renderer. The file watcher is now just the cross-INSTANCE path.
 
 ### `activeSessionId` is served as `null` — deliberate, with a UX consequence
 
