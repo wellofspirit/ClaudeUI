@@ -92,6 +92,21 @@ export abstract class BaseSession implements ISession {
   /** Serializes {@link flushQueuedItems} against overlapping boundary signals. */
   private flushingQueue = false
 
+  /**
+   * Thinking-span clock (SyncCore phase 4b). `thinkingStartedAt` is the wall
+   * clock at the first thinking delta of the current span; `sealedThinkingMs`
+   * holds an already-sealed span's elapsed time until the next
+   * `session:message` can carry it.
+   *
+   * Lives HERE, on the one chokepoint all three engines' events pass through
+   * ({@link send}), rather than in claude-session / OpencodeSession / PiSession:
+   * the seal rule is a function of (channel, payload) only, it is the exact rule
+   * `applyEvent` applies to decide a span ended, and three copies of a clock +
+   * state machine would be three chances to disagree with it.
+   */
+  private thinkingStartedAt: number | null = null
+  private sealedThinkingMs: number | null = null
+
   constructor(routingId: string, win: BrowserWindow, cwd: string) {
     this.routingId = routingId
     this.win = win
@@ -364,9 +379,75 @@ export abstract class BaseSession implements ISession {
    * `sessionId` — positional, not a named field (see sync-core.md §"Wire
    * encoding"). It is read fresh on every send, so a rekey mid-turn is picked up
    * without any re-registration.
+   *
+   * The payload passes through {@link trackThinkingSpan} first, which is where a
+   * sealed thinking span's elapsed ms is attached (phase 4b).
    */
   protected send(channel: string, data: unknown): void {
-    emitEvent(channel, [this.routingId, data], 'all', this.win)
+    emitEvent(channel, [this.routingId, this.trackThinkingSpan(channel, data)], 'all', this.win)
+  }
+
+  /**
+   * Time the current thinking span and stamp its elapsed ms on the event that
+   * seals it — the emitter half of replicable "Thought for Xs".
+   *
+   * The seal points mirror the renderer's store handlers exactly (session-store
+   * `appendStreamingThinking` / `appendStreamingText` / `addMessage` /
+   * `setStatus` / `retractMessages`), because those are the points `applyEvent`
+   * mirrors too:
+   *
+   *  - a `thinking` delta OPENS the span (first delta wins — a span is one
+   *    continuous run of thinking output);
+   *  - a `text` delta SEALS it, but there is no thinking block on the wire yet:
+   *    park the elapsed time for the message that will carry the block;
+   *  - a `session:message` with any non-thinking content seals a still-open span
+   *    and carries either that elapsed time or the parked one, ONCE (the reducer
+   *    owns it from there — re-sending would stamp a later span with a stale
+   *    duration);
+   *  - `idle`/`disconnected` status and a retraction abandon an open span with no
+   *    stamp, exactly as the renderer's safety nets do.
+   *
+   * Returns the payload to emit — a shallow copy when a duration is attached, so
+   * the caller's object (which engines also keep in their own message history) is
+   * never mutated.
+   */
+  private trackThinkingSpan(channel: string, data: unknown): unknown {
+    switch (channel) {
+      case 'session:stream': {
+        const delta = data as { type?: string } | null
+        if (delta?.type === 'thinking') {
+          this.thinkingStartedAt ??= Date.now()
+        } else if (this.thinkingStartedAt !== null) {
+          this.sealedThinkingMs = Date.now() - this.thinkingStartedAt
+          this.thinkingStartedAt = null
+        }
+        return data
+      }
+      case 'session:message': {
+        const message = data as ChatMessage | null
+        if (!message || !Array.isArray(message.content)) return data
+        const sealsHere =
+          this.thinkingStartedAt !== null &&
+          message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
+        const durationMs = sealsHere ? Date.now() - this.thinkingStartedAt! : this.sealedThinkingMs
+        if (sealsHere) this.thinkingStartedAt = null
+        if (durationMs === null) return data
+        this.sealedThinkingMs = null
+        return { ...message, thinkingDurationMs: durationMs }
+      }
+      case 'session:status': {
+        const status = data as SessionStatus | null
+        if (status?.state === 'idle' || status?.state === 'disconnected') {
+          this.thinkingStartedAt = null
+        }
+        return data
+      }
+      case 'session:messages-retracted':
+        this.thinkingStartedAt = null
+        return data
+      default:
+        return data
+    }
   }
 
   /**

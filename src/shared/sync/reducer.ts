@@ -12,19 +12,24 @@
  * canonical state on every replay, so replay-equals-live — the property the
  * whole replication model rests on — would be false.
  *
- * Two as-built consequences, both real and both recorded rather than papered
- * over (see `docs/architecture/sync-channels.md` §"Reducer purity deltas"):
+ * Both as-built consequences of that contract were closed by **phase 4b**, in
+ * the only place they can be: the EMITTER now measures what needs a clock and
+ * mints what needs randomness, and the reducer just files it (see
+ * `docs/architecture/sync-channels.md` §"Reducer purity deltas"):
  *
- * 1. **Thinking-span durations are not computed here.** The renderer stamps
- *    `durationMs` on thinking blocks from wall-clock deltas. Core tracks only
- *    the boolean "is a thinking span open" ({@link CanonicalSessionState} has no
- *    timestamp), so the shadow comparator masks `durationMs`. Making durations
- *    replicable means the *emitter* must put the elapsed time in the event.
- * 2. **User-message identity is client-minted today.** `session:user-message`
- *    carries `{prompt, attachments}` only — the renderer mints
- *    `msg-${crypto.randomUUID()}` and `Date.now()` locally. Core therefore mints
- *    a deterministic `user-<seq>` id and a `0` timestamp, and the comparator
- *    masks both. 4b's cutover REQUIRES the id to move into the event payload.
+ * 1. **Thinking-span durations arrive in the event.** `BaseSession.send` times
+ *    the span and stamps `ChatMessage.thinkingDurationMs` on the message that
+ *    seals it; {@link stampThinkingDuration} moves it onto the block. Core still
+ *    tracks only the boolean "is a span open" ({@link CanonicalSessionState} has
+ *    no timestamp). The shadow comparator keeps masking `durationMs` until 4c,
+ *    because the desktop renderer still measures its own value in parallel and
+ *    the two differ by scheduling jitter.
+ * 2. **User-message identity arrives in the event.** `sendPrompt` mints
+ *    `msg-<uuid>` + `Date.now()` into the `session:user-message` payload, so
+ *    every replica agrees. The positional `user-<seq>` fallback below stays for
+ *    old-shape events (committed fixtures, a client mid-upgrade), and the
+ *    comparator keeps masking user identity until 4c retires the renderer's own
+ *    local mint.
  *
  * ## Cost fields (ratified §5)
  *
@@ -83,6 +88,29 @@ export interface ReducerAux {
 
 export function emptyAux(): ReducerAux {
   return { thinkingOpen: {} }
+}
+
+/**
+ * The aux a snapshot-restored state must resume from (SyncCore phase 4b).
+ *
+ * `thinkingOpen` is not on the wire, but it does not need to be: it is exactly
+ * "this session has un-sealed thinking output", and the snapshot field
+ * `streamingThinking` holds that output. Every writer keeps the two in lockstep —
+ * a thinking delta sets the flag AND appends, every seal clears the flag AND
+ * blanks the buffer — so recovering the flag from the buffer is a derivation, not
+ * a guess.
+ *
+ * Without this, a client (or a second core) that resumed from a snapshot taken
+ * mid-thinking-span would not recognise the next text delta as a seal, and its
+ * `streamingThinking` would never clear: stale thinking text under a finished
+ * answer, until the next turn overwrote it.
+ */
+export function auxFromCanonical(state: CanonicalState): ReducerAux {
+  const aux = emptyAux()
+  for (const [routingId, session] of Object.entries(state.sessions)) {
+    if (session.streamingThinking !== '') aux.thinkingOpen[routingId] = true
+  }
+  return aux
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +186,28 @@ function buildUserContentBlocks(
   }
   if (text) content.push({ type: 'text', text })
   return content
+}
+
+/**
+ * Move an emitter-supplied thinking-span duration onto the block it belongs to
+ * (SyncCore phase 4b — see {@link ChatMessage.thinkingDurationMs}).
+ *
+ * Scope is the COMMITTED content of the sealing message, which is the renderer's
+ * rule verbatim (`addMessage` maps over `committed.content`): after the merge
+ * that content includes the thinking block even when it arrived in an earlier
+ * frame of the same message id. Only the first still-unstamped block is written,
+ * so a re-delivered message (catchup overlap) is idempotent.
+ */
+function stampThinkingDuration(
+  content: ContentBlock[],
+  durationMs: number | undefined
+): ContentBlock[] {
+  if (typeof durationMs !== 'number') return content
+  const idx = content.findIndex((b) => b.type === 'thinking' && b.durationMs == null)
+  if (idx < 0) return content
+  const next = [...content]
+  next[idx] = { ...(next[idx] as { type: 'thinking'; text: string }), durationMs }
+  return next
 }
 
 /** Re-derive todos, honoring the null = "transcript says nothing" contract. */
@@ -290,11 +340,18 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       if (!routingId) return state
       const data = arg<{
+        id?: string
+        timestamp?: number
         prompt?: string
         attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
       }>(event, 1)
       if (!state.sessions[routingId]) return state
-      const id = `user-${event.seq ?? state.sessions[routingId].messages.length}`
+      // Identity comes from the EVENT as of phase 4b (`handlers-core.sendPrompt`
+      // mints it), so every replica agrees on the id and a resync cannot renumber
+      // the transcript. The positional fallback stays for old-shape events: the
+      // committed golden fixtures replay them, and so does any client mid-upgrade.
+      const id = data?.id ?? `user-${event.seq ?? state.sessions[routingId].messages.length}`
+      const timestamp = typeof data?.timestamp === 'number' ? data.timestamp : 0
       return withSession(state, routingId, (s) => ({
         messages: [
           ...s.messages,
@@ -302,7 +359,7 @@ export function applyEvent(
             id,
             role: 'user' as const,
             content: buildUserContentBlocks(data?.prompt ?? '', data?.attachments),
-            timestamp: 0
+            timestamp
           }
         ]
       }))
@@ -323,13 +380,15 @@ export function applyEvent(
       const hasNonThinking = content.some((b) => b.type === 'text' || b.type === 'tool_use')
       const sealsThinking = aux.thinkingOpen[routingId] === true && hasNonThinking
 
-      const committed: ChatMessage =
-        idx < 0
-          ? { ...message, content }
-          : {
-              ...message,
-              content: mergeContentBlocks(session.messages[idx].content ?? [], content)
-            }
+      // The emitter's elapsed-time hint (phase 4b) is consumed here and never
+      // stored: it moves onto the sealed thinking block and the field is dropped,
+      // so a snapshot carries `durationMs` exactly where a client renders it.
+      const { thinkingDurationMs, ...bare } = message
+      const merged = idx < 0 ? content : mergeContentBlocks(session.messages[idx].content ?? [], content)
+      const committed: ChatMessage = {
+        ...bare,
+        content: stampThinkingDuration(merged, thinkingDurationMs)
+      }
       const messages =
         idx < 0
           ? [...session.messages, committed]

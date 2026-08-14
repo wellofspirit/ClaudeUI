@@ -43,6 +43,7 @@ import {
   setPermissionMode
 } from '../handlers-core'
 import { BaseSession } from '../../providers/BaseSession'
+import { syncCore } from '../../services/sync-host'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -135,6 +136,33 @@ describe('handlers-core', () => {
 
     saveSessions(win, config, { notifyMainWindow: true })
     expect(win.webContents.send).toHaveBeenCalledWith('config:sessions-changed', config)
+  })
+
+  it('a DESKTOP-originated saveSessions is visible in the next getSnapshot (phase 4b)', () => {
+    // The desktop path delivers `extras-only` (the originating renderer already
+    // knows), and before the cutover that was fine because the snapshot came from
+    // that renderer. Now the snapshot comes from canonical state, so the APPLY has
+    // to happen regardless of delivery target — otherwise a phone that resynced
+    // after a desktop pin/rename would read the pre-save registry until the file
+    // watcher happened to fire. SyncCore applies before it delivers, which is what
+    // makes this hold; this test is the thing that would notice if that changed.
+    syncCore.resetCanonicalForTests()
+    const win = makeFakeWindow()
+    saveSessions(
+      win,
+      {
+        recentSessions: ['rid-a'],
+        pinnedSessions: ['rid-a'],
+        customTitles: { 'rid-a': 'Renamed' }
+      } as any,
+      { notifyMainWindow: false }
+    )
+
+    const snap = syncCore.getSnapshot()
+    expect(win.webContents.send).not.toHaveBeenCalled() // still extras-only
+    expect(snap.recentSessionIds).toEqual(['rid-a'])
+    expect(snap.pinnedSessionIds).toEqual(['rid-a'])
+    expect(snap.customTitles).toEqual({ 'rid-a': 'Renamed' })
   })
 
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {

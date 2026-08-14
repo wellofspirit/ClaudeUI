@@ -115,6 +115,19 @@ export interface ChatMessage {
   content: ContentBlock[]
   timestamp: number
   planContent?: string
+  /**
+   * Elapsed wall-clock ms of the thinking span this message SEALS, stamped by
+   * the emitter (`BaseSession.send`) — SyncCore phase 4b.
+   *
+   * A transient wire hint, not stored state: the shared reducer moves it onto
+   * the sealed thinking block's `durationMs` and drops the field, so canonical
+   * state (and every snapshot built from it) carries the duration where the
+   * renderer expects it. It exists because `applyEvent` is clock-free by
+   * contract — a reducer that measured the span itself would fold a different
+   * state on every replay — so the only honest source of elapsed time is the
+   * process that watched the clock: the emitter.
+   */
+  thinkingDurationMs?: number
 }
 
 export type EngineId = 'claude' | 'opencode' | 'pi'
@@ -996,12 +1009,21 @@ interface SessionAPI {
   onSessionCreated(
     cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void
   ): () => void
-  /** Relayed for NON-queued sends only. A send that queues rides
-   *  `onQueueChanged` instead (ADR-053) — the old `{queued:true}` flavor is retired. */
+  /**
+   * Relayed for NON-queued sends only. A send that queues rides
+   * `onQueueChanged` instead (ADR-053) — the old `{queued:true}` flavor is retired.
+   *
+   * `id`/`timestamp` are minted by the EMITTER (SyncCore phase 4b) so every
+   * replica agrees on the transcript's identity; they are optional because a
+   * client may still be running against an older host that omits them, in which
+   * case the receiver falls back to minting its own.
+   */
   onUserMessage(
     cb: (
       routingId: string,
       data: {
+        id?: string
+        timestamp?: number
         prompt: string
         attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
       }

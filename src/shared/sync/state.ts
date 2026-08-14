@@ -160,6 +160,86 @@ export function emptyCanonicalState(): CanonicalState {
 }
 
 /**
+ * Wire → canonical: rebuild a full state from a snapshot (SyncCore phase 4b).
+ *
+ * The inverse of {@link toSnapshot}, and lossless in the only sense that matters
+ * — fold the events after the snapshot's `seq` onto the result and you get the
+ * state the producing core holds at head. That equivalence IS the phase-4
+ * snapshot invariant (`main/sync/__tests__/snapshot-invariant.unit.test.ts`), and
+ * having the restore live here rather than inside the test is what makes the
+ * invariant a property of the code instead of a property of a test helper.
+ *
+ * Two deliberate asymmetries, both benign:
+ *
+ *  - **`seeded`** is core-internal and not on the wire. A snapshot-fed session is
+ *    complete by definition (its transcript is whatever the producer had), so it
+ *    restores as `true` — never as "still waiting for history", which would make
+ *    a restored core skip the comparator and re-seed over live content.
+ *  - **`slashCommands` / `sdkSkillNames`** are app-level here but the wire
+ *    replicates them per session (every entry carries the same list, an as-built
+ *    quirk `toSnapshot` preserves). They come back from the first entry, so a
+ *    snapshot with NO sessions cannot carry them at all — an honest gap in the
+ *    wire shape, recorded in docs/architecture/sync-channels.md.
+ */
+export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
+  const sessions: Record<string, CanonicalSessionState> = {}
+  for (const [id, s] of Object.entries(snapshot.sessions ?? {})) {
+    sessions[id] = {
+      routingId: id,
+      cwd: s.cwd,
+      messages: s.messages,
+      streamingText: s.streamingText,
+      streamingThinking: s.streamingThinking,
+      status: s.status,
+      pendingApprovals: s.pendingApprovals,
+      todos: s.todos,
+      sentFiles: s.sentFiles ?? [],
+      queue: s.queue ?? [],
+      taskNotifications: s.taskNotifications,
+      activeTasks: s.activeTasks ?? {},
+      taskProgressMap: s.taskProgressMap,
+      subagentMessages: s.subagentMessages,
+      subagentStreamingText: s.subagentStreamingText,
+      subagentStreamingThinking: s.subagentStreamingThinking,
+      permissionMode: s.permissionMode,
+      effort: s.effort ?? null,
+      thinkingMode: s.thinkingMode ?? null,
+      reasoningVariant: s.reasoningVariant ?? null,
+      statusLine: s.statusLine,
+      metering: s.metering ?? null,
+      // Empty, NOT `s.slashCommands` — canonical holds these once, app-level
+      // (below); the per-session copies exist only because the wire shape fans
+      // the one list into every entry, and no reducer branch ever writes them.
+      // Restoring them per session would make a restored state disagree with the
+      // live one it is supposed to equal.
+      slashCommands: [],
+      sdkSkillNames: [],
+      sdkActive: s.sdkActive ?? false,
+      selectedEngineId: s.selectedEngineId ?? 'claude',
+      selectedModel: s.selectedModel ?? 'default',
+      seeded: true
+    }
+  }
+  const first = Object.values(snapshot.sessions ?? {})[0]
+  return {
+    sessions,
+    directories: snapshot.directories ?? [],
+    activeSessionId: snapshot.activeSessionId ?? null,
+    settings: snapshot.settings ?? {},
+    autoModeDisabledBySettings: snapshot.autoModeDisabledBySettings ?? false,
+    recentSessionIds: snapshot.recentSessionIds ?? [],
+    pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
+    customTitles: snapshot.customTitles ?? {},
+    worktreeInfoMap: snapshot.worktreeInfoMap ?? {},
+    sessionEngines: snapshot.sessionEngines ?? {},
+    hiddenSessions: snapshot.hiddenSessions ?? [],
+    hiddenProjects: snapshot.hiddenProjects ?? [],
+    slashCommands: first?.slashCommands ?? [],
+    sdkSkillNames: first?.sdkSkillNames ?? []
+  }
+}
+
+/**
  * Canonical → wire. `seq` is stamped by the caller in the SAME synchronous tick
  * it captured the value in (SyncCore.getSnapshot) — the ordering that kills the
  * as-built watermark race (remote.md defect 3) by construction rather than by

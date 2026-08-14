@@ -7,6 +7,7 @@ import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
+import { seedCanonicalAppState, refreshCanonicalDirectories } from '../services/sync-seed'
 import {
   listDirectories,
   loadSessionHistory,
@@ -2057,6 +2058,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // through the funnel now, so it no longer needs an extra-window accessor.
   startConfigWatcher(win)
 
+  // SyncCore phase 4b: canonical state is the `sync-full` source, so the fields
+  // that come from files/queries rather than events have to be in it before the
+  // first client connects. Non-blocking — nothing here gates IPC registration.
+  void seedCanonicalAppState()
+
   const savedSettings = loadSettings() as Record<string, unknown>
 
   // Apply saved session idle timeout
@@ -2460,6 +2466,12 @@ function startProjectsWatcher(win: BrowserWindow): void {
   const notify = (): void => {
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
+      // Canonical holds the listing the notify tells clients to refetch (phase
+      // 4b): the snapshot carries `directories`, so core must refresh from the
+      // SAME trigger or a resyncing client would get a stale sidebar while a
+      // live one got a fresh one. Fire-and-forget — the notify must not wait on
+      // a directory walk.
+      void refreshCanonicalDirectories()
       emitEvent('session:directories-changed', [], 'all', win)
     }, 500)
   }

@@ -85,9 +85,10 @@ describe('SyncCore.emit — fail-closed classification (item 3)', () => {
   })
 
   it('a reducer throw does NOT break the emission it rode in on', () => {
-    // Canonical state is SHADOW in 4a. Routing every send through the funnel is
-    // only safe if a malformed payload degrades canonical state and nothing else
-    // — before the funnel such a payload was a harmless no-op at the far end.
+    // Routing every send through the funnel is only safe if a malformed payload
+    // degrades canonical state and nothing else — before the funnel such a payload
+    // was a harmless no-op at the far end. Since 4b the degraded state is what a
+    // reconnecting client gets, so the error is logged loudly rather than swallowed.
     const onApplyError = vi.fn()
     const core = new SyncCore({ onApplyError })
     const delivered: string[] = []
@@ -195,6 +196,45 @@ describe('SyncCore.getSnapshot', () => {
     expect('metering' in snap.sessions['rid']).toBe(true)
     expect(snap.sessions['rid'].metering).toBeUndefined()
     expect('seeded' in snap.sessions['rid']).toBe(false)
+  })
+})
+
+describe('SyncCore.setAppState — query-shaped app state (phase 4b)', () => {
+  it('lands in the snapshot without touching the ring', () => {
+    // Not an event by design: `directories` is a listing clients FETCH, and the
+    // boot seeds are files they used to read themselves. Appending them would put
+    // payloads in the ring no reducer branch interprets — and would make the
+    // ring's contents depend on how often a watcher fired.
+    const { core, delivered } = recordingCore()
+    core.setDirectories([{ path: '/repo', sessions: [] } as never])
+    core.setAppState({
+      settings: { theme: 'monokai' },
+      recentSessionIds: ['rid'],
+      autoModeDisabledBySettings: true
+    })
+
+    const snap = core.getSnapshot()
+    expect(snap.directories).toEqual([{ path: '/repo', sessions: [] }])
+    expect(snap.settings).toEqual({ theme: 'monokai' })
+    expect(snap.recentSessionIds).toEqual(['rid'])
+    expect(snap.autoModeDisabledBySettings).toBe(true)
+    expect(core.currentSeq()).toBe(0)
+    expect(delivered).toEqual([])
+  })
+
+  it('a later config event replaces a seeded value (events win over seeds)', () => {
+    // The seed is a floor, not a lock: whichever save fires next is the truth,
+    // and it must not have to fight the boot value.
+    const { core } = recordingCore()
+    core.setAppState({ recentSessionIds: ['stale'], customTitles: { a: 'old' } })
+    core.emit(
+      'config:sessions-changed',
+      [{ recentSessions: ['fresh'], customTitles: { a: 'new' } }],
+      ALL
+    )
+    const snap = core.getSnapshot()
+    expect(snap.recentSessionIds).toEqual(['fresh'])
+    expect(snap.customTitles).toEqual({ a: 'new' })
   })
 })
 

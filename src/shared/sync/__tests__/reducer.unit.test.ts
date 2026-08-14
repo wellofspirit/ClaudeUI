@@ -9,8 +9,14 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { applyEvent, emptyAux, checkDerivedFields, rekeyTargetFor } from '../reducer'
-import { emptyCanonicalState, toSnapshot, type CanonicalState } from '../state'
+import {
+  applyEvent,
+  emptyAux,
+  auxFromCanonical,
+  checkDerivedFields,
+  rekeyTargetFor
+} from '../reducer'
+import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../types'
 
 function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
@@ -154,6 +160,110 @@ describe('reducer — transcript', () => {
     expect(a.sessions['rid'].messages[0].id).toBe('user-2')
     expect(a.sessions['rid'].messages[0].id).toBe(b.sessions['rid'].messages[0].id)
     expect(a.sessions['rid'].messages[0].timestamp).toBe(0)
+  })
+})
+
+describe('reducer — event-carried identity (phase 4b)', () => {
+  it('takes the user message id + timestamp from the payload', () => {
+    // `sendPrompt` mints them now, so every replica agrees on the id. Before 4b
+    // each client invented its own and a resync renumbered the transcript.
+    const s = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'msg-abc', timestamp: 1_700_000_000_000, prompt: 'hi' }]
+    ])
+    const msg = s.sessions['rid'].messages[0]
+    expect(msg.id).toBe('msg-abc')
+    expect(msg.timestamp).toBe(1_700_000_000_000)
+  })
+
+  it('falls back to user-<seq>/0 for an old-shape payload (fixture-pinned)', () => {
+    // The committed golden fixtures replay the pre-4b shape, and so does any
+    // client mid-upgrade. Positional, so it stays deterministic on replay.
+    const s = fold([created(), ['session:user-message', 'rid', { prompt: 'hi' }]])
+    expect(s.sessions['rid'].messages[0]).toMatchObject({ id: 'user-2', timestamp: 0 })
+  })
+
+  it('is idempotent under a catchup overlap — the same id lands once', () => {
+    // Two deliveries of ONE send (a rewound watermark after sync-full) must not
+    // duplicate the turn. With client-minted ids this was impossible to detect.
+    let s = fold([created()])
+    const event = {
+      channel: 'session:user-message',
+      args: ['rid', { id: 'msg-abc', timestamp: 5, prompt: 'hi' }]
+    }
+    s = applyEvent(s, { ...event, seq: 2 })
+    const ids = () => s.sessions['rid'].messages.map((m) => m.id)
+    expect(ids()).toEqual(['msg-abc'])
+    // NOTE: the reducer APPENDS user messages, so replay-safety here comes from
+    // the client's cursor (`sync-client` drops seq <= lastSeq), not from an
+    // upsert. Pinned so a future change to either side is a deliberate one.
+    s = applyEvent(s, { ...event, seq: 2 })
+    expect(ids()).toEqual(['msg-abc', 'msg-abc'])
+  })
+})
+
+describe('reducer — emitter-supplied thinking duration (phase 4b)', () => {
+  it('moves thinkingDurationMs onto the sealed block and drops the field', () => {
+    const s = fold([
+      created(),
+      ['session:stream', 'rid', { type: 'thinking', text: 'weighing' }],
+      ['session:stream', 'rid', { type: 'text', text: 'answer' }],
+      [
+        'session:message',
+        'rid',
+        {
+          ...assistant('m1', [
+            { type: 'thinking', text: 'weighing' },
+            { type: 'text', text: 'answer' }
+          ]),
+          thinkingDurationMs: 4200
+        }
+      ]
+    ])
+    const msg = s.sessions['rid'].messages[0]
+    const block = msg.content.find((b) => b.type === 'thinking')
+    expect(block?.type === 'thinking' ? block.durationMs : null).toBe(4200)
+    // The hint is transient: canonical must not carry a duplicate of it, or the
+    // snapshot would ship a field with no meaning at rest.
+    expect('thinkingDurationMs' in msg).toBe(false)
+  })
+
+  it('stamps a thinking block that arrived in an EARLIER frame of the same message', () => {
+    // The streaming shape: [thinking] lands first, the sealing text lands in a
+    // later frame of the same message id, and the merge is what brings them
+    // together. The renderer stamps over the merged content; so does this.
+    const s = fold([
+      created(),
+      ['session:message', 'rid', assistant('m1', [{ type: 'thinking', text: 'weighing' }])],
+      [
+        'session:message',
+        'rid',
+        { ...assistant('m1', [{ type: 'text', text: 'answer' }]), thinkingDurationMs: 1500 }
+      ]
+    ])
+    const block = s.sessions['rid'].messages[0].content.find((b) => b.type === 'thinking')
+    expect(block?.type === 'thinking' ? block.durationMs : null).toBe(1500)
+  })
+
+  it('leaves an already-stamped block alone and never invents a duration', () => {
+    const s = fold([
+      created(),
+      [
+        'session:message',
+        'rid',
+        {
+          ...assistant('m1', [{ type: 'thinking', text: 'a', durationMs: 111 }]),
+          thinkingDurationMs: 999
+        }
+      ],
+      // No hint at all ⇒ no durationMs, which is exactly the pre-4b behavior for
+      // an engine that does not time its spans.
+      ['session:message', 'rid', assistant('m2', [{ type: 'thinking', text: 'b' }])]
+    ])
+    const first = s.sessions['rid'].messages[0].content[0]
+    const second = s.sessions['rid'].messages[1].content[0]
+    expect(first.type === 'thinking' ? first.durationMs : null).toBe(111)
+    expect(second.type === 'thinking' ? second.durationMs : undefined).toBeUndefined()
   })
 })
 
@@ -630,6 +740,97 @@ describe('reducer — app-level config', () => {
     expect(snap.sessions['a'].slashCommands).toEqual([{ name: '/foo' }])
     expect(snap.sessions['b'].slashCommands).toEqual([{ name: '/foo' }])
     expect(snap.sessions['b'].sdkSkillNames).toEqual(['skill-x'])
+  })
+})
+
+describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () => {
+  it('round-trips canonical state through the wire shape', () => {
+    const live = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'msg-1', timestamp: 9, prompt: 'hi' }],
+      ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'yo' }])],
+      ['session:queue-changed', 'rid', { items: [{ itemId: 'i1', text: 'later', state: 'queued' }] }],
+      ['session:metering', 'rid', { tokens: { total: 3 } } as never],
+      ['session:config-changed', 'rid', { model: 'opus', effort: 'high' }],
+      ['session:slash-commands', 'rid', [{ name: '/foo' }]],
+      ['session:skills', 'rid', ['skill-x']],
+      ['config:settings-changed', { theme: 'monokai' }]
+    ])
+    const restored = fromSnapshot(toSnapshot(live, 42))
+    // `seeded` is core-internal and not on the wire — a restored session is
+    // complete by definition. Everything else must match exactly.
+    const strip = (s: CanonicalState): unknown => ({
+      ...s,
+      sessions: Object.fromEntries(
+        Object.entries(s.sessions).map(([id, session]) => {
+          const { seeded: _seeded, ...rest } = session
+          return [id, rest]
+        })
+      )
+    })
+    expect(strip(restored)).toEqual(strip(live))
+  })
+
+  it('fills defaults for an older host\'s snapshot (absent optional fields)', () => {
+    const restored = fromSnapshot({
+      seq: 1,
+      sessions: {
+        rid: {
+          routingId: 'rid',
+          cwd: '/repo',
+          messages: [],
+          streamingText: '',
+          streamingThinking: '',
+          status: status({ state: 'idle' }),
+          pendingApprovals: [],
+          todos: [],
+          taskNotifications: [],
+          taskProgressMap: {},
+          subagentMessages: {},
+          subagentStreamingText: {},
+          subagentStreamingThinking: {},
+          permissionMode: 'default',
+          effort: null,
+          statusLine: null,
+          slashCommands: [],
+          sdkSkillNames: []
+        }
+      },
+      directories: [],
+      activeSessionId: null,
+      settings: {},
+      recentSessionIds: [],
+      pinnedSessionIds: [],
+      customTitles: {},
+      worktreeInfoMap: {}
+    })
+    const s = restored.sessions['rid']
+    expect(s.sentFiles).toEqual([])
+    expect(s.queue).toEqual([])
+    expect(s.activeTasks).toEqual({})
+    expect(s.metering).toBeNull()
+    expect(s.sdkActive).toBe(false)
+    expect(s.selectedEngineId).toBe('claude')
+    expect(restored.autoModeDisabledBySettings).toBe(false)
+  })
+
+  it('recovers the open-thinking-span flag from streamingThinking', () => {
+    // The flag is core-internal, but it is DERIVABLE: a non-empty thinking buffer
+    // IS an unsealed span. Without recovering it, a client restored mid-span would
+    // never clear that buffer — stale thinking text under a finished answer.
+    const midSpan = fold([created(), ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }]])
+    const restored = fromSnapshot(toSnapshot(midSpan, 2))
+    const aux = auxFromCanonical(restored)
+    expect(aux.thinkingOpen['rid']).toBe(true)
+
+    const sealed = applyEvent(
+      restored,
+      { channel: 'session:stream', args: ['rid', { type: 'text', text: 'answer' }], seq: 3 },
+      aux
+    )
+    expect(sealed.sessions['rid'].streamingThinking).toBe('')
+    // And an idle session restores with no open span at all.
+    expect(auxFromCanonical(fromSnapshot(toSnapshot(fold([created()]), 1))).thinkingOpen).toEqual({})
   })
 })
 

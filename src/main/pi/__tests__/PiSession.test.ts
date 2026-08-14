@@ -674,6 +674,51 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     const [resultPayload] = sentPayloads(win, 'session:result').slice(-1) as [{ totalCostUsd: number }]
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
+
+  // SyncCore phase 4b, invariant 5: the elapsed thinking span rides the sealing
+  // message so a snapshot-fed client renders "Thought for Xs". The timing lives on
+  // BaseSession.send (one implementation for all three engines); this pins that
+  // pi's own thinking deltas actually reach it, through the real event mapper.
+  it('stamps thinkingDurationMs on the message that seals a thinking span', async () => {
+    vi.useFakeTimers()
+    try {
+      const win = new MockWindow()
+      const session = new PiSession('rid-think', win as never, '/cwd', {})
+      await session.run('hi')
+      const handler = lastEventHandler()
+      const message = (content: Array<Record<string, unknown>>): Record<string, unknown> => ({
+        role: 'assistant',
+        content,
+        api: 'a',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop',
+        timestamp: 1
+      })
+
+      vi.setSystemTime(10_000)
+      handler({
+        type: 'message_update',
+        message: message([{ type: 'thinking', thinking: 'weighing' }]),
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'weighing' }
+      } as never)
+      expect(sentPayloads(win, 'session:stream').slice(-1)[0]).toEqual({
+        type: 'thinking',
+        text: 'weighing'
+      })
+
+      vi.setSystemTime(11_800)
+      handler({ type: 'message_end', message: message([{ type: 'text', text: 'answer' }]) } as never)
+
+      const [sealed] = sentPayloads(win, 'session:message').slice(-1) as [
+        { thinkingDurationMs?: number }
+      ]
+      expect(sealed.thinkingDurationMs).toBe(1800)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('PiSession.interrupt', () => {

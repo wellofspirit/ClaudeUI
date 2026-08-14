@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
@@ -70,6 +71,15 @@ import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
  * to hang a later consume/recall off, so the transitions were guessed from turn
  * state. `session:user-message` now means exactly one thing: this text is in
  * the transcript.
+ *
+ * **Identity is minted HERE, not per client (SyncCore phase 4b).** The payload
+ * used to carry `{prompt, attachments}` only, so every client invented its own
+ * `msg-<uuid>`/`Date.now()` — meaning the same user turn had a different id in
+ * each replica, and core (which must be clock- and randomness-free in the
+ * reducer) could only mint a positional `user-<seq>`. With the snapshot becoming
+ * the state of record, that difference would surface as a transcript whose ids
+ * change under a client on every resync. One mint at the emitter is the fix; the
+ * queue path already had stable `steer-<itemId>` ids and is unchanged.
  */
 export function sendPrompt(
   manager: SessionManager,
@@ -86,7 +96,14 @@ export function sendPrompt(
     return
   }
   session.run(prompt, attachments)
-  emitEvent('session:user-message', [routingId, { prompt, attachments }], 'all', win)
+  emitEvent(
+    'session:user-message',
+    // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
+    // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
+    [routingId, { id: `msg-${crypto.randomUUID()}`, timestamp: Date.now(), prompt, attachments }],
+    'all',
+    win
+  )
 }
 
 /**

@@ -12,10 +12,13 @@
  * provably contains every event through N, which is what kills the as-built
  * watermark race by construction rather than by under-claiming.
  *
- * **Phase 4a runs canonical state in SHADOW.** The renderer's Zustand store is
- * still the state of record for `sync-full` (see `services/event-log.ts`
- * `getFullState`); `getSnapshot()` is consumed only by the shadow comparator and
- * by tests. The cutover is 4b.
+ * **Phase 4b made canonical state the state of record.** `getSnapshot()` is what
+ * every `sync-full` carries (`services/remote-server.ts`), and the renderer-pull
+ * that used to serve it is gone — a busy, hung or absent renderer can no longer
+ * yield an empty snapshot (remote.md defect 2, state-of-record half). The shadow
+ * comparator survives with its roles INVERTED: it now validates the renderer's
+ * replica against authoritative canonical, until 4c rewires that replica onto
+ * the same reducer.
  *
  * Electron-free (lint-fenced). Delivery is INJECTED so this module never needs a
  * `BrowserWindow`: the host (`services/sync-host.ts`) wires the callback to
@@ -33,7 +36,7 @@ import {
   type CanonicalSessionState,
   type CanonicalState
 } from '../../shared/sync/state'
-import type { SessionStatus } from '../../shared/types'
+import type { DirectoryGroup, SessionStatus } from '../../shared/types'
 
 /**
  * Where one emission goes. The `target` names come from the call sites the funnel
@@ -62,8 +65,10 @@ export interface SyncCoreOptions {
    */
   onUnclassified?: (channel: string) => void
   /**
-   * Called when `applyEvent` throws. Canonical state is SHADOW in 4a, so a bad
-   * payload must never break the emission it rode in on — see {@link SyncCore.process}.
+   * Called when `applyEvent` throws. A bad payload must degrade canonical state
+   * and nothing else — never the emission it rode in on — see
+   * {@link SyncCore.process}. Loud, because since 4b that degraded state is what
+   * a reconnecting client receives.
    */
   onApplyError?: (channel: string, err: unknown) => void
 }
@@ -184,13 +189,17 @@ export class SyncCore {
     const seq = spec.ring ? this.ring.append(channel, args) : 0
 
     if (spec.canonical) {
-      // The apply is FENCED. Canonical state is shadow in 4a and the reducer sees
-      // payloads shaped by engines and by older cached clients, so a malformed one
-      // must degrade canonical state — never the delivery that the desktop and
-      // every remote client depend on. Before the funnel a bad payload was simply
-      // a no-op at the far end; keeping that property is what makes routing every
-      // send through here safe. The shadow comparator surfaces the resulting
-      // divergence, which is exactly the signal 4a exists to collect.
+      // The apply is FENCED. The reducer sees payloads shaped by engines and by
+      // older cached clients, so a malformed one must degrade canonical state —
+      // never the delivery that the desktop and every remote client depend on.
+      // Before the funnel a bad payload was simply a no-op at the far end;
+      // keeping that property is what makes routing every send through here safe.
+      //
+      // The trade-off changed with 4b: the skipped apply now costs a reconnecting
+      // client the effect of that event (it is not in the snapshot, and the
+      // catchup that replays it will hit the same throw), so `onApplyError` is
+      // wired to `logger.error` and the shadow comparator surfaces the resulting
+      // divergence against the renderer's replica.
       try {
         const rekey = this.pendingRekeyFor(channel, args)
         this.state = applyEvent(this.state, { channel, args, seq }, this.aux)
@@ -222,7 +231,7 @@ export class SyncCore {
   }
 
   // -------------------------------------------------------------------------
-  // Canonical state (shadow in 4a)
+  // Canonical state (the `sync-full` state of record since 4b)
   // -------------------------------------------------------------------------
 
   /**
@@ -237,6 +246,35 @@ export class SyncCore {
   /** Read-only view for the shadow comparator and tests. */
   getCanonicalState(): CanonicalState {
     return this.state
+  }
+
+  /**
+   * Refresh **query-shaped app state** — the fields no domain event carries
+   * (SyncCore phase 4b).
+   *
+   * Deliberately NOT an event. `directories` is a directory listing the sidebar
+   * has always fetched with `session:list-directories` (`session:directories-changed`
+   * is a payload-less "refetch now" notify), and the boot seeds below are files
+   * every client used to read for itself. Minting synthetic events for them would
+   * put data on the wire that no reducer branch interprets, and would make the
+   * ring's contents depend on how often a watcher fired.
+   *
+   * What it IS: the reason a snapshot from core can replace the renderer's. Until
+   * these fields were core-maintained, a canonical-sourced `sync-full` would have
+   * shipped an empty sidebar, empty settings and empty recents to every phone
+   * that reconnected before the first save of the session — the freshness half of
+   * the cutover (docs/architecture/sync-channels.md §"Client-written state").
+   *
+   * Main-process only (the host owns the services these values come from);
+   * `services/sync-seed.ts` is the only production caller.
+   */
+  setAppState(patch: Partial<Omit<CanonicalState, 'sessions'>>): void {
+    this.state = { ...this.state, ...patch }
+  }
+
+  /** The one field refreshed on a watcher trigger rather than at boot (A3). */
+  setDirectories(directories: DirectoryGroup[]): void {
+    this.setAppState({ directories })
   }
 
   /**
