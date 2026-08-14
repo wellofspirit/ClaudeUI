@@ -47,7 +47,7 @@ import {
 } from './db'
 import { v4 as uuid } from 'uuid'
 import { equivalentCostUsd, ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from './sync-host'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1924,12 +1924,7 @@ export class BlockUsageService {
 
   private pushToRenderer(data: BlockUsageData): void {
     try {
-      if (this.window && !this.window.isDestroyed()) {
-        this.window.webContents.send('usage:block-data', data)
-      }
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('usage:block-data', data)
-      }
+      emitEvent('usage:block-data', [data], 'all', this.window)
     } catch {
       // Window may have been closed
     }

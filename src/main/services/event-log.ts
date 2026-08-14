@@ -1,78 +1,32 @@
-import * as crypto from 'node:crypto'
-import type { EventEntry, FullStateSnapshot } from '../../shared/remote-protocol'
+import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import type { BrowserWindow } from 'electron'
 
 /**
- * Sequenced ring buffer of events for remote client catchup.
- * Each event gets a monotonically increasing sequence number.
- * When a client reconnects, it sends its lastSeq — if still in the buffer
- * we replay from there; otherwise we send a full state snapshot.
+ * The renderer-snapshot path — all that is left of the old `EventLog`.
  *
- * The `seq` counter starts at 0 for each new EventLog instance (i.e. each app
- * process). Without an identity marker, a client that reconnects across a
- * desktop restart would send a stale `lastSeq` that `getAfter` sees as "already
- * up to date" (its own seq is back at 0), silently missing everything. The
- * per-instance {@link epoch} lets the server detect that mismatch and answer
- * with a full snapshot instead (M-DB4).
+ * SyncCore phase 4a moved the ring itself into `main/sync/event-ring.ts` (and
+ * the emission funnel that feeds it into `main/sync/sync-core.ts`), because a
+ * ring appended from two places cannot hold the "one emission ⇒ one entry"
+ * invariant. What stays here is the one thing that genuinely needs Electron and
+ * is genuinely still authoritative in 4a: pulling the full state snapshot out of
+ * the desktop renderer's Zustand store.
+ *
+ * That privilege is what phase 4b deletes (`SyncCore.getSnapshot()` becomes the
+ * state of record and this class goes away). Until then core's canonical state
+ * runs in SHADOW and this remains the `sync-full` source, unchanged.
  */
 export class EventLog {
-  private buffer: EventEntry[] = []
-  private seq = 0
-  private readonly capacity: number
   private win: BrowserWindow | null = null
-  /** Unique per EventLog instance (≈ per app process). */
-  private readonly epochId = crypto.randomUUID()
 
-  constructor(capacity = 5000) {
-    this.capacity = capacity
-  }
+  /**
+   * Reads the CURRENT ring seq. Injected rather than owned: the seq must be the
+   * one the funnel is assigning, otherwise the watermark below would describe a
+   * different event stream than the client is replaying.
+   */
+  constructor(private readonly seqReader: { currentSeq(): number }) {}
 
   setWindow(win: BrowserWindow): void {
     this.win = win
-  }
-
-  /** The per-process epoch a client must echo back for a catchup to be valid. */
-  epoch(): string {
-    return this.epochId
-  }
-
-  /** Append an event and return its sequence number. */
-  append(channel: string, args: unknown[]): number {
-    this.seq++
-    const entry: EventEntry = {
-      seq: this.seq,
-      channel,
-      args,
-      timestamp: Date.now()
-    }
-    this.buffer.push(entry)
-    // Prune oldest entries when over capacity
-    if (this.buffer.length > this.capacity) {
-      this.buffer.splice(0, this.buffer.length - this.capacity)
-    }
-    return this.seq
-  }
-
-  /** Get current sequence number. */
-  currentSeq(): number {
-    return this.seq
-  }
-
-  /**
-   * Get all events after the given sequence number.
-   * Returns null if the requested seq has been evicted from the buffer.
-   */
-  getAfter(seq: number): EventEntry[] | null {
-    if (seq >= this.seq) return [] // already up to date
-    if (this.buffer.length === 0) return null
-
-    const oldest = this.buffer[0].seq
-    if (seq < oldest - 1) return null // too far behind, need full state
-
-    // Find the first entry after the requested seq
-    const startIdx = this.buffer.findIndex((e) => e.seq > seq)
-    if (startIdx === -1) return []
-    return this.buffer.slice(startIdx)
   }
 
   /**
@@ -89,9 +43,13 @@ export class EventLog {
    * catchup-replays `seqAtStart + 1..now` straight on top, and session events
    * are built for replay (messages upsert by id, status/permission-mode
    * replace), so re-applying the few the snapshot already reflects converges.
+   *
+   * `SyncCore.getSnapshot()` needs none of this ceremony — it captures seq and
+   * serializes in the same synchronous tick — which is the structural reason 4b
+   * can delete this method rather than keep patching it.
    */
   async getFullState(): Promise<FullStateSnapshot> {
-    const seqAtStart = this.seq
+    const seqAtStart = this.seqReader.currentSeq()
     const empty = (): FullStateSnapshot => ({
       seq: seqAtStart,
       sessions: {},
@@ -118,11 +76,5 @@ export class EventLog {
     }
 
     return empty()
-  }
-
-  /** Clear the buffer (e.g. when server stops). */
-  clear(): void {
-    this.buffer = []
-    // Don't reset seq — it should be monotonic across server restarts
   }
 }

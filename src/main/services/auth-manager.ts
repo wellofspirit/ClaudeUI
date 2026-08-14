@@ -26,6 +26,7 @@ import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
 import { serviceSession } from './service-session'
 import { logger } from './logger'
+import { emitEvent } from './sync-host'
 
 interface AuthorizeUrls {
   manualUrl?: string
@@ -86,11 +87,13 @@ class AuthManager {
     const acc = account as Record<string, unknown> | undefined
     const loggedIn = !!(acc && acc.email)
     // Matches the (routingId, source) shape of the session:auth-source event;
-    // login is global so the id is a synthetic 'system'.
-    this.window.webContents.send(
+    // login is global so the id is a synthetic 'system'. main-only, verbatim —
+    // ClaudeSession's own emitter is the one that fans out.
+    emitEvent(
       'session:auth-source',
-      'system',
-      loggedIn ? 'authenticated' : 'none'
+      ['system', loggedIn ? 'authenticated' : 'none'],
+      'main-only',
+      this.window
     )
   }
 

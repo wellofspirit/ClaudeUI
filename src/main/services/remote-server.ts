@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import type { BrowserWindow } from 'electron'
 import { app } from 'electron'
 import { EventLog } from './event-log'
+import { syncCore } from './sync-host'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
   hasLiveShellGrant,
@@ -293,7 +294,14 @@ export class RemoteServer {
   private port = 0
   private boundHost = '' // the IP the server is bound to (for URL generation)
   private clients = new Map<WebSocket, AuthenticatedClient>()
-  private eventLog: EventLog
+  /**
+   * The renderer-snapshot source. Phase 4a keeps the renderer authoritative for
+   * `sync-full`; the RING it stamps watermarks from now lives in SyncCore, which
+   * is the only thing that appends to it.
+   */
+  private rendererSnapshot: EventLog
+  /** The one event ring + canonical state. Injected for tests. */
+  private readonly core: typeof syncCore
   private dispatcher: RemoteDispatcher
   private bridge: RemoteBridge
   private win: BrowserWindow | null = null
@@ -335,9 +343,11 @@ export class RemoteServer {
   constructor(
     dispatcher: RemoteDispatcher,
     passwordAuth: PasswordAuthProvider = dbPasswordAuthProvider(),
-    tailscale: TailscaleServeController = new TailscaleManager()
+    tailscale: TailscaleServeController = new TailscaleManager(),
+    core: typeof syncCore = syncCore
   ) {
-    this.eventLog = new EventLog()
+    this.core = core
+    this.rendererSnapshot = new EventLog(core)
     this.dispatcher = dispatcher
     this.passwordAuth = passwordAuth
     this.tailscale = tailscale
@@ -347,17 +357,30 @@ export class RemoteServer {
     // Wire tunnel status changes to notify the desktop renderer
     this.tunnel.setStatusHandler(() => this.notifyStatus())
 
-    // Wire the bridge to forward events to the event log and all clients
-    this.bridge.onEvent((channel: string, ...args: unknown[]) => {
-      const seq = this.eventLog.append(channel, args)
+    // The funnel path: SyncCore already appended and applied; broadcast with
+    // ITS seq. No re-numbering — the frame's seq is the client's cursor and a
+    // catchup replays from that same ring.
+    this.bridge.onSequencedEvent((seq: number, channel: string, args: unknown[]) => {
       this.broadcast({ type: 'event', seq, channel, args })
+    })
+    // The legacy unsequenced path. Reaching it means an emitter bypassed
+    // `emitEvent`, so the event is NOT in the ring. Appending a second time
+    // here would break the one-emission-one-entry invariant that catchup rests
+    // on, so this is a loud no-op instead (the funnel guard test keeps
+    // production free of such callers).
+    this.bridge.onEvent((channel: string) => {
+      logger.error(
+        'remote-server',
+        `unfunneled emission on "${channel}" reached the remote bridge — route it ` +
+          `through emitEvent() in services/sync-host.ts (event dropped)`
+      )
     })
   }
 
   /** Set the main BrowserWindow (needed for full state snapshots). */
   setWindow(win: BrowserWindow): void {
     this.win = win
-    this.eventLog.setWindow(win)
+    this.rendererSnapshot.setWindow(win)
   }
 
   /** Set a callback for status change notifications. */
@@ -674,7 +697,7 @@ export class RemoteServer {
       this.httpServer = null
     }
 
-    this.eventLog.clear()
+    this.core.clearRing()
     this.port = 0
     this.token = ''
     this.mockupToken = ''
@@ -1375,7 +1398,7 @@ export class RemoteServer {
       return
     }
 
-    const state = await this.eventLog.getFullState()
+    const state = await this.rendererSnapshot.getFullState()
     const session = state.sessions?.[query.session]
     if (!session) {
       refuse(404, 'Not found')
@@ -2164,7 +2187,7 @@ export class RemoteServer {
   }
 
   private async handleSync(ws: WebSocket, lastSeq: number, epoch?: string): Promise<void> {
-    const currentEpoch = this.eventLog.epoch()
+    const currentEpoch = this.core.epoch()
     const mockupToken = this.mockupToken || undefined
     const fileToken = this.fileToken || undefined
 
@@ -2173,16 +2196,16 @@ export class RemoteServer {
     // back near 0) — the client's lastSeq is meaningless. Send a full snapshot
     // rather than a catchup that would falsely report "caught up" (M-DB4).
     if (lastSeq === 0 || epoch !== currentEpoch) {
-      const state = await this.eventLog.getFullState()
+      const state = await this.rendererSnapshot.getFullState()
       this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
       return
     }
 
     // Same epoch — try to catch up from the event log.
-    const events = this.eventLog.getAfter(lastSeq)
+    const events = this.core.getAfter(lastSeq)
     if (events === null) {
       // Too far behind — send full state
-      const state = await this.eventLog.getFullState()
+      const state = await this.rendererSnapshot.getFullState()
       this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
     } else {
       this.sendTo(ws, { type: 'sync-catchup', events, epoch: currentEpoch })
@@ -2337,10 +2360,16 @@ export class RemoteServer {
     }
   }
 
-  /** Also forward non-session events (git, config, etc.) from the main window. */
+  /**
+   * @deprecated SyncCore phase 4a — every emission goes through
+   * `emitEvent()` (services/sync-host.ts) now, which reaches remote clients via
+   * the bridge. This had no production callers even before the funnel
+   * (docs/architecture/remote.md defect 5) and appending here would be a second
+   * ring writer. Kept as a funnel delegation so any future caller is correct by
+   * construction.
+   */
   pushNonSessionEvent(channel: string, ...args: unknown[]): void {
-    const seq = this.eventLog.append(channel, args)
-    this.broadcast({ type: 'event', seq, channel, args })
+    this.core.emit(channel, args, { target: 'extras-only' })
   }
 }
 

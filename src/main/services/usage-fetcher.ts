@@ -24,7 +24,7 @@ import { homedir, platform } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type { BrowserWindow } from 'electron'
 import { getSdkVersion } from './claude-session'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from './sync-host'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
 import { recordWindowSample } from './db'
@@ -498,12 +498,7 @@ export class UsageFetcher {
     // time-series + 5h block alignment can be sourced from the DB. Best-effort.
     this.recordWindowSampleFromUsage(usage)
     try {
-      if (this.window && !this.window.isDestroyed()) {
-        this.window.webContents.send('usage:data', usage)
-      }
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('usage:data', usage)
-      }
+      emitEvent('usage:data', [usage], 'all', this.window)
     } catch {
       /* Window may have been closed */
     }

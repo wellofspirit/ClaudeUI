@@ -141,7 +141,7 @@ import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-
 import { RemoteDispatcher } from '../remote-dispatcher'
 import { registerCommand } from '../../ipc/command-registry'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../git-watch-registry'
-import { BaseSession } from '../../providers/BaseSession'
+import { emitEvent } from '../sync-host'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
 import type { GitStatusData } from '../../../shared/types'
@@ -625,15 +625,14 @@ describe('RemoteServer — remote git watching end-to-end', () => {
     port = await ephemeralPort()
 
     // Production installs this fan-out in registerSessionIpc(); replicated here
-    // verbatim minus the desktop main window (there is none in this harness). The
-    // `BaseSession.getExtraWindows()` hop is the load-bearing one: RemoteServer
-    // .start() registers its RemoteBridge there, and the bridge is what turns the
-    // send into a WS frame. Pushing to the server directly instead would bypass
-    // the bridge and prove nothing, so this is the ONLY wiring the test does.
+    // verbatim. Since SyncCore phase 4a that means ONE `emitEvent` call: the
+    // funnel appends to the ring and hands the seq to the RemoteBridge, which is
+    // what turns it into a WS frame. The bridge hop is still the load-bearing one
+    // (RemoteServer.start() registers it as an extra sink) — pushing to the
+    // server directly would bypass it and prove nothing, so this stays the ONLY
+    // wiring the test does. `win` is omitted: there is no desktop window here.
     gitWatchRegistry.init((cwd, status) => {
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
-      }
+      emitEvent('git:status-update', [{ cwd, status }], 'all')
     })
 
     // A committed file, then a real uncommitted modification to it.
@@ -1427,24 +1426,29 @@ describe('RemoteServer — sync epoch (R7)', () => {
 
   it('a sync with the CURRENT epoch returns a catchup', async () => {
     const res = await server.start(port, '127.0.0.1')
-    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
-    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
-    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 3 })
     const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
     await client.ready
 
-    // Learn the current epoch from a fresh full sync.
+    // Learn the epoch AND the current watermark before pushing. Since SyncCore
+    // phase 4a the ring is process-global (one app, one ring — which is the whole
+    // point of the single-append invariant), so seq numbers are no longer
+    // per-server and cannot be hardcoded.
     const fullP = nextSync(client)
     await client.send({ type: 'sync', lastSeq: 0 })
     const full = await fullP
     const epoch = full.epoch as string
+    const base = (full.state as { seq: number }).seq
 
-    // Now catch up from seq 1 with the matching epoch → events 2 and 3.
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 3 })
+
+    // Catch up from the first of the three with the matching epoch → the last two.
     const catchP = nextSync(client)
-    await client.send({ type: 'sync', lastSeq: 1, epoch })
+    await client.send({ type: 'sync', lastSeq: base + 1, epoch })
     const msg = await catchP
     expect(msg.type).toBe('sync-catchup')
-    expect((msg.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([2, 3])
+    expect((msg.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([base + 2, base + 3])
     expect(msg.epoch).toBe(epoch)
     client.close()
   })

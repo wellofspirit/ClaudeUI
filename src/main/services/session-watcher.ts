@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from './sync-host'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
 
@@ -46,23 +46,12 @@ export function watchSession(
           sessionId,
           projectKey
         )
-        if (!win.isDestroyed()) {
-          win.webContents.send('session:watch-update', {
-            routingId,
-            messages,
-            taskNotifications,
-            statusLine
-          })
-        }
-        for (const w of BaseSession.getExtraWindows()) {
-          if (!w.isDestroyed())
-            w.webContents.send('session:watch-update', {
-              routingId,
-              messages,
-              taskNotifications,
-              statusLine
-            })
-        }
+        emitEvent(
+          'session:watch-update',
+          [{ routingId, messages, taskNotifications, statusLine }],
+          'all',
+          win
+        )
       } catch (err) {
         logger.warn('SessionWatcher', `Parse error during watch update for ${sessionId}`, err)
       }

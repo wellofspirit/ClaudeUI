@@ -6,7 +6,7 @@ import * as os from 'os'
 import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts } from './claude-session'
-import { BaseSession } from '../providers/BaseSession'
+import { emitEvent } from './sync-host'
 import { loadSessionHistory } from './session-history'
 import { extractToolResultContent } from './tool-result-content'
 import { logger } from './logger'
@@ -518,32 +518,15 @@ export class AutomationManager {
   }
 
   private emitRunMessage(automationId: string, message: ChatMessage): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send('automation:run-message', { automationId, message })
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('automation:run-message', { automationId, message })
-    }
+    emitEvent('automation:run-message', [{ automationId, message }], 'all', this.win)
   }
 
   private emitStreamEvent(automationId: string, type: string, text: string): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send('automation:stream-event', { automationId, type, text })
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed())
-        w.webContents.send('automation:stream-event', { automationId, type, text })
-    }
+    emitEvent('automation:stream-event', [{ automationId, type, text }], 'all', this.win)
   }
 
   private emitProcessing(automationId: string, isProcessing: boolean): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send('automation:processing', { automationId, isProcessing })
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed())
-        w.webContents.send('automation:processing', { automationId, isProcessing })
-    }
+    emitEvent('automation:processing', [{ automationId, isProcessing }], 'all', this.win)
   }
 
   private async executeRun(automation: Automation): Promise<void> {
@@ -938,21 +921,11 @@ export class AutomationManager {
   // ---- Notifications ------------------------------------------------------
 
   private notifyRunUpdate(automationId: string, run: AutomationRun): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send('automation:run-update', { automationId, run })
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('automation:run-update', { automationId, run })
-    }
+    emitEvent('automation:run-update', [{ automationId, run }], 'all', this.win)
   }
 
   private notifyAutomationsChanged(): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send('automation:changed', this.automations)
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('automation:changed', this.automations)
-    }
+    emitEvent('automation:changed', [this.automations], 'all', this.win)
   }
 
   private sendNativeNotification(automation: Automation, run: AutomationRun): void {

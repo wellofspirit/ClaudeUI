@@ -13,6 +13,7 @@ import type { ISession } from './ISession'
 import { SessionQueue } from './session-queue'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
+import { addExtraSink, removeExtraSink, extraSinks, emitEvent } from '../services/sync-host'
 
 /**
  * Abstract base class holding engine-neutral plumbing shared by all session
@@ -36,18 +37,22 @@ export abstract class BaseSession implements ISession {
   // Static: extra broadcast windows (remote clients)
   // ---------------------------------------------------------------------------
 
-  private static extraWindows = new Set<BrowserWindow>()
+  // The registry itself lives in `services/sync-host.ts` (SyncCore phase 4a):
+  // the delivery adapter is the only thing that fans out to it, and keeping the
+  // set here would make `sync-host` ↔ `BaseSession` a cycle. These accessors
+  // stay as-is so every existing call site and test is unchanged; both they and
+  // the registry are 4c deletion targets.
 
   static addExtraWindow(win: BrowserWindow): void {
-    this.extraWindows.add(win)
+    addExtraSink(win)
   }
 
   static removeExtraWindow(win: BrowserWindow): void {
-    this.extraWindows.delete(win)
+    removeExtraSink(win)
   }
 
   static getExtraWindows(): Set<BrowserWindow> {
-    return this.extraWindows
+    return extraSinks()
   }
 
   // ---------------------------------------------------------------------------
@@ -347,16 +352,21 @@ export abstract class BaseSession implements ISession {
   }
 
   /**
-   * Broadcast an IPC event to the main window and all extra windows.
-   * Identical semantics to the former private ClaudeSession.send().
+   * Broadcast a domain event to this session's window and every extra window.
+   *
+   * SyncCore phase 4a: delegates to the emission funnel, so the event is appended
+   * to the ring and applied to canonical state BEFORE it is delivered — the
+   * ordering that makes "a snapshot at seq N contains every event through N"
+   * true by construction. Delivery semantics are unchanged: `this.win` (the
+   * session's OWN window, not a process-global one) plus all extras.
+   *
+   * `routingId` rides as `args[0]`, which is the wire encoding of contract 2's
+   * `sessionId` — positional, not a named field (see sync-core.md §"Wire
+   * encoding"). It is read fresh on every send, so a rekey mid-turn is picked up
+   * without any re-registration.
    */
   protected send(channel: string, data: unknown): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send(channel, this.routingId, data)
-    }
-    for (const w of BaseSession.extraWindows) {
-      if (!w.isDestroyed()) w.webContents.send(channel, this.routingId, data)
-    }
+    emitEvent(channel, [this.routingId, data], 'all', this.win)
   }
 
   /**
