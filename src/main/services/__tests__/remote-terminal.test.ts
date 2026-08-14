@@ -236,11 +236,32 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     vi.restoreAllMocks()
   })
 
-  async function connect(): Promise<RemoteClient> {
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+  async function connect(e2eKey?: string): Promise<RemoteClient> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token, e2eKey })
     await client.ready
     clients.push(client)
     return client
+  }
+
+  /**
+   * Restart the fixture server in TUNNEL mode and hand back its E2E key, so a
+   * client can complete the mandatory `e2e-activate` (a tunnel socket whose
+   * first post-auth frame is anything else is closed 4004). The key is private
+   * to the server — read the same way remote-server.test.ts does.
+   */
+  async function restartInTunnelMode(): Promise<string> {
+    for (const c of clients) c.close()
+    clients.length = 0
+    server.stop()
+    server = new RemoteServer(
+      new RemoteDispatcher(),
+      passwordProvider() as never,
+      tailscaleStub as never
+    )
+    terminalService.setRemoteSink(server.terminalSink())
+    port = await ephemeralPort()
+    token = (await server.start(port, '127.0.0.1', { tunnel: true })).token
+    return (server as unknown as { e2eKey: string }).e2eKey
   }
 
   /** Advance the (Date.now-only) clock by `minutes`. */
@@ -385,6 +406,54 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
           clients.push(c)
           return c.ready
         })
+    ).rejects.toThrow()
+  })
+
+  // -------------------------------------------------------------------------
+  // Test 2b — the ceremony is transport-INDEPENDENT (tunnel step-up)
+  // -------------------------------------------------------------------------
+
+  it('runs the step-up ceremony over the cloudflared tunnel and arms the grant', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const e2eKey = await restartInTunnelMode()
+    const client = await connect(e2eKey)
+
+    // Password AUTHENTICATION stays refused on this transport (the E2E key
+    // rides the URL fragment, which a password login does not have). A step-up
+    // is not authentication: this socket is already token-authed AND E2E-active,
+    // so the proof travels encrypted end to end and the tunnel edge sees only
+    // ciphertext. Pre-fix the gate reused passwordParams() and answered
+    // 'no-password' here, leaving the terminal permanently locked over tunnels.
+    await expect(client.invoke('terminal:create', '/tmp/x')).rejects.toThrow('needs-step-up')
+    expect(await stepUp(client)).toMatchObject({ ok: true })
+
+    await expect(client.invoke('terminal:create', '/tmp/x')).resolves.toBeTruthy()
+    expect(ptyStub.spawned).toHaveLength(1)
+  })
+
+  it('spends the SHARED password budget on a wrong tunnel step-up proof', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const e2eKey = await restartInTunnelMode()
+    const client = await connect(e2eKey)
+
+    const wrong = 'ff'.repeat(32)
+    for (let i = 0; i < 5; i++) {
+      expect(await stepUp(client, wrong)).toMatchObject({ ok: false, code: 'invalid-proof' })
+    }
+    expect(await stepUp(client, wrong)).toMatchObject({ ok: false, code: 'throttled' })
+    // Same budget the auth handshake spends: a brand-new socket from this key
+    // is refused before it can present a credential. Opening the ceremony to
+    // the tunnel must not open a fresh, unthrottled guessing surface.
+    await expect(
+      connectRemoteClient({
+        url: `ws://127.0.0.1:${port}/`,
+        token,
+        e2eKey,
+        handshakeTimeoutMs: 2000
+      }).then((c) => {
+        clients.push(c)
+        return c.ready
+      })
     ).rejects.toThrow()
   })
 
@@ -544,25 +613,57 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
   })
 
   it('reports availability honestly through each stage', async () => {
+    const stepUpParams = { saltHex: SALT_HEX, kdf: KDF }
     const client = await connect()
     await expect(client.invoke('terminal:availability')).resolves.toEqual({
       allowed: false,
       granted: false,
-      needsStepUp: false
+      needsStepUp: false,
+      stepUp: stepUpParams
     })
 
     remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
     await expect(client.invoke('terminal:availability')).resolves.toEqual({
       allowed: true,
       granted: false,
-      needsStepUp: true
+      needsStepUp: true,
+      stepUp: stepUpParams
     })
 
     await stepUp(client)
     await expect(client.invoke('terminal:availability')).resolves.toEqual({
       allowed: true,
       granted: true,
-      needsStepUp: false
+      needsStepUp: false,
+      stepUp: stepUpParams
+    })
+  })
+
+  it('delivers the step-up params iff a credential exists — over the tunnel too', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const lanClient = await connect()
+    await expect(lanClient.invoke('terminal:availability')).resolves.toMatchObject({
+      stepUp: { saltHex: SALT_HEX, kdf: KDF }
+    })
+
+    // On the tunnel `/remote/auth-info` advertises token-only (password AUTH is
+    // refused there by design), so this channel is the ONLY salt delivery the
+    // web client has for the ceremony.
+    const e2eKey = await restartInTunnelMode()
+    const tunnelClient = await connect(e2eKey)
+    await expect(tunnelClient.invoke('terminal:availability')).resolves.toMatchObject({
+      stepUp: { saltHex: SALT_HEX, kdf: KDF }
+    })
+
+    // No credential ⇒ no factor exists ⇒ null, and the client short-circuits on
+    // it with the same verdict the server would give.
+    remoteConfigRef.current = makeConfigRow({
+      allowTerminal: true,
+      passwordSalt: null,
+      passwordHash: null
+    })
+    await expect(tunnelClient.invoke('terminal:availability')).resolves.toMatchObject({
+      stepUp: null
     })
   })
 })

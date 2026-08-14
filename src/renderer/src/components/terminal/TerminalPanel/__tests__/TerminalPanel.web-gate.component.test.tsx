@@ -54,7 +54,8 @@ describe('TerminalPanel — web availability gate', () => {
       async (): Promise<TerminalAvailability> => ({
         allowed: true,
         granted: true,
-        needsStepUp: false
+        needsStepUp: false,
+        stepUp: null
       })
     )
     real.terminalStepUp = vi.fn(async () => ({ ok: true }))

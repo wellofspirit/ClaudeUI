@@ -1,4 +1,5 @@
 import type { ResolvedCapabilities } from './model-capabilities'
+import type { RemoteKdfParams } from './remote-protocol'
 import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
@@ -1474,12 +1475,31 @@ export interface RemoteConfig {
  * - `allowed`     — the host permits a terminal for this connection at all
  *                   (always true on desktop; the opt-in toggle over remote);
  * - `granted`     — a live `shell` grant is held, so commands will run;
- * - `needsStepUp` — allowed but not granted: run the step-up ceremony.
+ * - `needsStepUp` — allowed but not granted: run the step-up ceremony;
+ * - `stepUp`      — the public params to derive the ceremony's proof from, or
+ *                   null when no credential exists (so no factor exists either).
  */
 export interface TerminalAvailability {
   allowed: boolean
   granted: boolean
   needsStepUp: boolean
+  stepUp: TerminalStepUpParams | null
+}
+
+/**
+ * Public inputs for the step-up proof — the same salt + KDF params
+ * `/remote/auth-info` advertises, delivered on this channel instead.
+ *
+ * Auth-info cannot carry them over the tunnel: that transport refuses password
+ * AUTHENTICATION (an E2E session needs the fragment key a password client does
+ * not have), so it correctly omits `password` from the advertised methods. A
+ * step-up is a different act — an already-authenticated, E2E-active socket
+ * proving a human is present — so its params ride the authenticated channel.
+ * Both are public by construction (a salt discloses nothing).
+ */
+export interface TerminalStepUpParams {
+  saltHex: string
+  kdf: RemoteKdfParams
 }
 
 /** Outcome of a step-up ceremony (see `WsStepUpResponse`). */

@@ -959,6 +959,11 @@ export class RemoteServer {
    * E2E-encrypted session needs the key from the URL fragment, which a password
    * client by definition does not have — it would authenticate and then be
    * closed with 4004 for failing to activate E2E.
+   *
+   * This is the AUTHENTICATION gate only, hence the transport condition. The
+   * step-up ceremony reads {@link passwordAuth} directly instead: its caller is
+   * already authenticated and E2E-active, so its proof is confidential on every
+   * transport (see {@link handleStepUp}).
    */
   private passwordParams(): { saltHex: string; kdf: RemoteKdfParams } | null {
     if (this.e2eKey !== null) return null
@@ -1991,18 +1996,26 @@ export class RemoteServer {
       })
       return
     }
-    if (!this.passwordParams()) {
-      // Tunnel mode deliberately refuses password auth (an E2E session needs the
-      // fragment key a password client does not have), which also removes this
-      // phase's only step-up factor. Say THAT rather than "set a password" —
-      // the owner may well have one set and would be sent in circles.
-      const inTunnelMode = this.e2eKey !== null && this.passwordAuth.params() !== null
+    // Gates on CREDENTIAL EXISTENCE, not on transport — deliberately NOT
+    // passwordParams(), which is the AUTHENTICATION gate and stays
+    // transport-scoped (a password login cannot carry the E2E key that rides the
+    // URL fragment, so over the tunnel it would authenticate and then be closed
+    // with 4004; that gate is correct and untouched).
+    //
+    // A step-up caller is a different kind of caller: an ALREADY
+    // token-authenticated, E2E-ACTIVE socket (a tunnel connection whose first
+    // post-auth frame is not `e2e-activate` is closed 4004), so its `pwProof`
+    // rides the encrypted channel end to end and the tunnel edge only ever sees
+    // ciphertext. Confidentiality over the tunnel is therefore the same as on
+    // the LAN; the static-proof caveat is unchanged from LAN mode (security.md
+    // break-glass note), and a wrong proof still spends the shared password
+    // budget below.
+    if (!this.passwordAuth.params()) {
       respond({
         ok: false,
         code: 'no-password',
-        error: inTunnelMode
-          ? 'The terminal cannot be unlocked over the tunnel yet — connect over your LAN or Tailscale instead.'
-          : 'Set a remote-access password in Settings › Remote on the desktop app — the terminal needs it to confirm it is you.',
+        error:
+          'Set a remote-access password in Settings › Remote on the desktop app — the terminal needs it to confirm it is you.',
         retryable: false
       })
       return

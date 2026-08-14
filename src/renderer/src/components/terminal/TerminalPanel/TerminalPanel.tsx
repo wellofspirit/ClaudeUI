@@ -24,7 +24,9 @@ interface Props {
 const DESKTOP_AVAILABILITY: TerminalAvailability = {
   allowed: true,
   granted: true,
-  needsStepUp: false
+  needsStepUp: false,
+  // No ceremony on desktop, so no proof params to carry.
+  stepUp: null
 }
 
 export function TerminalPanel({ style }: Props): React.JSX.Element {
@@ -58,7 +60,7 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
     } catch {
       // An older host (or a dropped connection) means "no terminal here" —
       // never optimistically render a shell we cannot actually drive.
-      setAvailability({ allowed: false, granted: false, needsStepUp: false })
+      setAvailability({ allowed: false, granted: false, needsStepUp: false, stepUp: null })
     }
   }, [isWeb])
 
@@ -81,9 +83,15 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
       const terminalId = await window.api.createTerminal(cwd || '.')
       addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
     } catch (err) {
-      // The grant decayed between the availability check and the click.
+      // The grant decayed between the availability check and the click. Keep
+      // whatever step-up params the last query returned — only the grant died.
       if (isWeb && isNeedsStepUpError(err)) {
-        setAvailability({ allowed: true, granted: false, needsStepUp: true })
+        setAvailability((prev) => ({
+          allowed: true,
+          granted: false,
+          needsStepUp: true,
+          stepUp: prev?.stepUp ?? null
+        }))
         return
       }
       throw err

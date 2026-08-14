@@ -24,6 +24,7 @@ import { PtyManager, type PtyRemoteSink } from './pty-manager'
 import { appendAuditLog, getRemoteConfig, DEFAULT_SHELL_GRANT_IDLE_MINUTES } from './db'
 import { logger } from './logger'
 import { hasLiveShellGrant, type CommandConnection } from '../ipc/command-registry'
+import { dbPasswordAuthProvider, type PasswordAuthProvider } from './remote-auth'
 import {
   NEEDS_STEP_UP_ERROR,
   TERMINAL_DISABLED_ERROR,
@@ -70,6 +71,12 @@ export function shellGrantIdleMs(policy: TerminalPolicy = readTerminalPolicy()):
 export class TerminalService {
   private manager = new PtyManager()
   private win: BrowserWindow | null = null
+  /**
+   * Credential the step-up ceremony verifies against — used here only for its
+   * PUBLIC params (salt + KDF), never to verify anything. Constructed once; it
+   * reads `remote_config` on every call.
+   */
+  private stepUpCredential: PasswordAuthProvider = dbPasswordAuthProvider()
 
   /** Desktop renderer target for `terminal:data` / `terminal:exit`. */
   setWindow(win: BrowserWindow | null): void {
@@ -88,19 +95,33 @@ export class TerminalService {
 
   /**
    * The three booleans the UI gates on (capability honesty: the web client
-   * shows the terminal affordance only from this).
+   * shows the terminal affordance only from this), plus the params the step-up
+   * proof is derived from.
    *
    * The desktop renderer is never gated by the REMOTE toggle — that switch
    * exists to arm the `shell` capability for remote connections, not to take
-   * the local shell away from the person sitting at the machine.
+   * the local shell away from the person sitting at the machine. It never runs
+   * a ceremony either, hence `stepUp: null` there.
+   *
+   * `stepUp` is carried HERE rather than left to `/remote/auth-info` because
+   * auth-info advertises AUTHENTICATION methods, and the tunnel transport
+   * correctly refuses password auth (see `TerminalStepUpParams`). Read
+   * fresh per call (like the policy) so provisioning or clearing the credential
+   * applies to the very next query. Same DB-backed provider `RemoteServer`
+   * verifies the proof against, so the two can never disagree in production.
    */
   availability(connection: CommandConnection): TerminalAvailability {
     if (connection.identity.method === 'desktop') {
-      return { allowed: true, needsStepUp: false, granted: true }
+      return { allowed: true, needsStepUp: false, granted: true, stepUp: null }
     }
     const allowed = readTerminalPolicy().allowTerminal
     const granted = allowed && hasLiveShellGrant(connection)
-    return { allowed, needsStepUp: allowed && !granted, granted }
+    return {
+      allowed,
+      needsStepUp: allowed && !granted,
+      granted,
+      stepUp: this.stepUpCredential.params()
+    }
   }
 
   /**

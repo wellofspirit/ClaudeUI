@@ -7,10 +7,14 @@
  * to the same handler functions that IPC uses.
  */
 
-import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
+import type {
+  ApprovalDecision,
+  ClaudeAPI,
+  PermissionSuggestion,
+  TerminalAvailability
+} from '../shared/types'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
-import type { RemoteAuthInfo } from '../shared/remote-protocol'
 import { derivePasswordProof } from './password-proof'
 import type { RemoteConnection } from './connection'
 
@@ -379,13 +383,15 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     terminalAvailability: () =>
       connection.invoke('terminal:availability') as ReturnType<ClaudeAPI['terminalAvailability']>,
     terminalStepUp: async (password) => {
-      let info: RemoteAuthInfo
+      // Proof params come from `terminal:availability`, NOT `/remote/auth-info`:
+      // auth-info advertises authentication methods, and over the tunnel the
+      // server (correctly) refuses password auth, so it omits `password` there —
+      // which used to make a step-up impossible on that transport even though
+      // the ceremony itself is transport-independent (the proof rides the
+      // already-authenticated, E2E-encrypted channel).
+      let availability: TerminalAvailability
       try {
-        const res = await fetch(new URL('/remote/auth-info', window.location.origin).toString(), {
-          cache: 'no-store'
-        })
-        if (!res.ok) throw new Error(`auth-info returned HTTP ${res.status}`)
-        info = (await res.json()) as RemoteAuthInfo
+        availability = (await connection.invoke('terminal:availability')) as TerminalAvailability
       } catch (err) {
         return {
           ok: false,
@@ -393,7 +399,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
           retryable: true
         }
       }
-      if (!info.password) {
+      if (!availability.stepUp) {
         // No credential provisioned ⇒ no step-up factor exists. Same verdict the
         // server would give, minus a pointless round trip.
         return {
@@ -404,7 +410,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
           retryable: false
         }
       }
-      const proof = await derivePasswordProof(password, info.password.saltHex, info.password.kdf)
+      const proof = await derivePasswordProof(
+        password,
+        availability.stepUp.saltHex,
+        availability.stepUp.kdf
+      )
       const response = await connection.stepUp(proof)
       return {
         ok: response.ok,
