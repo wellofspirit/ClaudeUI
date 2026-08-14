@@ -125,7 +125,45 @@ export async function prepareAndCreateSession(
   // is client #1 and learns about its own session from the same event as every
   // other client. The originator's own local `createNewSession` makes the arrival
   // idempotent (the handler no-ops when the session already exists).
-  emitEvent('session:created', [routingId, { cwd, resumeSessionId }])
+  //
+  // The birth event carries the birth CONFIG. Without it the payload was
+  // `{cwd, resumeSessionId}` only, so the reducer built the entry from
+  // `emptySession()` — permissionMode 'default', engine 'claude', model 'default'
+  // — and ONLY the originating client was right (its own `createNewSession`
+  // seeds the replica). Every other client, and canonical itself (hence every
+  // snapshot and every resync), showed the wrong mode/engine/model until some
+  // later event happened to carry the real value. These are exactly the values
+  // this session just spawned with, including the RESOLVED model, so no client
+  // has to guess.
+  //
+  // `effort` / `thinkingMode` are deliberately NOT announced even though they are
+  // right here in scope: the values that reach this function are already RESOLVED
+  // spawn args (the renderer's `resolveSessionSdkOptions` substitutes the model's
+  // default when the session's own value is `null`), while canonical's `effort` /
+  // `thinkingMode` mean "the user explicitly picked this" — `null` is unset, and
+  // `session:config-changed` only ever announces an accepted explicit pick.
+  // Folding a resolved default in as an explicit one would freeze it: the effort
+  // ladder is `session pick > per-model user default > engine heuristic`, so a
+  // later change to the per-model default would stop reaching this session. Every
+  // client already derives the same display default from `availableModels`, so
+  // there is nothing to replicate here.
+  emitEvent('session:created', [
+    routingId,
+    {
+      cwd,
+      resumeSessionId,
+      engineId: resolvedEngineId,
+      // `!= null`, not `!== undefined`: a WS client's JSON turns an omitted
+      // positional arg into an explicit `null`, and announcing `null` for a
+      // field the canonical type declares as `string` would be a worse lie than
+      // announcing nothing (the reducer folds an absent field as "leave it
+      // alone"). `resolvedModel` is legitimately undefined when pi's catalog
+      // probe fails — then no client is told anything and each keeps the model
+      // it already had.
+      ...(permissionMode != null ? { permissionMode } : {}),
+      ...(resolvedModel != null ? { model: resolvedModel } : {})
+    }
+  ])
   // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript
   // lives on disk, so canonical state has to read it from the same source the
   // renderer does (`loadSessionHistory`) or 4b's snapshot would hand every client

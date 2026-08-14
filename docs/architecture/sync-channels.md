@@ -115,18 +115,25 @@ delta is a **snapshot field**, not a delivery change: `PerSessionSnapshot.meteri
 did not exist, so every resync silently blanked the TopBar breakdown.
 
 The `Delta` column tracks DELIVERY only, and `sync-funnel-guard.test.ts` asserts it
-holds exactly those two rows — which is why 4b's two payload additions below are
+holds exactly those two rows — which is why the payload additions below are
 recorded in the Notes column instead of flipping it.
 
-## Payload additions in 4b — the only wire changes in the cutover
+## Payload additions — the only wire changes since the cutover
+
+Two landed in 4b (the cutover's own wire changes); the third is a post-4 fix, kept in
+the same table because the rule is the same one: a value only the emitter knows must
+ride the event, or every non-originating replica invents it.
 
 | Channel                | Addition                    | Why it could not stay client-side                                                                                                                                                                                                                     |
 | ---------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session:user-message` | `{id, timestamp}`           | Minted by `sendPrompt`. Each client used to invent its own `msg-<uuid>`/`Date.now()`, so one user turn had a different id in every replica and canonical could only mint a positional `user-<seq>`. With the snapshot authoritative, that renumbers a client's transcript on every resync. |
-| `session:message`      | `thinkingDurationMs?`       | Timed by `BaseSession.send` (one implementation, all three engines) and moved onto the sealed thinking block by the reducer. `applyEvent` is clock-free by contract, so elapsed time can only come from the process that watched the clock.               |
+| `session:user-message` | `{id, timestamp}` (4b)      | Minted by `sendPrompt`. Each client used to invent its own `msg-<uuid>`/`Date.now()`, so one user turn had a different id in every replica and canonical could only mint a positional `user-<seq>`. With the snapshot authoritative, that renumbers a client's transcript on every resync. |
+| `session:message`      | `thinkingDurationMs?` (4b)  | Timed by `BaseSession.send` (one implementation, all three engines) and moved onto the sealed thinking block by the reducer. `applyEvent` is clock-free by contract, so elapsed time can only come from the process that watched the clock.               |
+| `session:created`      | `{permissionMode?, engineId?, model?}` (post-4) | The BIRTH CONFIG. The payload was `{cwd, resumeSessionId}`, so the reducer built the entry from `emptySession()` — `permissionMode: 'default'`, `selectedEngineId: 'claude'`, `selectedModel: 'default'` — and only the ORIGINATOR was right, because its own `createNewSession` seeds the replica before the event arrives. Every other client, and canonical itself (hence every snapshot and every resync), showed the wrong mode/engine/model until some later event happened to carry the real value: a session created on the desktop read as `default`/claude on a phone, and vice versa. Only `prepareAndCreateSession` knows these values at birth — the spawn opts (with the RESOLVED model) it just handed `manager.create`. Every field is optional and the reducer falls back to the existing session value, so an old-shape event (a committed golden fixture, catchup from an older host) folds exactly as before. `effort` / `thinkingMode` are deliberately excluded: the spawn args carrying them are already resolved model defaults (`resolveSessionSdkOptions`), while the canonical fields mean "explicitly picked" (`null` = unset, which the effort precedence ladder depends on), so announcing them would freeze a default into a pick. |
 
 `FullStateSnapshot` itself is UNCHANGED by 4b: the cutover moved where the snapshot
-comes from, not what it contains, so the web client works unmodified.
+comes from, not what it contains, so the web client works unmodified. The
+`session:created` addition does not change it either — the fields it carries are
+snapshot fields that already existed.
 
 ## The table
 
@@ -144,7 +151,7 @@ comes from, not what it contains, so the web client works unmodified.
 | `session:approval-request`       | replicated               | yes  | yes       | —     | Approval lifecycle is event-driven ONLY (ADR-038) — never inferred from turn state.                                                                                                                    |
 | `session:auth-source`            | replicated               | yes  | no        | —     | App-level auth banner input; no snapshot field.                                                                                                                                                        |
 | `session:config-changed`         | replicated               | yes  | yes       | yes   | Per-session config parity — the interim relief sync-core.md flagged, landed as part of phase 4.                                                                                                        |
-| `session:created`                | replicated               | yes  | yes       | —     | Session registry. 4c deleted the notifyMainWindow asymmetry in create-session.ts, so the originating client receives its own session:created like every other subscriber.                                           |
+| `session:created`                | replicated               | yes  | yes       | —     | Session registry. 4c deleted the notifyMainWindow asymmetry in create-session.ts, so the originating client receives its own session:created like every other subscriber. **Post-4 payload addition:** the birth config (`permissionMode` / `engineId` / resolved `model`) rides the event — without it every non-originating replica, and canonical, folded `emptySession()`'s default/claude/default over the session's real spawn config. Each field is optional and falls back to the existing session value, so old-shape events fold unchanged. |
 | `session:directories-changed`    | replicated               | yes  | no        | —     | A payload-less notify — the sidebar refetches via a query, so there is nothing to apply. **4b:** the same trigger also refreshes canonical's `directories` field (`SyncCore.setDirectories`, core-internal, NOT an event), so a resyncing client gets the same listing a live one refetches. |
 | `session:error`                  | replicated               | yes  | no        | —     | Rings and fans out today, but FullStateSnapshot carries no error list — per-client transient. Known 4b/5 gap, recorded not fixed.                                                                      |
 | `session:mcp-servers`            | replicated               | yes  | no        | —     | MCP status list; no snapshot field (clients refetch via `session:mcp-status`).                                                                                                                         |

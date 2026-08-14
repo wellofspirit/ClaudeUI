@@ -12,7 +12,7 @@ How ClaudeUI is put together. This directory splits the architecture by concern 
 | [remote.md](remote.md) | Remote access **transport + auth** as built — HTTP/WS listener, wire frames, auth modes, E2E, scoped URL tokens, tunnel/TLS |
 | [sync-core.md](sync-core.md) | **SyncCore** — state sync, replication, queueing, terminal, headless (ADR-051/053). Phases 0-4 landed; phase 5 + the follow-on ledger are here too |
 | [security.md](security.md) | The accepted target security model for remote access — passkeys, capability grants, decay, audit (ADR-052) |
-| [sync-channels.md](sync-channels.md) | Every event channel classified — ring / canonical / delivery, plus the recorded gaps and the 4b payload additions (SyncCore phases 4a-4b) |
+| [sync-channels.md](sync-channels.md) | Every event channel classified — ring / canonical / delivery, plus the recorded gaps and the payload additions (SyncCore phases 4a-4b + the post-4 `session:created` birth config) |
 
 ## Overview
 

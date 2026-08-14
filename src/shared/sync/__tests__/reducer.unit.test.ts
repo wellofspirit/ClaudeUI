@@ -74,6 +74,78 @@ describe('reducer — session registry', () => {
     const after = applyEvent(before, { channel: 'not:classified', args: ['rid', {}] })
     expect(after).toBe(before)
   })
+
+  // -------------------------------------------------------------------------
+  // The birth config (post-4 payload addition). Before it, EVERY client except
+  // the one that issued the create — and canonical, hence every snapshot — read
+  // a desktop-created session as default/claude/default and vice versa.
+  // -------------------------------------------------------------------------
+
+  it('applies the spawn config the birth event carries', () => {
+    const s = fold([
+      [
+        'session:created',
+        'rid',
+        { cwd: '/repo', permissionMode: 'plan', engineId: 'pi', model: 'gpt-5-codex' }
+      ]
+    ])
+    const session = s.sessions['rid']
+    expect(session.permissionMode).toBe('plan')
+    expect(session.selectedEngineId).toBe('pi')
+    expect(session.selectedModel).toBe('gpt-5-codex')
+    // Reasoning config is NOT part of the birth payload: what the emitter has at
+    // spawn is a RESOLVED model default, and these fields mean "explicitly
+    // picked" (null = unset, which drives the effort precedence ladder).
+    expect(session.effort).toBeNull()
+    expect(session.thinkingMode).toBeNull()
+  })
+
+  it('keeps the empty-session defaults for an OLD-SHAPE birth event', () => {
+    // Committed golden fixtures replay this shape, and so does catchup from a
+    // host that predates the addition: the per-field fallback to `base` is what
+    // makes those folds identical to what they were before.
+    const s = fold([['session:created', 'rid', { cwd: '/repo' }]])
+    const session = s.sessions['rid']
+    expect(session.permissionMode).toBe('default')
+    expect(session.selectedEngineId).toBe('claude')
+    expect(session.selectedModel).toBe('default')
+  })
+
+  it('converges with the ORIGINATOR seed instead of clobbering it', () => {
+    // The originating client's `createNewSession` seeds its replica through
+    // `patchLocalSession` BEFORE the event arrives. Same values ⇒ idempotent
+    // (assert 1); an old-shape event that announces nothing must leave the seed
+    // alone rather than reset it to claude/default (assert 2).
+    const seeded = fold([
+      [
+        'session:created',
+        'rid',
+        { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
+      ]
+    ])
+    const again = applyEvent(
+      seeded,
+      {
+        channel: 'session:created',
+        args: [
+          'rid',
+          { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
+        ],
+        seq: 2
+      },
+      emptyAux()
+    )
+    expect(again.sessions['rid']).toEqual(seeded.sessions['rid'])
+
+    const oldShape = applyEvent(
+      seeded,
+      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 3 },
+      emptyAux()
+    )
+    expect(oldShape.sessions['rid'].permissionMode).toBe('acceptEdits')
+    expect(oldShape.sessions['rid'].selectedEngineId).toBe('opencode')
+    expect(oldShape.sessions['rid'].selectedModel).toBe('zen/qwen')
+  })
 })
 
 describe('reducer — transcript', () => {

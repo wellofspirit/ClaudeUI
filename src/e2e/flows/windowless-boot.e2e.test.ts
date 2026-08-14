@@ -430,7 +430,23 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
   })
 
   it('a WS client creates a session that spawns with no window handle', async () => {
-    await client.invoke('session:create', ROUTING_ID, CWD)
+    // Positional `session:create` args: (routingId, cwd, effort, resumeSessionId,
+    // permissionMode, model, thinkingMode, resumeSessionAt, forkSession, engineId).
+    // The mode/model/engine are supplied so the birth-config assertion below is
+    // about a REQUESTED config, not about the defaults agreeing by accident.
+    await client.invoke(
+      'session:create',
+      ROUTING_ID,
+      CWD,
+      undefined,
+      undefined,
+      'acceptEdits',
+      'sonnet',
+      undefined,
+      undefined,
+      undefined,
+      'claude'
+    )
 
     // The real SessionManager holds a real ClaudeSession…
     const session = getSessionManager()?.get(ROUTING_ID)
@@ -447,6 +463,23 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     expect(created.args[0]).toBe(ROUTING_ID)
     expect(created.seq).toBeGreaterThan(0)
     expect(syncCore.getCanonicalState().sessions[ROUTING_ID]?.cwd).toBe(CWD)
+
+    // The birth event carries the birth CONFIG, so canonical — the source of
+    // every `sync-full` — holds the mode/engine/model this session actually
+    // spawned with. Before the addition it held `emptySession()`'s
+    // default/claude/default, and NO client but the originator (there is none
+    // here — the creator is a WebSocket) could ever have learned otherwise.
+    const canonicalSession = syncCore.getCanonicalState().sessions[ROUTING_ID]
+    expect(canonicalSession.permissionMode).toBe('acceptEdits')
+    expect(canonicalSession.selectedEngineId).toBe('claude')
+    expect(canonicalSession.selectedModel).toBe('sonnet')
+    // …and it is on the wire too, which is what a phone folds.
+    expect(created.args[1]).toMatchObject({
+      cwd: CWD,
+      permissionMode: 'acceptEdits',
+      engineId: 'claude',
+      model: 'sonnet'
+    })
   })
 
   it('a prompt streams engine output back over the WebSocket with ring seqs', async () => {

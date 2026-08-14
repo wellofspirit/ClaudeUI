@@ -314,7 +314,13 @@ export function applyEvent(
     case 'session:created': {
       const routingId = routingIdOf(event)
       if (!routingId) return state
-      const data = arg<{ cwd?: string; resumeSessionId?: string }>(event, 1)
+      const data = arg<{
+        cwd?: string
+        resumeSessionId?: string
+        permissionMode?: string
+        engineId?: EngineId
+        model?: string
+      }>(event, 1)
       const existing = state.sessions[routingId]
       const base = existing ?? emptySession(routingId)
       return {
@@ -324,6 +330,19 @@ export function applyEvent(
           [routingId]: {
             ...base,
             cwd: data?.cwd ?? base.cwd,
+            // The spawn config the emitter announced (create-session.ts). Every
+            // field falls back to `base`, which is what makes an OLD-shape event
+            // (committed golden fixtures, catchup from an older host) fold exactly
+            // as it did before — and what makes the arriving event idempotent for
+            // the originator, whose `createNewSession` already seeded the same
+            // values into `base`.
+            //
+            // `effort` / `thinkingMode` are absent by design, not by omission: the
+            // spawn args carrying them are RESOLVED model defaults, and these
+            // fields mean "explicitly picked" (`null` = unset). See the emit site.
+            permissionMode: data?.permissionMode ?? base.permissionMode,
+            selectedEngineId: data?.engineId ?? base.selectedEngineId,
+            selectedModel: data?.model ?? base.selectedModel,
             sdkActive: true,
             // A resumed session's transcript arrives via seedSession (a query);
             // a fresh one has nothing to seed, so it is already complete.

@@ -30,6 +30,7 @@ import type {
   BackgroundOutput,
   BlockUsageData,
   ChatMessage,
+  EngineId,
   GitStatusData,
   MeteringSnapshot,
   PendingApproval,
@@ -65,7 +66,30 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   // Session lifecycle + transcript
   // -------------------------------------------------------------------------
-  'session:created': (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void
+  /**
+   * A session was spawned. The payload carries the config it spawned WITH
+   * (`prepareAndCreateSession`): `permissionMode`, `engineId` and the RESOLVED
+   * `model`. They are optional because they are a post-phase-4 payload addition —
+   * a client talking to an older host, or a replay of a committed fixture, sees
+   * the `{cwd, resumeSessionId}` shape, and the reducer falls back to the existing
+   * session values for every absent field. Before the addition, every client
+   * except the originator (and canonical itself, hence every snapshot) folded
+   * `emptySession()`'s default/claude/default over the session's real config.
+   *
+   * `effort` / `thinkingMode` are NOT here on purpose: the spawn args carrying
+   * them are already resolved model defaults, whereas the canonical fields mean
+   * "explicitly picked" — see the emit site's note.
+   */
+  'session:created': (
+    routingId: string,
+    data: {
+      cwd: string
+      resumeSessionId?: string
+      permissionMode?: PermissionMode
+      engineId?: EngineId
+      model?: string
+    }
+  ) => void
   /**
    * Relayed for NON-queued sends only. A send that queues rides
    * `session:queue-changed` instead (ADR-053) — the old `{queued:true}` flavor is
