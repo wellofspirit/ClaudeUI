@@ -1,10 +1,19 @@
-# Event-channel classification — as of SyncCore phase 4c
+# Event-channel classification — as of SyncCore phase 4c (complete)
 
 Part of [architecture/](README.md). **Status:** landed with SyncCore phase 4a, updated
-by 4b (snapshot cutover) and 4c (uniform delivery). The machine-readable source of truth
-is `src/shared/sync/channels.ts`; this file is its prose twin, and
-`sync-funnel-guard.test.ts` fails if any emitted channel — or any channel either client
-subscribes to, on either surface — is missing from the table.
+by 4b (snapshot cutover) and 4c (uniform delivery, then reducer adoption). The
+machine-readable source of truth is `src/shared/sync/channels.ts`; this file is its prose
+twin, and `sync-funnel-guard.test.ts` fails if any emitted channel — or any channel either
+client subscribes to, on either surface — is missing from the table.
+
+**The `Canonical` column is now load-bearing on BOTH sides.** Since 4c's reducer
+adoption it decides not just whether `applyEvent` changes canonical state but whether a
+channel has a client handler at all: `canonical: yes` ⇒ the renderer's replica folds it
+and the field is SEALED (`renderer/src/stores/sealed-fields.ts`); `canonical: no` ⇒ there
+is no snapshot field to fold into, so the channel keeps an explicit `onSyncEvent`
+listener and a transient store writer, and a resync legitimately drops it. That is why
+the per-channel subscription surface shrank from ~40 to the size of the non-canonical
+set.
 
 Companions: [sync-core.md](sync-core.md) (target design + phases),
 [remote.md](remote.md) (as-built record), [security.md](security.md) (capabilities),
@@ -200,52 +209,53 @@ subscriber gets.
 fold a different state on every replay, so replay-equals-live would be false and
 catchup could not be trusted. Two as-built consequences followed from that; **4b
 closed both by moving the impure part into the emitter**, the only place it can
-honestly live:
+honestly live, and **4c deleted the renderer's mirrors of both**:
 
 | Divergence                      | Why it existed                                                                                                                                 | Closed in 4b by                                                                                                                          |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Thinking-block `durationMs`     | the renderer measured it with wall-clock deltas; core tracks only "is a span open"                                                              | `BaseSession.send` times the span and stamps `ChatMessage.thinkingDurationMs` on the sealing message; the reducer moves it onto the block   |
 | User-message `id` / `timestamp` | `session:user-message` carried `{prompt, attachments}` only, so the renderer minted `msg-<uuid>`/`Date.now()` and core minted `user-<seq>`/`0`  | `sendPrompt` mints both into the payload; the reducer prefers them, keeping the positional fallback for old-shape events                    |
 
-**The comparator still masks both**, and that is not a leftover: the desktop renderer
-keeps computing its own duration and minting its own user id until 4c rewires its
-store, so the two sides genuinely differ (by scheduling jitter, and by construction).
-What changed is which value is authoritative — canonical now carries real durations and
-stable ids, so a snapshot-fed client renders them.
+**Both masks are gone (4c).** They were not leftovers: the desktop renderer kept
+measuring its own duration and minting its own user id, so the two sides genuinely
+differed — by scheduling jitter, and by construction. With the renderer folding the
+shared reducer there is one value from one event, so
+`e2e/flows/sync-hydration-parity.e2e.test.ts` compares transcripts unnormalized and
+the shadow comparator that needed the masks is deleted.
 
-## Client-written state (not classified, and that is the finding)
+4c also fixed the emitter bug the mirror had been hiding: `trackThinkingSpan`
+cleared only the OPEN clock at a turn boundary, never an already-parked
+`sealedThinkingMs`, so a span sealed by a text delta whose message never arrived
+(interrupt, retraction, engine death) leaked its elapsed time onto the NEXT turn's
+first thinking block. The renderer's `pendingThinkingDurationMs` leaked the same
+value the same way, which is exactly why the comparator stayed quiet about it.
 
-These fields are in the snapshot but are written by **client actions**, so canonical
-cannot match them at an arbitrary instant. Both shadow flows — the dev watch and the
-parity e2e — skip them via the single shared definition (`CLIENT_WRITTEN_FIELDS` in
-`src/main/sync/shadow.ts`):
+## Client-written state — what is left of it (4c)
 
-| Field                                                                                                        | Written by                                                       | Reaches core via                                        |
-| ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------------------------------------- |
-| `activeSessionId`                                                                                            | `switchSession` / `createNewSession`                             | nothing — selection is per-client view state (ADR-041)   |
-| `recentSessionIds`, `pinnedSessionIds`, `customTitles`, `hiddenSessions`, `hiddenProjects`, `sessionEngines` | store actions that then save `sessions.json`                     | the `config:sessions-changed` save + file-watcher loop   |
-| `worktreeInfoMap`                                                                                            | `useClaudeEvents` **parses a tool_result** and stores the result | same loop                                                |
+This section used to name three rows of snapshot fields that **client actions**
+wrote, so canonical could not match them at an arbitrary instant, and both shadow
+flows skipped them through one shared definition (`CLIENT_WRITTEN_FIELDS` in
+`src/main/sync/shadow.ts`). That file, that set and the comparator are **deleted**:
+the renderer folds the shared reducer now, so its store IS the projection of
+canonical and there is no second interpretation to diff.
 
-`worktreeInfoMap` is the sharp one: deriving state from a tool result inside a
-client and storing it is precisely the pattern sync-core.md's client-computation
-rule bans. It survives because moving it means moving an emitter — and it survived 4c's
-transport half too, since it belongs to the reducer-adoption half that did not land.
+What each row became:
 
-**What 4c changed for this whole table:** the save's echo now reaches the client that
-saved. These fields are still client-WRITTEN (the store writes them optimistically, then
-invokes the save), but the desktop no longer skips its own `config:sessions-changed` /
-`config:settings-changed` broadcast, so an optimistic write that disagrees with what
-actually got persisted is corrected on the round trip instead of standing unopposed.
+| Field | Then | Now |
+| ----- | ---- | --- |
+| `activeSessionId` | client-written, never reached core | unchanged and correct: selection is per-client VIEW state (ADR-041). Core serves `null`; each client resolves its own — see below. |
+| `recentSessionIds`, `pinnedSessionIds`, `customTitles`, `hiddenSessions`, `hiddenProjects`, `sessionEngines` | store actions wrote them, then saved `sessions.json` | SEALED. The action applies the change **through the replica** and persists through `config:save-sessions`, whose `config:sessions-changed` echo reaches every client including the saver. The local apply stays deliberately (`saveSessionConfig` merges from current state, so two rapid mutations would otherwise both merge from a stale base) — recorded as the one 4c deviation in [sync-core.md](sync-core.md). |
+| `worktreeInfoMap` | `useClaudeEvents` **parsed a tool_result** and stored the result | moved to the MAIN process (`services/worktree-detect.ts`, observed at the funnel's delivery point) and persisted through that same save path. The sharp one is closed: no client derives state from a tool result any more. |
 
-**`directories` LEFT this table in 4b.** Core maintains it now (seeded at boot,
-refreshed on the `session:directories-changed` trigger — `SyncCore.setDirectories`), so
-it is core-written, compared strictly by the shadow, and a mismatch is real drift between
-the sidebar a live client sees and the one a reconnecting client gets.
+The registry-config row is fresher than it reads: the apply happens inside
+`SyncCore.emit` on every save, so a desktop-originated save is already in the next
+`getSnapshot()` (pinned by `handlers-core.test.ts`). The file watcher is now just the
+cross-INSTANCE path.
 
-The registry-config row is fresher than it reads: the apply happens inside `SyncCore.emit`
-on every save, so a desktop-originated save is already in the next `getSnapshot()` (pinned
-by `handlers-core.test.ts`) — that was true even in 4a, when the desktop save deliberately
-skipped its own renderer. The file watcher is now just the cross-INSTANCE path.
+**`directories` LEFT this table in 4b.** Core maintains it (seeded at boot, refreshed
+on the `session:directories-changed` trigger — `SyncCore.setDirectories`), so it is
+core-written, and a mismatch would be real drift between the sidebar a live client
+sees and the one a reconnecting client gets.
 
 ### `activeSessionId` is served as `null` — deliberate, with a UX consequence
 

@@ -1,6 +1,6 @@
 # SyncCore — target sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phases 4a-4b landed, and 4c's transport half landed** (SyncCore + emission funnel + shared reducer; canonical state is the `sync-full` state of record; the desktop renderer is a MessagePort subscriber and the delivery privilege is deleted) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phases 4a, 4b and 4c landed in full** (SyncCore + emission funnel + shared reducer; canonical state is the `sync-full` state of record; the desktop renderer is a MessagePort subscriber, the delivery privilege is deleted, and its store is the shared reducer's output) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
 
 **Design intent (owner):** every interaction's effect is an event broadcast to all clients equally; the backend (non-UI) maintains the event store and the state; a reconnecting client replays from its last seq or receives a full state sync; no client is privileged. SyncCore realizes that design and extends it to headless operation and remote terminals. **Single-operator is a standing assumption** — one human, many devices; multi-user is a non-goal.
 
@@ -78,11 +78,21 @@ Client-side computation is legitimate in exactly two places:
 
 **Litmus:** *if this client crashed and resynced from a snapshot, would anything it
 computed be lost?* Yes ⇒ core/reducer. No ⇒ presentation. Derive-and-render is fine;
-derive-and-**store** is banned outside the reducer, which is what 4c's type-brand +
-lint enforce. Derived per-session state (`todos`, `sentFiles`) moved inside
-`applyEvent` in 4a for exactly this reason; the surviving violation —
-`useClaudeEvents` parsing a tool result into `worktreeInfoMap` — is recorded in
-[sync-channels.md](sync-channels.md) §"Client-written state".
+derive-and-**store** is banned outside the reducer. Derived per-session state
+(`todos`, `sentFiles`) moved inside `applyEvent` in 4a for exactly this reason, and
+the last surviving violation — `useClaudeEvents` parsing an `EnterWorktree` tool
+result into `worktreeInfoMap` — moved to the main process in 4c
+(`services/worktree-detect.ts`, observed at the funnel).
+
+**Enforced, as of 4c, rather than documented.** `renderer/src/stores/sealed-fields.ts`
+names the SEALED set — exactly the snapshot-carried fields, so it is derived rather
+than chosen — and an ESLint `no-restricted-syntax` rule rejects a `set(...)` writing
+one of them anywhere but `renderer/src/stores/replica.ts`. `sealed-fields.unit.test.ts`
+pins the lint pattern against both the list and `FullStateSnapshot`, so adding a
+snapshot field without sealing it fails a test rather than quietly opening a hole.
+The complement is deliberate and equally named: channels classified
+`canonical: false` have no snapshot field to fold into, so they keep their
+per-channel listeners and their store writers.
 
 ## Queue subsystem — Claude Code parity (owner-ratified 2026-08-13)
 
@@ -131,7 +141,7 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 | 1 | Command registry: schemas, capabilities, per-connection identity, audit log | M | Every mutating channel registered with a declared capability; fail-closed test | **landed** (`48b4f72`, 2026-08-14) — plugin channels ride `config` pending plugin-declared capabilities; `automation:*`/`log-viewer:*` not yet ported |
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
-| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **4a + 4b landed** — invariant test green; see below |
+| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **4a + 4b + 4c landed** — invariant test green; 4d remains |
 | 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | not started |
 
 Phase 4 lands as a strangler in four stages:
@@ -139,8 +149,8 @@ Phase 4 lands as a strangler in four stages:
 | Stage | Content | Status |
 | - | ------- | ------ |
 | 4a | SyncCore module (ring + canonical state + one emission funnel), shared reducer, channel classification, `session:config-changed`, metering in the snapshot, rekey ownership in core, shadow harness, no-Electron lint fence | **landed** — canonical state runs in SHADOW; the renderer snapshot is still the state of record |
-| 4b | Snapshot cutover: `SyncCore.getSnapshot()` is the `sync-full` source; `EventLog` deleted; event-carried user identity + emitter-timed thinking spans; canonical directories/boot seeds; snapshot-invariant test | **landed** — `__getRemoteState` itself survives as the SHADOW comparator's input only (4c deletes it with the store rewiring) |
-| 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | **transport + delivery landed**; reducer adoption (store split) NOT started — see below |
+| 4b | Snapshot cutover: `SyncCore.getSnapshot()` is the `sync-full` source; `EventLog` deleted; event-carried user identity + emitter-timed thinking spans; canonical directories/boot seeds; snapshot-invariant test | **landed** — `__getRemoteState` survived as the SHADOW comparator's input until 4c's store rewiring deleted both |
+| 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | **landed in full** — transport + delivery first, then reducer adoption; see below |
 | 4d | Windowless smoke, sent-file inversion | not started |
 
 **Exit-criteria precision.** Defect 2 (privileged desktop renderer) has two halves and
@@ -150,15 +160,14 @@ synchronously and touches no window), and **4c** killed the *delivery privilege*
 4a intentionally changed neither: it preserved today's delivery targets verbatim so the
 funnel could be reviewed as a pure refactor. **Defect 2 is now fully dead.**
 
-### 4c as landed: the transport half, not the reducer half
+### 4c as landed, in two parts
 
-4c was specified as one stage with two independent halves. The **transport + delivery**
-half landed; the **reducer adoption** half did not, and the split is deliberate — the
-second half rewrites ~3,700 lines of store, ~630 lines of `useClaudeEvents` and ~14,000
-lines of tests that assert on store actions, and a half-applied version of it is worse
-than none.
+4c was specified as one stage with two independent halves, and they landed
+separately on purpose: the second rewrites ~3,700 lines of store, ~630 lines of
+`useClaudeEvents` and the test suites that assert on store actions, and a
+half-applied version of it is worse than none.
 
-**Landed:**
+**Part 1 — transport + delivery:**
 
 - **The desktop renderer is client #1.** `services/sync-port.ts` gives it a
   `MessagePortMain` on every load and answers its `sync` frames; the renderer
@@ -178,19 +187,66 @@ than none.
   `setWindow` methods are gone. That is the concrete prerequisite 4d's windowless smoke
   test needs.
 
-**NOT landed (the reducer half):**
+**Part 2 — the store folds the shared reducer.** `renderer/src/stores/replica.ts`
+holds a real `CanonicalState` plus the reducer's aux, folds `applyEvent` over a new
+channel-agnostic tap on the client (`SyncClient.onAnyEvent`, dispatched after the
+per-channel emit with the cursor already advanced), and projects the result into
+Zustand in one `set()`. Consequences:
 
-- `useClaudeEvents` still interprets each replicated channel with its own handler, and the
-  store still owns ~40 direct writers of replicated slices. `applyEvent` and the renderer
-  remain two interpretations of one stream, so the **shadow comparator survives** (it was
-  slated to retire here) along with `__getRemoteState` / `getRemoteStateSnapshot` and the
-  parity e2e that consumes them.
-- The §3 round-trip items that only make sense once the reducer owns the field:
-  `sendPrompt`'s local user-message mint, the permission-mode optimistic write + revert,
-  the renderer's own thinking-span clock, the `worktreeInfoMap` tool-result parser (the
-  one surviving client-computation violation), and the client-side `session:rekey` invoke.
-- The type-brand + lint rule sealing replicated slices, and deleting the store actions
-  the reducer subsumes.
+- **~40 store actions are deleted**, and with them `useClaudeEvents`'s per-channel
+  interpretation of every replicated channel. What survives in the hook is the
+  three things a reducer cannot own: the `canonical: false` transient channels, the
+  host-local ones, and the SIDE-EFFECT halves of the old handlers (notifications,
+  attention marks, the disk load a resumed `session:created` triggers, the
+  custom-command re-scan) re-attached as **post-apply observers**.
+- **The projection is identity-diffed.** `applyEvent` is persistent, so a
+  `session:stream` delta rebuilds one session entry and writes nothing app-level.
+  Without the diff every event would re-write `settings`, the registry config and
+  every session, so any in-flight local write would be reverted by the next
+  unrelated delta and every subscriber would re-render on every token.
+- **Sealed vs view is one function, not two stores.** `projectSession` writes only
+  the sealed fields; drafts, panels, git-panel state, toasts, `isHistorical`,
+  `evicted` and `needsAttention` are per-client and untouched. That IS the store
+  split ADR-051 asks for — kept in one merged `PerSessionState` so the ~200
+  components reading `useActiveSession(...)` did not all have to change.
+- **Three ways in, and only three:** the fold; hydration (`fromSnapshot` +
+  `auxFromCanonical` + the ADR-041 selection resolution, replacing
+  `applyRemoteSnapshot`); and a small named set of **sanctioned local writes** for
+  state that is genuinely client-originated — a session created before it spawns
+  (its engine/model/mode exist nowhere else), cold history read from disk, the
+  desktop's own boot read of the config files, and the renderer's heap-bounding
+  eviction. Each writes CANONICAL and re-projects, which is what keeps
+  "store ≡ projection of canonical" true after every one of them.
+- **The rekey is the reducer's.** `rekeySession`, the bounded `rekeyMap` and
+  `resolveRoutingId` are deleted, along with the client's `session:rekey` invoke:
+  core re-keys its own registry in the same tick it emits the `session:status` that
+  implies one, so every later event already carries the new id. The replica computes
+  the same target with the shared `rekeyTargetFor` so it can carry the session's
+  VIEW state to the new key and retire the old one — the split-brain the deleted
+  action existed to avoid. The main-side `session:rekey` shim stays for cached phone
+  bundles.
+- **Round-trip, not optimism, where an event exists.** The permission-mode
+  optimistic write and its `.catch` revert are gone (every path emits
+  `session:permission-mode`, including the reverted mode an engine chose); the
+  renderer's parallel thinking clock is gone (`thinkingDurationMs` /
+  `pendingThinkingDurationMs` deleted — durations arrive on the block, and
+  `thinkingStartedAt` survives as a projection-derived presentation ticker); the
+  local user-message mint is gone.
+- **The shadow comparator is retired**, with `main/sync/shadow.ts`,
+  `CLIENT_WRITTEN_FIELDS`, `startShadowWatch`, the `CLAUDEUI_SYNC_SHADOW` flag,
+  `getRemoteStateSnapshot` and `window.__getRemoteState`. It measured the gap
+  between two implementations of one contract; there is one implementation now, so
+  it has nothing to measure. Its value moved into
+  `e2e/flows/sync-hydration-parity.e2e.test.ts`, which asserts the property that
+  actually matters after the cutover: a client that re-hydrates from
+  `core.getSnapshot()` holds exactly what a client that watched the whole stream
+  holds — the client-side half of the phase-4 snapshot invariant.
+- **The last client-computation violation moved to main.** `worktreeInfoMap` is no
+  longer parsed out of a tool result in the renderer: `services/worktree-detect.ts`
+  does it once, observed at the funnel's delivery point (where canonical already
+  carries the tool_result attached to its tool_use, so the `EnterWorktree` gate
+  checks real state), and persists through the ordinary `config:sessions-changed`
+  save.
 
 **One thing 4c's delivery change fixed that was not on anyone's list.** `VoiceClient` was
 raising the REPLICATED `voice:error` through a targeted `webContents.send` on a computed
@@ -198,6 +254,14 @@ channel, which the funnel guard's channel-literal scan could not see. Under unif
 delivery the desktop subscribes to that channel, so the targeted send would have landed
 nowhere and voice errors would have gone silent. Routed through `emitEvent`, and the guard
 grew a check for computed-channel sends whose allowlist has to prove itself host-local.
+
+**A defect the seal exposed on the way in.** `BaseSession.trackThinkingSpan` cleared
+only the OPEN clock at a turn boundary, never an already-parked `sealedThinkingMs`;
+a span sealed by a text delta whose message never arrived (interrupt, refusal
+retraction, engine death) leaked its elapsed time onto the NEXT turn's first thinking
+block. 4b left it deliberately — the renderer's `pendingThinkingDurationMs` leaked the
+same value the same way, so the two sides agreed and the comparator stayed quiet. With
+the renderer's clock deleted there is no mirror to preserve, and the leak is fixed.
 
 **What 4b had to fix before it could flip (canonical freshness).** A snapshot built from
 the event stream is only as complete as the stream. Four snapshot fields had no event
@@ -240,6 +304,19 @@ the next text delta as a seal.
 Interim relief (no longer optional — landed in 4a): `session:config-changed` + a
 pre-spawn echo for model/effort/thinking/reasoning-variant, mirroring the
 permission-mode pattern.
+
+**One deviation from the 4c plan, recorded rather than hidden.** The plan said the
+registry-config mutations (pins / titles / hidden / recents / `sessionEngines` /
+settings) should become invoke-only, updating the replica solely from the `config:*`
+echo. They ARE replica-owned — the seal holds, nothing else writes them — but they
+apply locally first and then persist, because `saveSessionConfig` merges from current
+state: with no local apply, two rapid mutations would both merge from a stale base and
+the second would revert the first until its echo arrived. The echo is a whole-config
+replace, so re-applying it is a no-op for the writer and authoritative for everyone
+else. Making these true commands with `causedBy` reconciliation is the follow-up, and
+it belongs with the generic `command()` migration rather than with the store split.
+`causedBy` itself is still unbuilt — the designed escape hatch if the honest
+round-trip ever feels slow from a phone, and an owner call after living with it.
 
 ## Relations
 
