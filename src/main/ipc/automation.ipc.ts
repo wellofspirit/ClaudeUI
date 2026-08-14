@@ -1,4 +1,4 @@
-import { ipcMain, type BrowserWindow } from 'electron'
+import { ipcMain } from 'electron'
 import { app } from 'electron'
 const is = { dev: !app.isPackaged }
 import { AutomationManager, isValidAutomationId } from '../services/automation-manager'
@@ -30,13 +30,13 @@ const AUTOMATION_IPC_CHANNELS = [
   'automation:send-message'
 ]
 
-export function registerAutomationIpc(win: BrowserWindow): AutomationManager {
+export function registerAutomationIpc(): AutomationManager {
   // Remove old handlers (for re-registration)
   for (const ch of AUTOMATION_IPC_CHANNELS) {
     ipcMain.removeHandler(ch)
   }
 
-  const manager = new AutomationManager(win)
+  const manager = new AutomationManager()
   manager.load()
 
   // Skip automatic scheduling in dev mode — avoids spawning SDK subprocesses

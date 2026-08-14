@@ -1,7 +1,6 @@
 import * as crypto from 'node:crypto'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { BrowserWindow } from 'electron'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
@@ -83,7 +82,6 @@ import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
  */
 export function sendPrompt(
   manager: SessionManager,
-  win: BrowserWindow,
   routingId: string,
   prompt: string,
   attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
@@ -96,14 +94,12 @@ export function sendPrompt(
     return
   }
   session.run(prompt, attachments)
-  emitEvent(
-    'session:user-message',
+  emitEvent('session:user-message', [
+    routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    [routingId, { id: `msg-${crypto.randomUUID()}`, timestamp: Date.now(), prompt, attachments }],
-    'all',
-    win
-  )
+    { id: `msg-${crypto.randomUUID()}`, timestamp: Date.now(), prompt, attachments }
+  ])
 }
 
 /**
@@ -124,7 +120,6 @@ export function sendPrompt(
  */
 export async function setPermissionMode(
   manager: SessionManager,
-  win: BrowserWindow,
   routingId: string,
   mode: string
 ): Promise<void> {
@@ -137,7 +132,7 @@ export async function setPermissionMode(
     await session.setPermissionMode(mode)
     return
   }
-  emitEvent('session:permission-mode', [routingId, mode], 'all', win)
+  emitEvent('session:permission-mode', [routingId, mode])
 }
 
 export function watchBackground(
@@ -305,16 +300,14 @@ export function rekeyShim(
 
 /** One field of a session's config changed — emit the partial patch. */
 function emitConfigChanged(
-  win: BrowserWindow,
   routingId: string,
   patch: { model?: string; effort?: string; thinkingMode?: string; reasoningVariant?: string | null }
 ): void {
-  emitEvent('session:config-changed', [routingId, patch], 'all', win)
+  emitEvent('session:config-changed', [routingId, patch])
 }
 
 export async function setModel(
   manager: SessionManager,
-  win: BrowserWindow,
   routingId: string,
   model: string
 ): Promise<void> {
@@ -324,41 +317,38 @@ export async function setModel(
   // invalidates the variant (different models expose different variants) — the
   // desktop picker already resets it locally, so emitting only `model` would
   // leave every OTHER replica holding a variant that no longer exists.
-  emitConfigChanged(win, routingId, { model, reasoningVariant: null })
+  emitConfigChanged(routingId, { model, reasoningVariant: null })
 }
 
 export function setEffort(
   manager: SessionManager,
-  win: BrowserWindow,
   routingId: string,
   effort: string
 ): void {
   const s = manager.get(routingId)
   if (s && s.capabilities.reasoning.effort == null) return
   s?.setEffort?.(effort)
-  emitConfigChanged(win, routingId, { effort })
+  emitConfigChanged(routingId, { effort })
 }
 
 export function setThinkingMode(
   manager: SessionManager,
-  win: BrowserWindow,
   routingId: string,
   mode: string
 ): void {
   const s = manager.get(routingId)
   if (s && s.capabilities.reasoning.thinking == null) return
   s?.setThinkingMode?.(mode)
-  emitConfigChanged(win, routingId, { thinkingMode: mode })
+  emitConfigChanged(routingId, { thinkingMode: mode })
 }
 
 export function setReasoningVariant(
   manager: SessionManager,
-  win: BrowserWindow,
   routingId: string,
   variant: string | null
 ): void {
   manager.get(routingId)?.setReasoningVariant?.(variant)
-  emitConfigChanged(win, routingId, { reasoningVariant: variant })
+  emitConfigChanged(routingId, { reasoningVariant: variant })
 }
 
 export function getPlanContent(manager: SessionManager, routingId: string): string | null {
@@ -431,24 +421,18 @@ export function loadSkillDetails(manager: SessionManager, cwd: string) {
 }
 
 /**
- * Persist session config and broadcast the change. `notifyMainWindow` mirrors
- * the `create-session.ts` rationale: the desktop IPC caller's own renderer
- * already knows the change locally (it originated the write), so only extra
- * windows need notifying; the remote WebSocket caller's change arrived
- * off-window, so the main window needs the broadcast too.
+ * Persist session config and broadcast the change to every client.
+ *
+ * SyncCore phase 4c deleted the `notifyMainWindow` split. The desktop caller used
+ * to be skipped on the theory that its renderer "already knew locally", which was
+ * the delivery privilege in miniature: it meant the one client that could NOT be
+ * corrected by the broadcast was the one whose optimistic write might be wrong.
+ * The payload is a whole-config replace, so the echo is idempotent for the writer
+ * and authoritative for everyone else.
  */
-export function saveSessions(
-  win: BrowserWindow,
-  config: UISessionConfig,
-  opts: { notifyMainWindow: boolean }
-): void {
+export function saveSessions(config: UISessionConfig): void {
   saveSessionConfig(config)
-  emitEvent(
-    'config:sessions-changed',
-    [config],
-    opts.notifyMainWindow ? 'all' : 'extras-only',
-    win
-  )
+  emitEvent('config:sessions-changed', [config])
 }
 
 /**
@@ -461,15 +445,13 @@ export function saveSessions(
  * engines/claude.json / vendors/anthropic.json now), persisting, mockup CSP
  * cache invalidation, usage/analytics interval propagation, log filter
  * application, re-applying proxy/endpoint/model env from the engine/vendor
- * stores, and session idle timeout propagation. The only per-surface
- * difference is broadcast targeting via `notifyMainWindow`, same rationale as
- * `saveSessions` above.
+ * stores, and session idle timeout propagation. As of SyncCore phase 4c there is
+ * no per-surface difference at all: the broadcast reaches every client including
+ * the one that saved (see `saveSessions`).
  */
 export function saveUiSettings(
   manager: SessionManager,
-  win: BrowserWindow,
-  incomingSettings: UISettings,
-  opts: { notifyMainWindow: boolean }
+  incomingSettings: UISettings
 ): void {
   // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
   // that have moved to engines/claude.json and vendors/anthropic.json
@@ -516,12 +498,7 @@ export function saveUiSettings(
   if (typeof timeoutMins === 'number') {
     manager.setSessionTimeout(timeoutMins * 60 * 1000)
   }
-  emitEvent(
-    'config:settings-changed',
-    [settings],
-    opts.notifyMainWindow ? 'all' : 'extras-only',
-    win
-  )
+  emitEvent('config:settings-changed', [settings])
 }
 
 // ---------------------------------------------------------------------------

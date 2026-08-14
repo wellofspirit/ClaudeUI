@@ -306,8 +306,7 @@ export function registerRemoteHandlers(
           resumeSessionAt,
           forkSession,
           engineId
-        },
-        { notifyMainWindow: true }
+        }
       )
     }
   })
@@ -340,7 +339,7 @@ export function registerRemoteHandlers(
       routingId: string,
       prompt: string,
       attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, win, routingId, prompt, attachments)
+    ) => sendPrompt(manager, routingId, prompt, attachments)
   })
 
   handleRemote({
@@ -469,7 +468,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, mode: string) =>
-      setPermissionMode(manager, win, routingId, mode)
+      setPermissionMode(manager, routingId, mode)
   })
 
   handleRemote({
@@ -477,7 +476,7 @@ export function registerRemoteHandlers(
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, model: string) => setModel(manager, win, routingId, model)
+    handler: async (routingId: string, model: string) => setModel(manager, routingId, model)
   })
 
   handleRemote({
@@ -486,7 +485,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, effort: string) =>
-      setEffort(manager, win, routingId, effort)
+      setEffort(manager, routingId, effort)
   })
 
   handleRemote({
@@ -495,7 +494,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, mode: string) =>
-      setThinkingMode(manager, win, routingId, mode)
+      setThinkingMode(manager, routingId, mode)
   })
 
   handleRemote({
@@ -595,7 +594,7 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, variant: string | null) =>
-      setReasoningVariant(manager, win, routingId, variant)
+      setReasoningVariant(manager, routingId, variant)
   })
 
   handleRemote({
@@ -660,7 +659,7 @@ export function registerRemoteHandlers(
     kind: 'query',
     sessionIdArg: 0,
     handler: async (routingId: string, sessionId: string, projectKey: string) => {
-      watchSession(routingId, sessionId, projectKey, win)
+      watchSession(routingId, sessionId, projectKey)
     }
   })
   handleRemote({
@@ -782,7 +781,7 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (settings: UISettings) =>
-      saveUiSettings(manager, win, settings, { notifyMainWindow: true })
+      saveUiSettings(manager, settings)
   })
   handleRemote({
     channel: 'config:load-sessions',
@@ -795,7 +794,7 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (config: UISessionConfig) =>
-      saveSessions(win, config, { notifyMainWindow: true })
+      saveSessions(config)
   })
   handleRemote({
     channel: 'config:load-slash-commands',
@@ -1200,7 +1199,7 @@ export function registerRemoteHandlers(
         if (!filename) return
         if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
         entry.debounceTimer = setTimeout(() => {
-          emitEvent('mockup:file-changed', [directory], 'all', win)
+          emitEvent('mockup:file-changed', [directory])
         }, 200)
       })
 

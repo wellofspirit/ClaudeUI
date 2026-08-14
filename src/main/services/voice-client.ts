@@ -18,6 +18,7 @@
  */
 
 import * as net from 'net'
+import { emitEvent } from './sync-host'
 import * as readline from 'readline'
 import type { BrowserWindow } from 'electron'
 import { startRecording, stopRecording } from './voice-capture'
@@ -236,15 +237,30 @@ export class VoiceClient {
     this.send('voice:state', this.routingId, state)
   }
 
+  /**
+   * `voice:error` is the one channel this client raises that is NOT host-local.
+   *
+   * It is classified `replicated` because `ClaudeSession` also raises it through
+   * `BaseSession.send` (an early-capture failure), so it rings and reaches every
+   * client — an anomaly `shared/sync/channels.ts` records rather than papers over.
+   * Since SyncCore phase 4c the desktop renderer subscribes to it on the sync
+   * transport, so a targeted `webContents.send` would land nowhere: it has to go
+   * through the funnel like every other replicated event.
+   */
   private sendError(message: string): void {
-    this.send('voice:error', this.routingId, message)
+    emitEvent('voice:error', [this.routingId, message])
   }
 
   /**
-   * Guarded webContents.send. The window can be destroyed while a voice
-   * session is still finalizing (user closes the window mid-transcription);
-   * sending to a destroyed webContents throws and would surface as an
-   * uncaughtException. `isDestroyed?.()` tolerates the plain test double.
+   * Guarded webContents.send for this client's HOST-LOCAL channels
+   * (`voice:state`, `voice:transcript` — microphone capture belongs to the machine
+   * with the microphone). `voice:error` does NOT come through here; see
+   * {@link VoiceClient.sendError}.
+   *
+   * The window can be destroyed while a voice session is still finalizing (user
+   * closes the window mid-transcription); sending to a destroyed webContents throws
+   * and would surface as an uncaughtException. `isDestroyed?.()` tolerates the
+   * plain test double.
    */
   private send(channel: string, ...args: unknown[]): void {
     const wc = this.win.webContents

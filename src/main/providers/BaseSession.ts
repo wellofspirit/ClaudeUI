@@ -13,16 +13,15 @@ import type { ISession } from './ISession'
 import { SessionQueue } from './session-queue'
 import { dispatchedCostsByRouting } from '../services/db'
 import { logger } from '../services/logger'
-import { addExtraSink, removeExtraSink, extraSinks, emitEvent } from '../services/sync-host'
+import { emitEvent } from '../services/sync-host'
 
 /**
  * Abstract base class holding engine-neutral plumbing shared by all session
  * implementations (ClaudeSession, future opencode session, etc.).
  *
  * Owns:
- *  - The extraWindows static set (broadcast to remote clients)
  *  - Instance fields: win, routingId, cwd, messageHistory, inactivity timer
- *  - protected send() — IPC broadcast to win + extraWindows
+ *  - protected send() — one emission through the funnel, to every subscriber
  *  - getMessages() / setInactivityTimeout() — common ISession implementations
  *  - baseStatusFields() — injects engineId + capabilities into a SessionStatus object
  *
@@ -34,30 +33,14 @@ import { addExtraSink, removeExtraSink, extraSinks, emitEvent } from '../service
  */
 export abstract class BaseSession implements ISession {
   // ---------------------------------------------------------------------------
-  // Static: extra broadcast windows (remote clients)
-  // ---------------------------------------------------------------------------
-
-  // The registry itself lives in `services/sync-host.ts` (SyncCore phase 4a):
-  // the delivery adapter is the only thing that fans out to it, and keeping the
-  // set here would make `sync-host` ↔ `BaseSession` a cycle. These accessors
-  // stay as-is so every existing call site and test is unchanged; both they and
-  // the registry are 4c deletion targets.
-
-  static addExtraWindow(win: BrowserWindow): void {
-    addExtraSink(win)
-  }
-
-  static removeExtraWindow(win: BrowserWindow): void {
-    removeExtraSink(win)
-  }
-
-  static getExtraWindows(): Set<BrowserWindow> {
-    return extraSinks()
-  }
-
-  // ---------------------------------------------------------------------------
   // Instance fields
   // ---------------------------------------------------------------------------
+  //
+  // `addExtraWindow` / `removeExtraWindow` / `getExtraWindows` were DELETED by
+  // SyncCore phase 4c. "Extra window" was the shape the delivery privilege took:
+  // the desktop renderer was the fan-out target, and every other client had to be
+  // dressed up as a fake `BrowserWindow` to receive anything. Clients are uniform
+  // subscribers now — `addSyncSubscriber` in `services/sync-host.ts`.
 
   protected win: BrowserWindow
   /** Mutable: SessionManager.rekey() writes this when the session UUID arrives. */
@@ -367,13 +350,18 @@ export abstract class BaseSession implements ISession {
   }
 
   /**
-   * Broadcast a domain event to this session's window and every extra window.
+   * Broadcast a domain event to every client.
    *
    * SyncCore phase 4a: delegates to the emission funnel, so the event is appended
    * to the ring and applied to canonical state BEFORE it is delivered — the
    * ordering that makes "a snapshot at seq N contains every event through N"
-   * true by construction. Delivery semantics are unchanged: `this.win` (the
-   * session's OWN window, not a process-global one) plus all extras.
+   * true by construction.
+   *
+   * Phase 4c dropped the delivery target and the per-session window: every
+   * channel a session emits is replicated or volatile, so it reaches every
+   * SUBSCRIBER, and the session's own `this.win` is no longer part of the fan-out
+   * (the desktop renderer is a subscriber like any other). `this.win` survives as
+   * the spawn/host handle the engines need, not as a delivery target.
    *
    * `routingId` rides as `args[0]`, which is the wire encoding of contract 2's
    * `sessionId` — positional, not a named field (see sync-core.md §"Wire
@@ -384,7 +372,7 @@ export abstract class BaseSession implements ISession {
    * sealed thinking span's elapsed ms is attached (phase 4b).
    */
   protected send(channel: string, data: unknown): void {
-    emitEvent(channel, [this.routingId, this.trackThinkingSpan(channel, data)], 'all', this.win)
+    emitEvent(channel, [this.routingId, this.trackThinkingSpan(channel, data)])
   }
 
   /**

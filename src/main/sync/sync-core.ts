@@ -27,7 +27,7 @@
 
 import { EventRing } from './event-ring'
 import type { EventEntry, FullStateSnapshot } from '../../shared/remote-protocol'
-import { channelSpec, type DeliveryTarget } from '../../shared/sync/channels'
+import { channelSpec, type ChannelClass } from '../../shared/sync/channels'
 import { applyEvent, emptyAux, rekeyTargetFor, type ReducerAux } from '../../shared/sync/reducer'
 import {
   emptyCanonicalState,
@@ -36,23 +36,37 @@ import {
   type CanonicalSessionState,
   type CanonicalState
 } from '../../shared/sync/state'
+import { decideSync, type SyncDecision } from '../../shared/sync/sync-decision'
 import type { DirectoryGroup, SessionStatus } from '../../shared/types'
 
 /**
- * Where one emission goes. The `target` names come from the call sites the funnel
- * absorbed; `window` overrides the host's primary window for the per-session case
- * (`BaseSession.send` fans out to the session's OWN `win`, not a global one).
+ * Per-emission delivery input.
+ *
+ * As of SyncCore phase 4c there is no `target`: delivery follows the channel's
+ * CLASS (`host-local` ⇒ the owning window, anything else ⇒ every subscriber), so
+ * a call site can no longer choose who sees a replicated event. The only thing
+ * left to say is WHICH window a host-local emission belongs to, for the
+ * per-session case (`BaseSession.send` used to fan out to the session's OWN
+ * `win`, not a global one).
  *
  * `window` is `unknown` on purpose — SyncCore never dereferences it, which is how
  * a `BrowserWindow` can ride through an Electron-free module.
  */
 export interface Delivery {
-  target: DeliveryTarget
   window?: unknown
 }
 
-/** The host's fan-out, invoked once per event AFTER append + apply. */
-export type DeliverFn = (seq: number, channel: string, args: unknown[], delivery: Delivery) => void
+/**
+ * The host's fan-out, invoked once per event AFTER append + apply. `cls` is
+ * passed rather than re-derived so the host adapter and the funnel cannot
+ * disagree about which lane an event belongs to.
+ */
+export type DeliverFn = (
+  seq: number,
+  channel: string,
+  args: unknown[],
+  delivery: Delivery & { cls: ChannelClass }
+) => void
 
 /** Fired when core rekeys a session, so the host registry can follow in-tick. */
 export type RekeyObserver = (oldId: string, newId: string) => void
@@ -157,7 +171,7 @@ export class SyncCore {
    * order would stop matching apply order and a catchup replay would diverge
    * from what the live client saw.
    */
-  emit(channel: string, args: unknown[], delivery: Delivery): void {
+  emit(channel: string, args: unknown[], delivery: Delivery = {}): void {
     if (this.inFlight) {
       this.pending.push({ channel, args, delivery })
       return
@@ -211,7 +225,21 @@ export class SyncCore {
       }
     }
 
-    this.deliver?.(seq, channel, args, delivery)
+    this.deliver?.(seq, channel, args, { ...delivery, cls: spec.cls })
+  }
+
+  // -------------------------------------------------------------------------
+  // Sync answering (SyncCore phase 4c — one decision, two transports)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Answer one client `sync` frame. Both transports (the WS server and the
+   * desktop renderer's MessagePort) route through here so the epoch/catchup/full
+   * branching cannot diverge between them — see
+   * `src/shared/sync/sync-decision.ts`.
+   */
+  answerSync(lastSeq: number, epoch?: string): SyncDecision {
+    return decideSync(this, lastSeq, epoch)
   }
 
   /**

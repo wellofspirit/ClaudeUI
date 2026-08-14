@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { Notification, type BrowserWindow } from 'electron'
+import { Notification } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts } from './claude-session'
 import { emitEvent } from './sync-host'
@@ -136,7 +136,6 @@ export class AutomationManager {
   /** Largest delay setTimeout honors before the runtime clamps it to 1ms. */
   private static readonly MAX_TIMER_DELAY_MS = 2_147_483_647
 
-  private win: BrowserWindow
   private automations: Automation[] = []
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
   private activeRuns = new Map<string, AbortController>()
@@ -147,10 +146,6 @@ export class AutomationManager {
   private watchDebounce: ReturnType<typeof setTimeout> | null = null
   /** Flag to ignore file-change events triggered by our own writes */
   private suppressWatch = false
-
-  constructor(win: BrowserWindow) {
-    this.win = win
-  }
 
   // ---- Persistence --------------------------------------------------------
 
@@ -518,15 +513,15 @@ export class AutomationManager {
   }
 
   private emitRunMessage(automationId: string, message: ChatMessage): void {
-    emitEvent('automation:run-message', [{ automationId, message }], 'all', this.win)
+    emitEvent('automation:run-message', [{ automationId, message }])
   }
 
   private emitStreamEvent(automationId: string, type: string, text: string): void {
-    emitEvent('automation:stream-event', [{ automationId, type, text }], 'all', this.win)
+    emitEvent('automation:stream-event', [{ automationId, type, text }])
   }
 
   private emitProcessing(automationId: string, isProcessing: boolean): void {
-    emitEvent('automation:processing', [{ automationId, isProcessing }], 'all', this.win)
+    emitEvent('automation:processing', [{ automationId, isProcessing }])
   }
 
   private async executeRun(automation: Automation): Promise<void> {
@@ -921,11 +916,11 @@ export class AutomationManager {
   // ---- Notifications ------------------------------------------------------
 
   private notifyRunUpdate(automationId: string, run: AutomationRun): void {
-    emitEvent('automation:run-update', [{ automationId, run }], 'all', this.win)
+    emitEvent('automation:run-update', [{ automationId, run }])
   }
 
   private notifyAutomationsChanged(): void {
-    emitEvent('automation:changed', [this.automations], 'all', this.win)
+    emitEvent('automation:changed', [this.automations])
   }
 
   private sendNativeNotification(automation: Automation, run: AutomationRun): void {

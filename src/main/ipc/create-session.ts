@@ -79,8 +79,7 @@ async function seedCanonicalTranscript(
 export async function prepareAndCreateSession(
   manager: SessionManager,
   win: BrowserWindow,
-  args: CreateSessionArgs,
-  opts: { notifyMainWindow: boolean }
+  args: CreateSessionArgs
 ): Promise<void> {
   const {
     routingId,
@@ -114,19 +113,13 @@ export async function prepareAndCreateSession(
   // engineId (not resolvedEngineId) — SessionManager.create()'s own `= 'claude'`
   // default preserves the legacy claude-default boundary at that layer.
   manager.create(routingId, win, cwd, spawnOpts, engineId)
-  // Desktop (notifyMainWindow=false) notifies only extra windows: the initiating
-  // renderer already knows locally. Remote (notifyMainWindow=true) also notifies
-  // the main window because the request arrived over WebSocket, not IPC.
-  //
-  // That asymmetry is preserved VERBATIM by SyncCore phase 4a — it is a named 4c
-  // deletion target (once the desktop renderer is just client #1 there is no
-  // "already knows locally"), not something 4a is allowed to quietly fix.
-  emitEvent(
-    'session:created',
-    [routingId, { cwd, resumeSessionId }],
-    opts.notifyMainWindow ? 'all' : 'extras-only',
-    win
-  )
+  // ONE emit, every subscriber (SyncCore phase 4c). The `notifyMainWindow`
+  // asymmetry that lived here — desktop-originated creates skipped the initiating
+  // renderer because it "already knew locally" — is deleted: the desktop renderer
+  // is client #1 and learns about its own session from the same event as every
+  // other client. The originator's own local `createNewSession` makes the arrival
+  // idempotent (the handler no-ops when the session already exists).
+  emitEvent('session:created', [routingId, { cwd, resumeSessionId }])
   // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript
   // lives on disk, so canonical state has to read it from the same source the
   // renderer does (`loadSessionHistory`) or 4b's snapshot would hand every client

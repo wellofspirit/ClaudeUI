@@ -43,6 +43,7 @@ const optimizer = {
 }
 import { registerSessionIpc } from './ipc/session.ipc'
 import { setSyncWindow, startShadowWatch } from './services/sync-host'
+import { attachSyncPort } from './services/sync-port'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { terminalService } from './services/terminal-service'
 import { registerAutomationIpc } from './ipc/automation.ipc'
@@ -301,11 +302,15 @@ function createWindow(): void {
   })
   currentWindow = mainWindow
   // SyncCore phase 4a: register the host's primary window with the emission
-  // funnel. Every emit site still passes its own `win` explicitly, so this is the
-  // FALLBACK target — and it is what makes "no window exists" a tested mode
-  // rather than an edge case once 4b removes the per-call windows.
+  // funnel. As of 4c this is the fallback target for HOST-LOCAL channels only
+  // (window chrome, voice, native pickers, PTY bytes) — replicated events no
+  // longer know what a window is.
   setSyncWindow(mainWindow)
-  // Dev-only drift detector for the 4a shadow duplication (no-op unless
+  // SyncCore phase 4c: the renderer becomes client #1. Hands it a MessagePort on
+  // every load and answers its `sync` frames from the ring/canonical state,
+  // exactly as the WebSocket server answers a phone's.
+  attachSyncPort(mainWindow)
+  // Dev-only drift detector for the shadow duplication (no-op unless
   // CLAUDEUI_SYNC_SHADOW=1).
   startShadowWatch(mainWindow)
 
@@ -434,7 +439,7 @@ function createWindow(): void {
   // Stop the previous automation manager (macOS re-create) before replacing it,
   // then hoist so the single before-quit teardown reaches the live instance.
   currentAutomationManager?.stopAll()
-  const automationManager = registerAutomationIpc(mainWindow)
+  const automationManager = registerAutomationIpc()
   currentAutomationManager = automationManager
 
   // Remote access server. Stop any previous server first (macOS re-create) so it

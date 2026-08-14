@@ -1,7 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import type { BrowserWindow } from 'electron'
 import { logger } from './logger'
 import { emitEvent } from './sync-host'
 import { writeFileAtomicSync } from './write-json-atomic'
@@ -307,7 +306,7 @@ export function saveVendorConfig(
  * Polling interval is 500ms — a good balance between responsiveness and CPU.
  * For just 2 small config files, the stat overhead is negligible.
  */
-export function startConfigWatcher(win: BrowserWindow): () => void {
+export function startConfigWatcher(): () => void {
   ensureDir()
 
   const watched = [
@@ -335,7 +334,7 @@ export function startConfigWatcher(win: BrowserWindow): () => void {
 
       try {
         const data = JSON.parse(content)
-        emitEvent(entry.channel, [data], 'all', win)
+        emitEvent(entry.channel, [data])
       } catch (err) {
         logger.warn('UIConfig', `Malformed JSON in ${path.basename(entry.filePath)}`, err)
       }

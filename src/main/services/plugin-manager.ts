@@ -8,7 +8,7 @@ import { SessionManager } from './session-manager'
 import { AutomationManager } from './automation-manager'
 import { RemoteDispatcher } from './remote-dispatcher'
 import { commandRegistry, desktopConnection, registerCommand } from '../ipc/command-registry'
-import { BaseSession } from '../providers/BaseSession'
+import { addSyncSubscriber } from './sync-host'
 import type {
   ClaudeUIPlugin,
   PluginContext,
@@ -37,38 +37,6 @@ const LOG_SOURCE = 'plugin-manager'
 const PLUGIN_CHANNEL_DECLARATION = { capability: 'config', kind: 'command' } as const
 
 // ---------------------------------------------------------------------------
-// PluginBridge — virtual BrowserWindow that bridges session events to plugins
-// ---------------------------------------------------------------------------
-
-class PluginBridge {
-  private destroyed = false
-  private pushFn: ((channel: string, ...args: unknown[]) => void) | null = null
-
-  onEvent(fn: (channel: string, ...args: unknown[]) => void): void {
-    this.pushFn = fn
-  }
-
-  isDestroyed(): boolean {
-    return this.destroyed
-  }
-
-  get webContents(): { send: (channel: string, ...args: unknown[]) => void } {
-    return {
-      send: (channel: string, ...args: unknown[]): void => {
-        if (!this.destroyed && this.pushFn) {
-          this.pushFn(channel, ...args)
-        }
-      }
-    }
-  }
-
-  destroy(): void {
-    this.destroyed = true
-    this.pushFn = null
-  }
-}
-
-// ---------------------------------------------------------------------------
 // LoadedPlugin — internal tracking
 // ---------------------------------------------------------------------------
 
@@ -91,7 +59,8 @@ interface LoadedPlugin {
 export class PluginManager {
   private plugins = new Map<string, LoadedPlugin>()
   private eventListeners = new Map<string, Set<(...args: unknown[]) => void>>()
-  private bridge: PluginBridge
+  /** Unsubscribe for this manager's funnel sink (SyncCore phase 4c). */
+  private unsubscribeSync: (() => void) | null = null
   private win: BrowserWindow
   private sessionManager: SessionManager
   private automationManager: AutomationManager
@@ -109,12 +78,16 @@ export class PluginManager {
     this.automationManager = opts.automationManager
     this.remoteDispatcher = opts.remoteDispatcher
 
-    // Create bridge and wire it to the event bus.
+    // Subscribe to the funnel's fan-out (SyncCore phase 4c — the fake-BrowserWindow
+    // `PluginBridge` is gone; a plugin surface is one subscriber like every other
+    // client). The event SET is unchanged: extras used to receive every
+    // replicated + volatile channel and never a host-local one, which is exactly
+    // what a subscriber receives now.
+    //
     // Session events arrive as (channel, routingId, data) from BaseSession.send().
     // We wrap them into an object with { routingId, sessionId, ...data } so plugins
     // get a stable, self-documenting event shape (see ADR-005).
-    this.bridge = new PluginBridge()
-    this.bridge.onEvent((channel, ...args) => {
+    this.unsubscribeSync = addSyncSubscriber((_seq, channel, args) => {
       if (this.tracing) {
         logger.debug(LOG_SOURCE, `[trace] ${channel} ${JSON.stringify(args).slice(0, 200)}`)
       }
@@ -131,7 +104,6 @@ export class PluginManager {
         this.fireEvent(channel, ...args)
       }
     })
-    BaseSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
   }
 
   // -------------------------------------------------------------------------
@@ -184,8 +156,8 @@ export class PluginManager {
         logger.error(LOG_SOURCE, `Error deactivating plugin "${id}" during shutdown`, err)
       }
     }
-    BaseSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
-    this.bridge.destroy()
+    this.unsubscribeSync?.()
+    this.unsubscribeSync = null
   }
 
   listPlugins(): PluginInfo[] {

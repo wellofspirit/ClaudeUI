@@ -1,7 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import type { BrowserWindow } from 'electron'
 import { emitEvent } from './sync-host'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
@@ -18,12 +17,7 @@ interface WatchEntry {
 
 const watchers = new Map<string, WatchEntry>()
 
-export function watchSession(
-  routingId: string,
-  sessionId: string,
-  projectKey: string,
-  win: BrowserWindow
-): void {
+export function watchSession(routingId: string, sessionId: string, projectKey: string): void {
   // Already watching this routingId
   if (watchers.has(routingId)) return
 
@@ -46,12 +40,7 @@ export function watchSession(
           sessionId,
           projectKey
         )
-        emitEvent(
-          'session:watch-update',
-          [{ routingId, messages, taskNotifications, statusLine }],
-          'all',
-          win
-        )
+        emitEvent('session:watch-update', [{ routingId, messages, taskNotifications, statusLine }])
       } catch (err) {
         logger.warn('SessionWatcher', `Parse error during watch update for ${sessionId}`, err)
       }

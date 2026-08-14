@@ -87,14 +87,11 @@ class AuthManager {
     const acc = account as Record<string, unknown> | undefined
     const loggedIn = !!(acc && acc.email)
     // Matches the (routingId, source) shape of the session:auth-source event;
-    // login is global so the id is a synthetic 'system'. main-only, verbatim —
-    // ClaudeSession's own emitter is the one that fans out.
-    emitEvent(
-      'session:auth-source',
-      ['system', loggedIn ? 'authenticated' : 'none'],
-      'main-only',
-      this.window
-    )
+    // login is global so the id is a synthetic 'system'. Reaches every subscriber
+    // since SyncCore phase 4c — the channel rings, so a reconnecting client
+    // already replayed this from the catchup; being main-window-only live was the
+    // asymmetry, not a privacy boundary.
+    emitEvent('session:auth-source', ['system', loggedIn ? 'authenticated' : 'none'])
   }
 
   // ---------------------------------------------------------------------------

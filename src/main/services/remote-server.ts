@@ -6,7 +6,7 @@ import * as fs from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { BrowserWindow } from 'electron'
 import { app } from 'electron'
-import { syncCore } from './sync-host'
+import { syncCore, addSyncSubscriber } from './sync-host'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
   hasLiveShellGrant,
@@ -17,9 +17,7 @@ import {
 import { terminalService, readTerminalPolicy, shellGrantIdleMs } from './terminal-service'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
-import { RemoteBridge } from './remote-bridge'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from './git-watch-registry'
-import { BaseSession } from '../providers/BaseSession'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
@@ -299,7 +297,12 @@ export class RemoteServer {
    */
   private readonly core: typeof syncCore
   private dispatcher: RemoteDispatcher
-  private bridge: RemoteBridge
+  /**
+   * Unsubscribe for this server's delivery sink (SyncCore phase 4c). Non-null
+   * exactly while the server is listening: the WS broadcaster is a plain
+   * subscriber now, not a fake `BrowserWindow` registered as an "extra window".
+   */
+  private unsubscribeSync: (() => void) | null = null
   private win: BrowserWindow | null = null
   private idleTimer?: ReturnType<typeof setInterval>
   private tunnel: TunnelManager
@@ -346,30 +349,10 @@ export class RemoteServer {
     this.dispatcher = dispatcher
     this.passwordAuth = passwordAuth
     this.tailscale = tailscale
-    this.bridge = new RemoteBridge()
     this.tunnel = new TunnelManager()
 
     // Wire tunnel status changes to notify the desktop renderer
     this.tunnel.setStatusHandler(() => this.notifyStatus())
-
-    // The funnel path: SyncCore already appended and applied; broadcast with
-    // ITS seq. No re-numbering — the frame's seq is the client's cursor and a
-    // catchup replays from that same ring.
-    this.bridge.onSequencedEvent((seq: number, channel: string, args: unknown[]) => {
-      this.broadcast({ type: 'event', seq, channel, args })
-    })
-    // The legacy unsequenced path. Reaching it means an emitter bypassed
-    // `emitEvent`, so the event is NOT in the ring. Appending a second time
-    // here would break the one-emission-one-entry invariant that catchup rests
-    // on, so this is a loud no-op instead (the funnel guard test keeps
-    // production free of such callers).
-    this.bridge.onEvent((channel: string) => {
-      logger.error(
-        'remote-server',
-        `unfunneled emission on "${channel}" reached the remote bridge — route it ` +
-          `through emitEvent() in services/sync-host.ts (event dropped)`
-      )
-    })
   }
 
   /**
@@ -388,11 +371,6 @@ export class RemoteServer {
   /** Set a callback for status change notifications. */
   onStatusChange(cb: (status: RemoteStatus) => void): void {
     this.statusCallback = cb
-  }
-
-  /** Get the RemoteBridge instance for registering with BaseSession. */
-  getBridge(): RemoteBridge {
-    return this.bridge
   }
 
   /** Get the RemoteDispatcher for handler registration. */
@@ -538,8 +516,13 @@ export class RemoteServer {
     this.lastStartError = null
     this.port = actualPort
 
-    // Register bridge as extra window for all session events
-    BaseSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
+    // Become a client of the funnel (SyncCore phase 4c). One sink, the ring's own
+    // seq, no re-numbering: the seq a WS client stores as its cursor is the seq a
+    // catchup replays from.
+    this.unsubscribeSync?.()
+    this.unsubscribeSync = addSyncSubscriber((seq, channel, args) => {
+      this.broadcast({ type: 'event', seq, channel, args })
+    })
 
     // Start idle timeout checker
     this.idleTimer = setInterval(() => this.checkIdleClients(), 60_000)
@@ -686,8 +669,9 @@ export class RemoteServer {
     // socket's async `close` handler — the server is going away now.
     gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
 
-    // Remove bridge from BaseSession
-    BaseSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
+    // Stop receiving the funnel's fan-out.
+    this.unsubscribeSync?.()
+    this.unsubscribeSync = null
 
     // Close servers
     if (this.wss) {
@@ -2204,29 +2188,25 @@ export class RemoteServer {
    * and no sync path touches a `BrowserWindow` at all.
    */
   private handleSync(ws: WebSocket, lastSeq: number, epoch?: string): void {
-    const currentEpoch = this.core.epoch()
-    const mockupToken = this.mockupToken || undefined
-    const fileToken = this.fileToken || undefined
-
-    // Fresh connection (lastSeq 0), OR a reconnect carrying a lastSeq from a
-    // DIFFERENT process epoch (the desktop app restarted, so our seq counter is
-    // back near 0) — the client's lastSeq is meaningless. Send a full snapshot
-    // rather than a catchup that would falsely report "caught up" (M-DB4).
-    if (lastSeq === 0 || epoch !== currentEpoch) {
-      const state = this.core.getSnapshot()
-      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
+    // The full/catchup branching (fresh client, stale epoch, ring-evicted cursor)
+    // lives in `shared/sync/sync-decision.ts` as of phase 4c, so this transport
+    // and the desktop renderer's MessagePort (`services/sync-port.ts`) cannot
+    // drift apart on the one branch that matters — a stale epoch, where a catchup
+    // would falsely report "caught up" (M-DB4). What stays HERE is the pair of
+    // scoped tokens, which are WS-only: they exist to build URLs a browser will
+    // fetch, and the desktop reads those files through IPC.
+    const decision = this.core.answerSync(lastSeq, epoch)
+    if (decision.kind === 'full') {
+      this.sendTo(ws, {
+        type: 'sync-full',
+        state: decision.state,
+        epoch: decision.epoch,
+        mockupToken: this.mockupToken || undefined,
+        fileToken: this.fileToken || undefined
+      })
       return
     }
-
-    // Same epoch — try to catch up from the event log.
-    const events = this.core.getAfter(lastSeq)
-    if (events === null) {
-      // Too far behind — send full state
-      const state = this.core.getSnapshot()
-      this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
-    } else {
-      this.sendTo(ws, { type: 'sync-catchup', events, epoch: currentEpoch })
-    }
+    this.sendTo(ws, { type: 'sync-catchup', events: decision.events, epoch: decision.epoch })
   }
 
   // ---------------------------------------------------------------------------
@@ -2379,14 +2359,14 @@ export class RemoteServer {
 
   /**
    * @deprecated SyncCore phase 4a — every emission goes through
-   * `emitEvent()` (services/sync-host.ts) now, which reaches remote clients via
-   * the bridge. This had no production callers even before the funnel
+   * `emitEvent()` (services/sync-host.ts) now, which reaches every subscriber
+   * including this server. This had no production callers even before the funnel
    * (docs/architecture/remote.md defect 5) and appending here would be a second
    * ring writer. Kept as a funnel delegation so any future caller is correct by
    * construction.
    */
   pushNonSessionEvent(channel: string, ...args: unknown[]): void {
-    this.core.emit(channel, args, { target: 'extras-only' })
+    this.core.emit(channel, args)
   }
 }
 

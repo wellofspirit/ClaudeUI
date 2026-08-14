@@ -13,7 +13,6 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import { watch, type FSWatcher } from 'node:fs'
-import type { BrowserWindow } from 'electron'
 import type {
   TokenCounts,
   UsageBlock,
@@ -270,7 +269,6 @@ const MAX_PROJECTION_SAMPLES = 30
 const MIN_API_PERCENT_FOR_SAMPLE = 0.5
 
 export class BlockUsageService {
-  private window: BrowserWindow | null = null
   private fileCache: Map<string, FileCache> = new Map()
   private lastData: BlockUsageData | null = null
   private previousBlockIds: Set<string> = new Set()
@@ -307,10 +305,6 @@ export class BlockUsageService {
   /** Cached account log + file mtime for invalidation. */
   private accountLog: AccountLogRecord[] = []
   private accountLogMtime = 0
-
-  setWindow(win: BrowserWindow): void {
-    this.window = win
-  }
 
   /** Update the debounce interval for incremental recalculations. */
   setDebounceSecs(secs: number): void {
@@ -1924,7 +1918,7 @@ export class BlockUsageService {
 
   private pushToRenderer(data: BlockUsageData): void {
     try {
-      emitEvent('usage:block-data', [data], 'all', this.window)
+      emitEvent('usage:block-data', [data])
     } catch {
       // Window may have been closed
     }

@@ -716,8 +716,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
           resumeSessionAt,
           forkSession,
           engineId
-        },
-        { notifyMainWindow: false }
+        }
       )
     }
   })
@@ -759,7 +758,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       routingId: string,
       prompt: string,
       attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, win, routingId, prompt, attachments)
+    ) => sendPrompt(manager, routingId, prompt, attachments)
   })
 
   handleIpc({
@@ -900,7 +899,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, mode: string) =>
-      setPermissionMode(manager, win, routingId, mode)
+      setPermissionMode(manager, routingId, mode)
   })
 
   // Voice input handlers (Claude-only: capabilities.voice)
@@ -970,7 +969,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, model: string) => setModel(manager, win, routingId, model)
+    handler: async (routingId: string, model: string) => setModel(manager, routingId, model)
   })
 
   handleIpc({
@@ -978,7 +977,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (routingId: string, effort: string) => setEffort(manager, win, routingId, effort)
+    handler: (routingId: string, effort: string) => setEffort(manager, routingId, effort)
   })
 
   handleIpc({
@@ -987,7 +986,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: (routingId: string, variant: string | null) =>
-      setReasoningVariant(manager, win, routingId, variant)
+      setReasoningVariant(manager, routingId, variant)
   })
 
   handleIpc({
@@ -995,7 +994,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: (routingId: string, mode: string) => setThinkingMode(manager, win, routingId, mode)
+    handler: (routingId: string, mode: string) => setThinkingMode(manager, routingId, mode)
   })
 
   handleIpc({
@@ -1266,7 +1265,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     kind: 'query',
     sessionIdArg: 0,
     handler: (routingId: string, sessionId: string, projectKey: string) => {
-      watchSession(routingId, sessionId, projectKey, win)
+      watchSession(routingId, sessionId, projectKey)
     }
   })
 
@@ -1292,7 +1291,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'config',
     kind: 'command',
     handler: (incomingSettings: UISettings) =>
-      saveUiSettings(manager, win, incomingSettings, { notifyMainWindow: false })
+      saveUiSettings(manager, incomingSettings)
   })
   handleIpc({
     channel: 'config:load-sessions',
@@ -1305,7 +1304,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'config',
     kind: 'command',
     handler: (config: UISessionConfig) =>
-      saveSessions(win, config, { notifyMainWindow: false })
+      saveSessions(config)
   })
   handleIpc({
     channel: 'config:load-slash-commands',
@@ -1990,7 +1989,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // registry is what keeps desktop and remote owners coexisting. This is also
   // the only place that knows the window fan-out, so it installs it.
   gitWatchRegistry.init((cwd, status) => {
-    emitEvent('git:status-update', [{ cwd, status }], 'all', win)
+    emitEvent('git:status-update', [{ cwd, status }])
   })
 
   handleIpc({
@@ -2052,11 +2051,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   })
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
-  startProjectsWatcher(win)
+  startProjectsWatcher()
 
   // Watch ~/.claude/ui/ config files for cross-instance sync. The watcher emits
   // through the funnel now, so it no longer needs an extra-window accessor.
-  startConfigWatcher(win)
+  startConfigWatcher()
 
   // SyncCore phase 4b: canonical state is the `sync-full` source, so the fields
   // that come from files/queries rather than events have to be in it before the
@@ -2090,7 +2089,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // inference headers). Background polling (every 30 min) fetches supplementary
   // data (per-model breakdowns, extra_usage). Disk cache avoids API calls on
   // every launch.
-  usageFetcher.setWindow(win)
   // Wire up SDK usage relay — tries active user sessions first, then
   // the always-on service session as fallback.
   usageFetcher.setSessionGetter(async () => {
@@ -2119,7 +2117,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Disabled in dev builds to avoid snapshot write conflicts with the prod
   // instance. Set CLAUDE_UI_DEV_USAGE=1 to enable for testing.
   const skipUsageInDev = !app.isPackaged && !process.env.CLAUDE_UI_DEV_USAGE
-  blockUsageService.setWindow(win)
   if (!skipUsageInDev) {
     // Phase 7 Pass 2 (Full SQL): run the backfill reconciler FIRST so usage_event
     // holds out-of-tool Claude + opencode usage before the first dashboard
@@ -2429,9 +2426,12 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         if (!filename) return
         if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
         entry.debounceTimer = setTimeout(() => {
-          // main-only, verbatim: the DESKTOP mockup watcher never fanned out to
-          // extras (the remote-registered watcher in remote-handlers.ts does).
-          emitEvent('mockup:file-changed', [directory], 'main-only', win)
+          // Uniform delivery since SyncCore phase 4c: this watcher used to be
+          // main-window-only while the remote-registered one (remote-handlers.ts)
+          // fanned out, which meant a reconnecting client replayed a notify it
+          // could never receive live (4a's "catchup leak"). Both reach every
+          // subscriber now.
+          emitEvent('mockup:file-changed', [directory])
         }, 200)
       })
 
@@ -2457,7 +2457,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   return manager
 }
 
-function startProjectsWatcher(win: BrowserWindow): void {
+function startProjectsWatcher(): void {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects')
   if (!fs.existsSync(projectsDir)) return
 
@@ -2472,7 +2472,7 @@ function startProjectsWatcher(win: BrowserWindow): void {
       // live one got a fresh one. Fire-and-forget — the notify must not wait on
       // a directory walk.
       void refreshCanonicalDirectories()
-      emitEvent('session:directories-changed', [], 'all', win)
+      emitEvent('session:directories-changed', [])
     }, 500)
   }
 

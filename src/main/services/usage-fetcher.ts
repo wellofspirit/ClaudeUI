@@ -22,7 +22,6 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import type { BrowserWindow } from 'electron'
 import { getSdkVersion } from './claude-session'
 import { emitEvent } from './sync-host'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
@@ -129,7 +128,6 @@ export type SessionUsageGetter = () => Promise<Record<string, unknown> | null>
 // ---------------------------------------------------------------------------
 
 export class UsageFetcher {
-  private window: BrowserWindow | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private lastUsage: AccountUsage | null = null
   private pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS
@@ -147,11 +145,6 @@ export class UsageFetcher {
   /** One-shot timer firing shortly after the 5h window expires. */
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
   private lastFetchStartedAt = 0
-
-  /** Attach the main BrowserWindow so we can push events to the renderer. */
-  setWindow(win: BrowserWindow): void {
-    this.window = win
-  }
 
   /** Set the SDK session fallback getter. */
   setSessionGetter(getter: SessionUsageGetter): void {
@@ -498,7 +491,7 @@ export class UsageFetcher {
     // time-series + 5h block alignment can be sourced from the DB. Best-effort.
     this.recordWindowSampleFromUsage(usage)
     try {
-      emitEvent('usage:data', [usage], 'all', this.window)
+      emitEvent('usage:data', [usage])
     } catch {
       /* Window may have been closed */
     }
