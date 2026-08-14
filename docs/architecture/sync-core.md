@@ -1,6 +1,20 @@
-# SyncCore — target sync architecture
+# SyncCore — sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). Phases 0-3 landed 2026-08-14; **phases 4a, 4b and 4c landed in full** (SyncCore + emission funnel + shared reducer; canonical state is the `sync-full` state of record; the desktop renderer is a MessagePort subscriber, the delivery privilege is deleted, and its store is the shared reducer's output) — phase status at the bottom. Until the remaining phases land, [remote.md](remote.md) describes the running system, and [sync-channels.md](sync-channels.md) is the per-channel classification.
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); phase 5 (volatile-stream separation) and the named follow-on phase are not started — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
+
+**Phase 4 complete (4a → 4d).** Canonical state in the main process is the state of
+record: one emission funnel appends every domain event to the ring and applies it
+through the shared reducer before any client sees it, `sync-full` is
+`SyncCore.getSnapshot()` read in one synchronous tick, and the desktop renderer is
+client #1 on a MessagePort — folding the same `applyEvent`, holding no delivery
+privilege, with no `BrowserWindow` anywhere on a snapshot or delivery path. 4d
+finished it from the other end: core boots before any window decision
+(`src/main/boot-core.ts`), a session's `win` is a nullable HOST handle rather than a
+requirement, and `CLAUDEUI_NO_WINDOW=1` runs the app with no window at all — seeding
+canonical state, serving `sync-full`, spawning sessions and streaming events to
+WebSocket clients, proven end to end by
+`src/e2e/flows/windowless-boot.e2e.test.ts`. Defect 2 (the privileged desktop
+renderer) is dead in both halves, and "no window exists" is a tested mode.
 
 **Design intent (owner):** every interaction's effect is an event broadcast to all clients equally; the backend (non-UI) maintains the event store and the state; a reconnecting client replays from its last seq or receives a full state sync; no client is privileged. SyncCore realizes that design and extends it to headless operation and remote terminals. **Single-operator is a standing assumption** — one human, many devices; multi-user is a non-goal.
 
@@ -22,18 +36,38 @@ claudeui-server — headless entrypoint (bun) booting core alone: systemd unit, 
                   files/env, `tailscale serve` in front for TLS + identity (ADR-039/042 stack).
 ```
 
-**Headless rescope (4a).** The physical `src/core` extraction and the `claudeui-server`
-entrypoint are a **named follow-on phase**, not part of phase 4. Phase 4's exit is a
-**windowless-Electron smoke test** — the app boots, syncs and serves with no
-`BrowserWindow` — which is what actually proves "a hung or absent renderer never
-degrades sync"; moving files proves nothing on its own and would collide with 4b/4c's
-edits to the very modules involved. The Electron-free constraint is enforced NOW,
-by lint, on `src/main/sync/**` and `src/shared/sync/**` (the future `src/core`), so
-the extraction stays a move rather than a rewrite. The vendor-OAuth-on-a-browserless-
-server design session moves with that follow-on phase, since it only becomes
-answerable once there is a server to provision.
+**Headless rescope (4a), as realized in 4d.** The physical `src/core` extraction and
+the `claudeui-server` entrypoint are a **named follow-on phase**, not part of phase 4.
+Phase 4's exit was a **windowless-Electron smoke test** — the app boots, syncs and
+serves with no `BrowserWindow` — which is what actually proves "a hung or absent
+renderer never degrades sync"; moving files proves nothing on its own and would have
+collided with 4b/4c's edits to the very modules involved. The Electron-free constraint
+is enforced by lint on `src/main/sync/**` and `src/shared/sync/**` (the future
+`src/core`), so the extraction stays a move rather than a rewrite. The
+vendor-OAuth-on-a-browserless-server design session moves with that follow-on phase,
+since it only becomes answerable once there is a server to provision.
 
-A hung or absent renderer must never degrade sync (before 4b it silently yielded an empty snapshot). **As of 4b no snapshot path touches a window** — `handleSync` and the `/sent-file` allowlist both read canonical state in-process. What 4d still owes is the other direction: proving the app BOOTS and serves with no `BrowserWindow` at all, so "no window exists" is a tested mode rather than an inference.
+**The boot order is what 4d actually changed.** `bootCore()` (`src/main/boot-core.ts`)
+runs from `app.whenReady()` BEFORE any window decision and owns everything
+window-independent: `registerSessionIpc()` (sessions, config, git, usage, the canonical
+seeds, the file watchers), `registerTerminalIpc()`, the automation manager, and the
+remote HTTP+WS server with its autostart. `createWindow()` is now purely ADDITIVE —
+the `MessagePort` hand-off, the host-local delivery target, window chrome, plugins, the
+log viewer — and `CLAUDEUI_NO_WINDOW=1` skips it entirely. The rule that keeps this
+true: **nothing on the boot path may CAPTURE a window.** Whatever genuinely needs one
+reads it from `services/host-window.ts` at USE time and copes with `null` — the
+`host-local` delivery lane, `session:pick-folder`'s dialog parent, and the spawn handle
+a session keeps for voice capture. Two signatures lost their window parameter for this
+(`registerSessionIpc`, `registerRemoteHandlers`); `BaseSession.win` became
+`BrowserWindow | null`.
+
+A hung or absent renderer must never degrade sync (before 4b it silently yielded an
+empty snapshot). **As of 4b no snapshot path touches a window** — `handleSync` and the
+`/sent-file` allowlist both read canonical state in-process. **As of 4d no BOOT path
+needs one either**, and the smoke test asserts it the only way that means anything: it
+counts `BrowserWindow` constructions across a whole flow (boot → `sync-full` →
+`session:create` → prompt → streamed deltas → mid-turn queue → take-back, all driven by
+a WebSocket client) and requires zero.
 
 ## The four wire contracts (closed set)
 
@@ -141,7 +175,7 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 | 1 | Command registry: schemas, capabilities, per-connection identity, audit log | M | Every mutating channel registered with a declared capability; fail-closed test | **landed** (`48b4f72`, 2026-08-14) — plugin channels ride `config` pending plugin-declared capabilities; `automation:*`/`log-viewer:*` not yet ported |
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
-| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **4a + 4b + 4c landed** — invariant test green; 4d remains |
+| 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **landed** — all four stages; invariant test green, windowless smoke green (`windowless-boot.e2e.test.ts`) |
 | 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | not started |
 
 Phase 4 lands as a strangler in four stages:
@@ -151,7 +185,7 @@ Phase 4 lands as a strangler in four stages:
 | 4a | SyncCore module (ring + canonical state + one emission funnel), shared reducer, channel classification, `session:config-changed`, metering in the snapshot, rekey ownership in core, shadow harness, no-Electron lint fence | **landed** — canonical state runs in SHADOW; the renderer snapshot is still the state of record |
 | 4b | Snapshot cutover: `SyncCore.getSnapshot()` is the `sync-full` source; `EventLog` deleted; event-carried user identity + emitter-timed thinking spans; canonical directories/boot seeds; snapshot-invariant test | **landed** — `__getRemoteState` survived as the SHADOW comparator's input until 4c's store rewiring deleted both |
 | 4c | Renderer rewiring: MessagePort transport, store split (replica vs view), delivery privilege deleted, `extraWindows` + the `notifyMainWindow` asymmetry deleted | **landed in full** — transport + delivery first, then reducer adoption; see below |
-| 4d | Windowless smoke, sent-file inversion | not started |
+| 4d | Window-independent boot (`bootCore`), nullable session host handle, `CLAUDEUI_NO_WINDOW`, windowless smoke, sent-file inversion confirmed, docs closeout | **landed** — see the boot-order note above; the sent-file inversion was landed by 4b and 4d only confirmed it (ADR-043's note is accurate: the `/sent-file` allowlist reads `SyncCore.getSnapshot()` in-process, asserted by the funnel guard) |
 
 **Exit-criteria precision.** Defect 2 (privileged desktop renderer) has two halves and
 they died in different stages: **4b** killed the *state-of-record* half (a hung or absent
@@ -317,6 +351,77 @@ else. Making these true commands with `causedBy` reconciliation is the follow-up
 it belongs with the generic `command()` migration rather than with the store split.
 `causedBy` itself is still unbuilt — the designed escape hatch if the honest
 round-trip ever feels slow from a phone, and an owner call after living with it.
+
+## Follow-ons
+
+Everything phase 4 deliberately left, recorded at the point it stopped being a
+plan and became a decision. Nothing here is a defect in the landed design; each
+line is a named next step with the reason it is not phase-4 work.
+
+**The named follow-on phase** (was "headless", rescoped in 4a):
+
+- **Physical `src/core` extraction** — move `src/main/sync/**` + `src/shared/sync/**`
+  (and the engine adapters, PTY manager and HTTP/WS server) to `src/core`. A MOVE, not
+  a rewrite: the Electron-free lint fence already holds on both trees, and 4d made the
+  boot order expressible (`bootCore()` is what a second entrypoint would call).
+- **`claudeui-server` (bun) entrypoint** — systemd unit, config by files/env,
+  `tailscale serve` in front. `bootCore()` still imports Electron (`ipcMain`, `app`);
+  the seam to break is the desktop IPC transport adapter, not the services behind it.
+- **Vendor OAuth on a browserless server** — direction is vault sync from a desktop
+  enrollment (ADR-036) and/or device-code flows. Only answerable once there is a server
+  to provision, which is why it moves with this phase.
+
+**Phase 5** — volatile-stream separation and per-client subscriptions: stream/PTY/log
+frames leave the ring entirely (`{streamId, turnId, offset, chunk}` with self-healing
+refetch), so a 10-minute background reconnect catches up without a `sync-full`.
+
+**Command-registry completeness** (the `command()` migration, ADR-051 contract 1):
+
+- **Registry-config mutations are invoke-only and apply locally first** (pins, titles,
+  recents, `sessionEngines`, settings). They ARE replica-owned, but `saveSessionConfig`
+  merges from current state, so a pure round-trip would let two rapid mutations revert
+  each other. Making them real commands with `causedBy` reconciliation is the fix; see
+  the 4c deviation note above. **`causedBy` itself is still unbuilt** — the designed
+  escape hatch if the honest round-trip ever feels slow from a phone, and an owner call
+  after living with it.
+- **`automation:*` and `log-viewer:*` are not ported** to the registry: they register
+  through bare `ipcMain.handle` (`ipc/automation.ipc.ts`, `services/log-viewer.ts`), so
+  they get no capability check and no audit row, and they are unreachable remotely.
+- **`app:version-info` never reaches the remote dispatcher.**
+  `registerRemoteVersionInfo()` no-ops unless `registerRemoteHandlers()` has already
+  run, and the bootstrap computes the build versions BEFORE core boots — so the web
+  client's Settings dialog cannot read the server's versions. Pre-existing (4d's
+  reordering neither fixed nor worsened it); the desktop half is also a bare
+  `ipcMain.handle`, outside the registry. A three-line ordering fix, deliberately not
+  taken inside 4d's scope.
+- **Plugin channels ride the `config` capability** pending plugin-declared capabilities
+  (phase 1 note).
+
+**Replication gaps recorded rather than closed:**
+
+- **The desktop's effort / thinking-mode / reasoning-variant picks are client-local.**
+  `session-store`'s `setEffort` / `setThinkingMode` / `setReasoningVariant` call
+  `patchLocalSession` with no IPC: the desktop picker RESTARTS the session and the
+  respawn carries the value, so between the pick and the respawn that value's only home
+  is the client that made it — canonical (and therefore every remote client) does not
+  see it. Main-side setters exist (`session:set-effort`, `session:set-thinking-mode`)
+  and the pre-spawn `session:config-changed` echo exists; wiring the desktop picker to
+  them is the remaining half.
+- **A zero-session `sync-full` cannot carry `slashCommands` / `sdkSkillNames`.**
+  `SyncCore.setAppState` seeds them app-level at boot, but `FullStateSnapshot` has no
+  app-level field — `toSnapshot` fans the one list into every PER-SESSION entry — so a
+  client that connects before any session exists receives neither. Surfaced concretely
+  by 4d's windowless smoke (which asserts the seed against canonical instead). Closing
+  it is a wire change, which phase 4 excluded by its non-goals.
+- **`session:rekey` survives as a main-side no-op shim** for phone bundles cached before
+  4c stopped clients from invoking it. Removable once those are no longer a concern.
+
+**Test-infrastructure debt:**
+
+- **`mirrorStoreIntoReplica`** (`src/test/helpers/replica-seed.ts`) exists so pre-4c
+  fixtures that `setState` the store directly stay consistent with the replica's
+  canonical mirror. Every such fixture should seed canonical and let the projection run;
+  the helper can then go.
 
 ## Relations
 

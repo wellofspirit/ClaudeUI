@@ -1,6 +1,6 @@
 # ADR-043: SendUserFile client integration — Files widget, preview, remote download
 
-**Status:** Accepted (2026-07-30) — the "renderer store is the single source of truth; main stays a pure relay" doctrine (Decision 5's rationale) is **superseded by ADR-051 (SyncCore)**, which inverts it; the sent-file mechanism itself remains as-built until SyncCore phase 4.
+**Status:** Accepted (2026-07-30) — the "renderer store is the single source of truth; main stays a pure relay" doctrine (Decision 5's rationale) is **superseded by ADR-051 (SyncCore)**, which inverts it. **SyncCore phase 4 completed 2026-08-14 and the sent-file MECHANISM survived it unchanged**: the URL shape, the scoped `fileToken`, the extension allowlist and the size cap are all as documented below. What inverted is where the allowlist reads its truth — canonical state in the main process, read in-process, instead of a renderer round-trip (phase 4b; see the note under the allowlist bullet, and `ipc/__tests__/sync-funnel-guard.test.ts`, which asserts the route takes exactly one `SyncCore.getSnapshot()` and never calls `executeJavaScript`).
 
 ## Context
 

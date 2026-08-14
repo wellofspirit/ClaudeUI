@@ -1,6 +1,6 @@
 # ADR-051 — SyncCore: main-process canonical state, closed wire contracts, desktop as client #1
 
-**Status:** Accepted (2026-08-13) — design; implemented in phases per `docs/architecture/sync-core.md` (none landed yet)
+**Status:** Accepted (2026-08-13) — design; implemented in phases per `docs/architecture/sync-core.md`. **Phases 0-4 landed 2026-08-14** (canonical state is the state of record, the desktop renderer is client #1 folding the shared reducer, and the app runs windowless); phase 5 (volatile-stream separation) and the named follow-on phase (physical `src/core` + a bun server entrypoint) remain — ledger in that file's §Follow-ons.
 **Relates to:** ADR-008 (typed web client — retired as a mirror, kept as a belt), ADR-030 (capability honesty), ADR-038/040/045 (event-driven lifecycle discipline — SyncCore generalizes it), ADR-050 (web-client default derivation — absorbed by snapshot-from-core), ADR-052 (security companion), ADR-053 (queue subsystem)
 **Supersedes in part:** ADR-041 (desktop-renderer snapshot + resync merge), ADR-043 (the "renderer store is the single source of truth; main stays a pure relay" doctrine)
 
@@ -23,5 +23,5 @@ Rebuild the sync layer as **SyncCore** (normative spec: `docs/architecture/sync-
 - Model/effort/thinking/queue changes become ordinary domain events — the per-field sync gaps and the H15-class whole-blob clobber bugs become unrepresentable; granular commands replace `config:save-sessions` round-trips.
 - ADR-041's merge semantics and ADR-050's web-side default derivation dissolve: reconnect is snapshot + replay from core, and per-client selection survives because it was never replicated.
 - The `api-adapter` hand-mirror is retired; parity is by construction (ADR-008's typecheck stays as a belt).
-- Migration is phased (0–5, sized in the design doc); until phase 4 lands, ADR-041/043 remain the accurate as-built record and `docs/architecture/remote.md` documents the running system.
+- Migration is phased (0–5, sized in the design doc). With phase 4 landed, `docs/architecture/sync-core.md` IS the as-built record for sync; ADR-041/043 describe the pre-cutover system in the parts their own status lines name, and `docs/architecture/remote.md` is now the transport + auth record rather than a parallel sync description.
 - review.md's remote findings (watermark race, drop-before-mount, structural-not-semantic parity) are resolved by construction rather than patched.

@@ -9,8 +9,8 @@ How ClaudeUI is put together. This directory splits the architecture by concern 
 | [data-flow.md](data-flow.md) | IPC & data flow, key runtime patterns, cli.js integration pointers |
 | [persistence.md](persistence.md) | Config/operational persistence planes, settings & config wiring |
 | [ui.md](ui.md) | Views, theming, layout, working-on-the-app gotchas |
-| [remote.md](remote.md) | The remote-access layer **as built today** — components, wire protocol, known structural defects |
-| [sync-core.md](sync-core.md) | **SyncCore** — the accepted target design for state sync, replication, queueing, terminal, and headless operation (ADR-051/053) |
+| [remote.md](remote.md) | Remote access **transport + auth** as built — HTTP/WS listener, wire frames, auth modes, E2E, scoped URL tokens, tunnel/TLS |
+| [sync-core.md](sync-core.md) | **SyncCore** — state sync, replication, queueing, terminal, headless (ADR-051/053). Phases 0-4 landed; phase 5 + the follow-on ledger are here too |
 | [security.md](security.md) | The accepted target security model for remote access — passkeys, capability grants, decay, audit (ADR-052) |
 | [sync-channels.md](sync-channels.md) | Every event channel classified — ring / canonical / delivery, plus the recorded gaps and the 4b payload additions (SyncCore phases 4a-4b) |
 
