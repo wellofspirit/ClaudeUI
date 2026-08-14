@@ -157,10 +157,10 @@ export function emitEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Shadow watch (dev only — SyncCore phase 4a item 9)
+// Shadow watch (dev only — SyncCore phase 4a item 9, inverted by 4b)
 // ---------------------------------------------------------------------------
 
-/** How often the dev shadow watch diffs canonical against the renderer. */
+/** How often the dev shadow watch diffs the renderer replica against canonical. */
 const SHADOW_INTERVAL_MS = 15_000
 
 /** Env flag that arms the watch. Absent in every production build path. */
@@ -169,12 +169,17 @@ export const SHADOW_ENV_FLAG = 'CLAUDEUI_SYNC_SHADOW'
 let shadowTimer: ReturnType<typeof setInterval> | null = null
 
 /**
- * Periodically diff canonical state against the renderer replica and log a
+ * Periodically diff the renderer's replica against canonical state and log a
  * BOUNDED summary when they disagree.
  *
- * Off unless `CLAUDEUI_SYNC_SHADOW=1`: canonical state is shadow in 4a, so this
- * is a development instrument, not a product feature — no telemetry, no
- * user-facing surface, and no cost at all when the flag is absent.
+ * The direction of suspicion flipped in 4b: canonical is now the state of record
+ * (`sync-full` serves it), so what this watch surfaces is the DESKTOP store
+ * showing something no reconnecting client would see. It dies with the
+ * duplication in 4c.
+ *
+ * Off unless `CLAUDEUI_SYNC_SHADOW=1` — a development instrument, not a product
+ * feature: no telemetry, no user-facing surface, and no cost at all when the flag
+ * is absent.
  *
  * Deliberately tolerant: the renderer round-trip can fail (not yet mounted, page
  * reloading) and a failed compare must never be louder than a real divergence.
@@ -217,7 +222,7 @@ async function runShadowCompare(win: BrowserWindow): Promise<void> {
       .map(([id]) => id)
   )
   // Skip the client-written fields (sync-channels.md §"Client-written state") —
-  // known 4a divergence, not signal. Without this the watch logs noise every tick.
+  // known divergence, not signal. Without this the watch logs noise every tick.
   const diffs = compareShadow(canonical, renderer, { unseeded, ignoreFields: CLIENT_WRITTEN_FIELDS })
   if (diffs.length === 0) return
   logger.warn(

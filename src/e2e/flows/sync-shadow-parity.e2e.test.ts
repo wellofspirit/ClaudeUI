@@ -202,6 +202,10 @@ function wireRendererHandlers(app: TestApp): Array<() => void> {
   on('session:task-notification', (routingId: string, data: TaskNotification) => {
     store().addTaskNotification(resolveRoutingId(routingId), data)
   })
+  // Cross-instance registry config (useClaudeEvents.onSessionConfigChanged).
+  on('config:sessions-changed', (config: Record<string, unknown>) => {
+    store().applyExternalSessionConfig(config as never)
+  })
 
   return list
 }
@@ -249,7 +253,11 @@ beforeEach(async () => {
     worktreeInfoMap: {},
     sessionEngines: {},
     slashCommands: [],
-    sdkSkillNames: []
+    sdkSkillNames: [],
+    // `applyRemoteSnapshot` derives this from the snapshot's settings (ADR-050),
+    // and `createNewSession` seeds a new session's mode from it — so a test that
+    // hydrates a snapshot would otherwise change the NEXT test's baseline mode.
+    defaultPermissionMode: 'default'
   })
   syncCore.resetCanonicalForTests()
   // The delivery adapter's "primary window" is the test bridge: `emitEvent`
@@ -469,6 +477,172 @@ describe('E2E: SyncCore shadow parity', () => {
     expect(rendered.effort).toBe('high')
     expect(rendered.thinkingMode).toBe('enabled')
     expectParity()
+  })
+
+  // -------------------------------------------------------------------------
+  // Phase 4b — the cutover proof: "a phone reconnecting sees the truth"
+  // -------------------------------------------------------------------------
+
+  it('a FRESH store hydrated from core.getSnapshot() matches the live renderer store', () => {
+    // This is the cutover itself, end to end. The web client's only hydration
+    // path is `applyRemoteSnapshot(sync-full.state)`, and `sync-full.state` is now
+    // `core.getSnapshot()`. So: drive a full turn, then throw the store away and
+    // rebuild it from canonical alone — the way a phone that reconnects does —
+    // and require the rebuild to match what the client that stayed connected has.
+    // Before 4b this comparison was circular (the snapshot WAS the renderer's
+    // store); now it has content.
+    const DIRECTORIES = [{ path: '/project', name: 'project', sessions: [] }]
+    // Both sides learn the sidebar listing from the same query; canonical holds
+    // it because `sync-full` carries it (SyncCore.setDirectories, phase 4b A3).
+    syncCore.setDirectories(DIRECTORIES as never)
+    useSessionStore.setState({ directories: DIRECTORIES as never })
+
+    emitEvent('session:created', ['rid-1', { cwd: '/project' }], 'all')
+    emitEvent('session:status', ['rid-1', makeStatus({ sessionId: 'rid-1' })], 'all')
+    emitEvent(
+      'session:user-message',
+      // Identity now rides the event (phase 4b A1) — the renderer still mints its
+      // own until 4c, which is why the comparator masks user ids.
+      ['rid-1', { id: 'msg-e2e-1', timestamp: 1_700_000_000_000, prompt: 'ship it' }],
+      'all'
+    )
+    emitEvent('session:stream', ['rid-1', { type: 'thinking', text: 'planning' }], 'all')
+    emitEvent('session:stream', ['rid-1', { type: 'text', text: 'On it. ' }], 'all')
+    emitEvent(
+      'session:message',
+      [
+        'rid-1',
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: [
+            { type: 'thinking', text: 'planning' },
+            { type: 'text', text: 'On it.' },
+            {
+              type: 'tool_use',
+              toolUseId: 't-todo',
+              toolName: 'TodoWrite',
+              toolInput: {
+                todos: [{ content: 'step one', status: 'in_progress', activeForm: 'Doing one' }]
+              }
+            },
+            {
+              type: 'tool_use',
+              toolUseId: 't-file',
+              toolName: 'SendUserFile',
+              toolInput: { files: ['out/report.md'], caption: 'the report', display: 'attach' }
+            }
+          ],
+          timestamp: 0,
+          // The emitter's thinking-span timing (phase 4b A2).
+          thinkingDurationMs: 1234
+        }
+      ],
+      'all'
+    )
+    emitEvent(
+      'session:tool-result',
+      ['rid-1', { toolUseId: 't-todo', result: 'ok', isError: false }],
+      'all'
+    )
+    emitEvent(
+      'session:tool-result',
+      ['rid-1', { toolUseId: 't-file', result: 'delivered', isError: false }],
+      'all'
+    )
+    emitEvent('session:config-changed', ['rid-1', { model: 'opus', effort: 'high' }], 'all')
+    emitEvent('session:permission-mode', ['rid-1', 'acceptEdits'], 'all')
+    emitEvent(
+      'session:status-line',
+      ['rid-1', { model: 'opus', totalCostUsd: 0.31 } as never],
+      'all'
+    )
+    emitEvent(
+      'session:metering',
+      [
+        'rid-1',
+        {
+          engineId: 'claude',
+          vendorId: 'anthropic',
+          billingType: 'subscription',
+          tokens: { input: 20, output: 9, cacheWrite: 0, cacheRead: 0, total: 29 },
+          equivalentCostUsd: 0.31,
+          contextWindow: { used: 29, size: 200000 }
+        } as never
+      ],
+      'all'
+    )
+    emitEvent(
+      'session:queue-changed',
+      ['rid-1', { items: [{ itemId: 'q1', text: 'and then deploy', state: 'queued' }] }],
+      'all'
+    )
+    emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })], 'all')
+    // Registry config: emitted last so both replicas end on the same value (the
+    // renderer also writes recents locally on a user message — 4c's problem).
+    emitEvent(
+      'config:sessions-changed',
+      [{ recentSessions: ['rid-1'], pinnedSessions: [], customTitles: { 'rid-1': 'Shipping' } }],
+      'all'
+    )
+    expectParity()
+
+    const live = getRemoteStateSnapshot() as unknown as FullStateSnapshot
+    const canonical = syncCore.getSnapshot()
+
+    // Throw the replica away and rebuild it from the snapshot alone.
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      directories: [],
+      recentSessionIds: [],
+      pinnedSessionIds: [],
+      customTitles: {},
+      worktreeInfoMap: {},
+      sessionEngines: {},
+      hiddenSessionIds: [],
+      hiddenProjectKeys: []
+    })
+    useSessionStore.getState().applyRemoteSnapshot(canonical, false)
+    const hydrated = getRemoteStateSnapshot() as unknown as FullStateSnapshot
+
+    // Almost nothing is masked here — NOT the whole client-written set: canonical
+    // is authoritative for the registry config now, so recents/titles must match.
+    // The two exceptions are genuinely per-client:
+    //  - `activeSessionId` — selection (ADR-041); core serves null and the client
+    //    picks its own landing session from recents.
+    //  - `sessionEngines` — `createNewSession` writes it LOCALLY on the client
+    //    that spawned the session, and it reaches core only through a
+    //    `config:sessions-changed` save (4c makes that write a command).
+    const diffs = compareShadow(hydrated, live, {
+      ignoreFields: new Set(['activeSessionId', 'sessionEngines']),
+      compareStreamingAlways: true
+    })
+    expect(diffs.length, `resync divergence:\n${formatShadowDiff(diffs).join('\n')}`).toBe(0)
+
+    // Non-vacuity: every field a resync used to silently drop is populated.
+    const session = hydrated.sessions['rid-1']
+    expect(session.messages.map((m) => m.id)).toEqual(['msg-e2e-1', 'a1'])
+    expect(session.queue).toEqual([{ itemId: 'q1', text: 'and then deploy', state: 'queued' }])
+    expect(session.metering?.equivalentCostUsd).toBe(0.31)
+    expect(session.todos).toHaveLength(1)
+    expect(session.sentFiles).toEqual([
+      { path: 'out/report.md', caption: 'the report', display: 'attach', toolUseId: 't-file' }
+    ])
+    expect(session.selectedModel).toBe('opus')
+    expect(session.effort).toBe('high')
+    expect(session.permissionMode).toBe('acceptEdits')
+    expect(session.statusLine).toMatchObject({ totalCostUsd: 0.31 })
+    expect(hydrated.directories).toEqual(DIRECTORIES)
+    expect(hydrated.recentSessionIds).toEqual(['rid-1'])
+    expect(hydrated.customTitles).toEqual({ 'rid-1': 'Shipping' })
+    // The phone lands on a real session even though the snapshot carries no
+    // selection (phase 4b A5 — resolved from recents by the client itself).
+    expect(useSessionStore.getState().activeSessionId).toBe('rid-1')
+    // And the emitter-timed duration survived into the client's transcript, which
+    // the pre-4b clock-free reducer could not have produced.
+    const thinking = session.messages[1].content.find((b) => b.type === 'thinking')
+    expect(thinking?.type === 'thinking' ? thinking.durationMs : null).toBe(1234)
   })
 
   it('the comparator would CATCH a divergence (guard against a vacuous pass)', () => {

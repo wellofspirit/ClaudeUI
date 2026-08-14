@@ -23,7 +23,8 @@ export interface SyncClientOptions {
 
 /**
  * Cap on events held while the readiness gate is closed. Matched to the
- * server's event-log ring: buffering more than the server could replay buys
+ * server's event ring (`main/sync/event-ring.ts`): buffering more than the
+ * server could replay buys
  * nothing. Overflow prunes the OLDEST entries, which leaves a hole the flush's
  * gap check catches — so a client that never mounts degrades into a resync,
  * never into a silently skipped range.
@@ -140,9 +141,18 @@ export class SyncClient {
    * A full snapshot. `seq` is the snapshot's watermark, passed explicitly so
    * the core never has to interpret the payload.
    *
-   * The watermark REPLACES the cursor, it never maxes with it: the server
-   * under-claims it on purpose (see `event-log.ts` `getFullState`), and
-   * rewinding is what makes the events it may have missed get redelivered.
+   * The watermark REPLACES the cursor, it never maxes with it.
+   *
+   * Since SyncCore phase 4b the server's watermark is **exact**: the snapshot is
+   * canonical state serialized in the same tick its `seq` was read
+   * (`SyncCore.getSnapshot`), so it provably contains every event through that
+   * seq and no more. Replace is still the right rule, and for BOTH kinds of
+   * server: an exact claim makes it a no-op in the common case, and an older
+   * host's deliberate under-claim (its snapshot came from an async renderer pull,
+   * so it advertised the seq from BEFORE the round-trip) makes it a rewind —
+   * which is just a replay, and every event is built to survive one (messages
+   * upsert by id, status/config replace). Maxing instead would turn that
+   * defensive under-claim into a permanently skipped range.
    */
   applyFullState(state: FullStateSnapshot, epoch: string, seq: number): void {
     this.epoch = epoch

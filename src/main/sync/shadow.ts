@@ -1,12 +1,15 @@
 /**
- * Shadow comparator — SyncCore phase 4a item 9.
+ * Shadow comparator — SyncCore phase 4a item 9, **role inverted by 4b**.
  *
- * 4a runs canonical state alongside the still-authoritative renderer store. The
- * comparator is the drift detector for that duplication: it diffs
- * `SyncCore.getSnapshot()` against the renderer's `__getRemoteState()` and names
- * the fields that disagree. If the two interpretations of the same event stream
- * diverge, 4b's cutover would silently change what clients see — so the whole
- * point of shadowing is to find that BEFORE the switch, not after.
+ * It still diffs `SyncCore.getSnapshot()` against the renderer's
+ * `__getRemoteState()` and names the fields that disagree. What changed is which
+ * side is on trial: in 4a canonical was the shadow and the comparator's job was
+ * to prove it safe to promote; since the 4b cutover canonical IS the state of
+ * record, so the comparator now validates the RENDERER'S REPLICA against it. A
+ * divergence used to mean "do not cut over yet"; it now means the desktop store
+ * is showing something no reconnecting client would see. The instrument retires
+ * in 4c, when that store is fed by the same reducer and the duplication it
+ * measures no longer exists.
  *
  * Dev/test only. Nothing here runs in a production build path: the host gates it
  * behind `CLAUDEUI_SYNC_SHADOW=1` and the e2e suite calls it directly.
@@ -20,14 +23,15 @@
  *   for cold sessions (`evictColdSessions`) and hydrates them through a query
  *   core never sees; core seeds from the transcript asynchronously. Neither is
  *   drift, and both resolve to the same content once the session is warm.
- * - **`durationMs` on thinking blocks** is stripped. The renderer computes it
- *   from wall-clock deltas; the reducer is clock-free by contract
- *   (`shared/sync/reducer.ts`). Replicating durations needs the EMITTER to put
- *   elapsed time in the event — a 4b prerequisite, recorded here.
- * - **User-message identity** (`id`, `timestamp`) is normalized. Today's
- *   `session:user-message` payload carries neither, so the renderer mints
- *   `msg-<uuid>`/`Date.now()` locally and core mints `user-<seq>`/`0`. Also a 4b
- *   prerequisite: the id must move into the event.
+ * - **`durationMs` on thinking blocks** is stripped. Canonical now carries a REAL
+ *   duration (the emitter times the span and ships it — `BaseSession.send` +
+ *   `ChatMessage.thinkingDurationMs`), so snapshot-fed clients render it; the
+ *   desktop renderer still measures its own in parallel until 4c, and the two
+ *   differ by scheduling jitter. Comparing them would report that jitter forever.
+ * - **User-message identity** (`id`, `timestamp`) is normalized. The event now
+ *   carries both (`sendPrompt`), but `useClaudeEvents` still overrides them with
+ *   a locally minted `msg-<uuid>`/`Date.now()` — a 4c deletion, and until then
+ *   the ids genuinely differ.
  *
  * Electron-free (lint-fenced): the caller supplies both snapshots.
  */
@@ -62,10 +66,9 @@ export interface ShadowCompareOptions {
    *   `hiddenProjects` / `sessionEngines` / `worktreeInfoMap` — mutated by client
    *   actions (`createNewSession`, `addUserMessage`, `setCustomTitle`, the
    *   worktree detection in `useClaudeEvents`) and reaching canonical only via the
-   *   slow `config:sessions-changed` file-watcher loop, so they cannot match at an
-   *   arbitrary instant in 4a. Closing that gap means those writes become
-   *   commands — 4c work, recorded in docs/architecture/sync-channels.md.
-   * - `directories` — sourced from a query, not the stream.
+   *   `config:sessions-changed` save/watcher loop, so they cannot match at an
+   *   arbitrary instant. Closing that gap means those writes become commands —
+   *   4c work, recorded in docs/architecture/sync-channels.md.
    */
   ignoreFields?: ReadonlySet<string>
   /** Cap on reported rows so a dev-mode log line stays bounded. */
@@ -75,11 +78,16 @@ export interface ShadowCompareOptions {
 /**
  * The client-written snapshot fields (docs/architecture/sync-channels.md
  * §"Client-written state"): mutated by client actions and reaching core only via
- * the slow config file-watcher loop — or never — so a 4a shadow compare must
- * skip them. ONE definition, used by both the dev watch (`services/sync-host.ts`)
- * and the shadow-parity e2e: a watch that forgot one of these would log
+ * the config file-watcher loop — or never — so a shadow compare must skip them.
+ * ONE definition, used by both the dev watch (`services/sync-host.ts`) and the
+ * shadow-parity e2e: a watch that forgot one of these would log
  * known-divergence noise every tick, which is exactly the blunted-instrument
  * failure the shadow exists to avoid.
+ *
+ * `directories` LEFT this set in 4b: core maintains it now (`SyncCore.setDirectories`,
+ * refreshed at boot and on the `session:directories-changed` trigger), so a
+ * mismatch there is real drift between the sidebar a live client sees and the one
+ * a reconnecting client gets.
  */
 export const CLIENT_WRITTEN_FIELDS: ReadonlySet<string> = new Set([
   'activeSessionId',
@@ -89,8 +97,7 @@ export const CLIENT_WRITTEN_FIELDS: ReadonlySet<string> = new Set([
   'sessionEngines',
   'hiddenSessions',
   'hiddenProjects',
-  'worktreeInfoMap',
-  'directories'
+  'worktreeInfoMap'
 ])
 
 /** Per-session fields compared verbatim (deep JSON equality). */

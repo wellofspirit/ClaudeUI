@@ -97,6 +97,40 @@ describe('emission funnel (item 2)', () => {
   })
 })
 
+describe('snapshot path is synchronous (phase 4b, invariant 2)', () => {
+  // The exact watermark is a property of the CODE SHAPE, not of any single
+  // execution: `getSnapshot()` reads the ring seq and serializes canonical state
+  // in one synchronous tick, so nothing can be appended in between. One `await`
+  // anywhere on that path silently reintroduces the race the old renderer pull
+  // had to under-claim around (remote.md defect 3) — and a behavioral test would
+  // only catch it on the interleaving it happens to produce.
+  it('SyncCore.getSnapshot and toSnapshot are not async and contain no await', () => {
+    const core = read('src/main/sync/sync-core.ts')
+    const snapshotFn = /getSnapshot\(\)[^{]*\{([\s\S]*?)\n {2}\}/.exec(core)
+    expect(snapshotFn, 'getSnapshot() not found in sync-core.ts').not.toBeNull()
+    expect(snapshotFn![1]).not.toMatch(/\bawait\b/)
+    expect(core).not.toMatch(/async\s+getSnapshot/)
+
+    const state = read('src/shared/sync/state.ts')
+    expect(state).not.toMatch(/async\s+function\s+(to|from)Snapshot/)
+    expect(state).not.toMatch(/\bawait\b/)
+  })
+
+  it('remote-server serves sync-full and /sent-file from canonical, never a renderer pull', () => {
+    const src = read('src/main/services/remote-server.ts')
+    // The whole point of the cutover: no window is involved in a snapshot, so a
+    // busy/hung/absent renderer cannot degrade a reconnect. (Matched on the CALL,
+    // not the word — the doc comments explain what was removed.)
+    expect(src).not.toMatch(/\.executeJavaScript\(/)
+    expect(src).not.toMatch(/window\.__getRemoteState/)
+    expect(src).toMatch(/type: 'sync-full', state/)
+    const syncFulls = src.match(/this\.core\.getSnapshot\(\)/g) ?? []
+    // Two sync-full branches (fresh/stale-epoch, ring-evicted) + the sent-file
+    // allowlist.
+    expect(syncFulls.length).toBe(3)
+  })
+})
+
 describe('channel classification coverage (item 3, fail-closed)', () => {
   /**
    * Every channel literal the main process emits, from both emission shapes:

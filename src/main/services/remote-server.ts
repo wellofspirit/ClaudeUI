@@ -6,7 +6,6 @@ import * as fs from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { BrowserWindow } from 'electron'
 import { app } from 'electron'
-import { EventLog } from './event-log'
 import { syncCore } from './sync-host'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
@@ -295,12 +294,9 @@ export class RemoteServer {
   private boundHost = '' // the IP the server is bound to (for URL generation)
   private clients = new Map<WebSocket, AuthenticatedClient>()
   /**
-   * The renderer-snapshot source. Phase 4a keeps the renderer authoritative for
-   * `sync-full`; the RING it stamps watermarks from now lives in SyncCore, which
-   * is the only thing that appends to it.
+   * The one event ring + canonical state — and, since SyncCore phase 4b, the
+   * `sync-full` state of record. Injected for tests.
    */
-  private rendererSnapshot: EventLog
-  /** The one event ring + canonical state. Injected for tests. */
   private readonly core: typeof syncCore
   private dispatcher: RemoteDispatcher
   private bridge: RemoteBridge
@@ -347,7 +343,6 @@ export class RemoteServer {
     core: typeof syncCore = syncCore
   ) {
     this.core = core
-    this.rendererSnapshot = new EventLog(core)
     this.dispatcher = dispatcher
     this.passwordAuth = passwordAuth
     this.tailscale = tailscale
@@ -377,10 +372,17 @@ export class RemoteServer {
     })
   }
 
-  /** Set the main BrowserWindow (needed for full state snapshots). */
+  /**
+   * Set the main BrowserWindow.
+   *
+   * Snapshots no longer need it (phase 4b — they come from canonical state); the
+   * only surviving use is {@link notifyStatus}, which pushes `remote:status` to
+   * the host window that owns the remote-access UI. That is host-local by
+   * classification, so it is not a sync path and does not block windowless
+   * operation (4d).
+   */
   setWindow(win: BrowserWindow): void {
     this.win = win
-    this.rendererSnapshot.setWindow(win)
   }
 
   /** Set a callback for status change notifications. */
@@ -1103,8 +1105,10 @@ export class RemoteServer {
       // Serve mockup HTML + sibling assets (web client preview iframe)
       void this.serveMockupHttp(url, req, res)
     } else if (url.pathname === SENT_FILE_ROUTE) {
-      // Download / inline-preview a file delivered by SendUserFile (ADR-043)
-      void this.serveSentFile(url, req, res)
+      // Download / inline-preview a file delivered by SendUserFile (ADR-043).
+      // Synchronous since phase 4b: the allowlist is canonical state, read
+      // in-process, so there is nothing left to await.
+      this.serveSentFile(url, req, res)
     } else if (
       url.pathname.startsWith('/assets/') ||
       url.pathname.endsWith('.js') ||
@@ -1341,21 +1345,20 @@ export class RemoteServer {
    *
    * Serves a file the model delivered through `SendUserFile` to a remote client
    * (mobile download + `<img>` preview). Gated by the dedicated
-   * {@link fileToken}, then by a RENDERER-authoritative allowlist: the path must
-   * resolve to an entry in that session's `sentFiles` snapshot. Main keeps no
-   * ledger of its own, so there is nothing to drift out of sync — the cost is
-   * one `executeJavaScript` round-trip per request, which is fine at
-   * user-click frequency.
+   * {@link fileToken}, then by a CANONICAL allowlist: the path must resolve to an
+   * entry in that session's `sentFiles`, which the shared reducer derives from
+   * the transcript (`buildSentFilesFromMessages`) rather than from a ledger this
+   * route keeps — so there is nothing to drift out of sync. Phase 4b replaced the
+   * per-request `executeJavaScript` round-trip into the renderer with an
+   * in-process read: same allowlist semantics, no dependence on a live window,
+   * and the allowlist is now derived from the SAME messages the requesting client
+   * is looking at.
    *
    * Everything that is not "authenticated AND allowlisted AND readable" answers
    * 404, so the route is not an existence oracle for arbitrary host paths. Only
    * a token mismatch answers 403.
    */
-  private async serveSentFile(
-    url: URL,
-    req: http.IncomingMessage,
-    res: http.ServerResponse
-  ): Promise<void> {
+  private serveSentFile(url: URL, req: http.IncomingMessage, res: http.ServerResponse): void {
     const refuse = (status: number, body: string): void => {
       res.writeHead(status, {
         'Content-Type': 'text/plain; charset=utf-8',
@@ -1398,7 +1401,7 @@ export class RemoteServer {
       return
     }
 
-    const state = await this.rendererSnapshot.getFullState()
+    const state = this.core.getSnapshot()
     const session = state.sessions?.[query.session]
     if (!session) {
       refuse(404, 'Not found')
@@ -1407,7 +1410,7 @@ export class RemoteServer {
 
     // `matchSentFilePath` returns the path derived from the SNAPSHOT (session
     // cwd + stored entry), never the requester's string, so an equivalent-but-
-    // exotic spelling can still only open a file the renderer listed.
+    // exotic spelling can still only open a file the model delivered.
     const allowed = matchSentFilePath(session.cwd ?? '', session.sentFiles ?? [], query.path)
     if (!allowed) {
       logger.warn(
@@ -1861,7 +1864,9 @@ export class RemoteServer {
           void this.handleInvoke(ws, msg)
           break
         case 'sync':
-          await this.handleSync(ws, msg.lastSeq, msg.epoch)
+          // Synchronous since 4b: the snapshot is canonical state, not a
+          // renderer round-trip, so a sync can no longer stall the frame queue.
+          this.handleSync(ws, msg.lastSeq, msg.epoch)
           break
         case 'step-up':
           this.handleStepUp(ws, ip, msg)
@@ -2186,7 +2191,19 @@ export class RemoteServer {
     }
   }
 
-  private async handleSync(ws: WebSocket, lastSeq: number, epoch?: string): Promise<void> {
+  /**
+   * The reconnect protocol's server half.
+   *
+   * **Synchronous since SyncCore phase 4b.** The snapshot is `core.getSnapshot()`
+   * — canonical state serialized in the same tick its `seq` is read — instead of
+   * an `await`ed `executeJavaScript` round-trip into the desktop renderer's
+   * store. Three things follow, and they are the whole point of the cutover:
+   * the watermark is EXACT rather than deliberately under-claimed (nothing can
+   * land between reading the seq and building the state); a busy, hung or absent
+   * renderer can no longer answer with an empty snapshot (remote.md defect 2);
+   * and no sync path touches a `BrowserWindow` at all.
+   */
+  private handleSync(ws: WebSocket, lastSeq: number, epoch?: string): void {
     const currentEpoch = this.core.epoch()
     const mockupToken = this.mockupToken || undefined
     const fileToken = this.fileToken || undefined
@@ -2196,7 +2213,7 @@ export class RemoteServer {
     // back near 0) — the client's lastSeq is meaningless. Send a full snapshot
     // rather than a catchup that would falsely report "caught up" (M-DB4).
     if (lastSeq === 0 || epoch !== currentEpoch) {
-      const state = await this.rendererSnapshot.getFullState()
+      const state = this.core.getSnapshot()
       this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
       return
     }
@@ -2205,7 +2222,7 @@ export class RemoteServer {
     const events = this.core.getAfter(lastSeq)
     if (events === null) {
       // Too far behind — send full state
-      const state = await this.rendererSnapshot.getFullState()
+      const state = this.core.getSnapshot()
       this.sendTo(ws, { type: 'sync-full', state, epoch: currentEpoch, mockupToken, fileToken })
     } else {
       this.sendTo(ws, { type: 'sync-catchup', events, epoch: currentEpoch })

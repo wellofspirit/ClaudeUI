@@ -2612,6 +2612,11 @@ export const useSessionStore = create<SessionState>((set) => ({
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
           reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
           statusLine: snap.statusLine,
+          // SyncCore phase 4a added `metering` to the snapshot but nothing read it
+          // back here, so a resync still blanked the TopBar breakdown — the exact
+          // hole the field was added to close. Found by the 4b cutover-parity e2e
+          // (hydrate a fresh store from the snapshot, compare against the live one).
+          metering: snap.metering ?? EMPTY_SESSION_STATE.metering,
           // H15 — hydrate the live engine identity so a remote first-send steers
           // the running session instead of respawning it as Claude (InputBox.doSend).
           sdkActive: snap.sdkActive ?? EMPTY_SESSION_STATE.sdkActive,
@@ -2631,22 +2636,40 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? { ...state.sessions, ...sessions }
         : sessions
 
-      let activeSessionId = snapshot.activeSessionId
-      if (isResync) {
-        // Preserve the local active session unless there isn't one — and only
-        // if it still resolves to a real entry post-merge. A local
-        // `activeSessionId` pointing at nothing (shouldn't happen, but a stale
-        // pointer is worse than falling back) drops to the snapshot's choice
-        // rather than rendering a broken view (EMPTY_SESSION_STATE).
-        const preserved = state.activeSessionId ?? snapshot.activeSessionId
-        activeSessionId = preserved && mergedSessions[preserved] ? preserved : snapshot.activeSessionId
-      }
+      // Selection is per-client view state (ADR-041), and since SyncCore phase
+      // 4b the snapshot no longer carries the desktop's: core serves
+      // `activeSessionId: null` because a host-wide selection is not a thing a
+      // shared state can have. So resolve it locally, in preference order:
+      //
+      //  1. this client's own selection on a RE-sync — a phone that navigated to
+      //     a historical session must not be yanked off it by a reconnect (and a
+      //     stale pointer that no longer resolves post-merge is skipped, since a
+      //     broken view is worse than a fallback);
+      //  2. whatever the server offered, for an older host that still sends one;
+      //  3. the most recent session THIS snapshot knows about — the landing spot
+      //     that replaces "the desktop's current session" for a fresh phone.
+      //     Empty ⇒ null ⇒ the welcome screen, which is also the honest answer
+      //     when the host has no sessions at all.
+      const activeSessionId =
+        [
+          isResync ? state.activeSessionId : null,
+          snapshot.activeSessionId,
+          ...(snapshot.recentSessionIds ?? [])
+        ].find((id): id is string => !!id && !!mergedSessions[id]) ?? null
 
+      // App-level catalogs. The wire replicates them PER SESSION (every entry
+      // carries the same list — see toSnapshot), so recover them from any entry;
+      // they are app-level in this store. Nothing read them back before, which
+      // left a remote client's slash menu and Skills button empty until an engine
+      // spawn happened to re-broadcast them.
+      const firstSession = Object.values(snapshot.sessions)[0]
       return {
         sessions: mergedSessions,
         directories: snapshot.directories,
         activeSessionId,
         settings,
+        slashCommands: firstSession?.slashCommands ?? state.slashCommands,
+        sdkSkillNames: firstSession?.sdkSkillNames ?? state.sdkSkillNames,
         // The web client never runs hydrateConfigFromDisk — this snapshot IS
         // its hydration, so the fields hydrate derives from settings must be
         // derived here too. Without this the remote store kept the initial

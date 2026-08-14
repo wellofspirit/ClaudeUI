@@ -271,7 +271,7 @@ export function isTerminalDisabledError(message: unknown): boolean {
 // Terminal stream (SyncCore phase 2 — the VOLATILE lane)
 // ---------------------------------------------------------------------------
 //
-// These frames never enter the EventLog and never reach the audit log: PTY
+// These frames never enter the event ring and never reach the audit log: PTY
 // content and keystrokes capture secrets (security.md §Audit). They are
 // transport frames rather than invokes so a keystroke costs no request/response
 // bookkeeping — and they are accepted ONLY from a connection that currently

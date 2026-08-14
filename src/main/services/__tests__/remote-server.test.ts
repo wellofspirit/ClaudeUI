@@ -141,7 +141,7 @@ import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-
 import { RemoteDispatcher } from '../remote-dispatcher'
 import { registerCommand } from '../../ipc/command-registry'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../git-watch-registry'
-import { emitEvent } from '../sync-host'
+import { emitEvent, syncCore } from '../sync-host'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
 import type { GitStatusData } from '../../../shared/types'
@@ -986,8 +986,14 @@ describe('RemoteServer — static asset encoding + caching', () => {
 
 // ---------------------------------------------------------------------------
 // ADR-043 §5 — `GET /sent-file`. Authenticated by a THIRD scoped token and
-// allowlisted against the renderer's own `sentFiles` snapshot, so the route can
-// never read a host path the model didn't explicitly deliver.
+// allowlisted against the session's `sentFiles`, so the route can never read a
+// host path the model didn't explicitly deliver.
+//
+// SyncCore phase 4b: that allowlist comes from CANONICAL state now, not from an
+// `executeJavaScript` pull of the renderer's store — so these tests seed it the
+// way production does, by emitting the `SendUserFile` tool_use the reducer
+// derives `sentFiles` from. The stubbed renderer is gone: there is no renderer in
+// this path any more, which is the point of the cutover.
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer — /sent-file route', () => {
@@ -996,28 +1002,34 @@ describe('RemoteServer — /sent-file route', () => {
   let cwd: string
   const SESSION = 'route-files'
 
-  /** Point the server's EventLog at a fake renderer returning `snapshot`. */
-  function stubRendererState(snapshot: Record<string, unknown>): void {
-    server.setWindow({
-      isDestroyed: () => false,
-      // `send` is used by notifyStatus on every connect/disconnect — without it
-      // the status push throws asynchronously and fails the run.
-      webContents: { executeJavaScript: async () => snapshot, send: () => {} }
-    } as unknown as Parameters<RemoteServer['setWindow']>[0])
-  }
-
-  function snapshotWith(files: Array<{ path: string }>): Record<string, unknown> {
-    return {
-      seq: 0,
-      sessions: { [SESSION]: { routingId: SESSION, cwd, sentFiles: files } },
-      directories: [],
-      activeSessionId: SESSION,
-      settings: {},
-      recentSessionIds: [],
-      pinnedSessionIds: [],
-      customTitles: {},
-      worktreeInfoMap: {}
-    }
+  /**
+   * Put `files` on the session's delivered list the only way anything can: a
+   * `SendUserFile` tool call in the transcript. `sentFiles` is DERIVED
+   * (`buildSentFilesFromMessages`), so seeding it any other way would test a
+   * shape production can't produce.
+   */
+  function seedDeliveredFiles(files: Array<{ path: string }>): void {
+    syncCore.resetCanonicalForTests()
+    emitEvent('session:created', [SESSION, { cwd }], 'all')
+    if (files.length === 0) return
+    emitEvent(
+      'session:message',
+      [
+        SESSION,
+        {
+          id: 'm-send',
+          role: 'assistant',
+          timestamp: 0,
+          content: files.map((f, i) => ({
+            type: 'tool_use',
+            toolUseId: `tu-${i}`,
+            toolName: 'SendUserFile',
+            toolInput: { files: [f.path], display: 'attach' }
+          }))
+        }
+      ],
+      'all'
+    )
   }
 
   /** Pull the file token from a WS full-sync (its only authenticated home). */
@@ -1076,7 +1088,7 @@ describe('RemoteServer — /sent-file route', () => {
 
   it('rejects a missing or wrong token with 403 (constant-time compare)', async () => {
     await server.start(port, '127.0.0.1')
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const noToken = await httpGet(
       `http://127.0.0.1:${port}/sent-file?session=${SESSION}&path=${Buffer.from(
@@ -1094,7 +1106,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('404s an unknown session', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const got = await httpGet(
       urlFor(fileToken, path.join(cwd, 'out', 'report.html'), { session: 'nope' })
@@ -1105,7 +1117,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('404s a path that was never delivered (not an existence oracle)', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     // Exists on disk, inside the cwd — but not on the renderer's list.
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'secret.txt')))
@@ -1120,7 +1132,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('404s when the session delivered nothing at all', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([]))
+    seedDeliveredFiles([])
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
     expect(got.status).toBe(404)
   })
@@ -1128,7 +1140,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('serves an allowlisted file as an attachment with nosniff', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
     expect(got.status).toBe(200)
@@ -1143,7 +1155,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('honours inline=1 for images', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/shot.png' }]))
+    seedDeliveredFiles([{ path: 'out/shot.png' }])
 
     const got = await httpGet(
       urlFor(fileToken, path.join(cwd, 'out', 'shot.png'), { inline: true })
@@ -1156,7 +1168,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('FORCES attachment for a non-image even when inline=1 is requested', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const got = await httpGet(
       urlFor(fileToken, path.join(cwd, 'out', 'report.html'), { inline: true })
@@ -1169,7 +1181,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('404s an allowlisted entry whose file has since disappeared', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/gone.txt' }]))
+    seedDeliveredFiles([{ path: 'out/gone.txt' }])
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'gone.txt')))
     expect(got.status).toBe(404)
   })
@@ -1177,7 +1189,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('405s a non-GET method', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
     const got = await httpRequest('POST', urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
     expect(got.status).toBe(405)
   })
@@ -1185,7 +1197,7 @@ describe('RemoteServer — /sent-file route', () => {
   it('404s a structurally broken path parameter', async () => {
     const res = await server.start(port, '127.0.0.1')
     const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
     const got = await httpGet(
       `http://127.0.0.1:${port}/sent-file?session=${SESSION}&path=!!!&token=${fileToken}`
     )
@@ -1451,6 +1463,124 @@ describe('RemoteServer — sync epoch (R7)', () => {
     expect((msg.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([base + 2, base + 3])
     expect(msg.epoch).toBe(epoch)
     client.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SyncCore phase 4b — `sync-full` carries CANONICAL state.
+//
+// Every test here runs with NO window ever registered on the server, which is
+// the assertion that matters: before the cutover this suite had to stub a fake
+// renderer (`executeJavaScript`) to get a non-empty snapshot at all, and a real
+// desktop whose renderer was busy, reloading or absent got the same empty
+// snapshot a missing stub gives (remote.md defect 2).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    syncCore.resetCanonicalForTests()
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  async function firstSyncFull(token: string): Promise<Record<string, unknown>> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+    await client.ready
+    const msg = await new Promise<Record<string, unknown>>((resolve) => {
+      const off = client.onMessage((m) => {
+        if (m.type === 'sync-full') {
+          off()
+          resolve(m as unknown as Record<string, unknown>)
+        }
+      })
+      void client.send({ type: 'sync', lastSeq: 0 })
+    })
+    client.close()
+    return msg
+  }
+
+  it('serves state built from the event stream, with no renderer involved', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }], 'all')
+    emitEvent(
+      'session:message',
+      [
+        'canon-1',
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'from canonical' }],
+          timestamp: 0
+        }
+      ],
+      'all'
+    )
+    emitEvent(
+      'session:metering',
+      [
+        'canon-1',
+        {
+          engineId: 'claude',
+          vendorId: 'anthropic',
+          billingType: 'subscription',
+          tokens: { input: 7, output: 3, cacheWrite: 0, cacheRead: 0, total: 10 },
+          equivalentCostUsd: 0.05,
+          contextWindow: { used: 10, size: 200000 }
+        }
+      ],
+      'all'
+    )
+
+    const msg = await firstSyncFull(res.token)
+    const state = msg.state as {
+      seq: number
+      sessions: Record<string, { messages: Array<{ id: string }>; metering?: { equivalentCostUsd: number } }>
+      activeSessionId: string | null
+    }
+    expect(state.sessions['canon-1'].messages.map((m) => m.id)).toEqual(['a1'])
+    // Metering had no snapshot field before 4a and no canonical source before 4b.
+    expect(state.sessions['canon-1'].metering?.equivalentCostUsd).toBe(0.05)
+    // Selection is per-client (ADR-041): core has no opinion, and the web client
+    // resolves its own landing session from recents (`applyRemoteSnapshot`).
+    expect(state.activeSessionId).toBeNull()
+  })
+
+  it('claims the watermark EXACTLY — the catchup from it is empty', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }], 'all')
+    const msg = await firstSyncFull(res.token)
+    const state = msg.state as { seq: number }
+    // Same tick capture ⇒ the snapshot contains everything through `seq` and
+    // nothing after it. The old renderer-pull deliberately under-claimed here.
+    expect(state.seq).toBe(syncCore.currentSeq())
+    expect(syncCore.getAfter(state.seq)).toEqual([])
+  })
+
+  it('a resync mid-stream carries the accumulated streaming buffers', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }], 'all')
+    emitEvent('session:stream', ['canon-1', { type: 'thinking', text: 'weighing' }], 'all')
+    emitEvent('session:stream', ['canon-1', { type: 'text', text: 'partial ' }], 'all')
+
+    const msg = await firstSyncFull(res.token)
+    const state = msg.state as {
+      sessions: Record<string, { streamingText: string; streamingThinking: string }>
+    }
+    expect(state.sessions['canon-1'].streamingText).toBe('partial ')
+    // The thinking buffer was sealed by the text delta, exactly as every client
+    // replica seals it — canonical is not a second interpretation.
+    expect(state.sessions['canon-1'].streamingThinking).toBe('')
   })
 })
 

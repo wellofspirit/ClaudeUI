@@ -6,8 +6,8 @@
  * RemoteBridge is a tiny adapter: it looks like a `BrowserWindow` to
  * `ClaudeSession` (exposing `webContents.send`, `isDestroyed()`), and forwards
  * every send() call to a `pushFn` callback. The real pushFn (wired in
- * remote-server.ts) appends to an EventLog and broadcasts to all WebSocket
- * clients. These tests exercise the bridge in isolation — we supply our own
+ * remote-server.ts) broadcasts to all WebSocket clients with the seq SyncCore's
+ * funnel already assigned. These tests exercise the bridge in isolation — we supply our own
  * pushFn and verify fan-out, filtering, unsubscribe, and cleanup semantics.
  */
 
