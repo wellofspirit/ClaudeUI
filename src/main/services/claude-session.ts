@@ -1514,6 +1514,44 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           .catch(() => {})
       }, 500) // delay to let SDK flush JSONL to disk
     }
+
+    this.flushQueueAtTurnEnd()
+  }
+
+  /**
+   * Treat cli.js's `result` as a queue-flush boundary (ADR-053 addendum).
+   *
+   * CLAUDE ONLY — opencode/pi hold their items in core and forward them at
+   * `result` through {@link BaseSession.flushQueuedItems}, where a real
+   * post-send ack consumes each one. Claude has no such hold:
+   * {@link onPromptQueued} pushes into cli.js's native queue the instant an item
+   * lands, and a push that races the turn's `result` is taken by cli.js as the
+   * NEXT turn's fresh prompt — so `queued_command_consumed` never arrives and
+   * the item would sit 'queued' on every client's card while its text runs.
+   *
+   * Marking everything still pending 'consumed' here is truthful in BOTH states
+   * a `result` can find:
+   *  a) cli.js still holds the item in its queueArray — its between-turns drain
+   *     runs it next turn, and the late `queued_command_consumed` no-ops against
+   *     our already-consumed item (`consumeByText` matches `state === 'queued'`
+   *     only, and `emit()` has already pruned it);
+   *  b) the push landed after `result` and is already running as a fresh prompt,
+   *     with no consumed notification ever coming.
+   * Either way the text WILL run, which is exactly what 'consumed' asserts. One
+   * broadcast covers the whole list, and renderer synthesis stays exactly-once
+   * because the chat message id is derived from the item id (`steer-${itemId}`).
+   *
+   * KNOWN MICRO-RACE (accepted; documented, not fixed): a `recallQueued` in
+   * flight at this exact instant can dequeue an item from cli.js AFTER we marked
+   * it consumed — the item then never runs but is shown as a chat message. The
+   * window is one IPC round trip at turn end, and the card empties on this flush
+   * so the take-back affordance disappears immediately.
+   */
+  private flushQueueAtTurnEnd(): void {
+    const pending = this.queue.pending()
+    if (pending.length === 0) return
+    for (const item of pending) this.queue.setState(item, 'consumed')
+    this.queue.emit()
   }
 
   /**

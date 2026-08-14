@@ -252,6 +252,68 @@ describe('ClaudeSession queue — consumed correlation (ADR-053)', () => {
   })
 })
 
+describe('ClaudeSession queue — turn-end flush (ADR-053 addendum)', () => {
+  it('consumes every still-queued item when `result` lands with NO queued_command_consumed', async () => {
+    const { session, sent, handle } = await startBusySession('r-queue-flush')
+
+    session.enqueuePrompt('run me next')
+    session.enqueuePrompt('and me')
+    const [firstId, secondId] = session.queuedItems.map((i) => i.itemId)
+    const broadcastsBefore = queueBroadcasts(sent).length
+
+    // The race this guards: the push landed at/after the turn's result, so
+    // cli.js treats it as a fresh prompt and NEVER acks it as consumed. Pre-fix
+    // the items stayed 'queued' on every client's card while their text ran.
+    // No session_id on purpose — it keeps getSessionLogPath() null, so the
+    // 500ms JSONL reconciliation timer never arms in this test.
+    handle.emit({ type: 'result', subtype: 'success', total_cost_usd: 0 })
+
+    await vi.waitFor(() => expect(session.queuedItems).toEqual([]))
+
+    const flushBroadcasts = queueBroadcasts(sent).slice(broadcastsBefore)
+    // ONE broadcast for the whole flush, not one per item.
+    expect(flushBroadcasts).toHaveLength(1)
+    // itemId + text on a 'consumed' entry is exactly what the renderer store
+    // synthesizes the chat message from, keyed `steer-${itemId}` (guarded in
+    // useClaudeEvents-queue.component.test.tsx / session-store-actions).
+    expect(flushBroadcasts[0]).toEqual([
+      expect.objectContaining({ itemId: firstId, text: 'run me next', state: 'consumed' }),
+      expect.objectContaining({ itemId: secondId, text: 'and me', state: 'consumed' })
+    ])
+  })
+
+  it('a late queued_command_consumed after the flush changes nothing and broadcasts nothing', async () => {
+    const { session, sent, handle } = await startBusySession('r-queue-flush-late')
+
+    session.enqueuePrompt('run me next')
+    handle.emit({ type: 'result', subtype: 'success', total_cost_usd: 0 })
+    await vi.waitFor(() => expect(session.queuedItems).toEqual([]))
+    const broadcastsAfterFlush = queueBroadcasts(sent).length
+
+    // Case (a) of the flush rationale: cli.js kept the item and drains it next
+    // turn, so its ack arrives late. It must find nothing to do.
+    handle.emit({
+      type: 'system',
+      subtype: 'queued_command_consumed',
+      prompt: 'run me next',
+      session_id: 's1',
+      uuid: 'u1'
+    })
+    // Ordering fence: messages are processed in arrival order, so once this
+    // later message's effect is observable the consume above has been handled.
+    handle.emit({
+      type: 'system',
+      subtype: 'model_fallback',
+      original_model: 'a',
+      fallback_model: 'b'
+    })
+    await vi.waitFor(() => expect(sent.some(([c]) => c === 'session:warning')).toBe(true))
+
+    expect(queueBroadcasts(sent)).toHaveLength(broadcastsAfterFlush)
+    expect(session.queuedItems).toEqual([])
+  })
+})
+
 describe('ClaudeSession queue — engine death (ADR-053)', () => {
   it('cancel() recalls everything still queued and broadcasts it', async () => {
     const { session, sent } = await startBusySession('r-queue-death')
