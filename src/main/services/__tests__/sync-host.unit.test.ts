@@ -26,12 +26,15 @@ import type { BrowserWindow } from 'electron'
 import {
   syncCore,
   emitEvent,
-  setSyncWindow,
   addSyncSubscriber,
   syncSubscriberCount,
   clearSyncSubscribersForTests,
   type SyncSubscriber
 } from '../sync-host'
+// The host window moved out of the delivery adapter in SyncCore phase 4d — the
+// adapter READS it (so a windowless boot has nothing to register) instead of
+// owning it.
+import { setHostWindow } from '../host-window'
 
 interface FakeWindow {
   isDestroyed: () => boolean
@@ -50,14 +53,14 @@ function fakeSubscriber(): SyncSubscriber & ReturnType<typeof vi.fn> {
 describe('sync-host delivery', () => {
   beforeEach(() => {
     clearSyncSubscribersForTests()
-    setSyncWindow(null)
+    setHostWindow(null)
   })
 
   it('a replicated channel reaches every subscriber and NO window', () => {
     const main = fakeWindow()
     const a = fakeSubscriber()
     const b = fakeSubscriber()
-    setSyncWindow(main as unknown as BrowserWindow)
+    setHostWindow(main as unknown as BrowserWindow)
     addSyncSubscriber(a)
     addSyncSubscriber(b)
 
@@ -88,7 +91,7 @@ describe('sync-host delivery', () => {
   it('a host-local channel reaches the window and NO subscriber', () => {
     const main = fakeWindow()
     const sink = fakeSubscriber()
-    setSyncWindow(main as unknown as BrowserWindow)
+    setHostWindow(main as unknown as BrowserWindow)
     addSyncSubscriber(sink)
 
     emitEvent('auth:state', [{ status: 'success' }])
@@ -100,7 +103,7 @@ describe('sync-host delivery', () => {
   it('an explicit window overrides the primary one, for host-local only', () => {
     const primary = fakeWindow()
     const other = fakeWindow()
-    setSyncWindow(primary as unknown as BrowserWindow)
+    setHostWindow(primary as unknown as BrowserWindow)
 
     emitEvent('mockup:file-changed', ['dir'], other as unknown as BrowserWindow)
     // `mockup:file-changed` is REPLICATED, so the window argument is ignored: no
@@ -118,7 +121,7 @@ describe('sync-host delivery', () => {
 
   it('skips a destroyed host window instead of throwing', () => {
     const main = fakeWindow(true)
-    setSyncWindow(main as unknown as BrowserWindow)
+    setHostWindow(main as unknown as BrowserWindow)
 
     expect(() => emitEvent('auth:state', [{ status: 'success' }])).not.toThrow()
     expect(main.webContents.send).not.toHaveBeenCalled()
@@ -195,7 +198,7 @@ describe('sync-host delivery', () => {
   it('an unclassified channel is dropped, not delivered (fail-closed)', () => {
     const main = fakeWindow()
     const sink = fakeSubscriber()
-    setSyncWindow(main as unknown as BrowserWindow)
+    setHostWindow(main as unknown as BrowserWindow)
     addSyncSubscriber(sink)
     const before = syncCore.currentSeq()
 

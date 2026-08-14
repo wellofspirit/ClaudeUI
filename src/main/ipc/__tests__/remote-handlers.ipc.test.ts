@@ -374,7 +374,7 @@ describe('registerRemoteHandlers', () => {
       if (typeof fn === 'function') (fn as any).mockClear?.()
     })
     sessionManagerStub.get.mockReturnValue(sessionStub)
-    registerRemoteHandlers(dispatcher, sessionManagerStub, win)
+    registerRemoteHandlers(dispatcher, sessionManagerStub)
   })
 
   afterEach(() => {
@@ -1272,11 +1272,12 @@ const PHASE2_TERMINAL_CHANNELS = [
 const PHASE2_SHELL_CHANNELS = PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability')
 
 describe('remote surface parity (phase 1 port)', () => {
-  let win: any
-
   beforeEach(() => {
-    win = makeFakeWindow()
-    registerRemoteHandlers(new RemoteDispatcher(), sessionManagerStub, win)
+    // Subscribes a fake desktop client to the funnel, mirroring production's
+    // "somebody else is listening too" (the parity assertions below read the
+    // registry, not this sink).
+    makeFakeWindow()
+    registerRemoteHandlers(new RemoteDispatcher(), sessionManagerStub)
     // Registered later in the real bootstrap, once build versions are known.
     registerRemoteVersionInfo({ appVersion: '1', sdkVersion: '2', cliVersion: '3' })
   })

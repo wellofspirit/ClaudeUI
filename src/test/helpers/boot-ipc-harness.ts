@@ -6,7 +6,10 @@
  *   vi.mock('electron', () => import('../../test/stubs/electron-shim'))
  *   ...
  *   const { bridge, win, call } = await bootIpcHarness()
- *   registerTerminalIpc(win)
+ *   registerTerminalIpc()
+ *   // `win` is for the surfaces that still take one; the register* functions are
+ *   // window-free since SyncCore phase 4d (they run in a windowless boot), so a
+ *   // host window is published with `setHostWindow(win)` when a test needs one.
  *   const id = await call('terminal:create', '/tmp')
  *
  * For safeHandler-wrapped channels, use callSafe() which unwraps `{ ok, data, error }`.

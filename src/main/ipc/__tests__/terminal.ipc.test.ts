@@ -53,6 +53,7 @@ vi.mock('../../services/logger', () => ({
 
 // Import AFTER mocks so the real module picks up the mocked electron/pty.
 import { registerTerminalIpc } from '../terminal.ipc'
+import { terminalService } from '../../services/terminal-service'
 
 describe('terminal.ipc', () => {
   let harness: IpcHarness
@@ -67,10 +68,15 @@ describe('terminal.ipc', () => {
       if (event === 'closed') closedHandler = cb
       return harness.win
     }
-    registerTerminalIpc(harness.win)
+    // SyncCore 4d: the registration is window-free (so it can run in a windowless
+    // boot); the desktop delivery target AND the window-lifetime shell teardown are
+    // `terminalService.setWindow`'s, which is what `createWindow()` calls.
+    registerTerminalIpc()
+    terminalService.setWindow(harness.win)
   })
 
   afterEach(() => {
+    terminalService.setWindow(null)
     harness.teardown()
     vi.clearAllMocks()
   })
@@ -139,7 +145,7 @@ describe('terminal.ipc', () => {
     await expect(harness.call('terminal:kill', id)).resolves.toBeUndefined()
   })
 
-  it('win.on("closed") triggers killAll', async () => {
+  it('the host window closing triggers killAll', async () => {
     const id1 = await harness.call<string>('terminal:create', '/tmp/a')
     const id2 = await harness.call<string>('terminal:create', '/tmp/b')
     expect(ptyStub.spawned).toHaveLength(2)

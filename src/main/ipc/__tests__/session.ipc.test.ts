@@ -300,6 +300,7 @@ import {
   GIT_WATCH_OWNER_REMOTE
 } from '../../services/git-watch-registry'
 import { addSyncSubscriber } from '../../services/sync-host'
+import { setHostWindow } from '../../services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // Fill in the stub's capabilities now that the top-level import is available
@@ -318,10 +319,14 @@ describe('session.ipc', () => {
       if (typeof fn === 'function') (fn as any).mockClear?.()
     }
     sessionManagerSpies.get.mockReturnValue(sessionStub)
-    registerSessionIpc(harness.win)
+    // SyncCore 4d: the registration is window-free, and the two handlers that
+    // want the host's window read it from host-window.ts at use time.
+    setHostWindow(harness.win)
+    registerSessionIpc()
   })
 
   afterEach(() => {
+    setHostWindow(null)
     harness.teardown()
     vi.clearAllMocks()
   })

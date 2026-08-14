@@ -190,6 +190,7 @@ vi.mock('../../../main/sdk/endpoint-env', () => ({ setEndpointEnv: vi.fn() }))
 vi.mock('../../../main/sdk/model-env', () => ({ setModelEnv: vi.fn() }))
 
 import { registerSessionIpc } from '../session.ipc'
+import { setHostWindow } from '../../services/host-window'
 
 describe('session:create spawn rewiring (Phase 3b)', () => {
   let harness: IpcHarness
@@ -197,10 +198,12 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     harness = bootIpcHarness()
-    registerSessionIpc(harness.win)
+    setHostWindow(harness.win)
+    registerSessionIpc()
   })
 
   afterEach(() => {
+    setHostWindow(null)
     harness.teardown()
   })
 

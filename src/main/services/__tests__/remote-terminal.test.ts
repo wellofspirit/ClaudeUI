@@ -210,13 +210,9 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
       webContents: { send: vi.fn(), executeJavaScript: vi.fn(async () => ({})) },
       on: vi.fn()
     }
-    registerRemoteHandlers(
-      dispatcher,
-      { get: () => undefined, rekey: vi.fn() } as never,
-      fakeWin as never
-    )
+    registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never)
     // Both transports, same registry — the production bootstrap order.
-    registerTerminalIpc(fakeWin as never)
+    registerTerminalIpc()
     server = new RemoteServer(dispatcher, passwordProvider() as never, tailscaleStub as never)
     server.setWindow(fakeWin as never)
     terminalService.setWindow(fakeWin as never)
