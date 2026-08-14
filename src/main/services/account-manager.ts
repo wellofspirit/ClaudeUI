@@ -55,8 +55,15 @@ class AccountManager {
   /** In-memory cache of the current state. Always consistent with DB + pointer file. */
   private state: AccountsState = { enabled: false, activeId: null, accounts: [] }
 
-  /** Wire up at app start: load state, apply active env, capture login emails. */
-  init(win: BrowserWindow): void {
+  /**
+   * Wire up at app start: load state, apply active env, capture login emails.
+   *
+   * Called from `bootCore()` (process lifetime) — `win` is `null` in a windowless
+   * boot, which costs only the two host-local broadcasts below; applying the
+   * active account's spawn env is what a headless session actually needs, and it
+   * happens either way.
+   */
+  init(win: BrowserWindow | null): void {
     this.window = win
     this.state = this.load()
     this.applyActive()

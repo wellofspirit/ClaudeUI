@@ -404,7 +404,12 @@ export class PiSession extends BaseSession {
    *  resume in M1 (only cost is — see the kickoff spec's resume bullet); starts at 0. */
   private accTotalDurationMs = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
+  constructor(
+    routingId: string,
+    win: BrowserWindow | null,
+    cwd: string,
+    opts: EngineSpawnOptions = {}
+  ) {
     super(routingId, win, cwd)
     // sandboxConfig/thinkingMode are intentionally unread — Claude-only
     // options per EngineSpawnOptions' docs / ADR-030. `effort` IS consumed

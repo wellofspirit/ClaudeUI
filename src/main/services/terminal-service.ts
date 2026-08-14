@@ -78,9 +78,21 @@ export class TerminalService {
    */
   private stepUpCredential: PasswordAuthProvider = dbPasswordAuthProvider()
 
-  /** Desktop renderer target for `terminal:data` / `terminal:exit`. */
+  /**
+   * Desktop renderer target for `terminal:data` / `terminal:exit`, and the
+   * window-lifetime shell teardown.
+   *
+   * The `closed` → {@link killAll} hookup lives here as of SyncCore phase 4d: it
+   * used to sit in `registerTerminalIpc(win)`, which made a window-free
+   * registration impossible even though the pty manager is process-lifetime and
+   * shared with the remote transport. The shells belong to this service, so their
+   * lifetime rule does too — and a windowless boot simply never calls this.
+   */
   setWindow(win: BrowserWindow | null): void {
     this.win = win
+    win?.on('closed', () => {
+      this.killAll()
+    })
   }
 
   /** Install the remote transport's delivery sink (null tears it down). */

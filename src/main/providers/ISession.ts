@@ -219,7 +219,8 @@ export interface EngineSpawnOptions {
  */
 export type EngineSessionFactory = (
   routingId: string,
-  win: import('electron').BrowserWindow,
+  /** Host window handle, or `null` when the app runs windowless (SyncCore 4d). */
+  win: import('electron').BrowserWindow | null,
   cwd: string,
   opts: EngineSpawnOptions
 ) => ISession

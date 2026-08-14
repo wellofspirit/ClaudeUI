@@ -42,7 +42,15 @@ export abstract class BaseSession implements ISession {
   // dressed up as a fake `BrowserWindow` to receive anything. Clients are uniform
   // subscribers now — `addSyncSubscriber` in `services/sync-host.ts`.
 
-  protected win: BrowserWindow
+  /**
+   * The host's window, as a HOST HANDLE — never a delivery target (4c deleted
+   * that; see {@link send}). `null` when the app runs windowless
+   * (`CLAUDEUI_NO_WINDOW=1`, phase 4d): a session created by a WebSocket client
+   * spawns, streams and queues identically, and the one thing that genuinely
+   * needs a window — voice capture, which belongs to the machine with the
+   * microphone — refuses instead of dereferencing null.
+   */
+  protected win: BrowserWindow | null
   /** Mutable: SessionManager.rekey() writes this when the session UUID arrives. */
   routingId: string
   readonly cwd: string
@@ -90,7 +98,7 @@ export abstract class BaseSession implements ISession {
   private thinkingStartedAt: number | null = null
   private sealedThinkingMs: number | null = null
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string) {
+  constructor(routingId: string, win: BrowserWindow | null, cwd: string) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
@@ -361,7 +369,8 @@ export abstract class BaseSession implements ISession {
    * channel a session emits is replicated or volatile, so it reaches every
    * SUBSCRIBER, and the session's own `this.win` is no longer part of the fan-out
    * (the desktop renderer is a subscriber like any other). `this.win` survives as
-   * the spawn/host handle the engines need, not as a delivery target.
+   * the spawn/host handle the engines need, not as a delivery target — which is
+   * why it can be `null` in a windowless boot without any of this changing.
    *
    * `routingId` rides as `args[0]`, which is the wire encoding of contract 2's
    * `sessionId` — positional, not a named field (see sync-core.md §"Wire

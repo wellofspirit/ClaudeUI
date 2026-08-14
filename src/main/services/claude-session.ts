@@ -23,6 +23,9 @@ import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
+// Host-local emissions (`voice:state`) go through the funnel like everything else
+// — see the note in voiceStartRecording. Replicated events use BaseSession.send.
+import { emitEvent } from './sync-host'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
@@ -300,7 +303,12 @@ export class ClaudeSession extends BaseSession {
   /** Epoch ms when the currently in-flight turn started; null while idle. */
   private turnStartedAtMs: number | null = null
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
+  constructor(
+    routingId: string,
+    win: BrowserWindow | null,
+    cwd: string,
+    opts: EngineSpawnOptions = {}
+  ) {
     const {
       effort,
       resumeSessionId,
@@ -1795,8 +1803,22 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.send('voice:error', 'Failed to start audio capture. Check microphone access.')
       return
     }
-    // Notify renderer we're connecting (audio is flowing, just buffering)
-    this.win.webContents.send('voice:state', this.routingId, 'connecting')
+    // A windowless boot (SyncCore 4d) has no host to stream a microphone to, and
+    // `VoiceClient` posts its transcript frames at a window. Refuse the same way a
+    // failed capture does rather than dereference a null handle — voice is the ONE
+    // host-local surface a session owns, so it is also the only thing a WS-created
+    // session cannot do.
+    if (!this.win) {
+      stopRecording()
+      this.send('voice:error', 'Voice input needs the desktop window (this app is running windowless).')
+      return
+    }
+    const win = this.win
+    // Notify renderer we're connecting (audio is flowing, just buffering). Through
+    // the funnel: `voice:state` is host-local, so it lands on the host window
+    // exactly as the old targeted send did (4c's VoiceClient lesson — a computed
+    // or hand-rolled send is one refactor away from being invisible).
+    emitEvent('voice:state', [this.routingId, 'connecting'])
 
     try {
       // Ensure voice server is running (may spawn SDK + create TCP server)
@@ -1809,7 +1831,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
       const port = this.voiceServerPort!
       if (!this.voiceClient) {
-        this.voiceClient = new VoiceClient(port, this.win, this.routingId)
+        this.voiceClient = new VoiceClient(port, win, this.routingId)
       } else {
         this.voiceClient.updatePort(port)
       }
@@ -1820,7 +1842,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     } catch (err) {
       earlyCaptureStopped = true
       stopRecording()
-      this.win.webContents.send('voice:state', this.routingId, 'idle')
+      emitEvent('voice:state', [this.routingId, 'idle'])
       throw err
     }
   }
@@ -1830,7 +1852,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     if (!this.voiceClient) {
       // If voiceClient never started (still in early capture), just stop recording
       stopRecording()
-      this.win.webContents.send('voice:state', this.routingId, 'idle')
+      emitEvent('voice:state', [this.routingId, 'idle'])
       return
     }
     await this.voiceClient.stopRecording()

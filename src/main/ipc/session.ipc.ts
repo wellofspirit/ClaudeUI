@@ -1,12 +1,13 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { app, ipcMain, dialog, BrowserWindow } from 'electron'
+import { app, ipcMain, dialog } from 'electron'
 import { query as sdkQuery } from '../sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
+import { getHostWindow } from '../services/host-window'
 import { seedCanonicalAppState, refreshCanonicalDirectories } from '../services/sync-seed'
 import {
   listDirectories,
@@ -663,8 +664,21 @@ export function getSessionManager(): SessionManager | null {
   return sharedManager
 }
 
-export function registerSessionIpc(win: BrowserWindow): SessionManager {
-  // Remove previous handlers to allow re-registration (e.g. macOS dock re-open)
+/**
+ * Register every session/config/git/usage channel and start the window-independent
+ * services behind them.
+ *
+ * **Takes no window (SyncCore phase 4d).** It used to take the one it was called
+ * with from `createWindow`, which made the whole surface — including the canonical
+ * seeds and the watchers below — window-lifetime code that could not run at all
+ * without a `BrowserWindow`. It is called once from `bootCore()` now, BEFORE any
+ * window decision, so the two places that genuinely want the host's window (a
+ * native folder picker and the spawn handle a session holds) read it from
+ * `services/host-window.ts` at USE time and cope with `null`.
+ */
+export function registerSessionIpc(): SessionManager {
+  // Remove previous handlers to allow re-registration (e.g. a second bootCore in
+  // a test; production boots core exactly once).
   for (const channel of SESSION_IPC_CHANNELS) {
     ipcMain.removeHandler(channel)
   }
@@ -677,9 +691,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     capability: 'host',
     kind: 'command',
     handler: async () => {
-      const result = await dialog.showOpenDialog(win, {
-        properties: ['openDirectory']
-      })
+      // `host` capability, so only the desktop client can reach this — but a
+      // windowless boot has no window to parent the dialog to, and Electron's
+      // overload set makes that a different call rather than a nullable arg.
+      const win = getHostWindow()
+      const result = win
+        ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+        : await dialog.showOpenDialog({ properties: ['openDirectory'] })
       if (result.canceled || result.filePaths.length === 0) return null
       return result.filePaths[0]
     }
@@ -704,7 +722,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     ) => {
       await prepareAndCreateSession(
         manager,
-        win,
+        getHostWindow(),
         {
           routingId,
           cwd,

@@ -75,10 +75,16 @@ async function seedCanonicalTranscript(
  * (or resolves the spawn model for opencode), and creates the session —
  * shared by the desktop IPC handler and the remote WebSocket handler so both
  * surfaces spawn sessions identically.
+ *
+ * `win` is the HOST handle a session keeps (voice capture belongs to the machine
+ * with the microphone), never a delivery target — every event a session emits
+ * goes through the funnel to every subscriber (phase 4c). It is `null` when the
+ * app runs windowless (phase 4d): a WS-created session spawns and streams
+ * exactly the same, and only the host-local voice path is unavailable.
  */
 export async function prepareAndCreateSession(
   manager: SessionManager,
-  win: BrowserWindow,
+  win: BrowserWindow | null,
   args: CreateSessionArgs
 ): Promise<void> {
   const {

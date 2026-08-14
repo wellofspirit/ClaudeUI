@@ -47,7 +47,7 @@ class ClaudeAuthProvider implements EngineAuthProvider {
    * Wire up at app start. Subscribes to login-success callbacks so probe()
    * can reflect fresh account info after re-auth without doing a file read.
    */
-  init(win: BrowserWindow): void {
+  init(win: BrowserWindow | null): void {
     // Intercept successful logins to keep cachedAccount fresh.
     authManager.onLoginSuccess((account) => {
       if (account) this.cachedAccount = account

@@ -34,10 +34,19 @@
  * (window chrome, native pickers, voice, OAuth, desktop PTY bytes, the
  * log-viewer window). Those are not sync, they are the host talking to its own
  * shell, and the funnel guard asserts nothing else uses that path.
+ *
+ * ## What 4d changed
+ *
+ * The host window is no longer a field here: it lives in `services/host-window.ts`
+ * and is READ at delivery time. A windowless boot (`CLAUDEUI_NO_WINDOW=1`) has no
+ * window to register, so the host-local lane degrades to a no-op while every
+ * subscriber keeps receiving — which is the property the phase-4 exit criterion
+ * asks for.
  */
 
 import type { BrowserWindow } from 'electron'
 import { SyncCore, type Delivery } from '../sync/sync-core'
+import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
   detectEnteredWorktree,
@@ -84,21 +93,6 @@ export function clearSyncSubscribersForTests(): void {
 // Delivery
 // ---------------------------------------------------------------------------
 
-/**
- * The host's own window. Only `host-local` channels target it now, and only
- * when the emission did not name a window of its own.
- */
-let primaryWindow: BrowserWindow | null = null
-
-/** Register the main BrowserWindow with the funnel. Idempotent. */
-export function setSyncWindow(win: BrowserWindow | null): void {
-  primaryWindow = win
-}
-
-export function getSyncWindow(): BrowserWindow | null {
-  return primaryWindow
-}
-
 function sendToWindow(win: BrowserWindow | null, channel: string, args: unknown[]): void {
   if (!win || win.isDestroyed()) return
   win.webContents.send(channel, ...args)
@@ -107,8 +101,9 @@ function sendToWindow(win: BrowserWindow | null, channel: string, args: unknown[
 /**
  * The delivery callback. Two lanes, chosen by class:
  *
- *  - `host-local` → a targeted `webContents.send` to the owning window. Not
- *    sync; not ringed; never reaches a subscriber.
+ *  - `host-local` → a targeted `webContents.send` to the owning window (or
+ *    nowhere at all, when the app runs windowless). Not sync; not ringed; never
+ *    reaches a subscriber.
  *  - everything else → EVERY subscriber, always.
  *
  * Each subscriber is fenced: the desktop port and the WS broadcaster must not be
@@ -124,7 +119,7 @@ function hostDelivery(
   delivery: Delivery & { cls: string }
 ): void {
   if (delivery.cls === 'host-local') {
-    sendToWindow((delivery.window as BrowserWindow | undefined) ?? primaryWindow, channel, args)
+    sendToWindow((delivery.window as BrowserWindow | undefined) ?? getHostWindow(), channel, args)
     return
   }
   // Main-side observers run BEFORE the fan-out: their own emissions are queued by

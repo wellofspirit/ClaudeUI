@@ -61,7 +61,8 @@ export class SessionManager {
 
   create(
     routingId: string,
-    win: BrowserWindow,
+    /** Host handle for the session (voice capture); `null` when windowless — phase 4d. */
+    win: BrowserWindow | null,
     cwd: string,
     opts: EngineSpawnOptions = {},
     engineId: EngineId = 'claude'

@@ -55,11 +55,11 @@ import type {
   PermissionScope,
   ClaudePermissions
 } from '../../shared/types'
-import type { BrowserWindow } from 'electron'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { dispatchedUsageSummary } from '../services/db'
 import { emitEvent } from '../services/sync-host'
+import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
@@ -264,10 +264,18 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
   }
 }
 
+/**
+ * Register the remote transport's command surface.
+ *
+ * **Takes no window (SyncCore phase 4d).** It used to capture `createWindow`'s
+ * window purely to hand it to `prepareAndCreateSession` as the new session's host
+ * handle; core registers this BEFORE any window decision now, so the handle is
+ * read at spawn time from `services/host-window.ts` and is `null` when the app
+ * runs windowless.
+ */
 export function registerRemoteHandlers(
   dispatcher: RemoteDispatcher,
-  manager: SessionManager,
-  win: BrowserWindow
+  manager: SessionManager
 ): void {
   remoteHandlersRegistered = true
 
@@ -294,7 +302,7 @@ export function registerRemoteHandlers(
     ) => {
       await prepareAndCreateSession(
         manager,
-        win,
+        getHostWindow(),
         {
           routingId,
           cwd,

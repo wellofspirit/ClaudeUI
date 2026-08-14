@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain } from 'electron'
 import { terminalService } from '../services/terminal-service'
 import {
   commandRegistry,
@@ -30,15 +30,18 @@ function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
   )
 }
 
-export function registerTerminalIpc(win: BrowserWindow): void {
+/**
+ * Register the terminal channels. Window-free since SyncCore phase 4d: the pty
+ * manager is process-lifetime, so the registration is too, and the two
+ * window-LIFETIME concerns it used to own — where `terminal:data`/`terminal:exit`
+ * are delivered (`terminalService.setWindow`) and killing the shells when the
+ * window closes — moved to `createWindow()`. A windowless boot therefore still
+ * serves `terminal:*` to remote clients (phase 2 multi-attach) with no local sink.
+ */
+export function registerTerminalIpc(): void {
   for (const channel of TERMINAL_IPC_CHANNELS) {
     ipcMain.removeHandler(channel)
   }
-
-  // ONE pty manager per app run, shared with the remote transport (phase 2
-  // multi-attach). The window is where `terminal:data` / `terminal:exit` go —
-  // the desktop transport is byte-identical to what it was before the port.
-  terminalService.setWindow(win)
 
   handleIpc({
     channel: 'terminal:create',
@@ -96,9 +99,5 @@ export function registerTerminalIpc(win: BrowserWindow): void {
     kind: 'query',
     withConnection: true,
     handler: (connection: CommandConnection) => terminalService.availability(connection)
-  })
-
-  win.on('closed', () => {
-    terminalService.killAll()
   })
 }

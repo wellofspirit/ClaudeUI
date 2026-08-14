@@ -330,7 +330,12 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
+  constructor(
+    routingId: string,
+    win: BrowserWindow | null,
+    cwd: string,
+    opts: EngineSpawnOptions = {}
+  ) {
     super(routingId, win, cwd)
     // effort/sandboxConfig/thinkingMode/resumeSessionAt/forkSession are intentionally
     // unread — Claude-only options per EngineSpawnOptions' docs / ADR-030.
