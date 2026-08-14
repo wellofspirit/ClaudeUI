@@ -1,0 +1,79 @@
+{
+  "name": "cost fields replace, never accumulate (ratified §5)",
+  "why": "Engine cost/token fields are CUMULATIVE-PER-PROCESS snapshots that reset on --resume. Every status-line and metering apply is therefore a replace. Summing them would report 0.10+0.30+0.55 = 0.95 for a turn that cost 0.55, and the post-resume rows (which start over at 0.02) would be added on top of the pre-resume total instead of superseding it.",
+  "events": [
+    { "channel": "session:created", "args": ["rid", { "cwd": "/repo" }] },
+    {
+      "channel": "session:status-line",
+      "args": ["rid", { "model": "sonnet", "totalCostUsd": 0.1, "inputTokens": 100 }]
+    },
+    {
+      "channel": "session:metering",
+      "args": [
+        "rid",
+        {
+          "engineId": "claude",
+          "vendorId": "anthropic",
+          "billingType": "subscription",
+          "tokens": { "input": 100, "output": 20, "cacheWrite": 0, "cacheRead": 0, "total": 120 },
+          "equivalentCostUsd": 0.1,
+          "contextWindow": { "used": 120, "size": 200000 }
+        }
+      ]
+    },
+    {
+      "channel": "session:status-line",
+      "args": ["rid", { "model": "sonnet", "totalCostUsd": 0.3, "inputTokens": 400 }]
+    },
+    {
+      "channel": "session:status-line",
+      "args": ["rid", { "model": "sonnet", "totalCostUsd": 0.55, "inputTokens": 900 }]
+    },
+    {
+      "channel": "session:metering",
+      "args": [
+        "rid",
+        {
+          "engineId": "claude",
+          "vendorId": "anthropic",
+          "billingType": "subscription",
+          "tokens": { "input": 900, "output": 210, "cacheWrite": 0, "cacheRead": 0, "total": 1110 },
+          "equivalentCostUsd": 0.55,
+          "contextWindow": { "used": 1110, "size": 200000 }
+        }
+      ]
+    },
+    {
+      "channel": "session:status-line",
+      "args": ["rid", { "model": "sonnet", "totalCostUsd": 0.02, "inputTokens": 30 }]
+    },
+    {
+      "channel": "session:metering",
+      "args": [
+        "rid",
+        {
+          "engineId": "claude",
+          "vendorId": "anthropic",
+          "billingType": "subscription",
+          "tokens": { "input": 30, "output": 5, "cacheWrite": 0, "cacheRead": 0, "total": 35 },
+          "equivalentCostUsd": 0.02,
+          "contextWindow": { "used": 35, "size": 200000 }
+        }
+      ]
+    }
+  ],
+  "expectSessionIds": ["rid"],
+  "expectSession": {
+    "rid": {
+      "statusLine": { "model": "sonnet", "totalCostUsd": 0.02, "inputTokens": 30 },
+      "metering": {
+        "engineId": "claude",
+        "vendorId": "anthropic",
+        "billingType": "subscription",
+        "tokens": { "input": 30, "output": 5, "cacheWrite": 0, "cacheRead": 0, "total": 35 },
+        "equivalentCostUsd": 0.02,
+        "contextWindow": { "used": 35, "size": 200000 }
+      }
+    }
+  }
+}

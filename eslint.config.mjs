@@ -96,6 +96,37 @@ export default defineConfig(
     }
   },
 
+  // No-Electron fence for SyncCore (ADR-051 §Topology, phase 4a item 10).
+  //
+  // `src/main/sync/**` and `src/shared/sync/**` are the future `src/core`: they
+  // must stay runnable in a headless bun process with no Electron at all. The
+  // constraint is enforced, not documented — the Electron dependency is exactly
+  // the kind of thing that creeps in via one convenient import (a `BrowserWindow`
+  // type, `app.getPath`) and is then structural. Delivery and every other
+  // host-shaped concern is injected from `src/main/services/sync-host.ts`, which
+  // is deliberately OUTSIDE the fence.
+  //
+  // Type-only imports are blocked too: a `BrowserWindow` in a signature makes
+  // core's API Electron-shaped even when nothing is emitted at runtime.
+  {
+    files: ['src/main/sync/**/*.{ts,tsx}', 'src/shared/sync/**/*.{ts,tsx}'],
+    ignores: ['**/__tests__/**'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['electron', 'electron/*', '@electron/*', '@electron-toolkit/*'],
+              message:
+                'SyncCore must not import Electron (ADR-051 §Topology). Inject host behaviour from src/main/services/sync-host.ts instead.'
+            }
+          ]
+        }
+      ]
+    }
+  },
+
   // Relaxed rules for tests, stubs, fixtures, and build/patch scripts.
   {
     files: TEST_AND_SCRIPT_FILES,

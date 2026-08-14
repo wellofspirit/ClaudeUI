@@ -1,0 +1,101 @@
+{
+  "name": "derived todos + sentFiles across a full turn (ratified §2)",
+  "why": "Derived state is reducer-internal: no client computes it. This replays the exact triggers the as-built renderer used — a task tool in a message, a non-error tool result, and the turn boundary — and pins the two DIFFERENT lifetimes: todos are dismissed once all complete, sentFiles are never cleared.",
+  "events": [
+    { "channel": "session:created", "args": ["rid", { "cwd": "/repo" }] },
+    {
+      "channel": "session:message",
+      "args": [
+        "rid",
+        {
+          "id": "m1",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "toolUseId": "t-todo",
+              "toolName": "TodoWrite",
+              "toolInput": {
+                "todos": [
+                  { "content": "read the code", "status": "in_progress", "activeForm": "Reading" },
+                  { "content": "write the report", "status": "pending", "activeForm": "Writing" }
+                ]
+              }
+            }
+          ],
+          "timestamp": 0
+        }
+      ]
+    },
+    {
+      "channel": "session:tool-result",
+      "args": ["rid", { "toolUseId": "t-todo", "result": "ok", "isError": false }]
+    },
+    {
+      "channel": "session:message",
+      "args": [
+        "rid",
+        {
+          "id": "m2",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "toolUseId": "t-file",
+              "toolName": "SendUserFile",
+              "toolInput": {
+                "files": ["/repo/report.md"],
+                "caption": "the report",
+                "display": "attach"
+              }
+            }
+          ],
+          "timestamp": 0
+        }
+      ]
+    },
+    {
+      "channel": "session:tool-result",
+      "args": ["rid", { "toolUseId": "t-file", "result": "delivered", "isError": false }]
+    },
+    {
+      "channel": "session:message",
+      "args": [
+        "rid",
+        {
+          "id": "m3",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "toolUseId": "t-todo2",
+              "toolName": "TodoWrite",
+              "toolInput": {
+                "todos": [
+                  { "content": "read the code", "status": "completed", "activeForm": "Reading" },
+                  { "content": "write the report", "status": "completed", "activeForm": "Writing" }
+                ]
+              }
+            }
+          ],
+          "timestamp": 0
+        }
+      ]
+    },
+    { "channel": "session:result", "args": ["rid", {}] }
+  ],
+  "expectSessionIds": ["rid"],
+  "expectSession": {
+    "rid": {
+      "todos": [],
+      "sentFiles": [
+        {
+          "path": "/repo/report.md",
+          "caption": "the report",
+          "display": "attach",
+          "toolUseId": "t-file"
+        }
+      ]
+    }
+  }
+}

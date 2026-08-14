@@ -378,6 +378,7 @@ import type {
   WorktreeInfo,
   EngineId,
   ModelRef,
+  MeteringSnapshot,
   RemoteAuthMethod
 } from './types'
 
@@ -407,10 +408,23 @@ export interface PerSessionSnapshot {
   subagentStreamingText: Record<string, string>
   subagentStreamingThinking: Record<string, string>
   permissionMode: string
-  effort: string
-  thinkingMode?: string
+  /**
+   * `null` when unset. The declaration used to say `string`, but no producer has
+   * ever sent one for an unset value — the renderer's own snapshot builder emits
+   * the store's `null` — so the type was a latent lie that only surfaced when
+   * SyncCore's canonical state was compared against it (phase 4a shadow parity).
+   */
+  effort: string | null
+  thinkingMode?: string | null
   reasoningVariant?: string | null
   statusLine: StatusLineData | null
+  /**
+   * Engine-neutral metering snapshot. Optional for the same older-server-compat
+   * reason as {@link PerSessionSnapshot.queue} / {@link PerSessionSnapshot.sentFiles}:
+   * before SyncCore phase 4a the snapshot carried no metering at all, so every
+   * resync silently blanked the TopBar breakdown on remote clients.
+   */
+  metering?: MeteringSnapshot
   slashCommands: SlashCommandInfo[]
   sdkSkillNames: string[]
   /** Whether cli.js/the engine is live for this session. A remote client MUST
