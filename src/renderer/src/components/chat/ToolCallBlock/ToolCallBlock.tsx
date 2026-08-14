@@ -38,7 +38,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   approval
 }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
@@ -105,7 +105,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       undefined,
       selectedSuggestions
     )
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
   }
 
   const handleBackgroundTask = async (): Promise<void> => {

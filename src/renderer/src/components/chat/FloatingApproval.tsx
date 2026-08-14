@@ -201,7 +201,7 @@ function useUnmatchedApprovals(): PendingApproval[] {
 
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const setEngineConfig = useSessionStore((s) => s.setEngineConfig)
   const engineConfig = useSessionStore((s) => s.engineConfig)
   const sandboxSettings = engineConfig.sandbox
@@ -243,7 +243,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
       undefined,
       selected?.length ? selected : undefined
     )
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
   }
 
   return (

@@ -22,14 +22,15 @@
  * invisible.
  */
 
-import type { SyncClient, SyncListener } from './sync-client'
+import type { SyncClient, SyncListener, SyncEventTap } from './sync-client'
 import type { SyncEventMap } from './events'
 
 let client: SyncClient | null = null
 
 interface DeferredListener {
-  channel: string
-  cb: SyncListener
+  /** `null` ⇒ a channel-agnostic tap (see {@link onSyncAnyEvent}). */
+  channel: string | null
+  cb: SyncListener | SyncEventTap
   /** The real unsubscribe, once a client exists to register against. */
   off: (() => void) | null
   cancelled: boolean
@@ -45,7 +46,11 @@ const deferred: DeferredListener[] = []
 export function setSyncClient(next: SyncClient): void {
   client = next
   for (const entry of deferred.splice(0)) {
-    if (!entry.cancelled) entry.off = next.on(entry.channel)(entry.cb)
+    if (entry.cancelled) continue
+    entry.off =
+      entry.channel === null
+        ? next.onAnyEvent(entry.cb as SyncEventTap)
+        : next.on(entry.channel)(entry.cb as SyncListener)
   }
 }
 
@@ -69,6 +74,23 @@ export function onSyncEvent<K extends keyof SyncEventMap>(
   const listener = cb as SyncListener
   if (client) return client.on(channel)(listener)
   const entry: DeferredListener = { channel, cb: listener, off: null, cancelled: false }
+  deferred.push(entry)
+  return () => {
+    entry.cancelled = true
+    entry.off?.()
+    entry.off = null
+  }
+}
+
+/**
+ * Subscribe to EVERY event, channel-agnostic — the client replica's feed
+ * (SyncCore phase 4c). Deferred identically to {@link onSyncEvent}, because the
+ * replica is installed by the store module and the store can be imported before
+ * the transport runs (the web client imports it lazily, after `sync-full`).
+ */
+export function onSyncAnyEvent(cb: SyncEventTap): () => void {
+  if (client) return client.onAnyEvent(cb)
+  const entry: DeferredListener = { channel: null, cb, off: null, cancelled: false }
   deferred.push(entry)
   return () => {
     entry.cancelled = true

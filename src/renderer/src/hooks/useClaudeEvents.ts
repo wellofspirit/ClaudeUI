@@ -1,11 +1,37 @@
+/**
+ * Event wiring for the renderer — SyncCore phase 4c (the reducer half).
+ *
+ * Before 4c this hook was the renderer's *interpretation* of the replicated
+ * stream: ~40 handlers, each mapping one channel onto one store action, in
+ * parallel with `shared/sync/reducer.ts` doing the same job for canonical state.
+ * Two interpretations of one stream is the shape of every divergence bug the
+ * shadow comparator was built to find.
+ *
+ * What is left is exactly the part a reducer cannot own:
+ *
+ *  1. **Transient handlers** — channels classified `canonical: false`
+ *     (`docs/architecture/sync-channels.md`). They have no snapshot field to fold
+ *     into, so they are per-client toast/banner state and keep a real listener:
+ *     errors, warnings, sandbox violations, git summaries, usage, MCP/auth
+ *     banners, vendor-auth cards, bash/background tails.
+ *  2. **Host-local handlers** — window chrome, native OAuth, accounts, voice,
+ *     plugins. Delivered by targeted `webContents.send`, meaningless remotely.
+ *  3. **Post-apply observers** — the SIDE-EFFECT halves of the deleted handlers:
+ *     notifications, attention marks, the disk load a resumed `session:created`
+ *     triggers, the custom-command re-scan. They run after the fold has been
+ *     projected (`stores/replica.ts` §onReplicaApplied), read state, and never
+ *     write a sealed field.
+ *
+ * Everything else — messages, streams, status, approvals, todos, tasks,
+ * subagents, queue, per-session config, catalogs, registry config — is
+ * `applyEvent`'s output projected by the replica.
+ */
+
 import { useEffect } from 'react'
 import { onSyncEvent, markSyncReady } from '../../../shared/sync/client-registry'
-import {
-  useSessionStore,
-  buildTodosFromMessages,
-  buildSentFilesFromMessages,
-  resolveRoutingId
-} from '../stores/session-store'
+import { useSessionStore } from '../stores/session-store'
+import { onReplicaApplied, seedColdSession, getReplicaState } from '../stores/replica'
+import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
 function notifyIfNeeded(routingId: string, title: string, body: string): void {
@@ -20,90 +46,34 @@ function notifyIfNeeded(routingId: string, title: string, body: string): void {
   new Notification(title, { body: `${folderName}: ${body}`, silent: false })
 }
 
-const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
-
-/** Claude Code's file-delivery tool — drives the floating Files widget. */
-const SEND_USER_FILE_TOOL = 'SendUserFile'
-
-/**
- * Built-in tool names whose result text is trusted to declare an entered
- * worktree. Gating on an EXACT name (not a `/worktree/i` substring over every
- * tool) closes the injection funnel behind audit C2: a third-party MCP tool
- * named e.g. `mcp__evil__worktree_helper` can no longer plant a `worktreePath`
- * that later flows into `worktree:remove`. `EnterWorktree` is the only cli.js
- * built-in that emits "Created worktree at: <path> on branch: <branch>".
- */
-export const WORKTREE_ENTER_TOOL_NAMES = new Set(['EnterWorktree'])
-
 /**
  * Display name for an entered worktree: the path's last segment, falling back
  * to the branch with its `worktree-` prefix stripped.
  *
  * Splits on BOTH separators — a Windows worktree path (`D:\wt\feature-x`) has
  * no `/`, so a `/`-only split yielded the ENTIRE path as the display name
- * (RN11). Exported so the hook's behavior is tested directly rather than via a
- * copy of this expression in the test harness.
+ * (RN11).
+ *
+ * Still exported (and still tested) even though the DETECTION moved to the main
+ * process in 4c: it is presentation, recomputed from the replica and never
+ * stored, which is the one kind of client-side derivation sync-core.md allows.
  */
 export function deriveWorktreeName(wtPath: string, wtBranch: string): string {
   return wtPath.split(/[\\/]/).pop() || wtBranch.replace(/^worktree-/, '')
 }
 
-/** Rebuild todos from all messages when a task-related tool call is detected */
-function rebuildTodos(routingId: string): void {
-  const { sessions, setTodos } = useSessionStore.getState()
-  const session = sessions[routingId]
-  if (!session) return
-  const todos = buildTodosFromMessages(session.messages)
-  if (todos) setTodos(routingId, todos)
-}
-
 /**
- * Rebuild the SendUserFile list from all messages.
+ * Was this session already resident when its `session:created` arrived?
  *
- * Same derive-from-transcript contract as {@link rebuildTodos} — which is what
- * makes the widget survive session resumption for free — but the result is
- * never cleared on turn end (see the `onResult` handler below).
+ * Captured by a PRE-fold listener, because after the fold the answer is always
+ * "yes" — the reducer bootstraps the entry. The observer needs it to decide
+ * whether this client is the ORIGINATOR (which already registered the session
+ * locally, with its engine/model pick) or a follower learning about someone
+ * else's session for the first time.
  */
-function rebuildSentFiles(routingId: string): void {
-  const { sessions, setSentFiles } = useSessionStore.getState()
-  const session = sessions[routingId]
-  if (!session) return
-  const sentFiles = buildSentFilesFromMessages(session.messages)
-  if (sentFiles) setSentFiles(routingId, sentFiles)
-}
+const wasResidentAtCreate = new Map<string, boolean>()
 
 export function useClaudeEvents(): void {
-  const addMessage = useSessionStore((s) => s.addMessage)
-  const appendStreamingText = useSessionStore((s) => s.appendStreamingText)
-  const appendStreamingThinking = useSessionStore((s) => s.appendStreamingThinking)
-  const addPendingApproval = useSessionStore((s) => s.addPendingApproval)
-  const clearPendingApprovals = useSessionStore((s) => s.clearPendingApprovals)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
-  const removePendingApprovalByToolUse = useSessionStore((s) => s.removePendingApprovalByToolUse)
-  const setStatus = useSessionStore((s) => s.setStatus)
-  const addError = useSessionStore((s) => s.addError)
-  const addWarning = useSessionStore((s) => s.addWarning)
-  const retractMessages = useSessionStore((s) => s.retractMessages)
-  const appendToolResult = useSessionStore((s) => s.appendToolResult)
-  const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
-  const setTaskStarted = useSessionStore((s) => s.setTaskStarted)
-  const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
-  const addSubagentMessage = useSessionStore((s) => s.addSubagentMessage)
-  const appendSubagentMessageBatch = useSessionStore((s) => s.appendSubagentMessageBatch)
-  const appendSubagentStreamingText = useSessionStore((s) => s.appendSubagentStreamingText)
-  const appendSubagentStreamingThinking = useSessionStore((s) => s.appendSubagentStreamingThinking)
-  const appendSubagentToolResult = useSessionStore((s) => s.appendSubagentToolResult)
-  const setBashOutput = useSessionStore((s) => s.setBashOutput)
-  const setBackgroundOutput = useSessionStore((s) => s.setBackgroundOutput)
-  const setStatusLine = useSessionStore((s) => s.setStatusLine)
-  const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
-  const setSlashCommands = useSessionStore((s) => s.setSlashCommands)
-  const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
-  const setSdkSkillNames = useSessionStore((s) => s.setSdkSkillNames)
-  const addSandboxViolation = useSessionStore((s) => s.addSandboxViolation)
-  const setVoiceState = useSessionStore((s) => s.setVoiceState)
-  const appendVoiceTranscript = useSessionStore((s) => s.appendVoiceTranscript)
-
   // Request notification permission on mount
   useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') {
@@ -118,359 +88,41 @@ export function useClaudeEvents(): void {
     }
 
     const cleanups = [
-      // Session lifecycle: another client (local or remote) created a session
-      onSyncEvent('session:created', (routingId, data) => {
-        const store = useSessionStore.getState()
-        // Only act if this session doesn't already exist in our store
-        // (the initiating client already called createNewSession locally)
-        if (!store.sessions[routingId]) {
-          const follow = store.settings.remoteFollowActions
-          store.createNewSession(routingId, data.cwd, follow)
-          if (!follow) {
-            // Mark the session as needing attention so the sidebar shows activity
-            store.setNeedsAttention(routingId, true)
-          }
-          // If resuming an existing session, load its history from disk
-          if (data.resumeSessionId) {
-            const projectKey = store.directories.find((g) =>
-              g.sessions.some((s) => s.sessionId === data.resumeSessionId)
-            )?.projectKey
-            if (projectKey) {
-              window.api
-                .loadSessionHistory(data.resumeSessionId, projectKey)
-                .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
-                  const s = useSessionStore.getState()
-                  // Only populate if the session still exists and is still empty
-                  if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
-                    s.loadHistoricalSession(
-                      routingId,
-                      messages,
-                      data.cwd,
-                      taskNotifications,
-                      {},
-                      statusLine,
-                      warnings
-                    )
-                    if (customTitle) s.setCustomTitle(routingId, customTitle)
-                    // Re-mark active since loadHistoricalSession sets isHistorical
-                    s.markSdkActive(routingId)
-                  }
-                })
-            }
-          }
-        }
-        // An SDK session was created — mark it active
-        store.markSdkActive(routingId)
-      }),
-      // User message relayed by the server (the single source of truth for user
-      // messages). Non-queued sends ONLY — a send that queues rides
-      // session:queue-changed instead (ADR-053).
-      onSyncEvent('session:user-message', (routingId, data) => {
-        // Resolve a possibly-stale (pre-rekey) id to the canonical session id at
-        // the event boundary so every handler targets the same session across a
-        // rekey (xhigh#9). No-op when no rekey mapping applies.
-        routingId = resolveRoutingId(routingId)
-        const store = useSessionStore.getState()
-        if (!store.sessions[routingId]) return
-        store.addUserMessage(
+      // -------------------------------------------------------------------
+      // Pre-fold capture (see wasResidentAtCreate)
+      // -------------------------------------------------------------------
+      onSyncEvent('session:created', (routingId) => {
+        wasResidentAtCreate.set(
           routingId,
-          // crypto.randomUUID (not Date.now) so two user messages within the
-          // same ms can't collide into a duplicate React key (Low).
-          `msg-${crypto.randomUUID()}`,
-          data.prompt,
-          undefined,
-          data.attachments
+          useSessionStore.getState().sessions[routingId] !== undefined
         )
       }),
-      // Queue of record (ADR-053): the full item list for a session. Idempotent
-      // — the store keys consumed-item synthesis on `steer-${itemId}`.
-      onSyncEvent('session:queue-changed', (routingId, data) => {
-        useSessionStore.getState().setQueueState(resolveRoutingId(routingId), data.items)
-      }),
-      onSyncEvent('session:message', (routingId, msg) => {
-        routingId = resolveRoutingId(routingId)
-        addMessage(routingId, msg)
 
-        // Rebuild todos when task-related tool calls arrive
-        const hasTaskTool = msg.content.some(
-          (b) => b.type === 'tool_use' && TASK_TOOLS.has(b.toolName)
-        )
-        if (hasTaskTool) rebuildTodos(routingId)
-
-        // Rebuild the Files widget when a SendUserFile call arrives
-        const hasSendUserFile = msg.content.some(
-          (b) => b.type === 'tool_use' && b.toolName === SEND_USER_FILE_TOOL
-        )
-        if (hasSendUserFile) rebuildSentFiles(routingId)
-      }),
-      onSyncEvent('session:stream', (routingId, data) => {
-        routingId = resolveRoutingId(routingId)
-        if (data.type === 'thinking') {
-          appendStreamingThinking(routingId, data.text)
-        } else {
-          appendStreamingText(routingId, data.text)
-        }
-      }),
-      onSyncEvent('session:approval-request', (routingId, approval) => {
-        routingId = resolveRoutingId(routingId)
-        addPendingApproval(routingId, approval)
-        const state = useSessionStore.getState()
-        if (state.activeSessionId !== routingId || !document.hasFocus()) {
-          state.setNeedsAttention(routingId, true)
-        }
-        notifyIfNeeded(
-          routingId,
-          'Permission required',
-          `${approval.toolName || 'Tool'} needs approval`
-        )
-      }),
-      // Externally-resolved approval (e.g. opencode's deny-cascade on a
-      // dispatch target, ADR-033) — remove the stale card.
-      onSyncEvent('session:approval-dismiss', (routingId, { requestId }) => {
-        removePendingApproval(resolveRoutingId(routingId), requestId)
-      }),
-      onSyncEvent('session:status', (routingId, status) => {
-        // Re-key session when SDK provides its stable session ID
-        let effectiveRoutingId = routingId
-        if (status.sessionId && status.sessionId !== routingId) {
-          const store = useSessionStore.getState()
-          if (store.sessions[routingId]) {
-            store.rekeySession(routingId, status.sessionId)
-            window.api.rekeySession(routingId, status.sessionId)
-            effectiveRoutingId = status.sessionId
-          }
-        }
-
-        if (status.state === 'disconnected') {
-          useSessionStore.getState().markSdkInactive(effectiveRoutingId)
-          setStatus(effectiveRoutingId, { ...status, state: 'idle' })
-          clearPendingApprovals(effectiveRoutingId)
-          // No queue fallback here: queue transitions are event-driven only
-          // (ADR-053 / ADR-038). The session's own disconnect path recalls
-          // whatever it still holds and broadcasts it.
-          return
-        }
-        setStatus(effectiveRoutingId, status)
-        // Nothing is inferred from the running→idle edge. Pending approvals are
-        // NOT cleared here: background subagents (Task tool) outlive the parent
-        // turn's `result`, and their can_use_tool requests may arrive — or
-        // remain unresolved — after cli.js reports idle. Queued items are NOT
-        // consumed here either (ADR-053): the old fallback painted them into
-        // the transcript whether or not the engine ever ran them. Both are
-        // driven exclusively by explicit events.
-        // Clear attention when a new turn starts
-        if (status.state === 'running') {
-          useSessionStore.getState().setNeedsAttention(effectiveRoutingId, false)
-        }
-        // Detect worktree exit: CWD changed back to originalCwd
-        if (status.cwd) {
-          const store = useSessionStore.getState()
-          const session = store.sessions[effectiveRoutingId]
-          if (session?.worktreeInfo && status.cwd === session.worktreeInfo.originalCwd) {
-            store.clearWorktreeInfo(effectiveRoutingId)
-          }
-        }
-      }),
-      onSyncEvent('session:result', (routingId) => {
-        routingId = resolveRoutingId(routingId)
-        // Dismiss completed task list when turn ends
-        const state = useSessionStore.getState()
-        const session = state.sessions[routingId]
-        if (session && session.todos.length > 0) {
-          const allDone = session.todos.every((t) => t.status === 'completed')
-          if (allDone) state.setTodos(routingId, [])
-        }
-        // Clear any pending vendor auth required card when a turn succeeds
-        useSessionStore.getState().clearVendorAuthRequired(routingId)
-        // Mark attention + notify when Claude's turn ends (user's turn)
-        if (session?.sdkActive) {
-          if (state.activeSessionId !== routingId || !document.hasFocus()) {
-            state.setNeedsAttention(routingId, true)
-          }
-          notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
-        }
-      }),
-      onSyncEvent('session:vendor-auth-required', (routingId, data) => {
-        useSessionStore.getState().setVendorAuthRequired(resolveRoutingId(routingId), data)
-      }),
+      // -------------------------------------------------------------------
+      // Transient channels (canonical: false — no snapshot field to fold into)
+      // -------------------------------------------------------------------
       onSyncEvent('session:error', (routingId, error) => {
-        routingId = resolveRoutingId(routingId)
-        addError(routingId, error)
+        useSessionStore.getState().addError(routingId, error)
         window.api.logError('session', `[routingId=${routingId}] ${error}`)
       }),
       onSyncEvent('session:warning', (routingId, warning) => {
-        addWarning(resolveRoutingId(routingId), warning)
-      }),
-      onSyncEvent('session:messages-retracted', (routingId, { messageIds }) => {
-        retractMessages(resolveRoutingId(routingId), messageIds)
-      }),
-      onSyncEvent('session:tool-result', (routingId, { toolUseId, result, isError, fileDiffs, images }) => {
-        routingId = resolveRoutingId(routingId)
-        appendToolResult(routingId, toolUseId, result, isError, fileDiffs, images)
-        // Belt-and-suspenders: when cli.js has produced a result for this
-        // tool_use, any approval still sitting in the store for it is
-        // necessarily stale (resolver already ran). Clear it so late
-        // cleanup races can't re-decorate a finished card.
-        if (toolUseId) removePendingApprovalByToolUse(routingId, toolUseId)
-        // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
-        if (!isError) rebuildTodos(routingId)
-
-        // The paired result for an in-flight SendUserFile: rebuild so the row
-        // picks up its error text. Gated on the toolUseId already being known
-        // to the widget (the tool_use lands via onMessage first), so an
-        // unrelated tool result never triggers a full transcript re-scan.
-        // Unlike todos this runs for error results too — that IS the payload.
-        if (
-          toolUseId &&
-          useSessionStore
-            .getState()
-            .sessions[routingId]?.sentFiles.some((f) => f.toolUseId === toolUseId)
-        ) {
-          rebuildSentFiles(routingId)
-        }
-
-        // Detect worktree enter from EnterWorktree tool result
-        if (!isError && result) {
-          const store = useSessionStore.getState()
-          const session = store.sessions[routingId]
-          if (session && !session.worktreeInfo) {
-            // Find the matching tool_use block by toolUseId
-            for (const msg of session.messages) {
-              const toolBlock = msg.content.find(
-                (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
-              )
-              if (
-                toolBlock &&
-                toolBlock.type === 'tool_use' &&
-                WORKTREE_ENTER_TOOL_NAMES.has(toolBlock.toolName)
-              ) {
-                // SDK result format: "Created worktree at <path> on branch <branch>. ..."
-                const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
-                // Also try structured formats: worktreePath: <path> or JSON "worktreePath": "<path>"
-                const pathMatch =
-                  naturalMatch?.[1] ||
-                  result.match(/worktreePath:\s*(.+?)(?:\n|$)/i)?.[1] ||
-                  result.match(/"worktreePath"\s*:\s*"([^"]+)"/i)?.[1]
-                const branchMatch =
-                  naturalMatch?.[2] ||
-                  result.match(/worktreeBranch:\s*(.+?)(?:\n|$)/i)?.[1] ||
-                  result.match(/"worktreeBranch"\s*:\s*"([^"]+)"/i)?.[1]
-                if (pathMatch && branchMatch) {
-                  const wtPath = pathMatch.trim()
-                  const wtBranch = branchMatch.trim()
-                  // Derive name from path (last segment) or branch (strip worktree- prefix)
-                  const wtName = deriveWorktreeName(wtPath, wtBranch)
-                  store.setWorktreeInfo(routingId, {
-                    worktreePath: wtPath,
-                    worktreeBranch: wtBranch,
-                    worktreeName: wtName,
-                    originalCwd: session.cwd,
-                    gitRoot: session.cwd,
-                    originalHeadCommit: '',
-                    createdAt: Date.now()
-                  })
-                }
-                break
-              }
-            }
-          }
-        }
-      }),
-      onSyncEvent('session:task-progress', (routingId, data) => {
-        updateTaskProgress(resolveRoutingId(routingId), data)
-      }),
-      onSyncEvent('session:task-started', (routingId, data) => {
-        setTaskStarted(resolveRoutingId(routingId), data)
-      }),
-      onSyncEvent('session:task-notification', (routingId, data) => {
-        addTaskNotification(resolveRoutingId(routingId), data)
-      }),
-      onSyncEvent('session:subagent-stream', (routingId, data) => {
-        routingId = resolveRoutingId(routingId)
-        if (data.type === 'thinking') {
-          appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
-        } else {
-          appendSubagentStreamingText(routingId, data.toolUseId, data.text)
-        }
-      }),
-      onSyncEvent('session:subagent-message', (routingId, data) => {
-        addSubagentMessage(resolveRoutingId(routingId), data.toolUseId, data.message)
-      }),
-      onSyncEvent('session:subagent-message-batch', (routingId, data) => {
-        appendSubagentMessageBatch(resolveRoutingId(routingId), data.toolUseId, data.messages)
-      }),
-      onSyncEvent('session:subagent-tool-result', (routingId, data) => {
-        appendSubagentToolResult(
-          resolveRoutingId(routingId),
-          data.toolUseId,
-          data.toolResultToolUseId,
-          data.result,
-          data.isError,
-          data.fileDiffs,
-          data.images
-        )
-      }),
-      onSyncEvent('session:bash-output', (routingId, data) => {
-        setBashOutput(
-          resolveRoutingId(routingId),
-          data.toolUseId,
-          data.output,
-          data.totalLines,
-          data.totalBytes
-        )
-      }),
-      onSyncEvent('session:background-output', (routingId, data) => {
-        setBackgroundOutput(resolveRoutingId(routingId), data.toolUseId, data.tail, data.totalSize)
-      }),
-      onSyncEvent('session:status-line', (routingId, data) => {
-        setStatusLine(resolveRoutingId(routingId), data)
-      }),
-      onSyncEvent('session:metering', (routingId, data) => {
-        useSessionStore.getState().setMetering(resolveRoutingId(routingId), data)
-      }),
-      onSyncEvent('session:plan', (routingId, todos) => {
-        useSessionStore.getState().setTodos(resolveRoutingId(routingId), todos)
-      }),
-      onSyncEvent('session:permission-mode', (routingId, mode) => {
-        setPermissionMode(mode, resolveRoutingId(routingId))
-      }),
-      onSyncEvent('session:slash-commands', (routingId, commands) => {
-        setSlashCommands(commands)
-        // The filesystem list is NOT cleared here: mergeSlashCommands already
-        // gives the engine list precedence by name, so the scan can only fill
-        // gaps (engines that under-report, skills added after spawn). Clearing
-        // it left the fallback empty for the rest of the app's lifetime, since
-        // the only other scan is keyed on cwd changes. Re-scan instead — the
-        // main-process scanner caches per cwd for 30s, so this is cheap.
-        const cwd = useSessionStore.getState().sessions[resolveRoutingId(routingId)]?.cwd
-        if (cwd) {
-          window.api
-            .scanCustomCommands(cwd)
-            .then((names) => setCustomCommands(names.map((name) => ({ name }))))
-            .catch(() => {
-              /* scanner failed — keep existing commands */
-            })
-        }
-        window.api.saveSlashCommands(commands)
-      }),
-      onSyncEvent('session:skills', (_routingId, names) => {
-        setSdkSkillNames(names)
+        useSessionStore.getState().addWarning(routingId, warning)
       }),
       onSyncEvent('session:sandbox-violation', (routingId, message) => {
-        addSandboxViolation(resolveRoutingId(routingId), message)
+        useSessionStore.getState().addSandboxViolation(routingId, message)
       }),
-      onSyncEvent('session:watch-update', ({ routingId, messages, taskNotifications, statusLine }) => {
-        routingId = resolveRoutingId(routingId)
-        useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
-        if (statusLine) setStatusLine(routingId, statusLine)
-        rebuildTodos(routingId)
-        rebuildSentFiles(routingId)
-        // Dismiss completed task list for watched sessions (no result event)
-        const session = useSessionStore.getState().sessions[routingId]
-        if (session && session.todos.length > 0) {
-          const allDone = session.todos.every((t) => t.status === 'completed')
-          if (allDone) useSessionStore.getState().setTodos(routingId, [])
-        }
+      onSyncEvent('session:vendor-auth-required', (routingId, data) => {
+        useSessionStore.getState().setVendorAuthRequired(routingId, data)
+      }),
+      onSyncEvent('session:bash-output', (routingId, data) => {
+        useSessionStore
+          .getState()
+          .setBashOutput(routingId, data.toolUseId, data.output, data.totalLines, data.totalBytes)
+      }),
+      onSyncEvent('session:background-output', (routingId, data) => {
+        useSessionStore
+          .getState()
+          .setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
       }),
       // Git status updates from polling
       onSyncEvent('git:status-update', ({ cwd, status }) => {
@@ -482,21 +134,6 @@ export function useClaudeEvents(): void {
           }
         }
       }),
-      // Cross-instance config sync
-      onSyncEvent('config:settings-changed', (settings) => {
-        useSessionStore.getState().applyExternalSettings(settings)
-      }),
-      onSyncEvent('config:sessions-changed', (config) => {
-        useSessionStore.getState().applyExternalSessionConfig(config)
-      }),
-      // Per-session config picked on ANOTHER client (SyncCore phase 4a). A
-      // partial patch, applied per-field as a REPLACE — idempotent, so the echo
-      // of this client's own pick is a no-op. The picker's local optimistic write
-      // stays until 4c, when the store adopts the reducer and the replace
-      // becomes the only writer.
-      onSyncEvent('session:config-changed', (routingId, patch) => {
-        useSessionStore.getState().applyRemoteSessionConfig(resolveRoutingId(routingId), patch)
-      }),
       // Account usage (5hr / 7-day rate limits)
       onSyncEvent('usage:data', (data) => {
         useSessionStore.getState().setAccountUsage(data)
@@ -504,17 +141,6 @@ export function useClaudeEvents(): void {
       // Block usage analytics
       onSyncEvent('usage:block-data', (data) => {
         useSessionStore.getState().setBlockUsage(data)
-      }),
-      // Native OAuth login-flow transitions (ADR-014)
-      window.api.onAuthState((state) => {
-        const store = useSessionStore.getState()
-        store.setAuthState(state)
-        // The running cli.js process cached the stale credential; mark the active
-        // session inactive so the next normal send respawns with fresh creds
-        // (Retry does its own respawn). See ADR-014.
-        if (state.status === 'success' && store.activeSessionId) {
-          store.markSdkInactive(store.activeSessionId)
-        }
       }),
       // Auth source from session init ('none' = logged out) — drives the banner
       // Also updates the vendorAuth probe so AuthBanner reads from the probe.
@@ -530,6 +156,24 @@ export function useClaudeEvents(): void {
             label: undefined
           }
         })
+      }),
+      onSyncEvent('voice:error', (routingId, error) => {
+        useSessionStore.getState().addError(routingId, error)
+      }),
+
+      // -------------------------------------------------------------------
+      // Host-local channels (targeted delivery, desktop only)
+      // -------------------------------------------------------------------
+      // Native OAuth login-flow transitions (ADR-014)
+      window.api.onAuthState((state) => {
+        const store = useSessionStore.getState()
+        store.setAuthState(state)
+        // The running cli.js process cached the stale credential; mark the active
+        // session inactive so the next normal send respawns with fresh creds
+        // (Retry does its own respawn). See ADR-014.
+        if (state.status === 'success' && store.activeSessionId) {
+          store.markSdkInactive(store.activeSessionId)
+        }
       }),
       // Multi-account state changes (ADR-015)
       window.api.onAccountsChanged((state) => {
@@ -553,18 +197,20 @@ export function useClaudeEvents(): void {
       }),
       // Voice input events
       window.api.onVoiceTranscript((routingId, data) => {
-        appendVoiceTranscript(resolveRoutingId(routingId), data.text, data.isFinal)
+        useSessionStore.getState().appendVoiceTranscript(routingId, data.text, data.isFinal)
       }),
       window.api.onVoiceState((routingId, state) => {
-        setVoiceState(resolveRoutingId(routingId), state)
-      }),
-      onSyncEvent('voice:error', (routingId, error) => {
-        addError(resolveRoutingId(routingId), error)
+        useSessionStore.getState().setVoiceState(routingId, state)
       }),
       // Plugin views
       window.api.onPluginViewsChanged((views) => {
         useSessionStore.getState().setPluginViews(views)
-      })
+      }),
+
+      // -------------------------------------------------------------------
+      // Post-apply observers — side effects of an already-folded event
+      // -------------------------------------------------------------------
+      onReplicaApplied(observeReplicatedEvent)
     ]
 
     // Trigger initial plugin views fetch
@@ -606,36 +252,158 @@ export function useClaudeEvents(): void {
     markSyncReady()
 
     return () => cleanups.forEach((fn) => fn())
-  }, [
-    addMessage,
-    appendStreamingText,
-    appendStreamingThinking,
-    addPendingApproval,
-    clearPendingApprovals,
-    removePendingApproval,
-    removePendingApprovalByToolUse,
-    setStatus,
-    addError,
-    addWarning,
-    retractMessages,
-    appendToolResult,
-    updateTaskProgress,
-    setTaskStarted,
-    addTaskNotification,
-    addSubagentMessage,
-    appendSubagentMessageBatch,
-    appendSubagentStreamingText,
-    appendSubagentStreamingThinking,
-    appendSubagentToolResult,
-    setBashOutput,
-    setBackgroundOutput,
-    setStatusLine,
-    setPermissionMode,
-    setSlashCommands,
-    setCustomCommands,
-    setSdkSkillNames,
-    addSandboxViolation,
-    setVoiceState,
-    appendVoiceTranscript
-  ])
+    // Every handler reads the store through `getState()` at call time, so the
+    // effect has no store-action dependencies to re-run on. (It used to list 29,
+    // every one of them a stable Zustand reference — the deps array was
+    // ceremony, and each entry was a chance for the effect to tear down and
+    // remount every listener mid-turn.)
+  }, [])
+}
+
+/**
+ * The side-effect half of each replicated channel, after its fold is committed.
+ *
+ * `routingId` is taken straight from `args[0]` — the wire's positional session
+ * scoping. There is no `resolveRoutingId` any more: core owns the rekey and
+ * re-keys its own registry in the same tick it emits the `session:status` that
+ * implies one, so every LATER event already carries the new id. The one event
+ * whose own id is stale is that status event itself, and its rekey target is
+ * right there in the payload ({@link effectiveIdFor}).
+ */
+function observeReplicatedEvent(channel: string, args: unknown[]): void {
+  const store = useSessionStore.getState()
+  const routingId = typeof args[0] === 'string' ? args[0] : ''
+
+  switch (channel) {
+    case 'session:created': {
+      const data = args[1] as { cwd?: string; resumeSessionId?: string } | undefined
+      const wasResident = wasResidentAtCreate.get(routingId) === true
+      wasResidentAtCreate.delete(routingId)
+      // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
+      // `isHistorical` is view state, so it is cleared here.
+      store.markSessionLive(routingId)
+      if (wasResident) return
+      // Another client created this session. Register it locally — recents +
+      // engine map — and either follow it or flag it in the sidebar.
+      const follow = store.settings.remoteFollowActions
+      store.registerRemoteSession(routingId, follow)
+      if (!follow) store.setNeedsAttention(routingId, true)
+      if (!data?.resumeSessionId) return
+      // A resumed session's transcript lives on disk. The HOST seeds its own
+      // canonical copy (create-session.ts), but that seed is not an event, so
+      // this replica has to read the same source for itself; `seedColdSession`
+      // is idempotent and refuses to clobber live content.
+      const resumeSessionId = data.resumeSessionId
+      const projectKey = store.directories.find((g) =>
+        g.sessions.some((s) => s.sessionId === resumeSessionId)
+      )?.projectKey
+      if (!projectKey) return
+      void window.api
+        .loadSessionHistory(resumeSessionId, projectKey)
+        .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
+          const s = useSessionStore.getState()
+          if (!s.sessions[routingId]) return
+          seedColdSession(routingId, {
+            cwd: data.cwd ?? s.sessions[routingId].cwd,
+            messages,
+            taskNotifications,
+            ...(statusLine ? { statusLine } : {})
+          })
+          if (warnings?.length) for (const w of warnings) s.addWarning(routingId, w)
+          if (customTitle) s.setCustomTitle(routingId, customTitle)
+          s.markSessionLive(routingId)
+        })
+      return
+    }
+
+    case 'session:user-message': {
+      // The transcript row itself is the reducer's; bumping this session up the
+      // recents list is registry config, and it persists through the save.
+      store.addRecentSession(routingId)
+      return
+    }
+
+    case 'session:approval-request': {
+      const approval = args[1] as { toolName?: string } | undefined
+      if (store.activeSessionId !== routingId || !document.hasFocus()) {
+        store.setNeedsAttention(routingId, true)
+      }
+      notifyIfNeeded(routingId, 'Permission required', `${approval?.toolName || 'Tool'} needs approval`)
+      return
+    }
+
+    case 'session:status': {
+      const status = args[1] as SessionStatus | undefined
+      const id = effectiveIdFor(routingId, status)
+      // Clear attention when a new turn starts. Nothing else is inferred from a
+      // status edge (ADR-038): approvals and queue transitions are event-driven,
+      // and the disconnect handling — idle + drop approvals + sdkActive false —
+      // is the reducer's.
+      if (status?.state === 'running') store.setNeedsAttention(id, false)
+      return
+    }
+
+    case 'session:result': {
+      const session = store.sessions[routingId]
+      // Clear any pending vendor auth required card when a turn succeeds
+      store.clearVendorAuthRequired(routingId)
+      // Mark attention + notify when the agent's turn ends (user's turn)
+      if (!session?.sdkActive) return
+      if (store.activeSessionId !== routingId || !document.hasFocus()) {
+        store.setNeedsAttention(routingId, true)
+      }
+      notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
+      return
+    }
+
+    case 'session:task-notification': {
+      // The notification list and `activeTasks` are the reducer's; the stop
+      // spinner and the live bash tail are per-client and die here.
+      const notification = args[1] as TaskNotification | undefined
+      if (notification?.toolUseId) {
+        store.clearTaskStopping(routingId, notification.toolUseId)
+        store.clearBashOutput(routingId, notification.toolUseId)
+      }
+      return
+    }
+
+    case 'session:slash-commands': {
+      const commands = (args[1] ?? []) as SlashCommandInfo[]
+      // The filesystem list is NOT cleared here: mergeSlashCommands already
+      // gives the engine list precedence by name, so the scan can only fill
+      // gaps (engines that under-report, skills added after spawn). Clearing
+      // it left the fallback empty for the rest of the app's lifetime, since
+      // the only other scan is keyed on cwd changes. Re-scan instead — the
+      // main-process scanner caches per cwd for 30s, so this is cheap.
+      const cwd = store.sessions[routingId]?.cwd
+      if (cwd) {
+        void window.api
+          .scanCustomCommands(cwd)
+          .then((names) =>
+            useSessionStore.getState().setCustomCommands(names.map((name) => ({ name })))
+          )
+          .catch(() => {
+            /* scanner failed — keep existing commands */
+          })
+      }
+      void window.api.saveSlashCommands(commands)
+      return
+    }
+
+    default:
+      return
+  }
+}
+
+/**
+ * The id a `session:status` event's SIDE EFFECTS belong to.
+ *
+ * The reducer may have just moved this session to the engine's stable session id
+ * (`rekeyTargetFor`), in which case the entry the observer wants is under the new
+ * key and the old one no longer resolves.
+ */
+function effectiveIdFor(routingId: string, status: SessionStatus | undefined): string {
+  const target = status?.sessionId
+  if (!target || target === routingId) return routingId
+  return getReplicaState().sessions[target] ? target : routingId
 }

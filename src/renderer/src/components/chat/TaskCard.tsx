@@ -80,7 +80,7 @@ export function formatTokens(n: number): string {
 export function TaskCard({ block, result, view, approval }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
@@ -212,7 +212,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
       undefined,
       selectedSuggestions
     )
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
   }
 
   const handleStopTask = async (): Promise<void> => {

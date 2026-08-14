@@ -88,7 +88,7 @@ function RemoteApp(): React.JSX.Element {
   const pwParams = useRef<PasswordParams | null>(null)
   /** Flips true after the first `sync-full` is applied. A later `sync-full`
    *  (background/foreground reconnect) is a RE-sync, not a first hydration —
-   *  applyRemoteSnapshot must not clobber local navigation (e.g. a
+   *  hydrateReplica must not clobber local navigation (e.g. a
    *  mobile-hydrated historical session) with the desktop's snapshot. */
   const hasHydratedRef = useRef(false)
 
@@ -130,12 +130,21 @@ function RemoteApp(): React.JSX.Element {
     if (fileToken) {
       ;(window as unknown as { __FILE_TOKEN__?: string }).__FILE_TOKEN__ = fileToken
     }
-    // Apply the full snapshot to the Zustand store (settings, sessions, config).
+    // Apply the full snapshot through the REPLICA (SyncCore phase 4c): it restores
+    // canonical state with the shared `fromSnapshot`, resumes the reducer's aux,
+    // and projects the sealed slices into the store — the same code the desktop
+    // runs, so the two clients cannot interpret a snapshot differently.
     // isResync=true from the second sync-full onward — see hasHydratedRef.
     const isResync = hasHydratedRef.current
     hasHydratedRef.current = true
-    import('@renderer/stores/session-store').then(({ useSessionStore }) => {
-      useSessionStore.getState().applyRemoteSnapshot(snapshot, isResync)
+    import('@renderer/stores/replica').then(({ startReplica, hydrateReplica }) => {
+      // The store module is imported lazily here (the App chunk is what pulls it
+      // in), so the tap cannot be installed at page load like the desktop's is —
+      // it goes in now, before the first snapshot is folded. Events that arrived
+      // in the meantime are still buffered behind the readiness gate, which
+      // `AppContent` opens only once App has mounted.
+      startReplica()
+      hydrateReplica(snapshot, isResync)
       setReady(true)
     })
   }, [])

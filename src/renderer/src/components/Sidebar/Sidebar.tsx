@@ -1,11 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { onSyncEvent } from '../../../../shared/sync/client-registry'
 import { v4 as uuid } from 'uuid'
-import {
-  useSessionStore,
-  buildTodosFromMessages,
-  buildSentFilesFromMessages
-} from '../../stores/session-store'
+import { useSessionStore } from '../../stores/session-store'
 import type {
   ChatMessage,
   DirectoryGroup,
@@ -533,14 +529,9 @@ export function Sidebar({
       warnings
     )
     if (customTitle) setCustomTitle(routingId, customTitle)
-
-    // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
-    const todos = buildTodosFromMessages(messages)
-    if (todos) useSessionStore.getState().setTodos(routingId, todos)
-    // …and the Files widget from SendUserFile calls — this is what makes it
-    // survive session resumption (nothing about it is persisted separately).
-    const sentFiles = buildSentFilesFromMessages(messages)
-    if (sentFiles) useSessionStore.getState().setSentFiles(routingId, sentFiles)
+    // todos + the Files widget are derived from the transcript INSIDE the cold-
+    // history seed now (SyncCore 4c): they are sealed, and deriving them here
+    // would have been a client computing state the reducer already computes.
     switchSession(routingId)
     // Close drawer on mobile after selecting a session
     if (isMobile && onToggleCollapse) onToggleCollapse()

@@ -127,6 +127,76 @@ export default defineConfig(
     }
   },
 
+  // Sealed-field brand for the renderer replica (SyncCore phase 4c, ADR-051
+  // §"Clients never compute state").
+  //
+  // A SEALED field is one the replica fold owns: its only writer is
+  // `renderer/src/stores/replica.ts`, projecting `applyEvent`'s output. The list
+  // below is the snapshot-carried state — per-session `PerSessionSnapshot` fields
+  // plus the app-level `FullStateSnapshot` ones, plus the two derived mirrors the
+  // projection also owns (`worktreeInfo`, `thinkingStartedAt`). Its prose twin,
+  // with the reason each `canonical: false` channel is deliberately NOT here, is
+  // `renderer/src/stores/sealed-fields.ts`; `sealed-fields.unit.test.ts` pins this
+  // pattern against that module so the two cannot drift.
+  //
+  // Why a syntax rule and not a type: the failure mode is re-introducing a store
+  // ACTION that writes the field, and TypeScript cannot see "inside a Zustand
+  // set()". Three selectors, matching the three shapes every deleted action had:
+  //
+  //   1. `updateSession(sessions, id, () => ({ <sealed>: … }))` — the store's only
+  //      per-session updater, and what ~30 of the deleted actions used;
+  //   2. `sessions: { …, [id]: { <sealed>: … } }` — the hand-rolled form the rest
+  //      used (addMessage, appendToolResult, loadHistoricalSession, …);
+  //   3. any `set(…)` / `setState(…)` naming an APP-LEVEL sealed field.
+  //
+  // Per-session names are gated on (1)/(2) rather than on a bare `set(` because
+  // several of them (`status`, `settings`, `streamingText`) are ordinary words that
+  // also name unrelated fields — `AuthFlowState.status`, the automation store's own
+  // run buffers. A rule that fired on those would be turned off within a week.
+  //
+  // Scope note: `replica.ts` is the sanctioned writer; `sealed-fields.ts` names the
+  // fields; tests legitimately construct whole `PerSessionState` fixtures.
+  {
+    files: ['src/renderer/**/*.{ts,tsx}', 'src/web/**/*.{ts,tsx}'],
+    ignores: [
+      'src/renderer/src/stores/replica.ts',
+      'src/renderer/src/stores/sealed-fields.ts',
+      '**/__tests__/**',
+      '**/*.{test,spec}.{ts,tsx}'
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "CallExpression[callee.name='updateSession'] Property[key.name=/^(cwd|messages|streamingText|streamingThinking|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|subagentStreamingText|subagentStreamingThinking|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|worktreeInfo|thinkingStartedAt)$/]",
+          message:
+            'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
+            'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
+            'its channel, or a sanctioned local write (patchLocalSession / seedColdSession). ' +
+            'See stores/sealed-fields.ts.'
+        },
+        {
+          selector:
+            "Property[key.name='sessions'] Property[key.name=/^(cwd|messages|streamingText|streamingThinking|status|pendingApprovals|todos|sentFiles|queuedItems|taskNotifications|activeTasks|taskProgressMap|subagentMessages|subagentStreamingText|subagentStreamingThinking|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|sdkActive|selectedEngineId|selectedModel|worktreeInfo|thinkingStartedAt)$/]",
+          message:
+            'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
+            'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
+            'its channel, or a sanctioned local write (patchLocalSession / seedColdSession). ' +
+            'See stores/sealed-fields.ts.'
+        },
+        {
+          selector:
+            "CallExpression[callee.name=/^(set|setState)$/] Property[key.name=/^(directories|settings|autoModeDisabledBySettings|recentSessionIds|pinnedSessionIds|customTitles|worktreeInfoMap|sessionEngines|hiddenSessionIds|hiddenProjectKeys|slashCommands|sdkSkillNames)$/]",
+          message:
+            'This app-level field is SEALED (SyncCore phase 4c): the replica fold is its only ' +
+            'writer. Route the change through stores/replica.ts (patchLocalApp / seedLocalApp). ' +
+            'See stores/sealed-fields.ts.'
+        }
+      ]
+    }
+  },
+
   // Relaxed rules for tests, stubs, fixtures, and build/patch scripts.
   {
     files: TEST_AND_SCRIPT_FILES,

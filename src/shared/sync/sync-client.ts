@@ -9,6 +9,8 @@ export interface SyncEvent {
 
 export type SyncListener = (...args: unknown[]) => void
 export type SyncFullStateHandler = (state: FullStateSnapshot) => void
+/** Raw-event tap (SyncCore phase 4c) — see {@link SyncClient.onAnyEvent}. */
+export type SyncEventTap = (event: SyncEvent) => void
 
 export interface SyncClientOptions {
   /**
@@ -54,6 +56,7 @@ const DEFAULT_BUFFER_LIMIT = 5000
  */
 export class SyncClient {
   private readonly listeners = new Map<string, Set<SyncListener>>()
+  private readonly taps = new Set<SyncEventTap>()
   private readonly requestResync: () => void
   private readonly bufferLimit: number
   /** Pre-ready (and mid-flush) events, kept in seq order. */
@@ -85,6 +88,33 @@ export class SyncClient {
       return () => {
         this.listeners.get(channel)?.delete(cb)
       }
+    }
+  }
+
+  /**
+   * Subscribe to EVERY dispatched event, channel-agnostic (SyncCore phase 4c).
+   *
+   * This is the client replica's feed: `renderer/src/stores/replica.ts` folds the
+   * shared reducer over it, so one subscription covers every replicated channel
+   * instead of ~40 per-channel handlers that each had to remember to interpret
+   * the payload the same way core does.
+   *
+   * Contract, in this order and no other:
+   *
+   *  1. the cursor has ALREADY advanced (`lastSeq === event.seq`) — a tap that
+   *     re-enters must not see a stale "applied through here" mark;
+   *  2. the per-channel listeners for this event have ALREADY run. Taps are
+   *     additive: registering one cannot change what a per-channel listener sees
+   *     or whether it fires, which is what makes the reducer adoption a strangler
+   *     rather than a cutover.
+   *
+   * A throwing tap is swallowed, exactly like a throwing listener — one broken
+   * subscriber must not strand the cursor or the events behind it.
+   */
+  onAnyEvent(cb: SyncEventTap): () => void {
+    this.taps.add(cb)
+    return () => {
+      this.taps.delete(cb)
     }
   }
 
@@ -220,6 +250,14 @@ export class SyncClient {
     // on the next `sync`, and a listener that re-enters must not see a stale one.
     this.lastSeq = event.seq
     this.emit(event.channel, event.args)
+    // Taps last — see onAnyEvent's ordering contract.
+    for (const tap of this.taps) {
+      try {
+        tap(event)
+      } catch {
+        /* one broken tap must not strand the events behind it */
+      }
+    }
   }
 
   private emit(channel: string, args: unknown[]): void {
