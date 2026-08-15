@@ -53,9 +53,6 @@ import { setLiveSessionCanceller, cancelClaudeSessions } from './services/sessio
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { logger } from './services/logger'
 import {
-  DEFAULT_AUDIT_RETENTION_DAYS,
-  DEFAULT_TLS_HTTPS_PORT,
-  DEFAULT_SHELL_GRANT_IDLE_MINUTES,
   MIN_AUDIT_RETENTION_DAYS,
   REMOTE_AUTH_POLICIES,
   STEP_UP_TIERS,
@@ -66,23 +63,16 @@ import {
 import {
   auditAuthPolicyChange,
   authSurfaceChanged,
-  describeAuthSurfaceChange,
-  readAuthPolicyContext,
-  readEffectiveStepUpTier,
-  resolveAuthPolicy
+  describeAuthSurfaceChange
 } from './services/auth-policy'
+import { sanitizedRemoteConfig } from './services/remote-config-view'
 import { registerWebauthnIpc } from './ipc/webauthn.ipc'
 import { registerAuthcfgIpc } from './ipc/authcfg.ipc'
 import { MAX_SESSION_MAX_AGE_HOURS } from './services/step-up-tier'
 import { desktopConnection } from './ipc/command-registry'
 import { provisionPassword } from './services/remote-auth'
 import type { SessionManager } from './services/session-manager'
-import type {
-  RemoteAuthPolicy,
-  RemoteConfig,
-  StepUpTier,
-  TailscaleDetection
-} from '../shared/types'
+import type { RemoteAuthPolicy, StepUpTier, TailscaleDetection } from '../shared/types'
 
 /** What core hands back so the (optional) window layer can attach to it. */
 export interface CoreBoot {
@@ -102,48 +92,11 @@ export interface BootCoreOptions {
   remoteAccessDisabled: boolean
 }
 
-/**
- * Sanitized view of the persisted remote-server config for `remote:get-config`
- * / `remote:set-config` responses — NEVER includes password_salt/
- * password_hash/kdf_params (only a `passwordSet` boolean derived from
- * whether a hash is stored). Defaults mirror the DB column defaults so the
- * shape is stable even before any row has been written.
- */
-function sanitizedRemoteConfig(): RemoteConfig {
-  const config = getRemoteConfig()
-  const policyCtx = readAuthPolicyContext()
-  return {
-    port: config?.port ?? 0,
-    bindHost: config?.bindHost ?? null,
-    autostart: config?.autostart ?? false,
-    tlsMode: config?.tlsMode ?? 0,
-    tlsHttpsPort: config?.tlsHttpsPort ?? DEFAULT_TLS_HTTPS_PORT,
-    // NOT exposed: last_serve_https_port / last_serve_local_port. They are
-    // internal bookkeeping for the startup serve reconciliation (ADR-042), not
-    // user-facing configuration.
-    allowTerminal: config?.allowTerminal ?? false,
-    shellGrantIdleMinutes: config?.shellGrantIdleMinutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
-    // Both the RAW setting (null = auto) and what it resolves to right now: a
-    // settings UI has to be able to say "Automatic (passkeys required)" without
-    // re-deriving the rule, and re-deriving it in the renderer is exactly how
-    // the displayed policy would drift from the enforced one.
-    authPolicy: config?.authPolicy ?? null,
-    effectiveAuthPolicy: resolveAuthPolicy(policyCtx),
-    credentialCount: policyCtx.credentialCount,
-    passwordBreakGlass: config?.passwordBreakGlass ?? true,
-    passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false,
-    // ADR-054's second axis, raw + resolved for the same reason the policy is:
-    // auth-mode `off` FORCES tier `off`, and re-deriving that in the renderer is
-    // how a displayed tier drifts from the enforced one.
-    stepUpTier: policyCtx.stepUpTier,
-    effectiveStepUpTier: readEffectiveStepUpTier(policyCtx),
-    stepUpMutationIdleMinutes: policyCtx.stepUpMutationIdleMinutes,
-    sessionMaxAgeHours: policyCtx.sessionMaxAgeHours,
-    auditRetentionDays: config?.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
-    passwordSet: config?.passwordHash != null,
-    passwordUpdatedAt: config?.passwordUpdatedAt ?? null
-  }
-}
+// `sanitizedRemoteConfig` moved to `services/remote-config-view.ts` when
+// `authcfg:get` became its second reader (ADR-054 series 2). Both transports
+// must answer with the SAME object — the settings components are shared and
+// branch only on transport for writes — and a second sanitizer would be a
+// second place to forget a field.
 
 /**
  * Boot the window-independent half of the app. Call ONCE, from

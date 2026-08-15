@@ -18,8 +18,11 @@ type FakeConnection = {
   on: RemoteConnection['on']
   passkeyAvailable: ReturnType<typeof vi.fn>
   stepUpWithPasskey: ReturnType<typeof vi.fn>
+  whenCredentialsChanged: ReturnType<typeof vi.fn>
   /** Push a server event to the api's listeners. */
   push: (channel: string, ...args: unknown[]) => void
+  /** Fire the close-4008 waiter the password-rotation path races against. */
+  closeWithCredentialsChanged: () => void
 }
 
 /**
@@ -31,12 +34,19 @@ function makeConnection(): FakeConnection {
   const sync = new SyncClient({ requestResync: () => {} })
   sync.markReady()
   let seq = 0
+  const credentialsChangedWaiters: (() => void)[] = []
   return {
     invoke: vi.fn(async () => undefined),
     on: (channel) => sync.on(channel),
     passkeyAvailable: vi.fn(() => false),
     stepUpWithPasskey: vi.fn(async () => ({ type: 'step-up-response', ok: true })),
-    push: (channel, ...args) => sync.receiveEvent({ seq: ++seq, channel, args })
+    whenCredentialsChanged: vi.fn(
+      () => new Promise<void>((resolve) => credentialsChangedWaiters.push(resolve))
+    ),
+    push: (channel, ...args) => sync.receiveEvent({ seq: ++seq, channel, args }),
+    closeWithCredentialsChanged: () => {
+      for (const resolve of credentialsChangedWaiters.splice(0)) resolve()
+    }
   }
 }
 
@@ -134,5 +144,66 @@ describe('web api-adapter — passkeys (ADR-052)', () => {
     // Unlike the password path, nothing is probed first — the challenge request
     // IS the probe, and guessing client-side could only guess wrong.
     expect(connection.invoke).not.toHaveBeenCalled()
+  })
+})
+
+describe('web api-adapter — remote-access settings (ADR-054 decision 6)', () => {
+  it('READS the config over `authcfg:get`, not the host-anchor channel', async () => {
+    // "Routine settings become web-reachable" is unimplementable without a read:
+    // a pane cannot administer a surface it cannot render. `authcfg:get` is a
+    // QUERY, so it costs no ceremony — the operator sees the tier before being
+    // asked to prove presence in order to change it.
+    connection.invoke.mockResolvedValueOnce({ stepUpTier: 'strong' })
+    await expect(api.getRemoteConfig()).resolves.toMatchObject({ stepUpTier: 'strong' })
+    expect(connection.invoke).toHaveBeenCalledWith('authcfg:get')
+  })
+
+  it('REFUSES the host-anchor writer locally — it is never on the wire', async () => {
+    // `remote:set-config` is the only writer that can reach the `off` master
+    // switch and has no remote registration at all. Refusing here (rather than
+    // invoking and letting the registry deny it) is what lets the settings pane
+    // say WHY, and keeps the structural guarantee visible in this file.
+    await expect(api.setRemoteConfig({ authPolicy: 'off' })).rejects.toThrow(/on the host/i)
+    await expect(api.setRemotePassword('x')).rejects.toThrow(/Not available in remote mode/)
+    await expect(api.clearRemotePassword()).rejects.toThrow(/Not available in remote mode/)
+    expect(connection.invoke).not.toHaveBeenCalled()
+  })
+
+  it('maps the routine verbs to their channels', async () => {
+    await api.authcfgSetTier('strong')
+    expect(connection.invoke).toHaveBeenCalledWith('authcfg:set-tier', 'strong')
+    await api.authcfgSetAuthMode(null)
+    expect(connection.invoke).toHaveBeenCalledWith('authcfg:set-auth-mode', null)
+    await api.authcfgSetRetention(90)
+    expect(connection.invoke).toHaveBeenCalledWith('authcfg:set-retention', 90)
+  })
+
+  describe('password rotation — success and disconnection are the same event', () => {
+    it('resolves on the normal response (a passkey actor is not disconnected)', async () => {
+      connection.invoke.mockResolvedValueOnce({ ok: true })
+      await expect(api.authcfgSetPassword('a-long-enough-password')).resolves.toEqual({ ok: true })
+      expect(connection.invoke).toHaveBeenCalledWith(
+        'authcfg:set-password',
+        'a-long-enough-password'
+      )
+    })
+
+    it('resolves on close-4008 when the ACTOR held the password it rotated', async () => {
+      // The server drops every socket holding the old password — the caller
+      // included — BEFORE the invoke response goes out. Without the race this
+      // would sit out the 30-second invoke timeout on a rotation that worked
+      // perfectly, and report a failure for it.
+      connection.invoke.mockImplementationOnce(() => new Promise(() => {}))
+      const rotating = api.authcfgSetPassword('a-long-enough-password')
+      connection.closeWithCredentialsChanged()
+      await expect(rotating).resolves.toEqual({ ok: true })
+    })
+
+    it('still REJECTS a refused rotation — the close is what never comes', async () => {
+      // A dismissed step-up, or a password the server calls too weak: the invoke
+      // settles with an error and no socket closes, so the race has one runner.
+      connection.invoke.mockRejectedValueOnce(new Error('needs-step-up'))
+      await expect(api.authcfgSetPassword('short')).rejects.toThrow('needs-step-up')
+    })
   })
 })

@@ -1537,6 +1537,8 @@ export interface RemoteConfig {
  *                   (always true on desktop; the opt-in toggle over remote);
  * - `granted`     — a live `shell` grant is held, so commands will run;
  * - `needsStepUp` — allowed but not granted: run the step-up ceremony;
+ * - `readsAllowed`— this connection may WATCH terminals (ADR-054's read/act
+ *                   split): attach, stream, resize, list the pool;
  * - `stepUp`      — the public params to derive the ceremony's proof from, or
  *                   null when no credential exists (so no factor exists either).
  */
@@ -1544,6 +1546,21 @@ export interface TerminalAvailability {
   allowed: boolean
   granted: boolean
   needsStepUp: boolean
+  /**
+   * May this client WATCH terminals right now (ADR-054 decision 4)?
+   *
+   * `granted` answers "may I ACT" and kept that ADR-052 meaning, because that is
+   * what the affordance asks. The split made a THIRD state real: a connection
+   * that armed once (so scrollback is unlocked for the socket's lifetime) but
+   * whose act window has since decayed may keep an attached view streaming while
+   * every keystroke is refused. Without this field a client can only see
+   * `granted: false` and would wall off a terminal it is perfectly entitled to
+   * watch.
+   *
+   * Optional so an older host — which had no such state — simply reads as
+   * "reads follow acts", the pre-ADR-054 behavior.
+   */
+  readsAllowed?: boolean
   stepUp: TerminalStepUpParams | null
   /**
    * Can THIS client run a passkey step-up ceremony (ADR-052 decision 5)?
@@ -1596,11 +1613,28 @@ interface RemoteAPI {
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
-  /** Persisted remote-server config (fixed port, bind host, autostart, tls
-   *  placeholder, password status). Main-only — never reachable via the
-   *  remote WS dispatcher (RemoteDispatcher.BLOCKED). */
+  /**
+   * The persisted remote-server config as a UI may see it (fixed port, bind
+   * host, autostart, TLS, auth surface, ADR-054 tier + dials, password status;
+   * never salt/hash/KDF params).
+   *
+   * TWO transports, ONE shape (ADR-054 series 2). On the desktop this is
+   * `remote:get-config`, the host anchor's own read. On the WEB client it is
+   * `authcfg:get` — the read half of decision 6, `admin`-gated and free of any
+   * freshness demand, because a settings pane must be able to render the tier
+   * before it asks anyone to prove presence in order to change it. Both answer
+   * with the same sanitized object (`services/remote-config-view.ts`), which is
+   * what lets the settings components be shared and branch only on WRITES.
+   */
   getRemoteConfig(): Promise<RemoteConfig>
-  /** Partial update of the persisted config; returns the fresh sanitized config. */
+  /**
+   * Partial update of the persisted config; returns the fresh sanitized config.
+   *
+   * HOST ANCHOR ONLY (ADR-054 decision 6): this is the writer that can reach the
+   * `off` master switch, so it has no remote registration at all and REJECTS on
+   * the web client. Web settings writes go through the `authcfg:*` verbs below,
+   * which are the routine subset — the `off` switch is not among them.
+   */
   setRemoteConfig(partial: {
     port?: number
     bindHost?: string | null
@@ -1609,11 +1643,55 @@ interface RemoteAPI {
     tlsHttpsPort?: number
     allowTerminal?: boolean
     shellGrantIdleMinutes?: number
-    /** `null` restores AUTO. Desktop-only by construction (ADR-052 decision 3). */
+    /** `null` restores AUTO. Host-anchor only by construction (ADR-054 dec. 6). */
     authPolicy?: RemoteAuthPolicy | null
     passwordBreakGlass?: boolean
     passkeyTailnetExempt?: boolean
+    /** ADR-054's second axis. */
+    stepUpTier?: StepUpTier
+    /** Strong-tier idle window for non-shell mutations, 1–1440 minutes. */
+    stepUpMutationIdleMinutes?: number
+    /** Strong-tier absolute session lifetime, 1–168 hours. */
+    sessionMaxAgeHours?: number
+    /** Audit-log retention window, ≥30 days. */
+    auditRetentionDays?: number
   }): Promise<RemoteConfig>
+  /**
+   * ADR-054 decision 6 — the ROUTINE remote-access settings, reachable from a
+   * web client behind a fresh presence proof (the mutation window, on every
+   * tier including `off`). That freshness demand is the server's; a stale proof
+   * comes back as `needs-step-up`, which the web transport turns into one
+   * ceremony and a single retry before the caller ever sees it.
+   *
+   * Registered on BOTH transports so the capability/kind declaration is a single
+   * reviewed fact. The desktop connection is exempt from the freshness gate — it
+   * IS the host anchor — so these behave there exactly as `setRemoteConfig` does.
+   *
+   * What is deliberately ABSENT is the point: nothing here can disable
+   * authentication.
+   */
+  authcfgSetTier(tier: StepUpTier): Promise<{ ok: true; tier: StepUpTier }>
+  /**
+   * Auth mode, MINUS the master switch. `null` restores AUTO; `'off'` is refused
+   * with `auth-off-is-host-anchor-only` and no write, on both transports — the
+   * desktop's own `off` path stays `setRemoteConfig` with its typed confirm.
+   */
+  authcfgSetAuthMode(
+    mode: RemoteAuthPolicy | null
+  ): Promise<{ ok: true; mode: RemoteAuthPolicy | null }>
+  /**
+   * Rotate the break-glass password.
+   *
+   * NOTE for web callers: this disconnects every socket that authenticated with
+   * the OLD password — which can include the caller. A password-authenticated
+   * actor is closed with 4008 BEFORE the invoke response is sent, so close-4008
+   * is that flow's success signal; a passkey-authenticated actor gets the normal
+   * response.
+   */
+  authcfgSetPassword(password: string): Promise<{ ok: true }>
+  /** Audit-log retention in days. Clamped to the 30-day floor; returns the
+   *  EFFECTIVE value, which may differ from what was asked for. */
+  authcfgSetRetention(days: number): Promise<{ ok: true; days: number }>
   /**
    * Re-run `tailscale serve` enablement for the running server with
    * `force: true` — it CLAIMS the pinned HTTPS port, overwriting whatever

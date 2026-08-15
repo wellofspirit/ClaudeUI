@@ -13,6 +13,9 @@ import { EnrollDevice } from './components/EnrollDevice'
 import { EnrollPrompt, dismissEnrollPrompt, enrollPromptDismissed } from './components/EnrollPrompt'
 import { NoAuthBanner } from './components/NoAuthBanner'
 import { MissingCredential } from './components/MissingCredential'
+import { SessionExpiredNotice } from './components/SessionExpiredNotice'
+import { StepUpOverlay } from './components/StepUpOverlay'
+import { createStepUpGate } from './step-up-gate'
 import { readCachedProof, writeCachedProof, clearCachedProof } from './password-proof'
 import { decideAuthEntry, type PasswordParams } from './auth-entry'
 import type { FullStateSnapshot, RemoteAuthInfo, RemoteAuthMethod } from '../shared/remote-protocol'
@@ -41,8 +44,24 @@ const connection = new RemoteConnection(
   enrollToken ? { enrollToken } : fragmentToken ? { token: fragmentToken } : {},
   e2eKeyHex
 )
+// ADR-054's generic step-up gate. Installed on the CONNECTION (not on the
+// api-adapter) so every invoke in the app is covered by one rule: a
+// `needs-step-up` refusal opens one ceremony for however many calls are waiting
+// and retries each once. Created before `window.api` exists, like everything
+// else the transport owns, because a demand can arrive on the very first invoke.
+const stepUpGate = createStepUpGate()
+connection.setInvokeGate(stepUpGate.intercept)
+
 const api = createWebSocketApi(connection)
 ;(window as unknown as { api: typeof api }).api = api
+// The keystroke path needs the gate without a refusal to react to: the server
+// drops a stale `term-input` frame SILENTLY (an error would be an oracle for
+// which terminals exist), so the read-only terminal has to prompt on the first
+// key itself. Handed to the renderer through the same `window` surface the
+// tokens use — the terminal components are shared with the desktop build, which
+// has no gate and must not import one.
+;(window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }).__STEP_UP_REQUEST__ =
+  (channel) => stepUpGate.request(channel)
 // SyncCore phase 4c: install the transport's SyncClient in the shared registry
 // BEFORE React mounts, so every replicated-channel listener in the renderer
 // subscribes to it. The desktop entry does the same with its MessagePort client —
@@ -149,6 +168,13 @@ function RemoteApp(): React.JSX.Element {
    * phone is admitted as (see `RemoteConnection.isAuthDisabled`).
    */
   const [authDisabled, setAuthDisabled] = useState(false)
+  /**
+   * The last disconnect was a strong-tier session cut (close 4010), and the user
+   * has not been back to `connected` since. Not an error state — the reconnect
+   * is already running — just the one sentence that explains the sign-in screen
+   * they are about to meet.
+   */
+  const [sessionExpired, setSessionExpired] = useState(false)
   /** The device already said "not now" to the enrollment offer. */
   const [enrollOffered, setEnrollOffered] = useState(!enrollPromptDismissed())
   /** Latest advertised password params, so a rejection can re-show the form
@@ -187,6 +213,10 @@ function RemoteApp(): React.JSX.Element {
     // under a tightened policy) re-enters the phase through the branch above,
     // which is the only thing that should put it back.
     if (state === 'connected') {
+      // The session-expired notice describes a gap that has now closed. Cleared
+      // here rather than on a timer so it lasts exactly as long as the thing it
+      // explains — a slow re-authentication keeps its explanation on screen.
+      setSessionExpired(false)
       // Unconditional and idempotent (a no-op on every visit that has no
       // `#enroll=`), so it can stay out of the state updater — an enrollment
       // that got this far has spent its link, and the dead token should not
@@ -314,7 +344,9 @@ function RemoteApp(): React.JSX.Element {
   useEffect(() => {
     connection.setStateHandler(handleStateChange)
     connection.setFullStateHandler(handleFullState)
+    connection.setSessionExpiredHandler(() => setSessionExpired(true))
     return () => {
+      connection.setSessionExpiredHandler(null)
       connection.destroy()
     }
   }, [handleStateChange, handleFullState])
@@ -418,14 +450,26 @@ function RemoteApp(): React.JSX.Element {
     }
   }, [connectWithProof])
 
+  /**
+   * The session-expired notice rides EVERY screen below, sign-in screens
+   * included — it exists precisely to explain why the operator is looking at one
+   * of those. Rendered as a sibling ahead of each branch rather than inside
+   * them, because the branch that shows is a fact about the connection and the
+   * notice is a fact about the connection it just lost.
+   */
+  const expiredNotice = sessionExpired ? <SessionExpiredNotice /> : null
+
   if (phase.kind === 'password') {
     return (
-      <PasswordLogin
-        saltHex={phase.params.saltHex}
-        kdf={phase.params.kdf}
-        error={phase.error}
-        onProof={handleProof}
-      />
+      <>
+        {expiredNotice}
+        <PasswordLogin
+          saltHex={phase.params.saltHex}
+          kdf={phase.params.kdf}
+          error={phase.error}
+          onProof={handleProof}
+        />
+      </>
     )
   }
   // The enrollment screen owns the whole `#enroll=` visit, including the
@@ -446,18 +490,21 @@ function RemoteApp(): React.JSX.Element {
   }
   if (phase.kind === 'passkey' && connState !== 'connected') {
     return (
-      <PasskeyLogin
-        onSignIn={handlePasskeySignIn}
-        error={phase.error ?? error}
-        onUsePassword={
-          pwParams.current
-            ? () => {
-                const params = pwParams.current
-                if (params) setPhase({ kind: 'password', params })
-              }
-            : undefined
-        }
-      />
+      <>
+        {expiredNotice}
+        <PasskeyLogin
+          onSignIn={handlePasskeySignIn}
+          error={phase.error ?? error}
+          onUsePassword={
+            pwParams.current
+              ? () => {
+                  const params = pwParams.current
+                  if (params) setPhase({ kind: 'password', params })
+                }
+              : undefined
+          }
+        />
+      </>
     )
   }
   if (phase.kind === 'unavailable') {
@@ -485,6 +532,7 @@ function RemoteApp(): React.JSX.Element {
 
   return (
     <>
+      {expiredNotice}
       {authDisabled && <NoAuthBanner />}
       {offerEnroll && (
         <EnrollPrompt
@@ -496,6 +544,10 @@ function RemoteApp(): React.JSX.Element {
         />
       )}
       <ConnectionOverlay state={connState} error={error} />
+      {/* Above the app, below the connection overlay: a ceremony is owed on a
+          LIVE connection, so it must never cover the screen that says the
+          connection is gone. */}
+      <StepUpOverlay gate={stepUpGate} connection={connection} />
       {ready && <AppContent />}
     </>
   )

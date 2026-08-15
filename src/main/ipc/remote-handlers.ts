@@ -80,6 +80,7 @@ import {
   type RegisterVerifyResult
 } from './webauthn-commands'
 import {
+  authcfgGet,
   authcfgSetAuthMode,
   authcfgSetPassword,
   authcfgSetRetention,
@@ -1457,6 +1458,18 @@ export function registerRemoteHandlers(
   // operations stay host-anchor only, and they stay in `remote:set-config`,
   // which has no remote registration at all. `authcfg:set-auth-mode` refuses
   // `off` with a typed error rather than silently dropping it.
+
+  // The READ half. A `query`, so it is classified `read` and costs no ceremony:
+  // an operator must be able to SEE the tier before being asked to prove
+  // presence in order to change it. Still `admin`, so only a passkey /
+  // break-glass connection reaches it at all.
+  handleRemote({
+    channel: 'authcfg:get',
+    capability: 'admin',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => authcfgGet(connection)
+  })
 
   handleRemote({
     channel: 'authcfg:set-tier',

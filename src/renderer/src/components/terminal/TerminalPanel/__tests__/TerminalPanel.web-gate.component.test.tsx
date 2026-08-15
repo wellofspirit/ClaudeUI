@@ -16,7 +16,11 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { ClaudeAPI, TerminalAvailability } from '../../../../../../shared/types'
 
 let viewRendered = 0
-let viewProps: { onNewTab: () => Promise<void> } | null = null
+let viewProps: {
+  onNewTab: () => Promise<void>
+  readOnly?: boolean
+  onBlockedInput?: () => void
+} | null = null
 vi.mock('../View', () => ({
   TerminalPanelView: (props: { onNewTab: () => Promise<void> }) => {
     viewRendered++
@@ -195,5 +199,107 @@ describe('TerminalPanel — web availability gate', () => {
     api.createTerminal.mockRejectedValue(new Error('spawn ENOENT'))
     await expect(viewProps!.onNewTab()).rejects.toThrow('spawn ENOENT')
     expect(screen.queryByTestId('TerminalStepUpPrompt')).toBeNull()
+  })
+  /**
+   * ADR-054's read/act split, from the client's side.
+   *
+   * The state that did not exist before: armed once (so scrollback is unlocked
+   * for this socket's lifetime) but idle past the ACT window. The stream keeps
+   * flowing and the server refuses keystrokes — SILENTLY, because an error would
+   * be an oracle for which terminals exist. So the panel must render the
+   * terminal rather than a wall, and hold the first key back itself.
+   */
+  describe('read-only (ADR-054 series 2)', () => {
+    const READ_ONLY: TerminalAvailability = {
+      allowed: true,
+      granted: false,
+      needsStepUp: true,
+      readsAllowed: true,
+      stepUp: null
+    }
+
+    it('renders the TERMINAL, not the step-up wall, when reads are still allowed', async () => {
+      api.terminalAvailability.mockResolvedValue(READ_ONLY)
+      await renderPanel()
+
+      await waitFor(() => expect(screen.getByTestId('TerminalPanelView')).toBeTruthy())
+      expect(screen.queryByTestId('TerminalStepUpPrompt')).toBeNull()
+      expect(viewProps!.readOnly).toBe(true)
+    })
+
+    it('keeps the WALL when the connection was never armed', async () => {
+      // First access ever still costs one proof (decision 4): scrollback and the
+      // live-shell inventory are sensitive, so "never armed" is a genuine wall
+      // rather than the read-only state.
+      api.terminalAvailability.mockResolvedValue({ ...READ_ONLY, readsAllowed: false })
+      await renderPanel()
+
+      await waitFor(() => expect(screen.getByTestId('TerminalStepUpPrompt')).toBeTruthy())
+      expect(screen.queryByTestId('TerminalPanelView')).toBeNull()
+    })
+
+    it('keeps the WALL against an older host that reports no readsAllowed at all', async () => {
+      api.terminalAvailability.mockResolvedValue({
+        allowed: true,
+        granted: false,
+        needsStepUp: true,
+        stepUp: null
+      })
+      await renderPanel()
+
+      await waitFor(() => expect(screen.getByTestId('TerminalStepUpPrompt')).toBeTruthy())
+    })
+
+    it('a held-back keystroke opens ONE ceremony and re-checks when it lands', async () => {
+      const request = vi.fn(async () => true)
+      ;(window as unknown as { __STEP_UP_REQUEST__?: typeof request }).__STEP_UP_REQUEST__ = request
+      api.terminalAvailability.mockResolvedValue(READ_ONLY)
+      await renderPanel()
+      await waitFor(() => expect(screen.getByTestId('TerminalPanelView')).toBeTruthy())
+
+      api.terminalAvailability.mockResolvedValue({
+        allowed: true,
+        granted: true,
+        needsStepUp: false,
+        readsAllowed: true,
+        stepUp: null
+      })
+      await act(async () => {
+        viewProps!.onBlockedInput!()
+      })
+
+      expect(request).toHaveBeenCalledWith('terminal:write')
+      await waitFor(() => expect(viewProps!.readOnly).toBe(false))
+      delete (window as unknown as { __STEP_UP_REQUEST__?: unknown }).__STEP_UP_REQUEST__
+    })
+
+    it('is inert where no gate is installed — the desktop build has no ceremony', async () => {
+      delete (window as unknown as { __STEP_UP_REQUEST__?: unknown }).__STEP_UP_REQUEST__
+      api.terminalAvailability.mockResolvedValue(READ_ONLY)
+      await renderPanel()
+      await waitFor(() => expect(screen.getByTestId('TerminalPanelView')).toBeTruthy())
+      // Must not throw: the panel is shared with a build that never installs one.
+      await act(async () => {
+        viewProps!.onBlockedInput!()
+      })
+      expect(viewProps!.readOnly).toBe(true)
+    })
+
+    it('a refused ACT does not flatten the right to WATCH', async () => {
+      // The regression the split exists to prevent: `terminal:create` refused for
+      // staleness says nothing about reading, and treating it as "no terminal
+      // here" would wall off shells this connection may still see.
+      api.terminalAvailability.mockResolvedValue(READ_ONLY)
+      await renderPanel()
+      await waitFor(() => expect(screen.getByTestId('TerminalPanelView')).toBeTruthy())
+
+      api.createTerminal.mockRejectedValue(new Error('needs-step-up'))
+      await act(async () => {
+        await viewProps!.onNewTab()
+      })
+
+      expect(screen.queryByTestId('TerminalStepUpPrompt')).toBeNull()
+      expect(viewProps!.readOnly).toBe(true)
+    })
   })
 })

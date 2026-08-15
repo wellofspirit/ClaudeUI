@@ -3079,17 +3079,44 @@ export class RemoteServer {
     const client = this.clients.get(ws)
     if (!client) return
 
+    // THE TERMINAL TOGGLE WITHDRAWS THE SHELL, NOT THE CEREMONY (ADR-054).
+    //
+    // ADR-052 could refuse the whole step-up here, because step-up existed for
+    // exactly one thing and "the terminal is off" made the ceremony pointless.
+    // Under ADR-054 the SAME ceremony is the only way to satisfy the settings
+    // gate — which demands a fresh proof on every tier — and the strong tier's
+    // mutation window. Refusing it while the toggle is off would therefore lock
+    // an operator out of their own remote-settings surface on the DEFAULT
+    // terminal setting (it ships OFF), with a message about a terminal they
+    // never asked for and `retryable: false` telling the client not to try
+    // again. The headless bootstrap chain (security.md) dies with it.
+    //
+    // So the toggle now does exactly what it says: no shell. The grant is
+    // revoked (it may have been armed before the toggle moved, and attachments
+    // go with it), the ceremony runs, and `armPresence` withholds the `shell`
+    // capability while still recording the presence proof. Every terminal verb
+    // stays refused by the two independent toggle checks it always had — the
+    // transport gate and the service-layer backstop.
     const policy = readTerminalPolicy()
-    if (!policy.allowTerminal) {
-      this.revokeShellGrant(client, 'policy-off')
-      respond({
-        ok: false,
-        code: 'terminal-disabled',
-        error: 'Remote terminal is turned off. Enable it in Settings › Remote on the desktop app.',
-        retryable: false
-      })
-      return
-    }
+    if (!policy.allowTerminal) this.revokeShellGrant(client, 'policy-off')
+
+    // WHAT THE ROW MAY CLAIM, decided once for both factors.
+    //
+    // A step-up used to buy exactly one thing, so both success rows could
+    // hardcode `capability: 'shell'` and a "shell + mutation grants armed"
+    // detail. Since the toggle stopped refusing the ceremony that is a lie in
+    // the toggle-off case: no `shell` capability was conferred and no shell
+    // window was written, yet a forensic reader — who is told by security.md
+    // §Audit that an `auth:*` row's capability names what the event is ABOUT —
+    // would conclude the session held a shell it never had. So the row varies
+    // with what was actually armed: the settings/mutation surface (`admin`) when
+    // the toggle is off, the shell when it is on.
+    const armedShell = policy.allowTerminal
+    const armedCapability: Capability = armedShell ? 'shell' : 'admin'
+    const armedDetail = (factor: string): string =>
+      armedShell
+        ? `shell + mutation grants armed via ${factor} step-up`
+        : `mutation grant armed via ${factor} step-up (terminal toggle off — no shell conferred)`
 
     // A narrow-grant socket may not step UP into a surface it was never given
     // (`holdsBaseRemoteSurface`): an enrollment link that also knows the
@@ -3172,7 +3199,10 @@ export class RemoteServer {
         })
         return
       }
-      const expiresAt = this.armPresence(client, 'passkey step-up', { policy })
+      const expiresAt = this.armPresence(client, 'passkey step-up', {
+        policy,
+        shell: policy.allowTerminal
+      })
       if (expiresAt === null) {
         // Unreachable: the narrow-grant guard at the top of this method already
         // refused such a connection. Kept so a refusal to arm can never be
@@ -3190,9 +3220,9 @@ export class RemoteServer {
         connectionId: client.connection.connectionId,
         method: 'webauthn',
         label: credentialLabel(result.credential.nickname, result.credential.credId),
-        capability: 'shell',
+        capability: armedCapability,
         outcome: 'ok',
-        detail: 'shell + mutation grants armed via passkey step-up'
+        detail: armedDetail('passkey')
       })
       respond({ ok: true, expiresAt })
       return
@@ -3265,7 +3295,10 @@ export class RemoteServer {
       return
     }
 
-    const expiresAt = this.armPresence(client, 'password step-up', { policy })
+    const expiresAt = this.armPresence(client, 'password step-up', {
+      policy,
+      shell: policy.allowTerminal
+    })
     if (expiresAt === null) {
       // Unreachable: the narrow-grant guard at the top of this method already
       // refused such a connection. Kept so a refusal to arm can never be
@@ -3288,9 +3321,9 @@ export class RemoteServer {
       connectionId: client.connection.connectionId,
       method: client.connection.identity.method,
       label: client.connection.identity.label,
-      capability: 'shell',
+      capability: armedCapability,
       outcome: 'ok',
-      detail: 'shell + mutation grants armed via break-glass password step-up'
+      detail: armedDetail('break-glass password')
     })
     respond({ ok: true, expiresAt })
   }
@@ -3306,14 +3339,16 @@ export class RemoteServer {
    * the paths that produce one. A second copy is precisely the drift that
    * produced the grant bugs this file's history is full of.
    *
-   * Returns the SHELL ACT deadline, or `null` when the connection was REFUSED
-   * arming (see {@link holdsBaseRemoteSurface}). Callers that report a deadline
-   * to the client must treat `null` as a refusal rather than as a success.
+   * Returns the deadline of what it armed — the SHELL ACT window, or the
+   * MUTATION window when `shell` was withheld — or `null` when the connection
+   * was REFUSED arming (see {@link holdsBaseRemoteSurface}). Callers that report
+   * a deadline to the client must treat `null` as a refusal rather than as a
+   * success.
    */
   private armPresence(
     client: AuthenticatedClient,
     via: string,
-    opts: { policy?: TerminalPolicy; windows?: boolean } = {}
+    opts: { policy?: TerminalPolicy; windows?: boolean; shell?: boolean } = {}
   ): number | null {
     // NARROW-GRANT SOCKETS ARE NEVER WIDENED BY ARMING.
     //
@@ -3345,26 +3380,39 @@ export class RemoteServer {
     // that connection the settings-area gate — which demands a real proof on
     // every tier — for the next hour, free.
     const windows = opts.windows !== false
+    // `shell: false` is the TERMINAL TOGGLE being off. A presence proof is still
+    // a presence proof — it is what satisfies the settings gate on every tier
+    // and the strong tier's mutation window — but there is no shell to confer,
+    // so the capability is withheld rather than granted and immediately revoked
+    // on the next dispatch.
+    const withShell = opts.shell !== false
     const now = Date.now()
     const shellActExpiresAt = now + shellGrantIdleMs(policy)
-    client.connection.grants = new Set<Capability>([...client.connection.grants, 'shell'])
+    const mutationExpiresAt = now + mutationIdleMs(client.policyCtx.stepUpMutationIdleMinutes)
+    if (withShell) {
+      client.connection.grants = new Set<Capability>([...client.connection.grants, 'shell'])
+    }
     client.connection.armedEver = true
     // Remembered so a later tier change can UNDO a waiver without mistaking it
     // for a real presence proof — see {@link resnapshotConnection}.
     client.armedByWaiver = !windows
     if (windows) {
-      client.connection.shellGrantExpiresAt = shellActExpiresAt
-      client.connection.mutationExpiresAt =
-        now + mutationIdleMs(client.policyCtx.stepUpMutationIdleMinutes)
+      // The shell window is only written alongside the capability: a deadline
+      // for something this connection does not hold is state a reviewer would
+      // have to reason about for no benefit.
+      if (withShell) client.connection.shellGrantExpiresAt = shellActExpiresAt
+      client.connection.mutationExpiresAt = mutationExpiresAt
     }
     logger.info(
       'remote-server',
       `Presence armed for ${client.ip} via ${via} (tier ${client.stepUpTier}` +
         (windows
-          ? `, shell acts ${policy.shellGrantIdleMinutes}m, mutations ${client.policyCtx.stepUpMutationIdleMinutes}m)`
+          ? `, ${
+              withShell ? `shell acts ${policy.shellGrantIdleMinutes}m, ` : 'no shell (toggle off), '
+            }mutations ${client.policyCtx.stepUpMutationIdleMinutes}m)`
           : ', capability waiver only — no freshness windows)')
     )
-    return shellActExpiresAt
+    return withShell ? shellActExpiresAt : mutationExpiresAt
   }
 
   /**

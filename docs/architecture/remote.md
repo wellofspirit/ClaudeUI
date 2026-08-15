@@ -78,7 +78,11 @@ adds to THIS layer's contract is three WS frame pairs (`auth-webauthn-start` /
 `enrollToken` field on the existing `auth` frame — all additive, so an older cached
 bundle's frames stay byte-compatible), the optional `webauthn` block on
 `GET /remote/auth-info`, and close code **4009** for "the auth surface changed, reconnect
-and re-authenticate". Everything about what those mean lives in security.md, not here.
+and re-authenticate". ADR-054 adds one more close code to this layer — **4010**, "the
+strong tier reached this session's absolute max-age; the stream is cut, reconnect and
+expect a ceremony" — plus the `authcfg:*` command namespace (a `query` read and four
+`admin` writes), which is ordinary invoke traffic and needs nothing new on the wire.
+Everything about what any of those mean lives in security.md, not here.
 
 **One thing phase 4d added to this layer's contract:** the listener no longer depends on
 a window existing. Core boots — including this server and its autostart — before any

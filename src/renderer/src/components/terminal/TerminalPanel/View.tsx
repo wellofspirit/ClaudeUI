@@ -32,6 +32,15 @@ export interface TerminalPanelViewProps {
    */
   nextSlot: number
   nextSlotRunning: boolean
+  /**
+   * This client may watch these shells but not type into them (ADR-054's
+   * read/act split — the arming proof holds, the act window decayed). The
+   * stream and the scrollback stay live; the first keystroke asks for a fresh
+   * proof instead of reaching the pty.
+   */
+  readOnly?: boolean
+  /** A keystroke was held back — run the step-up ceremony. */
+  onBlockedInput?: () => void
 }
 
 export function TerminalPanelView({
@@ -44,11 +53,16 @@ export function TerminalPanelView({
   onNewTab,
   onClosePanel,
   nextSlot,
-  nextSlotRunning
+  nextSlotRunning,
+  readOnly,
+  onBlockedInput
 }: TerminalPanelViewProps): React.JSX.Element {
   return (
     <div
       data-testid="TerminalPanel"
+      // Structural, so the live DOM says which of the two shell states this
+      // panel is in without reading pixels (ADR-027).
+      data-readonly={readOnly ? 'true' : undefined}
       style={style}
       className="flex flex-col bg-bg-primary border-t border-border overflow-hidden"
     >
@@ -86,6 +100,18 @@ export function TerminalPanelView({
             />
           )}
         </button>
+        {/* Read-only is otherwise INVISIBLE: the stream keeps flowing and the
+            only symptom is that typing does nothing until the ceremony lands.
+            Say so before the user discovers it by pressing keys. */}
+        {readOnly && (
+          <span
+            data-testid="TerminalPanel.readOnly"
+            title="Your presence proof has gone stale. Watching still works; press a key to confirm it's you and type again."
+            className="ml-2 shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[9px] text-accent"
+          >
+            Watching
+          </span>
+        )}
         <button
           data-testid="TerminalPanel.close"
           onClick={onClosePanel}
@@ -110,7 +136,12 @@ export function TerminalPanelView({
                 </div>
               }
             >
-              <XTermInstance terminalId={tab.id} isActive={tab.id === activeId} />
+              <XTermInstance
+                terminalId={tab.id}
+                isActive={tab.id === activeId}
+                readOnly={readOnly}
+                onBlockedInput={onBlockedInput}
+              />
             </Suspense>
           </div>
         ))}

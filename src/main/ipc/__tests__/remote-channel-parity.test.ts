@@ -40,18 +40,28 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  * in the base grant set. Sorted, and kept in sync with the registrations in
  * remote-handlers.ts.
  *
- * Two families, two reasons:
+ * Three families, three reasons:
  *  - `shell` (terminal) — reachable only after the step-up ceremony;
  *  - `enroll` / `admin` (ADR-052 passkeys) — reachable only from a passkey or
  *    break-glass-password connection, or (for the two `enroll` verbs) a
  *    one-time enrollment link. A token/tailnet connection never holds either.
+ *  - `admin` (ADR-054 decision 6, `authcfg:*`) — the routine remote-access
+ *    settings. Same reachability as the passkey management verbs, PLUS a
+ *    presence proof inside the mutation window on every tier for the writes.
+ *    The `off` master switch is deliberately not among them: it stays in
+ *    `remote:set-config`, which has no remote registration at all.
  *
- * "Invoked but not grantable at connect time" is the POINT for both, which is
- * why this list is an allowlist rather than an emptiness assertion: a new
+ * "Invoked but not grantable at connect time" is the POINT for all three, which
+ * is why this list is an allowlist rather than an emptiness assertion: a new
  * channel that lands here without a line in this comment is a channel whose
  * reachability nobody thought about.
  */
 const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
+  'authcfg:get',
+  'authcfg:set-auth-mode',
+  'authcfg:set-password',
+  'authcfg:set-retention',
+  'authcfg:set-tier',
   'terminal:attach',
   'terminal:create',
   'terminal:detach',

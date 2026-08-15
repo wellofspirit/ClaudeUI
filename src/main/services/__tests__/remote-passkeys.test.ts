@@ -1240,6 +1240,11 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
 
     client.frames.length = 0
+    // Cleared so the row asserted below is the STEP-UP's own: the passkey LOGIN
+    // already wrote an `auth:webauthn-assert` row of its own (arm-on-auth), and
+    // matching the first non-null-detail row would silently assert about that
+    // one instead.
+    auditRows.length = 0
     client.send({ type: 'step-up-challenge-request' })
     const challenge = await client.waitFor('step-up-challenge')
     client.send({
@@ -1254,13 +1259,54 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     expect(stepUp).toMatchObject({ ok: true })
     expect(stepUp.expiresAt).toBeGreaterThan(Date.now())
 
-    expect(
-      auditRows.some(
-        (r) =>
-          r.channel === 'auth:webauthn-assert' && r.capability === 'shell' && r.outcome === 'ok'
-      )
-    ).toBe(true)
+    const row = auditRows.find(
+      (r) => r.channel === 'auth:webauthn-assert' && r.outcome === 'ok' && r.detail !== null
+    )
+    expect(row).toMatchObject({ capability: 'shell' })
+    expect(row!.detail).toBe('shell + mutation grants armed via passkey step-up')
     await expect(invoke(client, 'terminal:availability')).resolves.toMatchObject({ granted: true })
+  })
+
+  it('audits a passkey step-up as `admin` when the toggle conferred NO shell', async () => {
+    // ADR-054 series 2: the terminal toggle stopped refusing the ceremony (it is
+    // how the settings gate is satisfied), so a step-up can legitimately arm the
+    // MUTATION window and nothing else. The row has to say so. A hardcoded
+    // `capability: 'shell'` + "shell + mutation grants armed" detail would tell a
+    // forensic reader — who is told by security.md §Audit that an `auth:*` row's
+    // capability names what the event is ABOUT — that this session held a shell
+    // it never had.
+    await boot('passkey-always', { allowTerminal: false })
+    const device = await enroll()
+    const client = await connect()
+    await ceremony(client, device)
+
+    client.frames.length = 0
+    auditRows.length = 0
+    client.send({ type: 'step-up-challenge-request' })
+    const challenge = await client.waitFor('step-up-challenge')
+    client.send({
+      type: 'step-up',
+      assertion: device.authenticate({
+        challenge: challenge.options.challenge,
+        origin: ORIGIN,
+        rpId: DNS_NAME
+      })
+    })
+    expect(await client.waitFor('step-up-response')).toMatchObject({ ok: true })
+
+    const row = auditRows.find(
+      (r) => r.channel === 'auth:webauthn-assert' && r.outcome === 'ok' && r.detail !== null
+    )
+    expect(row).toMatchObject({ capability: 'admin' })
+    expect(row!.detail).toBe(
+      'mutation grant armed via passkey step-up (terminal toggle off — no shell conferred)'
+    )
+    // …and the row is not merely worded differently: no shell was conferred.
+    await expect(invoke(client, 'terminal:availability')).resolves.toMatchObject({
+      allowed: false,
+      granted: false,
+      readsAllowed: false
+    })
   })
 
   it('refuses a HANDSHAKE assertion replayed as a step-up (challenge kind binding)', async () => {

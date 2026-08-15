@@ -108,11 +108,22 @@ describe('XTermInstance', () => {
     app.teardown()
   })
 
-  async function renderFC(terminalId = 'term-1', isActive = true): Promise<void> {
+  async function renderFC(
+    terminalId = 'term-1',
+    isActive = true,
+    extra: { readOnly?: boolean; onBlockedInput?: () => void } = {}
+  ): Promise<{ rerender: (props: Record<string, unknown>) => void }> {
     const { XTermInstance } = await import('../XTermInstance')
+    let view!: ReturnType<typeof render>
     await act(async () => {
-      render(React.createElement(XTermInstance, { terminalId, isActive }))
+      view = render(React.createElement(XTermInstance, { terminalId, isActive, ...extra }))
     })
+    return {
+      rerender: (props) =>
+        view.rerender(
+          React.createElement(XTermInstance, { terminalId, isActive, ...extra, ...props } as never)
+        )
+    }
   }
 
   it('forwards user input to writeTerminal IPC', async () => {
@@ -216,5 +227,71 @@ describe('XTermInstance', () => {
 
     expect(resizeCalls.length).toBeGreaterThanOrEqual(1)
     expect(resizeCalls[0].id).toBe('term-xyz')
+  })
+  /**
+   * ADR-054's read/act split at the keyboard.
+   *
+   * The server drops a stale `term-input` frame SILENTLY — an error would be an
+   * oracle for which terminals exist — so a read-only view cannot learn from a
+   * refusal and has to hold the key back itself.
+   */
+  describe('read-only input gating (ADR-054 series 2)', () => {
+    it('holds the keystroke back and asks for a proof instead', async () => {
+      const onBlockedInput = vi.fn()
+      await renderFC('term-ro', true, { readOnly: true, onBlockedInput })
+      const type = dataCallbacks[dataCallbacks.length - 1]
+
+      await act(async () => {
+        type?.('ls\r')
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(writeCalls, 'a refused keystroke must never reach the pty').toEqual([])
+      expect(onBlockedInput).toHaveBeenCalledTimes(1)
+    })
+
+    it('DROPS the key rather than buffering it across the ceremony', async () => {
+      // Replaying what was typed at a shell whose state has moved on is worse
+      // than making the user retype one command.
+      const onBlockedInput = vi.fn()
+      const { rerender } = await renderFC('term-ro', true, { readOnly: true, onBlockedInput })
+      const type = dataCallbacks[dataCallbacks.length - 1]
+      await act(async () => {
+        type?.('rm -rf /\r')
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      await act(async () => {
+        rerender({ readOnly: false })
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      expect(writeCalls).toEqual([])
+    })
+
+    it('types again once the gate opens — WITHOUT re-mounting the terminal', async () => {
+      // The mount effect keys on `terminalId` alone and must not re-run: tearing
+      // it down would drop the pty attachment and the scrollback with it. So the
+      // handler installed once has to see the CURRENT gate, not the mount-time
+      // one.
+      const { rerender } = await renderFC('term-ro', true, { readOnly: true })
+      const mounted = termInstances.length
+      // The handler of the view THIS case mounted: the suite does not unmount
+      // between cases, so index 0 belongs to the first test's terminal.
+      const type = dataCallbacks[dataCallbacks.length - 1]
+
+      // Two steps, deliberately: the gate has to be COMMITTED before the key
+      // arrives, which is the ordering the real panel produces (availability
+      // refresh, re-render, then the user types again).
+      await act(async () => {
+        rerender({ readOnly: false })
+      })
+      await act(async () => {
+        type?.('echo hi\r')
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(writeCalls).toEqual([{ id: 'term-ro', data: 'echo hi\r' }])
+      expect(termInstances.length, 'the pty view must survive the gate opening').toBe(mounted)
+    })
   })
 })

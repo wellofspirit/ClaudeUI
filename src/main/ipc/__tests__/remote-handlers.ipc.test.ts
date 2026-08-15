@@ -1353,7 +1353,7 @@ const PASSKEY_CHANNELS = [
 ] as const
 
 /**
- * ADR-054 decision 6 — the remote-access SETTINGS verbs. The THIRD deliberate
+ * ADR-054 decision 6 — the remote-access SETTINGS WRITES. The THIRD deliberate
  * widening, listed separately for the same reason the other two are.
  *
  * Every one declares `admin` (outside {@link LEGACY_REMOTE_GRANTS}, so
@@ -1363,12 +1363,27 @@ const PASSKEY_CHANNELS = [
  * master switch. Auth-DISABLING operations stay host-anchor only and stay in
  * `remote:set-config`, which has no remote registration at all (pinned below).
  */
-const AUTHCFG_CHANNELS = [
+const AUTHCFG_WRITE_CHANNELS = [
   'authcfg:set-auth-mode',
   'authcfg:set-password',
   'authcfg:set-retention',
   'authcfg:set-tier'
 ] as const
+
+/**
+ * The READ half (series 2). Same `admin` gate, but a `query` — so
+ * `classifyDispatch` calls it `read` and it demands no freshness: an operator
+ * has to be able to SEE the tier before being asked to prove presence in order
+ * to change it, and reads are free on every tier (ADR-054 decision 1).
+ *
+ * Listed apart from the writes because the two pins below say different things
+ * about them: both are registered and both need `admin`, but only the writes may
+ * appear in the classifier's `AUTHCFG_CHANNELS`.
+ */
+const AUTHCFG_READ_CHANNELS = ['authcfg:get'] as const
+
+/** Everything in the namespace, for the registration pins. */
+const AUTHCFG_CHANNELS = [...AUTHCFG_READ_CHANNELS, ...AUTHCFG_WRITE_CHANNELS] as const
 
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
@@ -1471,14 +1486,38 @@ describe('remote surface parity (phase 1 port)', () => {
     expect(both, `classified BOTH ways: ${both.join(', ')}`).toEqual([])
   })
 
-  it('the CLASSIFIER knows exactly the authcfg verbs that are registered', () => {
+  it('the CLASSIFIER knows exactly the authcfg WRITES that are registered', () => {
     // The coupling that makes the namespace's freshness rule real: a verb
     // registered here but missing from `AUTHCFG_CHANNELS` in step-up-tier.ts
     // would be classified `mutation` — i.e. silently FREE under the default
     // `medium` tier — instead of demanding a presence proof on every tier.
     // Compared against this file's own literal list so the pin stays
     // independent of the thing it is pinning.
-    expect([...CLASSIFIED_AUTHCFG_CHANNELS].sort()).toEqual([...AUTHCFG_CHANNELS].sort())
+    expect([...CLASSIFIED_AUTHCFG_CHANNELS].sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
+  })
+
+  it('everything in the authcfg namespace is a `command` EXCEPT the declared reads', () => {
+    // The guard that keeps "outside the classifier set" from ever meaning
+    // "accidentally free". Series 2 added `authcfg:get`, and the moment one
+    // member of the namespace is legitimately exempt from the freshness gate,
+    // "is it in AUTHCFG_CHANNELS?" stops being a complete question on its own.
+    //
+    // So the namespace is pinned BOTH ways: every `command` here must be
+    // classified `authcfg` (i.e. demand a proof), and the only channels that may
+    // sit outside that set are the ones declared `query`. A new WRITE that
+    // someone forgets to add to the classifier fails this test even if they also
+    // forget to add it to this file's write list — because it would have to be
+    // declared a `query` to pass, which is a lie a reviewer can see.
+    const registered = commandRegistry.channels('remote').filter((c) => c.startsWith('authcfg:'))
+    const commands = registered.filter(
+      (c) => commandRegistry.declaration(c)!.kind === 'command'
+    )
+    const queries = registered.filter((c) => commandRegistry.declaration(c)!.kind === 'query')
+    expect(commands.sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
+    expect(queries.sort()).toEqual([...AUTHCFG_READ_CHANNELS].sort())
+    // …and the classifier agrees about which is which.
+    for (const channel of commands) expect(CLASSIFIED_AUTHCFG_CHANNELS.has(channel)).toBe(true)
+    for (const channel of queries) expect(CLASSIFIED_AUTHCFG_CHANNELS.has(channel)).toBe(false)
   })
 
   it('no remotely-registered channel can write the auth-DISABLING switch', () => {

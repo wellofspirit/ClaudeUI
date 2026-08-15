@@ -128,7 +128,13 @@ export class TerminalService {
    */
   availability(connection: CommandConnection): TerminalAvailability {
     if (connection.identity.method === 'desktop') {
-      return { allowed: true, needsStepUp: false, granted: true, stepUp: null }
+      return {
+        allowed: true,
+        needsStepUp: false,
+        granted: true,
+        readsAllowed: true,
+        stepUp: null
+      }
     }
     const allowed = readTerminalPolicy().allowTerminal
     // `granted` keeps its ADR-052 meaning — "may I ACT?" — because that is the
@@ -141,6 +147,25 @@ export class TerminalService {
       allowed,
       needsStepUp: allowed && !granted,
       granted,
+      // The read/act split, made VISIBLE to the client (ADR-054 series 2). Both
+      // values are answered from `step-up-tier.ts`'s one table, so the affordance
+      // cannot disagree with the gate that will judge the next frame. `granted`
+      // implies this — the act window can only be live on an armed connection —
+      // but they are computed independently rather than derived, because the
+      // whole point is that the WIDER answer is the one a client must be able to
+      // ask for on its own.
+      //
+      // The CAPABILITY is part of the answer, not just the presence proof. The
+      // tier table reasons about freshness and knows nothing about grants, and
+      // the two come apart in exactly one place: `revokeShellGrant` (the desktop
+      // toggle going off) strips `shell` and deliberately leaves `armedEver`
+      // standing, so nothing but a fresh arming restores it. Without this clause
+      // a connection that lived through an off→on cycle — or that stepped up
+      // while the toggle was off, which now succeeds and confers no shell — would
+      // be told it may WATCH while the registry refuses every read verb it has,
+      // and the panel would render a "Watching" terminal in which nothing works.
+      // The wall is the honest answer there; one ceremony recovers it.
+      readsAllowed: allowed && connection.grants.has('shell') && shellReadAllowed(connection),
       stepUp: this.stepUpCredential.params()
     }
   }

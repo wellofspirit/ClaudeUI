@@ -179,6 +179,14 @@ interface PendingStepUpChallenge {
   timer: ReturnType<typeof setTimeout>
 }
 
+/**
+ * Wraps one invoke. `attempt` sends the frame and settles on the server's
+ * answer; calling it again re-sends the SAME request with a fresh id, which is
+ * what makes "retry after a ceremony" expressible without the gate knowing the
+ * channel or its arguments.
+ */
+export type InvokeGate = (channel: string, attempt: () => Promise<unknown>) => Promise<unknown>
+
 export type TerminalDataListener = (payload: { terminalId: string; data: string }) => void
 export type TerminalExitListener = (payload: { terminalId: string; code: number }) => void
 export type TerminalDetachedListener = (payload: {
@@ -309,6 +317,12 @@ export class RemoteConnection {
 
   // Callbacks
   private onStateChange: StateCallback | null = null
+  /** ADR-054 step-up gate — see {@link RemoteConnection.setInvokeGate}. */
+  private invokeGate: InvokeGate | null = null
+  /** Close-4010 notice — see {@link RemoteConnection.setSessionExpiredHandler}. */
+  private onSessionExpired: (() => void) | null = null
+  /** Close-4008 waiters — see {@link RemoteConnection.whenCredentialsChanged}. */
+  private credentialsChangedWaiters: (() => void)[] = []
 
   constructor(url: string, credential: RemoteCredential, e2eKeyHex?: string) {
     // Convert http(s) URL to ws(s), strip path and fragment
@@ -467,8 +481,68 @@ export class RemoteConnection {
     this.createWebSocket()
   }
 
-  /** Send an invoke request and return a promise for the result. */
+  /**
+   * Send an invoke request and return a promise for the result.
+   *
+   * Everything the app calls goes through here — the api-adapter is ~80 thin
+   * wrappers over this one method — which is why the ADR-054 step-up gate is
+   * installed HERE rather than at the call sites. A `needs-step-up` refusal is
+   * an answer about the CONNECTION's freshness, not about the verb, so exactly
+   * one place should know how to cure it: run one ceremony, retry once. See
+   * {@link RemoteConnection.setInvokeGate}.
+   */
   invoke(channel: string, ...args: unknown[]): Promise<unknown> {
+    const attempt = (): Promise<unknown> => this.sendInvoke(channel, args)
+    return this.invokeGate ? this.invokeGate(channel, attempt) : attempt()
+  }
+
+  /**
+   * Install the step-up gate (web client only — see `web/step-up-gate.ts`).
+   *
+   * The gate wraps every invoke: it forwards, and on a `needs-step-up` refusal
+   * it runs ONE ceremony for however many calls are waiting and then retries
+   * each once. Uninstalled by default, so this class stays a pure transport for
+   * anything that does not want the behavior (tests, and any future client that
+   * drives its own ceremony UI).
+   */
+  setInvokeGate(gate: InvokeGate | null): void {
+    this.invokeGate = gate
+  }
+
+  /**
+   * The connection was cut at its strong-tier session max-age (close 4010).
+   *
+   * Reported separately from the state callback because it is not a state: the
+   * socket goes straight back into an ordinary reconnect (no backoff, no
+   * rejection), and the only thing owed to the user is one sentence explaining
+   * why they are being asked to sign in again. Fires once per cut.
+   */
+  setSessionExpiredHandler(cb: (() => void) | null): void {
+    this.onSessionExpired = cb
+  }
+
+  /**
+   * Resolves the next time this socket is closed with 4008 — "the credential you
+   * hold no longer exists".
+   *
+   * Exists for ONE caller: `authcfg:set-password` from a password-authenticated
+   * client. That write disconnects every socket holding the OLD password, which
+   * includes the actor, and the server closes it BEFORE the invoke response goes
+   * out — so the close IS the success signal and the invoke would otherwise sit
+   * out its 30-second timeout on a rotation that worked perfectly. Racing the
+   * two is the honest reading of a protocol where success and disconnection are
+   * the same event.
+   *
+   * A waiter that never fires is simply garbage-collected with the promise it
+   * lost the race to; nothing latches.
+   */
+  whenCredentialsChanged(): Promise<void> {
+    return new Promise((resolve) => {
+      this.credentialsChangedWaiters.push(resolve)
+    })
+  }
+
+  private sendInvoke(channel: string, args: unknown[]): Promise<unknown> {
     return new Promise((resolve, reject) => {
       // `'enrolling'` is an authenticated state that deliberately never syncs,
       // so it never reaches `'connected'` — but the enrollment screen has to be
@@ -918,6 +992,15 @@ export class RemoteConnection {
       // key is throttled (4006, refused BEFORE any auth frame — so there is no
       // auth-response to learn it from).
       const code = (ev as CloseEvent | undefined)?.code
+      if (code === CLOSE_CREDENTIALS_CHANGED) {
+        // The rotation that caused this close may be one THIS client asked for
+        // (`authcfg:set-password`), in which case the close is its answer. Woken
+        // before the state change so the caller settles as a success rather than
+        // racing the sign-in screen the state change puts up.
+        const waiters = this.credentialsChangedWaiters
+        this.credentialsChangedWaiters = []
+        for (const resolve of waiters) resolve()
+      }
       if (code === CLOSE_CREDENTIALS_CHANGED || code === CLOSE_THROTTLED) {
         this.authRejected = true
         this.setState(
@@ -941,8 +1024,12 @@ export class RemoteConnection {
         }
         // 4010 is likewise not a rejection: the strong tier ended this SESSION on
         // its max-age. Reconnect immediately and let the fresh handshake ask for
-        // whatever it asks for.
+        // whatever it asks for — which under a tier that cuts sessions is the
+        // ceremony. The notice is fired ahead of the reconnect so the app can
+        // explain the sign-in screen the user is about to meet; it is NOT an
+        // error state, so nothing here latches.
         if (code === CLOSE_SESSION_EXPIRED) {
+          this.onSessionExpired?.()
           this.reconnectAttempt = 0
           this.scheduleReconnect('Session expired — signing in again')
           return

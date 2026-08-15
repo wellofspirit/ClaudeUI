@@ -860,6 +860,53 @@ describe('ADR-054 step-up tiers over the socket', () => {
       expect(auditChannels()).not.toContain('auth:session-expired')
     })
 
+    it('audits the password step-up for what it ACTUALLY armed, both ways', async () => {
+      // The row must not overclaim. With the toggle ON a step-up arms the shell
+      // and the mutation window; with it OFF it arms the mutation window only,
+      // and a hardcoded `capability: 'shell'` + "shell + mutation grants armed"
+      // detail would put a shell this session never held into the forensic
+      // record. Both shapes are pinned so neither can drift back.
+      const withShell = await adminUnarmed({ allowTerminal: true })
+      auditRows.length = 0
+      expect(await stepUp(withShell)).toMatchObject({ ok: true })
+      expect(auditRow('auth:step-up')).toMatchObject({ capability: 'shell' })
+      expect(auditRow('auth:step-up')!.detail).toBe(
+        'shell + mutation grants armed via break-glass password step-up'
+      )
+
+      const withoutShell = await adminUnarmed({ allowTerminal: false })
+      auditRows.length = 0
+      expect(await stepUp(withoutShell)).toMatchObject({ ok: true })
+      expect(auditRow('auth:step-up')).toMatchObject({ capability: 'admin' })
+      expect(auditRow('auth:step-up')!.detail).toBe(
+        'mutation grant armed via break-glass password step-up (terminal toggle off — no shell conferred)'
+      )
+    })
+
+    it('is administrable while the TERMINAL TOGGLE is off — the default setting', async () => {
+      // REGRESSION GUARD (series 2). `handleStepUp` used to refuse the entire
+      // ceremony with `terminal-disabled` + `retryable: false` whenever the
+      // desktop "Allow remote terminal" toggle was off — correct under ADR-052,
+      // where step-up existed only for the shell, and a lockout under ADR-054,
+      // where the same ceremony is the ONLY way to satisfy this gate. The
+      // terminal ships OFF, so this was the default configuration: an operator's
+      // window lapses, they try to change a setting from their phone, and they
+      // are told a terminal they never asked for is disabled, with the client
+      // instructed not to retry. The headless bootstrap chain dies with it.
+      const c = await adminUnarmed({ allowTerminal: false })
+      await expect(invoke(c, 'authcfg:set-tier', 'strong')).rejects.toThrow('needs-step-up')
+
+      expect(await stepUp(c), 'the ceremony must not be refused by the terminal toggle').toMatchObject(
+        { ok: true }
+      )
+      await expect(invoke(c, 'authcfg:set-tier', 'strong')).resolves.toMatchObject({ ok: true })
+
+      // …and the toggle still withdraws the shell just as completely: the proof
+      // records presence, it does not confer a terminal.
+      await expect(invoke(c, 'terminal:create', '/tmp/x')).rejects.toThrow('terminal-disabled')
+      await expect(invoke(c, 'terminal:attach', 'anything')).rejects.toThrow('terminal-disabled')
+    })
+
     it('a RETENTION change audits WITHOUT disconnecting (not an admission rule)', async () => {
       const actor = await adminUnarmed()
       expect(await stepUp(actor)).toMatchObject({ ok: true })

@@ -329,6 +329,128 @@ function auditRows(channel: string): AuditLogRow[] {
   return auditLogReader({ limit: 500 }).filter((r) => r.channel === channel)
 }
 
+// --- ADR-054 tier scene (step 7) -------------------------------------------
+
+/**
+ * Budget for the mutation window to go stale on its own.
+ *
+ * `stepUpMutationIdleMinutes` has a ONE-MINUTE floor (`boot-core.ts` validates
+ * 1–1440), so the walk waits out the real thing rather than a stub — the point
+ * of this scene is that the shipped bundle raises the prompt on a real lapse.
+ * The slack over 60 s is for the server's clock, not the client's.
+ */
+const MUTATION_WINDOW_LAPSE_MS = 100_000
+
+/**
+ * The SERVER's view of the sole remaining client's mutation deadline.
+ *
+ * Reaches into a private map, which is exactly what makes it worth having:
+ * "the prompt did not appear" has two very different causes — the gate is
+ * broken, or the window was never stale — and only the server can tell them
+ * apart. Step 7 closes every other tab first so "the sole client" is a fact.
+ * Returns null when there is not exactly one.
+ */
+function actorMutationDeadline(): number | null {
+  const clients = (
+    core.remoteServer as unknown as {
+      clients: Map<unknown, { connection: { mutationExpiresAt?: number | null } }>
+    }
+  ).clients
+  if (clients.size !== 1) return null
+  for (const client of clients.values()) return client.connection.mutationExpiresAt ?? null
+  return null
+}
+
+/**
+ * Wait for that deadline to pass, and REPORT what happened if it does not.
+ *
+ * "The prompt never appeared" has two very different causes — the gate is
+ * broken, or the window was never stale — and a bare timeout cannot tell them
+ * apart. The samples make the second case name itself: a deadline that keeps
+ * moving means something is refreshing it, which would be a defect in the
+ * refresh discipline (only ACTING may slide the window), and a client count
+ * that leaves 1 means the tab reconnected under the probe.
+ */
+async function awaitMutationWindowLapse(): Promise<void> {
+  const started = Date.now()
+  const samples: string[] = []
+  for (;;) {
+    const deadline = actorMutationDeadline()
+    const elapsed = Date.now() - started
+    if (deadline !== null && deadline <= Date.now()) return
+    if (elapsed > MUTATION_WINDOW_LAPSE_MS) {
+      throw new Error(
+        `the mutation window never lapsed in ${Math.round(elapsed / 1000)}s — samples ` +
+          `(elapsed s / clients / seconds until deadline): ${samples.join(', ')}`
+      )
+    }
+    if (elapsed % 5_000 < 250) {
+      samples.push(
+        `${Math.round(elapsed / 1000)}s/${status().connectedClients}/${
+          deadline === null ? 'n-a' : Math.round((deadline - Date.now()) / 1000)
+        }`
+      )
+    }
+    await new Promise((r) => setTimeout(r, 200))
+  }
+}
+
+/**
+ * The strong tier's session budget for step 7c, INJECTED (see there): the
+ * configurable floor is one hour, and a walk cannot wait one. Long enough for a
+ * ceremony plus the app chunk, short enough that the cut lands inside the step.
+ */
+const SHORT_SESSION_MAX_AGE_MS = 45_000
+
+/**
+ * The subset of `window.api` step 7 drives. Declared as a local shape rather
+ * than imported: the callback is serialized into the PAGE, where the renderer's
+ * `ClaudeAPI` type does not exist.
+ */
+interface WalkPageApi {
+  authcfgSetTier(tier: string): Promise<{ ok: boolean; tier?: string }>
+  loadSettings(): Promise<unknown>
+  saveSettings(settings: unknown): Promise<void>
+  terminalAvailability(): Promise<Record<string, unknown>>
+}
+
+/** Run `fn` against the page's live `window.api`. */
+function evalOnPage<T>(wp: WalkPage, fn: (api: WalkPageApi) => Promise<T> | T): Promise<T> {
+  return wp.page.evaluate(
+    (source) =>
+      (new Function(`return (${source})`)() as (api: WalkPageApi) => Promise<T>)(
+        (window as unknown as { api: WalkPageApi }).api
+      ),
+    fn.toString()
+  ) as Promise<T>
+}
+
+/**
+ * Get `loginPage` back into the app.
+ *
+ * Step 7 crosses several auth-surface changes and one deliberate session cut,
+ * and each of them puts this tab back on the one-tap screen. The MODE matters
+ * and is not guessable from the DOM: for a beat after a 4009 the socket is gone
+ * but the app subtree is still mounted, so "is SessionView present?" answers YES
+ * for a tab that is about to be thrown out and will then sit on the one-tap
+ * screen forever with nobody to press it. So a caller that KNOWS a disconnect
+ * was just triggered says so, and this waits for the sign-in screen rather than
+ * racing it.
+ */
+async function signInOnLoginPage(
+  label: string,
+  mode: 'after-disconnect' | 'tolerant' = 'after-disconnect'
+): Promise<void> {
+  const page = loginPage!.page
+  if (mode === 'tolerant' && (await hasTestId(page, 'SessionView'))) return
+  await waitForTestId(page, 'PasskeyLogin', 60_000)
+  await page.locator('[data-testid="PasskeyLogin.submit"]').click()
+  await waitForSurface(loginPage!, 'SessionView', {
+    timeoutMs: APP_SURFACE_TIMEOUT_MS,
+    label
+  })
+}
+
 /** Poll until `predicate` holds — network timing, so generous and interval-based. */
 async function until(label: string, predicate: () => boolean, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -827,7 +949,180 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     note('step 6: policy restored to AUTO → passkey-always')
   }, 300_000)
 
-  it('7. leaves the machine as it was found', async () => {
+  /**
+   * ADR-054 — the step-up TIERS, end to end in the browser.
+   *
+   * Everything the tier suites prove against a socket, this proves against the
+   * shipped bundle: the generic prompt really appears for a NON-terminal
+   * mutation, the settings verbs really are reachable from the web, the strong
+   * tier's session cut really lands as an explained sign-in rather than an
+   * unexplained one, and tier `off` really costs nothing.
+   */
+  it('7. step-up tiers: strong gates a mutation, 4010 is explained, off gates nothing', async () => {
+    // Retire the tabs the earlier steps opened. Three reasons, all of them
+    // about making this step's assertions unambiguous: the freshness probe
+    // below has to be able to name ONE connection, 7c's session cut has to be
+    // observable on the tab under test rather than raced by four reconnecting
+    // ones, and every extra client is extra ceremony traffic in the audit log.
+    for (const wp of [breakGlassPage, offTailnetPage, offLoopbackPage]) await closeWalkPage(wp)
+    breakGlassPage = null
+    offTailnetPage = null
+    offLoopbackPage = null
+
+    // Step 6 left the tab on the one-tap screen (its 4009). Get back in.
+    await signInOnLoginPage('step7-resume')
+    await until('exactly one client to remain connected', () => status().connectedClients === 1)
+
+    // Shorten the mutation window to its 1-minute FLOOR before switching tiers.
+    // Not part of the auth surface, so this causes no 4009 — and the window has
+    // to be short before the tier is armed, or 7b would wait an hour for a proof
+    // to go stale.
+    //
+    // The terminal toggle stays OFF through 7a–7c, deliberately: that is the
+    // DEFAULT, and it is the configuration in which the ceremony used to be
+    // refused outright ("Remote terminal is turned off", `retryable: false`) —
+    // locking the operator out of the very settings surface this scene drives.
+    // Every prompt below therefore runs on a server offering no shell at all.
+    await setConfig({ stepUpMutationIdleMinutes: 1, allowTerminal: false })
+
+    // ── 7a: set the tier FROM THE BROWSER, and prove arm-on-auth ────────────
+    // A passkey login IS a presence proof, so this settings write — which
+    // demands a fresh proof on every tier — goes through with NO ceremony. That
+    // is the whole point of arm-on-auth: ADR-052 asked for a second ceremony
+    // seconds after the first, and ADR-054 does not.
+    const tierWrite = await evalOnPage<{ ok: boolean; tier?: string; error?: string }>(
+      loginPage!,
+      async (api) => {
+        try {
+          return await api.authcfgSetTier('strong')
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) }
+        }
+      }
+    )
+    expect(tierWrite, 'a freshly-armed passkey session must not be asked to prove itself again')
+      .toMatchObject({ ok: true, tier: 'strong' })
+    expect((await getConfig()).stepUpTier).toBe('strong')
+    expect(await hasTestId(loginPage!.page, 'StepUpOverlay')).toBe(false)
+    const shotTier = await shot(loginPage!.page, '12-tier-strong-set-from-web')
+    note(`step 7a: authcfg:set-tier('strong') from the BROWSER, no ceremony (arm-on-auth) → ${shotTier}`)
+
+    // The tier write is an auth-surface change: everyone but the actor is
+    // dropped, and the actor is re-snapshotted IN PLACE — so this tab is
+    // deliberately still signed in, and the tolerant mode is the right one.
+    await signInOnLoginPage('step7a-after-tier', 'tolerant')
+    expect(status().connectedClients, 'the actor is spared its own 4009').toBe(1)
+
+    // ── 7b: the SAME mutation, allowed while fresh and gated once stale ────
+    //
+    // `config:save-settings` is a `command` outside the shell and outside the
+    // settings namespace — exactly the class that was free under `medium` and is
+    // gated under `strong`. Written back unchanged, so the assertion is about
+    // the gate and not about the payload.
+    const saveSettingsUnchanged = (): Promise<string> =>
+      evalOnPage<string>(loginPage!, async (api) => {
+        try {
+          await api.saveSettings(await api.loadSettings())
+          return 'ok'
+        } catch (err) {
+          return `err:${err instanceof Error ? err.message : String(err)}`
+        }
+      })
+
+    // First pass: still inside the window, so it goes straight through — the
+    // strong tier gates STALENESS, not the verb. It also re-stamps the window
+    // with the shortened budget: the tier write a moment ago refreshed using the
+    // policy snapshot this connection was ADMITTED under (60 minutes), because
+    // the freshness gate necessarily runs before the handler that re-snapshots
+    // it. Anything else here would idle for an hour.
+    expect(await saveSettingsUnchanged()).toBe('ok')
+    expect(await hasTestId(loginPage!.page, 'StepUpOverlay')).toBe(false)
+
+    // The premise is asserted, not assumed: wait until the SERVER says this
+    // connection's mutation window has actually gone stale. A fixed sleep would
+    // turn "something quietly refreshed the window" — the exact failure the
+    // refresh discipline exists to prevent — into a mysterious missing prompt
+    // instead of a named finding.
+    await awaitMutationWindowLapse()
+    note('step 7b: the mutation window lapsed on idle — no read or keepalive slid it')
+
+    const mutation = saveSettingsUnchanged()
+    // The GENERIC prompt — not the terminal's. Nothing about this call site
+    // knows what a step-up is; the gate on the invoke path is what raised it.
+    await waitForTestId(loginPage!.page, 'StepUpOverlay', 60_000)
+    const shotPrompt = await shot(loginPage!.page, '13-generic-step-up-prompt')
+    note(`step 7b: a chat/config mutation past the idle window raised the generic prompt → ${shotPrompt}`)
+    await loginPage!.page.locator('[data-testid="StepUpPrompt.passkey"]').click()
+    // …and the ORIGINAL call completes, once, behind it. Note what this also
+    // proves about the gate's shape: the first attempt is REFUSED immediately
+    // (so its 30-second invoke timer never runs while a human hunts for a
+    // fingerprint), and the retry starts a fresh one.
+    await expect(mutation).resolves.toBe('ok')
+    await waitForTestId(loginPage!.page, 'SessionView', 30_000)
+    note('step 7b: the ceremony completed and the original invoke was retried to success')
+
+    // ── 7c: the strong tier's session cut (4010) ───────────────────────────
+    // The max-age floor is one HOUR, so the budget is injected through the
+    // server's own timeouts seam instead — the same field the tier suites use.
+    // Test-only reach into a private field, deliberately and locally: the
+    // alternative is an env var that would be a production backdoor.
+    const timeouts = (core.remoteServer as unknown as { timeouts: { sessionMaxAgeMs?: number } })
+      .timeouts
+    timeouts.sessionMaxAgeMs = SHORT_SESSION_MAX_AGE_MS
+    // The budget is armed AT ACCEPT, so a fresh handshake is needed for it to
+    // apply; a break-glass flip is the cheapest auth-surface change that
+    // produces one.
+    await setConfig({ passwordBreakGlass: false })
+    // Tap in, but do NOT wait for the app surface first: the budget starts at
+    // accept, and a cut that lands mid-boot is a legitimate outcome of a
+    // deliberately tiny one. What must hold either way is that the client
+    // EXPLAINS it.
+    await waitForTestId(loginPage!.page, 'PasskeyLogin', 60_000)
+    await loginPage!.page.locator('[data-testid="PasskeyLogin.submit"]').click()
+    // …and the socket is cut on its own budget, sync stream included.
+    await waitForTestId(loginPage!.page, 'SessionExpiredNotice', 120_000)
+    const shotExpired = await shot(loginPage!.page, '14-session-expired-notice')
+    note(`step 7c: the 4010 cut landed as an EXPLAINED sign-in, not a failure overlay → ${shotExpired}`)
+    // A reconnect, never a credential rejection: the recovery is the ordinary
+    // one-tap screen with the notice above it.
+    await waitForTestId(loginPage!.page, 'PasskeyLogin', 30_000)
+    expect(auditRows('auth:session-expired').length).toBeGreaterThan(0)
+
+    // Restore a real budget before signing back in, or the next socket dies too.
+    timeouts.sessionMaxAgeMs = undefined
+    await setConfig({ passwordBreakGlass: true })
+    await signInOnLoginPage('step7c-recovered')
+
+    // ── 7d: tier `off` gates nothing post-login ────────────────────────────
+    // The terminal toggle comes ON here and only here: this is the one
+    // assertion about a SHELL, and the toggle is a different gate from the tier
+    // (capability arming, not a freshness claim).
+    await setConfig({ stepUpTier: 'off', allowTerminal: true })
+    await signInOnLoginPage('step7d-tier-off')
+    const availability = await evalOnPage<Record<string, unknown>>(loginPage!, (api) =>
+      api.terminalAvailability()
+    )
+    // Armed by the tier-`off` capability waiver at accept: the terminal is open
+    // for both watching and acting with no ceremony anywhere in this scene.
+    expect(availability).toMatchObject({
+      allowed: true,
+      granted: true,
+      needsStepUp: false,
+      readsAllowed: true
+    })
+    expect(await hasTestId(loginPage!.page, 'StepUpOverlay')).toBe(false)
+    const shotOff = await shot(loginPage!.page, '15-tier-off-no-prompts')
+    note(`step 7d: under tier off the terminal is granted at accept, zero prompts → ${shotOff}`)
+
+    // ── 7e: restore the default posture ────────────────────────────────────
+    await setConfig({ stepUpTier: 'medium', stepUpMutationIdleMinutes: 60, allowTerminal: false })
+    const restored = await getConfig()
+    expect(restored.stepUpTier).toBe('medium')
+    expect(restored.effectiveStepUpTier).toBe('medium')
+    note('step 7e: tier restored to medium, terminal toggle back off')
+  }, 600_000)
+
+  it('8. leaves the machine as it was found', async () => {
     // The teardown proper runs in afterAll (it must run even when a step above
     // throws); this asserts the parts that are observable while the instance is
     // still up — i.e. that nothing outside the pinned port was ever touched.
@@ -841,7 +1136,7 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     const mine = occupied.find((o) => o.httpsPort === HTTPS_PORT)
     expect(mine?.target).toBe(`http://127.0.0.1:${localPort}`)
     note(
-      `step 7: serve table before teardown → ${occupied.map((o) => `${o.httpsPort}→${o.target}`).join(', ')}`
+      `step 8: serve table before teardown → ${occupied.map((o) => `${o.httpsPort}→${o.target}`).join(', ')}`
     )
   }, 60_000)
 })

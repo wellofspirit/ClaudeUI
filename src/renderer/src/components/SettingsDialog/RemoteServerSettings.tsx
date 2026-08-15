@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
 import { RemotePasskeySettings } from './RemotePasskeySettings'
 import { SelectMenu } from '../shared/SelectMenu'
+import { isWebClient, rotateRemotePassword } from './remote-settings-transport'
 
 // Mirrors remote-auth.ts's MIN_PASSWORD_LENGTH — kept as a local literal
 // because that module is main-only (imports node:crypto) and can't be
@@ -33,6 +34,9 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [passwordDraft, setPasswordDraft] = useState('')
   const [passwordConfirm, setPasswordConfirm] = useState('')
   const [passwordError, setPasswordError] = useState<string | null>(null)
+  /** Confirmation for the web rotation path, whose success may arrive as a
+   *  socket close rather than a response (see handleSetPassword). */
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
   /** Actionable message from the last failed `detectTailscale()` probe. */
@@ -163,8 +167,21 @@ export function RemoteServerSettings(): React.JSX.Element {
     setIdleInput(String(updated.shellGrantIdleMinutes))
   }, [idleInput])
 
+  /**
+   * Provision or rotate the break-glass password.
+   *
+   * TRANSPORT-AWARE (ADR-054 decision 6): the desktop writes it directly, a web
+   * client rides `authcfg:set-password` behind a fresh presence proof. The web
+   * path has a shape nothing else here does — the rotation DISCONNECTS every
+   * socket holding the old password, and when the caller is one of them the
+   * server closes it before the response goes out. The api-adapter races the
+   * close against the response, so this resolves either way; what it must NOT do
+   * afterwards is assume it still has a connection, hence the confirmation
+   * message instead of a `reload()` that would hang on a socket that has gone.
+   */
   const handleSetPassword = useCallback(async (): Promise<void> => {
     setPasswordError(null)
+    setPasswordNotice(null)
     if (passwordDraft.length < MIN_PASSWORD_LENGTH) {
       setPasswordError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
       return
@@ -175,9 +192,19 @@ export function RemoteServerSettings(): React.JSX.Element {
     }
     setBusy(true)
     try {
-      await window.api.setRemotePassword(passwordDraft)
+      await rotateRemotePassword(passwordDraft)
       setPasswordDraft('')
       setPasswordConfirm('')
+      if (isWebClient()) {
+        setPasswordNotice(
+          // "Sent", not "updated": on the web this can resolve because the socket
+          // was CLOSED rather than because a response arrived, and a close says
+          // "the password this socket held is gone" — strong evidence for this
+          // rotation, not proof of it (see the race in api-adapter.ts).
+          'Password change sent. Any device signed in with the old password — possibly this one — has been signed out and needs the new one.'
+        )
+        return
+      }
       await reload()
     } catch (err) {
       setPasswordError(err instanceof Error ? err.message : String(err))
@@ -212,209 +239,237 @@ export function RemoteServerSettings(): React.JSX.Element {
   const bindHostKnown =
     config.bindHost == null || interfaces.some((iface) => iface.address === config.bindHost)
   const tlsEnabled = config.tlsMode === 1
+  /**
+   * Not the host anchor (ADR-054 decision 6).
+   *
+   * Everything from here to the password block is TRANSPORT configuration —
+   * which port to listen on, which interface to bind, whether `tailscale serve`
+   * runs, whether a remote shell is offered at all — and none of it has a
+   * web-reachable writer, deliberately: a remote client must never be able to
+   * take over the transport it is talking through (the ADR-042 rule, generalised
+   * by the host anchor). So the web client renders the auth surface only, rather
+   * than a wall of controls whose every write would be refused.
+   */
+  const web = isWebClient()
 
   return (
     <div
       data-testid="RemoteServerSettings"
+      data-transport={web ? 'web' : 'host'}
       className="px-3 py-1.5 text-[13px] text-text-secondary space-y-3"
     >
-      {/* Port */}
-      <div>
-        <div className="mb-1">Port</div>
-        <input
-          data-testid="RemoteServerSettings.port"
-          type="text"
-          inputMode="numeric"
-          value={portInput}
-          placeholder="Random port"
-          onChange={(e) => setPortInput(e.target.value)}
-          onBlur={() => void commitPort()}
-          className={`${inputClass} w-full`}
-        />
-        {portError && (
-          <div
-            data-testid="RemoteServerSettings.portError"
-            className="text-[10px] text-red-400 mt-0.5"
-          >
-            {portError}
-          </div>
-        )}
-        <div className="text-[10px] text-text-muted/60 mt-1">
-          Applies the next time the server starts.
-        </div>
-      </div>
-
-      {/* Bind interface */}
-      <div>
-        <div className="mb-1">Bind interface</div>
-        <SelectMenu
-          testid="RemoteServerSettings.bindHost"
-          value={config.bindHost ?? ''}
-          disabled={tlsEnabled}
-          onChange={(v) => void handleBindHostChange(v)}
-          options={[
-            { value: '', label: 'All interfaces (0.0.0.0)' },
-            ...interfaces.map((iface) => ({
-              value: iface.address,
-              label: `${iface.address} (${iface.name})`
-            })),
-            // A stale/hand-edited bindHost that no longer matches a live NIC
-            // stays selectable so the control reports what is actually saved.
-            ...(!bindHostKnown && config.bindHost
-              ? [{ value: config.bindHost, label: `${config.bindHost} (unavailable)` }]
-              : [])
-          ]}
-          triggerClassName={`${inputClass} w-full ${tlsEnabled ? 'opacity-40' : ''}`}
-        />
-        {tlsEnabled && (
-          <div
-            data-testid="RemoteServerSettings.bindHostTlsHint"
-            className="text-[10px] text-text-muted/60 mt-1"
-          >
-            TLS mode binds 127.0.0.1 — reached via your tailnet name.
-          </div>
-        )}
-      </div>
-
-      {/* Autostart */}
-      <button
-        data-testid="RemoteServerSettings.autostart"
-        onClick={() => void handleAutostartToggle()}
-        className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
-      >
-        <span>Start remote access on launch</span>
-        <span
-          className={`w-7 h-4 rounded-full relative transition-colors ${config.autostart ? 'bg-accent' : 'bg-text-muted/30'}`}
-        >
-          <span
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.autostart ? 'left-3.5' : 'left-0.5'}`}
-          />
-        </span>
-      </button>
-
-      {/* Tailscale HTTPS (TLS mode) */}
-      <div>
-        <button
-          data-testid="RemoteServerSettings.tls"
-          disabled={busy}
-          onClick={() => void handleTlsToggle()}
-          className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default disabled:opacity-50"
-        >
-          <span>Tailscale HTTPS (tailnet identity)</span>
-          <span
-            className={`w-7 h-4 rounded-full relative transition-colors ${tlsEnabled ? 'bg-accent' : 'bg-text-muted/30'}`}
-          >
-            <span
-              className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${tlsEnabled ? 'left-3.5' : 'left-0.5'}`}
-            />
-          </span>
-        </button>
-        {confirmTls && (
-          <div
-            data-testid="RemoteServerSettings.tlsConfirm"
-            className="text-[10px] text-warning mt-0.5"
-          >
-            Configures `tailscale serve` on this machine (persists until turned off) and restricts
-            the server to Tailscale-only access. Click the toggle again to confirm.
-          </div>
-        )}
-        {tlsDetection && (
-          <div
-            data-testid="RemoteServerSettings.tlsDetection"
-            className="text-[10px] text-red-400 mt-0.5"
-          >
-            {tlsDetection}
-          </div>
-        )}
-        <div className="text-[10px] text-text-muted/60 mt-1">
-          Applies the next time the server starts.
-        </div>
-
-        {/* Pinned HTTPS port (ADR-042) — only meaningful while TLS mode is on. */}
-        <div className="mt-2">
-          <div className="mb-1 text-[12px] text-text-secondary">HTTPS port (Tailscale)</div>
-          <input
-            data-testid="RemoteServerSettings.tlsHttpsPort"
-            type="text"
-            inputMode="numeric"
-            value={tlsPortInput}
-            placeholder="443"
-            disabled={!tlsEnabled}
-            onChange={(e) => setTlsPortInput(e.target.value)}
-            onBlur={() => void commitTlsPort()}
-            className={`${inputClass} w-full ${tlsEnabled ? '' : 'opacity-40'}`}
-          />
-          {tlsPortError && (
-            <div
-              data-testid="RemoteServerSettings.tlsHttpsPortError"
-              className="text-[10px] text-red-400 mt-0.5"
-            >
-              {tlsPortError}
-            </div>
-          )}
-          <div
-            data-testid="RemoteServerSettings.tlsHttpsPortHint"
-            className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-          >
-            The only port used — no fallback. 443 gives a bare https://&lt;your-node&gt;.ts.net URL;
-            443, 8443 and 10000 are the ports Tailscale Funnel would accept.
-          </div>
-        </div>
-      </div>
-
-      {/* Remote terminal (ADR-052) */}
-      <div>
-        <button
-          data-testid="RemoteServerSettings.allowTerminal"
-          onClick={() => void handleTerminalToggle()}
-          className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
-        >
-          <span>Allow remote terminal</span>
-          <span
-            className={`w-7 h-4 rounded-full relative transition-colors ${config.allowTerminal ? 'bg-accent' : 'bg-text-muted/30'}`}
-          >
-            <span
-              className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.allowTerminal ? 'left-3.5' : 'left-0.5'}`}
-            />
-          </span>
-        </button>
-        {/* Say plainly what this exposes — it is a raw shell, not a sandbox. */}
+      {web && (
         <div
-          data-testid="RemoteServerSettings.allowTerminalNote"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
+          data-testid="RemoteServerSettings.hostOnlyNote"
+          className="text-[10px] text-text-muted/60 leading-snug"
         >
-          Lets a signed-in remote client open a real shell on this machine, running as you, with no
-          per-command approval. Each client must re-enter the remote password to unlock it, and
-          access ends after the timeout below. You can watch any remote shell live from this app.
+          Port, network interface, Tailscale HTTPS and the remote-terminal switch are set on the
+          machine itself — the desktop app, or the server’s own configuration on a headless install.
         </div>
+      )}
 
-        <div className="mt-2">
-          <div className="mb-1 text-[12px] text-text-secondary">Terminal timeout (minutes)</div>
-          <input
-            data-testid="RemoteServerSettings.shellGrantIdleMinutes"
-            type="text"
-            inputMode="numeric"
-            value={idleInput}
-            placeholder="10"
-            disabled={!config.allowTerminal}
-            onChange={(e) => setIdleInput(e.target.value)}
-            onBlur={() => void commitIdleMinutes()}
-            className={`${inputClass} w-full ${config.allowTerminal ? '' : 'opacity-40'}`}
-          />
-          {idleError && (
-            <div
-              data-testid="RemoteServerSettings.shellGrantIdleMinutesError"
-              className="text-[10px] text-red-400 mt-0.5"
-            >
-              {idleError}
+      {!web && (
+        <>
+          {/* Port */}
+          <div>
+            <div className="mb-1">Port</div>
+            <input
+              data-testid="RemoteServerSettings.port"
+              type="text"
+              inputMode="numeric"
+              value={portInput}
+              placeholder="Random port"
+              onChange={(e) => setPortInput(e.target.value)}
+              onBlur={() => void commitPort()}
+              className={`${inputClass} w-full`}
+            />
+            {portError && (
+              <div
+                data-testid="RemoteServerSettings.portError"
+                className="text-[10px] text-red-400 mt-0.5"
+              >
+                {portError}
+              </div>
+            )}
+            <div className="text-[10px] text-text-muted/60 mt-1">
+              Applies the next time the server starts.
             </div>
-          )}
-          <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">
-            Idle time before a remote client must re-enter the password. Reading chat does not keep
-            a terminal unlocked — only terminal use does.
           </div>
-        </div>
-      </div>
+
+          {/* Bind interface */}
+          <div>
+            <div className="mb-1">Bind interface</div>
+            <SelectMenu
+              testid="RemoteServerSettings.bindHost"
+              value={config.bindHost ?? ''}
+              disabled={tlsEnabled}
+              onChange={(v) => void handleBindHostChange(v)}
+              options={[
+                { value: '', label: 'All interfaces (0.0.0.0)' },
+                ...interfaces.map((iface) => ({
+                  value: iface.address,
+                  label: `${iface.address} (${iface.name})`
+                })),
+                // A stale/hand-edited bindHost that no longer matches a live NIC
+                // stays selectable so the control reports what is actually saved.
+                ...(!bindHostKnown && config.bindHost
+                  ? [{ value: config.bindHost, label: `${config.bindHost} (unavailable)` }]
+                  : [])
+              ]}
+              triggerClassName={`${inputClass} w-full ${tlsEnabled ? 'opacity-40' : ''}`}
+            />
+            {tlsEnabled && (
+              <div
+                data-testid="RemoteServerSettings.bindHostTlsHint"
+                className="text-[10px] text-text-muted/60 mt-1"
+              >
+                TLS mode binds 127.0.0.1 — reached via your tailnet name.
+              </div>
+            )}
+          </div>
+
+          {/* Autostart */}
+          <button
+            data-testid="RemoteServerSettings.autostart"
+            onClick={() => void handleAutostartToggle()}
+            className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
+          >
+            <span>Start remote access on launch</span>
+            <span
+              className={`w-7 h-4 rounded-full relative transition-colors ${config.autostart ? 'bg-accent' : 'bg-text-muted/30'}`}
+            >
+              <span
+                className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.autostart ? 'left-3.5' : 'left-0.5'}`}
+              />
+            </span>
+          </button>
+
+          {/* Tailscale HTTPS (TLS mode) */}
+          <div>
+            <button
+              data-testid="RemoteServerSettings.tls"
+              disabled={busy}
+              onClick={() => void handleTlsToggle()}
+              className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default disabled:opacity-50"
+            >
+              <span>Tailscale HTTPS (tailnet identity)</span>
+              <span
+                className={`w-7 h-4 rounded-full relative transition-colors ${tlsEnabled ? 'bg-accent' : 'bg-text-muted/30'}`}
+              >
+                <span
+                  className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${tlsEnabled ? 'left-3.5' : 'left-0.5'}`}
+                />
+              </span>
+            </button>
+            {confirmTls && (
+              <div
+                data-testid="RemoteServerSettings.tlsConfirm"
+                className="text-[10px] text-warning mt-0.5"
+              >
+                Configures `tailscale serve` on this machine (persists until turned off) and
+                restricts the server to Tailscale-only access. Click the toggle again to confirm.
+              </div>
+            )}
+            {tlsDetection && (
+              <div
+                data-testid="RemoteServerSettings.tlsDetection"
+                className="text-[10px] text-red-400 mt-0.5"
+              >
+                {tlsDetection}
+              </div>
+            )}
+            <div className="text-[10px] text-text-muted/60 mt-1">
+              Applies the next time the server starts.
+            </div>
+
+            {/* Pinned HTTPS port (ADR-042) — only meaningful while TLS mode is on. */}
+            <div className="mt-2">
+              <div className="mb-1 text-[12px] text-text-secondary">HTTPS port (Tailscale)</div>
+              <input
+                data-testid="RemoteServerSettings.tlsHttpsPort"
+                type="text"
+                inputMode="numeric"
+                value={tlsPortInput}
+                placeholder="443"
+                disabled={!tlsEnabled}
+                onChange={(e) => setTlsPortInput(e.target.value)}
+                onBlur={() => void commitTlsPort()}
+                className={`${inputClass} w-full ${tlsEnabled ? '' : 'opacity-40'}`}
+              />
+              {tlsPortError && (
+                <div
+                  data-testid="RemoteServerSettings.tlsHttpsPortError"
+                  className="text-[10px] text-red-400 mt-0.5"
+                >
+                  {tlsPortError}
+                </div>
+              )}
+              <div
+                data-testid="RemoteServerSettings.tlsHttpsPortHint"
+                className="text-[10px] text-text-muted/60 mt-1 leading-snug"
+              >
+                The only port used — no fallback. 443 gives a bare https://&lt;your-node&gt;.ts.net
+                URL; 443, 8443 and 10000 are the ports Tailscale Funnel would accept.
+              </div>
+            </div>
+          </div>
+
+          {/* Remote terminal (ADR-052) */}
+          <div>
+            <button
+              data-testid="RemoteServerSettings.allowTerminal"
+              onClick={() => void handleTerminalToggle()}
+              className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
+            >
+              <span>Allow remote terminal</span>
+              <span
+                className={`w-7 h-4 rounded-full relative transition-colors ${config.allowTerminal ? 'bg-accent' : 'bg-text-muted/30'}`}
+              >
+                <span
+                  className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.allowTerminal ? 'left-3.5' : 'left-0.5'}`}
+                />
+              </span>
+            </button>
+            {/* Say plainly what this exposes — it is a raw shell, not a sandbox. */}
+            <div
+              data-testid="RemoteServerSettings.allowTerminalNote"
+              className="text-[10px] text-text-muted/60 mt-1 leading-snug"
+            >
+              Lets a signed-in remote client open a real shell on this machine, running as you, with
+              no per-command approval. Each client must re-enter the remote password to unlock it,
+              and access ends after the timeout below. You can watch any remote shell live from this
+              app.
+            </div>
+
+            <div className="mt-2">
+              <div className="mb-1 text-[12px] text-text-secondary">Terminal timeout (minutes)</div>
+              <input
+                data-testid="RemoteServerSettings.shellGrantIdleMinutes"
+                type="text"
+                inputMode="numeric"
+                value={idleInput}
+                placeholder="10"
+                disabled={!config.allowTerminal}
+                onChange={(e) => setIdleInput(e.target.value)}
+                onBlur={() => void commitIdleMinutes()}
+                className={`${inputClass} w-full ${config.allowTerminal ? '' : 'opacity-40'}`}
+              />
+              {idleError && (
+                <div
+                  data-testid="RemoteServerSettings.shellGrantIdleMinutesError"
+                  className="text-[10px] text-red-400 mt-0.5"
+                >
+                  {idleError}
+                </div>
+              )}
+              <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">
+                Idle time before a remote client must re-enter the password. Reading chat does not
+                keep a terminal unlocked — only terminal use does.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Password */}
       <div>
@@ -453,6 +508,15 @@ export function RemoteServerSettings(): React.JSX.Element {
             {passwordError}
           </div>
         )}
+        {passwordNotice && (
+          <div
+            data-testid="RemoteServerSettings.passwordNotice"
+            role="status"
+            className="text-[10px] text-accent mt-0.5 leading-snug"
+          >
+            {passwordNotice}
+          </div>
+        )}
         <div className="flex items-center gap-2 mt-1.5">
           <button
             data-testid="RemoteServerSettings.setPassword"
@@ -462,7 +526,11 @@ export function RemoteServerSettings(): React.JSX.Element {
           >
             {config.passwordSet ? 'Change' : 'Set'}
           </button>
-          {config.passwordSet && (
+          {/* CLEARING the credential is host-anchor only: `remote:clear-password`
+              has no remote registration, and removing the last way back in over
+              the network is close enough to disabling authentication to belong
+              on the same side of the line. */}
+          {config.passwordSet && !web && (
             <button
               data-testid="RemoteServerSettings.clearPassword"
               disabled={busy}

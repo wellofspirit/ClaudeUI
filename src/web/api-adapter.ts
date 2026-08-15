@@ -639,22 +639,72 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       authMethods: []
     }),
     onRemoteStatus: () => () => {},
-    // Persisted remote-server config (Phase 1) is main-only IPC on the
-    // desktop — never registered on the remote dispatcher (see
-    // RemoteDispatcher.BLOCKED), so a remote/web client must never be able to
-    // read/rotate the credential or flip transport/autostart flags.
-    getRemoteConfig: async () => {
-      throw new Error('Not available in remote mode')
-    },
+    // The READ is real over remote as of ADR-054 decision 6: `authcfg:get`, an
+    // `admin`-gated QUERY answering the same sanitized object the desktop's
+    // `remote:get-config` does. Making the routine settings web-reachable is
+    // unimplementable without it — a pane cannot administer a surface it cannot
+    // render — and it carries no secret (salt/hash/KDF never leave main; only a
+    // `passwordSet` boolean does).
+    getRemoteConfig: () =>
+      connection.invoke('authcfg:get') as ReturnType<ClaudeAPI['getRemoteConfig']>,
+    // The WRITE stays host-anchor only: `remote:set-config` is the one writer
+    // that can reach the `off` master switch, and it has no remote registration
+    // at all. The routine subset is `authcfg:*` below.
     setRemoteConfig: async () => {
-      throw new Error('Not available in remote mode')
+      throw new Error(
+        'Transport and authentication-disabling settings can only be changed on the host — ' +
+          'use the desktop app (or the server console on a headless install).'
+      )
     },
+    // Password ROTATION is reachable (authcfgSetPassword below); these two are
+    // the host-anchor `remote:*` credential channels, which are not.
     setRemotePassword: async () => {
       throw new Error('Not available in remote mode')
     },
     clearRemotePassword: async () => {
       throw new Error('Not available in remote mode')
     },
+    // ADR-054 decision 6 — the routine remote-access settings, behind `admin`
+    // AND a presence proof inside the mutation window on every tier. A stale
+    // proof answers `needs-step-up`, which the connection's step-up gate turns
+    // into one ceremony and a single retry before the caller sees it.
+    authcfgSetTier: (tier) =>
+      connection.invoke('authcfg:set-tier', tier) as ReturnType<ClaudeAPI['authcfgSetTier']>,
+    authcfgSetAuthMode: (mode) =>
+      connection.invoke('authcfg:set-auth-mode', mode) as ReturnType<
+        ClaudeAPI['authcfgSetAuthMode']
+      >,
+    // Success and disconnection are the SAME event here when the caller is
+    // password-authenticated: the server drops every socket holding the old
+    // password — the actor included — before the invoke response goes out. So
+    // the two are raced. A passkey actor is not disconnected and simply wins with
+    // the normal response; a password actor wins with close-4008 instead of
+    // sitting out a 30-second timeout on a rotation that worked. A REFUSAL
+    // (needs-step-up after a dismissed ceremony, a weak password) still rejects,
+    // because the invoke settles and the close never comes.
+    //
+    // The close is STRONG EVIDENCE, not proof. 4008 means "the password this
+    // socket holds is gone", and in the window between sending and settling that
+    // could in principle be somebody ELSE's rotation — a second admin, or the
+    // host anchor — in which case this call reports success for a write that may
+    // never have landed. Single-operator deployment, a window of milliseconds,
+    // and the confirmation copy deliberately says the device has been signed out
+    // rather than asserting whose password is now in force; the alternative
+    // (correlating the close to this request) needs a wire field the protocol
+    // does not have. Recorded so the next reader knows it is a considered trade.
+    authcfgSetPassword: async (password) => {
+      const rotatedAndDisconnected = connection
+        .whenCredentialsChanged()
+        .then(() => ({ ok: true }) as const)
+      const answered = connection.invoke('authcfg:set-password', password) as ReturnType<
+        ClaudeAPI['authcfgSetPassword']
+      >
+      return Promise.race([answered, rotatedAndDisconnected])
+    },
+    authcfgSetRetention: (days) =>
+      connection.invoke('authcfg:set-retention', days) as ReturnType<
+        ClaudeAPI['authcfgSetRetention']
+      >,
     detectTailscale: async () => {
       throw new Error('Not available in remote mode')
     },

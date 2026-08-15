@@ -12,6 +12,9 @@ export const DESKTOP_AVAILABILITY: TerminalAvailability = {
   allowed: true,
   granted: true,
   needsStepUp: false,
+  // The host anchor is exempt from the whole ADR-054 tier table, so it may both
+  // watch and act, always.
+  readsAllowed: true,
   // No ceremony on desktop, so no proof params to carry.
   stepUp: null
 }
@@ -21,6 +24,7 @@ const DENIED: TerminalAvailability = {
   allowed: false,
   granted: false,
   needsStepUp: false,
+  readsAllowed: false,
   stepUp: null
 }
 

@@ -1,6 +1,6 @@
 # ADR-054 — Step-up policy tiers: separating login auth from presence freshness
 
-**Status:** **Accepted** (owner-ratified 2026-08-15; implementation pending — this ADR is the kickoff's normative source).
+**Status:** **Implemented** (owner-ratified 2026-08-15). Server core landed in `8a4b28d`; client UX, the `authcfg:*` read verb, the read/act client state and the docs amendment landed in the follow-on series. As-built detail lives in [security.md](../architecture/security.md) — this ADR keeps the decisions and the reasoning, including the ordering clarifications ratified during implementation (§3/§6 below).
 **Relates to:** ADR-051 (command registry — the `kind` field becomes security-load-bearing here), ADR-053.
 **Supersedes in part:** ADR-052 — its Decision 3 (`passkey-for-grants` as a mode), Decision 5 (grant-decay scope and what feeds it), and the "never reachable remotely" wording of its Decision 3 `off` clause (generalized, not weakened — see Decision 6). Everything else in ADR-052 stands.
 
@@ -38,6 +38,10 @@ A login that *is* a presence proof arms the relevant grants at accept: a **passk
 
 Flat — no origin carve-outs. You cannot demand a ceremony from an identity that was never established, and gating a pty while unauthenticated model-mediated execution is open is theater. The `off` banners, typed opt-in, startup warning and audit rows (ADR-052) carry the posture unchanged.
 
+**Ordering clarification (owner-RATIFIED during implementation).** Read literally, this decision and Decision 6 collide on an explicitly-`off` tier: one says nothing is gated, the other says the settings verbs carry strong-tier freshness "regardless of tier". The order is resolved **in favour of Decision 6** — the settings verbs demand a fresh presence proof on EVERY tier, `off` included. An operator choosing "don't nag me post-login" is choosing it for their chat and their shell, not for the surface that decides who may connect at all; a session that can silently rewrite the auth mode is the one thing tier `off` must not buy.
+
+This does not weaken Decision 3 in substance: under auth-MODE `off` a connection holds the as-built grant set and never `admin`, so it can never actually administer the settings surface. Note the order precisely, because the obvious statement of it is wrong — the transport checks freshness BEFORE capability, so such a connection meets `needs-step-up` first and only reaches `Permission denied` if it goes on to complete a ceremony. Both walls hold; the freshness one is simply in front.
+
 ### 4. The shell read/act split (applies in `medium` AND `strong`)
 
 Owner-designed, borrowing the strong-tier principle into the terminal itself:
@@ -59,6 +63,17 @@ Owner-designed, borrowing the strong-tier principle into the terminal itself:
 - **Auth-disabling operations** — the `off` master switch and anything else that disables authentication — are **host-anchor only, forever**: the desktop renderer today; the server's own console/config file (reached via SSH) on headless. Never the web, even behind a fresh ceremony: a stolen stepped-up session must not be able to turn auth off, on either form factor.
 - **Routine remote-access settings** — step-up tier selection, password rotation, credential list/rename/revoke, auth-mode changes **among the non-off modes** — become web-reachable behind a **fresh passkey step-up** (strong-tier freshness for this area regardless of tier). This is what makes headless administrable day-to-day without SSH.
 - The structural guard survives intact: no `remote:*`-namespace channel is ever registered on the remote transport; the newly web-reachable settings verbs get their own namespace and declarations, and the `off` writer stays out of them.
+
+**Which factor may administer the settings area (owner-RATIFIED during implementation).** The decision text above says "behind a fresh **passkey** step-up". As built, the settings area accepts either factor the ordinary step-up accepts: **a password step-up may administer the settings area.** Two reasons, and the owner ratified both:
+
+- The break-glass password is the owner's own secret and already carries `admin` + `enroll` under the passkey modes (ADR-052's grant bundles). Refusing it *here* while accepting it for the terminal would be a distinction with no threat behind it.
+- It is what makes the surface recoverable. On a plain-LAN IP or a tunnel hostname no passkey ceremony is possible at all, and a passkey-only settings area would be unreachable from exactly the transports an operator falls back to when something is wrong.
+
+What the password may **never** reach is the `off` switch — that is host-anchor only on every transport and behind no ceremony at all. The line is not "which factor", it is "which operation".
+
+**Headless bootstrap chain (owner-RATIFIED during implementation).** Decision 6 makes a headless box administrable, but "the first passkey comes from the desktop" needed a second answer for a deployment with no desktop. The chain: **(1)** first boot prints a one-time enrollment URL on the console — same single-use short-TTL mint as the desktop's, necessarily at the tailnet HTTPS name because that hostname IS the RP ID; **(2)** the first passkey ceremony arms the settings window through arm-on-auth, so that device reaches `authcfg:*` with no second ceremony; **(3)** `authcfg:*` then covers day-to-day administration, including `authcfg:set-password` to provision break-glass; **(4)** an operator who wants password-only headless provisions the credential through the host's own config/CLI — a password login arms nothing, so the first settings write meets a step-up the password itself may satisfy; **(5)** all-passkeys-lost recovery is a console re-mint, i.e. step 1 again. There is deliberately no network-reachable recovery, because a network-reachable recovery is a network-reachable bypass.
+
+**The read verb.** `authcfg:get` (a `query`, `admin`, no freshness demand) was added during implementation because the decision is unimplementable without it: a settings pane cannot administer a surface it cannot render, and demanding a ceremony before the tier can be DISPLAYED would put the ceremony in front of its own explanation. It answers the same sanitized object `remote:get-config` does — one sanitizer, so no field can be exposed on one transport and forgotten on the other.
 
 ## Consequences
 

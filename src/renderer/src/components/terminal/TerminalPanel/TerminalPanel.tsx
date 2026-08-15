@@ -49,9 +49,33 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
     } catch {
       // An older host (or a dropped connection) means "no terminal here" —
       // never optimistically render a shell we cannot actually drive.
-      setAvailability({ allowed: false, granted: false, needsStepUp: false, stepUp: null })
+      setAvailability({
+        allowed: false,
+        granted: false,
+        needsStepUp: false,
+        readsAllowed: false,
+        stepUp: null
+      })
     }
   }, [isWeb])
+
+  /**
+   * Ask for a fresh presence proof from the keystroke path (ADR-054).
+   *
+   * The web bundle installs `__STEP_UP_REQUEST__`; this component is shared with
+   * the desktop build, which has no ceremony at all — hence the optional call
+   * rather than an import. A granted ceremony re-reads availability, which is
+   * what turns the panel from watching back into typing.
+   */
+  const requestStepUp = useCallback((): void => {
+    const request = (
+      window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }
+    ).__STEP_UP_REQUEST__
+    if (!request) return
+    void request('terminal:write').then((granted) => {
+      if (granted) void refreshAvailability()
+    })
+  }, [refreshAvailability])
 
   useEffect(() => {
     void refreshAvailability()
@@ -80,11 +104,13 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
   // an answer taken before that shell existed is exactly the stale one that
   // makes a running shell invisible after its tab is closed.
   const tabKey = visibleTabs.map((t) => `${t.poolIndex ?? ''}:${t.id}`).join(',')
-  const { liveSlots, refresh: refreshPool } = useTerminalPool(
-    cwd,
-    !isWeb || !!availability?.granted,
-    tabKey
-  )
+  // `terminal:pool` is a shell READ (ADR-054), so the gate is `readsAllowed`, not
+  // `granted`: a connection whose act window decayed can still be told which
+  // slots are live, and asking is what keeps the "+" indicator honest while the
+  // panel is in its watching state. `granted` is kept in the disjunction for an
+  // older host that answers no `readsAllowed` at all.
+  const canReadShells = !isWeb || !!availability?.granted || !!availability?.readsAllowed
+  const { liveSlots, refresh: refreshPool } = useTerminalPool(cwd, canReadShells, tabKey)
 
   const handleNewTab = async (): Promise<void> => {
     const target = cwd || '.'
@@ -111,6 +137,11 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
           allowed: true,
           granted: false,
           needsStepUp: true,
+          // Acting was refused; WATCHING is a separate question this refusal
+          // says nothing about, so the previous answer stands. Flattening it to
+          // false here would wall off a terminal the connection may still read
+          // — the exact regression the read/act split exists to prevent.
+          readsAllowed: prev?.readsAllowed,
           stepUp: prev?.stepUp ?? null
         }))
         return
@@ -160,7 +191,15 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
     return unsub
   }, [removeTerminalTab, refreshPool])
 
-  if (isWeb && (!availability || !availability.allowed || availability.needsStepUp)) {
+  // The step-up WALL, narrowed by ADR-054's read/act split: a connection that
+  // may still watch gets the terminal itself (read-only) rather than a prompt in
+  // front of shells it is entitled to see. `readsAllowed` is absent on an older
+  // host, which therefore keeps the pre-ADR-054 wall exactly as it was.
+  const readOnly = isWeb && !!availability?.readsAllowed && !availability.granted
+  if (
+    isWeb &&
+    (!availability || !availability.allowed || (availability.needsStepUp && !readOnly))
+  ) {
     return (
       <div
         data-testid="TerminalPanel"
@@ -219,6 +258,8 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
       onClosePanel={() => setTerminalPanelOpen(false)}
       nextSlot={nextSlot}
       nextSlotRunning={liveSlots.has(nextSlot)}
+      readOnly={readOnly}
+      onBlockedInput={requestStepUp}
     />
   )
 }

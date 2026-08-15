@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DISABLE_AUTH_PHRASE, RemotePasskeySettings } from '../RemotePasskeySettings'
-import { selectMenuValue } from '../../../../../test/helpers/select-menu'
-import { LAST_CREDENTIAL_LOCKOUT_ERROR } from '../../../../../shared/remote-protocol'
+import {
+  chooseSelectMenuOption,
+  selectMenuOptionValues,
+  selectMenuValue
+} from '../../../../../test/helpers/select-menu'
+import {
+  LAST_CREDENTIAL_LOCKOUT_ERROR,
+  NEEDS_STEP_UP_ERROR
+} from '../../../../../shared/remote-protocol'
 import type { RemoteConfig, WebauthnCredential } from '../../../../../shared/types'
 
 // qrcode is dynamically imported by the mint path so it stays off the eager
@@ -46,7 +53,11 @@ const credential = (over: Partial<WebauthnCredential> = {}): WebauthnCredential 
 let statusSubscribers: (() => void)[] = []
 
 const api = {
+  /** Overridden per test — the transport split is what several of these pin. */
+  platform: 'darwin' as string,
   setRemoteConfig: vi.fn(),
+  getRemoteConfig: vi.fn(),
+  authcfgSetAuthMode: vi.fn(),
   webauthnCredentials: vi.fn(),
   webauthnRename: vi.fn(),
   webauthnRevoke: vi.fn(),
@@ -79,7 +90,10 @@ describe('RemotePasskeySettings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     statusSubscribers = []
+    api.platform = 'darwin'
     api.webauthnCredentials.mockResolvedValue([])
+    api.getRemoteConfig.mockResolvedValue(baseConfig)
+    api.authcfgSetAuthMode.mockResolvedValue({ ok: true, mode: null })
     api.setRemoteConfig.mockImplementation(async (partial: Partial<RemoteConfig>) => ({
       ...baseConfig,
       ...partial
@@ -460,6 +474,70 @@ describe('RemotePasskeySettings', () => {
       expect(await screen.findByTestId('RemotePasskeySettings.enrollNote')).toHaveTextContent(
         /Tailscale HTTPS address/i
       )
+    })
+  })
+  /**
+   * ADR-054 decision 6 — the HOST ANCHOR, from the client's side.
+   *
+   * The server enforces every one of these (the `off` writer has no remote
+   * registration at all; `authcfg:set-auth-mode` refuses `off` with a typed
+   * error; the two toggles below have no web-reachable verb). What this block
+   * pins is that a web client never OFFERS what it cannot do — an operator
+   * should not learn the rule by clicking into a refusal.
+   */
+  describe('web transport (ADR-054 decision 6)', () => {
+    beforeEach(() => {
+      api.platform = 'web'
+      api.authcfgSetAuthMode.mockResolvedValue({ ok: true, mode: 'passkey-always' })
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, authPolicy: 'passkey-always' })
+    })
+
+    it('does not offer "No authentication" at all', async () => {
+      renderPane()
+      await screen.findByTestId('RemotePasskeySettings')
+      const offered = selectMenuOptionValues(screen.getByTestId('RemotePasskeySettings.policy'))
+      expect(offered).not.toContain('off')
+      expect(offered).toEqual(['auto', 'passkey-always', 'legacy'])
+      // …and says WHY, rather than leaving an operator hunting for a control
+      // that was there on the desktop.
+      expect(screen.getByTestId('RemotePasskeySettings.offHostAnchorNote')).toHaveTextContent(
+        /only be done on the machine itself/i
+      )
+    })
+
+    it('writes a non-off mode through authcfg, never through the host-anchor channel', async () => {
+      const { onConfigChange } = renderPane()
+      await screen.findByTestId('RemotePasskeySettings')
+      chooseSelectMenuOption(screen.getByTestId('RemotePasskeySettings.policy'), 'passkey-always')
+      await waitFor(() =>
+        expect(api.authcfgSetAuthMode).toHaveBeenCalledWith('passkey-always')
+      )
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+      await waitFor(() => expect(onConfigChange).toHaveBeenCalled())
+    })
+
+    it('reports a refused mode change instead of pretending it landed', async () => {
+      api.authcfgSetAuthMode.mockRejectedValue(new Error(NEEDS_STEP_UP_ERROR))
+      renderPane()
+      await screen.findByTestId('RemotePasskeySettings')
+      chooseSelectMenuOption(screen.getByTestId('RemotePasskeySettings.policy'), 'legacy')
+      await waitFor(() =>
+        expect(screen.getByTestId('RemotePasskeySettings.policyError')).toHaveTextContent(
+          NEEDS_STEP_UP_ERROR
+        )
+      )
+    })
+
+    it('disables the two toggles that have no web-reachable writer', async () => {
+      renderPane()
+      await screen.findByTestId('RemotePasskeySettings')
+      expect(screen.getByTestId('RemotePasskeySettings.passwordBreakGlass')).toBeDisabled()
+      expect(screen.getByTestId('RemotePasskeySettings.passkeyTailnetExempt')).toBeDisabled()
+    })
+
+    it('still shows the off-mode banner — the posture travels, the switch does not', async () => {
+      renderPane({ effectiveAuthPolicy: 'off' })
+      expect(await screen.findByTestId('RemotePasskeySettings.offBanner')).toBeInTheDocument()
     })
   })
 })

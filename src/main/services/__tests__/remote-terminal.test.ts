@@ -291,9 +291,90 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
 
     await expect(client.invoke('terminal:create', '/tmp/x')).rejects.toThrow('terminal-disabled')
 
+    // ADR-054: the ceremony itself is NOT refused any more — it is the only way
+    // to satisfy the settings gate and the strong tier's mutation window, and
+    // refusing it while the terminal ships OFF locked an operator out of their
+    // own remote-settings surface. What the toggle withdraws is the SHELL, and
+    // it withdraws it just as completely as before: a step-up that succeeds buys
+    // no terminal at all.
     const response = await stepUp(client)
-    expect(response).toMatchObject({ ok: false, code: 'terminal-disabled', retryable: false })
+    expect(response).toMatchObject({ ok: true })
+    await expect(client.invoke('terminal:create', '/tmp/x')).rejects.toThrow('terminal-disabled')
+    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow('terminal-disabled')
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      allowed: false,
+      granted: false,
+      readsAllowed: false
+    })
     expect(ptyStub.spawned).toHaveLength(0)
+  })
+
+  /**
+   * REGRESSION GUARDS (ADR-054 series 2, review round): `readsAllowed` must
+   * answer for the CAPABILITY, not only for the presence proof.
+   *
+   * The toggle going off calls `revokeShellGrant`, which strips the `shell`
+   * capability but deliberately leaves `armedEver` alone — nothing restores the
+   * capability except a fresh arming, so a connection whose toggle is flipped
+   * off and on again is answered `Permission denied` by the registry for reads
+   * and acts alike until it steps up. An `armedEver`-only `readsAllowed` misses
+   * exactly that: it answers "you may watch" for a connection whose every read
+   * verb is refused, and the web panel renders a "Watching" terminal in which
+   * nothing works. The wall is the honest answer, and the next ceremony
+   * recovers it cleanly.
+   */
+  it('reports readsAllowed=false after a toggle OFF→ON cycle (capability, not just arming)', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const client = await connect()
+    expect(await stepUp(client)).toMatchObject({ ok: true })
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      granted: true,
+      readsAllowed: true
+    })
+
+    // OFF: the dispatch that meets the closed toggle is what withdraws the
+    // capability (and any attachments) from this live connection.
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: false })
+    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow('terminal-disabled')
+
+    // ON again: the toggle is open, so `allowed` is true — but this connection
+    // holds no `shell`, and the registry refuses every terminal verb it has.
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow(/Permission denied/)
+    await expect(client.invoke('terminal:attach', 'anything')).rejects.toThrow(/Permission denied/)
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      allowed: true,
+      granted: false,
+      needsStepUp: true,
+      // The whole point: a client must be told to step up, not invited to watch.
+      readsAllowed: false
+    })
+
+    // …and one fresh ceremony puts it back, reads and acts together.
+    expect(await stepUp(client)).toMatchObject({ ok: true })
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      granted: true,
+      readsAllowed: true
+    })
+    await expect(client.invoke('terminal:pool', '/tmp/x')).resolves.toEqual([])
+  })
+
+  it('reports readsAllowed=false when the step-up happened while the toggle was OFF', async () => {
+    // The other way into the same state, and the one series 2 created: a step-up
+    // run while the terminal is off now SUCCEEDS (it is how the settings gate is
+    // satisfied) and deliberately confers no `shell`. Turning the toggle on
+    // afterwards must not turn that proof into a terminal it never bought.
+    const client = await connect()
+    expect(await stepUp(client)).toMatchObject({ ok: true })
+
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      allowed: true,
+      granted: false,
+      needsStepUp: true,
+      readsAllowed: false
+    })
+    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow(/Permission denied/)
   })
 
   it('refuses a STALE grant the moment the toggle goes OFF', async () => {
@@ -811,6 +892,8 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
       allowed: false,
       granted: false,
       needsStepUp: false,
+      // The toggle is off, so there is no terminal to watch either.
+      readsAllowed: false,
       stepUp: stepUpParams
     })
 
@@ -819,6 +902,10 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
       allowed: true,
       granted: false,
       needsStepUp: true,
+      // Never armed: ADR-054 decision 4 keeps the FIRST access behind one proof,
+      // because scrollback and the live-shell inventory are sensitive. So this
+      // stage is a genuine wall, not the read-only state.
+      readsAllowed: false,
       stepUp: stepUpParams
     })
 
@@ -827,7 +914,33 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
       allowed: true,
       granted: true,
       needsStepUp: false,
+      readsAllowed: true,
       stepUp: stepUpParams
+    })
+  })
+
+  it('reports the READ-ONLY stage once the act window has decayed (ADR-054 series 2)', async () => {
+    // The state the `readsAllowed` field exists for, and the one no client could
+    // see before it: armed once (so scrollback is unlocked for this socket's
+    // lifetime) but idle past the act window, so keystrokes are refused while the
+    // attached view keeps streaming. A client reading only `granted` would wall
+    // off a terminal it is entitled to watch.
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true, shellGrantIdleMinutes: 10 })
+    const client = await connect()
+    await stepUp(client)
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      granted: true,
+      readsAllowed: true,
+      needsStepUp: false
+    })
+
+    // Walk past the act deadline without touching anything.
+    advance(11)
+    await expect(client.invoke('terminal:availability')).resolves.toMatchObject({
+      allowed: true,
+      granted: false,
+      needsStepUp: true,
+      readsAllowed: true
     })
   })
 

@@ -39,7 +39,11 @@ vi.mock('../../services/db', () => ({
   MIN_AUDIT_RETENTION_DAYS: 30,
   DEFAULT_STEP_UP_TIER: 'medium',
   DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES: 60,
-  DEFAULT_SESSION_MAX_AGE_HOURS: 4
+  DEFAULT_SESSION_MAX_AGE_HOURS: 4,
+  // Pulled in by `remote-config-view.ts`, which `authcfg:get` answers from.
+  DEFAULT_AUDIT_RETENTION_DAYS: 365,
+  DEFAULT_TLS_HTTPS_PORT: 443,
+  DEFAULT_SHELL_GRANT_IDLE_MINUTES: 10
 }))
 
 vi.mock('../../services/remote-auth', () => ({
@@ -51,6 +55,7 @@ vi.mock('../../services/logger', () => ({
 }))
 
 import {
+  authcfgGet,
   authcfgSetAuthMode,
   authcfgSetPassword,
   authcfgSetRetention,
@@ -254,5 +259,55 @@ describe('authcfgSetPassword', () => {
     await expect(authcfgSetPassword(armedConn(), 'short', host)).rejects.toThrow(/12 characters/)
     expect(host.passwordDisconnects).toBe(0)
     expect(auditRows).toEqual([])
+  })
+})
+
+describe('authcfgGet — the READ half (ADR-054 series 2)', () => {
+  it('answers an UNARMED connection: reads are free on every tier', async () => {
+    // Deliberately NOT behind the freshness backstop the four writes share. A
+    // pane that had to run a ceremony before it could render the tier would put
+    // the ceremony in front of its own explanation — and reads are free on every
+    // tier by ADR-054 decision 1, so demanding one here would also be the only
+    // place in the codebase where a `query` costs a presence proof.
+    await expect(authcfgGet(unarmedConn())).resolves.toMatchObject({
+      stepUpTier: 'medium',
+      effectiveStepUpTier: 'medium',
+      auditRetentionDays: 365
+    })
+    expect(configWrites).toEqual([])
+    // A read is not an event: nothing may reach the audit trail, or the trail
+    // fills with settings panes being opened.
+    expect(auditRows).toEqual([])
+  })
+
+  it('answers the SAME sanitized object the host anchor does — no secrets', async () => {
+    configRef.current = {
+      ...configRef.current,
+      passwordSalt: 'deadbeef',
+      passwordHash: 'cafebabe',
+      kdfParams: '{"N":32768}',
+      passwordUpdatedAt: 1234
+    }
+    const view = (await authcfgGet(armedConn())) as unknown as Record<string, unknown>
+    // The `passwordSet` boolean is the ONLY thing a client learns about the
+    // credential. This assertion is the whole reason one sanitizer is shared
+    // between `remote:get-config` and this verb.
+    expect(view.passwordSet).toBe(true)
+    expect(view.passwordUpdatedAt).toBe(1234)
+    for (const secret of ['passwordSalt', 'passwordHash', 'kdfParams']) {
+      expect(view, `${secret} must never cross the wire`).not.toHaveProperty(secret)
+    }
+  })
+
+  it('reports the EFFECTIVE tier, so a UI cannot re-derive the off rule wrongly', async () => {
+    // Auth-mode `off` FORCES tier `off` (decision 3). The settings pane renders
+    // `effectiveStepUpTier` rather than deriving it, which is what keeps the
+    // displayed posture from drifting from the enforced one.
+    configRef.current = { ...configRef.current, authPolicy: 'off', stepUpTier: 'strong' }
+    await expect(authcfgGet(armedConn())).resolves.toMatchObject({
+      stepUpTier: 'strong',
+      effectiveStepUpTier: 'off',
+      effectiveAuthPolicy: 'off'
+    })
   })
 })

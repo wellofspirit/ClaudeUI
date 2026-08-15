@@ -346,6 +346,14 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
     forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
+    // Remote-access settings (ADR-054 decision 6) — real desktop channels, like
+    // the preload's. The desktop connection is the host anchor and is exempt
+    // from the freshness gate, so they behave here as `remote:set-config` does.
+    authcfgSetTier: (tier) => ipcRenderer.invoke('authcfg:set-tier', tier),
+    authcfgSetAuthMode: (mode) => ipcRenderer.invoke('authcfg:set-auth-mode', mode),
+    authcfgSetPassword: (password) => ipcRenderer.invoke('authcfg:set-password', password),
+    authcfgSetRetention: (days) => ipcRenderer.invoke('authcfg:set-retention', days),
+
     // Passkeys — mirrors the preload split: the four management verbs are real
     // desktop channels, the two ceremony verbs are not registered there at all.
     webauthnCredentials: () => ipcRenderer.invoke('webauthn:credentials'),

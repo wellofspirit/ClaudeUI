@@ -26,19 +26,27 @@
  *
  * ## Freshness
  *
- * Every verb here demands a presence proof inside the MUTATION window on EVERY
+ * Every WRITE here demands a presence proof inside the MUTATION window on EVERY
  * tier — they behave strong-tier for everyone. The transport gate does this
  * ahead of dispatch (`classifyDispatch` → `authcfg`); the bodies assert it again
  * through the same table, so a future transport that forgets the gate still
  * cannot rewrite the auth surface with a stale proof. Same backstop discipline
  * as `terminal-service.assertAllowed`.
+ *
+ * {@link authcfgGet} is the ONE exception and deliberately so: it is a `query`,
+ * classified `read`, and therefore free on every tier. Reads are free in ADR-054
+ * (decision 1) and a settings pane that demanded a ceremony before it could even
+ * RENDER the current tier would put the ceremony in front of the explanation of
+ * why there is a ceremony. It stays behind `admin` — the same capability the
+ * writes and `webauthn:credentials` declare — so only a passkey / break-glass
+ * connection sees it at all.
  */
 
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
   NEEDS_STEP_UP_ERROR
 } from '../../shared/remote-protocol'
-import type { RemoteAuthPolicy, StepUpTier } from '../../shared/types'
+import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../shared/types'
 import {
   withAuthSurfaceReaction,
   type AuthSurfaceDisconnector
@@ -53,6 +61,7 @@ import {
 } from '../services/db'
 import { logger } from '../services/logger'
 import { provisionPassword } from '../services/remote-auth'
+import { sanitizedRemoteConfig } from '../services/remote-config-view'
 import { authcfgAllowed } from '../services/step-up-tier'
 import type { CommandConnection } from './command-registry'
 
@@ -107,6 +116,34 @@ function auditSettingsChange(connection: CommandConnection, detail: string): voi
       `settings-change audit append failed: ${err instanceof Error ? err.message : String(err)}`
     )
   }
+}
+
+/**
+ * `authcfg:get` — the settings surface as this client may see it.
+ *
+ * The READ half of ADR-054 decision 6. "Routine remote-access settings become
+ * web-reachable" is unimplementable without it: the pane has to show the tier,
+ * the dials, the credential count and the effective policy before an operator
+ * can meaningfully change any of them, and re-deriving those in the renderer is
+ * exactly how a displayed policy drifts from the enforced one.
+ *
+ * Answers with the SAME object `remote:get-config` does
+ * ({@link sanitizedRemoteConfig}) — one sanitizer, so a field can never be
+ * exposed on one transport and forgotten on the other, and the shared settings
+ * components need no per-transport shape. It carries no secret by construction:
+ * salt / hash / KDF params never leave that function, only a `passwordSet`
+ * boolean.
+ *
+ * NO freshness assertion, and no `AUTHCFG_CHANNELS` membership: this is a
+ * `query`, so `classifyDispatch` calls it `read` and it never slides a window
+ * either (queries never refresh — ADR-054 decision 4). The namespace-completeness
+ * guard in `__tests__/remote-handlers.ipc.test.ts` ("everything in the authcfg
+ * namespace is a `command` EXCEPT the declared reads") pins that every OTHER
+ * verb here is a `command` that IS in that set, so "outside the set" can only
+ * ever mean a deliberate read.
+ */
+export async function authcfgGet(_connection: CommandConnection): Promise<RemoteConfig> {
+  return sanitizedRemoteConfig()
 }
 
 /**

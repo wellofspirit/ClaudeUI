@@ -27,6 +27,7 @@ import {
   type CommandRegistration
 } from './command-registry'
 import {
+  authcfgGet,
   authcfgSetAuthMode,
   authcfgSetPassword,
   authcfgSetRetention,
@@ -37,22 +38,30 @@ import { AUTHCFG_CHANNELS } from '../services/step-up-tier'
 import type { RemoteAuthPolicy, StepUpTier } from '../../shared/types'
 
 /**
- * The channels to clear before re-registering — read from the CLASSIFIER, not
- * restated here.
+ * The channels to clear before re-registering — the MUTATING set read from the
+ * CLASSIFIER, not restated here, plus the one READ verb.
  *
  * That import is the point: `AUTHCFG_CHANNELS` is what `classifyDispatch` uses
- * to give this namespace strong-tier freshness on every tier. A fifth verb
+ * to give this namespace strong-tier freshness on every tier. A new WRITE verb
  * registered below without being added there would be classified `mutation`
  * instead — i.e. silently free under the default `medium` tier — which is
  * exactly the "two places restating one rule" failure this codebase has already
  * paid for once. Sharing the constant makes that a visible edit rather than a
  * silent downgrade.
  *
+ * `authcfg:get` is deliberately OUTSIDE that set: it is a `query`, reads are
+ * free on every tier (ADR-054 decision 1), and demanding a ceremony to render
+ * the settings pane would put the ceremony in front of its own explanation. So
+ * that "outside the set" can only ever mean "a deliberate read", the guard in
+ * `__tests__/remote-handlers.ipc.test.ts` pins the namespace both ways: every
+ * `command`-kind `authcfg:*` channel is in `AUTHCFG_CHANNELS`, and every member
+ * of that set is registered as a `command`.
+ *
  * The parity test in `__tests__/remote-handlers.ipc.test.ts` keeps its own
  * literal list on purpose: an independent pin is worth nothing if it imports
  * the thing it is pinning.
  */
-const AUTHCFG_IPC_CHANNELS = [...AUTHCFG_CHANNELS]
+const AUTHCFG_IPC_CHANNELS = ['authcfg:get', ...AUTHCFG_CHANNELS]
 
 function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'desktop' })
@@ -72,6 +81,15 @@ export function registerAuthcfgIpc(host: AuthcfgHost | null): void {
   for (const channel of AUTHCFG_IPC_CHANNELS) {
     ipcMain.removeHandler(channel)
   }
+
+  // The READ. `query`, so it is free on every tier — see AUTHCFG_IPC_CHANNELS.
+  handleIpc({
+    channel: 'authcfg:get',
+    capability: 'admin',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => authcfgGet(connection)
+  })
 
   handleIpc({
     channel: 'authcfg:set-tier',

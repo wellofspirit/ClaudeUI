@@ -7,6 +7,23 @@ import '@xterm/xterm/css/xterm.css'
 interface Props {
   terminalId: string
   isActive: boolean
+  /**
+   * The connection may WATCH this pty but not act on it (ADR-054's read/act
+   * split): the arming proof still holds, so the stream keeps flowing, but the
+   * act window has decayed and the server will refuse keystrokes.
+   *
+   * It refuses them SILENTLY — a `term-input` error would be an oracle for which
+   * terminals exist — so the client cannot learn from a dropped frame and has to
+   * hold the key back itself. Always false on desktop, which is never gated.
+   */
+  readOnly?: boolean
+  /**
+   * A keystroke was held back because {@link Props.readOnly} was set. The panel
+   * turns this into a step-up ceremony; the keystroke itself is DROPPED (the
+   * user retypes), because buffering input across a ceremony means replaying
+   * whatever was typed at a shell whose state has moved on.
+   */
+  onBlockedInput?: () => void
 }
 
 function buildXtermTheme(themeId: ThemeId): Record<string, string> {
@@ -86,11 +103,24 @@ function buildXtermTheme(themeId: ThemeId): Record<string, string> {
   }
 }
 
-export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Element {
+export function XTermInstance({
+  terminalId,
+  isActive,
+  readOnly,
+  onBlockedInput
+}: Props): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const theme = useSessionStore((s) => s.settings.theme)
+  /**
+   * Read through a ref inside the mount effect: that effect keys on
+   * `terminalId` alone and must not re-run (it would tear down the pty
+   * attachment and the scrollback with it), so the `onData` handler installed
+   * once has to see the CURRENT gate rather than the one that existed at mount.
+   */
+  const inputGate = useRef({ readOnly, onBlockedInput })
+  inputGate.current = { readOnly, onBlockedInput }
 
   // Initialize Terminal once on mount
   useEffect(() => {
@@ -117,8 +147,15 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
     termRef.current = term
     fitAddonRef.current = fitAddon
 
-    // User input -> IPC -> PTY
+    // User input -> IPC -> PTY, unless this view is read-only (ADR-054): the
+    // server would drop the frame without saying so, so the FIRST key is what
+    // asks for a fresh presence proof, and it is dropped rather than buffered.
     const dataDisposable = term.onData((data) => {
+      const gate = inputGate.current
+      if (gate.readOnly) {
+        gate.onBlockedInput?.()
+        return
+      }
       window.api.writeTerminal(terminalId, data)
     })
 

@@ -458,7 +458,24 @@ export interface WsStepUpResponse {
   code?: StepUpFailureCode
   /** `false` ⇒ the client must stop retrying as-is (throttled / disabled). */
   retryable?: boolean
-  /** Success only: epoch-ms deadline of the grant just armed. */
+  /**
+   * Success only: epoch-ms deadline of the grant just armed — and **which**
+   * grant that is depends on the server's terminal toggle (ADR-054 series 2).
+   *
+   * - "Allow remote terminal" ON  → the SHELL ACT window (`shellGrantIdleMinutes`).
+   * - "Allow remote terminal" OFF → the MUTATION window
+   *   (`stepUpMutationIdleMinutes`). The ceremony still succeeds there — it is
+   *   how the settings gate and the strong tier's mutation window are satisfied
+   *   — but no `shell` capability and no shell window are conferred at all.
+   *
+   * The polymorphism is deliberate (the field means "the thing you just bought
+   * expires here") but it means a client MUST NOT treat this as a promise about
+   * the shell: a deadline in the future is not evidence that a terminal is
+   * reachable. `terminal:availability` is the only honest answer to that
+   * question, and it reports `allowed` / `granted` / `readsAllowed` separately
+   * for exactly this reason. No shipping client renders this value today; it is
+   * documented so the next one does not infer a shell from it.
+   */
   expiresAt?: number
 }
 

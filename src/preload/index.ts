@@ -459,6 +459,18 @@ const api: ClaudeAPI = {
   detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
   forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
+  // Remote-access settings, the ROUTINE subset (ADR-054 decision 6). Real IPC
+  // here rather than a refusal: the channels are registered on BOTH transports
+  // (authcfg.ipc.ts) precisely so the capability/kind declaration is one
+  // reviewed fact, and the desktop connection — being the host anchor — is
+  // exempt from the freshness gate, so they behave here exactly as
+  // `remote:set-config` does. The `off` master switch is NOT among them and
+  // stays in `setRemoteConfig` with its typed confirmation.
+  authcfgSetTier: (tier) => ipcRenderer.invoke('authcfg:set-tier', tier),
+  authcfgSetAuthMode: (mode) => ipcRenderer.invoke('authcfg:set-auth-mode', mode),
+  authcfgSetPassword: (password: string) => ipcRenderer.invoke('authcfg:set-password', password),
+  authcfgSetRetention: (days: number) => ipcRenderer.invoke('authcfg:set-retention', days),
+
   // Passkeys (ADR-052) — MANAGEMENT ONLY on this transport. `webauthn.ipc.ts`
   // registers exactly these four channels; the two register verbs below are
   // deliberately absent from it, so wiring them here would be an invoke against
