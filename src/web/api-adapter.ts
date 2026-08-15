@@ -359,8 +359,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Desktop-only lifecycle sweep (cold-session cleanup); not on the remote
     // surface, so a web client never mass-kills the operator's shells.
     killTerminalsByCwd: async () => [],
-    terminalAvailability: () =>
-      connection.invoke('terminal:availability') as ReturnType<ClaudeAPI['terminalAvailability']>,
+    // The host answers everything except `passkey`: whether a ceremony is
+    // possible is a fact about THIS browser's origin and this socket's auth
+    // method, which `terminal:availability` is answered by a service that knows
+    // neither. Merged here so the prompt has one object to branch on.
+    terminalAvailability: async () => {
+      const availability = (await connection.invoke(
+        'terminal:availability'
+      )) as TerminalAvailability
+      return { ...availability, passkey: connection.passkeyAvailable() }
+    },
     terminalStepUp: async (password) => {
       // Proof params come from `terminal:availability`, NOT `/remote/auth-info`:
       // auth-info advertises authentication methods, and over the tunnel the
@@ -395,6 +403,20 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         availability.stepUp.kdf
       )
       const response = await connection.stepUp(proof)
+      return {
+        ok: response.ok,
+        error: response.error,
+        code: response.code,
+        retryable: response.retryable,
+        expiresAt: response.expiresAt
+      }
+    },
+    // Passkey step-up (ADR-052 decision 5). No local pre-checks at all, unlike
+    // the password path above: the challenge request IS the probe, and its
+    // refusal codes (`passkey-unavailable`, `throttled`) are what the prompt
+    // branches on. Guessing client-side would only be able to guess wrong.
+    terminalStepUpPasskey: async () => {
+      const response = await connection.stepUpWithPasskey()
       return {
         ok: response.ok,
         error: response.error,
@@ -638,6 +660,32 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     forceReserve: async () => {
       throw new Error('Not available in remote mode')
     },
+
+    // Passkeys (ADR-052). All SIX verbs, unlike the desktop preload: this is the
+    // only surface that can actually run a ceremony, because it is the only one
+    // served from an origin with an RP ID. Reachability is the server's call —
+    // `enroll` / `admin` are outside the base remote grant set, so a plain token
+    // connection gets "permission denied" from the registry, which is the point.
+    webauthnCredentials: () =>
+      connection.invoke('webauthn:credentials') as ReturnType<ClaudeAPI['webauthnCredentials']>,
+    webauthnRename: (credId, nickname) =>
+      connection.invoke('webauthn:rename', credId, nickname) as ReturnType<
+        ClaudeAPI['webauthnRename']
+      >,
+    webauthnRevoke: (credId) =>
+      connection.invoke('webauthn:revoke', credId) as ReturnType<ClaudeAPI['webauthnRevoke']>,
+    webauthnMintEnrollToken: () =>
+      connection.invoke('webauthn:mint-enroll-token') as ReturnType<
+        ClaudeAPI['webauthnMintEnrollToken']
+      >,
+    webauthnRegisterOptions: () =>
+      connection.invoke('webauthn:register-options') as ReturnType<
+        ClaudeAPI['webauthnRegisterOptions']
+      >,
+    webauthnRegisterVerify: (payload) =>
+      connection.invoke('webauthn:register-verify', payload) as ReturnType<
+        ClaudeAPI['webauthnRegisterVerify']
+      >,
 
     // Voice input — not available on web (audio hardware is on the server)
     voiceStartServer: async () => {},

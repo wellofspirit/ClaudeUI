@@ -68,6 +68,7 @@ import {
   type WebauthnCredentialRow
 } from './db'
 import { logger } from './logger'
+import type { WebauthnCredential } from '../../shared/types'
 
 /** Shown by the authenticator's own UI ("Sign in to …"). */
 const RP_NAME = 'ClaudeUI'
@@ -219,15 +220,16 @@ export function resolveWebauthnOrigin(
   return null
 }
 
-/** The rows the management UI is allowed to see — never `publicKey`. */
-export interface WebauthnCredentialSummary {
-  credId: string
-  nickname: string | null
-  createdAt: number
-  lastUsedAt: number | null
-  backedUp: boolean
-  transports: string[] | null
-}
+/**
+ * The rows the management UI is allowed to see — never `publicKey`.
+ *
+ * An ALIAS of the shared declaration, not a second copy: both clients render
+ * these rows, and this module is main-only (it imports `@simplewebauthn/server`),
+ * so the shape has to live in `shared/types.ts` for the renderer and the web
+ * adapter to type it. Keeping the historical name as an alias means every call
+ * site here is unchanged and the two can no longer drift.
+ */
+export type WebauthnCredentialSummary = WebauthnCredential
 
 /**
  * The persistence slice this service uses. Injected (rather than importing

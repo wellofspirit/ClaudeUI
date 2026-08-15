@@ -10,7 +10,7 @@ A desktop client for coding agents, built with Electron + React 19 + TypeScript.
 
 Full documentation index: [docs/README.md](docs/README.md)
 
-Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; target security model in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
+Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
 
 ## Development Workflow (read this first)
 

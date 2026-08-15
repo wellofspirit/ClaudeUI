@@ -68,9 +68,17 @@ The transport/auth hardening was unaffected by the SyncCore rebuild and carries 
 unchanged: token/password/tailnet-identity modes, Host allowlist, per-IP throttling with
 separate token and password budgets, funnel reject (ADR-039), the pinned tailscale HTTPS
 port and its serve reconciliation (ADR-042), tunnel E2E (AES-256-GCM + HKDF, replay
-guard), and the scoped mockup/sent-file tokens (ADR-007/043). The auth *policy* layer on
-top of it is [security.md](security.md) / ADR-052: capability grants, the `shell`
-step-up ceremony, idle grant decay, and the append-only audit log.
+guard), and the scoped mockup/sent-file tokens (ADR-007/043).
+
+The auth *policy* layer on top of it is **built** and documented in
+[security.md](security.md) / ADR-052: capability grants, passkeys and the policy modes,
+the `shell` step-up ceremony, idle grant decay, and the append-only audit log. What it
+adds to THIS layer's contract is three WS frame pairs (`auth-webauthn-start` /
+`-challenge` / `-finish`, `step-up-challenge-request` / `step-up-challenge`, and the
+`enrollToken` field on the existing `auth` frame — all additive, so an older cached
+bundle's frames stay byte-compatible), the optional `webauthn` block on
+`GET /remote/auth-info`, and close code **4009** for "the auth surface changed, reconnect
+and re-authenticate". Everything about what those mean lives in security.md, not here.
 
 **One thing phase 4d added to this layer's contract:** the listener no longer depends on
 a window existing. Core boots — including this server and its autostart — before any

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
+import { RemotePasskeySettings } from './RemotePasskeySettings'
 import { SelectMenu } from '../shared/SelectMenu'
 
 // Mirrors remote-auth.ts's MIN_PASSWORD_LENGTH — kept as a local literal
@@ -482,6 +483,12 @@ export function RemoteServerSettings(): React.JSX.Element {
           Use it over Tailscale or a trusted LAN — not open Wi-Fi.
         </div>
       </div>
+
+      {/* Passkeys + the auth-policy switch (ADR-052). Its own component: this
+          block owns credential state that changes without any local action
+          (a phone enrolling lands here), which the pure-config blocks above
+          never do. */}
+      <RemotePasskeySettings config={config} onConfigChange={setConfig} onReload={reload} />
     </div>
   )
 }

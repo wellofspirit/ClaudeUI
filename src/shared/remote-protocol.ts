@@ -10,8 +10,24 @@
 // `verifyAuthenticationResponse` accepts them structurally.
 import type {
   AuthenticationResponseJSON,
-  PublicKeyCredentialRequestOptionsJSON
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON
 } from '@simplewebauthn/browser'
+
+/**
+ * Re-exported so every other module reaches these DTOs through THIS file and
+ * the sourcing rationale above stays a single copy. The registration pair rides
+ * the invoke surface rather than a wire frame (`webauthn:register-*`), but the
+ * types belong next to their authentication twins — `shared/types.ts` uses them
+ * to declare those verbs, and the web client uses all four.
+ */
+export type {
+  AuthenticationResponseJSON,
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON
+}
 
 /** Client → Server: request (mirrors ipcRenderer.invoke) */
 export interface WsInvokeRequest {
@@ -420,6 +436,33 @@ export function isNeedsStepUpError(message: unknown): boolean {
 /** True for the error a shell dispatch throws while the terminal toggle is OFF. */
 export function isTerminalDisabledError(message: unknown): boolean {
   return messageIncludes(message, TERMINAL_DISABLED_ERROR)
+}
+
+/**
+ * True for the registry refusal a `webauthn:register-*` dispatch produces when
+ * this connection does not hold `enroll`.
+ *
+ * This is the EXPECTED answer, not a bug: under effective-`legacy` (nothing
+ * enrolled, policy AUTO) a break-glass password connection carries the as-built
+ * grant set and no `enroll` — deliberately, so a stolen password cannot mint
+ * itself a permanent credential. The very first passkey therefore has to come
+ * from the desktop's QR / one-time link, and a client that offers inline
+ * enrollment must render THAT guidance rather than an error toast.
+ *
+ * Matched on the registry's composed wording (`command-registry.ts` builds it
+ * per channel from the DECLARED CAPABILITY) rather than a pinned constant. The
+ * capability clause is the whole match, deliberately: a looser "contains
+ * enroll" would also fire on an `admin` refusal of
+ * `webauthn:mint-enroll-token`, whose channel NAME carries the word.
+ *
+ * The coupling is pinned where the string is actually PRODUCED —
+ * `ipc/__tests__/command-registry.test.ts` runs this predicate over a real
+ * `registry.dispatch` refusal, so a reword there fails the build. The cases in
+ * `__tests__/remote-protocol.test.ts` are shape tests over hand-written input
+ * and cannot catch that on their own.
+ */
+export function isEnrollNotPermittedError(message: unknown): boolean {
+  return messageIncludes(message, 'requires the "enroll" capability')
 }
 
 // ---------------------------------------------------------------------------

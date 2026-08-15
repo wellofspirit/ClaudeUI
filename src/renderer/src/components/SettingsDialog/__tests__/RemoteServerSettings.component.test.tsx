@@ -36,7 +36,12 @@ const api = {
   setRemotePassword: vi.fn(),
   clearRemotePassword: vi.fn(),
   getNetworkInterfaces: vi.fn(),
-  detectTailscale: vi.fn()
+  detectTailscale: vi.fn(),
+  // Needed by the nested RemotePasskeySettings (ADR-052), which subscribes to
+  // `remote:status` and reads the credential list. Its own behavior is covered
+  // in RemotePasskeySettings.component.test.tsx; here they only have to exist.
+  onRemoteStatus: vi.fn(() => () => {}),
+  webauthnCredentials: vi.fn(async () => [])
 }
 
 describe('RemoteServerSettings', () => {

@@ -30,6 +30,7 @@ import {
   makeRemoteConnection,
   type CommandRegistration
 } from '../command-registry'
+import { isEnrollNotPermittedError } from '../../../shared/remote-protocol'
 
 let registry: CommandRegistry
 
@@ -56,15 +57,15 @@ function reg(overrides: Partial<CommandRegistration> = {}): CommandRegistration 
 describe('registration is fail-closed', () => {
   it('throws when no capability is declared (the compile error is belt; this is braces)', () => {
     // A JS caller — or an `as any` — can still omit it at runtime.
-    expect(() =>
-      registry.register({ ...reg(), capability: undefined as any })
-    ).toThrow(/a declared capability is required/)
+    expect(() => registry.register({ ...reg(), capability: undefined as any })).toThrow(
+      /a declared capability is required/
+    )
   })
 
   it('throws on an unknown capability', () => {
-    expect(() =>
-      registry.register({ ...reg(), capability: 'superuser' as any })
-    ).toThrow(/a declared capability is required/)
+    expect(() => registry.register({ ...reg(), capability: 'superuser' as any })).toThrow(
+      /a declared capability is required/
+    )
   })
 
   it('throws on an invalid kind', () => {
@@ -80,9 +81,9 @@ describe('registration is fail-closed', () => {
   })
 
   it('refuses a capability that contradicts the pinned one', () => {
-    expect(() =>
-      registry.register(reg({ channel: 'terminal:write', capability: 'chat' }))
-    ).toThrow(/pinned to "shell"/)
+    expect(() => registry.register(reg({ channel: 'terminal:write', capability: 'chat' }))).toThrow(
+      /pinned to "shell"/
+    )
     // The pinned capability itself registers fine.
     expect(() =>
       registry.register(reg({ channel: 'terminal:write', capability: 'shell' }))
@@ -169,9 +170,35 @@ describe('capability gating', () => {
       expect(desktopConnection().grants.has(capability)).toBe(true)
     }
     registry.register(reg({ channel: 'host:thing', capability: 'host', transport: 'desktop' }))
-    await expect(
-      registry.dispatch('host:thing', 'desktop', [], desktopConnection())
-    ).resolves.toBe('ok')
+    await expect(registry.dispatch('host:thing', 'desktop', [], desktopConnection())).resolves.toBe(
+      'ok'
+    )
+  })
+
+  // ADR-052 cross-pin. The web client renders "the first passkey has to be set
+  // up from the desktop" off `isEnrollNotPermittedError`, which string-matches
+  // the refusal THIS registry composes. Nothing else connects the two: reword
+  // the message and that guidance silently becomes an unreachable branch, with
+  // the operator getting a raw permission error on the one screen that was
+  // supposed to explain the situation. So the predicate is exercised against a
+  // REAL dispatch refusal here, not against a hand-typed copy of the wording.
+  it('composes an `enroll` refusal the web client can still classify (GUARD)', async () => {
+    registry.register(reg({ channel: 'webauthn:register-options', capability: 'enroll' }))
+    registry.register(reg({ channel: 'webauthn:mint-enroll-token', capability: 'admin' }))
+
+    const refusal = async (channel: string): Promise<unknown> =>
+      await registry.dispatch(channel, 'remote', [], remoteConn).then(
+        () => {
+          throw new Error(`${channel} was not refused`)
+        },
+        (err) => err
+      )
+
+    expect(isEnrollNotPermittedError(await refusal('webauthn:register-options'))).toBe(true)
+    // And NOT the `admin` twin, whose channel name also contains "enroll" —
+    // classifying it would tell an operator to go enroll from the desktop when
+    // what they actually lack is admin.
+    expect(isEnrollNotPermittedError(await refusal('webauthn:mint-enroll-token'))).toBe(false)
   })
 
   it('the legacy remote grant set excludes shell/admin/host', () => {

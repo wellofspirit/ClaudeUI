@@ -232,6 +232,10 @@ const api: ClaudeAPI = {
   // host surface, already holding a non-decaying `shell` grant, so there is
   // nothing to step up to. Local no-op, deliberately not an IPC round trip.
   terminalStepUp: async () => ({ ok: true }),
+  // Same reasoning for the passkey factor: nothing to prove when you are the
+  // host surface, and this renderer could not run a ceremony anyway (no RP ID
+  // on `file://` — see the webauthn block below).
+  terminalStepUpPasskey: async () => ({ ok: true }),
   // Attach/detach, by contrast, are REAL here now that terminals are a per-cwd
   // pool: a desktop tab can resolve to a pty another surface spawned, and the
   // attach is what replays that terminal's scrollback onto `terminal:data`.
@@ -450,6 +454,28 @@ const api: ClaudeAPI = {
   clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
   detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
   forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
+
+  // Passkeys (ADR-052) — MANAGEMENT ONLY on this transport. `webauthn.ipc.ts`
+  // registers exactly these four channels; the two register verbs below are
+  // deliberately absent from it, so wiring them here would be an invoke against
+  // a channel that does not exist.
+  webauthnCredentials: () => ipcRenderer.invoke('webauthn:credentials'),
+  webauthnRename: (credId: string, nickname: string | null) =>
+    ipcRenderer.invoke('webauthn:rename', credId, nickname),
+  webauthnRevoke: (credId: string) => ipcRenderer.invoke('webauthn:revoke', credId),
+  webauthnMintEnrollToken: () => ipcRenderer.invoke('webauthn:mint-enroll-token'),
+  // The ceremony verbs REFUSE here rather than round-tripping. The desktop
+  // renderer loads from `file://` (or the vite dev origin), so it has no RP ID
+  // to bind a credential to and `webauthnOrigin` is null on its connection —
+  // there is no ceremony to run, and pretending otherwise would produce a
+  // credential that can never assert. Desktop-side enrollment is the QR /
+  // one-time-link flow (`webauthnMintEnrollToken` above).
+  webauthnRegisterOptions: async () => {
+    throw new Error('Passkey enrollment runs in a browser — use the enrollment link or QR code.')
+  },
+  webauthnRegisterVerify: async () => {
+    throw new Error('Passkey enrollment runs in a browser — use the enrollment link or QR code.')
+  },
 
   // Voice input
   voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),

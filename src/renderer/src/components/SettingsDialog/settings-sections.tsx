@@ -3680,7 +3680,8 @@ export const SECTIONS: Section[] = [
       {
         key: 'remoteServerConfig',
         label: 'Remote server',
-        keywords: 'remote port password autostart bind interface server',
+        keywords:
+          'remote port password autostart bind interface server passkey webauthn biometric fingerprint face authentication sign-in enroll device credential',
         render: () => <RemoteServerSettings />
       }
     ]

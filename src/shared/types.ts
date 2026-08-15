@@ -1,5 +1,9 @@
 import type { ResolvedCapabilities } from './model-capabilities'
-import type { RemoteKdfParams } from './remote-protocol'
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  RegistrationResponseJSON,
+  RemoteKdfParams
+} from './remote-protocol'
 import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
@@ -1287,6 +1291,19 @@ interface TerminalAPI {
    */
   terminalStepUp(password: string): Promise<TerminalStepUpResult>
   /**
+   * Run the step-up ceremony with a PASSKEY (ADR-052 decision 5: step-up is
+   * passkey-first, password only as fallback). Fetches a fresh `step-up`-kind
+   * challenge, signs it, and sends the assertion — no password ever leaves the
+   * device. Desktop resolves `{ok:true}` for the same reason
+   * {@link TerminalAPI.terminalStepUp} does.
+   *
+   * Refusals arrive as a resolved `{ok:false, code}`, not a throw: `code` is
+   * what tells the prompt whether to offer the password instead
+   * (`passkey-unavailable`) or to keep insisting on the passkey
+   * (`passkey-required` from the password path).
+   */
+  terminalStepUpPasskey(): Promise<TerminalStepUpResult>
+  /**
    * Subscribe this client to a live PTY (server-side scrollback replays first).
    * Real on BOTH surfaces since the terminal pool landed: a desktop tab can
    * resolve to a pty it did not spawn, and the replay is how it renders that
@@ -1493,6 +1510,20 @@ export interface TerminalAvailability {
   granted: boolean
   needsStepUp: boolean
   stepUp: TerminalStepUpParams | null
+  /**
+   * Can THIS client run a passkey step-up ceremony (ADR-052 decision 5)?
+   *
+   * Filled in by the WEB transport, not by the host: whether a ceremony is
+   * possible is a fact about the browser's origin and this socket's auth
+   * method, and `terminal:availability` is answered by a service that knows
+   * neither. Absent on desktop, where step-up does not exist at all.
+   *
+   * It only decides which affordance the prompt leads with — the server still
+   * refuses a factor it does not accept, and both refusals
+   * (`passkey-unavailable` / `passkey-required`) flip the prompt to the other
+   * one. Optional so an older host/adapter simply reads as "password only".
+   */
+  passkey?: boolean
 }
 
 /**
@@ -1569,6 +1600,89 @@ interface RemoteAPI {
    * the owner's login.
    */
   detectTailscale(): Promise<TailscaleDetection>
+}
+
+/**
+ * One enrolled passkey, as shown in the management UI (ADR-052 / security.md
+ * §Enrollment). Never carries the COSE public key — the list is a UI surface,
+ * not a credential export.
+ *
+ * Declared HERE rather than next to the service that produces it because both
+ * clients render it and `webauthn-service.ts` is main-only (it imports
+ * `@simplewebauthn/server`). That module aliases its `WebauthnCredentialSummary`
+ * to this type, so the row a client renders and the row the server maps cannot
+ * drift.
+ */
+export interface WebauthnCredential {
+  /** base64url credential id — also the rename/revoke key. */
+  credId: string
+  /** Operator-chosen label, or null when the device was never named. */
+  nickname: string | null
+  createdAt: number
+  lastUsedAt: number | null
+  /**
+   * The authenticator says this credential is backed up / syncable (iCloud
+   * Keychain, Google Password Manager). Surfaced because "synced across my
+   * devices" and "lives only in this phone" are very different things to revoke.
+   */
+  backedUp: boolean
+  transports: string[] | null
+}
+
+/**
+ * A freshly minted one-time enrollment link (`webauthn:mint-enroll-token`).
+ *
+ * `url` is the whole product: `https://<tailnet-host>/remote#enroll=<token>`.
+ * The hostname in it IS the RP ID the new credential will bind to, which is why
+ * minting fails with `enroll-unavailable` while `tailscale serve` is down. Every
+ * mint is SINGLE-USE — a UI must mint per action, never cache one.
+ */
+export interface WebauthnEnrollToken {
+  token: string
+  /** Epoch ms; the server drops the token at this point regardless. */
+  expiresAt: number
+  url: string
+}
+
+/**
+ * Passkey enrollment + management (ADR-052). Six verbs, split by transport:
+ *
+ * - the four MANAGEMENT verbs run on both — the desktop renderer is where an
+ *   operator lists and revokes credentials, and mints the link for a new device;
+ * - the two REGISTER verbs are remote-only, because a ceremony needs a browser
+ *   on a WebAuthn-capable origin and the desktop renderer is loaded from
+ *   `file://` / the vite dev server. The desktop implementations therefore
+ *   REJECT rather than invoke a channel that is not registered for that
+ *   transport (`webauthn.ipc.ts` registers four, not six).
+ */
+interface WebauthnAPI {
+  /** Enrolled credentials, newest-first ordering is the caller's business. */
+  webauthnCredentials(): Promise<WebauthnCredential[]>
+  /** Rename one credential; `null` clears the nickname. */
+  webauthnRename(credId: string, nickname: string | null): Promise<{ ok: boolean }>
+  /**
+   * Revoke one credential. THROWS `last-credential-lockout` when removing the
+   * last passkey while the policy is explicitly `passkey-always` with no usable
+   * break-glass password — the UI must render that as an explanation, not as a
+   * raw error string.
+   */
+  webauthnRevoke(credId: string): Promise<{ ok: boolean }>
+  /**
+   * Mint a one-time "add this device" link. THROWS `enroll-unavailable` when
+   * `tailscale serve` is not up. Single-use: mint per action.
+   */
+  webauthnMintEnrollToken(): Promise<WebauthnEnrollToken>
+  /**
+   * Begin a registration ceremony on THIS connection (remote/web only). The
+   * options go straight into `startRegistration({ optionsJSON })` — neither end
+   * reshapes them.
+   */
+  webauthnRegisterOptions(): Promise<PublicKeyCredentialCreationOptionsJSON>
+  /** Finish it. `response` is `startRegistration()`'s output, verbatim. */
+  webauthnRegisterVerify(payload: {
+    response: RegistrationResponseJSON
+    nickname?: string | null
+  }): Promise<{ ok: boolean; credId?: string; backedUp?: boolean; error?: string }>
 }
 
 /**
@@ -1834,6 +1948,7 @@ export interface ClaudeAPI
     AccountAPI,
     VendorAuthAPI,
     RemoteAPI,
+    WebauthnAPI,
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {

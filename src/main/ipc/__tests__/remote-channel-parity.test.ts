@@ -36,15 +36,32 @@ const REPO = process.cwd()
 const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf-8')
 
 /**
- * Remote channels whose capability (`shell`) is deliberately NOT in the base
- * grant set — they are reachable only after the step-up ceremony. Sorted, and
- * kept in sync with the registrations in remote-handlers.ts.
+ * Remote channels the web client invokes whose capability is deliberately NOT
+ * in the base grant set. Sorted, and kept in sync with the registrations in
+ * remote-handlers.ts.
+ *
+ * Two families, two reasons:
+ *  - `shell` (terminal) — reachable only after the step-up ceremony;
+ *  - `enroll` / `admin` (ADR-052 passkeys) — reachable only from a passkey or
+ *    break-glass-password connection, or (for the two `enroll` verbs) a
+ *    one-time enrollment link. A token/tailnet connection never holds either.
+ *
+ * "Invoked but not grantable at connect time" is the POINT for both, which is
+ * why this list is an allowlist rather than an emptiness assertion: a new
+ * channel that lands here without a line in this comment is a channel whose
+ * reachability nobody thought about.
  */
-const SHELL_GATED_REMOTE_CHANNELS = [
+const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'terminal:attach',
   'terminal:create',
   'terminal:detach',
-  'terminal:kill'
+  'terminal:kill',
+  'webauthn:credentials',
+  'webauthn:mint-enroll-token',
+  'webauthn:register-options',
+  'webauthn:register-verify',
+  'webauthn:rename',
+  'webauthn:revoke'
 ]
 
 /** Channels the web client invokes over the WS (connection.invoke / unwrap). */
@@ -94,15 +111,17 @@ describe('remote channel parity (R5)', () => {
     const ungranted = [...invoked]
       .filter((c) => declared.has(c) && !LEGACY_REMOTE_GRANTS.has(declared.get(c)!))
       .sort()
-    // The terminal channels are the ONE deliberate exception (SyncCore phase 2,
-    // ADR-052 decision 6): they declare `shell`, which authentication alone
-    // never grants. The web client invokes them only after
-    // `terminal:availability` says the toggle is on and a step-up has armed the
-    // grant — "not grantable at connect time" is the point, not a gap.
+    // The terminal and passkey channels are the deliberate exceptions (SyncCore
+    // phase 2 / ADR-052): they declare `shell`, `enroll` or `admin`, none of
+    // which authentication alone grants. The web client invokes the terminal
+    // ones only after `terminal:availability` says the toggle is on and a
+    // step-up armed the grant, and the passkey ones only from the settings /
+    // enrollment surfaces a qualifying connection reaches — "not grantable at
+    // connect time" is the point, not a gap.
     expect(
       ungranted,
       `invoked but not grantable: ${ungranted.map((c) => `${c}(${declared.get(c)})`).join(', ')}`
-    ).toEqual(SHELL_GATED_REMOTE_CHANNELS)
+    ).toEqual(UNGRANTED_AT_CONNECT_REMOTE_CHANNELS)
   })
 
   it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {
@@ -122,6 +141,33 @@ describe('remote channel parity (R5)', () => {
       if (!channel.startsWith('webauthn:')) continue
       expect(LEGACY_REMOTE_GRANTS.has(capability), channel).toBe(false)
     }
+  })
+
+  it('the desktop preload wires only the passkey channels that exist there (ADR-052)', () => {
+    // The two ceremony verbs are remote-ONLY: the desktop renderer loads from
+    // `file://` / the vite dev origin, so it has no RP ID to bind a credential
+    // to and `webauthn.ipc.ts` deliberately registers four channels, not six.
+    // A preload `ipcRenderer.invoke('webauthn:register-…')` would therefore be
+    // an invoke at a channel with no handler — a runtime throw, discovered by
+    // whoever pressed the button. The same SOURCE-scan reasoning as the tests
+    // above: importing the preload here would need a live Electron.
+    const preload = read('src/preload/index.ts')
+    const invoked = new Set<string>()
+    const re = /ipcRenderer\.invoke\(\s*['"](webauthn:[^'"]+)['"]/g
+    for (let m = re.exec(preload); m; m = re.exec(preload)) invoked.add(m[1])
+
+    const ipcSrc = read('src/main/ipc/webauthn.ipc.ts')
+    const registered = new Set<string>()
+    const regRe = /['"](webauthn:[^'"]+)['"]/g
+    for (let m = regRe.exec(ipcSrc); m; m = regRe.exec(ipcSrc)) registered.add(m[1])
+
+    expect([...registered].sort()).toEqual([
+      'webauthn:credentials',
+      'webauthn:mint-enroll-token',
+      'webauthn:rename',
+      'webauthn:revoke'
+    ])
+    expect([...invoked].sort()).toEqual([...registered].sort())
   })
 
   it('the web client subscribes only to CLASSIFIED event channels (4a)', () => {

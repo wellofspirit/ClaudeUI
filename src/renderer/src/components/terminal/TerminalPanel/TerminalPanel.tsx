@@ -166,7 +166,10 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
               </div>
             </div>
           ) : (
-            <TerminalStepUpPrompt onGranted={() => void refreshAvailability()} />
+            <TerminalStepUpPrompt
+              passkey={availability.passkey}
+              onGranted={() => void refreshAvailability()}
+            />
           )}
         </div>
       </div>

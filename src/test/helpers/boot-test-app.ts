@@ -193,6 +193,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     // desktop transport too (the terminal pool means a tab can resolve to a pty
     // this surface never spawned, and attach is what replays its scrollback).
     terminalStepUp: async () => ({ ok: true }),
+    terminalStepUpPasskey: async () => ({ ok: true }),
     attachTerminal: (id) => ipcRenderer.invoke('terminal:attach', id),
     detachTerminal: (id) => ipcRenderer.invoke('terminal:detach', id),
     onTerminalDetached: () => () => {},
@@ -343,6 +344,20 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
     detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
     forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
+
+    // Passkeys — mirrors the preload split: the four management verbs are real
+    // desktop channels, the two ceremony verbs are not registered there at all.
+    webauthnCredentials: () => ipcRenderer.invoke('webauthn:credentials'),
+    webauthnRename: (credId, nickname) =>
+      ipcRenderer.invoke('webauthn:rename', credId, nickname),
+    webauthnRevoke: (credId) => ipcRenderer.invoke('webauthn:revoke', credId),
+    webauthnMintEnrollToken: () => ipcRenderer.invoke('webauthn:mint-enroll-token'),
+    webauthnRegisterOptions: async () => {
+      throw new Error('Passkey enrollment runs in a browser')
+    },
+    webauthnRegisterVerify: async () => {
+      throw new Error('Passkey enrollment runs in a browser')
+    },
 
     voiceStartServer: (routingId) => unwrap('voice:start-server', routingId),
     voiceStopServer: (routingId) => unwrap('voice:stop-server', routingId),

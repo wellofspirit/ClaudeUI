@@ -1,13 +1,24 @@
+import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
 import { E2ECrypto } from '../shared/e2e-crypto'
 import { SyncClient, type SyncListener } from '../shared/sync/sync-client'
 import { base64ToText, textToBase64 } from '../shared/base64-text'
+import {
+  PASSKEY_FAILED_ERROR,
+  PASSKEY_REQUIRED_ERROR,
+  PASSKEY_UNAVAILABLE_ERROR
+} from '../shared/remote-protocol'
 import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  RemoteAuthMethod,
   WsClientMessage,
   WsServerMessage,
   WsEvent,
   WsSyncCatchup,
   WsSyncFull,
   WsInvokeResponse,
+  WsStepUpRequest,
   WsStepUpResponse,
   WsTermData,
   WsTermExit,
@@ -24,6 +35,21 @@ export type ConnectionState =
   | 'connected'
   | 'reconnecting'
   /**
+   * The server wants the WebAuthn assertion ceremony on THIS socket (ADR-052).
+   * Not a rejection and not a failure — the socket is still open and the only
+   * thing missing is a human tapping a biometric, which the login screen asks
+   * for. Deliberately distinct from `'auth-rejected'`, which means the
+   * credential we hold is dead.
+   */
+  | 'passkey-required'
+  /**
+   * Authenticated with a one-time ENROLLMENT token (`#enroll=`): the socket may
+   * register a credential and then re-authenticate as `webauthn`, and reaches
+   * nothing else. Never syncs — there is no app behind this state, only the
+   * enrollment screen.
+   */
+  | 'enrolling'
+  /**
    * The presented credential was definitively rejected (wrong password) or has
    * been revoked under us (close 4008), or the key is throttled (4006). Unlike
    * `'failed'` this is RECOVERABLE by the app: it re-prompts and calls
@@ -35,17 +61,67 @@ export type ConnectionState =
 
 /**
  * Exactly one field is honoured by the server, which branches on `pwProof`
- * first. `token` comes from the URL fragment (QR scan); `pwProof` is
- * `hex(scrypt(...))` derived from the user's password (see password-proof.ts).
+ * first, then `enrollToken`, then `token` — this client sends them in the same
+ * order for the same reason. `token` comes from the URL fragment (QR scan);
+ * `pwProof` is `hex(scrypt(...))` derived from the user's password (see
+ * password-proof.ts); `enrollToken` comes from the `#enroll=` fragment of a
+ * desktop-minted "add this device" link.
+ *
+ * All three are SECRETS: they ride the fragment (never the request line) and
+ * must never reach a log line, an error message, or a state label.
  */
 export interface RemoteCredential {
   token?: string
   pwProof?: string
+  enrollToken?: string
 }
 
 /** Close codes that mean "this credential will not work again as-is". */
 const CLOSE_CREDENTIALS_CHANGED = 4008
 const CLOSE_THROTTLED = 4006
+/**
+ * The AUTH SURFACE changed under a live connection (policy write, first enroll,
+ * last revoke). Not a verdict on our credential: reconnect and let a fresh
+ * handshake decide what this client now needs — which may be nothing, may be a
+ * ceremony, may be a rejection.
+ */
+const CLOSE_AUTH_SURFACE_CHANGED = 4009
+
+/**
+ * How long a passkey ceremony may take before this client gives up on it.
+ *
+ * Matched to the server's own post-challenge budget (`WEBAUTHN_AUTH_TIMEOUT_MS`,
+ * 120 s): a biometric involves finding a phone, a fingerprint that misreads, a
+ * PIN. A shorter client timeout would resolve the UI as "timed out" while the
+ * server was still happily waiting.
+ */
+const PASSKEY_CEREMONY_TIMEOUT_MS = 120_000
+
+/**
+ * Human copy for a ceremony the BROWSER refused, before anything was sent.
+ *
+ * `navigator.credentials` reports through DOMException names, and the two that
+ * matter read very differently to a user: a cancelled/timed-out prompt is
+ * routine and retryable, while a security error means this page can never do
+ * WebAuthn (wrong origin — a plain-LAN IP or a tunnel hostname) and retrying is
+ * pointless. Never surface the raw name.
+ */
+export function describeCeremonyError(err: unknown): string {
+  const name = err instanceof Error ? err.name : ''
+  switch (name) {
+    case 'NotAllowedError':
+    case 'AbortError':
+      return 'Passkey prompt was cancelled or timed out.'
+    case 'InvalidStateError':
+      return 'This device already has a passkey enrolled here.'
+    case 'SecurityError':
+      return 'This address cannot use passkeys — open ClaudeUI on its Tailscale HTTPS name.'
+    case 'NotSupportedError':
+      return 'This browser or device has no passkey support.'
+    default:
+      return err instanceof Error && err.message ? err.message : 'The passkey prompt failed.'
+  }
+}
 
 type StateCallback = (state: ConnectionState, error?: string) => void
 type FullStateCallback = (state: FullStateSnapshot) => void
@@ -63,6 +139,33 @@ interface PendingInvoke {
  */
 interface PendingStepUp {
   resolve: (response: WsStepUpResponse) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+/**
+ * An assertion ceremony this client started and is waiting on the server's
+ * `auth-response` for. At most one exists: a ceremony is driven by a button on
+ * a modal login screen, and a second concurrent one would race the server's
+ * single-use, connection-bound challenge.
+ */
+interface PendingAssertion {
+  resolve: () => void
+  reject: (err: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+/**
+ * A `step-up-challenge-request` in flight. The server answers it with EITHER the
+ * challenge or a `step-up-response` refusal (throttled / no passkey here), so
+ * both frames have to be able to settle it — a refusal carries no correlation id
+ * and would otherwise be dropped as an unmatched step-up response.
+ */
+type StepUpChallengeOutcome =
+  | { kind: 'challenge'; options: PublicKeyCredentialRequestOptionsJSON }
+  | { kind: 'refused'; response: WsStepUpResponse }
+
+interface PendingStepUpChallenge {
+  settle: (outcome: StepUpChallengeOutcome) => void
   timer: ReturnType<typeof setTimeout>
 }
 
@@ -123,6 +226,50 @@ export class RemoteConnection {
    * `window.api` is bound to it and cannot be re-pointed at a replacement.
    */
   private authRejected = false
+  /**
+   * How the server says this connection authenticated (`auth-response.method`).
+   * Read by the app to render the `off`-mode warning banner (`'none'`) and to
+   * decide whether a passkey step-up is worth offering (`'webauthn'`). Cleared
+   * whenever a socket goes away, so it never describes a dead connection.
+   */
+  private authMethodValue?: RemoteAuthMethod
+  /**
+   * `/remote/auth-info` advertised `webauthn` for this origin — i.e. at least
+   * one credential is enrolled AND this Host can do WebAuthn. Set by the page
+   * bootstrap; it is the only thing a client can know about passkey feasibility
+   * BEFORE it has authenticated with one.
+   */
+  private webauthnAdvertised = false
+  /**
+   * A user-initiated passkey sign-in is waiting for a socket to run on.
+   *
+   * INVARIANT: this is true exactly while {@link RemoteConnection.pendingAssertion}
+   * is a HANDSHAKE waiter — it is armed by `authenticateWithPasskey` and cleared
+   * by every `settleAssertion`, success or failure. That coupling is the whole
+   * safety property. The flag exists so ONE tap can survive the reconnect it
+   * needs to get a live socket (tap → connect → `passkey-required` → auto-start,
+   * without a second tap); if it outlived the attempt it armed, a later
+   * `passkey-required` — after a dropped socket, minutes on — would fire
+   * `startAssertion()` with no user gesture behind it: an unprompted biometric
+   * modal on Chrome, and on iOS Safari a silent `NotAllowedError` (no transient
+   * activation) that leaves the socket idling against the server's 120 s
+   * ceremony budget. Any settled failure therefore returns the user to the tap.
+   */
+  private passkeyPending = false
+  /**
+   * A credential has already been REGISTERED on this socket, so a retry owes
+   * only the upgrade assertion.
+   *
+   * Without it, re-running `enrollThisDevice` after a failed upgrade would ask
+   * for registration options again — and those carry `excludeCredentials` with
+   * the key that just registered, so the authenticator answers
+   * `InvalidStateError` ("already enrolled here") and the retry is a guaranteed
+   * dead end. Per-socket, because a new socket means a new (unburned) token and
+   * a genuinely fresh start.
+   */
+  private registeredOnThisSocket = false
+  private pendingAssertion: PendingAssertion | null = null
+  private pendingStepUpChallenge: PendingStepUpChallenge | null = null
   /** Mockup-scoped token delivered over the authenticated WS (see sync-full). */
   private mockupTokenValue?: string
   /** File-scoped token delivered over the authenticated WS (see sync-full). */
@@ -168,6 +315,46 @@ export class RemoteConnection {
   setCredential(credential: RemoteCredential): void {
     this.credential = credential
     if (credential.pwProof !== undefined) this.e2eKeyHex = undefined
+  }
+
+  /**
+   * Record that `/remote/auth-info` advertised a passkey for this origin. Called
+   * once by the page bootstrap, before any socket exists.
+   */
+  setWebauthnAdvertised(advertised: boolean): void {
+    this.webauthnAdvertised = advertised
+  }
+
+  /**
+   * The method the server accepted, or undefined while unauthenticated.
+   * `'none'` means the operator turned authentication OFF and the app owes the
+   * user a permanent warning banner (security.md §Policy modes).
+   */
+  getAuthMethod(): RemoteAuthMethod | undefined {
+    return this.authMethodValue
+  }
+
+  /**
+   * Is the credential we would present a PASSWORD proof?
+   *
+   * Asked by the app before it discards a cached proof on `auth-rejected`: that
+   * state is reached by several credentials now (a refused passkey, a dead
+   * enrollment link), and throwing away a perfectly good cached password
+   * because something ELSE was rejected turns one re-prompt into two.
+   */
+  hasPasswordCredential(): boolean {
+    return this.credential.pwProof !== undefined
+  }
+
+  /**
+   * Is a passkey ceremony worth OFFERING on this connection?
+   *
+   * A completed handshake assertion is proof; otherwise the auth-info
+   * advertisement is the best a client can know. Purely an affordance hint —
+   * the server is still the authority and refuses what it does not accept.
+   */
+  passkeyAvailable(): boolean {
+    return this.authMethodValue === 'webauthn' || this.webauthnAdvertised
   }
 
   /**
@@ -255,7 +442,12 @@ export class RemoteConnection {
   /** Send an invoke request and return a promise for the result. */
   invoke(channel: string, ...args: unknown[]): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.state !== 'connected') {
+      // `'enrolling'` is an authenticated state that deliberately never syncs,
+      // so it never reaches `'connected'` — but the enrollment screen has to be
+      // able to call `webauthn:register-*` on it. The socket's grants
+      // (`enroll` only) are what actually bound this, server-side.
+      const usable = this.state === 'connected' || this.state === 'enrolling'
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !usable) {
         reject(new Error('Not connected'))
         return
       }
@@ -272,6 +464,88 @@ export class RemoteConnection {
   }
 
   // ---------------------------------------------------------------------------
+  // Passkeys (ADR-052)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Sign in with a passkey on the CURRENT socket.
+   *
+   * Deliberately user-initiated rather than fired automatically off
+   * `passkey-required`: `navigator.credentials.get()` needs a transient user
+   * activation on Safari/iOS, so an auto-run ceremony would fail on exactly the
+   * device this feature exists for. The login screen's one tap is that
+   * activation.
+   *
+   * Resolves when the server accepts the assertion; rejects with human-readable
+   * copy when the browser refuses, the user cancels, or the server rejects it.
+   */
+  authenticateWithPasskey(): Promise<void> {
+    if (this.pendingAssertion) {
+      return Promise.reject(new Error('A passkey sign-in is already in progress'))
+    }
+    return this.awaitAssertion(() => {
+      this.passkeyPending = true
+      // A live pre-auth socket already sitting on `passkey-required` is the
+      // socket the challenge must be bound to. Anything else (closed, timed
+      // out, mid-backoff) needs a fresh handshake first, and the auto-fire in
+      // `handleMessage` picks the ceremony back up when it lands.
+      if (this.ws?.readyState === WebSocket.OPEN && this.state === 'passkey-required') {
+        this.startAssertion()
+      } else {
+        this.connect()
+      }
+    })
+  }
+
+  /**
+   * Register a passkey for THIS device, then (on an enrollment-token socket)
+   * re-authenticate with it.
+   *
+   * Two callers, one flow:
+   *  - the `#enroll=` link screen, where the socket holds `enroll` ONLY and the
+   *    upgrade assertion is what buys it real access (the server never widens
+   *    an enroll connection silently);
+   *  - the inline post-password offer, where the socket is already a full
+   *    connection and enrolling is the whole job.
+   *
+   * Rejects with the server's own refusal for the case that matters most: under
+   * effective-`legacy` (nothing enrolled, policy AUTO) a password connection
+   * does NOT hold `enroll`, so the first credential must come from the desktop.
+   */
+  async enrollThisDevice(nickname?: string | null): Promise<void> {
+    // A retry after a failed UPGRADE skips straight to the assertion — the
+    // credential exists, and asking for registration options again would hand
+    // the authenticator an `excludeCredentials` list containing it.
+    if (!this.registeredOnThisSocket) {
+      const options = (await this.invoke(
+        'webauthn:register-options'
+      )) as PublicKeyCredentialCreationOptionsJSON
+      let response: RegistrationResponseJSON
+      try {
+        response = await startRegistration({ optionsJSON: options })
+      } catch (err) {
+        throw new Error(describeCeremonyError(err))
+      }
+      const result = (await this.invoke('webauthn:register-verify', {
+        response,
+        nickname: nickname ?? null
+      })) as { ok: boolean; error?: string }
+      if (!result?.ok) {
+        throw new Error(
+          result?.error === 'malformed'
+            ? 'The passkey the browser produced was rejected — try again.'
+            : 'This passkey could not be verified for this address.'
+        )
+      }
+      this.registeredOnThisSocket = true
+    }
+    // An enrollment socket proves it can USE what it just made; a socket that
+    // was already authenticated has nothing to upgrade to.
+    if (this.authMethodValue !== 'enroll-token') return
+    await this.awaitAssertion(() => this.startAssertion())
+  }
+
+  // ---------------------------------------------------------------------------
   // Terminal (SyncCore phase 2)
   // ---------------------------------------------------------------------------
 
@@ -283,24 +557,36 @@ export class RemoteConnection {
    * caller renders `error`/`code` inline in the prompt.
    */
   stepUp(pwProof: string): Promise<WsStepUpResponse> {
-    return new Promise((resolve) => {
-      if (this.ws?.readyState !== WebSocket.OPEN || this.state !== 'connected') {
-        resolve({
-          type: 'step-up-response',
-          ok: false,
-          error: 'Not connected',
-          retryable: true
-        })
-        return
+    return this.sendStepUp({ type: 'step-up', pwProof })
+  }
+
+  /**
+   * The passkey half of the same ceremony (ADR-052 decision 5: step-up is
+   * passkey-FIRST). Fetches a `step-up`-kind challenge mid-session, signs it,
+   * and sends the assertion — a handshake challenge cannot be replayed into a
+   * step-up, nor the reverse, so the extra round trip is the point.
+   *
+   * Resolves with a verdict in every path (never throws): a browser refusal and
+   * a server refusal are the same thing to the prompt, which renders `error`
+   * and branches on `code`.
+   */
+  async stepUpWithPasskey(): Promise<WsStepUpResponse> {
+    if (this.ws?.readyState !== WebSocket.OPEN || this.state !== 'connected') {
+      return { type: 'step-up-response', ok: false, error: 'Not connected', retryable: true }
+    }
+    const outcome = await this.requestStepUpChallenge()
+    if (outcome.kind === 'refused') return outcome.response
+    try {
+      const assertion = await startAuthentication({ optionsJSON: outcome.options })
+      return await this.sendStepUp({ type: 'step-up', assertion })
+    } catch (err) {
+      return {
+        type: 'step-up-response',
+        ok: false,
+        error: describeCeremonyError(err),
+        retryable: true
       }
-      const timer = setTimeout(() => {
-        const index = this.pendingStepUps.findIndex((p) => p.timer === timer)
-        if (index >= 0) this.pendingStepUps.splice(index, 1)
-        resolve({ type: 'step-up-response', ok: false, error: 'Timed out', retryable: true })
-      }, INVOKE_TIMEOUT_MS)
-      this.pendingStepUps.push({ resolve, timer })
-      this.send({ type: 'step-up', pwProof })
-    })
+    }
   }
 
   /** Keystrokes for an attached terminal. Fire-and-forget, like a keypress. */
@@ -332,19 +618,7 @@ export class RemoteConnection {
   destroy(): void {
     this.destroyed = true
     this.clearTimers()
-    if (this.ws) {
-      // Detach the handlers BEFORE closing. `close()` fires `onclose`
-      // asynchronously, so a discarded socket's close event could otherwise
-      // land after a later `connect()` revived us — clearing the *new*
-      // connection's timers and scheduling a spurious reconnect.
-      const ws = this.ws
-      ws.onopen = null
-      ws.onmessage = null
-      ws.onclose = null
-      ws.onerror = null
-      this.ws = null
-      ws.close(1000, 'Client closing')
-    }
+    this.discardSocket()
     // Reject all pending invokes
     for (const [, pending] of this.pendingInvokes) {
       clearTimeout(pending.timer)
@@ -361,6 +635,21 @@ export class RemoteConnection {
       })
     }
     this.pendingStepUps.length = 0
+    const challenge = this.pendingStepUpChallenge
+    if (challenge) {
+      this.pendingStepUpChallenge = null
+      challenge.settle({
+        kind: 'refused',
+        response: {
+          type: 'step-up-response',
+          ok: false,
+          error: 'Connection destroyed',
+          retryable: true
+        }
+      })
+    }
+    this.settleAssertion(new Error('Connection destroyed'))
+    this.authMethodValue = undefined
   }
 
   /** Get the current last sequence number (for debugging). */
@@ -369,11 +658,150 @@ export class RemoteConnection {
   }
 
   // ---------------------------------------------------------------------------
+  // Internal — passkey ceremonies
+  // ---------------------------------------------------------------------------
+
+  /** Install the single assertion waiter, then kick the frame that starts it. */
+  private awaitAssertion(kick: () => void): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        // Identity-checked: a lapsed timer must not settle a LATER ceremony
+        // that replaced this one (the enroll path installs a waiter without
+        // the concurrency guard `authenticateWithPasskey` has).
+        if (this.pendingAssertion?.timer !== timer) return
+        this.settleAssertion(new Error('Passkey sign-in timed out'))
+      }, PASSKEY_CEREMONY_TIMEOUT_MS)
+      this.pendingAssertion = { resolve, reject, timer }
+      kick()
+    })
+  }
+
+  /** Ask for a handshake challenge on the current socket. */
+  private startAssertion(): void {
+    this.send({ type: 'auth-webauthn-start' })
+  }
+
+  /**
+   * Resolve or reject the in-flight assertion, exactly once. Idempotent, so the
+   * `auth-response` that settles it and the socket close that follows do not
+   * both try to.
+   *
+   * Disarming {@link RemoteConnection.passkeyPending} here — on EVERY settle, not
+   * only the successful one — is what keeps the auto-start tied to the tap that
+   * armed it. See that field's invariant.
+   */
+  private settleAssertion(err: Error | null): void {
+    this.passkeyPending = false
+    const pending = this.pendingAssertion
+    if (!pending) return
+    this.pendingAssertion = null
+    clearTimeout(pending.timer)
+    if (err) pending.reject(err)
+    else pending.resolve()
+  }
+
+  /** Sign the server's challenge and send it back. */
+  private async completeAssertion(options: PublicKeyCredentialRequestOptionsJSON): Promise<void> {
+    try {
+      const assertion = await startAuthentication({ optionsJSON: options })
+      this.send({ type: 'auth-webauthn-finish', assertion })
+    } catch (err) {
+      // Nothing went out, so the server will simply let its ceremony budget
+      // lapse. Settle our own waiter now rather than leaving the UI spinning
+      // for two minutes on a prompt the user already dismissed.
+      this.settleAssertion(new Error(describeCeremonyError(err)))
+    }
+  }
+
+  /**
+   * `step-up-challenge-request` → whichever of the two answers arrives first.
+   * Times out on the same budget as the ceremony it precedes.
+   */
+  private requestStepUpChallenge(): Promise<StepUpChallengeOutcome> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        // Same identity check as `awaitAssertion`: clear only OUR slot.
+        if (this.pendingStepUpChallenge?.timer === timer) this.pendingStepUpChallenge = null
+        resolve({
+          kind: 'refused',
+          response: { type: 'step-up-response', ok: false, error: 'Timed out', retryable: true }
+        })
+      }, INVOKE_TIMEOUT_MS)
+      this.pendingStepUpChallenge = {
+        settle: (outcome) => {
+          clearTimeout(timer)
+          resolve(outcome)
+        },
+        timer
+      }
+      this.send({ type: 'step-up-challenge-request' })
+    })
+  }
+
+  /**
+   * Send one `step-up` frame and wait for its verdict. Shared by both factors:
+   * the frame carries no request id (at most one ceremony per connection, it is
+   * driven by a modal), so responses are matched FIFO.
+   */
+  private sendStepUp(frame: WsStepUpRequest): Promise<WsStepUpResponse> {
+    return new Promise((resolve) => {
+      if (this.ws?.readyState !== WebSocket.OPEN || this.state !== 'connected') {
+        resolve({
+          type: 'step-up-response',
+          ok: false,
+          error: 'Not connected',
+          retryable: true
+        })
+        return
+      }
+      const timer = setTimeout(() => {
+        const index = this.pendingStepUps.findIndex((p) => p.timer === timer)
+        if (index >= 0) this.pendingStepUps.splice(index, 1)
+        resolve({ type: 'step-up-response', ok: false, error: 'Timed out', retryable: true })
+      }, INVOKE_TIMEOUT_MS)
+      this.pendingStepUps.push({ resolve, timer })
+      this.send(frame)
+    })
+  }
+
+  // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
 
+  /**
+   * Drop the current socket without letting it talk back.
+   *
+   * Handlers are detached BEFORE closing: `close()` fires `onclose`
+   * asynchronously, so a discarded socket's close event could otherwise land
+   * after a later `connect()` revived us — clearing the NEW connection's timers
+   * and scheduling a spurious reconnect.
+   */
+  private discardSocket(): void {
+    const ws = this.ws
+    if (!ws) return
+    ws.onopen = null
+    ws.onmessage = null
+    ws.onclose = null
+    ws.onerror = null
+    this.ws = null
+    ws.close(1000, 'Client closing')
+  }
+
   private createWebSocket(): void {
     if (this.destroyed) return
+
+    // A live socket can still be sitting here: the `passkey-required` handshake
+    // deliberately leaves one OPEN, and switching to the password form calls
+    // connect() on top of it. Without this it would hold a server connection
+    // slot until the pre-auth deadline reaped it.
+    this.discardSocket()
+
+    // Per-socket facts, reset HERE rather than only in `onclose`: a socket the
+    // app discards deliberately (connect() over a live one) never fires its
+    // close handler, and a stale `registeredOnThisSocket` would make the next
+    // `enrollThisDevice` skip the registration it actually owes.
+    this.authMethodValue = undefined
+    this.registeredOnThisSocket = false
 
     try {
       this.ws = new WebSocket(this.url)
@@ -399,6 +827,8 @@ export class RemoteConnection {
       // the token branch of `handleMessage` surfaces as `failed`.
       if (this.credential.pwProof !== undefined) {
         this.sendRaw({ type: 'auth', pwProof: this.credential.pwProof })
+      } else if (this.credential.enrollToken !== undefined) {
+        this.sendRaw({ type: 'auth', enrollToken: this.credential.enrollToken })
       } else {
         this.sendRaw({ type: 'auth', token: this.credential.token })
       }
@@ -421,6 +851,16 @@ export class RemoteConnection {
 
     this.ws.onclose = (ev): void => {
       this.clearTimers()
+      // A socket that goes away takes its authentication with it — the method
+      // described THAT connection, and leaving it set would have the app render
+      // an `off`-mode banner (or offer a passkey step-up) for a dead socket.
+      this.authMethodValue = undefined
+      // Per-socket, like the method above: a new socket carries a new token and
+      // starts the enrollment over from registration.
+      this.registeredOnThisSocket = false
+      // Any ceremony still in flight died with the socket. Settle it here so the
+      // login screen re-offers instead of spinning to its 2-minute timeout.
+      this.settleAssertion(new Error('Connection lost during passkey sign-in'))
       // Two server close codes mean "don't just retry": the credential was
       // rotated out from under us (4008, sent only to password clients) or the
       // key is throttled (4006, refused BEFORE any auth frame — so there is no
@@ -437,6 +877,16 @@ export class RemoteConnection {
         return
       }
       if (!this.destroyed) {
+        // 4009 is not a rejection: the RULES moved (a policy write, the first
+        // enrollment, the last revoke), and every live client owes a fresh
+        // handshake under them. Reconnect immediately rather than serving out a
+        // backoff for something that is not a failure — the new handshake is
+        // what decides whether we now owe a ceremony, or nothing at all.
+        if (code === CLOSE_AUTH_SURFACE_CHANGED) {
+          this.reconnectAttempt = 0
+          this.scheduleReconnect('Sign-in requirements changed — reconnecting')
+          return
+        }
         this.scheduleReconnect()
       }
     }
@@ -469,7 +919,19 @@ export class RemoteConnection {
     switch (msg.type) {
       case 'auth-response':
         if (msg.ok) {
-          if (this.e2eKeyHex) {
+          this.authMethodValue = msg.method
+          this.settleAssertion(null)
+          if (msg.method === 'enroll-token') {
+            // The server consumed the token to answer this frame — it is
+            // single-use and now dead. Drop it so a reconnect authenticates as
+            // an ordinary credential-less client (and gets the passkey screen)
+            // instead of presenting a burned secret and being refused.
+            this.credential = { ...this.credential, enrollToken: undefined }
+            // An `enroll`-only socket. It must NOT sync: there is no app behind
+            // it, only the enrollment screen, and asking for a snapshot it
+            // cannot use would just be noise on the wire.
+            this.setState('enrolling')
+          } else if (this.e2eKeyHex) {
             // Activate E2E encryption before syncing
             this.setState('e2e-activating')
             this.initE2E()
@@ -477,6 +939,38 @@ export class RemoteConnection {
             this.setState('syncing')
             this.sendSync()
           }
+        } else if (msg.error === PASSKEY_REQUIRED_ERROR) {
+          // NOT a rejection, and the socket deliberately stays OPEN — this is
+          // the socket the ceremony has to run on, and tearing it down would
+          // force a reconnect between "you need a passkey" and "here it is".
+          if (this.passkeyPending) this.startAssertion()
+          else this.setState('passkey-required')
+        } else if (msg.error === PASSKEY_UNAVAILABLE_ERROR) {
+          // Definitive: nothing enrolled, or this origin cannot do WebAuthn.
+          // Recoverable at the APP level (it may still have a password form),
+          // so `auth-rejected` rather than `failed`.
+          this.settleAssertion(new Error('No passkey is available for this address.'))
+          this.authRejected = true
+          this.setState('auth-rejected', 'No passkey is available for this address.')
+          this.ws?.close()
+        } else if (msg.error === PASSKEY_FAILED_ERROR && this.authMethodValue === 'enroll-token') {
+          // The UPGRADE assertion failed on an enrollment socket. Mirror the
+          // server, which pointedly does NOT close here
+          // (`handleEnrollUpgrade`): the enrollment token was consumed the
+          // moment this socket authenticated, so reconnecting would arrive with
+          // a burned credential — a dead end reached WITH a perfectly good
+          // passkey already registered. Stay on this socket, stay `enrolling`,
+          // and let the screen offer the assertion again.
+          this.settleAssertion(
+            new Error('That was not the passkey you just created — try again on this device.')
+          )
+        } else if (msg.error === PASSKEY_FAILED_ERROR) {
+          // The assertion did not verify. `retryable`, so let the backoff
+          // reconnect: the fresh handshake answers `passkey-required` again and
+          // the login screen re-offers with this reason attached.
+          this.settleAssertion(new Error('That passkey did not verify — try again.'))
+          this.setState('reconnecting', 'That passkey did not verify — try again.')
+          this.ws?.close()
         } else if (this.credential.pwProof !== undefined) {
           // Password path: recoverable. Do NOT latch `destroyed` — the app
           // re-prompts and revives this instance with a fresh proof. A
@@ -489,11 +983,27 @@ export class RemoteConnection {
             this.setState('auth-rejected', msg.error || 'Authentication failed')
           }
           this.ws?.close()
+        } else if (this.credential.enrollToken !== undefined) {
+          // A used-up or expired enrollment link. Recoverable only by minting a
+          // new one on the desktop, so stop the backoff (nothing about retrying
+          // this token will change) but stay revivable.
+          this.authRejected = true
+          this.setState('auth-rejected', msg.error || 'Enrollment link is invalid or expired')
+          this.ws?.close()
         } else {
           this.setState('failed', msg.error || 'Authentication failed')
           this.destroyed = true // Don't reconnect on auth failure
           this.ws?.close()
         }
+        break
+
+      case 'auth-webauthn-challenge':
+        // The flag is NOT cleared here: it lives and dies with the waiter (see
+        // `passkeyPending`), and `completeAssertion` settles that waiter on
+        // every path — a signed assertion resolves it via the `auth-response`
+        // below, a refused prompt rejects it directly. Clearing early would
+        // just be a second, weaker copy of the same rule.
+        void this.completeAssertion(msg.options)
         break
 
       case 'e2e-ack':
@@ -542,8 +1052,27 @@ export class RemoteConnection {
         }
         break
 
+      case 'step-up-challenge':
+        {
+          const pending = this.pendingStepUpChallenge
+          this.pendingStepUpChallenge = null
+          pending?.settle({ kind: 'challenge', options: msg.options })
+        }
+        break
+
       case 'step-up-response':
         {
+          // A REFUSAL to issue a challenge (throttled, no passkey on this
+          // connection) comes back on this frame with nothing to correlate it
+          // to, so the challenge waiter gets first claim — otherwise it would
+          // be consumed by an unrelated pending step-up, or dropped entirely
+          // and left to time out.
+          const challenge = this.pendingStepUpChallenge
+          if (challenge) {
+            this.pendingStepUpChallenge = null
+            challenge.settle({ kind: 'refused', response: msg as WsStepUpResponse })
+            break
+          }
           const pending = this.pendingStepUps.shift()
           if (pending) {
             clearTimeout(pending.timer)
@@ -652,14 +1181,14 @@ export class RemoteConnection {
     }
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(reason?: string): void {
     // `authRejected` stops the backoff without latching `destroyed`, so the app
     // can revive this instance via setCredential() + connect().
     if (this.destroyed || this.authRejected) return
 
     const delay = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)]
     this.reconnectAttempt++
-    this.setState('reconnecting')
+    this.setState('reconnecting', reason)
 
     this.reconnectTimer = setTimeout(() => {
       this.createWebSocket()

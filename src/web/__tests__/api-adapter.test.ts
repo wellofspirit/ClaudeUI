@@ -16,6 +16,8 @@ import type { RemoteConnection } from '../connection'
 type FakeConnection = {
   invoke: ReturnType<typeof vi.fn>
   on: RemoteConnection['on']
+  passkeyAvailable: ReturnType<typeof vi.fn>
+  stepUpWithPasskey: ReturnType<typeof vi.fn>
   /** Push a server event to the api's listeners. */
   push: (channel: string, ...args: unknown[]) => void
 }
@@ -32,6 +34,8 @@ function makeConnection(): FakeConnection {
   return {
     invoke: vi.fn(async () => undefined),
     on: (channel) => sync.on(channel),
+    passkeyAvailable: vi.fn(() => false),
+    stepUpWithPasskey: vi.fn(async () => ({ type: 'step-up-response', ok: true })),
     push: (channel, ...args) => sync.receiveEvent({ seq: ++seq, channel, args })
   }
 }
@@ -65,4 +69,70 @@ describe('web api-adapter — git live watching', () => {
   // (`shared/sync/client-registry` does, for both clients), so asserting it here
   // would only be re-testing `SyncClient.on`. What remains in this file is the
   // INVOKE surface, which 4c did not touch.
+})
+
+describe('web api-adapter — passkeys (ADR-052)', () => {
+  it('maps all SIX verbs to their channels (GUARD: this is the only surface with the two register verbs)', async () => {
+    await api.webauthnCredentials()
+    expect(connection.invoke).toHaveBeenCalledWith('webauthn:credentials')
+    await api.webauthnRename('cred-1', 'Phone')
+    expect(connection.invoke).toHaveBeenCalledWith('webauthn:rename', 'cred-1', 'Phone')
+    await api.webauthnRevoke('cred-1')
+    expect(connection.invoke).toHaveBeenCalledWith('webauthn:revoke', 'cred-1')
+    await api.webauthnMintEnrollToken()
+    expect(connection.invoke).toHaveBeenCalledWith('webauthn:mint-enroll-token')
+    await api.webauthnRegisterOptions()
+    expect(connection.invoke).toHaveBeenCalledWith('webauthn:register-options')
+    const payload = { response: { id: 'c' }, nickname: null } as never
+    await api.webauthnRegisterVerify(payload)
+    expect(connection.invoke).toHaveBeenCalledWith('webauthn:register-verify', payload)
+  })
+
+  it('never unwraps a webauthn result (they are not safeHandler envelopes)', async () => {
+    // `webauthn:register-verify` legitimately answers `{ok:false, error}` as
+    // DATA. Routing it through `unwrap()` would turn a "that key did not
+    // verify" answer into a thrown transport error and lose the reason.
+    connection.invoke.mockResolvedValueOnce({ ok: false, error: 'malformed' })
+    await expect(api.webauthnRegisterVerify({ response: {} } as never)).resolves.toEqual({
+      ok: false,
+      error: 'malformed'
+    })
+  })
+
+  it('merges the client-side passkey hint into terminal availability', async () => {
+    connection.invoke.mockResolvedValueOnce({
+      allowed: true,
+      granted: false,
+      needsStepUp: true,
+      stepUp: null
+    })
+    connection.passkeyAvailable.mockReturnValue(true)
+    // The host cannot answer this: whether a ceremony is possible depends on
+    // this browser's origin and this socket's auth method, neither of which
+    // `terminal:availability` knows about.
+    await expect(api.terminalAvailability()).resolves.toMatchObject({
+      needsStepUp: true,
+      passkey: true
+    })
+  })
+
+  it('passkey step-up goes through the connection, with no local pre-checks', async () => {
+    connection.stepUpWithPasskey.mockResolvedValue({
+      type: 'step-up-response',
+      ok: false,
+      code: 'throttled',
+      error: 'Too many attempts',
+      retryable: false
+    })
+    await expect(api.terminalStepUpPasskey()).resolves.toEqual({
+      ok: false,
+      code: 'throttled',
+      error: 'Too many attempts',
+      retryable: false,
+      expiresAt: undefined
+    })
+    // Unlike the password path, nothing is probed first — the challenge request
+    // IS the probe, and guessing client-side could only guess wrong.
+    expect(connection.invoke).not.toHaveBeenCalled()
+  })
 })
