@@ -228,6 +228,10 @@ const api: ClaudeAPI = {
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
   killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
   terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
+  // Real IPC on desktop (unlike availability, which is a constant here): the
+  // pool is main-process state, and the desktop is just as capable of reopening
+  // a slot whose shell is still running as a phone is.
+  terminalPool: (cwd: string) => ipcRenderer.invoke('terminal:pool', cwd),
   // Step-up is a REMOTE concept (SyncCore phase 2): the desktop renderer is the
   // host surface, already holding a non-decaying `shell` grant, so there is
   // nothing to step up to. Local no-op, deliberately not an IPC round trip.

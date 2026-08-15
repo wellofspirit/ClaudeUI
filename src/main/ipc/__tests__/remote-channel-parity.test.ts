@@ -56,6 +56,7 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'terminal:create',
   'terminal:detach',
   'terminal:kill',
+  'terminal:pool',
   'webauthn:credentials',
   'webauthn:mint-enroll-token',
   'webauthn:register-options',

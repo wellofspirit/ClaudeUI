@@ -315,6 +315,69 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     await expect(client.invoke('terminal:attach', id)).resolves.toBe(true)
   })
 
+  /**
+   * The DESTRUCTIVE verb runs the identical gate series.
+   *
+   * `terminal:kill` only became reachable from the UI when the tab menu gave it
+   * a visible affordance, and the whole gate story so far is told through
+   * `terminal:create`. Pin it here: a channel that can end the operator's shell
+   * must never be the one whose gates were assumed rather than checked. Same
+   * for the new `terminal:pool` — a listing of the operator's live shells is not
+   * something an un-stepped-up socket may read.
+   */
+  it('holds terminal:kill and terminal:pool to the SAME gates as create', async () => {
+    // Gate 1 — the desktop toggle is off: nothing about the shell is reachable.
+    const off = await connect()
+    await expect(off.invoke('terminal:kill', 'whatever')).rejects.toThrow('terminal-disabled')
+    await expect(off.invoke('terminal:pool', '/tmp/x')).rejects.toThrow('terminal-disabled')
+
+    // Gate 2 — toggle on, no ceremony yet.
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true, shellGrantIdleMinutes: 10 })
+    const client = await connect()
+    await expect(client.invoke('terminal:kill', 'whatever')).rejects.toThrow('needs-step-up')
+    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow('needs-step-up')
+
+    expect(await stepUp(client)).toMatchObject({ ok: true })
+    const id = await client.invoke<string>('terminal:create', '/tmp/x', 0)
+    await expect(client.invoke('terminal:pool', '/tmp/x')).resolves.toEqual([0])
+    await client.invoke('terminal:kill', id)
+    expect(ptyStub.spawned[0].killed).toBe(true)
+    await expect(client.invoke('terminal:pool', '/tmp/x')).resolves.toEqual([])
+
+    // Gate 3 — the grant decays; both are refused again.
+    advance(11)
+    await expect(client.invoke('terminal:kill', 'whatever')).rejects.toThrow('needs-step-up')
+    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow('needs-step-up')
+  })
+
+  /**
+   * READS MUST NOT FEED THE DECAY.
+   *
+   * The idle window is a presence proof: it expires because nobody has USED the
+   * shell. The gate slides the deadline for every `shell`-capability dispatch,
+   * which was fine while every such channel was a `command` — but `terminal:pool`
+   * is a `query`, and the panel re-asks it on window focus. Without this
+   * distinction a stepped-up browser tab renews its own grant on every alt-tab,
+   * forever, with no shell use at all: the ceremony would effectively be
+   * permanent for anyone who left the tab open.
+   *
+   * 6 + 6 minutes across a 10-minute window: the query in the middle must not
+   * reset the clock, so the command at the end is refused.
+   */
+  it('does not let a shell QUERY renew the grant — only acting refreshes the decay', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true, shellGrantIdleMinutes: 10 })
+    const client = await connect()
+    expect(await stepUp(client)).toMatchObject({ ok: true })
+
+    advance(6)
+    // The read itself is still allowed — it is inside the window.
+    await expect(client.invoke('terminal:pool', '/tmp/x')).resolves.toEqual([])
+
+    advance(6)
+    await expect(client.invoke('terminal:create', '/tmp/x')).rejects.toThrow('needs-step-up')
+    expect(ptyStub.spawned).toHaveLength(0)
+  })
+
   it('decays the grant on idle and demands a fresh step-up', async () => {
     remoteConfigRef.current = makeConfigRow({ allowTerminal: true, shellGrantIdleMinutes: 10 })
     const client = await connect()

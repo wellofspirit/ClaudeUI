@@ -220,6 +220,24 @@ export class TerminalService {
     this.manager.kill(id)
   }
 
+  /**
+   * Which slots of `cwd`'s pool hold a live pty right now.
+   *
+   * Read-only affordance data: closing a tab detaches, so a client that reopens
+   * slot 0 may land on a shell that has been running all along — and nothing
+   * else on the wire says so before the click. Gated exactly like the rest of
+   * the terminal surface (`assertAllowed` + the `shell` capability at both
+   * registrations), so a client without a live grant learns nothing.
+   *
+   * Slots only, never pty ids: the caller re-opens by SLOT, and an id it is not
+   * showing is not its business.
+   */
+  poolSlots(connection: CommandConnection, cwd: string): number[] {
+    this.assertAllowed(connection)
+    if (typeof cwd !== 'string' || cwd.trim() === '') return []
+    return this.manager.poolOf(cwd).map((slot) => slot.index)
+  }
+
   killByCwd(connection: CommandConnection, cwd: string): string[] {
     this.assertAllowed(connection)
     return this.manager.killByCwd(cwd)

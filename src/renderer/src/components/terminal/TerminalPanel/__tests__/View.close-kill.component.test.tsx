@@ -1,5 +1,5 @@
 /**
- * Layer 2: the tab close button's two paths.
+ * Layer 2: the tab close button's two paths, THROUGH the strip.
  *
  * Closing a terminal tab is DETACH-ONLY since terminals became a shared per-cwd
  * pool — which left no UI path at all to stop a runaway process, because the
@@ -7,6 +7,10 @@
  * in). Shift-click is that path. The modifier belongs on the DESTRUCTIVE action:
  * the unmodified click must stay the safe one, since another surface may be
  * attached to the same pty.
+ *
+ * The tab itself is now its own component (it owns a context menu — see
+ * TerminalTab.component.test.tsx); these cases stay here because what they pin
+ * is the STRIP's contract: which tab id the view reports, and with which flag.
  *
  * XTermInstance is stubbed so this stays a test of the tab bar — the lazy
  * boundary itself is covered by View.lazy-xterm.component.test.tsx.
@@ -32,7 +36,9 @@ function viewProps(onCloseTab: TerminalPanelViewProps['onCloseTab']): TerminalPa
     onSelectTab: () => {},
     onCloseTab,
     onNewTab: () => {},
-    onClosePanel: () => {}
+    onClosePanel: () => {},
+    nextSlot: 1,
+    nextSlotRunning: false
   }
 }
 
@@ -68,11 +74,11 @@ describe('TerminalPanelView — close vs kill', () => {
     expect(onSelectTab).not.toHaveBeenCalled()
   })
 
-  it('advertises both paths on the button itself', () => {
+  it('advertises both paths on the button itself, plus the menu that spells them out', () => {
     render(<TerminalPanelView {...viewProps(vi.fn())} />)
     expect(screen.getByTestId('TerminalTab.close')).toHaveAttribute(
       'title',
-      'Close (detach) — Shift-click to kill'
+      'Close (detach) — Shift-click to kill, right-click for more'
     )
   })
 })

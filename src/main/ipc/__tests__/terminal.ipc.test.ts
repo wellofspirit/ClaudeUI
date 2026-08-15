@@ -153,6 +153,50 @@ describe('terminal.ipc', () => {
     await expect(harness.call('terminal:kill', id)).resolves.toBeUndefined()
     // kill-by-cwd returns an array of killed ids
     await expect(harness.call('terminal:kill-by-cwd', '/nonexistent')).resolves.toEqual([])
+    // pool answers with the live SLOTS of a cwd (empty for one with no shells)
+    await expect(harness.call('terminal:pool', '/nonexistent')).resolves.toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // `terminal:pool` — what the "still running here" indicator reads
+  // -------------------------------------------------------------------------
+
+  it('terminal:pool lists the live slots of one cwd, by directory not by spelling', async () => {
+    await harness.call<string>('terminal:create', '/tmp/proj', 0)
+    await harness.call<string>('terminal:create', '/tmp/proj', 2)
+    await harness.call<string>('terminal:create', '/tmp/other', 0)
+
+    await expect(harness.call('terminal:pool', '/tmp/proj')).resolves.toEqual([0, 2])
+    // Same normalization the pool key itself uses — a trailing slash names the
+    // same directory, and an indicator that disagreed with `create` would be
+    // worse than no indicator.
+    await expect(harness.call('terminal:pool', '/tmp/proj/')).resolves.toEqual([0, 2])
+    await expect(harness.call('terminal:pool', '/tmp/other')).resolves.toEqual([0])
+  })
+
+  it('terminal:pool drops a slot as soon as its pty is gone', async () => {
+    const id = await harness.call<string>('terminal:create', '/tmp/proj', 0)
+    await harness.call<string>('terminal:create', '/tmp/proj', 1)
+    await expect(harness.call('terminal:pool', '/tmp/proj')).resolves.toEqual([0, 1])
+
+    await harness.call('terminal:kill', id)
+    await expect(harness.call('terminal:pool', '/tmp/proj')).resolves.toEqual([1])
+
+    // A natural exit frees its slot the same way.
+    ptyStub.spawned[1].emitExit(0)
+    await expect(harness.call('terminal:pool', '/tmp/proj')).resolves.toEqual([])
+  })
+
+  it('terminal:pool answers empty for a missing cwd instead of throwing', async () => {
+    await expect(harness.call('terminal:pool', '')).resolves.toEqual([])
+    await expect(harness.call('terminal:pool', '   ')).resolves.toEqual([])
+  })
+
+  it('terminal:pool leaks no pty ids — a caller re-opens by SLOT', async () => {
+    const id = await harness.call<string>('terminal:create', '/tmp/proj', 0)
+    const slots = await harness.call<number[]>('terminal:pool', '/tmp/proj')
+    expect(slots).toEqual([0])
+    expect(JSON.stringify(slots)).not.toContain(id)
   })
 
   it('terminal:create returns a string id', async () => {

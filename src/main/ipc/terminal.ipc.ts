@@ -15,6 +15,7 @@ const TERMINAL_IPC_CHANNELS = [
   'terminal:kill',
   'terminal:kill-by-cwd',
   'terminal:availability',
+  'terminal:pool',
   'terminal:attach',
   'terminal:detach'
 ]
@@ -84,6 +85,21 @@ export function registerTerminalIpc(): void {
     handler: (connection: CommandConnection, id: string) => {
       terminalService.kill(connection, id)
     }
+  })
+
+  // Which slots of a cwd's pool are live — what the "+" affordance badges
+  // "running" with, since a plain close only DETACHES this surface. `shell`
+  // like every other terminal verb (so the same three gates run, and the remote
+  // transport's capability-driven step-up gate covers it automatically), and a
+  // `query` because it moves nothing: the audit records the LIFECYCLE, and a
+  // listing of slot numbers is not part of it.
+  handleIpc({
+    channel: 'terminal:pool',
+    capability: 'shell',
+    kind: 'query',
+    withConnection: true,
+    handler: (connection: CommandConnection, cwd: string) =>
+      terminalService.poolSlots(connection, cwd)
   })
 
   handleIpc({

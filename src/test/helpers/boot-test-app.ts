@@ -189,6 +189,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     killTerminal: (id) => ipcRenderer.invoke('terminal:kill', id),
     killTerminalsByCwd: (cwd) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
     terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
+    terminalPool: (cwd) => ipcRenderer.invoke('terminal:pool', cwd),
     // Mirrors preload: step-up is remote-only, but attach/detach are real on the
     // desktop transport too (the terminal pool means a tab can resolve to a pty
     // this surface never spawned, and attach is what replays its scrollback).

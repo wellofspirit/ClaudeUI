@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
-import type { TerminalTab } from '../../../../../shared/types'
+import type { TerminalTab as TerminalTabModel } from '../../../../../shared/types'
+import { TerminalTab } from './TerminalTab'
 
 // Lazy: xterm.js + addon-fit + xterm.css must not ride the eager App chunk. This
 // panel's container is always mounted (display:none preserves scrollback), so the
@@ -10,18 +11,27 @@ const XTermInstance = lazy(() =>
 
 export interface TerminalPanelViewProps {
   style: React.CSSProperties
-  visibleTabs: TerminalTab[]
-  allTabs: TerminalTab[]
+  visibleTabs: TerminalTabModel[]
+  allTabs: TerminalTabModel[]
   activeId: string | null
   onSelectTab: (id: string, cwd: string) => void
   /**
-   * Close this tab. `kill: true` (Shift-click) also terminates the pty behind
-   * it — the only UI path that kills a shell now that a plain close merely
-   * detaches this surface from the shared per-cwd pool.
+   * Close this tab. `kill: true` (Shift-click, or the tab menu's confirmed
+   * "Kill shell") also terminates the pty behind it — the only UI path that
+   * kills a shell now that a plain close merely detaches this surface from the
+   * shared per-cwd pool.
    */
   onCloseTab: (id: string, kill?: boolean) => void
   onNewTab: () => void
   onClosePanel: () => void
+  /**
+   * The pool slot "+" will ask for, and whether a shell is ALREADY running in
+   * it. True means the next open re-attaches to a live pty (this surface closed
+   * its tab, or another surface owns it) instead of spawning — which is
+   * invisible otherwise, because a detached shell leaves nothing on screen.
+   */
+  nextSlot: number
+  nextSlotRunning: boolean
 }
 
 export function TerminalPanelView({
@@ -32,7 +42,9 @@ export function TerminalPanelView({
   onSelectTab,
   onCloseTab,
   onNewTab,
-  onClosePanel
+  onClosePanel,
+  nextSlot,
+  nextSlotRunning
 }: TerminalPanelViewProps): React.JSX.Element {
   return (
     <div
@@ -42,41 +54,37 @@ export function TerminalPanelView({
     >
       <div className="flex items-center gap-0.5 px-2 py-1 bg-bg-secondary border-b border-border shrink-0">
         {visibleTabs.map((tab) => (
-          <div
+          <TerminalTab
             key={tab.id}
-            data-testid="TerminalTab"
-            data-id={tab.id}
-            onClick={() => onSelectTab(tab.id, tab.cwd)}
-            className={`group flex items-center gap-1 px-2.5 h-6 rounded text-[11px] cursor-default transition-colors select-none ${
-              tab.id === activeId
-                ? 'bg-bg-primary text-text-primary'
-                : 'text-text-muted hover:text-text-secondary hover:bg-bg-hover'
-            }`}
-          >
-            <span className="truncate max-w-[120px]">{tab.title}</span>
-            <button
-              data-testid="TerminalTab.close"
-              data-id={tab.id}
-              title="Close (detach) — Shift-click to kill"
-              onClick={(e) => {
-                e.stopPropagation()
-                // Shift is the kill modifier: a plain close leaves the shell
-                // running for the other surfaces attached to this pool slot.
-                onCloseTab(tab.id, e.shiftKey)
-              }}
-              className="w-3.5 h-3.5 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-bg-tertiary text-[10px]"
-            >
-              &times;
-            </button>
-          </div>
+            tab={tab}
+            active={tab.id === activeId}
+            onSelect={() => onSelectTab(tab.id, tab.cwd)}
+            onClose={(kill) => onCloseTab(tab.id, kill)}
+          />
         ))}
         <button
           data-testid="TerminalPanel.newTab"
+          // Structural, so the live DOM says which of the two things this
+          // button does — the label is one glyph either way.
+          data-running={nextSlotRunning ? 'true' : undefined}
           onClick={onNewTab}
-          className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary hover:bg-bg-hover text-sm"
-          title="New terminal"
+          className="relative w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary hover:bg-bg-hover text-sm"
+          title={
+            nextSlotRunning
+              ? // 1-BASED in copy only — the wire (and `nextSlot`) stays 0-based.
+                // "slot 0" is an implementation detail leaking into a tooltip;
+                // the number a person can check is the tab's position.
+                `Re-attach to the shell already running in terminal ${nextSlot + 1}`
+              : 'New terminal'
+          }
         >
           +
+          {nextSlotRunning && (
+            <span
+              data-testid="TerminalPanel.newTabRunning"
+              className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-green-400"
+            />
+          )}
         </button>
         <button
           data-testid="TerminalPanel.close"
@@ -106,15 +114,40 @@ export function TerminalPanelView({
             </Suspense>
           </div>
         ))}
-        {visibleTabs.length === 0 && (
-          <div className="h-full flex items-center justify-center text-text-muted text-xs">
-            Press{' '}
-            <span className="font-mono mx-1 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
-              +
-            </span>{' '}
-            to open a terminal
-          </div>
-        )}
+        {visibleTabs.length === 0 &&
+          (nextSlotRunning ? (
+            // The case the pool made invisible: the tab is gone but the shell
+            // (a dev server, a `tail -f`) is still running, and nothing on
+            // screen said so — the operator reads an empty panel as an empty
+            // machine. Reopening re-attaches and replays its scrollback.
+            <div
+              data-testid="TerminalPanel.emptyRunning"
+              className="h-full flex flex-col items-center justify-center gap-1 text-text-muted text-xs"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400" />A shell is still running
+                here
+              </div>
+              <div className="text-[10px] text-text-muted/70">
+                Press{' '}
+                <span className="font-mono mx-0.5 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
+                  +
+                </span>{' '}
+                to re-attach, then right-click the tab to kill it
+              </div>
+            </div>
+          ) : (
+            <div
+              data-testid="TerminalPanel.empty"
+              className="h-full flex items-center justify-center text-text-muted text-xs"
+            >
+              Press{' '}
+              <span className="font-mono mx-1 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
+                +
+              </span>{' '}
+              to open a terminal
+            </div>
+          ))}
       </div>
     </div>
   )

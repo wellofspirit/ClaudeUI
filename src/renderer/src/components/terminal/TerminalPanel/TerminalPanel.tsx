@@ -10,6 +10,7 @@ import { isNeedsStepUpError } from '../../../../../shared/remote-protocol'
 import type { TerminalAvailability } from '../../../../../shared/types'
 import { TerminalStepUpPrompt } from '../TerminalStepUpPrompt'
 import { DESKTOP_AVAILABILITY } from '../terminal-availability'
+import { useTerminalPool } from '../terminal-pool'
 import { nextFreeSlot } from '../pool-slot'
 import { TerminalPanelView } from './View'
 
@@ -66,15 +67,34 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
     })
   }, [isWeb, refreshAvailability])
 
+  // Terminals are an ordered per-cwd POOL shared by every surface: "+" asks for
+  // the lowest slot this surface is not already showing. If a live pty sits
+  // there — this surface closed its tab (a close DETACHES), or another surface
+  // owns it — the open re-attaches instead of spawning, and the strip says so.
+  const nextSlot = nextFreeSlot(visibleTabs)
+  // Web asks only once the server has said "granted": every `shell` channel is
+  // refused before that, and a query we know will fail is noise on the wire.
+  //
+  // The tab SET is the re-ask trigger, not this panel's own actions: a pty can
+  // appear without "+" being pressed (opening the panel auto-opens slot 0), and
+  // an answer taken before that shell existed is exactly the stale one that
+  // makes a running shell invisible after its tab is closed.
+  const tabKey = visibleTabs.map((t) => `${t.poolIndex ?? ''}:${t.id}`).join(',')
+  const { liveSlots, refresh: refreshPool } = useTerminalPool(
+    cwd,
+    !isWeb || !!availability?.granted,
+    tabKey
+  )
+
   const handleNewTab = async (): Promise<void> => {
     const target = cwd || '.'
-    // Terminals are an ordered per-cwd POOL shared by every surface: this asks
-    // for the lowest slot this surface is not already showing. If another
-    // surface (a phone, the desktop) already holds that slot, we ATTACH to its
-    // pty and replay its scrollback instead of spawning a second shell.
-    const index = nextFreeSlot(visibleTabs)
+    const index = nextSlot
     try {
       const terminalId = await window.api.createTerminal(target, index)
+      // No explicit pool re-ask here: adding the tab changes the tab key, which
+      // is what the hook watches. The one path that does NOT change it —
+      // resolving to a tab we already show — has not changed the pool either.
+      //
       // Defensive: a slot we believed free resolving to a pty we already show
       // (possible if another surface reshuffled the pool between render and
       // click) must select that tab, never duplicate it.
@@ -100,34 +120,45 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
   }
 
   /**
-   * Close a tab, and on Shift-click KILL the pty behind it.
+   * Close a tab, and KILL the pty behind it when asked (Shift-click on the ×,
+   * or the tab menu's confirmed "Kill shell").
    *
    * Closing became detach-only when terminals became a shared per-cwd pool, which
    * left no way at all to stop a runaway process (a dev server, a `tail -f`) from
    * the UI: the cold sweep only reaps cwds with no live session, i.e. never the
-   * one you are working in. Shift is the modifier because the SAFE action must
-   * stay the unmodified one — closing a viewer must not take a shell away from
-   * another viewer by accident.
+   * one you are working in. The kill is always the EXPLICIT half — an unmodified
+   * click, and the plain menu item, must not take a shell away from another
+   * viewer by accident.
+   *
+   * The tab goes either way. A refused kill (decayed grant, pty already gone) is
+   * swallowed: closing the tab is the part the operator can always have, and the
+   * pool query is what re-tells them whether the shell survived.
    */
   const handleCloseTab = useCallback(
     (id: string, kill?: boolean): void => {
       if (kill) {
         // Best-effort: a pty that is already gone (or a decayed grant) must
         // still close the tab, which is the part the user asked for.
-        void window.api.killTerminal(id).catch(() => {})
+        void window.api
+          .killTerminal(id)
+          .catch(() => {})
+          .finally(() => refreshPool())
       }
       closeTerminalTab(id)
     },
-    [closeTerminalTab]
+    [closeTerminalTab, refreshPool]
   )
 
-  // Listen for PTY exit events
+  // Listen for PTY exit events. The exit is also how a kill this surface did
+  // NOT issue (another device, or the shell exiting on its own) reaches the
+  // indicator — the pool has one fewer live slot the moment it fires.
   useEffect(() => {
     const unsub = window.api.onTerminalExit(({ terminalId }) => {
       removeTerminalTab(terminalId)
+      refreshPool()
     })
     return unsub
-  }, [removeTerminalTab])
+  }, [removeTerminalTab, refreshPool])
 
   if (isWeb && (!availability || !availability.allowed || availability.needsStepUp)) {
     return (
@@ -186,6 +217,8 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
       onCloseTab={handleCloseTab}
       onNewTab={handleNewTab}
       onClosePanel={() => setTerminalPanelOpen(false)}
+      nextSlot={nextSlot}
+      nextSlotRunning={liveSlots.has(nextSlot)}
     />
   )
 }

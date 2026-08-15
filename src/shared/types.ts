@@ -1285,6 +1285,21 @@ interface TerminalAPI {
    */
   terminalAvailability(): Promise<TerminalAvailability>
   /**
+   * Which slots of `cwd`'s terminal POOL currently hold a LIVE pty.
+   *
+   * Terminals are an ordered per-cwd pool shared by every surface, and closing
+   * a tab only DETACHES this surface — so "open terminal N" may resolve to a
+   * shell that is still running from an earlier tab (or from a phone). Nothing
+   * else on the wire tells a client that: `terminal:create` answers with a bare
+   * id whether it spawned or attached, and `terminal:availability` is cwd-less.
+   * This is the query the open/reopen affordance badges "running" from.
+   *
+   * Declares the `shell` capability like every other terminal verb, so it runs
+   * the same three gates (toggle, grant, decay) — a refusal must read as "no
+   * information", never as "no shells here".
+   */
+  terminalPool(cwd: string): Promise<number[]>
+  /**
    * Run the step-up ceremony with the operator's remote-access password.
    * Desktop resolves `{ok:true}` without a ceremony — there is nothing to step
    * up to when you are already at the machine.

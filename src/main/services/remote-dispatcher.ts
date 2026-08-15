@@ -3,6 +3,7 @@ import {
   commandRegistry,
   type Capability,
   type CommandConnection,
+  type CommandKind,
   type CommandRegistry
 } from '../ipc/command-registry'
 import { logger } from './logger'
@@ -43,6 +44,21 @@ export class RemoteDispatcher {
    */
   capabilityOf(channel: string): Capability | undefined {
     return this.registry.declaration(channel)?.capability
+  }
+
+  /**
+   * Declared kind for a channel, or undefined when it is not registered.
+   *
+   * Load-bearing for the `shell` decay, not just for the audit: the idle window
+   * is a presence proof, so it may only be refreshed by ACTING. A `query` is a
+   * read (`terminal:pool`, re-asked by the panel on every window focus) and
+   * must therefore be checked against the deadline WITHOUT sliding it —
+   * otherwise an open browser tab renews its own grant indefinitely with no
+   * shell use at all. Read through the same registry accessor as
+   * {@link capabilityOf} so the two can never disagree about a channel.
+   */
+  kindOf(channel: string): CommandKind | undefined {
+    return this.registry.declaration(channel)?.kind
   }
 
   /**

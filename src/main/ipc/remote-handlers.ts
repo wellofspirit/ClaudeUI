@@ -1343,6 +1343,20 @@ export function registerRemoteHandlers(
     }
   })
 
+  // Live slots of one cwd's pool — the "a shell is still running here" badge on
+  // the open/reopen affordance. `shell`, unlike `terminal:availability` below:
+  // availability answers "may I?" and must be answerable before the grant
+  // exists, while this reports the state of the operator's shells and belongs
+  // behind the same three gates as the rest of the terminal surface.
+  handleRemote({
+    channel: 'terminal:pool',
+    capability: 'shell',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection, cwd: string) =>
+      terminalService.poolSlots(connection, cwd)
+  })
+
   // Capability honesty: the ONLY thing a web client needs to decide whether to
   // render the terminal affordance, and whether to prompt for step-up first.
   // `config` (not `shell`) on purpose — asking "may I?" must be answerable

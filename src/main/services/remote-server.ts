@@ -2602,8 +2602,13 @@ export class RemoteServer {
       // shell channel registered for the desktop only (`terminal:kill-by-cwd`)
       // must still answer with the historical "Channel not available", not with
       // a step-up prompt for something this transport does not expose.
+      //
+      // A `query` is checked but does NOT refresh the idle deadline: reads
+      // (`terminal:pool`, re-asked whenever the panel's window regains focus)
+      // are not presence, and letting them slide the window would make an open
+      // browser tab renew its own grant forever without a single shell command.
       if (this.dispatcher.has(msg.channel) && this.dispatcher.capabilityOf(msg.channel) === 'shell') {
-        this.assertShellGrant(client)
+        this.assertShellGrant(client, this.dispatcher.kindOf(msg.channel) !== 'query')
       }
       const result = await this.dispatcher.handle(msg, client.connection)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: true, data: result })
@@ -2846,8 +2851,14 @@ export class RemoteServer {
    * `shell` from the connection on the way out so every later layer (registry
    * included) also refuses. Otherwise slides the deadline forward: "idle" means
    * no shell-bearing traffic, not wall-clock age.
+   *
+   * `refresh: false` for a shell-capability `query`. The window is a PRESENCE
+   * proof, and a read is not presence — the terminal panel re-asks
+   * `terminal:pool` on every window focus, so a refreshing read would let a tab
+   * the operator merely left open keep its own grant alive indefinitely. The
+   * check still runs: an expired grant refuses the read too.
    */
-  private assertShellGrant(client: AuthenticatedClient): void {
+  private assertShellGrant(client: AuthenticatedClient, refresh = true): void {
     const policy = readTerminalPolicy()
     if (!policy.allowTerminal) {
       this.revokeShellGrant(client, 'policy-off')
@@ -2857,7 +2868,7 @@ export class RemoteServer {
       this.revokeShellGrant(client, 'grant-expired')
       throw new Error(NEEDS_STEP_UP_ERROR)
     }
-    client.connection.shellGrantExpiresAt = Date.now() + shellGrantIdleMs(policy)
+    if (refresh) client.connection.shellGrantExpiresAt = Date.now() + shellGrantIdleMs(policy)
   }
 
   /** Drop the `shell` grant (and any attachments) from one connection. */

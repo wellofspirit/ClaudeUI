@@ -1297,8 +1297,24 @@ const PHASE2_TERMINAL_CHANNELS = [
   'terminal:write'
 ] as const
 
-/** Of those, the ones gated behind the `shell` capability (i.e. all but availability). */
-const PHASE2_SHELL_CHANNELS = PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability')
+/**
+ * Terminal channels added AFTER the phase-2 widening, listed separately for the
+ * same reason {@link POST_PORT_CHANNELS} is: the set above is the record of
+ * what that widening exposed, and later additions must read as their own
+ * decision rather than be back-dated into it.
+ *
+ * `terminal:pool` reports which slots of a cwd hold a live pty — what the tab
+ * strip badges "a shell is still running here" from, now that closing a tab
+ * only detaches. It declares `shell`, so it joins the gated set below and
+ * inherits every pin in this file.
+ */
+const POST_PHASE2_TERMINAL_CHANNELS = ['terminal:pool'] as const
+
+/** Every terminal channel behind the `shell` capability (i.e. all but availability). */
+const SHELL_GATED_CHANNELS = [
+  ...PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability'),
+  ...POST_PHASE2_TERMINAL_CHANNELS
+]
 
 /**
  * Channels added AFTER the phase-1 port, listed separately so the pre-port set
@@ -1361,6 +1377,7 @@ describe('remote surface parity (phase 1 port)', () => {
       [
         ...PRE_PORT_REMOTE_CHANNELS,
         ...PHASE2_TERMINAL_CHANNELS,
+        ...POST_PHASE2_TERMINAL_CHANNELS,
         ...POST_PORT_CHANNELS,
         ...PASSKEY_CHANNELS
       ].sort()
@@ -1377,7 +1394,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // human, or a one-time enrollment link). Anything else appearing here is a
     // channel that silently stopped being reachable — or started being one.
     const expected = [
-      ...PHASE2_SHELL_CHANNELS.map((c) => [c, 'shell'] as const),
+      ...SHELL_GATED_CHANNELS.map((c) => [c, 'shell'] as const),
       ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
@@ -1398,11 +1415,30 @@ describe('remote surface parity (phase 1 port)', () => {
     }
   })
 
+  it('declares the terminal KINDS the gates depend on', () => {
+    // `kind` is not just an audit label on this surface: remote-server refreshes
+    // the `shell` idle deadline only for a `command`, so a channel relabelled
+    // `command` would let the panel's focus-driven `terminal:pool` re-ask keep a
+    // grant alive forever (and one relabelled `query` would drop a lifecycle
+    // row the audit requires). Both directions are pinned here because neither
+    // is visible at the call site of the thing it protects.
+    expect(commandRegistry.declaration('terminal:pool')).toMatchObject({
+      capability: 'shell',
+      kind: 'query'
+    })
+    for (const channel of ['terminal:create', 'terminal:kill', 'terminal:attach'] as const) {
+      expect(commandRegistry.declaration(channel), channel).toMatchObject({
+        capability: 'shell',
+        kind: 'command'
+      })
+    }
+  })
+
   it('the phase-2 terminal channels are unreachable WITHOUT a step-up grant', async () => {
     // The registration is not the gate — the grant set is. A connection holding
     // the standard remote grants is refused by the registry itself.
     const conn = makeRemoteConnection('token', null)
-    for (const channel of PHASE2_SHELL_CHANNELS) {
+    for (const channel of SHELL_GATED_CHANNELS) {
       await expect(
         commandRegistry.dispatch(channel, 'remote', ['x'], conn),
         `${channel} must require the shell capability`
@@ -1422,7 +1458,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // switch structurally unreachable from a remote client now that a passkey
     // connection holds `admin`.
     const exposed = new Set(commandRegistry.channels('remote'))
-    const sanctioned = new Set<string>([...PHASE2_SHELL_CHANNELS, ...PASSKEY_CHANNELS])
+    const sanctioned = new Set<string>([...SHELL_GATED_CHANNELS, ...PASSKEY_CHANNELS])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue
       expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)
