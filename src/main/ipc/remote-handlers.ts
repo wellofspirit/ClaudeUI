@@ -4,7 +4,6 @@ import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { SessionManager } from '../services/session-manager'
 import {
-  listDirectories,
   loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
@@ -35,8 +34,6 @@ import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery
 import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
-import { deleteProjectFiles } from '../services/delete-session-files'
-import { deleteSessionByEngine } from '../services/session-delete'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import {
@@ -59,6 +56,7 @@ import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { dispatchedUsageSummary } from '../services/db'
 import { emitEvent } from '../services/sync-host'
+import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
@@ -95,7 +93,10 @@ import {
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
-  listDirEntries
+  listDirEntries,
+  deleteSession,
+  deleteProject,
+  clearConversation
 } from './handlers-core'
 
 /**
@@ -628,7 +629,9 @@ export function registerRemoteHandlers(
     capability: 'fs-read',
     kind: 'query',
     handler: async () => {
-      return await listDirectories()
+      // The MERGED listing — same value the replicated
+      // `session:directories-changed` carries (see sync-seed.ts).
+      return await listAllDirectories()
     }
   })
 
@@ -666,8 +669,8 @@ export function registerRemoteHandlers(
     capability: 'fs-read',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string, sessionId: string, projectKey: string) => {
-      watchSession(routingId, sessionId, projectKey)
+    handler: async (routingId: string, sessionId: string, projectKey: string, cwd?: string) => {
+      watchSession(routingId, sessionId, projectKey, cwd)
     }
   })
   handleRemote({
@@ -724,8 +727,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string) => {
-      return await loadSessionHistory(sessionId, projectKey)
+    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
+      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
     }
   })
 
@@ -761,7 +764,17 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, engineId?: EngineId) => {
-      await deleteSessionByEngine(sessionId, projectKey, engineId)
+      await deleteSession(manager, sessionId, projectKey, engineId)
+    }
+  })
+
+  handleRemote({
+    channel: 'session:clear-conversation',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, permissionMode?: string) => {
+      await clearConversation(manager, routingId, permissionMode)
     }
   })
 
@@ -770,7 +783,7 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (projectKey: string) => {
-      await deleteProjectFiles(projectKey)
+      await deleteProject(manager, projectKey)
     }
   })
 

@@ -276,7 +276,9 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
 
   switch (channel) {
     case 'session:created': {
-      const data = args[1] as { cwd?: string; resumeSessionId?: string } | undefined
+      const data = args[1] as
+        | { cwd?: string; resumeSessionId?: string; resumeSessionAt?: string }
+        | undefined
       const wasResident = wasResidentAtCreate.get(routingId) === true
       wasResidentAtCreate.delete(routingId)
       // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
@@ -298,8 +300,14 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
         g.sessions.some((s) => s.sessionId === resumeSessionId)
       )?.projectKey
       if (!projectKey) return
+      // The FORK anchor rides the birth event (F3) and is passed straight
+      // through: without it this client painted the parent's post-anchor turns
+      // above an engine that was resumed from the truncated prefix — a
+      // conversation whose visible tail the model has never seen. Absent (the
+      // non-fork case, and an older host) loads the whole transcript, exactly as
+      // before. Canonical's own seed passes the same value to the same loader.
       void window.api
-        .loadSessionHistory(resumeSessionId, projectKey)
+        .loadSessionHistory(resumeSessionId, projectKey, data.resumeSessionAt)
         .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
           const s = useSessionStore.getState()
           if (!s.sessions[routingId]) return

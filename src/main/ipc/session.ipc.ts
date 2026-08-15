@@ -8,9 +8,12 @@ import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { getHostWindow } from '../services/host-window'
-import { seedCanonicalAppState, refreshCanonicalDirectories } from '../services/sync-seed'
 import {
-  listDirectories,
+  seedCanonicalAppState,
+  refreshCanonicalDirectories,
+  listAllDirectories
+} from '../services/sync-seed'
+import {
   loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
@@ -124,13 +127,11 @@ import type { OpencodeAgentInput } from '../opencode/opencode-agents'
 import { generateAgent } from '../opencode/agent-generate'
 import { refreshPrices } from '../services/opencode-pricing'
 import { logger } from '../services/logger'
-import { deleteProjectFiles } from '../services/delete-session-files'
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
-import { deleteSessionByEngine } from '../services/session-delete'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
 import {
@@ -163,7 +164,10 @@ import {
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
-  listDirEntries
+  listDirEntries,
+  deleteSession,
+  deleteProject,
+  clearConversation
 } from './handlers-core'
 
 /**
@@ -407,6 +411,7 @@ const SESSION_IPC_CHANNELS = [
   'session:get-session-log-path',
   'session:delete-session',
   'session:delete-project',
+  'session:clear-conversation',
   'session:list-directories',
   'session:list-opencode',
   'session:load-opencode-history',
@@ -1158,7 +1163,7 @@ export function registerSessionIpc(): SessionManager {
     capability: 'config',
     kind: 'command',
     handler: safeHandler(async (sessionId: string, projectKey: string, engineId?: EngineId) => {
-      await deleteSessionByEngine(sessionId, projectKey, engineId)
+      await deleteSession(manager, sessionId, projectKey, engineId)
     })
   })
 
@@ -1167,8 +1172,18 @@ export function registerSessionIpc(): SessionManager {
     capability: 'config',
     kind: 'command',
     handler: safeHandler(async (projectKey: string) => {
-      await deleteProjectFiles(projectKey)
+      await deleteProject(manager, projectKey)
     })
+  })
+
+  handleIpc({
+    channel: 'session:clear-conversation',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, permissionMode?: string) => {
+      await clearConversation(manager, routingId, permissionMode)
+    }
   })
 
   handleIpc({
@@ -1194,7 +1209,10 @@ export function registerSessionIpc(): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async () => {
-      return await listDirectories()
+      // The MERGED listing (claude + opencode + pi), so a cold query and the
+      // replicated `session:directories-changed` payload are the same value —
+      // they used to be the claude-only subset and a per-client merge.
+      return await listAllDirectories()
     }
   })
 
@@ -1245,8 +1263,8 @@ export function registerSessionIpc(): SessionManager {
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string) => {
-      return await loadSessionHistory(sessionId, projectKey)
+    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
+      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
     }
   })
 
@@ -1282,8 +1300,8 @@ export function registerSessionIpc(): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     sessionIdArg: 0,
-    handler: (routingId: string, sessionId: string, projectKey: string) => {
-      watchSession(routingId, sessionId, projectKey)
+    handler: (routingId: string, sessionId: string, projectKey: string, cwd?: string) => {
+      watchSession(routingId, sessionId, projectKey, cwd)
     }
   })
 
@@ -2475,7 +2493,26 @@ export function registerSessionIpc(): SessionManager {
   return manager
 }
 
+/** Matches the 30 s cadence the sidebar polled at before the merge moved here. */
+const DIRECTORY_POLL_MS = 30_000
+
+/**
+ * Keep the replicated sidebar listing fresh: a watcher on Claude's transcripts,
+ * plus a poll for the two engines that have no watchable path.
+ *
+ * The POLL is unconditional and starts first, deliberately. Only Claude keeps
+ * transcripts under `~/.claude/projects`; opencode keeps sessions in its own
+ * store and pi in `~/.pi`, so on a machine that has never run Claude the watcher
+ * below returns early and the poll would be the ONLY thing that ever refreshed
+ * the sidebar. `refreshCanonicalDirectories` emits only when the merged listing
+ * actually changed, so a quiet host adds nothing to the ring; `unref()` keeps
+ * the timer from holding the process open at quit.
+ */
 function startProjectsWatcher(): void {
+  setInterval(() => {
+    void refreshCanonicalDirectories()
+  }, DIRECTORY_POLL_MS).unref?.()
+
   const projectsDir = path.join(os.homedir(), '.claude', 'projects')
   if (!fs.existsSync(projectsDir)) return
 
@@ -2484,13 +2521,12 @@ function startProjectsWatcher(): void {
   const notify = (): void => {
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
-      // Canonical holds the listing the notify tells clients to refetch (phase
-      // 4b): the snapshot carries `directories`, so core must refresh from the
-      // SAME trigger or a resyncing client would get a stale sidebar while a
-      // live one got a fresh one. Fire-and-forget — the notify must not wait on
-      // a directory walk.
+      // ONE call: it re-reads the MERGED listing and emits
+      // `session:directories-changed` carrying it (only when the listing really
+      // changed), so canonical and every live client are updated by the same
+      // fold — the refetch-per-client round trip is gone. Fire-and-forget: the
+      // watcher must not wait on a directory walk.
       void refreshCanonicalDirectories()
-      emitEvent('session:directories-changed', [])
     }, 500)
   }
 

@@ -131,9 +131,29 @@ function withSession(
 }
 
 /**
- * Bootstrap a placeholder entry so an event for an unknown routingId is not
- * dropped — the renderer's `ensureSession` contract, kept verbatim (cross-client
- * events can outrun the `session:created` that names the session).
+ * Bootstrap a placeholder entry for a routingId nothing has introduced yet.
+ *
+ * **Exactly ONE branch may use this: `session:watch-update`.** A watched session
+ * is the only replicated state that has no birth event at all — the user clicks
+ * the eye on a historical row in the sidebar and a file watcher starts emitting;
+ * nothing spawns, so no `session:created` ever exists and the watch-update IS
+ * the introduction (which is why it also had to start carrying `cwd`).
+ *
+ * Everywhere else it was a hazard, not a safety net. The original rationale —
+ * "cross-client events can outrun the `session:created` that names the session"
+ * — does not survive the funnel: `prepareAndCreateSession` emits `session:created`
+ * synchronously at spawn, `SyncCore.emit` serializes emissions FIFO, and the ring
+ * replays catchup in seq order, so no engine event can precede its session's birth
+ * event on any transport. What DID reach these branches for unknown ids was:
+ *
+ *  - the pre-spawn `session:permission-mode` / `session:config-changed` echoes,
+ *    which since the birth event carries the spawn config (0065eef) have nothing
+ *    left to say about a session canonical has never heard of — a mode picked and
+ *    never sent left a permanent `cwd: ''` row in every snapshot;
+ *  - engine traffic arriving AFTER an explicit delete, which re-minted the entry
+ *    the delete had just removed (the ghost F1 closes).
+ *
+ * Both are honest no-ops, which is what {@link withSession} does.
  */
 function ensured(state: CanonicalState, routingId: string): CanonicalState {
   if (state.sessions[routingId]) return state
@@ -352,6 +372,112 @@ export function applyEvent(
       }
     }
 
+    /**
+     * Explicit removal — a session (or every session on a project) was deleted.
+     *
+     * Deletes the entry AND every id-keyed app-level row, which is the same set
+     * {@link rekeyCanonical} renames. The app-level half runs even when the
+     * session entry is absent: a COLD session (browsed from the sidebar, never
+     * spawned) has no canonical entry but can absolutely have a custom title, a
+     * pin and a recents slot, and leaving those behind is how a deleted session
+     * comes back as a dangling sidebar row.
+     *
+     * The paired half of this is {@link withSession} everywhere else (F7): a
+     * late engine event for a removed id must be an honest no-op, not a
+     * re-mint of a `cwd: ''` placeholder.
+     */
+    case 'session:removed': {
+      const routingId = routingIdOf(event)
+      if (!routingId) return state
+      delete aux.thinkingOpen[routingId]
+
+      const hadSession = state.sessions[routingId] !== undefined
+      const { [routingId]: _dropped, ...sessions } = state.sessions
+      const customTitles = { ...state.customTitles }
+      const worktreeInfoMap = { ...state.worktreeInfoMap }
+      const sessionEngines = { ...state.sessionEngines }
+      const hadRow =
+        customTitles[routingId] !== undefined ||
+        worktreeInfoMap[routingId] !== undefined ||
+        sessionEngines[routingId] !== undefined
+      delete customTitles[routingId]
+      delete worktreeInfoMap[routingId]
+      delete sessionEngines[routingId]
+
+      const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
+      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
+      const hiddenSessions = state.hiddenSessions.filter((id) => id !== routingId)
+      const listChanged =
+        recentSessionIds.length !== state.recentSessionIds.length ||
+        pinnedSessionIds.length !== state.pinnedSessionIds.length ||
+        hiddenSessions.length !== state.hiddenSessions.length
+      const wasActive = state.activeSessionId === routingId
+
+      // Identity-stable when the id was unknown everywhere — the projection is
+      // identity-diffed, so a no-op removal must not re-write every slice.
+      if (!hadSession && !hadRow && !listChanged && !wasActive) return state
+
+      return {
+        ...state,
+        sessions,
+        customTitles,
+        worktreeInfoMap,
+        sessionEngines,
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessions,
+        activeSessionId: wasActive ? null : state.activeSessionId
+      }
+    }
+
+    /**
+     * "Start fresh": reset a session to its birth state without removing it.
+     *
+     * Blanks exactly the set the store's `clearConversation` blanked locally —
+     * expressed as `emptySession()` rather than a hand-written field list, so it
+     * cannot drift from what a genuinely new session looks like — with three
+     * deliberate carry-overs:
+     *
+     *  - `cwd`, because the session stays where it is;
+     *  - `sdkActive`, because clearing the CONVERSATION is not a statement about
+     *    the process. The only caller (ExitPlanModeCard's "start fresh") cancels
+     *    and re-creates around this call, and those are the events that own that
+     *    flag;
+     *  - `seeded: true`, because an empty transcript is a COMPLETE one — without
+     *    it the next reselect would try to re-hydrate the cleared session from
+     *    disk and put the conversation back.
+     *
+     * `permissionMode` rides the event because a fresh RUN starts in the
+     * configured default, and resolving that default needs `availableModels` +
+     * the auto-mode gate — client state the reducer cannot see. The emitter
+     * validates it; an absent/invalid one falls back to `'default'`, which is
+     * `emptySession()`'s value.
+     */
+    case 'session:conversation-cleared': {
+      const routingId = routingIdOf(event)
+      if (!routingId) return state
+      const data = arg<{ permissionMode?: string }>(event, 1)
+      const session = state.sessions[routingId]
+      if (!session) return state
+      aux.thinkingOpen[routingId] = false
+      const fresh = emptySession(routingId, session.cwd)
+      return withSession(state, routingId, (s) => ({
+        ...fresh,
+        sdkActive: s.sdkActive,
+        // Carried, not reset. These per-session copies are vestigial — canonical
+        // holds ONE app-level list and `toSnapshot` fans it into every entry, so
+        // in practice both are always `[]` here — but the catalogs describe the
+        // ENGINE, not the conversation, and a bare remote clear (no cancel, no
+        // respawn) must not look like the slash menu went away. Blanking them
+        // would also be the one place this branch disagreed with the app-level
+        // fields it cannot see.
+        slashCommands: s.slashCommands,
+        sdkSkillNames: s.sdkSkillNames,
+        permissionMode: data?.permissionMode ?? fresh.permissionMode,
+        seeded: true
+      }))
+    }
+
     // -----------------------------------------------------------------------
     // Transcript
     // -----------------------------------------------------------------------
@@ -388,8 +514,12 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const message = arg<ChatMessage>(event, 1)
       if (!routingId || !message) return state
-      let next = ensured(state, routingId)
-      const session = next.sessions[routingId]
+      // No `ensured()`: an assistant message for an id canonical does not know is
+      // either post-delete engine traffic or a payload for a session that was
+      // never born here. Both are no-ops (see {@link ensured}).
+      const session = state.sessions[routingId]
+      if (!session) return state
+      let next = state
 
       const idx = session.messages.findIndex((m) => m.id === message.id)
       // `content` is defensive: engine adapters and older cached clients have
@@ -516,16 +646,19 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const data = arg<{ type?: string; text?: string }>(event, 1)
       if (!routingId || typeof data?.text !== 'string') return state
-      const next = ensured(state, routingId)
+      // `withSession` (not `ensured`) — and the aux writes are gated on the
+      // session existing too, or a stream delta for a removed id would leave an
+      // orphan `thinkingOpen` flag behind that a same-id respawn would inherit.
+      if (!state.sessions[routingId]) return state
       if (data.type === 'thinking') {
         aux.thinkingOpen[routingId] = true
-        return withSession(next, routingId, (s) => ({
+        return withSession(state, routingId, (s) => ({
           streamingThinking: s.streamingThinking + data.text
         }))
       }
       const sealing = aux.thinkingOpen[routingId] === true
       if (sealing) aux.thinkingOpen[routingId] = false
-      return withSession(next, routingId, (s) => ({
+      return withSession(state, routingId, (s) => ({
         streamingText: s.streamingText + data.text,
         ...(sealing ? { streamingThinking: '' } : {})
       }))
@@ -536,16 +669,15 @@ export function applyEvent(
       const data = arg<{ type?: string; toolUseId?: string; text?: string }>(event, 1)
       if (!routingId || !data?.toolUseId || typeof data.text !== 'string') return state
       const toolUseId = data.toolUseId
-      const next = ensured(state, routingId)
       if (data.type === 'thinking') {
-        return withSession(next, routingId, (s) => ({
+        return withSession(state, routingId, (s) => ({
           subagentStreamingThinking: {
             ...s.subagentStreamingThinking,
             [toolUseId]: (s.subagentStreamingThinking[toolUseId] || '') + data.text
           }
         }))
       }
-      return withSession(next, routingId, (s) => ({
+      return withSession(state, routingId, (s) => ({
         subagentStreamingText: {
           ...s.subagentStreamingText,
           [toolUseId]: (s.subagentStreamingText[toolUseId] || '') + data.text
@@ -561,21 +693,15 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const data = arg<{ toolUseId?: string; message?: ChatMessage }>(event, 1)
       if (!routingId || !data?.toolUseId || !data.message) return state
-      return upsertSubagentMessages(ensured(state, routingId), routingId, data.toolUseId, [
-        data.message
-      ])
+      // `upsertSubagentMessages` already no-ops on an unknown id.
+      return upsertSubagentMessages(state, routingId, data.toolUseId, [data.message])
     }
 
     case 'session:subagent-message-batch': {
       const routingId = routingIdOf(event)
       const data = arg<{ toolUseId?: string; messages?: ChatMessage[] }>(event, 1)
       if (!routingId || !data?.toolUseId || !Array.isArray(data.messages)) return state
-      return upsertSubagentMessages(
-        ensured(state, routingId),
-        routingId,
-        data.toolUseId,
-        data.messages
-      )
+      return upsertSubagentMessages(state, routingId, data.toolUseId, data.messages)
     }
 
     case 'session:subagent-tool-result': {
@@ -626,7 +752,7 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const approval = arg<PendingApproval>(event, 1)
       if (!routingId || !approval) return state
-      return withSession(ensured(state, routingId), routingId, (s) => ({
+      return withSession(state, routingId, (s) => ({
         pendingApprovals: [...s.pendingApprovals, approval]
       }))
     }
@@ -706,7 +832,7 @@ export function applyEvent(
       const data = arg<{ toolUseId?: string; taskId?: string; taskType?: string }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
-      return withSession(ensured(state, routingId), routingId, (s) => ({
+      return withSession(state, routingId, (s) => ({
         activeTasks: {
           ...s.activeTasks,
           [toolUseId]: { taskId: data.taskId ?? '', taskType: data.taskType ?? '' }
@@ -718,7 +844,7 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const progress = arg<TaskProgress>(event, 1)
       if (!routingId || !progress?.toolUseId) return state
-      return withSession(ensured(state, routingId), routingId, (s) => ({
+      return withSession(state, routingId, (s) => ({
         taskProgressMap: { ...s.taskProgressMap, [progress.toolUseId]: progress }
       }))
     }
@@ -727,7 +853,7 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const notification = arg<TaskNotification>(event, 1)
       if (!routingId || !notification) return state
-      return withSession(ensured(state, routingId), routingId, (s) => {
+      return withSession(state, routingId, (s) => {
         const activeTasks = notification.toolUseId
           ? Object.fromEntries(
               Object.entries(s.activeTasks).filter(([id]) => id !== notification.toolUseId)
@@ -776,7 +902,7 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const mode = arg<string>(event, 1)
       if (!routingId || typeof mode !== 'string') return state
-      return withSession(ensured(state, routingId), routingId, () => ({ permissionMode: mode }))
+      return withSession(state, routingId, () => ({ permissionMode: mode }))
     }
 
     case 'session:config-changed': {
@@ -788,7 +914,7 @@ export function applyEvent(
         reasoningVariant?: string | null
       }>(event, 1)
       if (!routingId || !isRecord(patch)) return state
-      return withSession(ensured(state, routingId), routingId, () => ({
+      return withSession(state, routingId, () => ({
         // Partial, per-field REPLACE — an absent key leaves the field alone.
         ...(patch.model !== undefined ? { selectedModel: patch.model } : {}),
         ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
@@ -819,7 +945,7 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       const todos = arg<TodoItem[]>(event, 1)
       if (!routingId || !Array.isArray(todos)) return state
-      return withSession(ensured(state, routingId), routingId, () => ({ todos }))
+      return withSession(state, routingId, () => ({ todos }))
     }
 
     // -----------------------------------------------------------------------
@@ -846,9 +972,13 @@ export function applyEvent(
         messages?: ChatMessage[]
         taskNotifications?: TaskNotification[]
         statusLine?: StatusLineData | null
+        cwd?: string
       }>(event, 0)
       const routingId = payload?.routingId
       if (!routingId || !Array.isArray(payload?.messages)) return state
+      // The ONE surviving `ensured()` — see its doc comment. A watched session
+      // has no birth event, so this IS the introduction, which is exactly why the
+      // payload had to start carrying `cwd`.
       let next = ensured(state, routingId)
       next = withSession(next, routingId, () => ({
         messages: payload.messages as ChatMessage[],
@@ -856,13 +986,35 @@ export function applyEvent(
         // A watched session's transcript IS the on-disk truth, so this update
         // completes any pending seed.
         seeded: true,
-        ...(payload.statusLine ? { statusLine: payload.statusLine } : {})
+        ...(payload.statusLine ? { statusLine: payload.statusLine } : {}),
+        // Old-shape events (no cwd) leave the existing value alone — never blank
+        // a cwd some other event already established.
+        ...(payload.cwd ? { cwd: payload.cwd } : {})
       }))
       next = withSession(next, routingId, rederiveTodos)
       next = withSession(next, routingId, rederiveSentFiles)
       // Watched sessions get no `session:result`, so the completed-list dismissal
       // rides here (verbatim from useClaudeEvents.onWatchUpdate).
       return withSession(next, routingId, dismissCompletedTodos)
+    }
+
+    /**
+     * The merged sidebar listing (claude + opencode + pi), as a REPLACE.
+     *
+     * It carries its payload now instead of being a "refetch" notify each client
+     * answered with its own three-query merge — the arrangement that made
+     * canonical's claude-only list and the clients' merged lists two different
+     * lists rather than two views of one.
+     *
+     * An ABSENT payload folds as the no-op notify it used to be. That matters for
+     * replay, not just for old hosts: the committed golden fixtures and any ring
+     * a client catches up from across the upgrade contain payload-less entries,
+     * and blanking the sidebar on one of those would be a regression.
+     */
+    case 'session:directories-changed': {
+      const directories = arg<unknown>(event, 0)
+      if (!Array.isArray(directories)) return state
+      return { ...state, directories: directories as CanonicalState['directories'] }
     }
 
     // -----------------------------------------------------------------------

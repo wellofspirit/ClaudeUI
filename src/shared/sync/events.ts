@@ -30,6 +30,7 @@ import type {
   BackgroundOutput,
   BlockUsageData,
   ChatMessage,
+  DirectoryGroup,
   EngineId,
   GitStatusData,
   MeteringSnapshot,
@@ -85,10 +86,39 @@ export interface SyncEventMap {
     data: {
       cwd: string
       resumeSessionId?: string
+      /**
+       * Fork/branch anchor — a JSONL line uuid (Claude) the resumed transcript is
+       * TRUNCATED at, inclusive. Every client that reads that transcript for
+       * itself must cut at the same line the engine did.
+       */
+      resumeSessionAt?: string
       permissionMode?: PermissionMode
       engineId?: EngineId
       model?: string
     }
+  ) => void
+  /**
+   * A session was explicitly DELETED (one session, or one of the sessions a
+   * project delete sweeps). Payload-free: the id is the whole fact.
+   *
+   * Emitted by `SyncCore.removeSession` on both surfaces, after the live session
+   * is cancelled and before its files are unlinked. The reducer drops the entry
+   * AND every id-keyed app-level row, which is what stops a deleted session from
+   * coming back as a dangling sidebar title/pin on a client that did not delete it.
+   */
+  'session:removed': (routingId: string) => void
+  /**
+   * "Start fresh": the session's conversation was reset in place (transcript,
+   * streams, todos, queue, tasks, subagents, per-session config), keeping its
+   * cwd and its `sdkActive` flag.
+   *
+   * `permissionMode` is the mode a fresh RUN starts in, resolved by the client
+   * that asked (it needs `availableModels` + the auto-mode gate, which the
+   * reducer cannot see) and validated by the emitter.
+   */
+  'session:conversation-cleared': (
+    routingId: string,
+    data: { permissionMode?: PermissionMode }
   ) => void
   /**
    * Relayed for NON-queued sends only. A send that queues rides
@@ -209,8 +239,15 @@ export interface SyncEventMap {
   // Watched sessions + app config
   // -------------------------------------------------------------------------
   'session:watch-update': (data: WatchUpdate) => void
-  /** A payload-less notify: the sidebar refetches via `session:list-directories`. */
-  'session:directories-changed': () => void
+  /**
+   * The merged sidebar listing (claude + opencode + pi), applied as a REPLACE.
+   *
+   * Was payload-less — a "refetch now" every client answered with its own
+   * three-query merge, which is exactly why canonical (claude-only) and the
+   * clients disagreed. `directories` is optional so an OLD-shape event replays as
+   * the no-op notify it used to be rather than blanking the list.
+   */
+  'session:directories-changed': (directories?: DirectoryGroup[]) => void
   'config:settings-changed': (settings: Record<string, unknown>) => void
   'config:sessions-changed': (config: UISessionConfig) => void
   'git:status-update': (data: { cwd: string; status: GitStatusData }) => void

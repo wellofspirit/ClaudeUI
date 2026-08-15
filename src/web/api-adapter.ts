@@ -97,6 +97,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:send', routingId, prompt, attachments) as Promise<void>,
 
     cancelSession: (routingId) => connection.invoke('session:cancel', routingId) as Promise<void>,
+    clearConversation: (routingId, permissionMode) =>
+      connection.invoke('session:clear-conversation', routingId, permissionMode) as Promise<void>,
 
     interruptSession: (routingId) =>
       connection.invoke('session:interrupt', routingId) as Promise<void>,
@@ -141,10 +143,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['loadPiHistory']
       >,
 
-    loadSessionHistory: (sessionId, projectKey) =>
-      connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<
-        ClaudeAPI['loadSessionHistory']
-      >,
+    loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
+      connection.invoke(
+        'session:load-history',
+        sessionId,
+        projectKey,
+        resumeSessionAt
+      ) as ReturnType<ClaudeAPI['loadSessionHistory']>,
 
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       connection.invoke(
@@ -320,8 +325,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:get-session-log-path', routingId) as Promise<string | null>,
 
     // Watch
-    watchSession: (routingId, sessionId, projectKey) =>
-      connection.invoke('session:watch-session', routingId, sessionId, projectKey) as Promise<void>,
+    watchSession: (routingId, sessionId, projectKey, cwd) =>
+      connection.invoke(
+        'session:watch-session',
+        routingId,
+        sessionId,
+        projectKey,
+        cwd
+      ) as Promise<void>,
     unwatchSession: (routingId) =>
       connection.invoke('session:unwatch-session', routingId) as Promise<void>,
 

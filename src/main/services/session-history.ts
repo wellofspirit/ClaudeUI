@@ -913,10 +913,25 @@ export async function resolveForkAnchor(
 /**
  * Load full conversation history from a JSONL session file.
  * Converts SDK messages to ChatMessage[] and extracts TaskNotification[].
+ *
+ * `resumeSessionAt` is the fork/branch anchor a session was (or is being) spawned
+ * with — a JSONL line `uuid`, the value `--resume-session-at` takes. Passing it
+ * TRUNCATES the load at that line, exactly the way cli.js truncates the context
+ * it resumes from: `lines.slice(0, w + 1)` where `lines[w].uuid === anchor`, so
+ * the anchor line is the last one kept (see `fork-anchor.ts`, which picks the
+ * anchor to be a tool-cycle-balanced boundary).
+ *
+ * Without it, every reader of a forked session's history — canonical's seed and
+ * each client's cold seed — showed the FULL parent transcript, including the
+ * turns the fork exists to discard, while the engine was answering from the
+ * truncated prefix. An unknown anchor (not in this file) truncates nothing, which
+ * is the pre-existing behavior and the only safe fallback: showing too much beats
+ * showing an empty conversation.
  */
 export async function loadSessionHistory(
   sessionId: string,
-  projectKey: string
+  projectKey: string,
+  resumeSessionAt?: string
 ): Promise<SessionHistoryResult> {
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
 
@@ -927,6 +942,8 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
+    /** Set once the anchor line has been READ — every LATER line is dropped. */
+    let pastAnchor = false
 
     let stream: fs.ReadStream
     try {
@@ -947,8 +964,13 @@ export async function loadSessionHistory(
     const rl = readline.createInterface({ input: stream })
 
     rl.on('line', (line) => {
+      if (pastAnchor) return
       try {
         const obj = JSON.parse(line)
+        // Flagged BEFORE this line is interpreted, so the anchor line itself
+        // is still folded in and only what follows it is dropped — cli.js's
+        // `slice(0, w + 1)` boundary, not `slice(0, w)`.
+        if (resumeSessionAt && obj.uuid === resumeSessionAt) pastAnchor = true
         const type = obj.type as string
 
         if (type === 'custom-title') {

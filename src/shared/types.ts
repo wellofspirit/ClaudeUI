@@ -842,6 +842,13 @@ export interface WatchUpdate {
   messages: ChatMessage[]
   taskNotifications: TaskNotification[]
   statusLine?: StatusLineData | null
+  /**
+   * The watched session's working directory. Optional for OLD-shape events only
+   * (a cached `/remote` bundle whose `watchSession` invoke sends three args) —
+   * the reducer leaves the existing cwd alone when it is absent. See
+   * `main/services/session-watcher.ts` for why it has to ride the event.
+   */
+  cwd?: string
 }
 
 export interface ModelInfo {
@@ -963,6 +970,12 @@ interface SessionAPI {
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void>
   cancelSession(routingId: string): Promise<void>
+  /**
+   * Reset a session's conversation in place ("start fresh"). Emits the
+   * replicated `session:conversation-cleared`; `permissionMode` is the mode a
+   * fresh RUN starts in, which only a client can resolve.
+   */
+  clearConversation(routingId: string, permissionMode?: string): Promise<void>
   interruptSession(routingId: string): Promise<void>
   respondApproval(
     routingId: string,
@@ -988,7 +1001,12 @@ interface SessionAPI {
   loadPiHistory(sessionId: string): Promise<ChatMessage[]>
   loadSessionHistory(
     sessionId: string,
-    projectKey: string
+    projectKey: string,
+    /**
+     * Fork/branch anchor (a JSONL line uuid) to TRUNCATE the load at, inclusive
+     * — the value the session was resumed with. Omit to load the whole file.
+     */
+    resumeSessionAt?: string
   ): Promise<{
     messages: ChatMessage[]
     taskNotifications: TaskNotification[]
@@ -1096,7 +1114,13 @@ interface SessionAPI {
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
   getPlanContent(routingId: string): Promise<string | null>
   getSessionLogPath(routingId: string): Promise<string | null>
-  watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
+  watchSession(
+    routingId: string,
+    sessionId: string,
+    projectKey: string,
+    /** Optional only for old clients — see `services/session-watcher.ts`. */
+    cwd?: string
+  ): Promise<void>
   unwatchSession(routingId: string): Promise<void>
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
@@ -1237,10 +1261,13 @@ interface TerminalAPI {
   killTerminal(id: string): Promise<void>
   killTerminalsByCwd(cwd: string): Promise<string[]>
   /**
-   * PTY bytes. `replay: true` marks a scrollback replay delivered on attach:
-   * it is the terminal's whole history, so the receiver must RESET and write it
+   * PTY bytes. `replay: true` marks a scrollback replay delivered on attach: it
+   * is the terminal's whole history, so the receiver must CLEAR and write it
    * rather than append (the desktop lane is a broadcast, so some of those bytes
-   * may already have been rendered). Live chunks always follow a replay, never
+   * may already have been rendered). The clear has to be IN BAND — write
+   * `ESC c` (RIS) immediately ahead of the data, not `Terminal.reset()`, whose
+   * synchronous execution would race the deferred write queue and leave the
+   * replay drawn after a no-op clear. Live chunks always follow a replay, never
    * interleave with it.
    */
   onTerminalData(

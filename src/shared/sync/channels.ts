@@ -110,6 +110,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'The other half of the registry: an explicit delete (session or whole project). Deleting the FILES was never replicated, so canonical and every non-deleting client kept the entry forever and a late engine event re-minted a ghost.'
   },
+  'session:conversation-cleared': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Resets a session to its birth state (transcript, streams, todos, queue, tasks, subagents, per-session config) without removing it. Was a local `patchLocalSession` on the clearing client only, so canonical kept the whole transcript and the next resync handed it straight back. `sdkActive` is deliberately preserved — clearing is a UI reset, not a process action.'
+  },
   'session:user-message': {
     cls: 'replicated',
     ring: true,
@@ -292,8 +298,8 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   'session:directories-changed': {
     cls: 'replicated',
     ring: true,
-    canonical: false,
-    why: 'A payload-less notify — the sidebar refetches via a query. Nothing to apply.'
+    canonical: true,
+    why: 'The merged (claude + opencode + pi) sidebar listing, applied as a replace. Was a payload-less notify each client answered with its OWN three-query merge, while canonical held the claude-only subset every sync-full then force-projected back over it.'
   },
 
   // -------------------------------------------------------------------------

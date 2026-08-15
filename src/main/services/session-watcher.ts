@@ -11,13 +11,38 @@ interface WatchEntry {
   routingId: string
   sessionId: string
   projectKey: string
+  cwd: string
   watcher: fs.FSWatcher
   debounceTimer: ReturnType<typeof setTimeout> | null
 }
 
 const watchers = new Map<string, WatchEntry>()
 
-export function watchSession(routingId: string, sessionId: string, projectKey: string): void {
+/**
+ * Start watching a persisted transcript and re-broadcast it on every change.
+ *
+ * `cwd` is the watched session's working directory, and it has to be an ARGUMENT
+ * because it cannot be recovered here: `projectKey` is `cwdToProjectKey`'s output,
+ * which replaces every non-alphanumeric character with `-` and is documented as
+ * lossy and irreversible. Every caller has it — the sidebar row the user clicked
+ * the eye on carries `SessionInfo.cwd`.
+ *
+ * Why it matters: `session:watch-update` is the ONLY event that introduces a
+ * watched session (nothing spawns, so there is no `session:created`), so its
+ * reducer branch is the one place `ensured()` still bootstraps an entry — and
+ * without a cwd that entry was born with `cwd: ''`. Every cwd-keyed feature then
+ * missed it: git status, the folder name in the sidebar and in notifications, the
+ * per-cwd terminal group, `deleteProject`'s live-session sweep.
+ *
+ * Optional so an older client (a cached `/remote` bundle) still watches, just
+ * without the cwd — the reducer leaves the existing value alone when it is absent.
+ */
+export function watchSession(
+  routingId: string,
+  sessionId: string,
+  projectKey: string,
+  cwd?: string
+): void {
   // Already watching this routingId
   if (watchers.has(routingId)) return
 
@@ -28,6 +53,7 @@ export function watchSession(routingId: string, sessionId: string, projectKey: s
     routingId,
     sessionId,
     projectKey,
+    cwd: cwd ?? '',
     watcher: null!,
     debounceTimer: null
   }
@@ -40,7 +66,18 @@ export function watchSession(routingId: string, sessionId: string, projectKey: s
           sessionId,
           projectKey
         )
-        emitEvent('session:watch-update', [{ routingId, messages, taskNotifications, statusLine }])
+        emitEvent('session:watch-update', [
+          {
+            routingId,
+            messages,
+            taskNotifications,
+            statusLine,
+            // Omitted rather than sent empty when the caller had none: the
+            // reducer treats an absent cwd as "leave it alone", and blanking a
+            // cwd another event already established would be strictly worse.
+            ...(entry.cwd ? { cwd: entry.cwd } : {})
+          }
+        ])
       } catch (err) {
         logger.warn('SessionWatcher', `Parse error during watch update for ${sessionId}`, err)
       }

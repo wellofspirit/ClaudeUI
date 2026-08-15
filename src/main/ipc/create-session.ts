@@ -35,20 +35,26 @@ export interface CreateSessionArgs {
 /**
  * Read a resumed session's on-disk transcript into canonical state.
  *
- * Uses `loadSessionHistory` — the SAME source the renderer's own resume path
- * uses (`useClaudeEvents`'s `session:created` handler) — so canonical and the
- * renderer replica start from identical content and the shadow comparator is
- * comparing interpretations, not inputs.
+ * Uses `loadSessionHistory` — the SAME source every client's own resume path
+ * uses (`useClaudeEvents`'s `session:created` observer) — so canonical and every
+ * replica start from identical content.
+ *
+ * `resumeSessionAt` is why "identical" needs saying: a FORK resumes from a
+ * truncated prefix of its parent's transcript, and a seed that ignored the anchor
+ * showed every client the parent's post-anchor turns above an engine that had
+ * never seen them. Both seeds pass the anchor, so both truncate at the same line.
  */
 async function seedCanonicalTranscript(
   routingId: string,
   resumeSessionId: string,
-  cwd: string
+  cwd: string,
+  resumeSessionAt?: string
 ): Promise<void> {
   try {
     const { messages, taskNotifications, statusLine } = await loadSessionHistory(
       resumeSessionId,
-      cwdToProjectKey(cwd)
+      cwdToProjectKey(cwd),
+      resumeSessionAt
     )
     syncCore.seedSession(routingId, {
       cwd,
@@ -152,7 +158,18 @@ export async function prepareAndCreateSession(
     {
       cwd,
       resumeSessionId,
-      engineId: resolvedEngineId,
+      // The fork/branch anchor, when there is one. It belongs on the birth event
+      // for the same reason the spawn config does: only THIS function knows it,
+      // and every client that reads the resumed transcript for itself has to
+      // truncate at the same line the engine did, or a forked session renders its
+      // parent's discarded turns. Absent = resume the whole transcript, which is
+      // both the non-fork case and the old-shape fallback.
+      ...(resumeSessionAt != null ? { resumeSessionAt } : {}),
+      // Announced only when the CALLER named an engine, same rule as the other
+      // fields: `resolvedEngineId` exists for every spawn (the claude default),
+      // but announcing that default for a caller that omitted `engineId` would
+      // clobber the session's real engine on every replica.
+      ...(engineId != null ? { engineId: resolvedEngineId } : {}),
       // `!= null`, not `!== undefined`: a WS client's JSON turns an omitted
       // positional arg into an explicit `null`, and announcing `null` for a
       // field the canonical type declares as `string` would be a worse lie than
@@ -161,7 +178,13 @@ export async function prepareAndCreateSession(
       // probe fails — then no client is told anything and each keeps the model
       // it already had.
       ...(permissionMode != null ? { permissionMode } : {}),
-      ...(resolvedModel != null ? { model: resolvedModel } : {})
+      // BOTH guards: `model` (the request) and `resolvedModel` (the outcome).
+      // The opencode/pi resolvers return a catalog fallback for an ABSENT
+      // request — announcing that would rewrite the user's pick on every
+      // replica just because a caller (e.g. a lazy re-spawn) didn't name one.
+      // A real request that got swapped IS announced: converging the picker on
+      // what actually spawned is the point.
+      ...(model != null && resolvedModel != null ? { model: resolvedModel } : {})
     }
   ])
   // Canonical seeding (SyncCore phase 4a item 5): a RESUMED session's transcript
@@ -174,6 +197,6 @@ export async function prepareAndCreateSession(
   // must never break session creation. `seedSession` only fills an EMPTY
   // transcript, so live events that arrive first always win.
   if (resumeSessionId) {
-    void seedCanonicalTranscript(routingId, resumeSessionId, cwd)
+    void seedCanonicalTranscript(routingId, resumeSessionId, cwd, resumeSessionAt)
   }
 }

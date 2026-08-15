@@ -49,7 +49,17 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     dismissApproval(activeSessionId, approval.requestId)
 
     await window.api.cancelSession(activeSessionId)
-    clearConversation(activeSessionId)
+    // AWAITED: the clear is a replicated event now, and the `session:created`
+    // below must be emitted after it — otherwise the fresh session's birth
+    // config would be blanked by a clear that arrived late.
+    //
+    // Error posture matches its neighbours (which all await bare invokes and let
+    // a rejection abort the flow): if the reset did not happen, spawning a fresh
+    // session on top of the OLD transcript is worse than doing nothing — the user
+    // would be talking to an empty engine under a conversation it never saw. The
+    // approval is already denied at this point, so the plan card resolves either
+    // way and the user can retry.
+    await clearConversation(activeSessionId)
 
     // Create a fresh SDK session for the same routingId.
     await window.api.createSession(

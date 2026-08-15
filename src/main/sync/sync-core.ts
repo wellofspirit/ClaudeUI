@@ -280,12 +280,17 @@ export class SyncCore {
    * Refresh **query-shaped app state** — the fields no domain event carries
    * (SyncCore phase 4b).
    *
-   * Deliberately NOT an event. `directories` is a directory listing the sidebar
-   * has always fetched with `session:list-directories` (`session:directories-changed`
-   * is a payload-less "refetch now" notify), and the boot seeds below are files
-   * every client used to read for itself. Minting synthetic events for them would
-   * put data on the wire that no reducer branch interprets, and would make the
-   * ring's contents depend on how often a watcher fired.
+   * Deliberately NOT an event. These are files every client used to read for
+   * itself at boot; minting synthetic events for them would put data on the wire
+   * that no reducer branch interprets.
+   *
+   * `directories` USED to be in that category and no longer is: it is the one
+   * field here that also changes while the app runs, so it became a replicated
+   * channel with a real reducer branch (`session:directories-changed` carries the
+   * merged listing). The concern this comment recorded — "the ring's contents
+   * would depend on how often a watcher fired" — turned out to be exactly right,
+   * and is answered by the throttle + membership rule in
+   * `services/sync-seed.ts` rather than by keeping the field off the wire.
    *
    * What it IS: the reason a snapshot from core can replace the renderer's. Until
    * these fields were core-maintained, a canonical-sourced `sync-full` would have
@@ -300,7 +305,17 @@ export class SyncCore {
     this.state = { ...this.state, ...patch }
   }
 
-  /** The one field refreshed on a watcher trigger rather than at boot (A3). */
+  /**
+   * Set the directory listing directly.
+   *
+   * **Test seam only.** Production writes this field through the fold, like every
+   * other replicated slice: `services/sync-seed.ts` emits
+   * `session:directories-changed` carrying the merged listing, and the reducer
+   * applies it. A second writer would be a second answer to "what is the sidebar",
+   * which is the exact class of bug the merge move (F6) closed. It survives
+   * because two tests need to stand a listing up without an emission
+   * (`sync-hydration-parity.e2e.test.ts`, `handlers-core.test.ts`).
+   */
   setDirectories(directories: DirectoryGroup[]): void {
     this.setAppState({ directories })
   }
@@ -332,21 +347,28 @@ export class SyncCore {
   }
 
   /**
-   * Drop a session from canonical state.
+   * Drop a session everywhere — the explicit-removal path (delete session /
+   * delete project), wired to `handlers-core.deleteSession` on both surfaces.
    *
-   * Mirrors the renderer's eviction policy in ONE respect deliberately: the
-   * renderer never removes an entry, it only strips the heavy arrays and marks
-   * it `evicted` (`evictColdSessions` in session-store.ts), so a remote client
-   * rehydrates through queries exactly as today. 4a therefore does NOT evict on
-   * a timer — this method exists for explicit session removal (delete/close),
-   * and the shadow comparator masks sessions the renderer has stripped. See
+   * It EMITS rather than mutating, and that is the whole point: canonical is
+   * only half the problem. A removal that only edited this object left every
+   * other client — and the deleting client's own replica, once a late engine
+   * event re-minted the entry — holding a session whose files are gone. Going
+   * through the funnel makes the delete an ordered, ringed fact that every
+   * replica folds with the same reducer branch, and a reconnecting client
+   * replays from catchup.
+   *
+   * Idempotent by construction (the reducer branch is identity-stable when the
+   * id is unknown), so a double-delete costs one no-op ring entry.
+   *
+   * Removal is still the ONLY thing that drops an entry: canonical does not
+   * evict on a timer, because no client does either — `evictLocalSessions`
+   * (stores/replica.ts) strips the heavy arrays and clears `seeded`, KEEPING the
+   * row so a reselect re-hydrates it from disk. See
    * `docs/architecture/sync-channels.md` §"Eviction".
    */
   removeSession(routingId: string): void {
-    if (!this.state.sessions[routingId]) return
-    const { [routingId]: _dropped, ...rest } = this.state.sessions
-    this.state = { ...this.state, sessions: rest }
-    delete this.aux.thinkingOpen[routingId]
+    this.emit('session:removed', [routingId])
   }
 
   /** Test seam: wipe canonical state (the ring's seq stays monotonic). */

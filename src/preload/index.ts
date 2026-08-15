@@ -114,6 +114,8 @@ const api: ClaudeAPI = {
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ) => ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) => ipcRenderer.invoke('session:cancel', routingId),
+  clearConversation: (routingId: string, permissionMode?: string) =>
+    ipcRenderer.invoke('session:clear-conversation', routingId, permissionMode),
   interruptSession: (routingId: string) => ipcRenderer.invoke('session:interrupt', routingId),
   respondApproval: (
     routingId: string,
@@ -139,8 +141,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
   listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
   loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
-  loadSessionHistory: (sessionId: string, projectKey: string) =>
-    ipcRenderer.invoke('session:load-history', sessionId, projectKey),
+  loadSessionHistory: (sessionId: string, projectKey: string, resumeSessionAt?: string) =>
+    ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   buildSubagentFileMap: (
@@ -214,8 +216,8 @@ const api: ClaudeAPI = {
   getPlanContent: (routingId: string) => ipcRenderer.invoke('session:get-plan-content', routingId),
   getSessionLogPath: (routingId: string) =>
     ipcRenderer.invoke('session:get-session-log-path', routingId),
-  watchSession: (routingId: string, sessionId: string, projectKey: string) =>
-    ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
+  watchSession: (routingId: string, sessionId: string, projectKey: string, cwd?: string) =>
+    ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey, cwd),
   unwatchSession: (routingId: string) => ipcRenderer.invoke('session:unwatch-session', routingId),
   // Terminal (PTY) operations
   createTerminal: (cwd: string, index?: number) =>

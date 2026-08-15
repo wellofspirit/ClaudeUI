@@ -135,8 +135,15 @@ export function startReplica(): () => void {
       // Computed BEFORE the fold, exactly as `SyncCore.pendingRekeyFor` does:
       // afterwards the old id is gone from the map.
       const rekey = pendingRekeyFor(event)
-      commit(applyEvent(canonical, event, aux), { rekey })
+      const removed = removedIdOf(event)
+      commit(applyEvent(canonical, event, aux), { rekey, removed })
       if (rekey) persistRekeyedRegistry(rekey.newId)
+      // The host now owns this id (or has dropped it) — either way it stops being
+      // this client's private invention. A rekey carries the marker across, since
+      // the pre-rekey id named the same still-private session.
+      if (event.channel === 'session:created') locallyCreated.delete(routingIdOf(event))
+      if (removed) locallyCreated.delete(removed)
+      if (rekey && locallyCreated.delete(rekey.oldId)) locallyCreated.add(rekey.newId)
     }
     for (const observer of observers) {
       try {
@@ -166,6 +173,57 @@ function pendingRekeyFor(event: { channel: string; args: unknown[] }): Rekey | n
   if (typeof oldId !== 'string') return null
   const newId = rekeyTargetFor(canonical, oldId, event.args[1] as SessionStatus | undefined)
   return newId ? { oldId, newId } : null
+}
+
+/**
+ * Sessions THIS client invented that the host has never heard of.
+ *
+ * `createNewSession` registers a session in the replica before anything spawns
+ * (`patchLocalSession` with `create: true`) and never calls
+ * `window.api.createSession` — the spawn happens on the first send. So between
+ * those two moments the entry exists here and nowhere else: not in canonical, not
+ * in any other client.
+ *
+ * That distinction has no other representation, which is why it needs a set.
+ * Every cheaper proxy is ambiguous: `sdkActive: false`, `messages: []`,
+ * `seeded: false` and `evicted: false` all describe a brand-new local session AND
+ * a real host session that was cancelled before its first prompt. The store's
+ * `cleanupEmptySession` used the ambiguous version and therefore discarded the
+ * second kind on every switch — and post-F7 the host's later events for it are
+ * honest no-ops, so it did not come back.
+ *
+ * An id leaves the set the moment the host announces it (`session:created`) or
+ * removes it. Membership is a lower bound on "safe to forget locally", never an
+ * upper bound on what exists.
+ */
+const locallyCreated = new Set<string>()
+
+/**
+ * Did THIS client create this session without the host ever being told?
+ *
+ * The only sanctioned use is the store's empty-session cleanup: it may drop an
+ * abandoned scratch session, and must not drop anything the host knows about.
+ */
+export function isLocallyCreated(routingId: string): boolean {
+  return locallyCreated.has(routingId)
+}
+
+/**
+ * The id an explicit DELETE just removed, or null.
+ *
+ * Only `session:removed` counts. Sessions leave the replica for other reasons —
+ * the empty-session cleanup on a switch (`dropLocalSessions`), the retiring half
+ * of a rekey — and neither is a statement about what this client should be
+ * LOOKING at, so neither may touch the selection.
+ */
+function removedIdOf(event: { channel: string; args: unknown[] }): string | null {
+  if (event.channel !== 'session:removed') return null
+  return typeof event.args[0] === 'string' ? event.args[0] : null
+}
+
+/** `args[0]` as a routing id, or `''` — the wire's positional session scoping. */
+function routingIdOf(event: { args: unknown[] }): string {
+  return typeof event.args[0] === 'string' ? event.args[0] : ''
 }
 
 /**
@@ -325,6 +383,9 @@ export function patchLocalSession(
 ): void {
   const existing = canonical.sessions[routingId]
   if (!existing && !options.create) return
+  // A session that appears here FIRST, before any event, is this client's own —
+  // see {@link locallyCreated} for why that has to be recorded, not inferred.
+  if (!existing) locallyCreated.add(routingId)
   const base = existing ?? emptySession(routingId, patch.cwd ?? '')
   commit({
     ...canonical,
@@ -336,6 +397,7 @@ export function patchLocalSession(
 export function dropLocalSessions(routingIds: readonly string[]): void {
   let sessions = canonical.sessions
   for (const id of routingIds) {
+    locallyCreated.delete(id)
     if (!sessions[id]) continue
     if (sessions === canonical.sessions) sessions = { ...sessions }
     delete sessions[id]
@@ -408,6 +470,7 @@ export function patchLocalApp(patch: Partial<Omit<CanonicalState, 'sessions'>>):
 export function resetReplicaForTests(): void {
   canonical = emptyCanonicalState()
   aux = emptyAux()
+  locallyCreated.clear()
   observers.clear()
   tapOff?.()
   tapOff = null
@@ -429,6 +492,8 @@ interface CommitOptions {
   /** Resolved per-client selection (hydration only — never derived from canonical). */
   activeSessionId?: string | null
   rekey?: Rekey | null
+  /** A `session:removed` id — the one drop that may clear the selection. */
+  removed?: string | null
 }
 
 function commit(next: CanonicalState, options: CommitOptions = {}): void {
@@ -448,6 +513,19 @@ function buildPatch(
   const patch: Partial<SessionState> = {}
 
   if (options.activeSessionId !== undefined) patch.activeSessionId = options.activeSessionId
+
+  // Selection is per-client view state, so canonical cannot clear it for us — but
+  // a session that was explicitly DELETED is gone for everyone, and leaving this
+  // client pointed at it renders EMPTY_SESSION_STATE forever. Handled here rather
+  // than in the delete ACTION so a delete driven from a phone lands the same way
+  // on the desktop.
+  if (
+    options.removed &&
+    state.activeSessionId === options.removed &&
+    patch.activeSessionId === undefined
+  ) {
+    patch.activeSessionId = null
+  }
 
   // --- app-level ----------------------------------------------------------
   if (force || prev.directories !== next.directories) patch.directories = next.directories

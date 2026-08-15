@@ -69,7 +69,8 @@ import {
   patchLocalApp,
   seedLocalApp,
   dropLocalSessions,
-  evictLocalSessions
+  evictLocalSessions,
+  isLocallyCreated
 } from './replica'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -471,6 +472,17 @@ function tryParseLocalStorage<T>(key: string): T | null {
  * abandoned session lives only in this client (it never spawned, so no
  * `session:created` ever named it), and leaving it in canonical would let the
  * next projection resurrect it in the sidebar.
+ *
+ * **Only a session THIS CLIENT invented may be cleaned up** ({@link isLocallyCreated}).
+ * "Empty" is a local judgement — no messages, no draft, not `sdkActive` — and it
+ * does not distinguish an abandoned scratch session from a REAL host session that
+ * was cancelled before its first prompt, or one whose transcript this client has
+ * not projected yet. Dropping the second kind threw away state the host still had,
+ * and post-F7 its later events are honest no-ops, so it did not come back: the
+ * session was simply gone from this client until the next `sync-full`.
+ *
+ * Removing a session the host DOES know is the explicit-delete path's job
+ * (`session:removed`), and that one is replicated.
  */
 function cleanupEmptySession(
   sessions: Record<string, PerSessionState>,
@@ -484,6 +496,7 @@ function cleanupEmptySession(
   if (!routingId) return { sessions, recentSessionIds, dropped: null }
   const session = sessions[routingId]
   if (!session) return { sessions, recentSessionIds, dropped: null }
+  if (!isLocallyCreated(routingId)) return { sessions, recentSessionIds, dropped: null }
   // Only clean up sessions with no messages and no active SDK
   if (session.messages.length > 0 || session.sdkActive || session.draftText)
     return { sessions, recentSessionIds, dropped: null }
@@ -982,7 +995,6 @@ export interface SessionState {
   forkFromMessage: (sourceRoutingId: string, messageId: string) => Promise<string | null>
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
-  setDirectories: (dirs: DirectoryGroup[]) => void
   addRecentSession: (routingId: string) => void
   removeRecentSession: (routingId: string) => void
   setCustomTitle: (sessionId: string, title: string | null) => void
@@ -1075,7 +1087,12 @@ export interface SessionState {
   setSelectedModel: (model: string) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
-  clearConversation: (routingId: string) => void
+  /**
+   * "Start fresh". Async since the reset became a replicated event — await it
+   * before spawning a replacement session, or the birth event can land BEFORE
+   * the clear and be blanked by it.
+   */
+  clearConversation: (routingId: string) => Promise<void>
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
   clearWorktreeInfo: (routingId: string) => void
@@ -1656,10 +1673,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     patchLocalSession(routingId, { sdkActive: false })
   },
 
-  setDirectories: (dirs) => {
-    patchLocalApp({ directories: dirs })
-  },
-
   // -----------------------------------------------------------------------
   // Registry config (recents / pins / titles / hidden / engine map)
   //
@@ -1812,18 +1825,13 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   deleteProject: async (projectKey) => {
+    // Deletes the OTHER engines' sessions too. This action used to follow up with
+    // its own `deleteSession` loop for opencode rows, because `deleteProjectFiles`
+    // only removes Claude's files and the surviving opencode data re-created the
+    // group on the next listing refresh. `handlers-core.deleteProject` does that
+    // sweep main-side now (pi included), which is also the only way the REMOTE
+    // surface ever got it — a phone has no such follow-up loop.
     await window.api.deleteProject(projectKey)
-    // Also delete any opencode sessions in this group so they don't reappear on the next poll.
-    const opencodeSessions =
-      useSessionStore
-        .getState()
-        .directories.find((g) => g.projectKey === projectKey)
-        ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
-    if (opencodeSessions.length > 0) {
-      await Promise.allSettled(
-        opencodeSessions.map((s) => window.api.deleteSession(s.sessionId, projectKey, 'opencode'))
-      )
-    }
     // Collect all session IDs in this project (both on-disk group members and live in-memory
     // sessions sharing the project's cwd) so we can purge them from every piece of state.
     const state = useSessionStore.getState()
@@ -2335,45 +2343,29 @@ export const useSessionStore = create<SessionState>((set) => ({
   setActiveView: (view) => set({ activeView: view }),
   setPluginViews: (views) => set({ pluginViews: views }),
 
-  clearConversation: (routingId) => {
+  clearConversation: async (routingId) => {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     if (!session) return
-    // A cleared conversation's next message spawns a fresh process — it's a new
-    // run, so it starts in the configured default mode. The reset goes through the
-    // replica because it blanks SEALED slices (transcript, streams, todos, queue);
-    // the view half (drafts, panels, toasts) is reset here.
-    const fresh = createEmptySession(
-      session.cwd,
+    // The SEALED half is no longer written here. It used to be a local
+    // `patchLocalSession`, which meant the clear existed only in the clearing
+    // client's replica: canonical kept the whole transcript, every other client
+    // kept showing it, and the next `sync-full` handed it back to the client that
+    // had just cleared it. Now this is an invoke, main emits the replicated
+    // `session:conversation-cleared`, and the fold blanks the same field set
+    // everywhere — including here, over the in-process MessagePort, which is why
+    // the originator still sees it clear immediately.
+    //
+    // The MODE has to travel with it: a cleared conversation's next message is a
+    // new RUN, so it starts in the configured default, and resolving that default
+    // needs `availableModels` + the auto-mode gate — client state no reducer and
+    // no main-process handler can see.
+    await window.api.clearConversation(
+      routingId,
       bootstrapPermissionMode(state, session.selectedEngineId)
     )
-    patchLocalSession(routingId, {
-      cwd: session.cwd,
-      messages: [],
-      streamingText: '',
-      streamingThinking: '',
-      status: fresh.status,
-      pendingApprovals: [],
-      todos: [],
-      sentFiles: [],
-      queue: [],
-      taskNotifications: [],
-      activeTasks: {},
-      taskProgressMap: {},
-      subagentMessages: {},
-      subagentStreamingText: {},
-      subagentStreamingThinking: {},
-      permissionMode: fresh.permissionMode,
-      effort: fresh.effort,
-      thinkingMode: fresh.thinkingMode,
-      reasoningVariant: fresh.reasoningVariant,
-      statusLine: null,
-      metering: null,
-      sdkActive: session.sdkActive,
-      selectedEngineId: fresh.selectedEngineId,
-      selectedModel: fresh.selectedModel,
-      seeded: true
-    })
+    // The VIEW half (drafts, panels, toasts, fork origin) is per-client and dies
+    // here, as it always did.
     set((s) => ({
       sessions: updateSession(s.sessions, routingId, () => ({
         isHistorical: false,
