@@ -188,6 +188,35 @@ function headerValue(headers: http.IncomingHttpHeaders, name: string): string {
 }
 
 /**
+ * Did this upgrade ask to authenticate with an ENROLLMENT LINK
+ * (`?intent=enroll`)?
+ *
+ * The flag is NON-SECRET by construction — the token itself stays in the `auth`
+ * frame and never touches the query string, so all a query log learns is that
+ * somebody is on the enrollment screen, which that screen already says.
+ *
+ * It exists to break a collision that otherwise makes FIRST-DEVICE enrollment
+ * impossible on any `tailscale serve` setup. Enrollment has to happen at the
+ * tailnet origin, because that hostname IS the RP ID the credential binds to —
+ * and at that origin serve attaches an owner identity that authenticates the
+ * socket at CONNECTION time, before the client's `{auth, enrollToken}` frame is
+ * read. With nothing enrolled yet the policy is effective-`legacy`, so no
+ * ceremony is owed, so {@link RemoteServer.handleConnection}'s unsolicited
+ * accept always wins the race: the phone lands in the app as an ordinary
+ * tailnet session and the enrollment never happens.
+ *
+ * Setting it is FAIL-CLOSED. All it does is decline ambient identity for this
+ * one socket; a peer that then presents no token, or a bad one, is refused like
+ * any other bad credential and has gained exactly nothing.
+ */
+function hasEnrollIntent(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false
+  const query = rawUrl.indexOf('?')
+  if (query < 0) return false
+  return new URLSearchParams(rawUrl.slice(query + 1)).get('intent') === 'enroll'
+}
+
+/**
  * True for `127.0.0.0/8`, `::1` and IPv4-mapped loopback. Only a loopback peer
  * can be the `tailscale serve` proxy running on this machine.
  */
@@ -1965,6 +1994,10 @@ export class RemoteServer {
     // client asserts about its own secure-context status.
     const webauthnOrigin = resolveWebauthnOrigin(req.headers.host, this.tlsServe)
     const capableOrigin = webauthnOrigin !== null
+    // Read ONCE, from the upgrade request, like every other per-connection fact
+    // above it. See `hasEnrollIntent` for why this exists and why declining
+    // ambient identity can only ever cost the caller.
+    const enrollIntent = hasEnrollIntent(req.url)
 
     /**
      * The policy this socket is currently being judged against.
@@ -2123,7 +2156,7 @@ export class RemoteServer {
     // NOT skip the ceremony (owner decision: device theft is exactly the threat
     // ambient identity does not cover) unless the operator set the exemption. We
     // simply send no unsolicited auth-response and let the ceremony run.
-    const identityAuthenticates =
+    const identityWouldAuthenticate =
       identity.kind === 'owner' &&
       !ceremonyRequiredForAuth({
         policy: auth.policy,
@@ -2132,8 +2165,19 @@ export class RemoteServer {
         method: 'tailnet-identity',
         passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
       })
+    // ...and it does not skip the ENROLLMENT LINK either. See `hasEnrollIntent`:
+    // without this, a first device can never enrol, because the origin
+    // enrollment requires is exactly the origin that hands out ambient identity.
+    // Deferring costs the socket nothing it cannot re-earn — the frame-driven
+    // path below is the ordinary one, and the pre-auth deadline already governs.
+    const identityAuthenticates = identityWouldAuthenticate && !enrollIntent
     if (identityAuthenticates) {
       accept('tailnet-identity', identity.kind === 'owner' ? identity.login : null)
+    } else if (identityWouldAuthenticate) {
+      logger.info(
+        'remote-server',
+        `enroll intent: deferring tailnet identity for ${ip} — authenticating from the auth frame instead`
+      )
     } else if (identityMismatch) {
       logger.warn(
         'remote-server',

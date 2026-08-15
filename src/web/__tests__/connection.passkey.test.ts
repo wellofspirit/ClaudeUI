@@ -411,6 +411,29 @@ describe('RemoteConnection — enrollment token', () => {
     conn.destroy()
   })
 
+  it('flags the UPGRADE URL with intent=enroll, and only while the credential is one', () => {
+    // Without the flag the server's unsolicited tailnet accept beats the
+    // `{auth, enrollToken}` frame at the only origin enrollment can happen on,
+    // and a first device can never enrol. The token must NOT ride the query
+    // string — only the non-secret intent does.
+    const { conn, internals } = makeConn({ enrollToken: 'etok' })
+    expect(internals.ws?.url).toBe('ws://box.tail.ts.net/?intent=enroll')
+    expect(internals.ws?.url).not.toContain('etok')
+
+    // The escape hatch drops the credential; the very next socket must go back
+    // to ordinary ambient auth or the operator can never sign in from here.
+    conn.setCredential({})
+    conn.connect()
+    expect(internals.ws?.url).toBe('ws://box.tail.ts.net')
+    conn.destroy()
+  })
+
+  it('a plain token connection never carries the flag', () => {
+    const { conn, internals } = makeConn({ token: 'tok' })
+    expect(internals.ws?.url).toBe('ws://box.tail.ts.net')
+    conn.destroy()
+  })
+
   it('burns the enroll token the moment the server accepts it (GUARD)', () => {
     // Single-use: the server consumed it to answer this frame. Keeping it would
     // have a reconnect present a dead secret and be refused, instead of falling

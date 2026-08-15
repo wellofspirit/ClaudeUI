@@ -769,6 +769,27 @@ export class RemoteConnection {
   // ---------------------------------------------------------------------------
 
   /**
+   * The URL this socket opens on — the base origin, plus `?intent=enroll` while
+   * the credential we are about to present is an ENROLLMENT LINK.
+   *
+   * The token itself stays in the `auth` frame; only the non-secret intent
+   * rides the query string. Without the flag a first device can never enrol:
+   * enrollment happens at the tailnet origin (that hostname is the RP ID), and
+   * there `tailscale serve` supplies an owner identity that authenticates the
+   * socket at CONNECTION time — before our `{auth, enrollToken}` frame is read
+   * — so the phone lands in the app with its token unspent and no biometric
+   * ever asked for. See `remote-server.ts`'s `hasEnrollIntent`.
+   *
+   * Derived per connect from the CREDENTIAL, never baked into `this.url`: the
+   * enrollment screen's "Sign in normally instead" escape calls
+   * `setCredential({})`, and the very next socket has to go back to ordinary
+   * ambient auth.
+   */
+  private socketUrl(): string {
+    return this.credential.enrollToken !== undefined ? `${this.url}/?intent=enroll` : this.url
+  }
+
+  /**
    * Drop the current socket without letting it talk back.
    *
    * Handlers are detached BEFORE closing: `close()` fires `onclose`
@@ -804,7 +825,7 @@ export class RemoteConnection {
     this.registeredOnThisSocket = false
 
     try {
-      this.ws = new WebSocket(this.url)
+      this.ws = new WebSocket(this.socketUrl())
     } catch {
       this.scheduleReconnect()
       return

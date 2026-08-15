@@ -233,11 +233,13 @@ interface RawClient {
 
 async function rawConnect(
   port: number,
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  /** Upgrade path + query. `?intent=enroll` is the enrollment opt-out (ADR-052). */
+  path = '/'
 ): Promise<RawClient> {
   // `Host` is what decides WebAuthn capability, and `Origin` must match it or
   // `verifyWsOrigin` refuses the upgrade.
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/`, {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
     headers: { host: DNS_NAME, origin: ORIGIN, ...extraHeaders }
   })
   const frames: WsServerMessage[] = []
@@ -347,8 +349,11 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     return { 'tailscale-headers-info': 'set', 'tailscale-user-login': login }
   }
 
-  async function connectWith(extraHeaders: Record<string, string>): Promise<RawClient> {
-    const c = await rawConnect(port, extraHeaders)
+  async function connectWith(
+    extraHeaders: Record<string, string>,
+    path?: string
+  ): Promise<RawClient> {
+    const c = await rawConnect(port, extraHeaders, path)
     clients.push(c)
     return c
   }
@@ -924,6 +929,94 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
     const creds = (await invoke(client, 'webauthn:credentials')) as Array<{ nickname: string }>
     expect(creds.map((c) => c.nickname)).toEqual(['New tablet'])
+  })
+
+  // -------------------------------------------------------------------------
+  // Enrollment vs ambient tailnet identity (`?intent=enroll`)
+  // -------------------------------------------------------------------------
+  //
+  // The collision this pins: enrollment MUST happen at the tailnet origin (that
+  // hostname is the RP ID), and at that origin `tailscale serve` hands us an
+  // owner identity that authenticates the socket at CONNECTION time, before any
+  // client frame. The FIRST device has zero credentials, so the policy is
+  // effective-`legacy`, so no ceremony is owed, so the unsolicited accept always
+  // wins — the phone lands in the app as an ordinary tailnet session, its
+  // enrollment token unspent and its URL fragment consumed by the client. Live
+  // on the owner's phone walk: scan QR → in the app → no biometric, ever.
+
+  it('FIRST DEVICE: an enroll-intent socket defers tailnet identity and enrolls (GUARD)', async () => {
+    // Exactly the live conditions: AUTO policy, nothing enrolled, serve up with
+    // a known owner login, request arriving with the identity headers.
+    await boot(null)
+    forceServeUp(OWNER_LOGIN)
+    const { token } = server.mintEnrollToken()
+
+    const client = await connectWith(tailnetHeaders(OWNER_LOGIN), '/?intent=enroll')
+    client.send({ type: 'auth', enrollToken: token })
+
+    const first = await client.waitFor('auth-response')
+    // Pre-fix this is `{ok:true, method:'tailnet-identity'}` — sent before the
+    // auth frame was even read.
+    expect(first).toMatchObject({ ok: true, method: 'enroll-token' })
+
+    // And the whole enrollment completes on that socket.
+    const options = (await invoke(client, 'webauthn:register-options')) as {
+      challenge: string
+      rp: { id: string }
+    }
+    const device = new VirtualAuthenticator({ backedUp: true })
+    await expect(
+      invoke(client, 'webauthn:register-verify', {
+        response: device.register({ challenge: options.challenge, origin: ORIGIN, rpId: DNS_NAME }),
+        nickname: 'First phone'
+      })
+    ).resolves.toMatchObject({ ok: true })
+
+    client.frames.length = 0
+    expect(await ceremony(client, device)).toMatchObject({
+      ok: true,
+      method: 'webauthn',
+      identity: { login: 'First phone' }
+    })
+  })
+
+  it('enroll intent with a BAD token is refused, not silently tailnet-accepted', async () => {
+    // Opting out of ambient identity is fail-closed: the flag can only ever cost
+    // the caller the authentication it just declined.
+    await boot(null)
+    forceServeUp(OWNER_LOGIN)
+
+    const client = await connectWith(tailnetHeaders(OWNER_LOGIN), '/?intent=enroll')
+    client.send({ type: 'auth', enrollToken: 'not-a-real-token' })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: false })
+    expect(await client.waitForClose()).toBe(4001)
+  })
+
+  it('NO intent flag: the unsolicited tailnet accept still fires (zero-regression pin)', async () => {
+    await boot(null)
+    forceServeUp(OWNER_LOGIN)
+    const client = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    expect(await client.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'tailnet-identity',
+      identity: { login: OWNER_LOGIN }
+    })
+  })
+
+  it('under passkey-always (unexempt) the flag is a no-op — the ceremony was already owed', async () => {
+    await boot('passkey-always')
+    await enroll()
+    forceServeUp(OWNER_LOGIN)
+    const { token } = server.mintEnrollToken()
+
+    // Ambient identity never authenticated here in the first place, so an
+    // enroll socket behaves identically with the flag as without it.
+    const client = await connectWith(tailnetHeaders(OWNER_LOGIN), '/?intent=enroll')
+    client.send({ type: 'auth', enrollToken: token })
+    expect(await client.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'enroll-token'
+    })
   })
 
   it('closes 4004 when a NON-enroll connection sends a post-auth ceremony frame', async () => {
