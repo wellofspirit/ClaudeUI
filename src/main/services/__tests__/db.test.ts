@@ -134,7 +134,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v11)', () => {
+  it('applies the real production migration set (v1–v12)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -143,8 +143,9 @@ describe('migration framework — user_version guard', () => {
       // v5: daily_usage, v6: dispatched_usage, v7: remote_config,
       // v8: remote_config pinned HTTPS port + serve cleanup record,
       // v9: audit_log, v10: remote-terminal posture columns,
-      // v11: webauthn_credential + auth-policy columns (ADR-052 passkeys)
-      expect(userVersion(db)).toBe(11)
+      // v11: webauthn_credential + auth-policy columns (ADR-052 passkeys),
+      // v12: step-up tier columns + audit detail/retention (ADR-054)
+      expect(userVersion(db)).toBe(12)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -223,7 +224,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(11)
+      expect(userVersion(db)).toBe(12)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -242,8 +243,133 @@ describe('migration framework — user_version guard', () => {
         // policy the operator never chose, and least of all on `off`.
         auth_policy: null,
         password_break_glass: 1,
-        passkey_tailnet_exempt: 0
+        passkey_tailnet_exempt: 0,
+        // v12 backfills the second axis at its defaults too: `medium` is the
+        // shipped posture, so a row upgraded across five migrations must land
+        // neither on a tier that locks the operator out of their own terminal
+        // nor on one that silently disables every freshness check.
+        step_up_tier: 'medium',
+        step_up_mutation_idle_minutes: 60,
+        session_max_age_hours: 4,
+        audit_retention_days: 365
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  // ADR-054 v12: the second policy axis, the audit `detail` column, and the
+  // one-time retirement of `passkey-for-grants`.
+  it('v12 adds the step-up columns with their defaults and audit_log.detail', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      const columns = (
+        db
+          .prepare('SELECT name, "notnull", dflt_value FROM pragma_table_info(?)')
+          .all('remote_config') as Array<{
+          name: string
+          notnull: number
+          dflt_value: string | null
+        }>
+      ).filter((c) => c.name.startsWith('step_up') || c.name.startsWith('session_max') || c.name.startsWith('audit_'))
+
+      expect(columns.map((c) => c.name).sort()).toEqual([
+        'audit_retention_days',
+        'session_max_age_hours',
+        'step_up_mutation_idle_minutes',
+        'step_up_tier'
+      ])
+      // All four are NOT NULL with a default: unlike `auth_policy` there is no
+      // AUTO state for freshness, so nullability would only invite a second
+      // "what does null mean here" rule.
+      for (const c of columns) expect(c.notnull, c.name).toBe(1)
+      const tier = columns.find((c) => c.name === 'step_up_tier')!
+      expect(tier.dflt_value).toMatch(/medium/)
+
+      const detail = (
+        db.prepare('SELECT name, "notnull" FROM pragma_table_info(?)').all('audit_log') as Array<{
+          name: string
+          notnull: number
+        }>
+      ).find((c) => c.name === 'detail')
+      // Nullable BY DESIGN: command rows carry no intent to record.
+      expect(detail).toBeDefined()
+      expect(detail!.notnull).toBe(0)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v12 rewrites a stored `passkey-for-grants` policy to legacy + the medium tier', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 11)
+      )
+      // The literal a pre-ADR-054 build could have stored.
+      db.prepare(
+        `INSERT INTO remote_config (id, port, auth_policy, password_break_glass, updated_at)
+         VALUES (1, 4568, 'passkey-for-grants', 0, 1)`
+      ).run()
+
+      runMigrations(db)
+
+      expect(userVersion(db)).toBe(12)
+      expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
+        // The mode was "legacy login + medium step-up tier" written as one knob,
+        // so the pair below is the SAME behavior on the two axes that exist now.
+        auth_policy: 'legacy',
+        step_up_tier: 'medium',
+        // Everything else the operator chose survives untouched.
+        port: 4568,
+        password_break_glass: 0
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v12 leaves every OTHER stored policy alone — including `off`', () => {
+    for (const policy of ['passkey-always', 'legacy', 'off']) {
+      const db = openRawDb()
+      try {
+        runMigrations(
+          db,
+          MIGRATIONS.filter((m) => m.version <= 11)
+        )
+        db.prepare(
+          `INSERT INTO remote_config (id, auth_policy, updated_at) VALUES (1, ?, 1)`
+        ).run(policy)
+        runMigrations(db)
+        // No migration may ever set OR clear the master switch.
+        expect(
+          (db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
+            auth_policy: string
+          }).auth_policy,
+          policy
+        ).toBe(policy)
+      } finally {
+        db.close()
+      }
+    }
+  })
+
+  it('v12 leaves an AUTO (NULL) policy as AUTO', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 11)
+      )
+      db.prepare('INSERT INTO remote_config (id, updated_at) VALUES (1, 1)').run()
+      runMigrations(db)
+      expect(
+        (db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
+          auth_policy: string | null
+        }).auth_policy
+      ).toBeNull()
     } finally {
       db.close()
     }

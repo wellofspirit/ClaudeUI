@@ -28,7 +28,11 @@ vi.mock('../../services/db', () => ({
   appendAuditLog: auditSpy,
   getRemoteConfig: () => configRef.current,
   countWebauthnCredentials: () =>
-    countImpl.current ? countImpl.current() : credentialCountRef.current
+    countImpl.current ? countImpl.current() : credentialCountRef.current,
+  // ADR-054 defaults — `auth-policy.ts` reads them for its fail-closed context.
+  DEFAULT_STEP_UP_TIER: 'medium',
+  DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES: 60,
+  DEFAULT_SESSION_MAX_AGE_HOURS: 4
 }))
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -348,8 +352,14 @@ describe('webauthn:revoke — the lockout guard', () => {
     expect(service.count()).toBe(1)
   })
 
-  it('does not guard under passkey-for-grants (the base connection still authenticates)', async () => {
-    setPolicy({ authPolicy: 'passkey-for-grants', credentialCount: 1, passwordBreakGlass: false })
+  it('does not guard under AUTO — reverting to `legacy` is what AUTO MEANS', async () => {
+    // Replaces an ADR-052-era case pinned on `passkey-for-grants`, a mode
+    // ADR-054 removed: `parseAuthPolicy` now maps that literal to AUTO, so the
+    // old case asserted a state the system can no longer be in. AUTO with the
+    // last credential going away is the surviving shape of "the guard must not
+    // fire", and it is the one that matters — the lockout guard exists only for
+    // an EXPLICITLY pinned `passkey-always`.
+    setPolicy({ authPolicy: null, credentialCount: 1, passwordBreakGlass: false })
     await expect(webauthnRevoke(conn(), 'cred-0', null, serviceWith(1))).resolves.toEqual({
       ok: true
     })

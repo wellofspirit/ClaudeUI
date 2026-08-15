@@ -22,6 +22,12 @@ const baseConfig: RemoteConfig = {
   credentialCount: 0,
   passwordBreakGlass: true,
   passkeyTailnetExempt: false,
+  // ADR-054 second axis, at its defaults (series 2 owns the tier UI).
+  stepUpTier: 'medium',
+  effectiveStepUpTier: 'medium',
+  stepUpMutationIdleMinutes: 60,
+  sessionMaxAgeHours: 4,
+  auditRetentionDays: 365,
   passwordSet: false,
   passwordUpdatedAt: null
 }
@@ -101,10 +107,10 @@ describe('RemotePasskeySettings', () => {
       fireEvent.click(
         screen
           .getAllByTestId('RemotePasskeySettings.policy.option')
-          .find((o) => o.getAttribute('data-id') === 'passkey-for-grants')!
+          .find((o) => o.getAttribute('data-id') === 'passkey-always')!
       )
       await waitFor(() =>
-        expect(api.setRemoteConfig).toHaveBeenCalledWith({ authPolicy: 'passkey-for-grants' })
+        expect(api.setRemoteConfig).toHaveBeenCalledWith({ authPolicy: 'passkey-always' })
       )
       expect(onConfigChange).toHaveBeenCalled()
     })
@@ -116,8 +122,10 @@ describe('RemotePasskeySettings', () => {
     it.each([
       ['passkey-always', /backup password below still gets in/i],
       ['passkey-always', /until at least one passkey is enrolled/i],
-      ['passkey-for-grants', /backup password is still accepted/i],
-      ['passkey-for-grants', /no passkey is enrolled/i]
+      // `passkey-for-grants` was removed by ADR-054 — it was "legacy sign-in +
+      // medium step-up tier" written as one knob, and its two hints went with
+      // it. The tier selector (and its own hints) is series 2's.
+      ['legacy', /No passkey anywhere/i]
     ])('the %s hint does not overstate enforcement', async (policy, expected) => {
       renderPane({
         authPolicy: policy as RemoteConfig['authPolicy'],

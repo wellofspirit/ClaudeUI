@@ -146,17 +146,17 @@ describe('remote_config auth-policy columns', () => {
   })
 
   it('the password accessor does not clobber the policy columns (and vice versa)', () => {
-    setRemoteConfig({ authPolicy: 'passkey-for-grants', passwordBreakGlass: false })
+    setRemoteConfig({ authPolicy: 'passkey-always', passwordBreakGlass: false })
     setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
     const afterPassword = getRemoteConfig()!
-    expect(afterPassword.authPolicy).toBe('passkey-for-grants')
+    expect(afterPassword.authPolicy).toBe('passkey-always')
     expect(afterPassword.passwordBreakGlass).toBe(false)
     expect(afterPassword.passwordHash).toBe('bb'.repeat(32))
 
     setRemoteConfig({ port: 4321 })
     const afterConfig = getRemoteConfig()!
     expect(afterConfig.passwordHash).toBe('bb'.repeat(32))
-    expect(afterConfig.authPolicy).toBe('passkey-for-grants')
+    expect(afterConfig.authPolicy).toBe('passkey-always')
   })
 })
 

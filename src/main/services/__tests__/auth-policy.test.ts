@@ -28,7 +28,12 @@ vi.mock('../db', () => ({
   countWebauthnCredentials: () => {
     if (dbThrows.current) throw new Error('db locked')
     return credentialCountRef.current
-  }
+  },
+  // ADR-054 defaults — the fail-closed context is built from them.
+  DEFAULT_STEP_UP_TIER: 'medium',
+  DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES: 60,
+  DEFAULT_SESSION_MAX_AGE_HOURS: 4,
+  appendAuditLog: vi.fn()
 }))
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -57,6 +62,9 @@ function ctx(over: Partial<AuthPolicyContext> = {}): AuthPolicyContext {
     credentialCount: 0,
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
     ...over
   }
 }
@@ -84,9 +92,6 @@ describe('resolveAuthPolicy — NULL means AUTO', () => {
     expect(resolveAuthPolicy(ctx({ stored: 'passkey-always', credentialCount: 0 }))).toBe(
       'passkey-always'
     )
-    expect(resolveAuthPolicy(ctx({ stored: 'passkey-for-grants', credentialCount: 0 }))).toBe(
-      'passkey-for-grants'
-    )
     expect(resolveAuthPolicy(ctx({ stored: 'off', credentialCount: 3 }))).toBe('off')
   })
 })
@@ -94,25 +99,37 @@ describe('resolveAuthPolicy — NULL means AUTO', () => {
 describe('readAuthPolicyContext', () => {
   it('reads the stored row', () => {
     configRef.current = {
-      authPolicy: 'passkey-for-grants',
+      authPolicy: 'passkey-always',
       passwordBreakGlass: false,
-      passkeyTailnetExempt: true
+      passkeyTailnetExempt: true,
+      stepUpTier: 'strong',
+      stepUpMutationIdleMinutes: 15,
+      sessionMaxAgeHours: 2
     }
     credentialCountRef.current = 2
     expect(readAuthPolicyContext()).toEqual({
-      stored: 'passkey-for-grants',
+      stored: 'passkey-always',
       credentialCount: 2,
       passwordBreakGlass: false,
-      passkeyTailnetExempt: true
+      passkeyTailnetExempt: true,
+      stepUpTier: 'strong',
+      stepUpMutationIdleMinutes: 15,
+      sessionMaxAgeHours: 2
     })
   })
 
-  it('defaults an absent row to AUTO / break-glass on / no exemption', () => {
+  it('defaults an absent row to AUTO / break-glass on / no exemption / medium tier', () => {
     expect(readAuthPolicyContext()).toEqual({
       stored: null,
       credentialCount: 0,
       passwordBreakGlass: true,
-      passkeyTailnetExempt: false
+      passkeyTailnetExempt: false,
+      // ADR-054's axis defaults to the shipped posture, for the same reason the
+      // policy defaults to AUTO: no migration or missing row may choose a
+      // stricter or looser stance than the operator did.
+      stepUpTier: 'medium',
+      stepUpMutationIdleMinutes: 60,
+      sessionMaxAgeHours: 4
     })
   })
 
@@ -210,16 +227,8 @@ describe('grantsFor — mode × origin × method', () => {
     { policy: 'passkey-always', method: 'password', capableOrigin: true, expected: P, why: 'break-glass is the owner' },
     { policy: 'passkey-always', method: 'password', capableOrigin: false, expected: P, why: 'break-glass is the owner' },
 
-    // passkey-for-grants — the base connection is as-built…
-    { policy: 'passkey-for-grants', method: 'token', capableOrigin: true, expected: L, why: 'base auth is as-built' },
-    { policy: 'passkey-for-grants', method: 'tailnet-identity', capableOrigin: true, expected: L, why: 'base auth is as-built' },
-    // …and a proven human still gets the human set.
-    { policy: 'passkey-for-grants', method: 'webauthn', capableOrigin: true, expected: P, why: 'proven human' },
-    { policy: 'passkey-for-grants', method: 'password', capableOrigin: true, expected: P, why: 'break-glass is the owner' },
-
     // enroll-token is `enroll` and nothing else, in every mode.
     { policy: 'passkey-always', method: 'enroll-token', capableOrigin: true, expected: E, why: 'enroll only' },
-    { policy: 'passkey-for-grants', method: 'enroll-token', capableOrigin: true, expected: E, why: 'enroll only' },
     { policy: 'legacy', method: 'enroll-token', capableOrigin: true, expected: E, why: 'enroll only' },
 
     // off — the as-built remote surface, deliberately WITHOUT admin/enroll.
@@ -248,7 +257,7 @@ describe('grantsFor — mode × origin × method', () => {
     // The invariant that replaced the drifted pair: EMPTY_GRANTS iff a ceremony
     // is owed. Exhaustive over the whole input space, so a future edit to either
     // function that reintroduces a private copy of the rule fails here.
-    for (const policy of ['legacy', 'passkey-always', 'passkey-for-grants', 'off'] as const) {
+    for (const policy of ['legacy', 'passkey-always', 'off'] as const) {
       for (const method of ['token', 'tailnet-identity'] as const) {
         for (const capableOrigin of [true, false]) {
           for (const credentialCount of [0, 1, 5]) {
@@ -286,7 +295,7 @@ describe('grantsFor — mode × origin × method', () => {
   })
 
   it('never grants admin/enroll to a token or tailnet connection, in any mode', () => {
-    for (const policy of ['legacy', 'passkey-always', 'passkey-for-grants', 'off'] as const) {
+    for (const policy of ['legacy', 'passkey-always', 'off'] as const) {
       for (const method of ['token', 'tailnet-identity'] as const) {
         for (const capableOrigin of [true, false]) {
           for (const passkeyTailnetExempt of [true, false]) {
@@ -330,7 +339,8 @@ describe('authSurfaceChanged', () => {
     authPolicy: null,
     effectiveAuthPolicy: 'legacy',
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false
+    passkeyTailnetExempt: false,
+    stepUpTier: 'medium'
   }
 
   it('is false for a no-op write (no audit spam, no gratuitous disconnects)', () => {
@@ -367,12 +377,21 @@ describe('authSurfaceChanged', () => {
     expect(authSurfaceChanged(base, { ...base, passkeyTailnetExempt: true })).toBe(true)
   })
 
+  it('catches a STEP-UP TIER change (ADR-054: the tier is an admission rule)', () => {
+    // A connection's tier is snapshotted at authentication, so without this the
+    // operator would flip to `strong` and every live socket would keep running
+    // under `medium` until it happened to reconnect.
+    expect(authSurfaceChanged(base, { ...base, stepUpTier: 'strong' })).toBe(true)
+    expect(authSurfaceChanged(base, { ...base, stepUpTier: 'off' })).toBe(true)
+  })
+
   it('catches a change in either direction', () => {
     const tightened: AuthSurfaceSnapshot = {
       authPolicy: 'passkey-always',
       effectiveAuthPolicy: 'passkey-always',
       passwordBreakGlass: false,
-      passkeyTailnetExempt: false
+      passkeyTailnetExempt: false,
+      stepUpTier: 'strong'
     }
     expect(authSurfaceChanged(base, tightened)).toBe(true)
     expect(authSurfaceChanged(tightened, base)).toBe(true)
@@ -386,12 +405,14 @@ describe('authSurfaceChanged', () => {
       'authPolicy',
       'effectiveAuthPolicy',
       'passkeyTailnetExempt',
-      'passwordBreakGlass'
+      'passwordBreakGlass',
+      'stepUpTier'
     ])
     for (const field of fields) {
       const flipped: AuthSurfaceSnapshot = { ...base }
       if (field === 'authPolicy') flipped.authPolicy = 'off'
       else if (field === 'effectiveAuthPolicy') flipped.effectiveAuthPolicy = 'off'
+      else if (field === 'stepUpTier') flipped.stepUpTier = 'strong'
       else flipped[field] = !base[field]
       expect(authSurfaceChanged(base, flipped), field).toBe(true)
     }
@@ -441,7 +462,7 @@ describe('ceremonyRequiredForAuth', () => {
   })
 
   it('never demands it under the other three modes', () => {
-    for (const policy of ['legacy', 'passkey-for-grants', 'off'] as const) {
+    for (const policy of ['legacy', 'off'] as const) {
       expect(ceremonyRequiredForAuth({ ...base, policy }), policy).toBe(false)
     }
   })

@@ -79,6 +79,14 @@ import {
   type RemoteAuthSurfaceHost,
   type RegisterVerifyResult
 } from './webauthn-commands'
+import {
+  authcfgSetAuthMode,
+  authcfgSetPassword,
+  authcfgSetRetention,
+  authcfgSetTier,
+  type AuthcfgHost
+} from './authcfg-commands'
+import type { RemoteAuthPolicy, StepUpTier } from '../../shared/types'
 import type { RegistrationResponseJSON } from '@simplewebauthn/server'
 import {
   sendPrompt,
@@ -295,7 +303,7 @@ export function registerRemoteHandlers(
    * must not depend on runtime configuration, or the parity pins would report a
    * different surface in tests than in production.
    */
-  enrollTokens?: RemoteAuthSurfaceHost
+  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost
 ): void {
   remoteHandlersRegistered = true
 
@@ -1433,6 +1441,57 @@ export function registerRemoteHandlers(
     capability: 'admin',
     kind: 'command',
     handler: async () => mintEnrollToken(enrollTokens ?? null)
+  })
+
+  // -------------------------------------------------------------------------
+  // Remote-access settings (ADR-054 decision 6 — the host anchor)
+  // -------------------------------------------------------------------------
+  //
+  // The THIRD deliberate widening of the remote surface. Every verb declares
+  // `admin` (outside the base grant set, so authenticating never suffices) AND
+  // is gated on a presence proof inside the mutation window on every tier — the
+  // transport classifies this namespace as `authcfg` and refuses a stale one
+  // with `needs-step-up`.
+  //
+  // What is NOT here is the point: the `off` master switch. Auth-DISABLING
+  // operations stay host-anchor only, and they stay in `remote:set-config`,
+  // which has no remote registration at all. `authcfg:set-auth-mode` refuses
+  // `off` with a typed error rather than silently dropping it.
+
+  handleRemote({
+    channel: 'authcfg:set-tier',
+    capability: 'admin',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, tier: StepUpTier) =>
+      authcfgSetTier(connection, tier, enrollTokens ?? null)
+  })
+
+  handleRemote({
+    channel: 'authcfg:set-auth-mode',
+    capability: 'admin',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, mode: RemoteAuthPolicy | null) =>
+      authcfgSetAuthMode(connection, mode, enrollTokens ?? null)
+  })
+
+  handleRemote({
+    channel: 'authcfg:set-password',
+    capability: 'admin',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, password: string) =>
+      authcfgSetPassword(connection, password, enrollTokens ?? null)
+  })
+
+  handleRemote({
+    channel: 'authcfg:set-retention',
+    capability: 'admin',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, days: number) =>
+      authcfgSetRetention(connection, days)
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)

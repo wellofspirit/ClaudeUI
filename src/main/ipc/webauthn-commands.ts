@@ -26,12 +26,7 @@ import type {
   PublicKeyCredentialCreationOptionsJSON,
   RegistrationResponseJSON
 } from '@simplewebauthn/server'
-import {
-  auditAuthPolicyChange,
-  authSurfaceChanged,
-  readAuthPolicyContext,
-  readAuthSurface
-} from '../services/auth-policy'
+import { readAuthPolicyContext, withAuthSurfaceReaction } from '../services/auth-policy'
 import { getRemoteConfig } from '../services/db'
 import { logger } from '../services/logger'
 import {
@@ -61,43 +56,23 @@ export interface RemoteAuthSurfaceHost {
 export type EnrollTokenMinter = RemoteAuthSurfaceHost
 
 /**
- * Run a credential mutation, then react if it moved the AUTH SURFACE.
+ * Run a credential mutation through the shared auth-surface reaction.
  *
  * Enrolling the FIRST credential (0→1) or revoking the LAST one (1→0) flips
  * what AUTO resolves to — `legacy` ⇄ `passkey-always` — with nobody writing the
  * config column. That is an auth-surface change exactly like a
- * `remote:set-config` write, and it owes the same two things: an audit row, and
- * dropping the clients still holding the rules they were admitted under.
- * Enrolling a second credential (1→2) moves nothing effective, so it owes
- * neither; the before/after comparison is what tells them apart, rather than
- * any counting the caller has to get right.
- *
- * The comparison also makes failure handling free: a registration that did not
- * verify, or a revoke refused by the lockout guard, leaves the surface
- * untouched and therefore fires nothing. A THROW propagates without reacting,
- * which is correct for the same reason.
- *
- * The ACTOR is spared the disconnect — see
- * `RemoteServer.disconnectAuthSurfaceClients`.
+ * `remote:set-config` write, and it owes the same two things: an audit row and a
+ * re-admission disconnect. Enrolling a second credential (1→2) moves nothing
+ * effective, so it owes neither. The reaction's own before/after comparison is
+ * what tells them apart (`auth-policy.ts`), which is why this wrapper is three
+ * lines and not a second copy of the rule.
  */
-async function withAuthSurfaceReaction<T>(
+async function withCredentialSurfaceReaction<T>(
   connection: CommandConnection,
   host: RemoteAuthSurfaceHost | null,
   mutate: () => T | Promise<T>
 ): Promise<T> {
-  const before = readAuthSurface()
-  const result = await mutate()
-  const after = readAuthSurface()
-  if (!authSurfaceChanged(before, after)) return result
-
-  auditAuthPolicyChange(connection)
-  logger.info(
-    'webauthn',
-    `Credential change by ${connection.identity.label} moved the auth policy: ` +
-      `${before.effectiveAuthPolicy} → ${after.effectiveAuthPolicy}`
-  )
-  host?.disconnectAuthSurfaceClients({ exceptConnectionId: connection.connectionId })
-  return result
+  return await withAuthSurfaceReaction({ connection, host, via: 'credential change', mutate })
 }
 
 /** Result envelope for `webauthn:register-verify`. */
@@ -134,7 +109,7 @@ export async function webauthnRegisterVerify(
   if (!payload || typeof payload !== 'object' || !payload.response) {
     return { ok: false, error: 'malformed' }
   }
-  return await withAuthSurfaceReaction(connection, host, async () => {
+  return await withCredentialSurfaceReaction(connection, host, async () => {
     const result = await service.finishRegistration({
       origin,
       connectionId: connection.connectionId,
@@ -198,7 +173,7 @@ export async function webauthnRevoke(
   // Revoking the LAST credential under AUTO is the loosening twin of enrolling
   // the first: `passkey-always` → `legacy`, so every client admitted under the
   // stricter rules is re-admitted under the looser ones.
-  return await withAuthSurfaceReaction(connection, host, () => ({ ok: service.revoke(credId) }))
+  return await withCredentialSurfaceReaction(connection, host, () => ({ ok: service.revoke(credId) }))
 }
 
 export function mintEnrollToken(host: RemoteAuthSurfaceHost | null): {

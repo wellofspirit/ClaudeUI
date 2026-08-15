@@ -179,6 +179,11 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: SALT_HEX,
     passwordHash: 'unused — the provider is stubbed',
     kdfParams: JSON.stringify(KDF),
@@ -454,7 +459,9 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     const stubServer = {
       mintEnrollToken: () => server.mintEnrollToken(),
       disconnectAuthSurfaceClients: (opts?: { exceptConnectionId?: string }) =>
-        server.disconnectAuthSurfaceClients(opts)
+        server.disconnectAuthSurfaceClients(opts),
+      disconnectPasswordClients: () => server.disconnectPasswordClients(),
+      resnapshotConnection: (id: string) => server.resnapshotConnection(id)
     }
     registerRemoteHandlers(
       dispatcherRef,
@@ -1223,8 +1230,13 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     const client = await connect()
     await ceremony(client, device)
 
+    // ADR-054 decision 2 (arm-on-auth) inverted this assertion, deliberately:
+    // the passkey LOGIN is itself a presence proof, so the grant is already
+    // armed and demanding a second ceremony seconds later gated nothing. The
+    // step-up below therefore exercises re-arming a connection that is already
+    // armed, which is still the path a decayed window takes.
     await expect(invoke(client, 'terminal:availability')).resolves.toMatchObject({
-      granted: false
+      granted: true
     })
 
     client.frames.length = 0
@@ -1325,8 +1337,11 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
   })
 
-  it('passkey-for-grants: the base connection is as-built, the step-up is the ceremony', async () => {
-    await boot('passkey-for-grants', { allowTerminal: true })
+  // ADR-054 retired `passkey-for-grants` as a mode; the behavior it named is
+  // `legacy` login + the default `medium` tier, which is exactly what this now
+  // exercises (and what migration v12 rewrites stored rows to).
+  it('legacy + medium tier: the base connection is as-built, the step-up is the ceremony', async () => {
+    await boot('legacy', { allowTerminal: true })
     const device = await enroll()
     const client = await connect()
 

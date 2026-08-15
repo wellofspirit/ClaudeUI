@@ -26,7 +26,8 @@ import type { BrowserWindow } from 'electron'
 import { PtyManager, type PtyRemoteSink } from './pty-manager'
 import { appendAuditLog, getRemoteConfig, DEFAULT_SHELL_GRANT_IDLE_MINUTES } from './db'
 import { logger } from './logger'
-import { hasLiveShellGrant, type CommandConnection } from '../ipc/command-registry'
+import { type CommandConnection } from '../ipc/command-registry'
+import { shellActAllowed, shellReadAllowed } from './step-up-tier'
 import { dbPasswordAuthProvider, type PasswordAuthProvider } from './remote-auth'
 import {
   NEEDS_STEP_UP_ERROR,
@@ -130,7 +131,12 @@ export class TerminalService {
       return { allowed: true, needsStepUp: false, granted: true, stepUp: null }
     }
     const allowed = readTerminalPolicy().allowTerminal
-    const granted = allowed && hasLiveShellGrant(connection)
+    // `granted` keeps its ADR-052 meaning — "may I ACT?" — because that is the
+    // question the affordance asks (can this client type into a shell). Under
+    // ADR-054 a connection may legitimately be able to WATCH without it, which
+    // is a strictly wider answer and therefore breaks no existing client: the
+    // web bundle still prompts for step-up exactly when it used to.
+    const granted = allowed && shellActAllowed(connection)
     return {
       allowed,
       needsStepUp: allowed && !granted,
@@ -145,11 +151,18 @@ export class TerminalService {
    * The transport (remote-server) checks first so it can refresh the decay
    * deadline and answer with the distinguishable error; this is the backstop
    * that keeps the guarantee true for any future caller that forgets.
+   *
+   * `cls` is the ADR-054 read/act split, and it is passed rather than derived
+   * here on purpose: the classification lives in ONE table (`step-up-tier.ts`),
+   * which both this backstop and the transport gate read, so the two layers
+   * cannot disagree about whether a verb is a read. Each call site names its
+   * own class, so the split is visible at the method it governs.
    */
-  private assertAllowed(connection: CommandConnection): void {
+  private assertAllowed(connection: CommandConnection, cls: 'read' | 'act'): void {
     if (connection.identity.method === 'desktop') return
     if (!readTerminalPolicy().allowTerminal) throw new Error(TERMINAL_DISABLED_ERROR)
-    if (!hasLiveShellGrant(connection)) throw new Error(NEEDS_STEP_UP_ERROR)
+    const ok = cls === 'read' ? shellReadAllowed(connection) : shellActAllowed(connection)
+    if (!ok) throw new Error(NEEDS_STEP_UP_ERROR)
   }
 
   /**
@@ -165,7 +178,7 @@ export class TerminalService {
    * backward compatibility: that is what every existing client awaits.
    */
   create(connection: CommandConnection, cwd: string, index?: number | null): string {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'act')
     if (typeof cwd !== 'string' || cwd.trim() === '') {
       throw new Error('A working directory is required to open a terminal')
     }
@@ -206,17 +219,20 @@ export class TerminalService {
   }
 
   write(connection: CommandConnection, id: string, data: string): void {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'act')
     this.manager.write(id, data)
   }
 
+  // Read-class (ADR-054): display geometry. It writes SIGWINCH but cannot
+  // execute, and an attached view being watched must survive a window resize
+  // after the act window decays.
   resize(connection: CommandConnection, id: string, cols: number, rows: number): void {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'read')
     this.manager.resize(id, cols, rows)
   }
 
   kill(connection: CommandConnection, id: string): void {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'act')
     this.manager.kill(id)
   }
 
@@ -233,13 +249,13 @@ export class TerminalService {
    * showing is not its business.
    */
   poolSlots(connection: CommandConnection, cwd: string): number[] {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'read')
     if (typeof cwd !== 'string' || cwd.trim() === '') return []
     return this.manager.poolOf(cwd).map((slot) => slot.index)
   }
 
   killByCwd(connection: CommandConnection, cwd: string): string[] {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'act')
     return this.manager.killByCwd(cwd)
   }
 
@@ -266,7 +282,7 @@ export class TerminalService {
    * replay-then-live with no interleave.
    */
   attach(connection: CommandConnection, id: string): boolean {
-    this.assertAllowed(connection)
+    this.assertAllowed(connection, 'read')
     if (connection.identity.method !== 'desktop') {
       return this.manager.attach(id, connection.connectionId)
     }

@@ -38,7 +38,7 @@ describe('DB migration — v6 dispatched_usage', () => {
       runMigrations(db)
       // Bump alongside MIGRATIONS in db.ts — currently v11 (webauthn_credential
       // + auth-policy columns, ADR-052 passkeys).
-      expect(userVersion(db)).toBe(11)
+      expect(userVersion(db)).toBe(12)
     } finally {
       db.close()
     }

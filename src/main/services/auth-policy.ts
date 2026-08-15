@@ -25,9 +25,17 @@ import {
   LEGACY_REMOTE_GRANTS,
   PASSKEY_REMOTE_GRANTS
 } from '../ipc/command-registry'
-import { appendAuditLog, countWebauthnCredentials, getRemoteConfig } from './db'
+import {
+  appendAuditLog,
+  countWebauthnCredentials,
+  getRemoteConfig,
+  DEFAULT_SESSION_MAX_AGE_HOURS,
+  DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
+  DEFAULT_STEP_UP_TIER
+} from './db'
 import { logger } from './logger'
-import type { RemoteAuthPolicy } from '../../shared/types'
+import { resolveStepUpTier } from './step-up-tier'
+import type { RemoteAuthPolicy, StepUpTier } from '../../shared/types'
 
 /**
  * Everything a connection's authorization decisions depend on, snapshotted at
@@ -42,6 +50,17 @@ export interface AuthPolicyContext {
   passwordBreakGlass: boolean
   /** Tailnet identity may skip the ceremony under `passkey-always` (default false). */
   passkeyTailnetExempt: boolean
+  /**
+   * The STORED step-up tier (ADR-054's second axis, default `medium`). Read in
+   * the same snapshot as the policy because the effective tier depends on it —
+   * auth-mode `off` forces tier `off` — and a decision built from two separate
+   * reads is exactly the drift this module's header warns about.
+   */
+  stepUpTier: StepUpTier
+  /** Strong-tier idle window for non-shell mutations, in minutes (default 60). */
+  stepUpMutationIdleMinutes: number
+  /** Strong-tier absolute session lifetime, in hours (default 4). */
+  sessionMaxAgeHours: number
 }
 
 /** The context a server should assume when the DB cannot be read. */
@@ -53,7 +72,13 @@ export const FAIL_CLOSED_POLICY_CONTEXT: AuthPolicyContext = {
   stored: null,
   credentialCount: 0,
   passwordBreakGlass: true,
-  passkeyTailnetExempt: false
+  passkeyTailnetExempt: false,
+  // `medium` for the same reason `legacy` is the policy fallback: it is the
+  // DEFAULT posture, neither a silent tightening that could lock the operator
+  // out of their own terminal nor a silent loosening on a DB hiccup.
+  stepUpTier: DEFAULT_STEP_UP_TIER,
+  stepUpMutationIdleMinutes: DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
+  sessionMaxAgeHours: DEFAULT_SESSION_MAX_AGE_HOURS
 }
 
 /**
@@ -68,7 +93,11 @@ export function readAuthPolicyContext(): AuthPolicyContext {
       stored: config?.authPolicy ?? null,
       credentialCount: countWebauthnCredentials(),
       passwordBreakGlass: config?.passwordBreakGlass ?? true,
-      passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false
+      passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false,
+      stepUpTier: config?.stepUpTier ?? DEFAULT_STEP_UP_TIER,
+      stepUpMutationIdleMinutes:
+        config?.stepUpMutationIdleMinutes ?? DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
+      sessionMaxAgeHours: config?.sessionMaxAgeHours ?? DEFAULT_SESSION_MAX_AGE_HOURS
     }
   } catch (err) {
     logger.warn(
@@ -193,6 +222,18 @@ export interface AuthSurfaceSnapshot {
   effectiveAuthPolicy: RemoteAuthPolicy
   passwordBreakGlass: boolean
   passkeyTailnetExempt: boolean
+  /**
+   * ADR-054: the step-up tier JOINS the auth surface. It is an admission rule
+   * like the others — a connection's tier is snapshotted at authentication, so
+   * a live socket would otherwise keep the tier it was admitted under until it
+   * happened to reconnect, and "I turned on strong and nothing happened" is
+   * exactly the failure the disconnect exists to prevent.
+   *
+   * Audit RETENTION deliberately does NOT join it: changing how long the trail
+   * is kept does not change who may connect, so it is audited without dropping
+   * anyone's session.
+   */
+  stepUpTier: StepUpTier
 }
 
 /**
@@ -217,8 +258,42 @@ export function authSurfaceChanged(
     before.authPolicy !== after.authPolicy ||
     before.effectiveAuthPolicy !== after.effectiveAuthPolicy ||
     before.passwordBreakGlass !== after.passwordBreakGlass ||
-    before.passkeyTailnetExempt !== after.passkeyTailnetExempt
+    before.passkeyTailnetExempt !== after.passkeyTailnetExempt ||
+    before.stepUpTier !== after.stepUpTier
   )
+}
+
+/**
+ * A human-readable description of what moved between two auth surfaces, for the
+ * `detail` column of the `auth:policy-change` row (ADR-054 decision 5).
+ *
+ * Built from the same before/after pair {@link authSurfaceChanged} compares, so
+ * the row can never claim a change the predicate did not see. Returns `null`
+ * when nothing moved.
+ */
+export function describeAuthSurfaceChange(
+  before: AuthSurfaceSnapshot,
+  after: AuthSurfaceSnapshot
+): string | null {
+  const parts: string[] = []
+  if (before.effectiveAuthPolicy !== after.effectiveAuthPolicy) {
+    parts.push(`effective policy ${before.effectiveAuthPolicy}→${after.effectiveAuthPolicy}`)
+  } else if (before.authPolicy !== after.authPolicy) {
+    // The stored value moved without moving what it resolves to (e.g. pinning
+    // AUTO's current answer). Worth recording — it changes what happens NEXT
+    // time a credential is enrolled or revoked.
+    parts.push(`stored policy ${before.authPolicy ?? 'auto'}→${after.authPolicy ?? 'auto'}`)
+  }
+  if (before.stepUpTier !== after.stepUpTier) {
+    parts.push(`step-up tier ${before.stepUpTier}→${after.stepUpTier}`)
+  }
+  if (before.passwordBreakGlass !== after.passwordBreakGlass) {
+    parts.push(`break-glass password ${before.passwordBreakGlass ? 'on' : 'off'}→${after.passwordBreakGlass ? 'on' : 'off'}`)
+  }
+  if (before.passkeyTailnetExempt !== after.passkeyTailnetExempt) {
+    parts.push(`tailnet exemption ${before.passkeyTailnetExempt ? 'on' : 'off'}→${after.passkeyTailnetExempt ? 'on' : 'off'}`)
+  }
+  return parts.length > 0 ? parts.join('; ') : null
 }
 
 /**
@@ -236,8 +311,21 @@ export function readAuthSurface(): AuthSurfaceSnapshot {
     authPolicy: ctx.stored,
     effectiveAuthPolicy: resolveAuthPolicy(ctx),
     passwordBreakGlass: ctx.passwordBreakGlass,
-    passkeyTailnetExempt: ctx.passkeyTailnetExempt
+    passkeyTailnetExempt: ctx.passkeyTailnetExempt,
+    // The RAW tier, matching `authPolicy` above: the config path's snapshots
+    // come from `sanitizedRemoteConfig()`, which carries the same raw value, so
+    // the two producers of this shape must agree on which one it is. The
+    // effective tier is a derived fact both can compute from the policy.
+    stepUpTier: ctx.stepUpTier
   }
+}
+
+/**
+ * The tier in force right now — auth-mode `off` forces `off` (ADR-054 decision
+ * 3). One reader, so a caller can never pair a raw tier with a resolved policy.
+ */
+export function readEffectiveStepUpTier(ctx: AuthPolicyContext = readAuthPolicyContext()): StepUpTier {
+  return resolveStepUpTier(resolveAuthPolicy(ctx), ctx.stepUpTier)
 }
 
 /**
@@ -252,10 +340,15 @@ export function readAuthSurface(): AuthSurfaceSnapshot {
  * `desktop-renderer`, a passkey nickname, or `enroll-token` for the very first
  * device.
  *
+ * `detail` (ADR-054 decision 5) records the INTENT — what actually moved, and
+ * through which path — so an audit reader does not have to infer it from the
+ * surrounding rows. Optional so a caller that has no before/after pair to hand
+ * still writes a well-formed row.
+ *
  * Never throws: the trail is observability, and refusing the operator's
  * enrollment because the DB is wedged would be the worse failure.
  */
-export function auditAuthPolicyChange(connection: CommandConnection): void {
+export function auditAuthPolicyChange(connection: CommandConnection, detail?: string | null): void {
   try {
     appendAuditLog({
       ts: Date.now(),
@@ -266,7 +359,8 @@ export function auditAuthPolicyChange(connection: CommandConnection): void {
       kind: 'command',
       channel: 'auth:policy-change',
       sessionId: null,
-      outcome: 'ok'
+      outcome: 'ok',
+      detail: detail ?? null
     })
   } catch (err) {
     logger.error(
@@ -274,6 +368,63 @@ export function auditAuthPolicyChange(connection: CommandConnection): void {
       `auth policy-change audit append failed: ${err instanceof Error ? err.message : String(err)}`
     )
   }
+}
+
+/**
+ * What an auth-surface writer needs from the running server: the mass
+ * re-admission disconnect. An interface rather than the concrete `RemoteServer`
+ * so this module stays out of that import graph.
+ */
+export interface AuthSurfaceDisconnector {
+  /** Drop every remote client, optionally sparing the one that caused it. */
+  disconnectAuthSurfaceClients(opts?: { exceptConnectionId?: string }): void
+}
+
+/**
+ * Run a mutation, then react if it moved the AUTH SURFACE: one audit row, and
+ * a re-admission disconnect for every client except the actor.
+ *
+ * THE single reaction path, shared by every writer — the desktop
+ * `remote:set-config` handler, the credential verbs (`webauthn:register-verify`
+ * / `:revoke`, where AUTO re-resolves with nobody writing a setting), and the
+ * web-reachable `authcfg:*` verbs. They already drifted once when there were
+ * two (the config path reacted, the credential path did not, so enrolling the
+ * first passkey silently left every live socket on the old rules), which is why
+ * the before/after comparison — not any counting or flag the caller has to get
+ * right — is what decides.
+ *
+ * Both halves fire together or not at all. The audit is what makes the change
+ * traceable after the fact; the disconnect is what makes it TAKE EFFECT, since
+ * policy, grants, origin capability and (since ADR-054) the step-up tier are all
+ * snapshotted per connection. Auditing a change nobody was re-authenticated for
+ * would be a trail that lies.
+ *
+ * A throw propagates without reacting, and a refused/no-op mutation leaves the
+ * surface untouched and therefore fires nothing — both correct, both free.
+ */
+export async function withAuthSurfaceReaction<T>(args: {
+  connection: CommandConnection
+  host: AuthSurfaceDisconnector | null
+  /** Named in the audit detail so a reader knows which path produced the row. */
+  via: string
+  mutate: () => T | Promise<T>
+}): Promise<T> {
+  const before = readAuthSurface()
+  const result = await args.mutate()
+  const after = readAuthSurface()
+  if (!authSurfaceChanged(before, after)) return result
+
+  const moved = describeAuthSurfaceChange(before, after)
+  auditAuthPolicyChange(
+    args.connection,
+    moved ? `${moved} (via ${args.via} by ${args.connection.identity.label})` : null
+  )
+  logger.info(
+    'auth-policy',
+    `Auth surface changed by ${args.connection.identity.label} via ${args.via}: ${moved ?? 'no detail'}`
+  )
+  args.host?.disconnectAuthSurfaceClients({ exceptConnectionId: args.connection.connectionId })
+  return result
 }
 
 /**

@@ -21,6 +21,12 @@ const baseConfig: RemoteConfig = {
   credentialCount: 0,
   passwordBreakGlass: true,
   passkeyTailnetExempt: false,
+  // ADR-054 second axis, at its defaults (series 2 owns the tier UI).
+  stepUpTier: 'medium',
+  effectiveStepUpTier: 'medium',
+  stepUpMutationIdleMinutes: 60,
+  sessionMaxAgeHours: 4,
+  auditRetentionDays: 365,
   passwordSet: false,
   passwordUpdatedAt: null
 }

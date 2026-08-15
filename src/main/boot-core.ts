@@ -53,9 +53,12 @@ import { setLiveSessionCanceller, cancelClaudeSessions } from './services/sessio
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { logger } from './services/logger'
 import {
+  DEFAULT_AUDIT_RETENTION_DAYS,
   DEFAULT_TLS_HTTPS_PORT,
   DEFAULT_SHELL_GRANT_IDLE_MINUTES,
+  MIN_AUDIT_RETENTION_DAYS,
   REMOTE_AUTH_POLICIES,
+  STEP_UP_TIERS,
   getRemoteConfig,
   setRemoteConfig as dbSetRemoteConfig,
   clearRemotePassword
@@ -63,14 +66,23 @@ import {
 import {
   auditAuthPolicyChange,
   authSurfaceChanged,
+  describeAuthSurfaceChange,
   readAuthPolicyContext,
+  readEffectiveStepUpTier,
   resolveAuthPolicy
 } from './services/auth-policy'
 import { registerWebauthnIpc } from './ipc/webauthn.ipc'
+import { registerAuthcfgIpc } from './ipc/authcfg.ipc'
+import { MAX_SESSION_MAX_AGE_HOURS } from './services/step-up-tier'
 import { desktopConnection } from './ipc/command-registry'
 import { provisionPassword } from './services/remote-auth'
 import type { SessionManager } from './services/session-manager'
-import type { RemoteAuthPolicy, RemoteConfig, TailscaleDetection } from '../shared/types'
+import type {
+  RemoteAuthPolicy,
+  RemoteConfig,
+  StepUpTier,
+  TailscaleDetection
+} from '../shared/types'
 
 /** What core hands back so the (optional) window layer can attach to it. */
 export interface CoreBoot {
@@ -120,6 +132,14 @@ function sanitizedRemoteConfig(): RemoteConfig {
     credentialCount: policyCtx.credentialCount,
     passwordBreakGlass: config?.passwordBreakGlass ?? true,
     passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false,
+    // ADR-054's second axis, raw + resolved for the same reason the policy is:
+    // auth-mode `off` FORCES tier `off`, and re-deriving that in the renderer is
+    // how a displayed tier drifts from the enforced one.
+    stepUpTier: policyCtx.stepUpTier,
+    effectiveStepUpTier: readEffectiveStepUpTier(policyCtx),
+    stepUpMutationIdleMinutes: policyCtx.stepUpMutationIdleMinutes,
+    sessionMaxAgeHours: policyCtx.sessionMaxAgeHours,
+    auditRetentionDays: config?.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS,
     passwordSet: config?.passwordHash != null,
     passwordUpdatedAt: config?.passwordUpdatedAt ?? null
   }
@@ -213,6 +233,10 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // Passkey management on the desktop transport (ADR-052). Separate call because
   // the ceremony verbs are remote-only — see webauthn.ipc.ts.
   registerWebauthnIpc(remoteServer)
+  // Remote-access settings on the desktop transport (ADR-054 decision 6). The
+  // `off` master switch is NOT among them — it stays in `remote:set-config`
+  // below, which has no remote registration at all.
+  registerAuthcfgIpc(remoteServer)
 
   // Idempotent registration, like every other register* in the tree: production
   // boots core exactly once, but a test that boots twice must not hit Electron's
@@ -293,6 +317,10 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
         authPolicy?: RemoteAuthPolicy | null
         passwordBreakGlass?: boolean
         passkeyTailnetExempt?: boolean
+        stepUpTier?: StepUpTier
+        stepUpMutationIdleMinutes?: number
+        sessionMaxAgeHours?: number
+        auditRetentionDays?: number
       }
     ) => {
       if (partial.port !== undefined && partial.port !== 0) {
@@ -337,24 +365,103 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
           )
         }
       }
+      // ADR-054's second axis. This handler keeps writing EVERYTHING — it is the
+      // host anchor, so unlike `authcfg:set-*` it has no refusals to make.
+      if (partial.stepUpTier !== undefined && !STEP_UP_TIERS.includes(partial.stepUpTier)) {
+        throw new Error(
+          `Unknown step-up tier "${String(partial.stepUpTier)}" — expected one of ${STEP_UP_TIERS.join(', ')}`
+        )
+      }
+      // Same reasoning as `shellGrantIdleMinutes`: freshness is the point, so 0
+      // ("never expires") is not on offer, and a day is the outer bound before
+      // the proof stops meaning anything.
+      if (partial.stepUpMutationIdleMinutes !== undefined) {
+        if (
+          !Number.isInteger(partial.stepUpMutationIdleMinutes) ||
+          partial.stepUpMutationIdleMinutes < 1 ||
+          partial.stepUpMutationIdleMinutes > 1440
+        ) {
+          throw new Error('Mutation step-up timeout must be between 1 and 1440 minutes')
+        }
+      }
+      // Ceiling is ONE WEEK, not a month: the budget becomes a `setTimeout`
+      // delay, and `setTimeout` takes a signed 32-bit int — a value above
+      // ~24.8 days wraps and fires on the next tick, cutting every strong-tier
+      // socket at accept and turning the client's reconnect loop into a
+      // self-inflicted outage. `sessionMaxAgeMs` clamps to the same ceiling for
+      // rows written before this validation existed, and `armMaxAgeCut` guards
+      // the arithmetic once more.
+      if (partial.sessionMaxAgeHours !== undefined) {
+        if (
+          !Number.isInteger(partial.sessionMaxAgeHours) ||
+          partial.sessionMaxAgeHours < 1 ||
+          partial.sessionMaxAgeHours > MAX_SESSION_MAX_AGE_HOURS
+        ) {
+          throw new Error(
+            `Session max age must be between 1 and ${MAX_SESSION_MAX_AGE_HOURS} hours`
+          )
+        }
+      }
+      // The 30-day FLOOR is enforced here as well as on read — retention is now
+      // web-settable, and a trail that can be erased by the session under
+      // investigation is not a trail.
+      if (partial.auditRetentionDays !== undefined) {
+        if (
+          !Number.isInteger(partial.auditRetentionDays) ||
+          partial.auditRetentionDays < MIN_AUDIT_RETENTION_DAYS ||
+          partial.auditRetentionDays > 36_500
+        ) {
+          throw new Error(
+            `Audit retention must be between ${MIN_AUDIT_RETENTION_DAYS} and 36500 days`
+          )
+        }
+      }
       const before = sanitizedRemoteConfig()
       dbSetRemoteConfig(partial)
       const after = sanitizedRemoteConfig()
-      // ANY auth-surface change — the policy mode, the break-glass toggle, or
-      // the tailnet exemption — is audited AND drops every live remote socket.
+      // ANY auth-surface change — the policy mode, the step-up tier, the
+      // break-glass toggle, or the tailnet exemption — is audited AND drops
+      // every live remote socket.
       //
       // Both halves matter and are deliberately one branch. The audit is what
       // makes the change traceable after the fact rather than only visible while
       // a banner is up (security.md §Audit). The disconnect is what makes it
-      // TAKE EFFECT: policy, grants and origin capability are snapshotted per
-      // connection, so without it a tightened policy would not reach anyone
+      // TAKE EFFECT: policy, grants, origin capability and tier are snapshotted
+      // per connection, so without it a tightened policy would not reach anyone
       // already connected until they happened to reconnect. Auditing a change
       // that nobody was re-authenticated for would be a trail that lies.
+      //
+      // WHY THIS IS NOT `withAuthSurfaceReaction` (the shared writer the
+      // credential and `authcfg:*` paths both use). Deliberate, not an oversight.
+      //
+      // The three things that must never drift between the paths are already
+      // shared functions: the PREDICATE (`authSurfaceChanged`), the detail
+      // FORMATTING (`describeAuthSurfaceChange`), and the single audit-row
+      // writer (`auditAuthPolicyChange`). What is local here is only the
+      // orchestration, and it is local because this path owes two obligations
+      // the helper does not model: the `off`-specific startup-grade WARNING, and
+      // returning the `after` snapshot as the IPC result. Both need the SAME
+      // before/after pair the reaction decides on. Routing through the helper
+      // would therefore mean either snapshotting twice — leaving the warning
+      // deciding on a different pair than the disconnect, which is precisely the
+      // drift consolidation exists to prevent — or widening the helper's
+      // contract to hand back a pair that only one of its three callers wants.
+      //
+      // The other asymmetry is real too: this path compares
+      // `sanitizedRemoteConfig()` (what the renderer is shown and what this
+      // handler returns), while the helper compares `readAuthSurface()`. Same
+      // values, different readers; making them one reader is a worthwhile
+      // follow-on, but it is a change to what the desktop settings pane sees and
+      // does not belong in a step-up-tier change.
       if (authSurfaceChanged(before, after)) {
         // ONE row writer, shared with the credential path (`webauthn:register-
         // verify` / `:revoke`), so an audit reader never has to know which of
         // the two produced a given row.
-        auditAuthPolicyChange(desktopConnection())
+        const moved = describeAuthSurfaceChange(before, after)
+        auditAuthPolicyChange(
+          desktopConnection(),
+          moved ? `${moved} (via remote:set-config on the host anchor)` : null
+        )
         if (after.effectiveAuthPolicy === 'off') {
           logger.warn(
             'main',
@@ -364,10 +471,7 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
         } else {
           logger.info(
             'main',
-            `Remote auth surface changed: policy ${before.effectiveAuthPolicy} → ` +
-              `${after.effectiveAuthPolicy}, break-glass ${before.passwordBreakGlass} → ` +
-              `${after.passwordBreakGlass}, tailnet-exempt ${before.passkeyTailnetExempt} → ` +
-              `${after.passkeyTailnetExempt}`
+            `Remote auth surface changed: ${moved ?? 'no detail'}`
           )
         }
         remoteServer.disconnectAuthSurfaceClients()

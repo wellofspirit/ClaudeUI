@@ -326,6 +326,47 @@ export const ENROLL_UNAVAILABLE_ERROR = 'enroll-unavailable'
  */
 export const LAST_CREDENTIAL_LOCKOUT_ERROR = 'last-credential-lockout'
 
+/**
+ * Error `authcfg:set-auth-mode` throws for `off` — THE host-anchor rule
+ * (ADR-054 decision 6).
+ *
+ * Auth-DISABLING operations are host-anchor only, forever: the desktop renderer
+ * today, the server's own console/config on a headless box. Never the web, not
+ * even behind a fresh ceremony — a stolen stepped-up session must not be able to
+ * turn authentication off. The routine settings verbs in this namespace are
+ * web-reachable precisely because they are NOT that, so the refusal is typed
+ * rather than free-form: series 2's settings UI has to say WHY the option is
+ * missing instead of rendering a generic failure.
+ */
+export const AUTH_MODE_OFF_HOST_ANCHOR_ERROR = 'auth-off-is-host-anchor-only'
+
+// ---------------------------------------------------------------------------
+// WebSocket close codes the client must not mistake for credential rejections
+// ---------------------------------------------------------------------------
+
+/**
+ * The auth SURFACE moved (policy mode, break-glass, tailnet exemption, step-up
+ * tier) — every live client owes a fresh handshake under the new rules
+ * (ADR-052). Declared here beside {@link CLOSE_SESSION_EXPIRED} so the two
+ * "reconnect, do not treat as a rejection" codes read as one family; the web
+ * client keeps its own copy of the literal for its close switch.
+ */
+export const CLOSE_AUTH_SURFACE_CHANGED = 4009
+
+/**
+ * Strong tier only: the connection hit its absolute session max-age
+ * (`remote_config.session_max_age_hours`, default 4 h) and was cut — sync
+ * stream included (ADR-054 decision 1).
+ *
+ * NOT a credential rejection and NOT throttling: the credential is fine, the
+ * SESSION is simply over, and the cure is a full ceremony on a fresh socket.
+ * A client must therefore reconnect (the existing 4009 handling is exactly the
+ * right shape) rather than latch an `auth-rejected` state a user cannot leave.
+ * The reconnect faces a normal handshake, which under the strong tier's policy
+ * means the ceremony it would face on any new socket.
+ */
+export const CLOSE_SESSION_EXPIRED = 4010
+
 /** Client → Server: activate E2E encryption (key is NOT sent — both sides already have it) */
 export interface WsE2EActivate {
   type: 'e2e-activate'
@@ -531,7 +572,17 @@ export type TermDetachReason =
   | 'policy-off'
   /** The socket could not keep up and was dropped instead of buffered. */
   | 'backpressure'
-  /** The connection's `shell` grant decayed. */
+  /**
+   * The connection's `shell` grant decayed.
+   *
+   * NO LONGER EMITTED as of ADR-054's read/act split: a decayed ACT window
+   * refuses acts and leaves the attachment alone, because an attached view
+   * being watched is exactly what the split exists to keep alive. Retained in
+   * the union so the client's existing handling stays valid and so a future
+   * revocation reason has a name; the only reasons a server sends today are
+   * `policy-off` (the operator turned the terminal toggle off) and
+   * `backpressure`.
+   */
   | 'grant-expired'
 
 /** Server → Client: this socket is no longer attached to `termId`. */

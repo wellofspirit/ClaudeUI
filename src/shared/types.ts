@@ -1505,6 +1505,26 @@ export interface RemoteConfig {
   passwordBreakGlass: boolean
   /** Let a tailnet-identified connection skip the ceremony under `passkey-always`. */
   passkeyTailnetExempt: boolean
+  /**
+   * Stored step-up tier (ADR-054). The SECOND axis: `authPolicy` governs the
+   * login ceremony, this governs post-login freshness. Never null — an
+   * unrecognised stored value reads as `medium`.
+   */
+  stepUpTier: StepUpTier
+  /**
+   * What the tier resolves to right now. Auth-mode `off` FORCES tier `off`
+   * (ADR-054 decision 3): you cannot demand a ceremony from an identity that was
+   * never established. Exposed alongside the raw value for the same reason
+   * {@link RemoteConfig.effectiveAuthPolicy} is — a settings UI must not
+   * re-derive the rule and drift from the enforced one.
+   */
+  effectiveStepUpTier: StepUpTier
+  /** Idle window for the strong tier's NON-shell mutation grant, in minutes. */
+  stepUpMutationIdleMinutes: number
+  /** Strong-tier absolute session lifetime, in hours (close 4010 at expiry). */
+  sessionMaxAgeHours: number
+  /** Audit-log retention window in days, floor 30 (clamped at READ). */
+  auditRetentionDays: number
   passwordSet: boolean
   passwordUpdatedAt: number | null
 }
@@ -1787,13 +1807,32 @@ export type RemoteAuthMethod =
  *
  * - `passkey-always` — every connection arriving on a WebAuthn-capable origin
  *   must complete the assertion ceremony (break-glass password aside).
- * - `passkey-for-grants` — base auth is as-built; the ceremony is required only
- *   to arm a decaying `shell` grant.
  * - `legacy` — the as-built ADR-039 stack, byte for byte.
- * - `off` — MASTER SWITCH: all authentication disabled. Desktop-only to set,
- *   audited on every change, and warned about at startup.
+ * - `off` — MASTER SWITCH: all authentication disabled. HOST-ANCHOR only to set
+ *   (ADR-054 decision 6), audited on every change, and warned about at startup.
+ *
+ * ADR-054 REMOVED `passkey-for-grants`: it was "legacy login + medium step-up
+ * tier" written as one knob, and the two axes are now independent (see
+ * {@link StepUpTier}). Migration v12 rewrites stored `passkey-for-grants` rows
+ * to `legacy`, which with the default `medium` tier is the same behavior.
  */
-export type RemoteAuthPolicy = 'passkey-always' | 'passkey-for-grants' | 'legacy' | 'off'
+export type RemoteAuthPolicy = 'passkey-always' | 'legacy' | 'off'
+
+/**
+ * Post-login presence-freshness tier (ADR-054 decision 1). Persisted in
+ * `remote_config.step_up_tier`; default (and fail-parse) is `medium`.
+ *
+ * - `strong` — reads and the sync stream are free; every MUTATING command needs
+ *   a presence proof no older than its idle window (shell acts 10 min, all
+ *   other mutations 60 min), and the session has an absolute max-age after
+ *   which the socket is cut (close 4010) and a full ceremony is owed.
+ * - `medium` — the shipped ADR-052 behavior, named: step-up gates exactly the
+ *   terminal (with the read/act split) and the remote-settings surface.
+ *   Everything else rides connection auth for the connection's lifetime.
+ * - `off` — nothing is gated post-login; the session lives until disconnect.
+ *   Auth-mode `off` forces this tier flat.
+ */
+export type StepUpTier = 'strong' | 'medium' | 'off'
 
 /**
  * Why a `tailscale serve` mutation failed. Declared here (not in the main-only

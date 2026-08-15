@@ -246,6 +246,11 @@ import {
   LEGACY_REMOTE_GRANTS,
   PINNED_CAPABILITIES
 } from '../command-registry'
+import {
+  AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
+  SHELL_ACT_VERBS,
+  SHELL_READ_VERBS
+} from '../../services/step-up-tier'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../../services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
@@ -1347,6 +1352,24 @@ const PASSKEY_CHANNELS = [
   'webauthn:revoke'
 ] as const
 
+/**
+ * ADR-054 decision 6 — the remote-access SETTINGS verbs. The THIRD deliberate
+ * widening, listed separately for the same reason the other two are.
+ *
+ * Every one declares `admin` (outside {@link LEGACY_REMOTE_GRANTS}, so
+ * authenticating never suffices) AND is gated on a presence proof inside the
+ * mutation window on every tier — the transport classifies this namespace as
+ * `authcfg`. What makes the widening safe to review is what is ABSENT: the `off`
+ * master switch. Auth-DISABLING operations stay host-anchor only and stay in
+ * `remote:set-config`, which has no remote registration at all (pinned below).
+ */
+const AUTHCFG_CHANNELS = [
+  'authcfg:set-auth-mode',
+  'authcfg:set-password',
+  'authcfg:set-retention',
+  'authcfg:set-tier'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1379,7 +1402,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...PHASE2_TERMINAL_CHANNELS,
         ...POST_PHASE2_TERMINAL_CHANNELS,
         ...POST_PORT_CHANNELS,
-        ...PASSKEY_CHANNELS
+        ...PASSKEY_CHANNELS,
+        ...AUTHCFG_CHANNELS
       ].sort()
     )
   })
@@ -1395,7 +1419,8 @@ describe('remote surface parity (phase 1 port)', () => {
     // channel that silently stopped being reachable — or started being one.
     const expected = [
       ...SHELL_GATED_CHANNELS.map((c) => [c, 'shell'] as const),
-      ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const)
+      ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const),
+      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -1415,13 +1440,72 @@ describe('remote surface parity (phase 1 port)', () => {
     }
   })
 
+  it('the authcfg channels are unreachable from a plain token connection', async () => {
+    // The capability half of the gate. The FRESHNESS half (a presence proof
+    // inside the mutation window, on every tier) is enforced at the transport
+    // and asserted over a real socket in remote-step-up-tiers.test.ts.
+    const conn = makeRemoteConnection('token', null)
+    for (const channel of AUTHCFG_CHANNELS) {
+      await expect(
+        commandRegistry.dispatch(channel, 'remote', ['x'], conn),
+        `${channel} must require admin`
+      ).rejects.toThrow(/Permission denied/)
+    }
+  })
+
+  it('every registered `shell` channel is classified read or act — exactly once', () => {
+    // The LIVE half of the ADR-054 coverage pin (its static twin, over
+    // PINNED_CAPABILITIES, is in services/__tests__/step-up-tier.test.ts). A new
+    // terminal channel that nobody classified would silently take
+    // `classifyDispatch`'s fail-closed ACT branch, which is the right failure but
+    // the wrong way to find out.
+    const shellChannels = commandRegistry
+      .channels()
+      .filter((c) => commandRegistry.declaration(c)!.capability === 'shell')
+    expect(shellChannels.length).toBeGreaterThan(5)
+    const unclassified = shellChannels.filter(
+      (c) => !SHELL_READ_VERBS.has(c) && !SHELL_ACT_VERBS.has(c)
+    )
+    expect(unclassified, `unclassified shell verbs: ${unclassified.join(', ')}`).toEqual([])
+    const both = shellChannels.filter((c) => SHELL_READ_VERBS.has(c) && SHELL_ACT_VERBS.has(c))
+    expect(both, `classified BOTH ways: ${both.join(', ')}`).toEqual([])
+  })
+
+  it('the CLASSIFIER knows exactly the authcfg verbs that are registered', () => {
+    // The coupling that makes the namespace's freshness rule real: a verb
+    // registered here but missing from `AUTHCFG_CHANNELS` in step-up-tier.ts
+    // would be classified `mutation` — i.e. silently FREE under the default
+    // `medium` tier — instead of demanding a presence proof on every tier.
+    // Compared against this file's own literal list so the pin stays
+    // independent of the thing it is pinning.
+    expect([...CLASSIFIED_AUTHCFG_CHANNELS].sort()).toEqual([...AUTHCFG_CHANNELS].sort())
+  })
+
+  it('no remotely-registered channel can write the auth-DISABLING switch', () => {
+    // ADR-054 decision 6, structurally. `remote:set-config` is the only writer of
+    // `authPolicy: 'off'`, and it has no remote registration — so the host anchor
+    // holds by construction rather than by a capability check (a passkey
+    // connection DOES hold `admin`). The settings verbs that ARE web-reachable
+    // live in their own namespace, and `authcfg:set-auth-mode` refuses `off`
+    // with a typed error (asserted in authcfg-commands.test.ts).
+    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([])
+    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('authcfg:')).sort()).toEqual(
+      [...AUTHCFG_CHANNELS].sort()
+    )
+  })
+
   it('declares the terminal KINDS the gates depend on', () => {
-    // `kind` is not just an audit label on this surface: remote-server refreshes
-    // the `shell` idle deadline only for a `command`, so a channel relabelled
-    // `command` would let the panel's focus-driven `terminal:pool` re-ask keep a
-    // grant alive forever (and one relabelled `query` would drop a lifecycle
-    // row the audit requires). Both directions are pinned here because neither
-    // is visible at the call site of the thing it protects.
+    // Since ADR-054 the shell idle deadline is refreshed by the read/act VERB
+    // SETS, not by `kind` — `terminal:attach` is a `command` that reads and
+    // `terminal:pool` is a `query` that is still a shell read, so keying the
+    // refresh on `kind` would have been wrong in both directions (that coupling
+    // is pinned in step-up-tier.test.ts).
+    //
+    // `kind` still carries the AUDIT contract, which is why these declarations
+    // stay pinned: a terminal lifecycle channel relabelled `query` silently
+    // stops being audited, and security.md §Audit requires spawn/attach/detach/
+    // exit in the trail. `terminal:pool` is a `query` precisely because it moves
+    // no lifecycle and has nothing to record.
     expect(commandRegistry.declaration('terminal:pool')).toMatchObject({
       capability: 'shell',
       kind: 'query'

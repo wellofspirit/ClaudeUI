@@ -271,6 +271,11 @@ function provisionPassword(password: string, saltHex: string): string {
     authPolicy: null,
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: saltHex,
     passwordHash: hash,
     kdfParams,
@@ -2778,6 +2783,11 @@ function remoteConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: null,
     passwordHash: null,
     kdfParams: null,

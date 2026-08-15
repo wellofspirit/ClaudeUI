@@ -153,6 +153,11 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: SALT_HEX,
     passwordHash: 'unused — the provider is stubbed',
     kdfParams: JSON.stringify(KDF),
@@ -344,10 +349,15 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     expect(ptyStub.spawned[0].killed).toBe(true)
     await expect(client.invoke('terminal:pool', '/tmp/x')).resolves.toEqual([])
 
-    // Gate 3 — the grant decays; both are refused again.
+    // Gate 3 — the ACT window decays. `terminal:kill` is refused again…
     advance(11)
     await expect(client.invoke('terminal:kill', 'whatever')).rejects.toThrow('needs-step-up')
-    await expect(client.invoke('terminal:pool', '/tmp/x')).rejects.toThrow('needs-step-up')
+    // …but `terminal:pool` is READ-class under the ADR-054 split and this
+    // connection has been armed, so it keeps answering. That is the ratified
+    // change, not a hole: the arming proof is what buys reads, for the socket's
+    // lifetime, and the window is what buys ACTS. Gate 2 above still shows the
+    // never-armed case being refused the same read.
+    await expect(client.invoke('terminal:pool', '/tmp/x')).resolves.toEqual([])
   })
 
   /**

@@ -86,6 +86,16 @@ const CLOSE_THROTTLED = 4006
  * ceremony, may be a rejection.
  */
 const CLOSE_AUTH_SURFACE_CHANGED = 4009
+/**
+ * Strong tier only (ADR-054): the connection reached its absolute session
+ * max-age and was cut, sync stream included. Handled with 4009 rather than with
+ * 4008/4006: the credential is not rejected, the SESSION is over, so the cure is
+ * a fresh handshake — which under a tier that cuts sessions will be a ceremony.
+ * Latching `auth-rejected` here would strand the user on a screen whose only
+ * exit is a manual reload. The user-facing copy series 2 owns; the reconnect
+ * behavior belongs with the server change that produces the code.
+ */
+const CLOSE_SESSION_EXPIRED = 4010
 
 /**
  * How long a passkey ceremony may take before this client gives up on it.
@@ -927,6 +937,14 @@ export class RemoteConnection {
         if (code === CLOSE_AUTH_SURFACE_CHANGED) {
           this.reconnectAttempt = 0
           this.scheduleReconnect('Sign-in requirements changed — reconnecting')
+          return
+        }
+        // 4010 is likewise not a rejection: the strong tier ended this SESSION on
+        // its max-age. Reconnect immediately and let the fresh handshake ask for
+        // whatever it asks for.
+        if (code === CLOSE_SESSION_EXPIRED) {
+          this.reconnectAttempt = 0
+          this.scheduleReconnect('Session expired — signing in again')
           return
         }
         this.scheduleReconnect()

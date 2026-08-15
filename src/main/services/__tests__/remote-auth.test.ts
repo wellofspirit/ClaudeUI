@@ -49,6 +49,11 @@ function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: 'aa'.repeat(16),
     passwordHash: 'bb'.repeat(32),
     kdfParams: KDF_JSON,

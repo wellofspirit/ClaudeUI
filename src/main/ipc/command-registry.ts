@@ -27,6 +27,7 @@
 import { randomUUID } from 'crypto'
 import { appendAuditLog } from '../services/db'
 import { logger } from '../services/logger'
+import type { StepUpTier } from '../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Capabilities, kinds, transports
@@ -125,26 +126,48 @@ export interface CommandConnection {
    *  - `number`    — epoch ms after which the grant is stale and the next
    *    shell-bearing command must be answered with `needs-step-up`.
    *
-   * Enforced server-side (remote-server.ts) and refreshed by every shell
-   * dispatch and every `term-input` frame. Client caching is irrelevant.
+   * Enforced server-side (remote-server.ts) and refreshed by every shell ACT
+   * (ADR-054 narrowed this from "every shell dispatch") and every `term-input`
+   * frame. Client caching is irrelevant.
    */
   shellGrantExpiresAt?: number | null
+  /**
+   * ADR-054 decision 2 — a presence proof has happened on this connection: a
+   * passkey login, the enroll→webauthn upgrade, or any successful step-up.
+   *
+   * NEVER decays, deliberately. It is what unlocks terminal READS for the
+   * connection's lifetime under the read/act split, while the two windows above
+   * and below govern ACTING. Weaker logins (token, ambient tailnet identity,
+   * tunnel fragment, and the password — whose proof is client-cacheable, so it
+   * authenticates the browser rather than provably the human) arm nothing and
+   * meet the step-up as their FIRST presence proof.
+   */
+  armedEver?: boolean
+  /**
+   * ADR-054 — expiry of the NON-shell mutation window (the `strong` tier's
+   * 60-minute default, and the window the settings-area `authcfg:*` verbs demand
+   * on every tier). Same three-state convention as
+   * {@link CommandConnection.shellGrantExpiresAt}.
+   */
+  mutationExpiresAt?: number | null
+  /**
+   * ADR-054 — the step-up tier this connection was ADMITTED under, resolved once
+   * at authentication like the policy and for the same reason: authority that
+   * shifts mid-socket produces an audit trail nobody can reconstruct. Staleness
+   * is bounded because a tier change is an auth-surface change, and those drop
+   * every live client (4009). `undefined` reads as `medium`.
+   */
+  stepUpTier?: StepUpTier
 }
 
-/**
- * Is `conn`'s `shell` grant stale? Only meaningful for decaying connections —
- * a connection whose `shellGrantExpiresAt` is `undefined` never decays.
- */
-export function shellGrantExpired(conn: CommandConnection, now = Date.now()): boolean {
-  const expiresAt = conn.shellGrantExpiresAt
-  if (expiresAt === undefined) return false
-  return expiresAt === null || expiresAt <= now
-}
-
-/** Does `conn` hold a `shell` grant that is both present and unexpired? */
-export function hasLiveShellGrant(conn: CommandConnection, now = Date.now()): boolean {
-  return conn.grants.has('shell') && !shellGrantExpired(conn, now)
-}
+// `shellGrantExpired` / `hasLiveShellGrant` lived here until ADR-054 and are
+// deliberately GONE rather than kept around: "does this connection hold a live
+// shell grant" is no longer a single question. Reads want the permanent arming
+// proof, acts want the window, and a helper that answered only the second would
+// be exactly the second source of truth the read/act split cannot afford — a
+// caller reaching for the familiar name would silently re-gate reads on decay.
+// `services/step-up-tier.ts` owns the predicates now (`shellReadAllowed`,
+// `shellActAllowed`), and both the transport and the service backstop read them.
 
 /** Every capability — the desktop renderer's grant set. */
 export const ALL_GRANTS: ReadonlySet<Capability> = new Set<Capability>(CAPABILITIES)
@@ -232,16 +255,25 @@ export function makeRemoteConnection(
   method: Exclude<IdentityMethod, 'desktop'>,
   login: string | null,
   grants: ReadonlySet<Capability> = LEGACY_REMOTE_GRANTS,
-  opts?: { connectionId?: string; webauthnOrigin?: { rpId: string; origin: string } | null }
+  opts?: {
+    connectionId?: string
+    webauthnOrigin?: { rpId: string; origin: string } | null
+    stepUpTier?: StepUpTier
+  }
 ): CommandConnection {
   return {
     connectionId: opts?.connectionId ?? randomUUID(),
     identity: { method, label: login ?? method, connectedAt: Date.now() },
     grants,
     webauthnOrigin: opts?.webauthnOrigin ?? null,
-    // Decaying-grant connection with nothing armed: `shell` arrives only via
-    // the step-up ceremony (ADR-052 decision 5), never at authentication.
-    shellGrantExpiresAt: null
+    // Decaying-grant connection with nothing armed: the windows arrive from a
+    // presence proof — the step-up ceremony (ADR-052 decision 5) or, since
+    // ADR-054 decision 2, a passkey login that IS one — never from mere
+    // authentication.
+    shellGrantExpiresAt: null,
+    mutationExpiresAt: null,
+    armedEver: false,
+    stepUpTier: opts?.stepUpTier ?? 'medium'
   }
 }
 

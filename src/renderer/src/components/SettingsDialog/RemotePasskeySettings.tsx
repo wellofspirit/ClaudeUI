@@ -31,7 +31,9 @@ type PolicyChoice = RemoteAuthPolicy | 'auto'
 const POLICY_OPTIONS: { value: PolicyChoice; label: string }[] = [
   { value: 'auto', label: 'Automatic (recommended)' },
   { value: 'passkey-always', label: 'Passkey for every sign-in' },
-  { value: 'passkey-for-grants', label: 'Passkey only to unlock the terminal' },
+  // `passkey-for-grants` is gone (ADR-054): it was "legacy sign-in + medium
+  // step-up tier" written as one knob, and the two axes are independent now.
+  // Stored values migrated to `legacy`; the tier selector is series 2's.
   { value: 'legacy', label: 'Password / link only' },
   { value: 'off', label: 'No authentication' }
 ]
@@ -46,8 +48,6 @@ const POLICY_HINTS: Record<PolicyChoice, string> = {
   auto: 'Password / link until you enroll a passkey, then a passkey for every sign-in. Enrolling your first passkey turns it on; revoking your last one turns it back off.',
   'passkey-always':
     'Connections from an address that can use passkeys are asked for the fingerprint / face check instead of the URL link or Tailscale identity. Nothing is demanded until at least one passkey is enrolled, and the backup password below still gets in while it is allowed. Other addresses (plain LAN, tunnel) keep using the password or link.',
-  'passkey-for-grants':
-    'Signing in works as it does today. Unlocking a terminal asks for the passkey first — the backup password is still accepted there while it is allowed, or when no passkey is enrolled.',
   legacy: 'The original stack: URL token, password, and Tailscale identity. No passkey anywhere.',
   off: 'Authentication is disabled entirely. Anyone who can reach this machine on the network has full control of it.'
 }

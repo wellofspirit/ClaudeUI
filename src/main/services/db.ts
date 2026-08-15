@@ -18,7 +18,8 @@ import type {
   ModelRef,
   AccountInfo,
   DispatchedUsageSummary,
-  RemoteAuthPolicy
+  RemoteAuthPolicy,
+  StepUpTier
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
@@ -425,6 +426,45 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE remote_config ADD COLUMN passkey_tailnet_exempt INTEGER NOT NULL DEFAULT 0;
       `)
     }
+  },
+  {
+    // v12 — step-up policy TIERS (ADR-054): the second axis, audit intent, and
+    // audit retention.
+    //
+    // `step_up_tier` is NOT NULL DEFAULT 'medium' — unlike `auth_policy`, which
+    // is nullable because AUTO is a real third state resolved per connection.
+    // There is no AUTO for freshness: `medium` IS the default posture, and a
+    // nullable column would only invite a second "what does null mean here"
+    // rule. An unrecognised value reads as `medium` (see `parseStepUpTier`);
+    // failing to `off` would silently disable step-up on a hand-edited typo.
+    //
+    // `audit_retention_days` is clamped to its 30-day floor at READ, never at
+    // write: a row hand-edited to 5 must degrade to the floor rather than
+    // silently start deleting a month of trail, and clamping at write would
+    // leave the bad value in place for anything reading the column directly.
+    //
+    // `detail` on `audit_log` is NULLABLE and stays NULL for command rows — it
+    // carries the INTENT of an auth-event row ("passkey login accepted;
+    // conferred admin+enroll"), which the `capability` column can only imply.
+    // Same single writer (`appendAuditLog`); no index (it is never a predicate).
+    //
+    // The DATA migration retires `passkey-for-grants` (ADR-054 supersedes
+    // ADR-052 decision 3): it was "legacy login + medium step-up tier" written
+    // as one knob. `legacy` plus this migration's default `medium` tier is the
+    // same behavior, expressed on the two axes that actually exist. Rows on any
+    // other policy are untouched — least of all `off`, which no migration may
+    // ever set OR clear.
+    version: 12,
+    up(db) {
+      db.exec(`
+        ALTER TABLE remote_config ADD COLUMN step_up_tier TEXT NOT NULL DEFAULT 'medium';
+        ALTER TABLE remote_config ADD COLUMN step_up_mutation_idle_minutes INTEGER NOT NULL DEFAULT 60;
+        ALTER TABLE remote_config ADD COLUMN session_max_age_hours INTEGER NOT NULL DEFAULT 4;
+        ALTER TABLE remote_config ADD COLUMN audit_retention_days INTEGER NOT NULL DEFAULT 365;
+        ALTER TABLE audit_log ADD COLUMN detail TEXT;
+        UPDATE remote_config SET auth_policy = 'legacy' WHERE auth_policy = 'passkey-for-grants';
+      `)
+    }
   }
 ]
 
@@ -485,6 +525,8 @@ export function runMigrations(db: Db, migrations: Migration[] = MIGRATIONS): voi
 // ---------------------------------------------------------------------------
 
 let _db: Db | null = null
+/** Periodic audit-retention sweep (ADR-054 decision 5); cleared by {@link closeDb}. */
+let _auditPruneTimer: ReturnType<typeof setInterval> | null = null
 
 /**
  * Open (or return the cached) operational DB.
@@ -516,6 +558,29 @@ function getDb(): Db {
     logger.warn('DB', `usage-table prune on open failed (non-fatal): ${err}`)
   }
 
+  // Audit retention (ADR-054 decision 5), same shape and the same best-effort
+  // contract. Unlike the usage tables this one ALSO gets a timer: a desktop app
+  // can stay open for weeks, and a retention window that only advances when the
+  // process restarts is not a retention window.
+  //
+  // `unref()` so the interval can never hold the process (or a test runner)
+  // alive by itself — this is housekeeping, not work anyone waits on.
+  try {
+    pruneAuditLog()
+  } catch (err) {
+    logger.warn('DB', `audit-log prune on open failed (non-fatal): ${err}`)
+  }
+  if (!_auditPruneTimer) {
+    _auditPruneTimer = setInterval(() => {
+      try {
+        pruneAuditLog()
+      } catch (err) {
+        logger.warn('DB', `periodic audit-log prune failed (non-fatal): ${err}`)
+      }
+    }, AUDIT_PRUNE_INTERVAL_MS)
+    _auditPruneTimer.unref?.()
+  }
+
   return _db
 }
 
@@ -523,6 +588,13 @@ function getDb(): Db {
  * Close the DB and reset the singleton. Primarily for test teardown.
  */
 export function closeDb(): void {
+  // Before the handle goes: a surviving timer would call getDb() on a closed
+  // singleton and silently re-open the file every 24 h (and, in tests, keep a
+  // handle on a DB the next case expects to be fresh).
+  if (_auditPruneTimer) {
+    clearInterval(_auditPruneTimer)
+    _auditPruneTimer = null
+  }
   if (_db) {
     _db.close()
     _db = null
@@ -1422,16 +1494,31 @@ export const DEFAULT_TLS_HTTPS_PORT = 443
 export const DEFAULT_SHELL_GRANT_IDLE_MINUTES = 10
 
 /**
+ * Defaults for the ADR-054 step-up columns. Mirrors of the v12 column defaults,
+ * used by the in-code COALESCE for rows written before that migration.
+ */
+export const DEFAULT_STEP_UP_TIER: StepUpTier = 'medium'
+export const DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES = 60
+export const DEFAULT_SESSION_MAX_AGE_HOURS = 4
+
+/**
  * The closed policy vocabulary, as a runtime value — the IPC validator and the
  * row mapper both need to test membership, and duplicating the literals is how
  * a fourth mode would end up accepted in one place and rejected in the other.
+ *
+ * `passkey-for-grants` was removed by ADR-054 (migration v12 rewrites stored
+ * rows to `legacy`); it is therefore no longer accepted on the write path
+ * either, which is what stops a client from re-creating a value the code no
+ * longer branches on.
  */
 export const REMOTE_AUTH_POLICIES: readonly RemoteAuthPolicy[] = [
   'passkey-always',
-  'passkey-for-grants',
   'legacy',
   'off'
 ]
+
+/** The closed step-up tier vocabulary, same single-source reasoning. */
+export const STEP_UP_TIERS: readonly StepUpTier[] = ['strong', 'medium', 'off']
 
 /**
  * Parse `remote_config.auth_policy`. Fails to AUTO (`null`), never to `off`:
@@ -1442,6 +1529,19 @@ export function parseAuthPolicy(raw: string | null | undefined): RemoteAuthPolic
   return (REMOTE_AUTH_POLICIES as readonly string[]).includes(raw)
     ? (raw as RemoteAuthPolicy)
     : null
+}
+
+/**
+ * Parse `remote_config.step_up_tier`. Fails CLOSED-ish to `medium`, never to
+ * `off`: a corrupt or hand-edited value must land on the default posture rather
+ * than silently disable every freshness check. There is no AUTO here — unlike
+ * the auth policy, the tier has a real default rather than a resolved one.
+ */
+export function parseStepUpTier(raw: string | null | undefined): StepUpTier {
+  if (raw == null) return DEFAULT_STEP_UP_TIER
+  return (STEP_UP_TIERS as readonly string[]).includes(raw)
+    ? (raw as StepUpTier)
+    : DEFAULT_STEP_UP_TIER
 }
 
 interface RemoteConfigDbRow {
@@ -1458,6 +1558,10 @@ interface RemoteConfigDbRow {
   auth_policy: string | null
   password_break_glass: number
   passkey_tailnet_exempt: number
+  step_up_tier: string | null
+  step_up_mutation_idle_minutes: number
+  session_max_age_hours: number
+  audit_retention_days: number
   password_salt: string | null
   password_hash: string | null
   kdf_params: string | null
@@ -1490,6 +1594,23 @@ export interface RemoteConfigRow {
   passwordBreakGlass: boolean
   /** Tailnet identity may skip the ceremony under `passkey-always`. Default OFF. */
   passkeyTailnetExempt: boolean
+  /**
+   * Stored step-up tier (ADR-054 decision 1). Never null — an unrecognised
+   * column value reads as `medium`. This is the RAW setting; auth-mode `off`
+   * forces the EFFECTIVE tier to `off` (`resolveStepUpTier`), which is a
+   * decision the policy layer makes, not the repository.
+   */
+  stepUpTier: StepUpTier
+  /** Strong-tier idle window for NON-shell mutations, in minutes. Default 60. */
+  stepUpMutationIdleMinutes: number
+  /** Strong-tier absolute session lifetime, in hours. Default 4. */
+  sessionMaxAgeHours: number
+  /**
+   * Audit retention in days, ALREADY CLAMPED to the 30-day floor. Clamping
+   * happens here (at read) rather than at write so a hand-edited column that
+   * says 5 degrades to 30 instead of quietly purging a month of trail.
+   */
+  auditRetentionDays: number
   passwordSalt: string | null
   passwordHash: string | null
   kdfParams: string | null
@@ -1519,6 +1640,13 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
     authPolicy: parseAuthPolicy(row.auth_policy),
     passwordBreakGlass: (row.password_break_glass ?? 1) === 1,
     passkeyTailnetExempt: (row.passkey_tailnet_exempt ?? 0) === 1,
+    // v12 (ADR-054). Same in-code COALESCE reasoning once more, plus the
+    // retention CLAMP — see `RemoteConfigRow.auditRetentionDays`.
+    stepUpTier: parseStepUpTier(row.step_up_tier),
+    stepUpMutationIdleMinutes:
+      row.step_up_mutation_idle_minutes ?? DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
+    sessionMaxAgeHours: row.session_max_age_hours ?? DEFAULT_SESSION_MAX_AGE_HOURS,
+    auditRetentionDays: clampAuditRetentionDays(row.audit_retention_days),
     passwordSalt: row.password_salt,
     passwordHash: row.password_hash,
     kdfParams: row.kdf_params,
@@ -1562,6 +1690,10 @@ export function setRemoteConfig(partial: {
   authPolicy?: RemoteAuthPolicy | null
   passwordBreakGlass?: boolean
   passkeyTailnetExempt?: boolean
+  stepUpTier?: StepUpTier
+  stepUpMutationIdleMinutes?: number
+  sessionMaxAgeHours?: number
+  auditRetentionDays?: number
 }): void {
   const db = getDb()
   const existing = getRemoteConfigDbRow(db)
@@ -1595,26 +1727,45 @@ export function setRemoteConfig(partial: {
         ? 1
         : 0
       : (existing?.passkey_tailnet_exempt ?? 0)
+  const stepUpTier =
+    partial.stepUpTier ?? parseStepUpTier(existing?.step_up_tier ?? DEFAULT_STEP_UP_TIER)
+  const stepUpMutationIdleMinutes =
+    partial.stepUpMutationIdleMinutes ??
+    existing?.step_up_mutation_idle_minutes ??
+    DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES
+  const sessionMaxAgeHours =
+    partial.sessionMaxAgeHours ?? existing?.session_max_age_hours ?? DEFAULT_SESSION_MAX_AGE_HOURS
+  // Stored verbatim (no clamp): the floor is applied on READ so a value written
+  // by a hand-edit or an older build degrades safely rather than being rewritten
+  // underneath whoever put it there.
+  const auditRetentionDays =
+    partial.auditRetentionDays ?? existing?.audit_retention_days ?? DEFAULT_AUDIT_RETENTION_DAYS
 
   db.prepare(
     `INSERT INTO remote_config (
        id, port, bind_host, autostart, tls_mode, tls_https_port,
        allow_terminal, shell_grant_idle_minutes,
-       auth_policy, password_break_glass, passkey_tailnet_exempt, updated_at
+       auth_policy, password_break_glass, passkey_tailnet_exempt,
+       step_up_tier, step_up_mutation_idle_minutes, session_max_age_hours,
+       audit_retention_days, updated_at
      )
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       port                     = excluded.port,
-       bind_host                = excluded.bind_host,
-       autostart                = excluded.autostart,
-       tls_mode                 = excluded.tls_mode,
-       tls_https_port           = excluded.tls_https_port,
-       allow_terminal           = excluded.allow_terminal,
-       shell_grant_idle_minutes = excluded.shell_grant_idle_minutes,
-       auth_policy              = excluded.auth_policy,
-       password_break_glass     = excluded.password_break_glass,
-       passkey_tailnet_exempt   = excluded.passkey_tailnet_exempt,
-       updated_at               = excluded.updated_at`
+       port                          = excluded.port,
+       bind_host                     = excluded.bind_host,
+       autostart                     = excluded.autostart,
+       tls_mode                      = excluded.tls_mode,
+       tls_https_port                = excluded.tls_https_port,
+       allow_terminal                = excluded.allow_terminal,
+       shell_grant_idle_minutes      = excluded.shell_grant_idle_minutes,
+       auth_policy                   = excluded.auth_policy,
+       password_break_glass          = excluded.password_break_glass,
+       passkey_tailnet_exempt        = excluded.passkey_tailnet_exempt,
+       step_up_tier                  = excluded.step_up_tier,
+       step_up_mutation_idle_minutes = excluded.step_up_mutation_idle_minutes,
+       session_max_age_hours         = excluded.session_max_age_hours,
+       audit_retention_days          = excluded.audit_retention_days,
+       updated_at                    = excluded.updated_at`
   ).run(
     port,
     bindHost,
@@ -1626,6 +1777,10 @@ export function setRemoteConfig(partial: {
     authPolicy,
     passwordBreakGlass,
     passkeyTailnetExempt,
+    stepUpTier,
+    stepUpMutationIdleMinutes,
+    sessionMaxAgeHours,
+    auditRetentionDays,
     Date.now()
   )
 }
@@ -1887,12 +2042,14 @@ export function renameWebauthnCredential(credId: string, nickname: string | null
 // ---------------------------------------------------------------------------
 // Audit log repository (SyncCore phase 1 — ADR-051/052, security.md §Audit)
 //
-// APPEND-ONLY BY CONSTRUCTION: this module exports exactly two audit functions,
-// `appendAuditLog` and `listAuditLog`. There is deliberately no update, no
-// delete and no prune here — adding one would be the change a reviewer must
-// catch, which is precisely why the surface is this small. Retention
-// ("keep-all by default, configurable") is a later phase and will need an
-// explicit, separately-reviewed accessor.
+// APPEND-ONLY BY CONSTRUCTION, with exactly ONE sanctioned deletion path.
+// This module exports `appendAuditLog`, `listAuditLog` and — as of ADR-054
+// decision 5 — `pruneAuditLog`. There is still no UPDATE and no row-targeted
+// delete: the prune is a MOVING WINDOW keyed on `ts` alone, so it can drop old
+// history but can never be aimed at a particular event, which is the property
+// that matters for a trail. Retention is uniform (auth rows purge on the same
+// window as command rows — the owner considered and declined an auth-forever
+// exception) and floors at 30 days.
 // ---------------------------------------------------------------------------
 
 /** One audited command dispatch. `kind` is always 'command' today — queries aren't audited. */
@@ -1910,6 +2067,17 @@ export interface AuditLogRow {
   channel: string
   sessionId: string | null
   outcome: 'ok' | 'error'
+  /**
+   * Explicit INTENT for auth-event rows (ADR-054 decision 5): "passkey login
+   * accepted; conferred admin+enroll", "step-up tier medium→strong", "session
+   * expired (max-age 4h)". NULL on ordinary command rows, whose channel and
+   * capability already say everything there is to say.
+   *
+   * It exists because `capability` on an `auth:*` row carries a convention a
+   * reader has to know (it names what the event is ABOUT, not what the
+   * connection held); `detail` removes the need to know it.
+   */
+  detail: string | null
 }
 
 interface AuditLogDbRow {
@@ -1923,6 +2091,7 @@ interface AuditLogDbRow {
   channel: string
   session_id: string | null
   outcome: string
+  detail: string | null
 }
 
 function rowToAuditLog(row: AuditLogDbRow): AuditLogRow {
@@ -1936,17 +2105,25 @@ function rowToAuditLog(row: AuditLogDbRow): AuditLogRow {
     kind: row.kind,
     channel: row.channel,
     sessionId: row.session_id,
-    outcome: row.outcome === 'error' ? 'error' : 'ok'
+    outcome: row.outcome === 'error' ? 'error' : 'ok',
+    // In-code COALESCE for a row written before v12.
+    detail: row.detail ?? null
   }
 }
 
-/** Append one audit row (`id` auto-assigned). The ONLY write path for audit_log. */
-export function appendAuditLog(entry: Omit<AuditLogRow, 'id'>): void {
+/**
+ * Append one audit row (`id` auto-assigned). The ONLY write path for audit_log.
+ *
+ * `detail` is optional at the call site so every existing command-path caller
+ * keeps compiling unchanged and lands a NULL, which is exactly the value a
+ * command row should carry.
+ */
+export function appendAuditLog(entry: Omit<AuditLogRow, 'id' | 'detail'> & { detail?: string | null }): void {
   const db = getDb()
   db.prepare(
     `INSERT INTO audit_log (
-       ts, connection_id, method, label, capability, kind, channel, session_id, outcome
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       ts, connection_id, method, label, capability, kind, channel, session_id, outcome, detail
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     entry.ts,
     entry.connectionId,
@@ -1956,7 +2133,8 @@ export function appendAuditLog(entry: Omit<AuditLogRow, 'id'>): void {
     entry.kind,
     entry.channel,
     entry.sessionId ?? null,
-    entry.outcome
+    entry.outcome,
+    entry.detail ?? null
   )
 }
 
@@ -1977,4 +2155,58 @@ export function listAuditLog(opts: { limit?: number; before?: number } = {}): Au
           .all(opts.before, limit)
   ) as AuditLogDbRow[]
   return rows.map(rowToAuditLog)
+}
+
+/**
+ * Audit retention (ADR-054 decision 5): a uniform moving purge, default 365
+ * days, configurable with a hard 30-day FLOOR.
+ *
+ * The floor is not decoration. Retention is settable from a web client now
+ * (`authcfg:set-retention`), so "0 days" would otherwise be a one-call erase of
+ * the trail that records the erasure — a stepped-up but stolen session must not
+ * be able to do that. 30 days is short enough to be a real privacy knob and long
+ * enough that an incident is still reconstructable.
+ */
+export const DEFAULT_AUDIT_RETENTION_DAYS = 365
+export const MIN_AUDIT_RETENTION_DAYS = 30
+
+/** Apply the floor (and reject nonsense) to a raw retention value. */
+export function clampAuditRetentionDays(raw: number | null | undefined): number {
+  if (raw == null || !Number.isFinite(raw)) return DEFAULT_AUDIT_RETENTION_DAYS
+  return Math.max(MIN_AUDIT_RETENTION_DAYS, Math.trunc(raw))
+}
+
+/**
+ * How often the periodic audit sweep runs. Retention is measured in DAYS, so
+ * the cadence only has to be well inside a day for the window to hold on a
+ * long-lived desktop session; the sweep also runs once on DB open.
+ */
+const AUDIT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Delete audit rows older than the configured retention window. Bounded,
+ * best-effort, and idempotent (a second call on the same clock deletes nothing)
+ * — the M-DB3 usage-prune pattern, applied to the one table ADR-054 gave a
+ * retention policy.
+ *
+ * Reads the window from `remote_config` when the caller does not name one, and
+ * ALWAYS through {@link clampAuditRetentionDays}, so no call path can purge
+ * below the floor. A config read failure falls back to the default rather than
+ * to something aggressive: the failure mode of a wedged config read must be
+ * "keep more", never "delete more".
+ */
+export function pruneAuditLog(now: number = Date.now(), retentionDays?: number): number {
+  const db = getDb()
+  let days: number
+  if (retentionDays !== undefined) {
+    days = clampAuditRetentionDays(retentionDays)
+  } else {
+    try {
+      days = getRemoteConfig()?.auditRetentionDays ?? DEFAULT_AUDIT_RETENTION_DAYS
+    } catch {
+      days = DEFAULT_AUDIT_RETENTION_DAYS
+    }
+  }
+  const cutoff = now - days * MS_PER_DAY
+  return db.prepare('DELETE FROM audit_log WHERE ts < ?').run(cutoff).changes
 }

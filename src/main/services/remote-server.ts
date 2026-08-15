@@ -9,7 +9,7 @@ import { app } from 'electron'
 import { syncCore, addSyncSubscriber } from './sync-host'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
-  hasLiveShellGrant,
+  LEGACY_REMOTE_GRANTS,
   makeRemoteConnection,
   type Capability,
   type CommandConnection,
@@ -24,6 +24,19 @@ import {
   resolveAuthPolicy,
   type AuthPolicyContext
 } from './auth-policy'
+import {
+  classifyDispatch,
+  evaluateStepUp,
+  mutationIdleMs,
+  presenceOf,
+  resolveStepUpTier,
+  sessionMaxAgeMs,
+  MAX_TIMER_MS,
+  TERM_INPUT_CLASS,
+  TERM_RESIZE_CLASS,
+  type DispatchClass,
+  type StepUpTier
+} from './step-up-tier'
 import {
   resolveWebauthnOrigin,
   webauthnService,
@@ -59,6 +72,7 @@ import {
 } from './db'
 import {
   ENROLL_UNAVAILABLE_ERROR,
+  CLOSE_SESSION_EXPIRED,
   NEEDS_STEP_UP_ERROR,
   PASSKEY_FAILED_ERROR,
   PASSKEY_REQUIRED_ERROR,
@@ -130,6 +144,17 @@ const WEBAUTHN_AUTH_TIMEOUT_MS = 120_000
 export interface RemoteServerTimeouts {
   preAuthMs: number
   ceremonyMs: number
+  /**
+   * Override for the strong tier's absolute session max-age (ADR-054), in ms.
+   *
+   * `undefined` — the production path — derives it from
+   * `remote_config.session_max_age_hours`, whose floor is one HOUR because it is
+   * a human-facing setting. Asserting the cut therefore needs an injected budget
+   * for the same reason the two pre-auth deadlines do: the alternative is an
+   * hour of wall clock, and `vi.useFakeTimers()` would freeze the socket I/O the
+   * assertion rides on.
+   */
+  sessionMaxAgeMs?: number
 }
 
 /** One-time enrollment token lifetime (ADR-052 §Enrollment). */
@@ -328,6 +353,23 @@ interface AuthDecision {
   ctx: AuthPolicyContext
 }
 
+/**
+ * Does this connection hold the ordinary remote surface — i.e. is it a normal
+ * session rather than a special-purpose, deliberately narrow socket?
+ *
+ * The one narrow method today is `enroll-token` ({@link ENROLL_ONLY_GRANTS}),
+ * and ADR-052's invariant is that a leaked enrollment link can add a device and
+ * reach nothing else. `EMPTY_GRANTS` (a connection that owes a ceremony) fails
+ * this too. Tested against the grant SET rather than the method name so a future
+ * narrow method is excluded without anyone having to remember it exists.
+ */
+function holdsBaseRemoteSurface(grants: ReadonlySet<Capability>): boolean {
+  for (const capability of LEGACY_REMOTE_GRANTS) {
+    if (!grants.has(capability)) return false
+  }
+  return true
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
@@ -356,8 +398,28 @@ interface AuthenticatedClient {
    */
   policy: RemoteAuthPolicy
   policyCtx: AuthPolicyContext
+  /**
+   * The EFFECTIVE step-up tier for this socket (ADR-054), snapshotted at accept
+   * alongside the policy and for the same reason. Also mirrored onto
+   * `connection.stepUpTier`, which is where the pure decision table reads it —
+   * this copy is what the transport's own paths (max-age, arming) consult.
+   */
+  stepUpTier: StepUpTier
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
+  /**
+   * Strong tier only: the absolute session max-age cut. A one-shot timer rather
+   * than a check folded into the idle sweep, because the sweep runs once a
+   * minute and "your session ends at 4 h" should not mean "somewhere in the
+   * minute after 4 h". Cleared on close and in {@link RemoteServer.stop}.
+   */
+  maxAgeTimer?: ReturnType<typeof setTimeout>
+  /**
+   * This connection's `armedEver` came from the tier-`off` CAPABILITY WAIVER,
+   * not from a presence proof. Tracked so a tier change away from `off` can undo
+   * it — a waiver must not survive as evidence of a human who never appeared.
+   */
+  armedByWaiver?: boolean
   e2e: E2ECrypto | null
   /** Promise chain to preserve message ordering with async encryption. */
   sendQueue: Promise<void>
@@ -474,7 +536,8 @@ export class RemoteServer {
     this.webauthn = webauthn
     this.timeouts = {
       preAuthMs: timeouts.preAuthMs ?? PREAUTH_TIMEOUT_MS,
-      ceremonyMs: timeouts.ceremonyMs ?? WEBAUTHN_AUTH_TIMEOUT_MS
+      ceremonyMs: timeouts.ceremonyMs ?? WEBAUTHN_AUTH_TIMEOUT_MS,
+      sessionMaxAgeMs: timeouts.sessionMaxAgeMs
     }
     this.tunnel = new TunnelManager()
 
@@ -785,6 +848,7 @@ export class RemoteServer {
     // Disconnect all clients
     for (const [ws, client] of this.clients) {
       if (client.pingTimer) clearInterval(client.pingTimer)
+      if (client.maxAgeTimer) clearTimeout(client.maxAgeTimer)
       // Drop PTY attachments here rather than leaving it to each socket's async
       // `close` handler: `this.clients` is cleared on the next line, so by the
       // time those run there is no connection id left to release.
@@ -1268,6 +1332,12 @@ export class RemoteServer {
     label: string
     capability: Capability
     outcome: 'ok' | 'error'
+    /**
+     * Explicit INTENT (ADR-054 decision 5) — what this event MEANT, in words, so
+     * a reader does not have to reconstruct it from the `capability` column's
+     * convention. Every auth row here carries one; command rows leave it NULL.
+     */
+    detail?: string | null
   }): void {
     try {
       appendAuditLog({
@@ -1279,7 +1349,8 @@ export class RemoteServer {
         kind: 'command',
         channel: entry.channel,
         sessionId: null,
-        outcome: entry.outcome
+        outcome: entry.outcome,
+        detail: entry.detail ?? null
       })
     } catch (err) {
       logger.error('remote-server', `auth audit append failed for ${entry.channel}: ${err}`)
@@ -2059,6 +2130,10 @@ export class RemoteServer {
       clearPending()
       // Clears BOTH failure budgets for this key.
       this.failedAuth.delete(ip)
+      // Resolved ONCE per connection, from the same snapshot the grants come
+      // from (ADR-054). Auth-mode `off` forces tier `off`, so this single call
+      // is also where that coupling is enforced.
+      const stepUpTier = resolveStepUpTier(auth.policy, auth.ctx.stepUpTier)
       const newClient: AuthenticatedClient = {
         ws,
         ip,
@@ -2074,10 +2149,11 @@ export class RemoteServer {
             credentialCount: auth.ctx.credentialCount,
             passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
           }),
-          { connectionId, webauthnOrigin }
+          { connectionId, webauthnOrigin, stepUpTier }
         ),
         policy: auth.policy,
         policyCtx: auth.ctx,
+        stepUpTier,
         lastActivity: Date.now(),
         pingTimer: setInterval(() => {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
@@ -2086,6 +2162,41 @@ export class RemoteServer {
         sendQueue: Promise.resolve()
       }
       this.clients.set(ws, newClient)
+      // ARM-ON-AUTH (ADR-054 decision 2) — this is what kills the double
+      // ceremony: a login that IS a presence proof arms what its tier would
+      // otherwise step-up-gate seconds later. A passkey assertion qualifies.
+      //
+      // Nothing else does. Token possession is a bookmark, ambient tailnet
+      // identity is network admission, a tunnel fragment is a URL — none is
+      // evidence a human is present. The PASSWORD is deliberately excluded even
+      // though it is the owner's own secret: its proof is deterministic and
+      // client-cacheable, so it authenticates the browser rather than provably
+      // the human (ADR-052's recorded caveat). It stays the step-up FALLBACK,
+      // where the human has to type it again.
+      if (method === 'webauthn') {
+        this.armPresence(newClient, 'passkey login')
+      } else if (stepUpTier === 'off') {
+        // Tier `off` gates nothing post-login, so an ORDINARY accepted
+        // connection is armed flat — including under the auth-mode master
+        // switch, which FORCES this tier. Without it a `shell`-capability
+        // dispatch would be refused by the registry (the capability is conferred
+        // by arming) and the operator would meet a step-up prompt on a server
+        // where nothing was authenticated in the first place — the incoherence
+        // ADR-054 decision 3 exists to remove.
+        //
+        // "ORDINARY" is load-bearing and enforced inside `armPresence`: the six
+        // accept methods are `webauthn`, `password`, `token`, `tailnet-identity`,
+        // `none` and `enroll-token`, and the last of those holds `enroll` and
+        // NOTHING else. Waiving freshness for it would hand a leaked enrollment
+        // link a pty — see `holdsBaseRemoteSurface`.
+        //
+        // Routed through the SAME arming path rather than a bespoke "set
+        // armedEver" so there is still exactly one place that decides what
+        // arming means, and one place that refuses. The two windows it skips are
+        // never consulted at this tier anyway.
+        this.armPresence(newClient, 'step-up tier off', { windows: false })
+      }
+      this.armMaxAgeCut(newClient)
       // Send auth response plaintext
       ws.send(
         JSON.stringify({
@@ -2140,10 +2251,13 @@ export class RemoteServer {
     }
 
     /** Is this connection allowed to run a HANDSHAKE assertion right now? */
+    // ADR-054 removed `passkey-for-grants` (it was "legacy login + medium tier"
+    // written as one knob), so `passkey-always` is the only mode that makes a
+    // handshake ceremony available. A `legacy` connection that wants the passkey
+    // benefits gets them from a step-up, not from a login ceremony it is not
+    // required to run.
     const handshakeCeremonyAvailable = (): boolean =>
-      webauthnOrigin !== null &&
-      (auth.policy === 'passkey-always' || auth.policy === 'passkey-for-grants') &&
-      auth.ctx.credentialCount > 0
+      webauthnOrigin !== null && auth.policy === 'passkey-always' && auth.ctx.credentialCount > 0
 
     // Tailnet identity (Phase 3). Everything it depends on is already in the
     // upgrade request, so there is nothing for the client to send: on a match we
@@ -2298,7 +2412,8 @@ export class RemoteServer {
                 method: 'webauthn',
                 label: 'unauthenticated',
                 capability: 'admin',
-                outcome: 'error'
+                outcome: 'error',
+                detail: `handshake passkey assertion refused (${result.reason})`
               })
               logger.warn('remote-server', `Passkey assertion from ${ip} failed: ${result.reason}`)
               ws.send(
@@ -2319,7 +2434,14 @@ export class RemoteServer {
               method: 'webauthn',
               label,
               capability: 'admin',
-              outcome: 'ok'
+              outcome: 'ok',
+              // Says what the ceremony CONFERRED, which is the reading that makes
+              // these rows useful: under a passkey mode a webauthn login carries
+              // admin+enroll, under `legacy`/`off` it keeps the as-built set.
+              detail:
+                auth.policy === 'legacy' || auth.policy === 'off'
+                  ? 'passkey login accepted; conferred the as-built remote set'
+                  : 'passkey login accepted; conferred admin+enroll; presence armed'
             })
             accept('webauthn', label)
             return
@@ -2384,7 +2506,8 @@ export class RemoteServer {
                 method: 'enroll-token',
                 label: 'unauthenticated',
                 capability: 'enroll',
-                outcome: 'error'
+                outcome: 'error',
+                detail: 'enrollment link refused (unknown, spent or expired)'
               })
               reject('Enrollment link is invalid or expired', 'Invalid enrollment token')
               return
@@ -2395,7 +2518,8 @@ export class RemoteServer {
               method: 'enroll-token',
               label: 'enroll-token',
               capability: 'enroll',
-              outcome: 'ok'
+              outcome: 'ok',
+              detail: 'enrollment link consumed; conferred enroll ONLY (arms nothing)'
             })
             accept('enroll-token')
             return
@@ -2561,6 +2685,7 @@ export class RemoteServer {
       this.webauthn.challenges.dropConnection(connectionId)
       const client = this.clients.get(ws)
       if (client?.pingTimer) clearInterval(client.pingTimer)
+      if (client?.maxAgeTimer) clearTimeout(client.maxAgeTimer)
       // Release every PTY attachment this socket held — a phone that sleeps or
       // a closed tab never sends terminal:detach, and a leaked attachment would
       // keep measuring a dead socket for backpressure.
@@ -2594,21 +2719,17 @@ export class RemoteServer {
       // dispatching with a synthesized identity.
       const client = this.clients.get(ws)
       if (!client) throw new Error('Not authenticated')
-      // Shell-capability commands run the phase-2 gate BEFORE dispatch: the
-      // registry would only say "permission denied", which tells the client
-      // nothing about how to recover.
+      // The step-up gate runs BEFORE dispatch: the registry would only say
+      // "permission denied", which tells the client nothing about how to
+      // recover, while `needs-step-up` is an actionable refusal the client turns
+      // into a ceremony.
       //
-      // Gated on `has()` as well because declarations are channel-GLOBAL: a
-      // shell channel registered for the desktop only (`terminal:kill-by-cwd`)
-      // must still answer with the historical "Channel not available", not with
-      // a step-up prompt for something this transport does not expose.
-      //
-      // A `query` is checked but does NOT refresh the idle deadline: reads
-      // (`terminal:pool`, re-asked whenever the panel's window regains focus)
-      // are not presence, and letting them slide the window would make an open
-      // browser tab renew its own grant forever without a single shell command.
-      if (this.dispatcher.has(msg.channel) && this.dispatcher.capabilityOf(msg.channel) === 'shell') {
-        this.assertShellGrant(client, this.dispatcher.kindOf(msg.channel) !== 'query')
+      // Gated on `has()` because declarations are channel-GLOBAL: a channel
+      // registered for the desktop only (`terminal:kill-by-cwd`) must still
+      // answer with the historical "Channel not available", not with a step-up
+      // prompt for something this transport does not expose.
+      if (this.dispatcher.has(msg.channel)) {
+        this.assertStepUp(client, msg.channel)
       }
       const result = await this.dispatcher.handle(msg, client.connection)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: true, data: result })
@@ -2764,7 +2885,8 @@ export class RemoteServer {
         method: 'enroll-token',
         label: client.connection.identity.label,
         capability: 'admin',
-        outcome: 'error'
+        outcome: 'error',
+        detail: `enrollment upgrade assertion refused (${result.reason}); socket stays enroll-only`
       })
       this.sendTo(ws, {
         type: 'auth-response',
@@ -2801,6 +2923,12 @@ export class RemoteServer {
     const fresh = this.readAuthDecision()
     client.policy = fresh.policy
     client.policyCtx = fresh.ctx
+    // The tier rides the same re-snapshot: enrolling the first credential can
+    // flip AUTO from `legacy` to `passkey-always`, and auth-mode `off` forces
+    // tier `off`, so a stale tier here would be judged against a policy that
+    // just changed underneath it.
+    client.stepUpTier = resolveStepUpTier(fresh.policy, fresh.ctx.stepUpTier)
+    client.connection.stepUpTier = client.stepUpTier
     client.connection.grants = grantsFor({
       method: 'webauthn',
       policy: fresh.policy,
@@ -2811,13 +2939,20 @@ export class RemoteServer {
       credentialCount: fresh.ctx.credentialCount,
       passkeyTailnetExempt: fresh.ctx.passkeyTailnetExempt
     })
+    // ARM-ON-AUTH (ADR-054 decision 2): the enroll→webauthn upgrade IS a passkey
+    // ceremony, so it arms exactly like the handshake one. This is the case that
+    // matters most for the double-ceremony complaint — the operator has just
+    // touched the sensor twice (register, then assert) and must not be asked a
+    // third time to open a terminal.
+    this.armPresence(client, 'enrollment upgrade to passkey')
     this.auditAuth({
       channel: 'auth:webauthn-assert',
       connectionId: client.connection.connectionId,
       method: 'webauthn',
       label,
       capability: 'admin',
-      outcome: 'ok'
+      outcome: 'ok',
+      detail: `enrollment connection upgraded to passkey auth (${label}); presence armed`
     })
     logger.info('remote-server', `Enrollment connection from ${client.ip} upgraded to passkey auth`)
     // Same shape the initial webauthn accept sends, `identity` included: this is
@@ -2842,36 +2977,81 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   /**
-   * The three gates in series (ADR-052 decision 6), plus the decay refresh.
+   * The ADR-054 step-up gate for one invoke, in front of dispatch.
    *
-   * Throws {@link TERMINAL_DISABLED_ERROR} while the desktop toggle is OFF —
-   * checked FIRST and independently of the grant, so a grant obtained before
-   * the flip (or a client that cached one) buys nothing. Throws
-   * {@link NEEDS_STEP_UP_ERROR} when the grant is absent or decayed, and strips
-   * `shell` from the connection on the way out so every later layer (registry
-   * included) also refuses. Otherwise slides the deadline forward: "idle" means
-   * no shell-bearing traffic, not wall-clock age.
+   * Two things happen here, in this order:
    *
-   * `refresh: false` for a shell-capability `query`. The window is a PRESENCE
-   * proof, and a read is not presence — the terminal panel re-asks
-   * `terminal:pool` on every window focus, so a refreshing read would let a tab
-   * the operator merely left open keep its own grant alive indefinitely. The
-   * check still runs: an expired grant refuses the read too.
+   * 1. **The terminal toggle**, for shell-capability channels only, checked
+   *    FIRST and independently of any grant — a grant obtained before the
+   *    operator flipped the switch (or a client that cached one) buys nothing.
+   *    It is not a freshness rule, so it lives outside the tier table.
+   * 2. **The tier decision** from {@link evaluateStepUp}: the single table that
+   *    also drives the service-layer backstop and the tests. On refusal the
+   *    answer is {@link NEEDS_STEP_UP_ERROR}, which the client can act on.
+   *
+   * What ADR-054 CHANGED versus ADR-052: a decayed window no longer strips the
+   * `shell` capability or drops attachments. Reads survive decay by design — an
+   * attached view keeps streaming, `terminal:pool` keeps answering — so tearing
+   * the capability off the connection would break exactly the liberation the
+   * split exists to provide. The capability is now revoked only by the toggle
+   * (see {@link revokeShellGrant}), which is a real withdrawal of authority
+   * rather than a lapsed proof.
    */
-  private assertShellGrant(client: AuthenticatedClient, refresh = true): void {
-    const policy = readTerminalPolicy()
-    if (!policy.allowTerminal) {
+  private assertStepUp(client: AuthenticatedClient, channel: string): void {
+    const capability = this.dispatcher.capabilityOf(channel)
+    const cls = classifyDispatch({
+      channel,
+      capability,
+      kind: this.dispatcher.kindOf(channel)
+    })
+    if (capability === 'shell' && !readTerminalPolicy().allowTerminal) {
       this.revokeShellGrant(client, 'policy-off')
       throw new Error(TERMINAL_DISABLED_ERROR)
     }
-    if (!hasLiveShellGrant(client.connection)) {
-      this.revokeShellGrant(client, 'grant-expired')
-      throw new Error(NEEDS_STEP_UP_ERROR)
-    }
-    if (refresh) client.connection.shellGrantExpiresAt = Date.now() + shellGrantIdleMs(policy)
+    this.applyStepUp(client, cls)
   }
 
-  /** Drop the `shell` grant (and any attachments) from one connection. */
+  /**
+   * Run the tier table for one dispatch class and apply its refreshes. Throws
+   * {@link NEEDS_STEP_UP_ERROR} on refusal. Shared by the invoke path and the
+   * terminal frames so a frame can never be judged differently from the invoke
+   * that does the same thing (`term-input` vs `terminal:write`).
+   */
+  private applyStepUp(client: AuthenticatedClient, cls: DispatchClass): void {
+    const now = Date.now()
+    const decision = evaluateStepUp({
+      tier: client.stepUpTier,
+      cls,
+      presence: presenceOf(client.connection),
+      now
+    })
+    if (!decision.allow) throw new Error(NEEDS_STEP_UP_ERROR)
+    for (const target of decision.refresh) {
+      if (target === 'shellAct') {
+        client.connection.shellGrantExpiresAt = now + shellGrantIdleMs()
+      } else {
+        client.connection.mutationExpiresAt =
+          now + mutationIdleMs(client.policyCtx.stepUpMutationIdleMinutes)
+      }
+    }
+  }
+
+  /**
+   * Withdraw the `shell` capability (and any attachments) from one connection.
+   *
+   * Since ADR-054 this is the TOGGLE's path only: the desktop switch went off,
+   * so there is no shell for anyone, armed or not. Window decay does not come
+   * here — a decayed act window refuses acts and leaves reads alone.
+   *
+   * `armedEver` and the MUTATION window are deliberately left alone, but do NOT
+   * read that as "reads resume when the toggle comes back". This method strips
+   * the `shell` CAPABILITY, and nothing restores it except a fresh arming, so a
+   * connection whose toggle is flipped off and on again is answered `Permission
+   * denied` by the registry — for reads and acts alike — until it steps up.
+   * What the two surviving fields buy is only that the eventual step-up is an
+   * ordinary one, and that the terminal switch does not reach into a window it
+   * has nothing to do with (non-shell mutations).
+   */
   private revokeShellGrant(client: AuthenticatedClient, reason?: TermDetachReason): void {
     const grants = client.connection.grants
     if (grants.has('shell')) {
@@ -2906,6 +3086,30 @@ export class RemoteServer {
         ok: false,
         code: 'terminal-disabled',
         error: 'Remote terminal is turned off. Enable it in Settings › Remote on the desktop app.',
+        retryable: false
+      })
+      return
+    }
+
+    // A narrow-grant socket may not step UP into a surface it was never given
+    // (`holdsBaseRemoteSurface`): an enrollment link that also knows the
+    // break-glass password must not be able to convert itself into a terminal.
+    // Refused BEFORE any factor is examined, so the refusal leaks nothing about
+    // the credential and spends no throttle budget.
+    //
+    // `terminal-disabled` is reused rather than given a new wire code because it
+    // carries exactly the right CLIENT contract — "no ceremony can fix this, do
+    // NOT prompt for a password" — and a new code would be a protocol change for
+    // a state the shipping client has no separate copy for.
+    if (!holdsBaseRemoteSurface(client.connection.grants)) {
+      logger.warn(
+        'remote-server',
+        `Refused step-up from ${client.ip}: narrow-grant connection (${client.connection.identity.method})`
+      )
+      respond({
+        ok: false,
+        code: 'terminal-disabled',
+        error: 'This connection cannot open a terminal.',
         retryable: false
       })
       return
@@ -2957,7 +3161,8 @@ export class RemoteServer {
           method: client.connection.identity.method,
           label: client.connection.identity.label,
           capability: 'shell',
-          outcome: 'error'
+          outcome: 'error',
+          detail: `step-up passkey assertion refused (${result.reason})`
         })
         respond({
           ok: false,
@@ -2967,19 +3172,28 @@ export class RemoteServer {
         })
         return
       }
-      const expiresAt = this.armShellGrant(client, policy)
+      const expiresAt = this.armPresence(client, 'passkey step-up', { policy })
+      if (expiresAt === null) {
+        // Unreachable: the narrow-grant guard at the top of this method already
+        // refused such a connection. Kept so a refusal to arm can never be
+        // reported back to the client as a success with a deadline behind it.
+        respond({
+          ok: false,
+          code: 'terminal-disabled',
+          error: 'This connection cannot open a terminal.',
+          retryable: false
+        })
+        return
+      }
       this.auditAuth({
         channel: 'auth:webauthn-assert',
         connectionId: client.connection.connectionId,
         method: 'webauthn',
         label: credentialLabel(result.credential.nickname, result.credential.credId),
         capability: 'shell',
-        outcome: 'ok'
+        outcome: 'ok',
+        detail: 'shell + mutation grants armed via passkey step-up'
       })
-      logger.info(
-        'remote-server',
-        `Shell grant armed for ${client.ip} via passkey step-up (expires in ${policy.shellGrantIdleMinutes}m)`
-      )
       respond({ ok: true, expiresAt })
       return
     }
@@ -3051,26 +3265,231 @@ export class RemoteServer {
       return
     }
 
-    const expiresAt = this.armShellGrant(client, policy)
-    logger.info(
-      'remote-server',
-      `Shell grant armed for ${client.ip} via password step-up (expires in ${policy.shellGrantIdleMinutes}m)`
-    )
+    const expiresAt = this.armPresence(client, 'password step-up', { policy })
+    if (expiresAt === null) {
+      // Unreachable: the narrow-grant guard at the top of this method already
+      // refused such a connection. Kept so a refusal to arm can never be
+      // reported back to the client as a success with a deadline behind it.
+      respond({
+        ok: false,
+        code: 'terminal-disabled',
+        error: 'This connection cannot open a terminal.',
+        retryable: false
+      })
+      return
+    }
+    // Audited like its passkey twin. The password path used to write no row at
+    // all, which left the weaker of the two factors as the one with no trail —
+    // exactly backwards for a break-glass credential, and a contradiction of
+    // security.md §Audit ("successes/failures, step-ups"). Its own channel
+    // because `auth:webauthn-assert` would misname the factor.
+    this.auditAuth({
+      channel: 'auth:step-up',
+      connectionId: client.connection.connectionId,
+      method: client.connection.identity.method,
+      label: client.connection.identity.label,
+      capability: 'shell',
+      outcome: 'ok',
+      detail: 'shell + mutation grants armed via break-glass password step-up'
+    })
     respond({ ok: true, expiresAt })
   }
 
   /**
-   * ONE arming path, two proof kinds (passkey and password).
+   * ONE arming path for every proof kind: a passkey login, the enroll→webauthn
+   * upgrade, a passkey step-up, a password step-up, and the flat arm under tier
+   * `off`.
    *
-   * Kept as a single method deliberately: the decay contract — which grant is
-   * added, and exactly when it expires — must not be able to differ between the
-   * two factors, which is precisely the kind of drift a second copy invites.
+   * Kept as a single method deliberately, and widened rather than forked for
+   * ADR-054: what a presence proof CONFERS — the permanent `armedEver` flag, the
+   * `shell` capability, and both windows — must not be able to differ between
+   * the paths that produce one. A second copy is precisely the drift that
+   * produced the grant bugs this file's history is full of.
+   *
+   * Returns the SHELL ACT deadline, or `null` when the connection was REFUSED
+   * arming (see {@link holdsBaseRemoteSurface}). Callers that report a deadline
+   * to the client must treat `null` as a refusal rather than as a success.
    */
-  private armShellGrant(client: AuthenticatedClient, policy: TerminalPolicy): number {
-    const expiresAt = Date.now() + shellGrantIdleMs(policy)
+  private armPresence(
+    client: AuthenticatedClient,
+    via: string,
+    opts: { policy?: TerminalPolicy; windows?: boolean } = {}
+  ): number | null {
+    // NARROW-GRANT SOCKETS ARE NEVER WIDENED BY ARMING.
+    //
+    // Arming confers freshness on a surface a connection ALREADY holds; it is
+    // not a route to one it does not. An `enroll`-only socket (a one-time "add
+    // this device" link) is the case that exists today: ADR-052's invariant is
+    // that a leaked link "can add a device but cannot read a conversation", and
+    // ADR-054 leaves that standing — so neither the tier-`off` waiver nor a
+    // step-up may hand it `shell`.
+    //
+    // Keyed on the GRANT SET rather than on a method denylist, deliberately: a
+    // future narrow-grant method is excluded by construction instead of by
+    // somebody remembering to add it to a list. The legitimate enroll→webauthn
+    // upgrade is unaffected because it re-derives its grants to the full set
+    // BEFORE arming.
+    if (!holdsBaseRemoteSurface(client.connection.grants)) {
+      logger.warn(
+        'remote-server',
+        `Refusing to arm ${client.ip} via ${via}: this connection does not hold the base remote ` +
+          'surface (narrow-grant socket — arming may not widen it)'
+      )
+      return null
+    }
+    const policy = opts.policy ?? readTerminalPolicy()
+    // `windows: false` is the tier-`off` waiver and ONLY that (ADR-054 decision
+    // 3: "armedEver = true, no windows, no max-age"). It matters that the two
+    // are separable: admitting a connection under tier `off` is a CAPABILITY
+    // waiver, not a presence proof, and writing fresh windows for it would hand
+    // that connection the settings-area gate — which demands a real proof on
+    // every tier — for the next hour, free.
+    const windows = opts.windows !== false
+    const now = Date.now()
+    const shellActExpiresAt = now + shellGrantIdleMs(policy)
     client.connection.grants = new Set<Capability>([...client.connection.grants, 'shell'])
-    client.connection.shellGrantExpiresAt = expiresAt
-    return expiresAt
+    client.connection.armedEver = true
+    // Remembered so a later tier change can UNDO a waiver without mistaking it
+    // for a real presence proof — see {@link resnapshotConnection}.
+    client.armedByWaiver = !windows
+    if (windows) {
+      client.connection.shellGrantExpiresAt = shellActExpiresAt
+      client.connection.mutationExpiresAt =
+        now + mutationIdleMs(client.policyCtx.stepUpMutationIdleMinutes)
+    }
+    logger.info(
+      'remote-server',
+      `Presence armed for ${client.ip} via ${via} (tier ${client.stepUpTier}` +
+        (windows
+          ? `, shell acts ${policy.shellGrantIdleMinutes}m, mutations ${client.policyCtx.stepUpMutationIdleMinutes}m)`
+          : ', capability waiver only — no freshness windows)')
+    )
+    return shellActExpiresAt
+  }
+
+  /**
+   * Strong tier only: arm the absolute session cut (ADR-054 decision 1).
+   *
+   * "Nothing stays alive forever" — measured from CONNECT, and nothing slides
+   * it. At expiry the socket is closed with {@link CLOSE_SESSION_EXPIRED}, which
+   * takes the sync STREAM with it (deliberately: a read-lock that left the
+   * stream running would be a veil, not a lock), and the client's existing
+   * reconnect machinery then faces a fresh ceremony.
+   *
+   * Not armed at all on the other tiers, so `medium` and `off` sockets are
+   * exactly as long-lived as before. The desktop renderer never reaches here —
+   * it rides a MessagePort and was never in `this.clients`.
+   */
+  private armMaxAgeCut(client: AuthenticatedClient): void {
+    // Idempotent: a re-snapshot re-arms, and a leaked previous timer would cut
+    // the socket on the OLD tier's budget.
+    if (client.maxAgeTimer) {
+      clearTimeout(client.maxAgeTimer)
+      client.maxAgeTimer = undefined
+    }
+    if (client.stepUpTier !== 'strong') return
+    // BELT GUARD on top of `sessionMaxAgeMs`'s clamp. `setTimeout` takes a
+    // SIGNED 32-BIT delay: a larger value wraps and fires on the next tick, so
+    // an over-large budget would cut every strong-tier socket ~1 ms after accept
+    // and the client's reconnect loop would hammer the server forever. The
+    // setting is already clamped to a week, and the injected test budget is
+    // small — this guard exists so that neither of those has to stay true for
+    // the failure mode to remain impossible.
+    const budget = Math.min(
+      this.timeouts.sessionMaxAgeMs ?? sessionMaxAgeMs(client.policyCtx.sessionMaxAgeHours),
+      MAX_TIMER_MS
+    )
+    // Measured from CONNECT, not from now — the age is ABSOLUTE, so a
+    // re-snapshot part-way through a session inherits the elapsed time instead
+    // of handing the socket a fresh full budget it could renew indefinitely by
+    // flipping a setting.
+    const remaining = Math.max(0, client.connection.identity.connectedAt + budget - Date.now())
+    client.maxAgeTimer = setTimeout(() => {
+      // The socket may have gone in the meantime; `clients` is the liveness test.
+      if (!this.clients.has(client.ws)) return
+      this.auditAuth({
+        channel: 'auth:session-expired',
+        connectionId: client.connection.connectionId,
+        method: client.connection.identity.method,
+        label: client.connection.identity.label,
+        capability: 'admin',
+        outcome: 'ok',
+        detail: `session expired (strong tier max-age ${client.policyCtx.sessionMaxAgeHours}h)`
+      })
+      logger.info(
+        'remote-server',
+        `Cutting ${client.ip}: strong-tier session max-age reached (${client.policyCtx.sessionMaxAgeHours}h)`
+      )
+      client.ws.close(CLOSE_SESSION_EXPIRED, 'Session expired')
+    }, remaining)
+  }
+
+  /**
+   * Re-snapshot ONE live connection against the auth surface as it stands now
+   * (ADR-054, mirroring {@link handleEnrollUpgrade}'s re-snapshot discipline).
+   *
+   * Every other client is dropped with 4009 after an auth-surface change and
+   * re-derives everything on reconnect. The ACTOR is deliberately spared that —
+   * cutting the socket that just made the change is a hostile way to confirm it,
+   * and for the enrollment case it would strand the operator's first device.
+   * The cost of sparing it is that it keeps the rules it was ADMITTED under, and
+   * for the step-up TIER that cost is visible and wrong: an operator flipping to
+   * `strong` would leave their own session as the one socket in the deployment
+   * that never expires.
+   *
+   * So the actor is re-derived in place instead: policy, context, tier, the
+   * tier-`off` waiver in either direction, and the max-age timer.
+   */
+  resnapshotConnection(connectionId: string): void {
+    let client: AuthenticatedClient | undefined
+    for (const candidate of this.clients.values()) {
+      if (candidate.connection.connectionId === connectionId) {
+        client = candidate
+        break
+      }
+    }
+    // Not a socket (the desktop renderer's MessagePort actor), or already gone.
+    if (!client) return
+
+    const fresh = this.readAuthDecision()
+    const previousTier = client.stepUpTier
+    client.policy = fresh.policy
+    client.policyCtx = fresh.ctx
+    const tier = resolveStepUpTier(fresh.policy, fresh.ctx.stepUpTier)
+    client.stepUpTier = tier
+    client.connection.stepUpTier = tier
+
+    if (tier === 'off') {
+      // Moving INTO the waiver: an ordinary connection stops being gated, so it
+      // needs the capability the waiver confers. Already-armed connections keep
+      // what they proved.
+      if (!client.connection.armedEver) {
+        this.armPresence(client, 'step-up tier off (re-snapshot)', { windows: false })
+      }
+    } else if (previousTier === 'off' && client.armedByWaiver) {
+      // Moving OUT of the waiver: UNDO it. The waiver was a capability grant, not
+      // a presence proof, and letting `armedEver` survive would leave a
+      // connection that never proved anything holding permanent terminal READS
+      // under a tier that exists to demand proof. Attachments go with it —
+      // `grant-expired` is exactly what happened.
+      this.revokeShellGrant(client, 'grant-expired')
+      client.connection.armedEver = false
+      client.connection.mutationExpiresAt = null
+      client.armedByWaiver = false
+      logger.info(
+        'remote-server',
+        `Withdrew the tier-off waiver from ${client.ip}: tier is now ${tier}, a step-up is owed`
+      )
+    }
+
+    // Re-arms or cancels, per the new tier. `armMaxAgeCut` clears any previous
+    // timer itself, so a flip AWAY from `strong` cancels the cut the socket was
+    // admitted with rather than letting it fire under rules that no longer apply.
+    this.armMaxAgeCut(client)
+    logger.info(
+      'remote-server',
+      `Re-snapshotted ${client.ip} in place: tier ${previousTier} → ${tier}, policy ${fresh.policy}`
+    )
   }
 
   /**
@@ -3081,11 +3500,12 @@ export class RemoteServer {
    * terminals exist.
    */
   private handleTermInput(ws: WebSocket, msg: WsTermInput): void {
-    const client = this.gateTerminalFrame(ws, msg.termId, 'term-input')
+    // ACT-class: the keystroke after an idle gap is exactly what must prompt.
+    // The gate also does the refresh (a keystroke IS presence), through the same
+    // table the `terminal:write` invoke runs — the frame and the invoke do the
+    // same thing and must never be judged differently.
+    const client = this.gateTerminalFrame(ws, msg.termId, 'term-input', TERM_INPUT_CLASS)
     if (!client) return
-    // Only `term-input` refreshes the deadline: output the user is merely
-    // watching is not evidence of a human at the keyboard.
-    client.connection.shellGrantExpiresAt = Date.now() + shellGrantIdleMs()
     try {
       terminalService.write(client.connection, msg.termId, base64ToText(msg.dataB64))
     } catch (err) {
@@ -3094,7 +3514,8 @@ export class RemoteServer {
   }
 
   private handleTermResize(ws: WebSocket, msg: WsTermResize): void {
-    const client = this.gateTerminalFrame(ws, msg.termId, 'term-resize')
+    // READ-class, matching the `terminal:resize` invoke: geometry, not execution.
+    const client = this.gateTerminalFrame(ws, msg.termId, 'term-resize', TERM_RESIZE_CLASS)
     if (!client) return
     if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows)) return
     if (msg.cols <= 0 || msg.rows <= 0) return
@@ -3108,11 +3529,19 @@ export class RemoteServer {
     }
   }
 
-  /** Shared gate for the client→server terminal frames. Returns null on refusal. */
+  /**
+   * Shared gate for the client→server terminal frames. Returns null on refusal.
+   *
+   * `cls` is the ADR-054 read/act class of the FRAME, so a frame is judged by
+   * the same table as the invoke that does the same thing. Refusals stay silent
+   * (dropped + logged) rather than answered: an error would be an oracle for
+   * which terminals exist.
+   */
   private gateTerminalFrame(
     ws: WebSocket,
     termId: string,
-    frame: string
+    frame: string,
+    cls: DispatchClass
   ): AuthenticatedClient | null {
     const client = this.clients.get(ws)
     if (!client) return null
@@ -3122,9 +3551,11 @@ export class RemoteServer {
       this.revokeShellGrant(client, 'policy-off')
       return null
     }
-    if (!hasLiveShellGrant(client.connection)) {
-      logger.warn('remote-server', `Refused ${frame} from ${client.ip}: no live shell grant`)
-      this.revokeShellGrant(client, 'grant-expired')
+    try {
+      // Also does the refresh for an act-class frame — see `applyStepUp`.
+      this.applyStepUp(client, cls)
+    } catch {
+      logger.warn('remote-server', `Refused ${frame} from ${client.ip}: presence proof is stale`)
       return null
     }
     if (!terminalService.ptyManager().isAttached(termId, client.connection.connectionId)) {
