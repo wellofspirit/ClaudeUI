@@ -4,6 +4,7 @@
 **Relates to:** ADR-042 (pinned HTTPS port — unchanged), ADR-046 (remote surface posture), ADR-051 (command registry this rides on)
 **Supersedes in part:** ADR-039 (auth *methods & policy* layer; its transport hardening — Host allowlist, throttling, funnel reject, identity-header trust predicate — carries forward unchanged)
 **Supersedes:** ADR-048 Decision 5 (terminal-on-mobile declined) and the audit-era `terminal:*` denylist posture
+**Superseded in part by:** ADR-054 (step-up policy tiers) — Decision 3's `passkey-for-grants` mode (folds into `legacy` login + `medium` tier), Decision 5's decay scope and feeding rules (read/act split; queries never refresh), and the `off` clause's "never reachable remotely" (generalized to the host-anchor rule). All other decisions stand.
 
 ## Context
 
