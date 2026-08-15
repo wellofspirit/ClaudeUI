@@ -137,6 +137,7 @@ per-channel listeners and their store writers.
 **Per-engine mechanics** (uniform events, per-engine transports — ADR-030 honesty):
 
 - **claude** — push into cli.js's native queue immediately (native sub-turn timing, zero added latency). Core correlates per-item by text via the existing `dequeue_message` / `queued_command_consumed` patch surface — **no patch growth**; duplicate-text items are interchangeable, so text ambiguity is harmless.
+  - **"By text" needs normalizing, and that was a real defect.** `queued_command_consumed` carries the queued attachment's `prompt` **verbatim**, and that prompt is the pushed message's `message.content` — a plain string for a text-only prompt but a **content-block ARRAY** whenever the prompt carried an image or a PDF. Comparing the array against `item.text` never matched, so an attachment-carrying steer was never seen as consumed at the moment cli.js injected it; it survived to the turn-end `result` flush and its user bubble was synthesized **after the entire turn** — visibly below the answer it had prompted. The RECALL half never had the bug, which is why it survived: `dequeue_message` matches with cli.js's own extractor (`VV_(v) = typeof v === 'string' ? v : Lu(v,'\n')`, `Lu` keeping `text` blocks). `sdk/queued-command-text.ts` applies that same rule at the read site, which is where cli.js applies it too — still no patch growth.
 - **opencode / pi** — these engines commit-on-post (coalesce/steer; unrecallable instantly), so core **holds the item and forwards at the next observed tool/step boundary** in the engine's event stream. The commitment point moves from keypress to boundary — up to one tool-call of extra latency versus today's instant post, ratified as the price of a real take-back window and cross-engine consistency.
 
 Details and supersessions: ADR-053.
@@ -144,9 +145,10 @@ Details and supersessions: ADR-053.
 ## Terminal subsystem
 
 - **PTY manager lives in core** (it already owns node-pty); terminals are an **ordered pool per cwd** (`cwd#0`, `cwd#1`, …); **multi-attach** — desktop and remote clients view the same live PTY, tmux-style — with a server-side scrollback ring (~200KB) so late attach renders history. **Real across surfaces as built**: opening terminal N of a cwd on ANY surface resolves to the pool in main (attach to the live pty in that slot, else spawn it there), so the desktop panel's tab 0 and a phone's tab 0 for one repo are one shell. Phase 2 shipped the fan-out and the ring but no lookup, so every open still called `create` and got a private pty — that gap is closed.
-- **Wire:** `terminal:create(cwd, index?)`. The index is the slot; omitted means "next free slot", which always spawns — so a client bundle that predates the pool keeps its old behavior instead of silently landing in the operator's shell. The reply is still a bare terminal id (also for compatibility); a client tracks its own tab→slot mapping and never sees the pty↔slot table.
-- **Two delivery lanes, one ring.** Remote attachments are registered in the manager and have the replay PUSHED to their socket (`term-data`). The desktop has no attachment set — its bytes are broadcast on `terminal:data` — so `terminal:attach` (now registered for the desktop transport too, not a preload no-op) PULLS the ring and delivers it on that same channel with `replay: true`, meaning "reset and take this as the whole history". That makes the delivery idempotent against bytes the broadcast already drew, and live chunks always follow on a later turn of the loop: replay then live, never interleaved.
-- **Closing a tab detaches that surface**; the pty dies only on its own exit, an explicit `terminal:kill`, the cold-session `killTerminalsByCwd` sweep, or window close. Closing a viewer must never take a shell away from another viewer.
+- **Wire:** `terminal:create(cwd, index?)`. The index is the slot; omitted means "next free slot", which always spawns — so a client bundle that predates the pool keeps its old behavior instead of silently landing in the operator's shell. The reply is still a bare terminal id (also for compatibility); a client tracks its own tab→slot mapping and never sees the pty↔slot table. The slot number is **bounded** (`MAX_POOL_INDEX`, 64) and an out-of-range index is refused with the same error a malformed one gets: slot claiming pads the pool array up to the requested index, so an unclamped index is a main-process memory bomb reachable from one wire frame — see [security.md](security.md) §Terminal posture.
+- **Two delivery lanes, one ring.** Remote attachments are registered in the manager and have the replay PUSHED to their socket (`term-data`). The desktop has no attachment set — its bytes are broadcast on `terminal:data` — so `terminal:attach` (now registered for the desktop transport too, not a preload no-op) PULLS the ring and delivers it on that same channel with `replay: true`, meaning "clear the screen and take this as the whole history". The client applies that clear **in band** — it writes `ESC c` (RIS) immediately ahead of the replay bytes, never `Terminal.reset()`. The distinction is load-bearing: xterm's `write()` is deferred (it queues into a WriteBuffer drained on a later task) while `reset()` is synchronous and does **not** discard that queue, so an out-of-band reset in a task batch that also carried a live chunk would clear an empty screen and then draw live+replay — duplicating scrollback in exactly the race the flag exists to close. RIS is parsed in stream order, so it clears precisely the bytes ahead of it and the delivery is idempotent however much of the history the client already drew. Live chunks always follow on a later turn of the loop: replay then live, never interleaved.
+- **Closing a tab detaches that surface**; the pty dies only on its own exit, an explicit `terminal:kill`, the cold-session `killTerminalsByCwd` sweep, or window close. Closing a viewer must never take a shell away from another viewer. The sweep matches by **directory**, through the same normalization the pool key uses — `entry.cwd` is whichever spelling the surface that spawned the pty used, so a raw string comparison stranded every pty whose spelling differed from the sweep caller's (and, having dropped the group, never retried).
+- **Shift-click on a tab's close button kills** the pty behind it (`terminal:kill`) as well as closing the tab; a plain click stays detach-only, and the button says so. Detach-only closing otherwise leaves **no** UI path to stop a runaway process (a dev server, a `tail -f`): the cold sweep only reaps cwds with no live session, i.e. never the directory you are actually working in. The modifier is on the destructive half deliberately — the unmodified click is the one that must not take a shell away from another viewer.
 - **Resize contention** (two surfaces, different viewports): **last-resize-wins**, tmux's default-ish behavior. Whoever refits most recently owns the pty's cols/rows; no negotiation, no smallest-viewport clamp.
 - PTY bytes ride the volatile-stream lane with backpressure (pause the PTY on a slow consumer, or drop + resnapshot from the scrollback ring).
 - Terminal **lifecycle** (spawned/attached/detached/exited, with client identity) goes in the event log and the audit log; PTY content and keystrokes are never logged. The pool changes WHICH pty an open resolves to, never WHO may open one — the `shell` gates are untouched.
@@ -306,9 +308,16 @@ the event stream is only as complete as the stream. Four snapshot fields had no 
 behind them, and the renderer had been covering for that by reading them itself during
 hydration:
 
-- **`directories`** — a query result (`session:directories-changed` is a payload-less
-  "refetch now"). Core now holds it: refreshed at boot and on that same watcher trigger
-  via `SyncCore.setDirectories`. It is no longer client-written.
+- **`directories`** — a query result. 4b made core hold one (refreshed at boot and on
+  the `~/.claude/projects` watcher trigger via `SyncCore.setDirectories`) but it was the
+  claude-only `listDirectories()`, while every client ran its own three-query merge
+  (claude + opencode + pi) and wrote the result locally — so canonical's copy was a
+  strict SUBSET that every `sync-full` force-projected over the merged one. A post-4 fix
+  moved the merge to main (`sync-seed.listAllDirectories`, over the pure helpers in
+  `shared/directory-merge.ts`) along with the 30 s poll, made
+  `session:directories-changed` CARRY the merged listing (emitted only on a real
+  change), and deleted the client-side merge and its `setDirectories` writer. It is
+  genuinely core-written now.
 - **`settings`, the session registry (`recentSessionIds`/`pinnedSessionIds`/
   `customTitles`/`worktreeInfoMap`/`hiddenSessions`/`hiddenProjects`/`sessionEngines`),
   `autoModeDisabledBySettings`, `slashCommands`** — files every client used to read for
@@ -374,6 +383,62 @@ line is a named next step with the reason it is not phase-4 work.
 - **Vendor OAuth on a browserless server** — direction is vault sync from a desktop
   enrollment (ADR-036) and/or device-code flows. Only answerable once there is a server
   to provision, which is why it moves with this phase.
+
+**Session-lifecycle residuals** (from the post-4 lifecycle batch that landed
+`session:removed` / `session:conversation-cleared` / the directory merge):
+
+- **A session's FIRST `session:status` is dropped by every replica.** `manager.create()`
+  runs before `emitEvent('session:created')`, and both `ClaudeSession` and `PiSession`
+  call `sendStatus()` from their constructors — so a `session:status` for an id
+  canonical has not met yet reaches the funnel first, and that branch has always
+  no-opped on unknown ids. Harmless today (the birth event immediately follows and the
+  next status refreshes everything), and deliberately NOT fixed here: the correct fix is
+  to emit the birth event before constructing the session, which reorders a spawn path
+  with its own races. Recorded so the next reader does not mistake it for the ghost
+  class F7 closed.
+- **Fork seeding reads the whole parent transcript for its status line.** F3 truncates
+  the MESSAGES at the anchor, but `ClaudeSession`'s resume-time
+  `reconcileAccumulatorsFromTranscript` (and `computeTokenMetrics` behind it) still
+  walks the parent's entire file, so a fork's opening token/cost figures include the
+  turns the fork discarded. Cosmetic and self-correcting — the first `result` of the
+  forked session replaces them with cli.js's authoritative numbers — but wrong until
+  then. The fix is the same anchor, threaded one level further down.
+- **The delete channels keep the `config` capability while now cancelling engines.**
+  `session:delete-session` / `session:delete-project` were file operations when that
+  capability was assigned; they stop live engine processes now. `config` is grantable
+  to a remote client, so a capability review is owed — either they move to a stronger
+  capability or the grant table records that `config` includes "may stop my sessions".
+- **The registry rows a delete removes from canonical are not persisted main-side.**
+  The `session:removed` reducer branch drops the deleted id from `customTitles` /
+  `pinnedSessionIds` / `recentSessionIds` / `hiddenSessions` / `worktreeInfoMap` /
+  `sessionEngines` in canonical and in every replica, but nothing main-side writes
+  `sessions.json` — the deleting CLIENT's store action still owns that save. So a delete
+  driven by a client that dies before its save lands leaves the rows on disk, and the
+  next boot's `seedCanonicalAppState` reads them back. Closing it means main owning the
+  registry write, which is the same `causedBy` / command-registry work listed below.
+- **A BARE `session:clear-conversation` resets engine and model to the defaults.**
+  The reducer builds the cleared entry from `emptySession()`, which is
+  `claude`/`default`, and only `permissionMode` rides the event. That is invisible
+  in the one flow that exists today — `ExitPlanModeCard` cancels, clears and then
+  `createSession`s, and the birth event re-announces the real engine/model — but a
+  remote client that cleared WITHOUT respawning would leave every replica showing
+  claude/default for a pi or opencode session. If bare clear becomes a supported
+  action, `selectedEngineId` / `selectedModel` should ride the event exactly as
+  `permissionMode` does; the alternative (carrying them over in the reducer) is
+  wrong, because a clear genuinely does precede a respawn today.
+- **`deleteSession` leaves the cancelled `ISession` resident in the manager map.**
+  `SessionManager.cancel()` does not remove the entry (only `dispose()`/`create()`
+  do), so a deleted session's object outlives its files until the routingId is
+  reused or the app exits. Pre-existing shape rather than a regression — `cancel()`
+  is documented as leaving the object usable for a later `run()` — and harmless
+  because canonical no longer has the id, so nothing it emits is folded. Noted so
+  it is not mistaken for a leak introduced by the delete path.
+- **Turn-end queue flush cannot position what it sweeps.** When a queue push lands
+  at/after a turn's `result`, cli.js takes it as the next turn's fresh prompt and no
+  `queued_command_consumed` ever arrives, so the item's position in the transcript is
+  genuinely unknowable — the flush marks it consumed at the boundary and the bubble
+  appears there. Attachment-carrying items no longer take this path by accident (that
+  was the correlation defect above); this is the residual, honest case.
 
 **Phase 5** — volatile-stream separation and per-client subscriptions: stream/PTY/log
 frames leave the ring entirely (`{streamId, turnId, offset, chunk}` with self-healing

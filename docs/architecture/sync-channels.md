@@ -93,8 +93,8 @@ per-site ring flags.
 
 **The other 4c visibility change.** The three `extras-only` sites — `create-session`'s
 `notifyMainWindow=false`, the desktop `config:settings-changed` / `config:sessions-changed`
-saves, and the pre-spawn `session:permission-mode` echo — now echo back to the client that
-originated them. Every one of those payloads is a REPLACE, so the echo is idempotent for
+saves, and the pre-spawn `session:permission-mode` echo (since DELETED — see that
+channel's row) — now echo back to the client that originated them. Every one of those payloads is a REPLACE, so the echo is idempotent for
 the writer; what it buys is that the one client whose optimistic write might be wrong is no
 longer the only one the broadcast cannot correct.
 
@@ -120,15 +120,18 @@ recorded in the Notes column instead of flipping it.
 
 ## Payload additions — the only wire changes since the cutover
 
-Two landed in 4b (the cutover's own wire changes); the third is a post-4 fix, kept in
-the same table because the rule is the same one: a value only the emitter knows must
-ride the event, or every non-originating replica invents it.
+Five entries, one rule: a value only the emitter knows must ride the event, or every
+non-originating replica invents it. The first two landed in 4b (the cutover's own wire
+changes); the last three are post-4 fixes, kept in the same table because the rule that
+justifies them is the same one.
 
 | Channel                | Addition                    | Why it could not stay client-side                                                                                                                                                                                                                     |
 | ---------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `session:user-message` | `{id, timestamp}` (4b)      | Minted by `sendPrompt`. Each client used to invent its own `msg-<uuid>`/`Date.now()`, so one user turn had a different id in every replica and canonical could only mint a positional `user-<seq>`. With the snapshot authoritative, that renumbers a client's transcript on every resync. |
 | `session:message`      | `thinkingDurationMs?` (4b)  | Timed by `BaseSession.send` (one implementation, all three engines) and moved onto the sealed thinking block by the reducer. `applyEvent` is clock-free by contract, so elapsed time can only come from the process that watched the clock.               |
-| `session:created`      | `{permissionMode?, engineId?, model?}` (post-4) | The BIRTH CONFIG. The payload was `{cwd, resumeSessionId}`, so the reducer built the entry from `emptySession()` — `permissionMode: 'default'`, `selectedEngineId: 'claude'`, `selectedModel: 'default'` — and only the ORIGINATOR was right, because its own `createNewSession` seeds the replica before the event arrives. Every other client, and canonical itself (hence every snapshot and every resync), showed the wrong mode/engine/model until some later event happened to carry the real value: a session created on the desktop read as `default`/claude on a phone, and vice versa. Only `prepareAndCreateSession` knows these values at birth — the spawn opts (with the RESOLVED model) it just handed `manager.create`. Every field is optional and the reducer falls back to the existing session value, so an old-shape event (a committed golden fixture, catchup from an older host) folds exactly as before. `effort` / `thinkingMode` are deliberately excluded: the spawn args carrying them are already resolved model defaults (`resolveSessionSdkOptions`), while the canonical fields mean "explicitly picked" (`null` = unset, which the effort precedence ladder depends on), so announcing them would freeze a default into a pick. |
+| `session:created`      | `{permissionMode?, engineId?, model?, resumeSessionAt?}` (post-4) | **The BIRTH CONFIG, plus the fork anchor.** The payload was `{cwd, resumeSessionId}`, so the reducer built the entry from `emptySession()` — `permissionMode: 'default'`, `selectedEngineId: 'claude'`, `selectedModel: 'default'` — and only the ORIGINATOR was right, because its own `createNewSession` seeds the replica before the event arrives. Every other client, and canonical itself (hence every snapshot and every resync), showed the wrong mode/engine/model until some later event happened to carry the real value: a session created on the desktop read as `default`/claude on a phone, and vice versa. `resumeSessionAt` is the same problem one layer down: a branched session spawns with `--resume <parent> --fork-session --resume-session-at <lineUuid>` and cli.js resumes from `lines.slice(0, w+1)`, but every reader of that transcript (canonical's seed in `create-session.ts`, and each client's own cold seed in `useClaudeEvents`) loaded the parent's WHOLE file — so a fork opened showing the turns it exists to discard, above a model that had never seen them. Only `prepareAndCreateSession` knows any of these values at birth: the spawn opts (with the RESOLVED model, and the anchor) it just handed `manager.create`. Every field is optional and the reducer falls back to the existing session value, so an old-shape event (a committed golden fixture, catchup from an older host) folds exactly as before; an absent anchor means "load everything", which is also the non-fork case, and an anchor not present in the file truncates nothing. `effort` / `thinkingMode` are deliberately excluded: the spawn args carrying them are already resolved model defaults (`resolveSessionSdkOptions`), while the canonical fields mean "explicitly picked" (`null` = unset, which the effort precedence ladder depends on), so announcing them would freeze a default into a pick. |
+| `session:watch-update` | `cwd?` (post-4) | The watched session's working directory. This event is the ONLY thing that introduces a watched session — nothing spawns, so there is no `session:created` — which is why its reducer branch is the one place `ensured()` still bootstraps an entry. Without the cwd that entry was born with `cwd: ''` and every cwd-keyed feature missed it (git status, sidebar/notification folder name, the per-cwd terminal group, `deleteProject`'s live-session sweep). It cannot be derived here: `projectKey` is `cwdToProjectKey`'s lossy, irreversible output. Every caller has it (`SessionInfo.cwd`); absent leaves the existing value alone. |
+| `session:directories-changed` | the merged listing (post-4) | Was payload-less: a "refetch now" every client answered with its OWN three-query merge (claude + opencode + pi), while canonical held only `listDirectories()`. Two different lists, not two views of one — so every `sync-full` force-projected the claude-only subset over the merged one and a reconnecting client lost its opencode/pi rows until its next 30 s poll. Main owns both other list sources, so it does the merge and the event carries the result. Absent folds as the old no-op notify (committed fixtures, catchup across the upgrade). Rate-limited at the emitter — see the row in the main table. |
 
 `FullStateSnapshot` itself is UNCHANGED by 4b: the cutover moved where the snapshot
 comes from, not what it contains, so the web client works unmodified. The
@@ -151,16 +154,18 @@ snapshot fields that already existed.
 | `session:approval-request`       | replicated               | yes  | yes       | —     | Approval lifecycle is event-driven ONLY (ADR-038) — never inferred from turn state.                                                                                                                    |
 | `session:auth-source`            | replicated               | yes  | no        | —     | App-level auth banner input; no snapshot field.                                                                                                                                                        |
 | `session:config-changed`         | replicated               | yes  | yes       | yes   | Per-session config parity — the interim relief sync-core.md flagged, landed as part of phase 4.                                                                                                        |
+| `session:conversation-cleared`   | replicated               | yes  | yes       | —     | "Start fresh": resets a session to its birth state (transcript, streams, todos, queue, tasks, subagents, per-session config) without removing it, keeping `cwd` and `sdkActive`. Was a local `patchLocalSession` on the clearing client ONLY, so canonical kept the whole transcript and the next resync handed it straight back to the client that had just cleared it. The fresh-run `permissionMode` rides the event because resolving it needs `availableModels` + the auto-mode gate — client state no reducer can see. |
 | `session:created`                | replicated               | yes  | yes       | —     | Session registry. 4c deleted the notifyMainWindow asymmetry in create-session.ts, so the originating client receives its own session:created like every other subscriber. **Post-4 payload addition:** the birth config (`permissionMode` / `engineId` / resolved `model`) rides the event — without it every non-originating replica, and canonical, folded `emptySession()`'s default/claude/default over the session's real spawn config. Each field is optional and falls back to the existing session value, so old-shape events fold unchanged. |
-| `session:directories-changed`    | replicated               | yes  | no        | —     | A payload-less notify — the sidebar refetches via a query, so there is nothing to apply. **4b:** the same trigger also refreshes canonical's `directories` field (`SyncCore.setDirectories`, core-internal, NOT an event), so a resyncing client gets the same listing a live one refetches. |
+| `session:directories-changed`    | replicated               | yes  | yes       | —     | The MERGED (claude + opencode + pi) sidebar listing, applied as a replace. Was a payload-less notify each client answered with its own three-query merge while canonical held the claude-only subset — see the payload-additions table. **Rate-limited at the emitter, and it has to be:** the trigger is the debounced recursive watcher on `~/.claude/projects`, and `SessionInfo.lastActivityAt` comes from mtime, so the listing "changes" for a whole turn's duration. The debounce is trailing-resetting, so that is one tick per quiet gap of ≥500 ms rather than two a second — but a long turn has many such gaps, and each would push a full payload into a 5000-entry ring. `services/sync-seed.ts` coalesces overlapping walks (out-of-order walks could emit stale-after-fresh, which an ordered ring does not self-correct), floors emissions at 5 s, and distinguishes MEMBERSHIP changes (a create/delete — never dropped, deferred to a trailing emit) from reorder-only mtime churn (dropped; the 30 s poll re-reads it). |
 | `session:error`                  | replicated               | yes  | no        | —     | Rings and fans out today, but FullStateSnapshot carries no error list — per-client transient. Known 4b/5 gap, recorded not fixed.                                                                      |
 | `session:mcp-servers`            | replicated               | yes  | no        | —     | MCP status list; no snapshot field (clients refetch via `session:mcp-status`).                                                                                                                         |
 | `session:message`                | replicated               | yes  | yes       | —     | Assistant messages, upsert-by-id. Also the trigger for the derived todos / sentFiles fields (reducer-internal). **4b payload addition:** an optional `thinkingDurationMs` — the elapsed thinking span this message seals, timed by the emitter and moved onto the block by the reducer. |
 | `session:messages-retracted`     | replicated               | yes  | yes       | —     | Removes messages by id and clears in-flight streaming buffers.                                                                                                                                         |
 | `session:metering`               | replicated               | yes  | yes       | yes   | Engine-neutral metering snapshot, applied as a replace.                                                                                                                                                |
-| `session:permission-mode`        | replicated               | yes  | yes       | —     | Per-session config. The pre-spawn echo (handlers-core.setPermissionMode) delivers `all` — the pattern session:config-changed mirrors.                                                                  |
+| `session:permission-mode`        | replicated               | yes  | yes       | —     | Per-session config, emitted by the live session itself (including the reverted mode when the engine rejects a change). The **pre-spawn echo is deleted** (post-4): a not-yet-spawned session exists only in its creating client's replica, so the echo reached nobody — it only ever LOOKED like it worked because the reducer's `ensured()` minted a placeholder for the unknown id, which is the ghost F7 removed. `session:config-changed` is gated the same way. |
 | `session:plan`                   | replicated               | yes  | yes       | —     | Plan steps arrive as an explicit todo list (pi) — replaces the derived todos.                                                                                                                          |
 | `session:queue-changed`          | replicated               | yes  | yes       | —     | Queue of record (ADR-053): the FULL item list, applied as a replace; consumed items synthesize a `steer-<itemId>` transcript message.                                                                  |
+| `session:removed`                | replicated               | yes  | yes       | —     | An explicit DELETE (one session, or one of the sessions a project delete sweeps). Emitted by `SyncCore.removeSession` after the live session is cancelled and before its files are unlinked. The reducer drops the entry AND every id-keyed app-level row (titles / pins / recents / hidden / worktrees / engines) — including for a COLD session canonical never held, which can still own a title and a pin. Identity-stable when the id is unknown, so a double delete costs one no-op ring entry. |
 | `session:result`                 | replicated               | yes  | yes       | —     | Turn boundary. Canonical effect is the completed-todo-list dismissal only; nothing else is inferred from the running→idle edge.                                                                        |
 | `session:sandbox-violation`      | replicated               | yes  | no        | —     | Same as session:error — no snapshot field.                                                                                                                                                             |
 | `session:skills`                 | replicated               | yes  | yes       | —     | App-level sdkSkillNames, same shape as slash-commands.                                                                                                                                                 |
@@ -195,7 +200,7 @@ snapshot fields that already existed.
 | `log-viewer:entry-batch`         | host-local               | no   | no        | —     | Coalesced form of log-viewer:entry.                                                                                                                                                                    |
 | `plugin:views-changed`           | host-local               | no   | no        | —     | Main-window-only today; plugin-declared capabilities decide later whether plugin surfaces replicate.                                                                                                   |
 | `remote:status`                  | host-local               | no   | no        | —     | The remote server describing itself to its host. A remote client learns its own connectivity from the socket.                                                                                          |
-| `terminal:data`                  | host-local               | no   | no        | —     | Desktop PTY bytes, plus the scrollback replay a desktop `terminal:attach` pulls (`replay: true` = reset and take this as the whole history). Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit. |
+| `terminal:data`                  | host-local               | no   | no        | —     | Desktop PTY bytes, plus the scrollback replay a desktop `terminal:attach` pulls (`replay: true` = clear the screen and take this as the whole history; the client applies the clear IN BAND by writing `ESC c` ahead of the bytes, never `Terminal.reset()` — see sync-core.md §Terminal). Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit. |
 | `terminal:exit`                  | host-local               | no   | no        | —     | Desktop PTY lifecycle; the remote lane has its own `term-exit` frame.                                                                                                                                  |
 | `voice:state`                    | host-local               | no   | no        | —     | Host microphone capture (security.md §Host-local).                                                                                                                                                     |
 | `voice:transcript`               | host-local               | no   | no        | —     | Host microphone capture.                                                                                                                                                                               |
@@ -259,10 +264,21 @@ The registry-config row is fresher than it reads: the apply happens inside
 `getSnapshot()` (pinned by `handlers-core.test.ts`). The file watcher is now just the
 cross-INSTANCE path.
 
-**`directories` LEFT this table in 4b.** Core maintains it (seeded at boot, refreshed
-on the `session:directories-changed` trigger — `SyncCore.setDirectories`), so it is
-core-written, and a mismatch would be real drift between the sidebar a live client
-sees and the one a reconnecting client gets.
+**`directories` LEFT this table in 4b — and only became TRUE later.** 4b made core
+maintain a listing, but it maintained the WRONG one: `listDirectories()` is Claude's
+JSONL walk, while every client ran its own three-query merge (claude + opencode + pi)
+in `Sidebar.tsx` and wrote the result locally. Canonical's copy was therefore a strict
+SUBSET, and `hydrateReplica` force-projects, so every `sync-full` overwrote a client's
+merged sidebar with the claude-only one and the opencode/pi rows vanished until that
+client's next 30 s poll. That was structural and permanent, not drift.
+
+It is core-written now in the sense the sentence always claimed: the merge itself moved
+to main (`services/sync-seed.ts` → `listAllDirectories`, over the shared pure helpers in
+`shared/directory-merge.ts`), the poll moved with it (`startProjectsWatcher`), the
+`session:list-directories` query returns the same merged value, and
+`session:directories-changed` CARRIES the listing so live clients fold it instead of
+each refetching. The client-side merge, the 30 s interval and the `setDirectories`
+store action are deleted. A mismatch here is now real drift.
 
 ### `activeSessionId` is served as `null` — deliberate, with a UX consequence
 
@@ -279,16 +295,53 @@ with many devices — the previous one silently overwrote a phone's navigation w
 desktop's on every resync — and the `recentSessionIds` fallback is what keeps it from
 being a blank screen.
 
-## Eviction
+## Eviction, and the removal that is not eviction
 
-Canonical does **not** evict on a timer, because the renderer does not either:
-`evictColdSessions` (session-store.ts) keeps the lightweight entry and strips the
-heavy arrays, marking it `evicted` so reselection re-hydrates from disk. Canonical
-therefore keeps its transcript, and the comparator treats "renderer transcript
-empty, canonical transcript non-empty" as eviction rather than drift.
-`SyncCore.removeSession` exists for explicit removal (delete/close), and a later
-resume re-seeds through `seedSession` from the same `loadSessionHistory` the
-renderer uses.
+Canonical does **not** evict on a timer, because no client does either:
+`evictLocalSessions` (stores/replica.ts) keeps the lightweight entry and strips the
+heavy arrays, marking it `seeded: false` so reselection re-hydrates from disk.
+Canonical therefore keeps its transcript. (Until 4c this section also said the shadow
+comparator treated "renderer transcript empty, canonical transcript non-empty" as
+eviction rather than drift — that comparator is **deleted**; the replica folds the
+shared reducer, so there is no second interpretation to mask.)
+
+`SyncCore.removeSession` is the explicit-removal path (delete session / delete
+project) — and it is **wired**, which it was not when this sentence was first written:
+`handlers-core.deleteSession` / `deleteProject` serve both surfaces and run
+cancel → `removeSession` → unlink, in that order. `removeSession` EMITS
+`session:removed` rather than editing canonical in place, so the delete is an ordered,
+ringed fact every replica folds and a reconnecting client replays. A later resume
+re-seeds through `seedSession` from the same `loadSessionHistory` every client uses.
+
+Two paired halves make the removal stick rather than being re-minted:
+
+- **F7's rule** — every reducer branch except `session:watch-update` no-ops on an
+  unknown id, so engine traffic that arrives after a delete cannot re-mint the entry
+  as a `cwd: ''` ghost.
+- **The unwatch** — `session:watch-update` is the one branch that still bootstraps,
+  and unlinking a watched `.jsonl` is exactly what makes the watcher fire one more
+  time. `handlers-core.deleteSession` / `deleteProject` therefore `unwatchSession`
+  every id they are about to remove, BEFORE the cancel.
+
+### The limit: a client offline across the delete keeps the entry
+
+`session:removed` reaches a client two ways, and neither covers every case:
+
+- **Live, or by catchup** — only while the removal is still inside the 5000-entry
+  ring. A client that reconnects after the ring has rolled past it gets a `sync-full`
+  instead, and that is where the gap is.
+- **By snapshot** — it is NOT covered. `hydrateReplica` merges on a resync
+  (`{...canonical.sessions, ...restored.sessions}`, `stores/replica.ts`), deliberately:
+  a client may have navigated to a historical session the host's snapshot knows nothing
+  about, and replacing the map would drop it. A snapshot says which sessions exist, not
+  which ones stopped existing, so a locally-known-but-omitted session SURVIVES the
+  resync. Its id-keyed registry rows (title, pin, recents) are force-projected clean, so
+  what is left is an orphan row rather than a working session.
+
+That is the honest bound: **a client that was offline across a delete, and reconnects
+after the ring has rolled past it, keeps a dead entry until it navigates away.** Closing
+it needs a tombstone set the snapshot carries and the merge intersects against — a wire
+change with its own eviction policy, deliberately not taken with this fix.
 
 ## Phase-1 residuals closed here
 
