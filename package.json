@@ -17,7 +17,8 @@
   "ripgrepVersion": "14.1.1",
   "overrides": {
     "node-abi": "^4.33.0",
-    "lightningcss": "^1.33.0"
+    "lightningcss": "^1.33.0",
+    "@peculiar/asn1-schema": "2.9.0"
   },
   "scripts": {
     "format": "prettier --write .",
@@ -60,6 +61,7 @@
     "@mermaid-js/parser": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@noble/hashes": "^2.3.0",
+    "@simplewebauthn/server": "^13.3.2",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "better-sqlite3": "^13.0.3",
@@ -78,6 +80,7 @@
   "devDependencies": {
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
+    "@simplewebauthn/browser": "^13.3.0",
     "@swc/core": "^1.15.47",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-virtual": "^3.14.9",

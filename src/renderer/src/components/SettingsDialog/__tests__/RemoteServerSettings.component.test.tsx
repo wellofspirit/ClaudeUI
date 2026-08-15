@@ -15,6 +15,12 @@ const baseConfig: RemoteConfig = {
   tlsHttpsPort: 443,
   allowTerminal: false,
   shellGrantIdleMinutes: 10,
+  // ADR-052 policy fields: AUTO with nothing enrolled, i.e. the legacy stack.
+  authPolicy: null,
+  effectiveAuthPolicy: 'legacy',
+  credentialCount: 0,
+  passwordBreakGlass: true,
+  passkeyTailnetExempt: false,
   passwordSet: false,
   passwordUpdatedAt: null
 }

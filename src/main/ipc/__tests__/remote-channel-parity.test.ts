@@ -105,6 +105,25 @@ describe('remote channel parity (R5)', () => {
     ).toEqual(SHELL_GATED_REMOTE_CHANNELS)
   })
 
+  it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {
+    // Same class of guard as the test above, applied ahead of the series-2 UI:
+    // these six ARE registered for the remote transport, so the only thing
+    // keeping a plain token connection away from "revoke the operator's passkey"
+    // is the declared capability. A future edit that relabels one `config` would
+    // otherwise be silent until someone read the diff.
+    const declared = remoteDeclarations()
+    expect(declared.get('webauthn:register-options')).toBe('enroll')
+    expect(declared.get('webauthn:register-verify')).toBe('enroll')
+    expect(declared.get('webauthn:credentials')).toBe('admin')
+    expect(declared.get('webauthn:rename')).toBe('admin')
+    expect(declared.get('webauthn:revoke')).toBe('admin')
+    expect(declared.get('webauthn:mint-enroll-token')).toBe('admin')
+    for (const [channel, capability] of declared) {
+      if (!channel.startsWith('webauthn:')) continue
+      expect(LEGACY_REMOTE_GRANTS.has(capability), channel).toBe(false)
+    }
+  })
+
   it('the web client subscribes only to CLASSIFIED event channels (4a)', () => {
     // The invoke surface and the event surface are the two halves of the client
     // contract. A channel the web client listens for that nothing classifies can

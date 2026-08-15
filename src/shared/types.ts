@@ -1458,6 +1458,21 @@ export interface RemoteConfig {
   allowTerminal: boolean
   /** Idle window before a stepped-up `shell` grant decays, in minutes. */
   shellGrantIdleMinutes: number
+  /**
+   * Stored auth policy, or `null` for AUTO (≥1 credential ⇒ `passkey-always`,
+   * else `legacy`). Same table + same desktop-only write path as
+   * {@link RemoteConfig.allowTerminal}, and for the same reason: a remotely
+   * writable policy would let a client downgrade its own authentication.
+   */
+  authPolicy: RemoteAuthPolicy | null
+  /** What AUTO resolves to right now, given the enrolled-credential count. */
+  effectiveAuthPolicy: RemoteAuthPolicy
+  /** Number of enrolled WebAuthn credentials (what AUTO resolves against). */
+  credentialCount: number
+  /** Break-glass password enabled (default true); the `passkey-only` toggle clears it. */
+  passwordBreakGlass: boolean
+  /** Let a tailnet-identified connection skip the ceremony under `passkey-always`. */
+  passkeyTailnetExempt: boolean
   passwordSet: boolean
   passwordUpdatedAt: number | null
 }
@@ -1528,6 +1543,10 @@ interface RemoteAPI {
     tlsHttpsPort?: number
     allowTerminal?: boolean
     shellGrantIdleMinutes?: number
+    /** `null` restores AUTO. Desktop-only by construction (ADR-052 decision 3). */
+    authPolicy?: RemoteAuthPolicy | null
+    passwordBreakGlass?: boolean
+    passkeyTailnetExempt?: boolean
   }): Promise<RemoteConfig>
   /**
    * Re-run `tailscale serve` enablement for the running server with
@@ -1611,8 +1630,41 @@ export type TunnelState =
  * scrypt proof derived from the user's persisted credential;
  * `'tailnet-identity'` is the spoof-stripped `Tailscale-User-Login` header a
  * `tailscale serve` proxy attaches, accepted for the node owner's login only.
+ *
+ * ADR-052 adds three. `'webauthn'` is a completed passkey assertion (the only
+ * method that proves a HUMAN rather than a cached client secret);
+ * `'enroll-token'` is the one-time desktop-minted enrollment token, which
+ * authenticates a socket that may do nothing but register a credential; and
+ * `'none'` is the `off` policy mode, where authentication is disabled outright.
+ *
+ * NOTE: `RemoteAuthInfo.methods` / `RemoteStatus.authMethods` still advertise
+ * only the three original values — the passkey advertisement is the separate,
+ * per-request `RemoteAuthInfo.webauthn` block, and `enroll-token` / `none` are
+ * not things a client picks.
  */
-export type RemoteAuthMethod = 'token' | 'password' | 'tailnet-identity'
+export type RemoteAuthMethod =
+  | 'token'
+  | 'password'
+  | 'tailnet-identity'
+  | 'webauthn'
+  | 'enroll-token'
+  | 'none'
+
+/**
+ * Remote authentication POLICY (ADR-052 decision 3 / security.md §"Policy
+ * modes"). Persisted in `remote_config.auth_policy`, where **NULL means auto**:
+ * ≥1 enrolled credential resolves to `passkey-always`, otherwise `legacy`. An
+ * explicitly stored value always wins over that inference.
+ *
+ * - `passkey-always` — every connection arriving on a WebAuthn-capable origin
+ *   must complete the assertion ceremony (break-glass password aside).
+ * - `passkey-for-grants` — base auth is as-built; the ceremony is required only
+ *   to arm a decaying `shell` grant.
+ * - `legacy` — the as-built ADR-039 stack, byte for byte.
+ * - `off` — MASTER SWITCH: all authentication disabled. Desktop-only to set,
+ *   audited on every change, and warned about at startup.
+ */
+export type RemoteAuthPolicy = 'passkey-always' | 'passkey-for-grants' | 'legacy' | 'off'
 
 /**
  * Why a `tailscale serve` mutation failed. Declared here (not in the main-only

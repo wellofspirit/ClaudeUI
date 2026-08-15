@@ -50,9 +50,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v10 (remote-terminal
-      // posture columns, ADR-052).
-      expect(userVersion(db)).toBe(10)
+      // Bump alongside MIGRATIONS in db.ts — currently v11 (webauthn_credential
+      // + auth-policy columns, ADR-052 passkeys).
+      expect(userVersion(db)).toBe(11)
     } finally {
       db.close()
     }

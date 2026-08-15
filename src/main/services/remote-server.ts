@@ -12,9 +12,30 @@ import {
   hasLiveShellGrant,
   makeRemoteConnection,
   type Capability,
-  type CommandConnection
+  type CommandConnection,
+  type IdentityMethod
 } from '../ipc/command-registry'
-import { terminalService, readTerminalPolicy, shellGrantIdleMs } from './terminal-service'
+import {
+  ceremonyRequiredForAuth,
+  grantsFor,
+  passwordAuthAllowed,
+  passwordStepUpAllowed,
+  readAuthPolicyContext,
+  resolveAuthPolicy,
+  type AuthPolicyContext
+} from './auth-policy'
+import {
+  resolveWebauthnOrigin,
+  webauthnService,
+  WebauthnService,
+  type WebauthnOrigin
+} from './webauthn-service'
+import {
+  terminalService,
+  readTerminalPolicy,
+  shellGrantIdleMs,
+  type TerminalPolicy
+} from './terminal-service'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from './git-watch-registry'
@@ -31,13 +52,19 @@ import type { PasswordAuthProvider } from './remote-auth'
 import { TailscaleManager, TailscaleServeError, serveTargetForPort } from './tailscale-manager'
 import {
   DEFAULT_TLS_HTTPS_PORT,
+  appendAuditLog,
   clearLastServeRecord,
   getRemoteConfig,
   setLastServeRecord
 } from './db'
 import {
+  ENROLL_UNAVAILABLE_ERROR,
   NEEDS_STEP_UP_ERROR,
+  PASSKEY_FAILED_ERROR,
+  PASSKEY_REQUIRED_ERROR,
+  PASSKEY_UNAVAILABLE_ERROR,
   TERMINAL_DISABLED_ERROR,
+  type WsAuthWebauthnFinish,
   type WsClientMessage,
   type WsServerMessage,
   type WsInvokeRequest,
@@ -53,6 +80,7 @@ import {
 } from '../../shared/remote-protocol'
 import type {
   NetworkInterfaceInfo,
+  RemoteAuthPolicy,
   RemoteServeFailureReason,
   RemoteTlsDetection,
   RemoteTlsStatus,
@@ -82,6 +110,30 @@ const FAILED_PW_AUTH_WINDOW_MS = 300_000
 /** Pre-auth frames (auth / e2e-activate) are tiny; ws's default 100 MiB
  *  maxPayload is a pre-auth memory-amplification vector. */
 const WS_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 // 4 MiB
+
+/** How long a socket has to authenticate with a credential it already holds. */
+const PREAUTH_TIMEOUT_MS = 10_000
+
+/**
+ * Pre-auth deadline once a socket has actually been ISSUED a challenge.
+ *
+ * {@link PREAUTH_TIMEOUT_MS} assumes a credential the client already holds; a
+ * ceremony costs a device wake, a system prompt and a fingerprint, and its
+ * challenge is valid for 2 minutes. Unlocked ONLY by a challenge that really
+ * went out — not by a `passkey-required` refusal, which is free to provoke —
+ * so it cannot be used to park sockets against the {@link MAX_CONNECTIONS} cap.
+ */
+const WEBAUTHN_AUTH_TIMEOUT_MS = 120_000
+
+/** Pre-auth deadline budgets. Injectable so tests can assert the lifecycle
+ *  without ten seconds of wall clock per case. */
+export interface RemoteServerTimeouts {
+  preAuthMs: number
+  ceremonyMs: number
+}
+
+/** One-time enrollment token lifetime (ADR-052 §Enrollment). */
+const ENROLL_TOKEN_TTL_MS = 10 * 60_000
 
 /**
  * Constant-time comparison for the server's hex tokens (WS token + mockup
@@ -233,6 +285,20 @@ interface TlsServeState {
   ownerLogin: string | null
 }
 
+/**
+ * A policy decision and the context it was derived from, produced by ONE read.
+ *
+ * Carried as a pair, never as two independently-read values, because the whole
+ * class of bug this phase kept producing is a decision made against one read
+ * and grants computed against another (`ceremonyRequiredForAuth` says "no
+ * ceremony owed" while `grantsFor` says "owes one" ⇒ a connection that is
+ * authenticated and holds nothing).
+ */
+interface AuthDecision {
+  policy: RemoteAuthPolicy
+  ctx: AuthPolicyContext
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
@@ -249,6 +315,18 @@ interface AuthenticatedClient {
    * grant differentiation (passkeys, step-up, `shell` decay) is phase 2.
    */
   connection: CommandConnection
+  /**
+   * Auth policy resolved ONCE, at authentication time (ADR-052). Snapshotted
+   * rather than re-read per frame: a socket whose authority changed mid-session
+   * because the operator opened Settings would produce an audit trail nobody
+   * could reconstruct, and the hot path (`term-input`) must not touch the DB.
+   *
+   * The enrolled-credential COUNT is deliberately NOT snapshotted alongside it —
+   * see {@link RemoteServer.handleStepUp}: a device that just enrolled must be
+   * able to step up with the passkey it made seconds ago.
+   */
+  policy: RemoteAuthPolicy
+  policyCtx: AuthPolicyContext
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
   e2e: E2ECrypto | null
@@ -315,6 +393,19 @@ export class RemoteServer {
   private lastStartError: string | null = null
   /** Owner of password-credential semantics; injectable so tests never hit the real DB. */
   private passwordAuth: PasswordAuthProvider
+  /** Owner of passkey-ceremony semantics (ADR-052); injectable for the same reason. */
+  private webauthn: WebauthnService
+  /**
+   * Live one-time enrollment tokens, `token → expiry`.
+   *
+   * IN MEMORY, never the DB, and deliberately so: a process restart must
+   * invalidate every outstanding "add this device" link. Persisting them would
+   * turn a link the operator forgot about into an indefinite enrollment
+   * capability, and the recovery cost of losing one is a single button press.
+   */
+  private enrollTokens = new Map<string, number>()
+  /** Pre-auth deadline budgets; overridden only by tests. */
+  private readonly timeouts: RemoteServerTimeouts
   /** `tailscale` CLI wrapper; injectable so tests never exec the real binary. */
   private tailscale: TailscaleServeController
   /** True while this run was started with `tls: true` (and not `tunnel`). */
@@ -343,12 +434,19 @@ export class RemoteServer {
     dispatcher: RemoteDispatcher,
     passwordAuth: PasswordAuthProvider = dbPasswordAuthProvider(),
     tailscale: TailscaleServeController = new TailscaleManager(),
-    core: typeof syncCore = syncCore
+    core: typeof syncCore = syncCore,
+    webauthn: WebauthnService = webauthnService,
+    timeouts: Partial<RemoteServerTimeouts> = {}
   ) {
     this.core = core
     this.dispatcher = dispatcher
     this.passwordAuth = passwordAuth
     this.tailscale = tailscale
+    this.webauthn = webauthn
+    this.timeouts = {
+      preAuthMs: timeouts.preAuthMs ?? PREAUTH_TIMEOUT_MS,
+      ceremonyMs: timeouts.ceremonyMs ?? WEBAUTHN_AUTH_TIMEOUT_MS
+    }
     this.tunnel = new TunnelManager()
 
     // Wire tunnel status changes to notify the desktop renderer
@@ -532,6 +630,7 @@ export class RemoteServer {
       'remote-server',
       `Remote server started on ${bindAddr}:${this.port} (URL host: ${this.boundHost})`
     )
+    this.warnIfAuthDisabled()
     this.notifyStatus()
 
     // TLS mode: put the serve proxy in front of the port we just bound. Done
@@ -688,6 +787,10 @@ export class RemoteServer {
     this.token = ''
     this.mockupToken = ''
     this.fileToken = ''
+    // Outstanding "add this device" links die with the listener — the URL they
+    // point at is gone, and a token that outlived its server would be a live
+    // enrollment capability with nothing supervising it.
+    this.enrollTokens.clear()
     this.boundHost = ''
     this.pendingConnections = 0
     this.failedAuth.clear()
@@ -1003,6 +1106,157 @@ export class RemoteServer {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Passkeys: policy, enrollment tokens, auth audit (ADR-052)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Enrolled credential count, failing CLOSED (0) on a DB error.
+   *
+   * Zero is the safe answer at every call site: it withholds the passkey
+   * advertisement, and it makes {@link ceremonyRequiredForAuth} false — i.e. a
+   * wedged credential table degrades to "no passkeys available", never to
+   * "passkeys required but unusable", which would be an unrecoverable lockout.
+   */
+  /**
+   * Resolve the auth policy from a SINGLE read of the context.
+   *
+   * The one place any authentication decision gets its inputs — the handshake
+   * (`handleConnection`) and the post-registration upgrade
+   * ({@link handleEnrollUpgrade}) both call this rather than each assembling
+   * their own pair. `readAuthPolicyContext` never throws (it degrades to
+   * `legacy`), so neither does this.
+   */
+  private readAuthDecision(): AuthDecision {
+    const ctx = readAuthPolicyContext()
+    return { policy: resolveAuthPolicy(ctx), ctx }
+  }
+
+  private credentialCount(): number {
+    try {
+      return this.webauthn.count()
+    } catch (err) {
+      logger.warn(
+        'remote-server',
+        `Could not count enrolled passkeys (treating as none): ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+      return 0
+    }
+  }
+
+  /**
+   * `off` is the master no-auth switch, and security.md requires it to be loud:
+   * a startup log warning here, an audit row on every policy change (written by
+   * the desktop `remote:set-config` handler), and the persistent on-screen
+   * banner series 2 renders.
+   */
+  private warnIfAuthDisabled(): void {
+    const ctx = readAuthPolicyContext()
+    if (resolveAuthPolicy(ctx) !== 'off') return
+    logger.warn(
+      'remote-server',
+      'REMOTE AUTHENTICATION IS DISABLED (remoteAuthPolicy = "off"): every client that can reach ' +
+        'this port has operator-level access to this machine. Change it in Settings › Remote.'
+    )
+  }
+
+  /**
+   * Mint a one-time enrollment token + the URL that carries it (ADR-052
+   * §Enrollment, "More devices").
+   *
+   * Requires `tailscale serve` to be UP, and not as a convenience: the URL's
+   * hostname IS the RP ID the credential will bind to, so minting a link that
+   * pointed at a LAN IP or a tunnel would produce either a failed ceremony or a
+   * credential bound to a name that will not exist tomorrow.
+   *
+   * The token rides the URL **fragment**, like every other secret this server
+   * hands out, so it never reaches a server log or a `Referer`.
+   */
+  mintEnrollToken(): { token: string; expiresAt: number; url: string } {
+    if (!this.httpServer || !this.tlsServe) {
+      throw new Error(ENROLL_UNAVAILABLE_ERROR)
+    }
+    const now = Date.now()
+    // Sweep here rather than on a timer: the map only grows when the operator
+    // presses the button, so lazy expiry is exact enough and has no lifetime.
+    for (const [token, expiresAt] of this.enrollTokens) {
+      if (expiresAt <= now) this.enrollTokens.delete(token)
+    }
+    const token = crypto.randomBytes(32).toString('hex')
+    const expiresAt = now + ENROLL_TOKEN_TTL_MS
+    this.enrollTokens.set(token, expiresAt)
+    const host =
+      this.tlsServe.httpsPort === 443
+        ? this.tlsServe.dnsName
+        : `${this.tlsServe.dnsName}:${this.tlsServe.httpsPort}`
+    return { token, expiresAt, url: `https://${host}/remote#enroll=${token}` }
+  }
+
+  /**
+   * Claim an enrollment token. Single-use: a match is deleted before it is
+   * reported, so two sockets racing the same link cannot both win.
+   *
+   * Compared with the same constant-time helper as the WS token — the map is
+   * tiny, and a keyed lookup would leak a prefix-match timing signal on a value
+   * that is otherwise a 256-bit secret.
+   */
+  private consumeEnrollToken(candidate: string): boolean {
+    const now = Date.now()
+    for (const [token, expiresAt] of this.enrollTokens) {
+      if (expiresAt <= now) {
+        this.enrollTokens.delete(token)
+        continue
+      }
+      if (safeHexEqual(token, candidate)) {
+        this.enrollTokens.delete(token)
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * Append one auth-lifecycle row (security.md §Audit, "Auth events").
+   *
+   * `capability` records WHAT THE CEREMONY CONFERRED, which is the only reading
+   * that makes the column useful for these rows: `admin` when an assertion
+   * authenticated a connection (a passkey connection holds `admin`), `shell`
+   * when one armed a step-up grant, `enroll` when an enrollment token was
+   * burned. `kind` is `command` — these move state, and they must never be
+   * filtered out as unaudited reads.
+   *
+   * Never throws: the trail is observability, and refusing a login because the
+   * DB is wedged would be a worse failure than a gap in it — the same trade the
+   * registry's own audit interceptor makes.
+   */
+  private auditAuth(entry: {
+    channel: string
+    connectionId: string
+    /** The CONNECTION's identity method, not the advertised auth-method list. */
+    method: IdentityMethod
+    label: string
+    capability: Capability
+    outcome: 'ok' | 'error'
+  }): void {
+    try {
+      appendAuditLog({
+        ts: Date.now(),
+        connectionId: entry.connectionId,
+        method: entry.method,
+        label: entry.label,
+        capability: entry.capability,
+        kind: 'command',
+        channel: entry.channel,
+        sessionId: null,
+        outcome: entry.outcome
+      })
+    } catch (err) {
+      logger.error('remote-server', `auth audit append failed for ${entry.channel}: ${err}`)
+    }
+  }
+
   /**
    * Throttle / attribution key for a request. Behind our own serve proxy every
    * peer is `127.0.0.1`, which would collapse the per-IP budget into ONE global
@@ -1036,6 +1290,49 @@ export class RemoteServer {
         `Disconnecting password client ${client.ip}: credentials changed`
       )
       ws.close(4008, 'Credentials changed')
+    }
+  }
+
+  /**
+   * Close EVERY remote socket after an auth-surface change (policy mode,
+   * break-glass toggle, tailnet exemption) — ADR-052.
+   *
+   * Same reasoning as {@link disconnectPasswordClients}, one step wider. A
+   * connection's policy, grant set and origin capability are snapshotted at
+   * authentication time (that is deliberate — see {@link AuthenticatedClient} —
+   * because authority that shifts mid-socket produces an audit trail nobody can
+   * reconstruct). The corollary is that a live socket keeps the rules it was
+   * admitted under, so tightening the policy would otherwise not bite until the
+   * client happened to reconnect: exactly the "I turned it on and nothing
+   * happened" failure the terminal toggle's immediate revocation exists to
+   * avoid. Every method is dropped, not just `password` — flipping to
+   * `passkey-always` is aimed at token and tailnet connections above all.
+   *
+   * The desktop renderer is untouched by construction: it rides a
+   * `MessagePort` (`services/sync-port.ts`) and was never in `this.clients`.
+   * Clients reconnect on their own and re-authenticate under the new rules.
+   *
+   * `exceptConnectionId` spares the connection that CAUSED the change, and it
+   * is not a courtesy — the flip can be triggered by enrolling the first
+   * passkey, and that actor may be a one-time enrollment link whose token is
+   * already burned. Dropping it would leave the operator's first device with no
+   * way back in, on the very step that was supposed to give it one. The actor
+   * keeps a stale policy snapshot for the rest of its socket; for the
+   * enroll-token case that is corrected immediately by the re-snapshot in
+   * {@link handleEnrollUpgrade}, and for an already-privileged actor the
+   * snapshot it holds is the one it just chose.
+   */
+  disconnectAuthSurfaceClients(opts?: { exceptConnectionId?: string }): void {
+    const doomed = [...this.clients.entries()].filter(
+      ([, client]) => client.connection.connectionId !== opts?.exceptConnectionId
+    )
+    if (doomed.length === 0) return
+    logger.info(
+      'remote-server',
+      `Disconnecting ${doomed.length} remote client(s): the auth policy changed`
+    )
+    for (const [ws] of doomed) {
+      ws.close(4009, 'Auth policy changed')
     }
   }
 
@@ -1163,6 +1460,14 @@ export class RemoteServer {
         this.identityContext()
       )
       info.identity = { login: outcome.kind === 'owner' ? outcome.login : null }
+    }
+    // Passkey advertisement (ADR-052): only where a ceremony could actually run
+    // — a credential exists AND this request's Host is a WebAuthn-capable
+    // origin. A LAN IP or tunnel hostname therefore learns nothing about whether
+    // passkeys are enrolled, and the POLICY MODE is never disclosed anywhere.
+    const webauthnOrigin = resolveWebauthnOrigin(req.headers.host, this.tlsServe)
+    if (webauthnOrigin && this.credentialCount() > 0) {
+      info.webauthn = { rpId: webauthnOrigin.rpId }
     }
 
     const body = JSON.stringify(info)
@@ -1621,6 +1926,13 @@ export class RemoteServer {
     const ip = this.throttleKey(req)
     let authenticated = false
     let awaitingE2E = false
+    /**
+     * Minted when the SOCKET opens, not when it authenticates, and reused as the
+     * `CommandConnection`'s id on success — so a failed ceremony, a burned
+     * enrollment token and the commands that follow all share one id and read as
+     * one story in the audit log.
+     */
+    const connectionId = crypto.randomUUID()
 
     // Connection cap + per-IP failed-auth throttle (M-RM3). Both gate BEFORE
     // any per-connection state (timers, buffers) is allocated.
@@ -1647,12 +1959,62 @@ export class RemoteServer {
       }
     }
 
-    // Auth timeout — must authenticate within 10 seconds
-    const authTimeout = setTimeout(() => {
-      if (!authenticated) {
-        ws.close(4000, 'Authentication timeout')
-      }
-    }, 10_000)
+    // Auth policy + WebAuthn origin capability, resolved ONCE per connection
+    // (ADR-052). `webauthnOrigin` is derived from the request `Host` — the same
+    // value the Host allowlist already validated — and NEVER from anything the
+    // client asserts about its own secure-context status.
+    const webauthnOrigin = resolveWebauthnOrigin(req.headers.host, this.tlsServe)
+    const capableOrigin = webauthnOrigin !== null
+
+    /**
+     * The policy this socket is currently being judged against.
+     *
+     * Refreshed at the AUTHENTICATION MOMENT — the arrival of the frame that
+     * asks to be authenticated — not at socket-open. The pre-auth window is up
+     * to 10 s (120 s mid-ceremony), and a policy tightened during it would
+     * otherwise have a hole exactly that wide: the socket would be admitted
+     * under the old rules, and the auth-surface disconnect could not clean it up
+     * because that only reaches connections that are already authenticated.
+     *
+     * ASYMMETRY, deliberate: this initial read IS tailnet identity's
+     * authentication moment. That method authenticates from the upgrade headers
+     * with no client frame at all (`accept` runs below, before any `message`
+     * event), so for it there is no later moment to re-read at.
+     *
+     * The pair is replaced wholesale, never field-by-field, so the ceremony
+     * decision and the grant computation can never be reading different vintages
+     * of the same setting.
+     */
+    let auth = this.readAuthDecision()
+
+    // ── Pre-auth deadline ────────────────────────────────────────────────────
+    //
+    // INVARIANT: from the moment this socket opens until it is either accepted
+    // or closed, EXACTLY ONE pre-auth deadline is armed at all times.
+    //
+    // Both budgets are ABSOLUTE — measured from when the socket opened, never
+    // from the current frame — so no amount of frame traffic can extend a
+    // pre-auth socket's hold on a {@link MAX_CONNECTIONS} slot. The long budget
+    // is unlocked ONLY by actually issuing a challenge: answering
+    // `passkey-required` costs the client nothing and must not buy it twelve
+    // extra times the standard grace period.
+    const connectedAt = Date.now()
+    let ceremonyStarted = false
+    let authTimeout: ReturnType<typeof setTimeout> | undefined
+    const armPreAuthDeadline = (): void => {
+      clearTimeout(authTimeout)
+      const budget = ceremonyStarted ? this.timeouts.ceremonyMs : this.timeouts.preAuthMs
+      const remaining = Math.max(0, connectedAt + budget - Date.now())
+      authTimeout = setTimeout(() => {
+        if (!authenticated) ws.close(4000, 'Authentication timeout')
+      }, remaining)
+    }
+    /** A challenge really went out — unlock the longer budget for a biometric. */
+    const beginCeremonyDeadline = (): void => {
+      ceremonyStarted = true
+      armPreAuthDeadline()
+    }
+    armPreAuthDeadline()
 
     /**
      * Shared success path for every method. Hoisted out of `handleFrame` because
@@ -1669,7 +2031,20 @@ export class RemoteServer {
         ip,
         authMethod: method,
         login,
-        connection: makeRemoteConnection(method, login),
+        connection: makeRemoteConnection(
+          method,
+          login,
+          grantsFor({
+            method,
+            policy: auth.policy,
+            capableOrigin,
+            credentialCount: auth.ctx.credentialCount,
+            passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
+          }),
+          { connectionId, webauthnOrigin }
+        ),
+        policy: auth.policy,
+        policyCtx: auth.ctx,
         lastActivity: Date.now(),
         pingTimer: setInterval(() => {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
@@ -1702,6 +2077,35 @@ export class RemoteServer {
       ws.close(4001, closeReason)
     }
 
+    /**
+     * Refuse a legacy credential under `passkey-always` WITHOUT closing.
+     *
+     * The socket is the one the ceremony will run on, so tearing it down would
+     * force a reconnect between "you need a passkey" and "here is my passkey".
+     * An OLD cached bundle that does not know the code shows its ordinary
+     * auth-failed state and stops — which is the honest outcome; inventing a
+     * half-authenticated `ok:true` for it would be worse than a clear refusal.
+     */
+    const requirePasskey = (): void => {
+      ws.send(
+        JSON.stringify({
+          type: 'auth-response',
+          ok: false,
+          error: PASSKEY_REQUIRED_ERROR,
+          retryable: false
+        })
+      )
+      // Deliberately does NOT unlock the ceremony budget. This answer is free to
+      // provoke — any tailnet peer can send `{type:'auth'}` — so it stays on the
+      // short clock; only an issued challenge earns the long one.
+    }
+
+    /** Is this connection allowed to run a HANDSHAKE assertion right now? */
+    const handshakeCeremonyAvailable = (): boolean =>
+      webauthnOrigin !== null &&
+      (auth.policy === 'passkey-always' || auth.policy === 'passkey-for-grants') &&
+      auth.ctx.credentialCount > 0
+
     // Tailnet identity (Phase 3). Everything it depends on is already in the
     // upgrade request, so there is nothing for the client to send: on a match we
     // authenticate immediately and push an UNSOLICITED auth-response. The bare
@@ -1715,8 +2119,21 @@ export class RemoteServer {
     // one improvement: if they turn out to have no credential at all, the
     // "missing credential" rejection is replaced by an actionable message.
     const identityMismatch = identity.kind === 'mismatch' ? identity : null
-    if (identity.kind === 'owner') {
-      accept('tailnet-identity', identity.login)
+    // Under `passkey-always` on a capable origin, ambient tailnet identity does
+    // NOT skip the ceremony (owner decision: device theft is exactly the threat
+    // ambient identity does not cover) unless the operator set the exemption. We
+    // simply send no unsolicited auth-response and let the ceremony run.
+    const identityAuthenticates =
+      identity.kind === 'owner' &&
+      !ceremonyRequiredForAuth({
+        policy: auth.policy,
+        capableOrigin,
+        credentialCount: auth.ctx.credentialCount,
+        method: 'tailnet-identity',
+        passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
+      })
+    if (identityAuthenticates) {
+      accept('tailnet-identity', identity.kind === 'owner' ? identity.login : null)
     } else if (identityMismatch) {
       logger.warn(
         'remote-server',
@@ -1761,52 +2178,238 @@ export class RemoteServer {
       }
 
       if (!authenticated) {
-        if (msg.type !== 'auth') {
-          ws.close(4000, 'Not authenticated')
-          return
-        }
-        clearTimeout(authTimeout)
+        // INVARIANT (see the deadline block above): every pre-auth path leaves
+        // exactly one deadline armed. The `finally` is what makes that true for
+        // the paths that are easy to miss — an `await` that THROWS (a wedged DB
+        // read inside a verify, say) unwinds straight past every re-arm a branch
+        // might have done, and a refusal that forgets to close would otherwise
+        // leave the socket immortal. Re-arming only while the socket is still
+        // OPEN keeps closed/accepted sockets from getting a stray timer.
+        try {
+          // THE AUTHENTICATION MOMENT. Re-read the policy for the frames that
+          // ask to be authenticated, so the decision is made against the rules
+          // in force NOW rather than whenever this socket happened to open.
+          //
+          // `auth-webauthn-finish` is deliberately absent: the challenge issued
+          // at `-start` was an OFFER, and the assertion completes that offer.
+          // Re-reading here would let a flip land between "tap your finger" and
+          // the tap, stranding a biometric the user already performed against a
+          // rule that changed underneath them. A flip in that window is instead
+          // handled after the fact, by the same auth-surface disconnect every
+          // other live connection gets — which is the honest model: the socket
+          // was admitted, and then re-admission was demanded of it.
+          if (msg.type === 'auth' || msg.type === 'auth-webauthn-start') {
+            auth = this.readAuthDecision()
+          }
 
-        // Fixed order, no cross-method fallthrough: a presented password is
-        // never retried as a token (and vice versa), so a client cannot probe
-        // its way in with whichever credential the server happens to accept.
-        if (typeof msg.pwProof === 'string') {
-          if (!this.passwordParams()) {
-            // Not provisioned, or tunnel mode (E2E needs the fragment key).
-            reject('Password auth not available', 'Password auth not available')
+          // The assertion ceremony is the ONE pre-auth exchange other than `auth`:
+          // it is how a socket acquires authority, so it cannot be gated on
+          // authority. Legal only where a ceremony could actually succeed.
+          if (msg.type === 'auth-webauthn-start' || msg.type === 'auth-webauthn-finish') {
+            if (!handshakeCeremonyAvailable() || !webauthnOrigin) {
+              ws.send(
+                JSON.stringify({
+                  type: 'auth-response',
+                  ok: false,
+                  error: PASSKEY_UNAVAILABLE_ERROR,
+                  retryable: false
+                })
+              )
+              ws.close(4001, 'Passkey auth not available')
+              return
+            }
+            if (msg.type === 'auth-webauthn-start') {
+              // No speculative clearTimeout: the enclosing finally owns arming, so
+              // a refusal inside sendWebauthnChallenge (throttled) or a throw out
+              // of it still leaves this socket on a live clock.
+              const issued = await this.sendWebauthnChallenge(ws, ip, {
+                origin: webauthnOrigin,
+                connectionId,
+                kind: 'auth'
+              })
+              if (issued) beginCeremonyDeadline()
+              return
+            }
+            const result = await this.webauthn.finishAuthentication({
+              origin: webauthnOrigin,
+              connectionId,
+              kind: 'auth',
+              assertion: (msg as WsAuthWebauthnFinish).assertion
+            })
+            if (!result.ok) {
+              // A failed assertion is a failed CREDENTIAL, so it spends the
+              // stricter password budget rather than the token one — the token
+              // budget is calibrated for a 256-bit random value where throttling
+              // is only about resource exhaustion.
+              this.recordFailedAuth(ip, 'password')
+              this.auditAuth({
+                channel: 'auth:webauthn-assert',
+                connectionId,
+                method: 'webauthn',
+                label: 'unauthenticated',
+                capability: 'admin',
+                outcome: 'error'
+              })
+              logger.warn('remote-server', `Passkey assertion from ${ip} failed: ${result.reason}`)
+              ws.send(
+                JSON.stringify({
+                  type: 'auth-response',
+                  ok: false,
+                  error: PASSKEY_FAILED_ERROR,
+                  retryable: true
+                })
+              )
+              ws.close(4001, 'Passkey rejected')
+              return
+            }
+            const label = credentialLabel(result.credential.nickname, result.credential.credId)
+            this.auditAuth({
+              channel: 'auth:webauthn-assert',
+              connectionId,
+              method: 'webauthn',
+              label,
+              capability: 'admin',
+              outcome: 'ok'
+            })
+            accept('webauthn', label)
             return
           }
-          if (this.passwordAuth.verify(msg.pwProof)) {
-            accept('password')
-          } else {
-            this.recordFailedAuth(ip, 'password')
-            reject('Invalid password', 'Invalid password')
-          }
-          return
-        }
 
-        if (typeof msg.token === 'string') {
-          if (this.verifyToken(msg.token)) {
+          if (msg.type !== 'auth') {
+            ws.close(4000, 'Not authenticated')
+            return
+          }
+
+          // `off` — the master no-auth switch (ADR-052 decision 3). ANY auth
+          // frame authenticates, including one with no credential at all: the
+          // mode means "authentication is disabled", so pretending to check
+          // something would be theatre. E2E on the tunnel is untouched — that is
+          // transport confidentiality, not authentication.
+          if (auth.policy === 'off') {
+            accept('none', 'unauthenticated')
+            return
+          }
+
+          // Fixed order, no cross-method fallthrough: a presented password is
+          // never retried as a token (and vice versa), so a client cannot probe
+          // its way in with whichever credential the server happens to accept.
+          // The enrollment token slots between them under the same rule.
+          if (typeof msg.pwProof === 'string') {
+            if (!this.passwordParams()) {
+              // Not provisioned, or tunnel mode (E2E needs the fragment key).
+              reject('Password auth not available', 'Password auth not available')
+              return
+            }
+            // `passkey-only` (break-glass off) removes the password wherever a
+            // passkey is actually possible — never on an origin that cannot do
+            // WebAuthn, which would silently reduce LAN/tunnel to token-only.
+            if (
+              !passwordAuthAllowed({
+                policy: auth.policy,
+                capableOrigin,
+                passwordBreakGlass: auth.ctx.passwordBreakGlass
+              })
+            ) {
+              requirePasskey()
+              return
+            }
+            if (this.passwordAuth.verify(msg.pwProof)) {
+              // Distinct log line: this is the escape hatch, and the operator
+              // should be able to see when it was used rather than a passkey.
+              logger.info('remote-server', `Break-glass password auth accepted from ${ip}`)
+              accept('password')
+            } else {
+              this.recordFailedAuth(ip, 'password')
+              reject('Invalid password', 'Invalid password')
+            }
+            return
+          }
+
+          if (typeof msg.enrollToken === 'string') {
+            if (!this.consumeEnrollToken(msg.enrollToken)) {
+              this.recordFailedAuth(ip, 'password')
+              this.auditAuth({
+                channel: 'auth:enroll-token',
+                connectionId,
+                method: 'enroll-token',
+                label: 'unauthenticated',
+                capability: 'enroll',
+                outcome: 'error'
+              })
+              reject('Enrollment link is invalid or expired', 'Invalid enrollment token')
+              return
+            }
+            this.auditAuth({
+              channel: 'auth:enroll-token',
+              connectionId,
+              method: 'enroll-token',
+              label: 'enroll-token',
+              capability: 'enroll',
+              outcome: 'ok'
+            })
+            accept('enroll-token')
+            return
+          }
+
+          if (typeof msg.token === 'string') {
+            if (!this.verifyToken(msg.token)) {
+              this.recordFailedAuth(ip, 'token')
+              reject('Invalid token', 'Invalid token')
+              return
+            }
+            // A VALID token under `passkey-always` still buys nothing on a capable
+            // origin — it only earns the right to run the ceremony on this socket.
+            // Verified first on purpose: an invalid token must not learn that a
+            // passkey would have worked.
+            if (
+              ceremonyRequiredForAuth({
+                policy: auth.policy,
+                capableOrigin,
+                credentialCount: auth.ctx.credentialCount,
+                method: 'token',
+                passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
+              })
+            ) {
+              requirePasskey()
+              return
+            }
             accept('token')
-          } else {
-            this.recordFailedAuth(ip, 'token')
-            reject('Invalid token', 'Invalid token')
+            return
           }
-          return
-        }
 
-        // `{type:'auth'}` with no credential must never reach a comparator.
-        // A tailnet user whose login is not the owner's lands here (identity did
-        // not authenticate them and they presented nothing else) — give them the
-        // actionable reason instead of a bare "Missing credential".
-        if (identityMismatch) {
-          reject(
-            `Signed in to Tailscale as ${identityMismatch.login.slice(0, 128)}, but this ClaudeUI only accepts ${identityMismatch.ownerLogin.slice(0, 128)}`,
-            'Identity not allowed'
-          )
+          // `{type:'auth'}` with no credential must never reach a comparator.
+          // Under `passkey-always` on a capable origin this is the NORMAL opening
+          // move for a passkey-first client (open the page, biometric, in) — it
+          // has no token to present, so answer with the ceremony prompt rather
+          // than a credential rejection.
+          if (
+            handshakeCeremonyAvailable() &&
+            ceremonyRequiredForAuth({
+              policy: auth.policy,
+              capableOrigin,
+              credentialCount: auth.ctx.credentialCount,
+              method: 'token',
+              passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
+            })
+          ) {
+            requirePasskey()
+            return
+          }
+          // A tailnet user whose login is not the owner's lands here (identity did
+          // not authenticate them and they presented nothing else) — give them the
+          // actionable reason instead of a bare "Missing credential".
+          if (identityMismatch) {
+            reject(
+              `Signed in to Tailscale as ${identityMismatch.login.slice(0, 128)}, but this ClaudeUI only accepts ${identityMismatch.ownerLogin.slice(0, 128)}`,
+              'Identity not allowed'
+            )
+            return
+          }
+          reject('Missing credential', 'Missing credential')
           return
+        } finally {
+          if (!authenticated && ws.readyState === WebSocket.OPEN) armPreAuthDeadline()
         }
-        reject('Missing credential', 'Missing credential')
         return
       }
 
@@ -1853,7 +2456,22 @@ export class RemoteServer {
           this.handleSync(ws, msg.lastSeq, msg.epoch)
           break
         case 'step-up':
-          this.handleStepUp(ws, ip, msg)
+          // AWAITED (not fire-and-forget) so the recv queue keeps step-up frames
+          // in arrival order with the invokes they gate — a `terminal:create`
+          // that overtook its own step-up would be answered `needs-step-up`.
+          await this.handleStepUp(ws, ip, msg)
+          break
+        case 'step-up-challenge-request':
+          await this.handleStepUpChallengeRequest(ws, ip)
+          break
+        case 'auth-webauthn-start':
+        case 'auth-webauthn-finish':
+          // Post-auth ceremony frames are legal ONLY for an enrollment-token
+          // connection re-authenticating itself as `webauthn` after registering
+          // a credential (ADR-052: the enroll connection never silently widens).
+          // Anything else is out of order — same close discipline as a socket
+          // that skips E2E activation.
+          await this.handleEnrollUpgrade(ws, ip, msg)
           break
         case 'term-input':
           this.handleTermInput(ws, msg)
@@ -1887,6 +2505,10 @@ export class RemoteServer {
     ws.on('close', () => {
       clearTimeout(authTimeout)
       clearPending()
+      // A challenge outlives its socket for up to 2 minutes otherwise, and a
+      // challenge whose connection is gone can never be legally completed —
+      // drop it rather than leave it sitting in the map.
+      this.webauthn.challenges.dropConnection(connectionId)
       const client = this.clients.get(ws)
       if (client?.pingTimer) clearInterval(client.pingTimer)
       // Release every PTY attachment this socket held — a phone that sleeps or
@@ -1942,6 +2564,217 @@ export class RemoteServer {
   }
 
   // ---------------------------------------------------------------------------
+  // Passkey ceremony frames (ADR-052)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mint and send an assertion challenge. Returns false when nothing was issued
+   * (throttled, or no credential to assert against).
+   *
+   * Throttle-GATED, not throttle-consuming: a locked-out key gets no challenges,
+   * but merely asking for one does not spend budget — a ceremony a user
+   * cancels and retries (mistyped PIN, phone locked) must not walk them into a
+   * five-minute lockout. Budget is spent by a FAILED assertion, which is the
+   * event that actually indicates guessing.
+   */
+  private async sendWebauthnChallenge(
+    ws: WebSocket,
+    ip: string,
+    args: { origin: WebauthnOrigin; connectionId: string; kind: 'auth' | 'step-up' }
+  ): Promise<boolean> {
+    if (this.isAuthThrottled(ip)) {
+      logger.warn('remote-server', `Refusing a passkey challenge for ${ip}: too many attempts`)
+      if (args.kind === 'auth') {
+        ws.send(
+          JSON.stringify({
+            type: 'auth-response',
+            ok: false,
+            error: 'Too many failed attempts',
+            retryable: false
+          })
+        )
+        ws.close(4006, 'Too many failed attempts')
+      } else {
+        this.sendTo(ws, {
+          type: 'step-up-response',
+          ok: false,
+          code: 'throttled',
+          error: 'Too many attempts — wait a few minutes and try again.',
+          retryable: false
+        })
+      }
+      return false
+    }
+    const options = await this.webauthn.startAuthentication({
+      origin: args.origin,
+      connectionId: args.connectionId,
+      kind: args.kind
+    })
+    if (!options) {
+      if (args.kind === 'auth') {
+        ws.send(
+          JSON.stringify({
+            type: 'auth-response',
+            ok: false,
+            error: PASSKEY_UNAVAILABLE_ERROR,
+            retryable: false
+          })
+        )
+        ws.close(4001, 'Passkey auth not available')
+      } else {
+        this.sendTo(ws, {
+          type: 'step-up-response',
+          ok: false,
+          code: 'passkey-unavailable',
+          error: 'No passkey is enrolled for this device.',
+          retryable: false
+        })
+      }
+      return false
+    }
+    this.sendTo(
+      ws,
+      args.kind === 'auth'
+        ? { type: 'auth-webauthn-challenge', options }
+        : { type: 'step-up-challenge', options }
+    )
+    return true
+  }
+
+  /** `step-up-challenge-request` — the mid-session half of the ceremony. */
+  private async handleStepUpChallengeRequest(ws: WebSocket, ip: string): Promise<void> {
+    const client = this.clients.get(ws)
+    if (!client) return
+    const origin = client.connection.webauthnOrigin
+    if (!origin) {
+      this.sendTo(ws, {
+        type: 'step-up-response',
+        ok: false,
+        code: 'passkey-unavailable',
+        error: 'This connection cannot use a passkey — use the password instead.',
+        retryable: false
+      })
+      return
+    }
+    await this.sendWebauthnChallenge(ws, ip, {
+      origin,
+      connectionId: client.connection.connectionId,
+      kind: 'step-up'
+    })
+  }
+
+  /**
+   * The one post-auth ceremony: an `enroll-token` connection re-authenticating
+   * as `webauthn` on the same socket, right after registering a credential.
+   *
+   * Deliberately NOT a silent widening of the enroll connection: the device has
+   * to prove it can actually USE the passkey it just made, which also means a
+   * registration that half-completed leaves an `enroll`-only socket rather than
+   * an admin one. Any other connection sending these frames is out of order and
+   * gets the 4004 close the E2E state machine uses.
+   */
+  private async handleEnrollUpgrade(
+    ws: WebSocket,
+    ip: string,
+    msg: WsClientMessage
+  ): Promise<void> {
+    const client = this.clients.get(ws)
+    if (!client) return
+    const origin = client.connection.webauthnOrigin
+    if (client.connection.identity.method !== 'enroll-token' || !origin) {
+      ws.close(4004, 'Unexpected auth frame')
+      return
+    }
+    if (msg.type === 'auth-webauthn-start') {
+      await this.sendWebauthnChallenge(ws, ip, {
+        origin,
+        connectionId: client.connection.connectionId,
+        kind: 'auth'
+      })
+      return
+    }
+    if (msg.type !== 'auth-webauthn-finish') return
+
+    const result = await this.webauthn.finishAuthentication({
+      origin,
+      connectionId: client.connection.connectionId,
+      kind: 'auth',
+      assertion: msg.assertion
+    })
+    if (!result.ok) {
+      this.recordFailedAuth(ip, 'password')
+      this.auditAuth({
+        channel: 'auth:webauthn-assert',
+        connectionId: client.connection.connectionId,
+        method: 'enroll-token',
+        label: client.connection.identity.label,
+        capability: 'admin',
+        outcome: 'error'
+      })
+      this.sendTo(ws, {
+        type: 'auth-response',
+        ok: false,
+        error: PASSKEY_FAILED_ERROR,
+        retryable: true
+      })
+      return
+    }
+
+    // Upgrade IN PLACE, keeping the connection id: one socket, one thread in the
+    // audit log, and no terminal/git-watch ownership to migrate.
+    const label = credentialLabel(result.credential.nickname, result.credential.credId)
+    client.authMethod = 'webauthn'
+    client.login = null
+    client.connection.identity = { method: 'webauthn', label, connectedAt: Date.now() }
+
+    // RE-SNAPSHOT the policy. This is a re-authentication moment, and the
+    // connect-time snapshot is provably stale here in the case that matters
+    // most: the first device connects on an enrollment link while AUTO still
+    // resolves to `legacy` (zero credentials), then registers — which flips AUTO
+    // to `passkey-always` — and only then asserts. Computing grants from the
+    // connect-time `legacy` would hand the operator's first passkey the LEGACY
+    // set and no way to manage credentials until it reconnected.
+    //
+    // Only the POLICY is re-read; `capableOrigin` stays true because it is a
+    // fact about this connection's Host, which cannot change under it. Same
+    // single-read helper the handshake uses — a third copy of "read context,
+    // resolve policy" is exactly how the two halves drift apart.
+    const fresh = this.readAuthDecision()
+    client.policy = fresh.policy
+    client.policyCtx = fresh.ctx
+    client.connection.grants = grantsFor({
+      method: 'webauthn',
+      policy: fresh.policy,
+      capableOrigin: true,
+      // Inert for `webauthn` (a completed ceremony is not the token/tailnet
+      // branch), but required by the signature so no call site can omit the
+      // fields that DO matter — which is exactly how they were omitted before.
+      credentialCount: fresh.ctx.credentialCount,
+      passkeyTailnetExempt: fresh.ctx.passkeyTailnetExempt
+    })
+    this.auditAuth({
+      channel: 'auth:webauthn-assert',
+      connectionId: client.connection.connectionId,
+      method: 'webauthn',
+      label,
+      capability: 'admin',
+      outcome: 'ok'
+    })
+    logger.info('remote-server', `Enrollment connection from ${client.ip} upgraded to passkey auth`)
+    // Same shape the initial webauthn accept sends, `identity` included: this is
+    // an authentication result like any other, and a client should not have to
+    // special-case where in its lifecycle the frame arrived to learn which
+    // passkey it is now holding.
+    this.sendTo(ws, {
+      type: 'auth-response',
+      ok: true,
+      method: 'webauthn',
+      identity: { login: label }
+    })
+    this.notifyStatus()
+  }
+
+  // ---------------------------------------------------------------------------
   // Terminal: step-up, grant decay, volatile stream (SyncCore phase 2)
   // ---------------------------------------------------------------------------
 
@@ -1990,7 +2823,7 @@ export class RemoteServer {
    * consumes the SAME per-key password budget — a step-up brute force must not
    * get a fresh allowance just because it arrives on an authenticated socket.
    */
-  private handleStepUp(ws: WebSocket, ip: string, msg: WsStepUpRequest): void {
+  private async handleStepUp(ws: WebSocket, ip: string, msg: WsStepUpRequest): Promise<void> {
     const respond = (response: Omit<WsStepUpResponse, 'type'>): void => {
       this.sendTo(ws, { type: 'step-up-response', ...response })
     }
@@ -2004,6 +2837,100 @@ export class RemoteServer {
         ok: false,
         code: 'terminal-disabled',
         error: 'Remote terminal is turned off. Enable it in Settings › Remote on the desktop app.',
+        retryable: false
+      })
+      return
+    }
+
+    // ── Passkey path (ADR-052 decision 5: step-up is passkey-FIRST) ──────────
+    // Branch on `assertion` before `pwProof` and never fall through, mirroring
+    // the handshake's one-credential-per-frame rule: a client must not be able
+    // to try a passkey and then a password on one socket.
+    const origin = client.connection.webauthnOrigin ?? null
+    // The enrolled COUNT is read live, not from the connection's policy
+    // snapshot: a device that just enrolled on this very socket must be able to
+    // step up with the passkey it made seconds ago. Step-up is a rare ceremony,
+    // not the `term-input` hot path, so the cheap COUNT(*) is affordable here.
+    const credentialCount = this.credentialCount()
+    if (msg.assertion !== undefined) {
+      if (!origin || credentialCount === 0) {
+        respond({
+          ok: false,
+          code: 'passkey-unavailable',
+          error: 'No passkey is available on this connection.',
+          retryable: false
+        })
+        return
+      }
+      if (this.isAuthThrottled(ip)) {
+        logger.warn('remote-server', `Refusing step-up for ${ip}: too many failed attempts`)
+        respond({
+          ok: false,
+          code: 'throttled',
+          error: 'Too many attempts — wait a few minutes and try again.',
+          retryable: false
+        })
+        return
+      }
+      const result = await this.webauthn.finishAuthentication({
+        origin,
+        connectionId: client.connection.connectionId,
+        kind: 'step-up',
+        assertion: msg.assertion
+      })
+      if (!result.ok) {
+        // SAME budget as a bad password — an assertion brute force must not get
+        // a fresh allowance just because it is a different frame field.
+        this.recordFailedAuth(ip, 'password')
+        this.auditAuth({
+          channel: 'auth:webauthn-assert',
+          connectionId: client.connection.connectionId,
+          method: client.connection.identity.method,
+          label: client.connection.identity.label,
+          capability: 'shell',
+          outcome: 'error'
+        })
+        respond({
+          ok: false,
+          code: 'invalid-assertion',
+          error: 'That passkey did not verify.',
+          retryable: true
+        })
+        return
+      }
+      const expiresAt = this.armShellGrant(client, policy)
+      this.auditAuth({
+        channel: 'auth:webauthn-assert',
+        connectionId: client.connection.connectionId,
+        method: 'webauthn',
+        label: credentialLabel(result.credential.nickname, result.credential.credId),
+        capability: 'shell',
+        outcome: 'ok'
+      })
+      logger.info(
+        'remote-server',
+        `Shell grant armed for ${client.ip} via passkey step-up (expires in ${policy.shellGrantIdleMinutes}m)`
+      )
+      respond({ ok: true, expiresAt })
+      return
+    }
+
+    // ── Password fallback ────────────────────────────────────────────────────
+    // Accepted where a passkey is impossible (non-capable origin, nothing
+    // enrolled) or where break-glass is on. Under `passkey-only` on a capable
+    // origin the client is told to run the ceremony instead of re-prompting.
+    if (
+      !passwordStepUpAllowed({
+        policy: client.policy,
+        capableOrigin: origin !== null,
+        credentialCount,
+        passwordBreakGlass: client.policyCtx.passwordBreakGlass
+      })
+    ) {
+      respond({
+        ok: false,
+        code: 'passkey-required',
+        error: 'This server requires a passkey to unlock the terminal.',
         retryable: false
       })
       return
@@ -2055,14 +2982,26 @@ export class RemoteServer {
       return
     }
 
+    const expiresAt = this.armShellGrant(client, policy)
+    logger.info(
+      'remote-server',
+      `Shell grant armed for ${client.ip} via password step-up (expires in ${policy.shellGrantIdleMinutes}m)`
+    )
+    respond({ ok: true, expiresAt })
+  }
+
+  /**
+   * ONE arming path, two proof kinds (passkey and password).
+   *
+   * Kept as a single method deliberately: the decay contract — which grant is
+   * added, and exactly when it expires — must not be able to differ between the
+   * two factors, which is precisely the kind of drift a second copy invites.
+   */
+  private armShellGrant(client: AuthenticatedClient, policy: TerminalPolicy): number {
     const expiresAt = Date.now() + shellGrantIdleMs(policy)
     client.connection.grants = new Set<Capability>([...client.connection.grants, 'shell'])
     client.connection.shellGrantExpiresAt = expiresAt
-    logger.info(
-      'remote-server',
-      `Shell grant armed for ${client.ip} via step-up (expires in ${policy.shellGrantIdleMinutes}m)`
-    )
-    respond({ ok: true, expiresAt })
+    return expiresAt
   }
 
   /**
@@ -2373,6 +3312,20 @@ export class RemoteServer {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+/**
+ * Audit / status label for a passkey connection: the credential's nickname when
+ * the operator named it, else a short credential-id prefix.
+ *
+ * The prefix is deliberately truncated — a full base64url credential id is long
+ * enough to make a log line unreadable, and 12 characters of a random id is
+ * already a stable per-device handle. It is not a secret (the operator's own
+ * management list shows it), so truncation costs nothing but noise.
+ */
+function credentialLabel(nickname: string | null, credId: string): string {
+  const trimmed = nickname?.trim()
+  return trimmed ? trimmed : `passkey:${credId.slice(0, 12)}`
+}
 
 /** User-facing message for a failed TLS-mode bring-up. */
 function tlsFailureMessage(err: unknown): string {

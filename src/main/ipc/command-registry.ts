@@ -32,7 +32,16 @@ import { logger } from '../services/logger'
 // Capabilities, kinds, transports
 // ---------------------------------------------------------------------------
 
-/** The closed capability set (security.md §"Capability grants"). */
+/**
+ * The closed capability set (security.md §"Capability grants").
+ *
+ * `enroll` is the ADR-052 passkey addition: the authority to CREATE a
+ * credential, and nothing else. It is separate from `admin` on purpose — a
+ * one-time enrollment token hands out exactly this one capability, so a leaked
+ * enrollment link can add a device but cannot read a conversation, list
+ * credentials, or revoke the operator's own passkey. (The docs' vocabulary list
+ * grows by this one entry; the amendment lands with series 2.)
+ */
 export const CAPABILITIES = [
   'chat',
   'session-config',
@@ -41,6 +50,7 @@ export const CAPABILITIES = [
   'fs-read',
   'shell',
   'admin',
+  'enroll',
   'host'
 ] as const
 
@@ -64,12 +74,31 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
 // Connection identity + grants
 // ---------------------------------------------------------------------------
 
-/** How a connection proved who it is. `desktop` is the in-process renderer. */
-export type IdentityMethod = 'token' | 'password' | 'tailnet-identity' | 'desktop'
+/**
+ * How a connection proved who it is. `desktop` is the in-process renderer.
+ *
+ * ADR-052 adds three: `webauthn` (a completed passkey assertion — the only
+ * method that proves a human rather than a cached secret), `enroll-token` (a
+ * one-time link that may do nothing but register a credential), and `none`
+ * (the `off` policy mode, where authentication is disabled outright and the
+ * audit trail must say so rather than implying a credential was checked).
+ */
+export type IdentityMethod =
+  | 'token'
+  | 'password'
+  | 'tailnet-identity'
+  | 'webauthn'
+  | 'enroll-token'
+  | 'none'
+  | 'desktop'
 
 export interface ConnectionIdentity {
   method: IdentityMethod
-  /** Tailnet login when we have one, else the method name. Audit-facing. */
+  /**
+   * Tailnet login when we have one; for `webauthn`, the credential's nickname
+   * (falling back to a short credential-id prefix, which is still a stable
+   * per-device handle); otherwise the method name. Audit-facing.
+   */
   label: string
   connectedAt: number
 }
@@ -79,6 +108,14 @@ export interface CommandConnection {
   connectionId: string
   identity: ConnectionIdentity
   grants: ReadonlySet<Capability>
+  /**
+   * The WebAuthn RP binding for this connection's origin, or `null` on an
+   * origin that cannot do WebAuthn (LAN IP, tunnel hostname, the desktop
+   * renderer). Resolved ONCE from the request `Host` at connection time and
+   * carried here because the enrollment verbs run through the registry — a
+   * handler must never re-derive an origin from anything the caller sends.
+   */
+  webauthnOrigin?: { rpId: string; origin: string } | null
   /**
    * Phase 2 (ADR-052 decision 5): expiry of a DECAYING `shell` grant.
    *
@@ -131,6 +168,41 @@ export const LEGACY_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>
 ])
 
 /**
+ * Grant set for a connection that proved a HUMAN: a completed passkey assertion
+ * (ADR-052 decision 1) or the break-glass password under a passkey policy.
+ *
+ * The legacy set plus `admin` and `enroll`. `admin` is safe to grant over
+ * remote because reachability is still `registered for the remote transport AND
+ * capability ∈ grants`: the `admin` channels that must never be remote —
+ * `remote:set-config` (which owns the policy column and the terminal toggle),
+ * `remote:set-password`, `remote:force-reserve`, `account:*`, `auth:*` — are
+ * raw desktop `ipcMain.handle` wiring and have no remote registration at all.
+ * What `admin` actually reaches over remote is the credential-management verbs
+ * this phase adds, which is the point: managing your passkeys from your phone.
+ *
+ * NOT `shell`: raw terminal still costs the desktop opt-in plus a step-up, and a
+ * passkey at connect time is not the same evidence as a passkey ten minutes into
+ * a session (ADR-052 decision 5 — decay applies in `passkey-always` too).
+ * NOT `host`: there is no host shell to reach from a phone.
+ */
+export const PASSKEY_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>([
+  ...LEGACY_REMOTE_GRANTS,
+  'admin',
+  'enroll'
+])
+
+/**
+ * A one-time enrollment link's grant set: `enroll` and NOTHING else.
+ *
+ * It does not widen on a successful registration either — the client re-runs the
+ * assertion ceremony on the same socket and comes back as `webauthn`. That
+ * ordering matters: it means the credential the device just created is what buys
+ * it access, so a link intercepted between minting and use can add a passkey the
+ * operator will see in the management list, but cannot read anything.
+ */
+export const ENROLL_ONLY_GRANTS: ReadonlySet<Capability> = new Set<Capability>(['enroll'])
+
+/**
  * The desktop renderer's synthetic connection. One id per app run so audit rows
  * from a single session group together; ALL grants (it is the host surface).
  */
@@ -147,16 +219,26 @@ export function desktopConnection(): CommandConnection {
   return desktopConnectionSingleton
 }
 
-/** Build a remote connection descriptor at authentication time. */
+/**
+ * Build a remote connection descriptor at authentication time.
+ *
+ * `opts.connectionId` lets the caller reuse an id it minted when the SOCKET
+ * opened rather than when it authenticated. The remote server does exactly
+ * that, so pre-auth audit rows (a failed assertion, a burned enrollment token)
+ * and the post-auth command rows share one id and read as one story — without
+ * it, every rejected handshake would be an orphan row.
+ */
 export function makeRemoteConnection(
   method: Exclude<IdentityMethod, 'desktop'>,
   login: string | null,
-  grants: ReadonlySet<Capability> = LEGACY_REMOTE_GRANTS
+  grants: ReadonlySet<Capability> = LEGACY_REMOTE_GRANTS,
+  opts?: { connectionId?: string; webauthnOrigin?: { rpId: string; origin: string } | null }
 ): CommandConnection {
   return {
-    connectionId: randomUUID(),
+    connectionId: opts?.connectionId ?? randomUUID(),
     identity: { method, label: login ?? method, connectedAt: Date.now() },
     grants,
+    webauthnOrigin: opts?.webauthnOrigin ?? null,
     // Decaying-grant connection with nothing armed: `shell` arrives only via
     // the step-up ceremony (ADR-052 decision 5), never at authentication.
     shellGrantExpiresAt: null
@@ -227,12 +309,23 @@ interface Declaration {
  * would silently widen the remote surface pin their capability here, and
  * `register()` refuses any registration that contradicts the pin.
  *
- * Every entry resolves to `host`, `shell` or `admin` — none of which are in
- * {@link LEGACY_REMOTE_GRANTS} — so registering any of them for the remote
- * transport still cannot make it reachable. Channels not yet ported to the
- * registry (`window:*`, `app:*` and `remote:*` in main/index.ts, `terminal:*`
- * in terminal.ipc.ts) are pinned here in advance, so they arrive correctly
- * classified whenever those files are ported.
+ * Every entry resolves to `host`, `shell`, `admin` or `enroll` — none of which
+ * are in {@link LEGACY_REMOTE_GRANTS} — so registering any of them for the
+ * remote transport cannot make it reachable to a token/tailnet connection.
+ * Channels not yet ported to the registry (`window:*`, `app:*` and `remote:*`
+ * in main/index.ts, `terminal:*` in terminal.ipc.ts) are pinned here in
+ * advance, so they arrive correctly classified whenever those files are ported.
+ *
+ * **What ADR-052 changed about this table's guarantee, stated honestly.**
+ * Before passkeys, `admin` was ungrantable over remote FULL STOP, so a pin to
+ * `admin` was equivalent to "unreachable remotely". A passkey-authenticated
+ * connection now holds `admin` ({@link PASSKEY_REMOTE_GRANTS}), so the pin's
+ * remaining guarantee is the narrower — and still load-bearing — one: a pinned
+ * channel can never be RECLASSIFIED into a capability the base grant set holds.
+ * The channels that must stay desktop-only are kept so by the OTHER half of the
+ * reachability rule (they have no remote registration at all: `remote:*`,
+ * `auth:*`, `account:*` and `window:*` are raw `ipcMain.handle` wiring in
+ * boot-core.ts / index.ts). `remote-handlers.ipc.test.ts` pins that absence.
  */
 export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // Host shell surfaces (window controls, native pickers, editor launch, quit).
@@ -303,7 +396,18 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'remote:set-password': 'admin',
   'remote:clear-password': 'admin',
   'remote:tailscale-detect': 'admin',
-  'remote:force-reserve': 'admin'
+  'remote:force-reserve': 'admin',
+  // Passkeys (ADR-052). Registered for real — unlike most of this table — and
+  // pinned because a misclassification here is precisely the silent widening the
+  // pin exists to stop: `webauthn:revoke` reclassified as `config` would let a
+  // plain token connection delete the operator's passkeys, and
+  // `webauthn:register-verify` as `config` would let one enroll its own.
+  'webauthn:register-options': 'enroll',
+  'webauthn:register-verify': 'enroll',
+  'webauthn:credentials': 'admin',
+  'webauthn:rename': 'admin',
+  'webauthn:revoke': 'admin',
+  'webauthn:mint-enroll-token': 'admin'
 }
 
 // ---------------------------------------------------------------------------

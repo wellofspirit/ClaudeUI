@@ -13,7 +13,13 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
-import type { EngineId, ModelRef, AccountInfo, DispatchedUsageSummary } from '../../shared/types'
+import type {
+  EngineId,
+  ModelRef,
+  AccountInfo,
+  DispatchedUsageSummary,
+  RemoteAuthPolicy
+} from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
 
@@ -367,6 +373,56 @@ export const MIGRATIONS: Migration[] = [
       db.exec(`
         ALTER TABLE remote_config ADD COLUMN allow_terminal INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE remote_config ADD COLUMN shell_grant_idle_minutes INTEGER NOT NULL DEFAULT 10;
+      `)
+    }
+  },
+  {
+    // v11 — passkeys (ADR-052 decision 1-3 / security.md §"Identity &
+    // authentication methods"): the WebAuthn credential table and the three
+    // policy columns.
+    //
+    // A stolen DB leaks PUBLIC keys only — `public_key` is the COSE public key
+    // the authenticator handed us at registration; the private half never
+    // leaves the device's enclave. `sign_count` is RECORDED BUT NEVER ENFORCED:
+    // synced passkeys (iCloud Keychain / Google Password Manager) legitimately
+    // report 0 forever, so a counter-regression rejection would lock out
+    // exactly the credentials the design is built around.
+    //
+    // `cred_id` is base64url TEXT (what the wire and @simplewebauthn both speak)
+    // rather than a BLOB, so lookups need no encoding dance; `transports` is a
+    // JSON array or NULL because it is opaque metadata we only ever hand back to
+    // the browser verbatim.
+    //
+    // `auth_policy` is NULLABLE ON PURPOSE: NULL means AUTO — ≥1 credential
+    // resolves to `passkey-always`, otherwise `legacy`. That is how "default
+    // once a credential is enrolled" stays true without a migration having to
+    // guess, while an explicit value still wins forever after. The column lives
+    // in `remote_config` (not settings.json) for the same reason
+    // `allow_terminal` does: `config:save-settings` is remotely reachable, and a
+    // remotely writable policy column would let a client downgrade its own
+    // authentication.
+    //
+    // `password_break_glass` defaults to 1 (owner decision: break-glass ON by
+    // default; the `passkey-only` toggle clears it). `passkey_tailnet_exempt`
+    // defaults to 0 — under `passkey-always` a tailnet identity does NOT skip
+    // the ceremony (device theft is the threat ambient identity does not cover).
+    version: 11,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS webauthn_credential (
+          cred_id        TEXT PRIMARY KEY,
+          public_key     BLOB NOT NULL,
+          transports     TEXT,
+          nickname       TEXT,
+          created_at     INTEGER NOT NULL,
+          last_used_at   INTEGER,
+          backed_up      INTEGER NOT NULL DEFAULT 0,
+          aaguid         TEXT,
+          sign_count     INTEGER NOT NULL DEFAULT 0
+        );
+        ALTER TABLE remote_config ADD COLUMN auth_policy TEXT;
+        ALTER TABLE remote_config ADD COLUMN password_break_glass INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE remote_config ADD COLUMN passkey_tailnet_exempt INTEGER NOT NULL DEFAULT 0;
       `)
     }
   }
@@ -1365,6 +1421,29 @@ export const DEFAULT_TLS_HTTPS_PORT = 443
  */
 export const DEFAULT_SHELL_GRANT_IDLE_MINUTES = 10
 
+/**
+ * The closed policy vocabulary, as a runtime value — the IPC validator and the
+ * row mapper both need to test membership, and duplicating the literals is how
+ * a fourth mode would end up accepted in one place and rejected in the other.
+ */
+export const REMOTE_AUTH_POLICIES: readonly RemoteAuthPolicy[] = [
+  'passkey-always',
+  'passkey-for-grants',
+  'legacy',
+  'off'
+]
+
+/**
+ * Parse `remote_config.auth_policy`. Fails to AUTO (`null`), never to `off`:
+ * the master switch must only ever be reachable by an explicit, audited write.
+ */
+export function parseAuthPolicy(raw: string | null | undefined): RemoteAuthPolicy | null {
+  if (raw == null) return null
+  return (REMOTE_AUTH_POLICIES as readonly string[]).includes(raw)
+    ? (raw as RemoteAuthPolicy)
+    : null
+}
+
 interface RemoteConfigDbRow {
   id: number
   port: number
@@ -1376,6 +1455,9 @@ interface RemoteConfigDbRow {
   last_serve_local_port: number | null
   allow_terminal: number
   shell_grant_idle_minutes: number
+  auth_policy: string | null
+  password_break_glass: number
+  passkey_tailnet_exempt: number
   password_salt: string | null
   password_hash: string | null
   kdf_params: string | null
@@ -1398,6 +1480,16 @@ export interface RemoteConfigRow {
   allowTerminal: boolean
   /** Idle decay window for a stepped-up `shell` grant, in minutes. */
   shellGrantIdleMinutes: number
+  /**
+   * Stored auth policy (ADR-052 decision 3), or `null` for AUTO. An
+   * unrecognised string in the column reads as `null` — a corrupt/hand-edited
+   * row must fall back to AUTO, never to `off`.
+   */
+  authPolicy: RemoteAuthPolicy | null
+  /** Break-glass password accepted under the passkey modes. Default ON. */
+  passwordBreakGlass: boolean
+  /** Tailnet identity may skip the ceremony under `passkey-always`. Default OFF. */
+  passkeyTailnetExempt: boolean
   passwordSalt: string | null
   passwordHash: string | null
   kdfParams: string | null
@@ -1421,6 +1513,12 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
     // `undefined` (which would be falsy for the toggle but NaN-ish for the window).
     allowTerminal: row.allow_terminal === 1,
     shellGrantIdleMinutes: row.shell_grant_idle_minutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
+    // Same in-code COALESCE reasoning again for the v11 columns. `auth_policy`
+    // additionally VALIDATES: anything outside the closed set (including a
+    // hand-edited row) reads as AUTO, so a typo can never silently mean `off`.
+    authPolicy: parseAuthPolicy(row.auth_policy),
+    passwordBreakGlass: (row.password_break_glass ?? 1) === 1,
+    passkeyTailnetExempt: (row.passkey_tailnet_exempt ?? 0) === 1,
     passwordSalt: row.password_salt,
     passwordHash: row.password_hash,
     kdfParams: row.kdf_params,
@@ -1459,6 +1557,11 @@ export function setRemoteConfig(partial: {
   tlsHttpsPort?: number
   allowTerminal?: boolean
   shellGrantIdleMinutes?: number
+  /** `null` is a MEANINGFUL value here (restore AUTO), so it is distinguished
+   *  from `undefined` (leave alone) — same convention as `bindHost`. */
+  authPolicy?: RemoteAuthPolicy | null
+  passwordBreakGlass?: boolean
+  passkeyTailnetExempt?: boolean
 }): void {
   const db = getDb()
   const existing = getRemoteConfigDbRow(db)
@@ -1478,13 +1581,28 @@ export function setRemoteConfig(partial: {
     partial.shellGrantIdleMinutes ??
     existing?.shell_grant_idle_minutes ??
     DEFAULT_SHELL_GRANT_IDLE_MINUTES
+  const authPolicy =
+    partial.authPolicy !== undefined ? partial.authPolicy : (existing?.auth_policy ?? null)
+  const passwordBreakGlass =
+    partial.passwordBreakGlass !== undefined
+      ? partial.passwordBreakGlass
+        ? 1
+        : 0
+      : (existing?.password_break_glass ?? 1)
+  const passkeyTailnetExempt =
+    partial.passkeyTailnetExempt !== undefined
+      ? partial.passkeyTailnetExempt
+        ? 1
+        : 0
+      : (existing?.passkey_tailnet_exempt ?? 0)
 
   db.prepare(
     `INSERT INTO remote_config (
        id, port, bind_host, autostart, tls_mode, tls_https_port,
-       allow_terminal, shell_grant_idle_minutes, updated_at
+       allow_terminal, shell_grant_idle_minutes,
+       auth_policy, password_break_glass, passkey_tailnet_exempt, updated_at
      )
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        port                     = excluded.port,
        bind_host                = excluded.bind_host,
@@ -1493,6 +1611,9 @@ export function setRemoteConfig(partial: {
        tls_https_port           = excluded.tls_https_port,
        allow_terminal           = excluded.allow_terminal,
        shell_grant_idle_minutes = excluded.shell_grant_idle_minutes,
+       auth_policy              = excluded.auth_policy,
+       password_break_glass     = excluded.password_break_glass,
+       passkey_tailnet_exempt   = excluded.passkey_tailnet_exempt,
        updated_at               = excluded.updated_at`
   ).run(
     port,
@@ -1502,6 +1623,9 @@ export function setRemoteConfig(partial: {
     tlsHttpsPort,
     allowTerminal,
     shellGrantIdleMinutes,
+    authPolicy,
+    passwordBreakGlass,
+    passkeyTailnetExempt,
     Date.now()
   )
 }
@@ -1595,6 +1719,169 @@ export function clearRemotePassword(): void {
        updated_at = ?
      WHERE id = 1`
   ).run(Date.now())
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn credential repository (ADR-052 decision 1 / security.md §Passkeys)
+//
+// Public keys only. `publicKey` is the COSE-encoded PUBLIC half handed over at
+// registration; the private key never leaves the authenticator's enclave, so a
+// stolen operational.db leaks nothing that can authenticate. Nothing here is
+// ever exposed verbatim over a wire — the management verbs project a
+// deliberately narrower row (see `webauthn:credentials`).
+// ---------------------------------------------------------------------------
+
+/** One enrolled passkey. `credId` is base64url — the id the wire speaks. */
+export interface WebauthnCredentialRow {
+  credId: string
+  /** COSE public key bytes. NEVER leaves the main process. */
+  publicKey: Buffer
+  /** Authenticator transports (`['internal','hybrid']`, …), or null. */
+  transports: string[] | null
+  nickname: string | null
+  createdAt: number
+  lastUsedAt: number | null
+  /** Synced/multi-device credential (iCloud Keychain, Google PM, …). */
+  backedUp: boolean
+  aaguid: string | null
+  /** Recorded, NEVER enforced — synced passkeys legitimately report 0. */
+  signCount: number
+}
+
+interface WebauthnCredentialDbRow {
+  cred_id: string
+  public_key: Buffer | Uint8Array
+  transports: string | null
+  nickname: string | null
+  created_at: number
+  last_used_at: number | null
+  backed_up: number
+  aaguid: string | null
+  sign_count: number
+}
+
+function rowToWebauthnCredential(row: WebauthnCredentialDbRow): WebauthnCredentialRow {
+  let transports: string[] | null = null
+  if (row.transports) {
+    try {
+      const parsed: unknown = JSON.parse(row.transports)
+      // A hand-edited / corrupt column must not crash the auth path; it is
+      // opaque metadata we only ever echo back to the browser.
+      if (Array.isArray(parsed)) transports = parsed.filter((t): t is string => typeof t === 'string')
+    } catch {
+      transports = null
+    }
+  }
+  return {
+    credId: row.cred_id,
+    // node:sqlite (the vitest shim) hands back a Uint8Array where
+    // better-sqlite3 hands back a Buffer; normalize so callers see one type.
+    publicKey: Buffer.isBuffer(row.public_key) ? row.public_key : Buffer.from(row.public_key),
+    transports,
+    nickname: row.nickname,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    backedUp: row.backed_up === 1,
+    aaguid: row.aaguid,
+    signCount: row.sign_count
+  }
+}
+
+/** Insert a freshly verified credential. Throws on a duplicate `credId`
+ *  (the PRIMARY KEY) — which is exactly what `excludeCredentials` prevents. */
+export function insertWebauthnCredential(cred: {
+  credId: string
+  publicKey: Uint8Array
+  transports?: string[] | null
+  nickname?: string | null
+  createdAt?: number
+  backedUp?: boolean
+  aaguid?: string | null
+  signCount?: number
+}): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO webauthn_credential (
+       cred_id, public_key, transports, nickname, created_at, last_used_at,
+       backed_up, aaguid, sign_count
+     ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`
+  ).run(
+    cred.credId,
+    Buffer.from(cred.publicKey),
+    cred.transports && cred.transports.length > 0 ? JSON.stringify(cred.transports) : null,
+    cred.nickname ?? null,
+    cred.createdAt ?? Date.now(),
+    cred.backedUp ? 1 : 0,
+    cred.aaguid ?? null,
+    cred.signCount ?? 0
+  )
+}
+
+/** Every enrolled credential, oldest first (enrollment order is the useful one). */
+export function listWebauthnCredentials(): WebauthnCredentialRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM webauthn_credential ORDER BY created_at ASC, cred_id ASC')
+    .all() as WebauthnCredentialDbRow[]
+  return rows.map(rowToWebauthnCredential)
+}
+
+/** One credential by base64url id, or null. */
+export function getWebauthnCredential(credId: string): WebauthnCredentialRow | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM webauthn_credential WHERE cred_id = ?').get(credId) as
+    | WebauthnCredentialDbRow
+    | undefined
+  return row ? rowToWebauthnCredential(row) : null
+}
+
+/**
+ * How many credentials are enrolled. This is what AUTO policy resolution reads,
+ * so it is a COUNT rather than `listWebauthnCredentials().length` — it runs on
+ * every connection and must not deserialize every public key to answer.
+ */
+export function countWebauthnCredentials(): number {
+  const db = getDb()
+  const row = db.prepare('SELECT COUNT(*) AS n FROM webauthn_credential').get() as
+    | { n: number }
+    | undefined
+  return Number(row?.n ?? 0)
+}
+
+/** Delete one credential. Returns false when nothing matched. */
+export function deleteWebauthnCredential(credId: string): boolean {
+  const db = getDb()
+  return db.prepare('DELETE FROM webauthn_credential WHERE cred_id = ?').run(credId).changes > 0
+}
+
+/**
+ * Record the post-assertion facts: last use, the authenticator's sign counter
+ * (stored, never compared) and the current backup state — a credential the user
+ * later syncs to iCloud flips `backedUp` on a subsequent assertion, and the
+ * management UI shows that flag.
+ */
+export function touchWebauthnCredential(
+  credId: string,
+  update: { lastUsedAt: number; signCount: number; backedUp: boolean }
+): void {
+  const db = getDb()
+  db.prepare(
+    `UPDATE webauthn_credential SET
+       last_used_at = ?,
+       sign_count   = ?,
+       backed_up    = ?
+     WHERE cred_id = ?`
+  ).run(update.lastUsedAt, update.signCount, update.backedUp ? 1 : 0, credId)
+}
+
+/** Rename one credential (`null` clears the nickname). False when no such row. */
+export function renameWebauthnCredential(credId: string, nickname: string | null): boolean {
+  const db = getDb()
+  return (
+    db
+      .prepare('UPDATE webauthn_credential SET nickname = ? WHERE cred_id = ?')
+      .run(nickname, credId).changes > 0
+  )
 }
 
 // ---------------------------------------------------------------------------

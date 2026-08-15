@@ -265,7 +265,7 @@ import { bootCore, type CoreBoot } from '../../main/boot-core'
 import { getSessionManager } from '../../main/ipc/session.ipc'
 import { getHostWindow } from '../../main/services/host-window'
 import { syncCore } from '../../main/services/sync-host'
-import { setRemoteConfig } from '../../main/services/db'
+import { listAuditLog, setRemoteConfig } from '../../main/services/db'
 
 // ---------------------------------------------------------------------------
 // The fake engine: one controllable cli.js run per `query()` call.
@@ -332,6 +332,8 @@ const CWD = '/tmp/proj'
 let core: CoreBoot
 let client: RemoteClient
 let port: number
+/** Kept so the last test can drive a REAL `remote:set-config` invoke. */
+let ipcBridge: TestIpcBridge
 /** Every server→client frame, in arrival order. */
 const frames: WsServerMessage[] = []
 
@@ -349,7 +351,8 @@ beforeAll(async () => {
   // that mints a stand-in window, and this file's whole claim is that none exists.
   // Nothing in the flow below invokes over the desktop transport — the client is a
   // WebSocket — so the bridge is just the registration sink.
-  setIpcBridge(new TestIpcBridge())
+  ipcBridge = new TestIpcBridge()
+  setIpcBridge(ipcBridge)
 
   mockQuery.mockImplementation(() => {
     const engine = makeEngineHandle()
@@ -565,5 +568,80 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     expect(windowsConstructed).toEqual([])
     expect(getHostWindow()).toBeNull()
     expect(tempHome).toContain('claudeui-windowless-')
+  })
+
+  // LAST TEST ON PURPOSE — it disconnects the shared client. It reconnects one
+  // before returning anyway, so a future test appended below still works; the
+  // placement is belt, the reconnect is braces.
+  it('an auth-surface change audits AND drops every live client (ADR-052)', async () => {
+    // The one piece of the passkey round that unit tests could only cover in
+    // halves: `authSurfaceChanged` and `disconnectAuthSurfaceClients` are each
+    // tested directly, but the DISPATCH between them lives in boot-core's
+    // `remote:set-config` handler. This drives that handler for real — through
+    // the same `ipcRenderer.invoke` path the Settings pane uses, against the
+    // server `bootCore()` autostarted — and asserts both effects together.
+    expect(client.ws.readyState).toBe(1) // OPEN
+    const auditBefore = listAuditLog({ limit: 200 }).filter(
+      (r) => r.channel === 'auth:policy-change'
+    ).length
+
+    // Resolves to the close code, or `'still-open'` after a generous ceiling —
+    // so a regression reports "expected 'still-open' to be 4009" in a second
+    // instead of hanging until the suite timeout.
+    const closed = new Promise<number | string>((resolve) => {
+      const timer = setTimeout(() => resolve('still-open'), 5000)
+      client.ws.once('close', (code) => {
+        clearTimeout(timer)
+        resolve(code)
+      })
+    })
+
+    // NOT the policy mode: a break-glass flip is precisely the case the first
+    // implementation left unaudited and un-disconnected, because it gated on
+    // `partial.authPolicy !== undefined`.
+    const updated = await ipcBridge.ipcRenderer.invoke('remote:set-config', {
+      passwordBreakGlass: false
+    })
+    expect(updated).toMatchObject({ passwordBreakGlass: false })
+
+    // (a) every remote socket is dropped, so nobody keeps the rules they were
+    // admitted under.
+    expect(await closed).toBe(4009)
+    await vi.waitFor(() => expect(core.remoteServer.getStatus().connectedClients).toBe(0), {
+      timeout: 5000,
+      interval: 10
+    })
+
+    // (b) …and the change is on the record.
+    const auditAfter = listAuditLog({ limit: 200 }).filter(
+      (r) => r.channel === 'auth:policy-change'
+    )
+    expect(auditAfter.length).toBe(auditBefore + 1)
+    expect(auditAfter[0]).toMatchObject({
+      channel: 'auth:policy-change',
+      capability: 'admin',
+      method: 'desktop',
+      kind: 'command',
+      outcome: 'ok'
+    })
+
+    // A no-op write must do neither again — otherwise every Settings save would
+    // kick every phone off.
+    const closedAgain = vi.fn()
+    const token = core.remoteServer.getStatus().token!
+    client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+    await client.ready
+    client.onMessage((msg) => frames.push(msg))
+    client.ws.once('close', closedAgain)
+
+    await ipcBridge.ipcRenderer.invoke('remote:set-config', { passwordBreakGlass: false })
+    await new Promise((r) => setTimeout(r, 100))
+    expect(closedAgain).not.toHaveBeenCalled()
+    expect(
+      listAuditLog({ limit: 200 }).filter((r) => r.channel === 'auth:policy-change').length
+    ).toBe(auditBefore + 1)
+
+    // Leave the shared client connected for anything appended after this.
+    expect(client.ws.readyState).toBe(1)
   })
 })

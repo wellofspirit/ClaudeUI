@@ -55,13 +55,22 @@ import { logger } from './services/logger'
 import {
   DEFAULT_TLS_HTTPS_PORT,
   DEFAULT_SHELL_GRANT_IDLE_MINUTES,
+  REMOTE_AUTH_POLICIES,
   getRemoteConfig,
   setRemoteConfig as dbSetRemoteConfig,
   clearRemotePassword
 } from './services/db'
+import {
+  auditAuthPolicyChange,
+  authSurfaceChanged,
+  readAuthPolicyContext,
+  resolveAuthPolicy
+} from './services/auth-policy'
+import { registerWebauthnIpc } from './ipc/webauthn.ipc'
+import { desktopConnection } from './ipc/command-registry'
 import { provisionPassword } from './services/remote-auth'
 import type { SessionManager } from './services/session-manager'
-import type { RemoteConfig, TailscaleDetection } from '../shared/types'
+import type { RemoteAuthPolicy, RemoteConfig, TailscaleDetection } from '../shared/types'
 
 /** What core hands back so the (optional) window layer can attach to it. */
 export interface CoreBoot {
@@ -90,6 +99,7 @@ export interface BootCoreOptions {
  */
 function sanitizedRemoteConfig(): RemoteConfig {
   const config = getRemoteConfig()
+  const policyCtx = readAuthPolicyContext()
   return {
     port: config?.port ?? 0,
     bindHost: config?.bindHost ?? null,
@@ -101,6 +111,15 @@ function sanitizedRemoteConfig(): RemoteConfig {
     // user-facing configuration.
     allowTerminal: config?.allowTerminal ?? false,
     shellGrantIdleMinutes: config?.shellGrantIdleMinutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
+    // Both the RAW setting (null = auto) and what it resolves to right now: a
+    // settings UI has to be able to say "Automatic (passkeys required)" without
+    // re-deriving the rule, and re-deriving it in the renderer is exactly how
+    // the displayed policy would drift from the enforced one.
+    authPolicy: config?.authPolicy ?? null,
+    effectiveAuthPolicy: resolveAuthPolicy(policyCtx),
+    credentialCount: policyCtx.credentialCount,
+    passwordBreakGlass: config?.passwordBreakGlass ?? true,
+    passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false,
     passwordSet: config?.passwordHash != null,
     passwordUpdatedAt: config?.passwordUpdatedAt ?? null
   }
@@ -190,7 +209,10 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // Multi-attach delivery path (SyncCore phase 2): the pty manager hands frames
   // for attached remote connections to THIS server's sink.
   terminalService.setRemoteSink(remoteServer.terminalSink())
-  registerRemoteHandlers(remoteDispatcher, sessionManager)
+  registerRemoteHandlers(remoteDispatcher, sessionManager, remoteServer)
+  // Passkey management on the desktop transport (ADR-052). Separate call because
+  // the ceremony verbs are remote-only — see webauthn.ipc.ts.
+  registerWebauthnIpc(remoteServer)
 
   // Idempotent registration, like every other register* in the tree: production
   // boots core exactly once, but a test that boots twice must not hit Electron's
@@ -268,6 +290,9 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
         tlsHttpsPort?: number
         allowTerminal?: boolean
         shellGrantIdleMinutes?: number
+        authPolicy?: RemoteAuthPolicy | null
+        passwordBreakGlass?: boolean
+        passkeyTailnetExempt?: boolean
       }
     ) => {
       if (partial.port !== undefined && partial.port !== 0) {
@@ -300,12 +325,58 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
           throw new Error('Tailscale HTTPS port must be between 1 and 65535')
         }
       }
+      // The auth policy is writable ONLY here (ADR-052 decision 3 / security.md
+      // §Policy modes). This channel is `admin`-pinned AND has no remote
+      // registration at all — `registerRemoteHandlers` never touches `remote:*`
+      // — so `off` is unreachable from any remote client by construction, and
+      // `remote-handlers.ipc.test.ts` pins that absence.
+      if (partial.authPolicy !== undefined && partial.authPolicy !== null) {
+        if (!REMOTE_AUTH_POLICIES.includes(partial.authPolicy)) {
+          throw new Error(
+            `Unknown remote auth policy "${String(partial.authPolicy)}" — expected one of ${REMOTE_AUTH_POLICIES.join(', ')}`
+          )
+        }
+      }
+      const before = sanitizedRemoteConfig()
       dbSetRemoteConfig(partial)
+      const after = sanitizedRemoteConfig()
+      // ANY auth-surface change — the policy mode, the break-glass toggle, or
+      // the tailnet exemption — is audited AND drops every live remote socket.
+      //
+      // Both halves matter and are deliberately one branch. The audit is what
+      // makes the change traceable after the fact rather than only visible while
+      // a banner is up (security.md §Audit). The disconnect is what makes it
+      // TAKE EFFECT: policy, grants and origin capability are snapshotted per
+      // connection, so without it a tightened policy would not reach anyone
+      // already connected until they happened to reconnect. Auditing a change
+      // that nobody was re-authenticated for would be a trail that lies.
+      if (authSurfaceChanged(before, after)) {
+        // ONE row writer, shared with the credential path (`webauthn:register-
+        // verify` / `:revoke`), so an audit reader never has to know which of
+        // the two produced a given row.
+        auditAuthPolicyChange(desktopConnection())
+        if (after.effectiveAuthPolicy === 'off') {
+          logger.warn(
+            'main',
+            'REMOTE AUTHENTICATION HAS BEEN DISABLED (remoteAuthPolicy = "off"): every client that ' +
+              'can reach the remote port now has operator-level access to this machine.'
+          )
+        } else {
+          logger.info(
+            'main',
+            `Remote auth surface changed: policy ${before.effectiveAuthPolicy} → ` +
+              `${after.effectiveAuthPolicy}, break-glass ${before.passwordBreakGlass} → ` +
+              `${after.passwordBreakGlass}, tailnet-exempt ${before.passkeyTailnetExempt} → ` +
+              `${after.passkeyTailnetExempt}`
+          )
+        }
+        remoteServer.disconnectAuthSurfaceClients()
+      }
       // Turning the terminal toggle OFF must bite NOW, not at the next
       // reconnect: every live connection loses its `shell` grant and every
       // remote attachment is dropped (ADR-052 decision 6).
       if (partial.allowTerminal !== undefined) remoteServer.applyTerminalPolicy()
-      return sanitizedRemoteConfig()
+      return after
     }
   )
   // Provisioning/clearing rotates the credential, so any live session that

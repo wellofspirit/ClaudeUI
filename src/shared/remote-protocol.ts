@@ -2,6 +2,17 @@
 // Remote Access WebSocket Protocol
 // ---------------------------------------------------------------------------
 
+// Type-only, so nothing from the package reaches either bundle at runtime.
+// Sourced from `@simplewebauthn/BROWSER` deliberately: this module is imported
+// by the web client as well as the main process, and the browser package is the
+// one a browser-side file may also import as a VALUE. The two packages ship
+// byte-identical declarations for these JSON DTOs, so the server's
+// `verifyAuthenticationResponse` accepts them structurally.
+import type {
+  AuthenticationResponseJSON,
+  PublicKeyCredentialRequestOptionsJSON
+} from '@simplewebauthn/browser'
+
 /** Client → Server: request (mirrors ipcRenderer.invoke) */
 export interface WsInvokeRequest {
   type: 'invoke'
@@ -49,6 +60,16 @@ export interface WsAuthRequest {
    * against the stored hash — see `src/main/services/remote-auth.ts`.
    */
   pwProof?: string
+  /**
+   * One-time enrollment token (ADR-052 §Enrollment), from the `#enroll=` URL
+   * fragment of a desktop-minted "add this device" link. ADDITIVE: an older
+   * bundle never sends it, so the frame stays byte-compatible.
+   *
+   * It authenticates an `enroll`-ONLY connection: the socket may register a
+   * credential and then run the assertion ceremony to re-authenticate as
+   * `webauthn`. It reaches nothing else — not chat, not config, not git.
+   */
+  enrollToken?: string
 }
 
 /** Server → Client: auth result */
@@ -59,11 +80,18 @@ export interface WsAuthResponse {
   /** Which method the server accepted. Present on success. */
   method?: RemoteAuthMethod
   /**
-   * Present only for `method: 'tailnet-identity'`. This frame is UNSOLICITED —
-   * the server sends it on `connection`, before (and instead of waiting for) any
-   * client `auth` frame, because identity lives entirely in the upgrade request
-   * headers and there is nothing for the client to send. `login` is the
-   * `Tailscale-User-Login` value the server accepted.
+   * A human-readable name for the identity the server accepted. It is always
+   * something this caller already proved, so it discloses nothing.
+   *
+   * - `tailnet-identity` — the `Tailscale-User-Login` value. This frame is then
+   *   UNSOLICITED: the server sends it on `connection`, before (and instead of
+   *   waiting for) any client `auth` frame, because identity lives entirely in
+   *   the upgrade request headers and there is nothing for the client to send.
+   * - `webauthn` (ADR-052) — the credential's nickname, or a short credential-id
+   *   prefix when it has none, so a client can say WHICH passkey signed in.
+   * - `none` (`off` policy) — the literal `unauthenticated`, which is the honest
+   *   answer: no credential was checked.
+   * - `token` / `password` / `enroll-token` — absent.
    */
   identity?: { login: string }
   /**
@@ -118,6 +146,18 @@ export interface RemoteAuthInfo {
    * would just be refused). See `evaluateIdentity` in `remote-server.ts`.
    */
   identity?: { login: string | null }
+  /**
+   * Passkey advertisement (ADR-052). Present IFF both hold: at least one
+   * credential is enrolled, AND this request's `Host` is a WebAuthn-capable
+   * origin (the tailnet DNS name, or `localhost` in dev). A plain-LAN IP or an
+   * ephemeral tunnel hostname therefore never sees it — the browser could not
+   * complete a ceremony there anyway (no secure context / no stable RP ID).
+   *
+   * The POLICY MODE is deliberately NOT advertised: it is observable by
+   * attempting a method, and naming it would tell an unauthenticated caller how
+   * the operator has configured their own lockout.
+   */
+  webauthn?: { rpId: string }
 }
 
 /** Client → Server: state sync request */
@@ -176,6 +216,81 @@ export interface WsPong {
   timestamp: number
 }
 
+// ---------------------------------------------------------------------------
+// WebAuthn ceremony frames (ADR-052 / security.md §Passkeys)
+// ---------------------------------------------------------------------------
+//
+// Modelled on the existing auth family, and for the same reason `step-up` is a
+// frame rather than a registry channel: a ceremony is how a socket ACQUIRES
+// authority, so it cannot be gated on authority it does not yet hold.
+//
+// Legality, enforced by remote-server.ts's handshake state machine:
+//  - `auth-webauthn-start` / `-finish` are PRE-auth frames, plus the one
+//    post-auth exception of an `enroll-token` connection re-authenticating
+//    itself as `webauthn` on the same socket after registering a credential;
+//  - `step-up-challenge-request` is POST-auth only.
+// Anything out of order is answered with the existing malformed/close
+// discipline rather than a helpful error.
+
+/** Client → Server: begin an assertion ceremony (pre-auth, or enroll-token upgrade). */
+export interface WsAuthWebauthnStart {
+  type: 'auth-webauthn-start'
+}
+
+/**
+ * Server → Client: the challenge to sign.
+ *
+ * `options` is `@simplewebauthn/server`'s `generateAuthenticationOptions()`
+ * output verbatim, which is exactly what `@simplewebauthn/browser`'s
+ * `startAuthentication()` takes — the two ends never reshape it. Discoverable
+ * credentials mean `allowCredentials` is empty: the authenticator, not the
+ * server, decides which passkey to offer, so no credential ids leak pre-auth.
+ */
+export interface WsAuthWebauthnChallenge {
+  type: 'auth-webauthn-challenge'
+  options: PublicKeyCredentialRequestOptionsJSON
+}
+
+/** Client → Server: the signed assertion. Answered with the normal `auth-response`. */
+export interface WsAuthWebauthnFinish {
+  type: 'auth-webauthn-finish'
+  assertion: AuthenticationResponseJSON
+}
+
+/**
+ * `auth-response.error` codes a passkey handshake can produce. Free-form text
+ * elsewhere in this family, but these three are matched on by the client:
+ *
+ * - `passkey-required` — the connection presented a legacy credential (or none)
+ *   on a capable origin under `passkey-always`. NOT a rejection of the
+ *   credential: the socket stays open and may run the ceremony. An OLD cached
+ *   bundle that does not know the code simply shows its auth-failed state,
+ *   which is the honest outcome — there is deliberately no half-authenticated
+ *   `ok:true` state for it to misread.
+ * - `passkey-failed` — the assertion did not verify (unknown credential, bad
+ *   signature, wrong origin/RP, stale or foreign challenge).
+ * - `passkey-unavailable` — no credential is enrolled, or this origin cannot do
+ *   WebAuthn, so there is no ceremony to run.
+ */
+export const PASSKEY_REQUIRED_ERROR = 'passkey-required'
+export const PASSKEY_FAILED_ERROR = 'passkey-failed'
+export const PASSKEY_UNAVAILABLE_ERROR = 'passkey-unavailable'
+
+/**
+ * Error a `webauthn:mint-enroll-token` dispatch throws when `tailscale serve` is
+ * not up: the enrollment URL must carry the stable tailnet HTTPS name, because
+ * that name IS the RP ID the credential will bind to. Pinned (not free-form) so
+ * series 2 can disable the button and say why.
+ */
+export const ENROLL_UNAVAILABLE_ERROR = 'enroll-unavailable'
+
+/**
+ * Error `webauthn:revoke` throws for the lockout guard: removing the LAST
+ * credential while the policy is explicitly `passkey-always` and break-glass is
+ * unavailable would leave no way back in over the network.
+ */
+export const LAST_CREDENTIAL_LOCKOUT_ERROR = 'last-credential-lockout'
+
 /** Client → Server: activate E2E encryption (key is NOT sent — both sides already have it) */
 export interface WsE2EActivate {
   type: 'e2e-activate'
@@ -203,6 +318,36 @@ export interface WsE2EAck {
 export interface WsStepUpRequest {
   type: 'step-up'
   pwProof?: string
+  /**
+   * Passkey alternative to {@link WsStepUpRequest.pwProof} (ADR-052 decision 5:
+   * step-up is passkey-FIRST, password only as fallback). Fetch the challenge
+   * with {@link WsStepUpChallengeRequest} first — a step-up assertion is bound
+   * to a `step-up`-kind challenge, so a handshake challenge cannot be replayed
+   * into one, nor the reverse.
+   *
+   * Exactly one factor is honoured per frame: the server branches on
+   * `assertion` first and never falls through to `pwProof`, so a client cannot
+   * probe both on one socket.
+   */
+  assertion?: AuthenticationResponseJSON
+}
+
+/**
+ * Client → Server: fetch a fresh step-up challenge MID-SESSION (post-auth only).
+ *
+ * Separate from the handshake ceremony because the socket is already
+ * authenticated: there is nothing to authenticate, only a grant to arm. Gated
+ * by the SAME per-key failure budget as every other credential attempt — a
+ * throttled key gets no challenges.
+ */
+export interface WsStepUpChallengeRequest {
+  type: 'step-up-challenge-request'
+}
+
+/** Server → Client: the step-up challenge. Same options shape as the handshake. */
+export interface WsStepUpChallenge {
+  type: 'step-up-challenge'
+  options: PublicKeyCredentialRequestOptionsJSON
 }
 
 /** Machine-readable reason a step-up was refused (the client maps it to copy). */
@@ -217,6 +362,16 @@ export type StepUpFailureCode =
   | 'throttled'
   /** Malformed frame / no proof presented. */
   | 'malformed'
+  /** The assertion did not verify (consumes the same budget as a bad password). */
+  | 'invalid-assertion'
+  /**
+   * A password proof was presented where only a passkey is accepted — the
+   * policy requires a passkey, break-glass is off, and this origin CAN do
+   * WebAuthn. The client must run the ceremony instead of re-prompting.
+   */
+  | 'passkey-required'
+  /** No passkey is enrolled / this origin cannot do WebAuthn, so no challenge exists. */
+  | 'passkey-unavailable'
 
 /** Server → Client: step-up outcome. */
 export interface WsStepUpResponse {
@@ -326,16 +481,20 @@ export interface WsTermDetached {
 
 export type WsClientMessage =
   | WsAuthRequest
+  | WsAuthWebauthnStart
+  | WsAuthWebauthnFinish
   | WsInvokeRequest
   | WsSyncRequest
   | WsPing
   | WsPong
   | WsE2EActivate
   | WsStepUpRequest
+  | WsStepUpChallengeRequest
   | WsTermInput
   | WsTermResize
 export type WsServerMessage =
   | WsAuthResponse
+  | WsAuthWebauthnChallenge
   | WsInvokeResponse
   | WsEvent
   | WsSyncCatchup
@@ -344,6 +503,7 @@ export type WsServerMessage =
   | WsPong
   | WsE2EAck
   | WsStepUpResponse
+  | WsStepUpChallenge
   | WsTermData
   | WsTermExit
   | WsTermDetached

@@ -70,6 +70,17 @@ import {
   type CommandRegistration
 } from './command-registry'
 import {
+  mintEnrollToken,
+  webauthnCredentials,
+  webauthnRegisterOptions,
+  webauthnRegisterVerify,
+  webauthnRename,
+  webauthnRevoke,
+  type RemoteAuthSurfaceHost,
+  type RegisterVerifyResult
+} from './webauthn-commands'
+import type { RegistrationResponseJSON } from '@simplewebauthn/server'
+import {
   sendPrompt,
   watchBackground,
   unwatchBackground,
@@ -276,7 +287,15 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
  */
 export function registerRemoteHandlers(
   dispatcher: RemoteDispatcher,
-  manager: SessionManager
+  manager: SessionManager,
+  /**
+   * The running remote server, for `webauthn:mint-enroll-token`. Optional so the
+   * existing two-argument call sites (and every test) keep working; absent, the
+   * channel still registers but throws `enroll-unavailable` — the channel SET
+   * must not depend on runtime configuration, or the parity pins would report a
+   * different surface in tests than in production.
+   */
+  enrollTokens?: RemoteAuthSurfaceHost
 ): void {
   remoteHandlersRegistered = true
 
@@ -1334,6 +1353,72 @@ export function registerRemoteHandlers(
     kind: 'query',
     withConnection: true,
     handler: async (connection: CommandConnection) => terminalService.availability(connection)
+  })
+
+  // -------------------------------------------------------------------------
+  // Passkeys (ADR-052) — enrollment + credential management
+  // -------------------------------------------------------------------------
+  //
+  // `enroll` and `admin` are both OUTSIDE the base remote grant set, so these
+  // are reachable only from a passkey-authenticated connection, a break-glass
+  // password connection, or (for the two `enroll` verbs) a one-time enrollment
+  // link. Every one is `withConnection` because the challenge binding and the
+  // RP ID are per-connection facts the caller must not be able to supply.
+
+  handleRemote({
+    channel: 'webauthn:register-options',
+    capability: 'enroll',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => webauthnRegisterOptions(connection)
+  })
+
+  handleRemote({
+    channel: 'webauthn:register-verify',
+    capability: 'enroll',
+    kind: 'command',
+    withConnection: true,
+    handler: async (
+      connection: CommandConnection,
+      payload: { response: RegistrationResponseJSON; nickname?: string | null }
+    ): Promise<RegisterVerifyResult> =>
+      webauthnRegisterVerify(connection, payload, enrollTokens ?? null)
+  })
+
+  handleRemote({
+    channel: 'webauthn:credentials',
+    capability: 'admin',
+    kind: 'query',
+    handler: async () => webauthnCredentials()
+  })
+
+  handleRemote({
+    channel: 'webauthn:rename',
+    capability: 'admin',
+    kind: 'command',
+    handler: async (credId: string, nickname: string | null) => webauthnRename(credId, nickname)
+  })
+
+  handleRemote({
+    channel: 'webauthn:revoke',
+    capability: 'admin',
+    kind: 'command',
+    // `withConnection` because revoking the LAST credential flips the AUTO
+    // policy, and the resulting audit row must name the actor (who is also the
+    // one client spared the re-admission disconnect).
+    withConnection: true,
+    handler: async (connection: CommandConnection, credId: string) =>
+      webauthnRevoke(connection, credId, enrollTokens ?? null)
+  })
+
+  // Minting a link for ANOTHER device from an already-trusted phone. Requires
+  // `tailscale serve` to be up — the URL's hostname is the RP ID the new
+  // credential binds to (see RemoteServer.mintEnrollToken).
+  handleRemote({
+    channel: 'webauthn:mint-enroll-token',
+    capability: 'admin',
+    kind: 'command',
+    handler: async () => mintEnrollToken(enrollTokens ?? null)
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)

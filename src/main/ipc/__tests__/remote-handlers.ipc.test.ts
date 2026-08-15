@@ -465,6 +465,17 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:set-default'
     ])
       expect(channels).not.toContain(channel)
+    // ADR-052 passkeys: registered for remote, but behind `enroll`/`admin`,
+    // neither of which a token/tailnet connection ever holds.
+    for (const channel of [
+      'webauthn:register-options',
+      'webauthn:register-verify',
+      'webauthn:credentials',
+      'webauthn:rename',
+      'webauthn:revoke',
+      'webauthn:mint-enroll-token'
+    ])
+      expect(channels).toContain(channel)
   })
 
   it('does NOT expose desktop-only channels on the remote transport', () => {
@@ -472,6 +483,24 @@ describe('registerRemoteHandlers', () => {
     expect(channels).not.toContain('session:pick-folder')
     expect(channels).not.toContain('app:quit-confirm')
     expect(channels).not.toContain('window:minimize')
+  })
+
+  it('keeps every remote:* server-config channel OFF the remote transport (ADR-052 `off`)', () => {
+    // The auth policy — including the `off` master switch — is written ONLY
+    // through `remote:set-config`. That channel having no remote registration is
+    // the structural reason a remote client can never disable authentication;
+    // the `admin` pin alone is no longer sufficient, because a passkey
+    // connection DOES hold `admin`.
+    const channels = dispatcher.channels()
+    for (const channel of [
+      'remote:get-config',
+      'remote:set-config',
+      'remote:set-password',
+      'remote:clear-password',
+      'remote:tailscale-detect',
+      'remote:force-reserve'
+    ])
+      expect(channels).not.toContain(channel)
   })
 
   it('session:send dispatches to session.run + broadcasts', async () => {
@@ -1282,6 +1311,36 @@ const PHASE2_SHELL_CHANNELS = PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'term
  */
 const POST_PORT_CHANNELS = ['session:clear-conversation'] as const
 
+/**
+ * ADR-052 passkeys. Listed separately for the same reason the terminal set is:
+ * these are the SECOND deliberate widening of the remote surface, and the pins
+ * below must show them as an explicit decision rather than absorb them into the
+ * pre-port baseline.
+ *
+ * Every one declares `enroll` or `admin`, neither of which is in
+ * {@link LEGACY_REMOTE_GRANTS} — so registering them changed what a
+ * passkey-authenticated connection can reach, and changed NOTHING for a
+ * token/tailnet one.
+ */
+const PASSKEY_CHANNELS = [
+  'webauthn:credentials',
+  'webauthn:mint-enroll-token',
+  'webauthn:register-options',
+  'webauthn:register-verify',
+  'webauthn:rename',
+  'webauthn:revoke'
+] as const
+
+/** channel → the capability it must declare (the reachability decision). */
+const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
+  'webauthn:register-options': 'enroll',
+  'webauthn:register-verify': 'enroll',
+  'webauthn:credentials': 'admin',
+  'webauthn:mint-enroll-token': 'admin',
+  'webauthn:rename': 'admin',
+  'webauthn:revoke': 'admin'
+}
+
 describe('remote surface parity (phase 1 port)', () => {
   beforeEach(() => {
     // Subscribes a fake desktop client to the funnel, mirroring production's
@@ -1297,23 +1356,46 @@ describe('remote surface parity (phase 1 port)', () => {
     gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
   })
 
-  it('exposes exactly the pre-port channel set plus the phase-2 terminal channels', () => {
+  it('exposes exactly the pre-port channel set plus the phase-2 terminal and passkey channels', () => {
     expect(commandRegistry.channels('remote')).toEqual(
-      [...PRE_PORT_REMOTE_CHANNELS, ...PHASE2_TERMINAL_CHANNELS, ...POST_PORT_CHANNELS].sort()
+      [
+        ...PRE_PORT_REMOTE_CHANNELS,
+        ...PHASE2_TERMINAL_CHANNELS,
+        ...POST_PORT_CHANNELS,
+        ...PASSKEY_CHANNELS
+      ].sort()
     )
   })
 
-  it('every exposed channel except the shell-gated terminal ones is reachable under the legacy grant set', () => {
+  it('every exposed channel outside the shell/passkey sets is reachable under the legacy grant set', () => {
     const unreachable = commandRegistry
       .channels('remote')
       .map((c) => [c, commandRegistry.declaration(c)!.capability] as const)
       .filter(([, cap]) => !LEGACY_REMOTE_GRANTS.has(cap))
+    // The complete list of channels a token/tailnet connection cannot reach:
+    // the shell-gated terminal set (step-up) and the passkey set (a proven
+    // human, or a one-time enrollment link). Anything else appearing here is a
+    // channel that silently stopped being reachable — or started being one.
+    const expected = [
+      ...PHASE2_SHELL_CHANNELS.map((c) => [c, 'shell'] as const),
+      ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const)
+    ].sort(([a], [b]) => a.localeCompare(b))
     expect(
-      unreachable,
+      [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
       `these channels declare a capability remote connections do not hold: ${unreachable
         .map(([c, cap]) => `${c}(${cap})`)
         .join(', ')}`
-    ).toEqual(PHASE2_SHELL_CHANNELS.map((c) => [c, 'shell'] as const))
+    ).toEqual(expected)
+  })
+
+  it('the passkey channels are unreachable from a plain token connection', async () => {
+    const conn = makeRemoteConnection('token', null)
+    for (const channel of PASSKEY_CHANNELS) {
+      await expect(
+        commandRegistry.dispatch(channel, 'remote', ['x'], conn),
+        `${channel} must require enroll/admin`
+      ).rejects.toThrow(/Permission denied/)
+    }
   })
 
   it('the phase-2 terminal channels are unreachable WITHOUT a step-up grant', async () => {
@@ -1332,9 +1414,15 @@ describe('remote surface parity (phase 1 port)', () => {
     ).resolves.toMatchObject({ allowed: false, granted: false })
   })
 
-  it('exposes no channel whose capability the old denylist stood for, except the terminal ones', () => {
+  it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
+    // Two sanctioned widenings, both deliberate and both behind a ceremony:
+    // the terminal set (ADR-052 decision 6) and the passkey set (decision 1).
+    // Everything else in the pin table must still be absent from the remote
+    // surface — which, for `remote:set-config`, is what makes the `off` master
+    // switch structurally unreachable from a remote client now that a passkey
+    // connection holds `admin`.
     const exposed = new Set(commandRegistry.channels('remote'))
-    const sanctioned = new Set<string>(PHASE2_SHELL_CHANNELS)
+    const sanctioned = new Set<string>([...PHASE2_SHELL_CHANNELS, ...PASSKEY_CHANNELS])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue
       expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)

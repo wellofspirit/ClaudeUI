@@ -134,7 +134,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v10)', () => {
+  it('applies the real production migration set (v1–v11)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -142,8 +142,9 @@ describe('migration framework — user_version guard', () => {
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
       // v5: daily_usage, v6: dispatched_usage, v7: remote_config,
       // v8: remote_config pinned HTTPS port + serve cleanup record,
-      // v9: audit_log, v10: remote-terminal posture columns
-      expect(userVersion(db)).toBe(10)
+      // v9: audit_log, v10: remote-terminal posture columns,
+      // v11: webauthn_credential + auth-policy columns (ADR-052 passkeys)
+      expect(userVersion(db)).toBe(11)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -222,7 +223,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(10)
+      expect(userVersion(db)).toBe(11)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -234,7 +235,14 @@ describe('migration framework — user_version guard', () => {
         last_serve_local_port: null,
         // v10 backfills the terminal posture at its (closed) defaults.
         allow_terminal: 0,
-        shell_grant_idle_minutes: 10
+        shell_grant_idle_minutes: 10,
+        // v11 backfills the auth policy at AUTO (NULL) with break-glass ON and
+        // no tailnet exemption — i.e. the as-built stack until a passkey is
+        // enrolled. A v7 row upgraded across four migrations must not land on a
+        // policy the operator never chose, and least of all on `off`.
+        auth_policy: null,
+        password_break_glass: 1,
+        passkey_tailnet_exempt: 0
       })
     } finally {
       db.close()
