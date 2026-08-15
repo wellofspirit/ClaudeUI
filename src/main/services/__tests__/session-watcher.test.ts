@@ -167,6 +167,52 @@ describe('session-watcher', () => {
     )
   })
 
+  /**
+   * F2. `session:watch-update` is the ONLY event that introduces a watched
+   * session — nothing spawns, so there is no `session:created` — which is why
+   * its reducer branch is the one place `ensured()` still bootstraps an entry.
+   * Without a cwd on the payload that entry was born with `cwd: ''`, and every
+   * cwd-keyed feature missed it: git status, the folder name in the sidebar and
+   * in notifications, the per-cwd terminal group, `deleteProject`'s live sweep.
+   *
+   * It has to be an ARGUMENT: `projectKey` is `cwdToProjectKey`'s output, which
+   * is documented as lossy and irreversible.
+   */
+  it('carries the watched session cwd on the update payload', async () => {
+    const win = makeFakeWindow()
+    watchSession('routing-cwd', ctx.sessionId, ctx.projectKey, '/repo/work')
+
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+
+    await vi.waitFor(
+      () => {
+        expect(win.webContents.send).toHaveBeenCalled()
+        const [, payload] = win.webContents.send.mock.calls[0]
+        expect(payload.cwd).toBe('/repo/work')
+      },
+      { timeout: 3000 }
+    )
+  })
+
+  it('omits cwd entirely when the caller had none (old-shape client)', async () => {
+    // Omitted, not blanked: the reducer treats an absent cwd as "leave it alone",
+    // so an old `/remote` bundle's 3-arg watch cannot erase a cwd another event
+    // already established.
+    const win = makeFakeWindow()
+    watchSession('routing-nocwd', ctx.sessionId, ctx.projectKey)
+
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+
+    await vi.waitFor(
+      () => {
+        expect(win.webContents.send).toHaveBeenCalled()
+        const [, payload] = win.webContents.send.mock.calls[0]
+        expect('cwd' in payload).toBe(false)
+      },
+      { timeout: 3000 }
+    )
+  })
+
   it('coalesces multiple rapid writes into a single debounced update', async () => {
     const win = makeFakeWindow()
     watchSession('routing-burst', ctx.sessionId, ctx.projectKey)

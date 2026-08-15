@@ -1271,6 +1271,17 @@ const PHASE2_TERMINAL_CHANNELS = [
 /** Of those, the ones gated behind the `shell` capability (i.e. all but availability). */
 const PHASE2_SHELL_CHANNELS = PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability')
 
+/**
+ * Channels added AFTER the phase-1 port, listed separately so the pre-port set
+ * above stays a faithful record of what the port had to preserve.
+ *
+ * `session:clear-conversation` (F4) is `chat`, the same capability as
+ * `session:cancel` and `session:send`: "start fresh" is a conversation action a
+ * phone must be able to take, and it touches nothing outside the session it
+ * names.
+ */
+const POST_PORT_CHANNELS = ['session:clear-conversation'] as const
+
 describe('remote surface parity (phase 1 port)', () => {
   beforeEach(() => {
     // Subscribes a fake desktop client to the funnel, mirroring production's
@@ -1288,7 +1299,7 @@ describe('remote surface parity (phase 1 port)', () => {
 
   it('exposes exactly the pre-port channel set plus the phase-2 terminal channels', () => {
     expect(commandRegistry.channels('remote')).toEqual(
-      [...PRE_PORT_REMOTE_CHANNELS, ...PHASE2_TERMINAL_CHANNELS].sort()
+      [...PRE_PORT_REMOTE_CHANNELS, ...PHASE2_TERMINAL_CHANNELS, ...POST_PORT_CHANNELS].sort()
     )
   })
 

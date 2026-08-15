@@ -94,6 +94,14 @@ describe('E2E: session switching during streaming', () => {
   it('switching active session does not clear or replay events on the other session', () => {
     useSessionStore.getState().createNewSession('A', '/a')
     useSessionStore.getState().createNewSession('B', '/b')
+    // SPAWN both before switching. `switchSession` runs `cleanupEmptySession`,
+    // which drops the session being left when it has no messages, no draft and
+    // no live engine — so without this, B is gone by the time it is switched back
+    // to. That used to be invisible here: the reducer's `ensured()` re-minted a
+    // placeholder for B's next event. F7 deleted that, and a session that can
+    // emit engine events is by definition one that spawned.
+    app.emit('session:created', 'A', { cwd: '/a' })
+    app.emit('session:created', 'B', { cwd: '/b' })
     useSessionStore.getState().switchSession('A')
 
     app.emit('session:message', 'A', makeAssistantMessage('hello A'))

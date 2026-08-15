@@ -96,6 +96,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
+    clearConversation: (routingId, permissionMode) =>
+      ipcRenderer.invoke('session:clear-conversation', routingId, permissionMode),
     interruptSession: (routingId) => ipcRenderer.invoke('session:interrupt', routingId),
     respondApproval: (routingId, requestId, decision, answers?, updatedPermissions?) =>
       ipcRenderer.invoke(
@@ -111,8 +113,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     closeWindow: () => ipcRenderer.invoke('window:close'),
     listDirectories: () => ipcRenderer.invoke('session:list-directories'),
     listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
-    loadSessionHistory: (sessionId, projectKey) =>
-      ipcRenderer.invoke('session:load-history', sessionId, projectKey),
+    loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
+      ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
@@ -176,8 +178,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:write-custom-title', sessionId, projectKey, title),
     getPlanContent: (routingId) => ipcRenderer.invoke('session:get-plan-content', routingId),
     getSessionLogPath: (routingId) => ipcRenderer.invoke('session:get-session-log-path', routingId),
-    watchSession: (routingId, sessionId, projectKey) =>
-      ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
+    watchSession: (routingId, sessionId, projectKey, cwd) =>
+      ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey, cwd),
     unwatchSession: (routingId) => ipcRenderer.invoke('session:unwatch-session', routingId),
 
     // Terminal

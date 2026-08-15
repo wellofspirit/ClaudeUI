@@ -194,6 +194,14 @@ export function mirrorStoreIntoReplica(): void {
 // ---------------------------------------------------------------------------
 
 export const seed = {
+  removed: (routingId: string) => emitSync('session:removed', [routingId]),
+
+  conversationCleared: (routingId: string, permissionMode?: string) =>
+    emitSync('session:conversation-cleared', [routingId, { permissionMode }]),
+
+  directories: (directories: unknown[]) =>
+    emitSync('session:directories-changed', [directories]),
+
   created: (routingId: string, data: { cwd?: string; resumeSessionId?: string } = {}) =>
     emitSync('session:created', [routingId, data]),
 

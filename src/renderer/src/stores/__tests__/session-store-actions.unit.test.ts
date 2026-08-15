@@ -51,7 +51,8 @@ beforeEach(() => {
     deleteSession: vi.fn().mockResolvedValue(undefined),
     deleteProject: vi.fn().mockResolvedValue(undefined),
     logError: vi.fn(),
-    setPermissionMode: vi.fn().mockResolvedValue(undefined)
+    setPermissionMode: vi.fn().mockResolvedValue(undefined),
+    clearConversation: vi.fn().mockResolvedValue(undefined)
   } as any
 
   useSessionStore.setState({
@@ -138,10 +139,14 @@ describe('addMessage', () => {
     expect(store().sessions['r1'].streamingText).toBe('')
   })
 
-  it('bootstraps a session when routingId is unknown (cross-window IPC scenario)', () => {
+  it('is a no-op when routingId is unknown — no ghost session (F7)', () => {
+    // This used to BOOTSTRAP a placeholder ("a cross-client event must not be
+    // dropped"). Nothing can outrun `session:created` through one FIFO funnel and
+    // one seq-ordered ring, so the only events that ever landed here named a
+    // session that had been DELETED, or a pre-spawn config echo — and both minted
+    // a permanent `cwd: ''` row in every snapshot.
     seed.message('ghost-session', makeAssistantMessage('hello'))
-    expect(store().sessions['ghost-session']).toBeDefined()
-    expect(store().sessions['ghost-session'].messages).toHaveLength(1)
+    expect(store().sessions['ghost-session']).toBeUndefined()
   })
 })
 
@@ -738,27 +743,38 @@ describe('createNewSession defaults', () => {
 // ---------------------------------------------------------------------------
 
 describe('clearConversation', () => {
-  it('resets per-session state but preserves cwd and sdkActive', () => {
+  /**
+   * F4. The SEALED half of the reset is no longer a local write: the action
+   * invokes, main emits the replicated `session:conversation-cleared`, and the
+   * fold blanks it here and on every other client. Before this, canonical kept
+   * the whole transcript and the next `sync-full` handed it back to the client
+   * that had just cleared it.
+   */
+  it('invokes main with the fresh-run mode, and the FOLD does the reset', async () => {
     store().createNewSession('r1', '/kept')
     seed.message('r1', makeAssistantMessage('hi'))
     store().addError('r1', 'e')
     useSessionStore.setState((st) => ({
-      sessions: {
-        ...st.sessions,
-        r1: { ...st.sessions['r1'], sdkActive: true }
-      }
+      sessions: { ...st.sessions, r1: { ...st.sessions['r1'], sdkActive: true } }
     }))
     mirrorStoreIntoReplica()
-    store().clearConversation('r1')
+
+    await store().clearConversation('r1')
+    // The mode a fresh RUN starts in can only be resolved client-side.
+    expect(window.api.clearConversation).toHaveBeenCalledWith('r1', 'default')
+    // View-half is local and immediate.
+    expect(store().sessions['r1'].errors).toEqual([])
+    // Sealed half arrives with the event main would have emitted.
+    seed.conversationCleared('r1', 'default')
     const s = store().sessions['r1']
     expect(s.cwd).toBe('/kept')
     expect(s.sdkActive).toBe(true)
     expect(s.messages).toEqual([])
-    expect(s.errors).toEqual([])
   })
 
-  it('is a no-op when the session does not exist', () => {
-    expect(() => store().clearConversation('ghost')).not.toThrow()
+  it('is a no-op when the session does not exist', async () => {
+    await expect(store().clearConversation('ghost')).resolves.toBeUndefined()
+    expect(window.api.clearConversation).not.toHaveBeenCalled()
     expect(store().sessions['ghost']).toBeUndefined()
   })
 })

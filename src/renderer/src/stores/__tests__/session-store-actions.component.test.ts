@@ -211,6 +211,28 @@ describe('switchSession', () => {
     expect(store().recentSessionIds).not.toContain('r1')
   })
 
+  /**
+   * R6. "Empty" is a local judgement and it does not distinguish an abandoned
+   * scratch session from a REAL host session that was cancelled before its first
+   * prompt. Dropping the second kind threw away state the host still had — and
+   * post-F7 the host's later events for it are honest no-ops, so it never came
+   * back; the session was simply gone from this client until the next sync-full.
+   *
+   * PRE-FIX: `sessions['host-known']` is undefined after the switch.
+   */
+  it('never cleans up a session the HOST introduced, however empty it looks', () => {
+    // Born from the wire, not from createNewSession — then cancelled before any
+    // prompt, so it is empty and `sdkActive: false`, exactly like a scratch one.
+    seed.created('host-known', { cwd: '/a' })
+    seed.status('host-known', makeSessionStatus({ state: 'disconnected' }))
+    useSessionStore.setState({ activeSessionId: 'host-known' })
+    store().createNewSession('r2', '/b', false)
+
+    store().switchSession('r2')
+
+    expect(store().sessions['host-known']).toBeDefined()
+  })
+
   it('preserves current session when it has messages', () => {
     store().createNewSession('r1', '/a')
     seed.userMessage('r1', { id: 'msg-1', prompt: 'hello' })
@@ -1301,9 +1323,12 @@ describe('addSubagentMessage', () => {
   // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
   // is deleted (4c) — see base-session-thinking-span.test.ts.
 
-  it('bootstraps session if it does not exist', () => {
+  it('is a no-op when the session does not exist — no ghost (F7)', () => {
+    // A subagent message can only follow the Task tool_use that started it, which
+    // can only follow `session:created`. The bootstrap that used to live here only
+    // ever fired for post-DELETE traffic.
     seed.subagentMessage('ghost', 'tool-1', makeAssistantMessage('hi'))
-    expect(store().sessions['ghost']).toBeDefined()
+    expect(store().sessions['ghost']).toBeUndefined()
   })
 })
 

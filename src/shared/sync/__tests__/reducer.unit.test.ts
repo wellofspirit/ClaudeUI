@@ -62,11 +62,89 @@ describe('reducer — session registry', () => {
     expect(s.sessions['rid'].sdkActive).toBe(true)
   })
 
-  it('bootstraps a placeholder for an event that outruns session:created', () => {
-    // Verbatim from the renderer's `ensureSession`: a cross-client event must not
-    // be dropped just because this replica has not seen the creation yet.
-    const s = fold([['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])]])
-    expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m1'])
+  // -------------------------------------------------------------------------
+  // F7 — `ensured()` is gone from every branch but `session:watch-update`.
+  //
+  // It used to bootstrap an `emptySession()` for ANY event naming an unknown id,
+  // inherited from the renderer's `ensureSession`. Nothing can legitimately
+  // outrun `session:created` on any transport (one FIFO funnel, one seq-ordered
+  // ring), so what actually reached it was the pre-spawn config echoes and
+  // post-DELETE engine traffic — both of which minted a permanent `cwd: ''` ghost.
+  // -------------------------------------------------------------------------
+
+  it.each([
+    ['session:message', ['rid', assistant('m1', [{ type: 'text', text: 'hi' }])]],
+    ['session:stream', ['rid', { type: 'text', text: 'hi' }]],
+    ['session:subagent-stream', ['rid', { type: 'text', toolUseId: 't1', text: 'hi' }]],
+    ['session:subagent-message', ['rid', { toolUseId: 't1', message: assistant('m1', []) }]],
+    ['session:subagent-message-batch', ['rid', { toolUseId: 't1', messages: [assistant('m1', [])] }]],
+    ['session:approval-request', ['rid', { requestId: 'r1', toolUseId: 't1' }]],
+    ['session:task-started', ['rid', { toolUseId: 't1', taskId: 'a', taskType: 'b' }]],
+    ['session:task-progress', ['rid', { toolUseId: 't1' }]],
+    ['session:task-notification', ['rid', { toolUseId: 't1' }]],
+    ['session:permission-mode', ['rid', 'plan']],
+    ['session:config-changed', ['rid', { model: 'opus' }]],
+    // The todos channel is `session:plan` — pi's explicit plan REPLACES the
+    // derived `todos` field. There is no `session:todos` channel; todos are
+    // otherwise reducer-DERIVED from the transcript, never carried by an event.
+    ['session:plan', ['rid', [{ content: 'step', status: 'pending' }]]],
+    ['session:tool-result', ['rid', { toolUseId: 't1', result: 'ok' }]],
+    ['session:status-line', ['rid', { totalCostUsd: 1 }]],
+    ['session:metering', ['rid', { contextWindow: null }]],
+    ['session:queue-changed', ['rid', { items: [] }]],
+    ['session:result', ['rid', {}]],
+    ['session:messages-retracted', ['rid', { messageIds: ['m1'] }]],
+    ['session:approval-dismiss', ['rid', { requestId: 'r1' }]],
+    ['session:subagent-tool-result', ['rid', { toolUseId: 't1', toolResultToolUseId: 'x' }]]
+  ])('%s for an unknown id is an honest no-op (no ghost session)', (channel, args) => {
+    const before = emptyCanonicalState()
+    const after = fold([[channel, ...(args as unknown[])]], before)
+    expect(after.sessions['rid']).toBeUndefined()
+    // Identity-stable too: the replica's projection is identity-diffed, so a
+    // no-op that returned a fresh object would re-write every slice.
+    expect(after).toBe(before)
+  })
+
+  it('a stream delta for an unknown id leaves no orphan thinking-span flag', () => {
+    // The aux write used to happen before the (bootstrapping) session write, so a
+    // delta for a dead id parked `thinkingOpen` that a same-id respawn inherited
+    // — its first real thinking output would be blanked by the next text delta.
+    const aux = emptyAux()
+    applyEvent(emptyCanonicalState(), {
+      channel: 'session:stream',
+      args: ['rid', { type: 'thinking', text: 'hmm' }],
+      seq: 1
+    }, aux)
+    expect(aux.thinkingOpen['rid']).toBeUndefined()
+  })
+
+  it('session:watch-update KEEPS the bootstrap — it is the only birth event a watched session has', () => {
+    const s = fold([
+      [
+        'session:watch-update',
+        {
+          routingId: 'watched',
+          messages: [assistant('m1', [{ type: 'text', text: 'hi' }])],
+          taskNotifications: [],
+          cwd: '/repo'
+        }
+      ]
+    ])
+    expect(s.sessions['watched'].messages.map((m) => m.id)).toEqual(['m1'])
+    // F2: without the cwd on the payload this entry was born with `cwd: ''`, and
+    // every cwd-keyed feature (git, folder name, terminal group) missed it.
+    expect(s.sessions['watched'].cwd).toBe('/repo')
+  })
+
+  it('an old-shape watch-update (no cwd) leaves the existing cwd alone', () => {
+    const s = fold([
+      created('watched', '/repo'),
+      [
+        'session:watch-update',
+        { routingId: 'watched', messages: [assistant('m1', [])], taskNotifications: [] }
+      ]
+    ])
+    expect(s.sessions['watched'].cwd).toBe('/repo')
   })
 
   it('is a no-op for an unclassified channel', () => {
@@ -145,6 +223,207 @@ describe('reducer — session registry', () => {
     expect(oldShape.sessions['rid'].permissionMode).toBe('acceptEdits')
     expect(oldShape.sessions['rid'].selectedEngineId).toBe('opencode')
     expect(oldShape.sessions['rid'].selectedModel).toBe('zen/qwen')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F1 — explicit removal
+// ---------------------------------------------------------------------------
+
+describe('reducer — session:removed (explicit delete)', () => {
+  it('drops the entry AND every id-keyed app-level row', () => {
+    const before = fold([created('rid')], {
+      ...emptyCanonicalState(),
+      customTitles: { rid: 'My session', other: 'keep' },
+      worktreeInfoMap: { rid: { worktreePath: '/wt', originalCwd: '/repo', branch: 'b' } } as never,
+      sessionEngines: { rid: { engineId: 'pi' } } as never,
+      recentSessionIds: ['rid', 'other'],
+      pinnedSessionIds: ['rid'],
+      hiddenSessions: ['rid']
+    })
+    const after = fold([['session:removed', 'rid']], before)
+    expect(after.sessions['rid']).toBeUndefined()
+    expect(after.customTitles).toEqual({ other: 'keep' })
+    expect(after.worktreeInfoMap).toEqual({})
+    expect(after.sessionEngines).toEqual({})
+    expect(after.recentSessionIds).toEqual(['other'])
+    expect(after.pinnedSessionIds).toEqual([])
+    expect(after.hiddenSessions).toEqual([])
+  })
+
+  it('cleans the app-level rows of a COLD session canonical never held', () => {
+    // Browsing an old session from the sidebar spawns nothing, so there is no
+    // canonical entry — but there can absolutely be a title and a pin, and
+    // leaving those behind is how a deleted session comes back as a dead row.
+    const before: CanonicalState = {
+      ...emptyCanonicalState(),
+      customTitles: { cold: 'Old work' },
+      pinnedSessionIds: ['cold']
+    }
+    const after = fold([['session:removed', 'cold']], before)
+    expect(after.customTitles).toEqual({})
+    expect(after.pinnedSessionIds).toEqual([])
+  })
+
+  it('is identity-stable when the id is unknown everywhere (double delete)', () => {
+    const before = fold([created('rid')])
+    const once = fold([['session:removed', 'rid']], before)
+    const twice = fold([['session:removed', 'rid']], once)
+    expect(twice).toBe(once)
+  })
+
+  it('drops the thinking-span bookkeeping, so a same-id respawn starts clean', () => {
+    const aux = emptyAux()
+    let state = applyEvent(
+      emptyCanonicalState(),
+      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 1 },
+      aux
+    )
+    state = applyEvent(
+      state,
+      { channel: 'session:stream', args: ['rid', { type: 'thinking', text: 'hmm' }], seq: 2 },
+      aux
+    )
+    expect(aux.thinkingOpen['rid']).toBe(true)
+    applyEvent(state, { channel: 'session:removed', args: ['rid'], seq: 3 }, aux)
+    expect(aux.thinkingOpen['rid']).toBeUndefined()
+  })
+
+  it('a late engine event after a removal cannot resurrect the session (F7)', () => {
+    const s = fold([
+      created('rid'),
+      ['session:removed', 'rid'],
+      ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'late' }])],
+      ['session:stream', 'rid', { type: 'text', text: 'later' }],
+      ['session:permission-mode', 'rid', 'plan']
+    ])
+    expect(s.sessions['rid']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F4 — clear conversation
+// ---------------------------------------------------------------------------
+
+describe('reducer — session:conversation-cleared', () => {
+  const dirty = (): CanonicalState =>
+    fold([
+      [
+        'session:created',
+        'rid',
+        { cwd: '/repo', permissionMode: 'plan', engineId: 'pi', model: 'gpt-5' }
+      ],
+      ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
+      ['session:stream', 'rid', { type: 'text', text: 'partial' }],
+      ['session:approval-request', 'rid', { requestId: 'r1', toolUseId: 't1' }],
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'b' }],
+      [
+        'session:queue-changed',
+        'rid',
+        { items: [{ itemId: 'q1', text: 'later', state: 'queued' }] }
+      ],
+      ['session:config-changed', 'rid', { effort: 'high', reasoningVariant: 'v' }]
+    ])
+
+  it('blanks the whole conversation but keeps cwd and sdkActive', () => {
+    const s = fold([['session:conversation-cleared', 'rid', {}]], dirty())
+    const session = s.sessions['rid']
+    expect(session.messages).toEqual([])
+    expect(session.streamingText).toBe('')
+    expect(session.pendingApprovals).toEqual([])
+    expect(session.activeTasks).toEqual({})
+    expect(session.queue).toEqual([])
+    expect(session.todos).toEqual([])
+    expect(session.statusLine).toBeNull()
+    expect(session.metering).toBeNull()
+    expect(session.effort).toBeNull()
+    expect(session.reasoningVariant).toBeNull()
+    // Preserved on purpose — clearing the CONVERSATION says nothing about the process.
+    expect(session.cwd).toBe('/repo')
+    expect(session.sdkActive).toBe(true)
+    // An empty transcript is a COMPLETE one; otherwise the next reselect would
+    // re-hydrate the cleared session from disk.
+    expect(session.seeded).toBe(true)
+  })
+
+  it('carries the per-session catalogs over rather than blanking them (R10)', () => {
+    // Vestigial in canonical (the app-level lists are the real ones and
+    // `toSnapshot` fans them out), but they describe the ENGINE, not the
+    // conversation — a bare remote clear must not look like the slash menu went
+    // away.
+    const before = dirty()
+    const seeded: CanonicalState = {
+      ...before,
+      sessions: {
+        ...before.sessions,
+        rid: {
+          ...before.sessions['rid'],
+          slashCommands: [{ name: '/compact' }] as never,
+          sdkSkillNames: ['dataviz']
+        }
+      }
+    }
+    const s = fold([['session:conversation-cleared', 'rid', {}]], seeded)
+    expect(s.sessions['rid'].slashCommands).toEqual([{ name: '/compact' }])
+    expect(s.sessions['rid'].sdkSkillNames).toEqual(['dataviz'])
+  })
+
+  it('takes the fresh-run permission mode from the event', () => {
+    const s = fold(
+      [['session:conversation-cleared', 'rid', { permissionMode: 'acceptEdits' }]],
+      dirty()
+    )
+    expect(s.sessions['rid'].permissionMode).toBe('acceptEdits')
+  })
+
+  it('falls back to the default mode when the payload carries none', () => {
+    const s = fold([['session:conversation-cleared', 'rid', {}]], dirty())
+    expect(s.sessions['rid'].permissionMode).toBe('default')
+  })
+
+  it('closes any open thinking span', () => {
+    const aux = emptyAux()
+    let state = applyEvent(
+      emptyCanonicalState(),
+      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 1 },
+      aux
+    )
+    state = applyEvent(
+      state,
+      { channel: 'session:stream', args: ['rid', { type: 'thinking', text: 'hmm' }], seq: 2 },
+      aux
+    )
+    applyEvent(state, { channel: 'session:conversation-cleared', args: ['rid', {}], seq: 3 }, aux)
+    expect(aux.thinkingOpen['rid']).toBe(false)
+  })
+
+  it('is a no-op for an unknown id', () => {
+    const before = emptyCanonicalState()
+    expect(fold([['session:conversation-cleared', 'ghost', {}]], before)).toBe(before)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// F6 — the directory listing is replicated, not refetched per client
+// ---------------------------------------------------------------------------
+
+describe('reducer — session:directories-changed', () => {
+  const listing = [
+    { cwd: '/repo', projectKey: '-repo', folderName: 'repo', sessions: [] }
+  ] as unknown as CanonicalState['directories']
+
+  it('applies the merged listing as a replace', () => {
+    const s = fold([['session:directories-changed', listing]])
+    expect(s.directories).toBe(listing)
+  })
+
+  it('an OLD-shape (payload-less) notify leaves the listing alone', () => {
+    // Committed fixtures and any ring caught up across the upgrade carry these;
+    // blanking the sidebar on one would be a regression, not a migration.
+    const before = fold([['session:directories-changed', listing]])
+    const after = fold([['session:directories-changed']], before)
+    expect(after).toBe(before)
+    expect(after.directories).toBe(listing)
   })
 })
 

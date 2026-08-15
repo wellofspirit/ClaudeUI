@@ -8,7 +8,7 @@
  * Also verifies that sessions with different projectKeys create separate groups.
  */
 import { describe, it, expect } from 'vitest'
-import { mergeOpencodeIntoDirectories } from '../Sidebar'
+import { mergeOpencodeIntoDirectories } from '../../../../../shared/directory-merge'
 import type { DirectoryGroup, SessionInfo } from '../../../../../shared/types'
 
 function makeClaudeSession(id: string, cwd: string, projectKey: string): SessionInfo {

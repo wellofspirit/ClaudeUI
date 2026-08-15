@@ -136,14 +136,31 @@ describe('Sidebar FC', () => {
   // 1. Mount — listDirectories populates store
   // -------------------------------------------------------------------------
 
-  it('fetches directories on mount and populates store', async () => {
+  /**
+   * F6: the sidebar no longer FETCHES. Main owns the three-engine merge and
+   * `session:directories-changed` carries the merged listing, so `directories`
+   * reaches this component through the replica fold like every other replicated
+   * slice. The old arrangement ran the merge per client and wrote it locally,
+   * while canonical held the Claude-only subset every `sync-full` projected back
+   * over it — the sidebar lost its opencode/pi rows on every reconnect.
+   */
+  it('renders the replicated directory listing (no fetch on mount)', async () => {
     const group = makeDirectoryGroup([makeSessionInfo('sess-1')])
-    app.bridge.ipcMain.handle('session:list-directories', async () => [group])
+    let listCalls = 0
+    app.bridge.ipcMain.handle('session:list-directories', async () => {
+      listCalls++
+      return [group]
+    })
 
     await act(async () => {
       await renderFC()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    act(() => {
+      seed.directories([group])
     })
 
+    expect(listCalls).toBe(0)
     expect(useSessionStore.getState().directories).toHaveLength(1)
     expect(useSessionStore.getState().directories[0].sessions).toHaveLength(1)
     expect(viewProps.augmentedDirs[0].folderName).toBe('demo')
@@ -264,9 +281,6 @@ describe('Sidebar FC', () => {
 
   it('applies a custom title and persists to disk', async () => {
     const group = makeDirectoryGroup([makeSessionInfo('rename-sess')])
-    // listDirectories is called on mount and overwrites preseeded directories —
-    // stub it to return our group so findProjectKey can resolve.
-    app.bridge.ipcMain.handle('session:list-directories', async () => [group])
 
     const writeCalls: unknown[][] = []
     app.bridge.ipcMain.handle('session:write-custom-title', async (...args) => {
@@ -276,8 +290,8 @@ describe('Sidebar FC', () => {
     await act(async () => {
       await renderFC()
     })
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0))
+    act(() => {
+      seed.directories([group])
     })
 
     act(() => {
@@ -396,26 +410,31 @@ describe('Sidebar FC', () => {
   })
 
   it('deleting one session keeps the OTHER engine’s sessions (no Claude-only clobber)', async () => {
-    // Regression: confirmDelete used to refresh with listDirectories() alone
-    // (Claude only), overwriting the merged list and wiping every opencode
-    // session until the next 30s poll. The post-delete refresh must merge both
-    // engines, so the surviving opencode session stays visible.
+    // Regression, now enforced a layer down: confirmDelete used to refresh with
+    // listDirectories() alone (Claude only), overwriting the merged list and
+    // wiping every opencode session until the next 30s poll. It no longer
+    // refreshes AT ALL — main re-reads the merged listing as part of the delete
+    // (`handlers-core.deleteSession`) and replicates it, so the survivor stays
+    // visible on every client, not just the one that clicked.
     const ocA: SessionInfo = { ...makeSessionInfo('oc-a', 'OC A'), engineId: 'opencode' }
     const ocB: SessionInfo = { ...makeSessionInfo('oc-b', 'OC B'), engineId: 'opencode' }
-    let opencodeList: SessionInfo[] = [ocA, ocB]
-    app.bridge.ipcMain.handle('session:list-directories', async () => [])
-    app.bridge.ipcMain.handle('session:list-opencode' as any, async () => opencodeList)
-    app.bridge.ipcMain.handle('session:delete-session' as any, async () => {
-      // The server drops the deleted session from the global list.
-      opencodeList = opencodeList.filter((s) => s.sessionId !== 'oc-a')
+    const groupWith = (sessions: SessionInfo[]): DirectoryGroup => ({
+      ...makeDirectoryGroup([]),
+      sessions
     })
+    let listCalls = 0
+    app.bridge.ipcMain.handle('session:list-directories', async () => {
+      listCalls++
+      return []
+    })
+    app.bridge.ipcMain.handle('session:delete-session' as any, async () => undefined)
 
     await act(async () => {
       await renderFC()
-      // Flush the second await (opencode list) inside refreshDirectories.
-      await new Promise((r) => setTimeout(r, 0))
     })
-    // Both opencode sessions are merged in on mount.
+    act(() => {
+      seed.directories([groupWith([ocA, ocB])])
+    })
     expect(
       useSessionStore.getState().directories.flatMap((g) => g.sessions).map((s) => s.sessionId)
     ).toEqual(expect.arrayContaining(['oc-a', 'oc-b']))
@@ -426,6 +445,10 @@ describe('Sidebar FC', () => {
     await act(async () => {
       await viewProps.onConfirmDelete()
     })
+    // Main's post-delete refresh, replicated.
+    act(() => {
+      seed.directories([groupWith([ocB])])
+    })
 
     const remaining = useSessionStore
       .getState()
@@ -433,6 +456,8 @@ describe('Sidebar FC', () => {
       .map((s) => s.sessionId)
     expect(remaining).toContain('oc-b') // survivor stays — not wiped
     expect(remaining).not.toContain('oc-a') // deleted one is gone
+    // And the client never re-queried the Claude-only listing on its own.
+    expect(listCalls).toBe(0)
   })
 
   // -------------------------------------------------------------------------
@@ -712,29 +737,30 @@ describe('Sidebar FC', () => {
   // 16. onDirectoriesChanged push event refreshes the sidebar
   // -------------------------------------------------------------------------
 
-  it('re-fetches directories when the onDirectoriesChanged event fires', async () => {
+  it('takes the listing straight off session:directories-changed — no refetch round trip', async () => {
     let listCalls = 0
     const firstGroup = makeDirectoryGroup([makeSessionInfo('s-orig')])
     const secondGroup = makeDirectoryGroup([makeSessionInfo('s-new')])
     app.bridge.ipcMain.handle('session:list-directories', async () => {
       listCalls++
-      return listCalls === 1 ? [firstGroup] : [secondGroup]
+      return []
     })
 
     await act(async () => {
       await renderFC()
     })
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0))
+    act(() => {
+      seed.directories([firstGroup])
     })
     expect(useSessionStore.getState().directories[0].sessions[0].sessionId).toBe('s-orig')
 
-    await act(async () => {
-      app.emit('session:directories-changed')
-      await new Promise((r) => setTimeout(r, 0))
+    act(() => {
+      seed.directories([secondGroup])
     })
 
-    expect(listCalls).toBe(2)
+    // The event CARRIES the listing now: no query, and therefore no window in
+    // which two clients answering the same notify hold different answers.
+    expect(listCalls).toBe(0)
     expect(useSessionStore.getState().directories[0].sessions[0].sessionId).toBe('s-new')
   })
 })

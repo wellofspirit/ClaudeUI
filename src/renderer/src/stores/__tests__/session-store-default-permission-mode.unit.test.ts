@@ -56,7 +56,8 @@ function stubWindowApi(
     loadClaudePermissions: vi.fn(() => userPermissions),
     saveSettings,
     saveSessionConfig: vi.fn(),
-    logError: vi.fn()
+    logError: vi.fn(),
+    clearConversation: vi.fn().mockResolvedValue(undefined)
   } as any
 }
 
@@ -189,7 +190,13 @@ describe('every fresh-run path seeds the default, not only createNewSession', ()
     expect(store().sessions['rid-evict'].permissionMode).toBe('plan')
   })
 
-  it('clearConversation resets to the default mode', () => {
+  /**
+   * F4 moved the RESET into the reducer, but not the DECISION: resolving the
+   * fresh-run mode needs `availableModels` + the auto-mode gate, which live only
+   * in a client. So the mode still comes from `bootstrapPermissionMode` here and
+   * rides the invoke; the reducer just files what it is told.
+   */
+  it('clearConversation sends the default mode to main', async () => {
     useSessionStore.setState({ defaultPermissionMode: 'auto' })
     store().createNewSession('rid-clear', '/repo')
     useSessionStore.setState({
@@ -198,8 +205,8 @@ describe('every fresh-run path seeds the default, not only createNewSession', ()
         'rid-clear': { ...store().sessions['rid-clear'], permissionMode: 'plan' }
       }
     })
-    store().clearConversation('rid-clear')
-    expect(store().sessions['rid-clear'].permissionMode).toBe('auto')
+    await store().clearConversation('rid-clear')
+    expect(window.api.clearConversation).toHaveBeenCalledWith('rid-clear', 'auto')
   })
 })
 

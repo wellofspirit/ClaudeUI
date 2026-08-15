@@ -306,7 +306,10 @@ describe('ExitPlanModeCard FC', () => {
       'session:create',
       'session:send',
       'session:get-session-log-path',
-      'session:set-permission-mode'
+      'session:set-permission-mode',
+      // F4: the reset is an invoke now, and `handleStartFresh` AWAITS it so the
+      // fresh session's birth event cannot be blanked by a late clear.
+      'session:clear-conversation'
     ]
     for (const ch of channels) {
       recordIpc(ch)
@@ -359,6 +362,12 @@ describe('ExitPlanModeCard FC', () => {
 
     // cancelSession called
     expect(lastCall('session:cancel')).toEqual([ROUTE_FC])
+
+    // The conversation reset went to MAIN (with the fresh-run mode), rather than
+    // being a local-only replica write nobody else would ever hear about.
+    expect(lastCall('session:clear-conversation')).toEqual([ROUTE_FC, 'default'])
+    // ...and it happened BEFORE the respawn, or the birth config would be wiped.
+    expect(ipcCalls['session:clear-conversation']).toHaveLength(1)
 
     // createSession called with acceptEdits permission mode
     const createArgs = lastCall('session:create') as unknown[]
