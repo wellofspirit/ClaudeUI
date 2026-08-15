@@ -49,6 +49,7 @@ import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
 import { credentialSync } from './auth/vault/CredentialSync'
 import { sharedProviderService } from './shared-providers'
 import { accountManager } from './services/account-manager'
+import { setLiveSessionCanceller, cancelClaudeSessions } from './services/session-invalidation'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { logger } from './services/logger'
 import {
@@ -133,6 +134,17 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
+
+  // An account switch or a fresh Claude login invalidates the credential every
+  // running CLAUDE process cached, so both paths stop those processes MAIN-side
+  // (services/session-invalidation.ts). Wired from here for the same reason the
+  // opencode lookup above is: this module owns the manager and sits above both
+  // import cycles. Registered BEFORE the two `init`s below, since either can
+  // reach `persistAndApply` on its first load.
+  //
+  // The POLICY (claude only, `cancel` not `cancelAll`) lives in that module with
+  // the reasoning; this is only the wiring that hands it the manager.
+  setLiveSessionCanceller(() => cancelClaudeSessions(sessionManager))
 
   // Account + Claude-auth wiring. Process lifetime, and window-free: what a
   // headless session needs from AccountManager is `applyActive()` (the spawn env

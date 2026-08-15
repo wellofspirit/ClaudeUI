@@ -25,6 +25,7 @@ import { shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
 import { serviceSession } from './service-session'
+import { invalidateLiveSessions } from './session-invalidation'
 import { logger } from './logger'
 import { emitEvent } from './sync-host'
 
@@ -195,6 +196,15 @@ class AuthManager {
 
     const state: AuthFlowState = { status: 'success', account, error: null }
     logger.info('AuthManager', `Login succeeded${account?.email ? ` (${account.email})` : ''}`)
+    // Every live engine process cached the credential this login just replaced,
+    // so stop them main-side. Before this the ONLY reaction was the desktop
+    // renderer's `auth:state` handler marking its ACTIVE session inactive: the
+    // processes stayed up on the stale token, every other session (and every
+    // other client) was told nothing, and canonical never heard about it at all.
+    // "The active session" is not expressible here on purpose — selection is
+    // per-client view state (ADR-041) — and it is also the wrong scope: every
+    // session holds the same stale credential.
+    invalidateLiveSessions('Claude login succeeded')
     this.broadcast(state)
     for (const cb of this.onSuccessCbs) {
       try {

@@ -22,9 +22,10 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type { AccountsState, AccountInfo, OAuthAccount } from '../../shared/types'
-import { setSecurestorageEnv } from '../sdk/securestorage-env'
+import { setSecurestorageEnv, getSecurestorageEnv } from '../sdk/securestorage-env'
 import { serviceSession } from './service-session'
 import { authManager } from './auth-manager'
+import { invalidateLiveSessions } from './session-invalidation'
 import { logger } from './logger'
 import {
   getAllAccounts,
@@ -204,7 +205,15 @@ class AccountManager {
     }
   }
 
-  /** Persist pointer file + re-point env + restart sessions so the change takes effect. */
+  /**
+   * Persist pointer file + re-point env, and — only when the EFFECTIVE credential
+   * directory actually moved — stop everything holding the old one.
+   *
+   * The gate matters because this method is the common tail of four very
+   * different mutations: `setEnabled`, `addAccount`, `switchAccount` and
+   * `deleteAccount`. Only some of them change which credential a spawn would
+   * read; `deleteAccount` of a NON-active account changes nothing at all.
+   */
   private persistAndApply(): void {
     // Upsert all accounts to DB (handles any new ones from createAccount → already done,
     // but re-syncing here ensures consistency after setEnabled/switch mutations).
@@ -216,12 +225,31 @@ class AccountManager {
       }
     }
     this.savePointer()
+    // Snapshot the EFFECTIVE credential dir across `applyActive()`. Not every
+    // mutation that lands here changes it: deleting a non-active account, or
+    // re-saving the same active id, leaves every running process pointed at the
+    // exact credential it already holds — and cancelling then would destroy live
+    // turns for a settings-list edit the user does not connect to their session.
+    const dirBefore = getSecurestorageEnv()?.dir ?? null
     this.applyActive()
+    const dirAfter = getSecurestorageEnv()?.dir ?? null
+    if (dirBefore === dirAfter) {
+      this.broadcast()
+      return
+    }
     // The service session caches its credential for its process lifetime; stop
     // it so the next use respawns against the new account dir.
     serviceSession.stop()
+    // Every CHAT session caches it too, and asking the desktop renderer to flip
+    // its own `sdkActive` flags never stopped the processes — nor told any other
+    // client. Cancelling here does both: the `disconnected` status each cancel
+    // broadcasts folds to `sdkActive: false` in canonical and in every replica.
+    invalidateLiveSessions(`active account changed to ${this.state.activeId ?? 'none'}`)
     this.broadcast()
-    // Tell the renderer to respawn chat sessions against the new account.
+    // Tell the renderer to respawn chat sessions against the new account. Kept
+    // verbatim: the desktop's respawn UX is unchanged, and its local
+    // `sdkActive: false` write is now idempotent with the fold above rather
+    // than the only thing that happens.
     if (this.window && !this.window.isDestroyed()) {
       this.window.webContents.send('account:respawn-sessions')
     }

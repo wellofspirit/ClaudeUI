@@ -40,9 +40,12 @@ vi.mock('../auth-manager', () => ({
     signIn: vi.fn(async () => {})
   }
 }))
-vi.mock('../logger', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
+vi.mock('../logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
 
 import { accountManager } from '../account-manager'
+import { setLiveSessionCanceller } from '../session-invalidation'
 import { getSecurestorageEnv } from '../../sdk/securestorage-env'
 import { serviceSession } from '../service-session'
 import { authManager } from '../auth-manager'
@@ -128,6 +131,84 @@ describe('AccountManager', () => {
     expect(state.activeId).toBe(first)
     expect(getSecurestorageEnv()?.dir).toBe(path.join(ACCOUNTS_DIR, first))
     expect(sent.some(([ch]) => ch === 'account:respawn-sessions')).toBe(true)
+  })
+
+  /**
+   * F5. The respawn broadcast above is a REQUEST to one renderer; it never
+   * stopped the processes holding the old account's credential, and no other
+   * client heard about the switch at all. Cancelling main-side is what makes the
+   * `disconnected` status (→ `sdkActive: false` in canonical and in every
+   * replica) happen.
+   *
+   * PRE-FIX: `cancelled` stays empty — nothing main-side reacted to a switch.
+   */
+  it('switching accounts cancels every live session MAIN-side', async () => {
+    const cancelled: string[] = []
+    setLiveSessionCanceller(() => cancelled.push('cancelAll'))
+    try {
+      await accountManager.setEnabled(true)
+      const first = accountManager.getState().accounts[0].id
+      await accountManager.addAccount()
+      cancelled.length = 0
+      await accountManager.switchAccount(first)
+      expect(cancelled).toEqual(['cancelAll'])
+    } finally {
+      setLiveSessionCanceller(null)
+    }
+  })
+
+  /** A windowless boot (or a not-yet-wired one) must not throw on a switch. */
+  it('an unwired canceller is a no-op, not a throw', async () => {
+    setLiveSessionCanceller(null)
+    await expect(accountManager.setEnabled(true)).resolves.toBeDefined()
+  })
+
+  /**
+   * R4. `persistAndApply` is the common tail of four different mutations, and
+   * only some of them move the EFFECTIVE credential dir. Deleting an account the
+   * user is not signed in as changes nothing a running process reads — cancelling
+   * there destroys live turns for a settings-list edit the user does not connect
+   * to their sessions.
+   */
+  it('deleting a NON-active account does not cancel anything', async () => {
+    const cancelled: string[] = []
+    setLiveSessionCanceller(() => cancelled.push('cancel'))
+    try {
+      await accountManager.setEnabled(true)
+      await accountManager.addAccount() // second account is now active
+      const inactive = accountManager
+        .getState()
+        .accounts.find((a) => a.id !== accountManager.getState().activeId)!
+      cancelled.length = 0
+      sent.length = 0
+
+      await accountManager.deleteAccount(inactive.id)
+
+      expect(cancelled).toEqual([])
+      // …and the renderer is not asked to respawn either: nothing changed for it.
+      expect(sent.some(([ch]) => ch === 'account:respawn-sessions')).toBe(false)
+      // The account list itself still changed, so the state broadcast still goes.
+      expect(sent.some(([ch]) => ch === 'account:changed')).toBe(true)
+    } finally {
+      setLiveSessionCanceller(null)
+    }
+  })
+
+  it('deleting the ACTIVE account does cancel (the dir really moves)', async () => {
+    const cancelled: string[] = []
+    setLiveSessionCanceller(() => cancelled.push('cancel'))
+    try {
+      await accountManager.setEnabled(true)
+      await accountManager.addAccount()
+      const activeId = accountManager.getState().activeId!
+      cancelled.length = 0
+
+      await accountManager.deleteAccount(activeId)
+
+      expect(cancelled).toEqual(['cancel'])
+    } finally {
+      setLiveSessionCanceller(null)
+    }
   })
 
   it('deleteAccount removes the dir and reassigns active', async () => {
