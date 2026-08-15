@@ -99,6 +99,28 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
     }
   }
 
+  /**
+   * Close a tab, and on Shift-click KILL the pty behind it.
+   *
+   * Closing became detach-only when terminals became a shared per-cwd pool, which
+   * left no way at all to stop a runaway process (a dev server, a `tail -f`) from
+   * the UI: the cold sweep only reaps cwds with no live session, i.e. never the
+   * one you are working in. Shift is the modifier because the SAFE action must
+   * stay the unmodified one — closing a viewer must not take a shell away from
+   * another viewer by accident.
+   */
+  const handleCloseTab = useCallback(
+    (id: string, kill?: boolean): void => {
+      if (kill) {
+        // Best-effort: a pty that is already gone (or a decayed grant) must
+        // still close the tab, which is the part the user asked for.
+        void window.api.killTerminal(id).catch(() => {})
+      }
+      closeTerminalTab(id)
+    },
+    [closeTerminalTab]
+  )
+
   // Listen for PTY exit events
   useEffect(() => {
     const unsub = window.api.onTerminalExit(({ terminalId }) => {
@@ -158,7 +180,7 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
       allTabs={allTabs}
       activeId={activeId}
       onSelectTab={setActiveTerminal}
-      onCloseTab={closeTerminalTab}
+      onCloseTab={handleCloseTab}
       onNewTab={handleNewTab}
       onClosePanel={() => setTerminalPanelOpen(false)}
     />

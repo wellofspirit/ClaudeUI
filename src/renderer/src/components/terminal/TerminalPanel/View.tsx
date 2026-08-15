@@ -14,7 +14,12 @@ export interface TerminalPanelViewProps {
   allTabs: TerminalTab[]
   activeId: string | null
   onSelectTab: (id: string, cwd: string) => void
-  onCloseTab: (id: string) => void
+  /**
+   * Close this tab. `kill: true` (Shift-click) also terminates the pty behind
+   * it — the only UI path that kills a shell now that a plain close merely
+   * detaches this surface from the shared per-cwd pool.
+   */
+  onCloseTab: (id: string, kill?: boolean) => void
   onNewTab: () => void
   onClosePanel: () => void
 }
@@ -50,9 +55,14 @@ export function TerminalPanelView({
           >
             <span className="truncate max-w-[120px]">{tab.title}</span>
             <button
+              data-testid="TerminalTab.close"
+              data-id={tab.id}
+              title="Close (detach) — Shift-click to kill"
               onClick={(e) => {
                 e.stopPropagation()
-                onCloseTab(tab.id)
+                // Shift is the kill modifier: a plain close leaves the shell
+                // running for the other surfaces attached to this pool slot.
+                onCloseTab(tab.id, e.shiftKey)
               }}
               className="w-3.5 h-3.5 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-bg-tertiary text-[10px]"
             >

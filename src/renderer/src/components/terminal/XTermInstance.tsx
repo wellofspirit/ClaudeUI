@@ -123,12 +123,19 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
     })
 
     // PTY output -> terminal. A `replay` chunk is the scrollback ring, i.e. the
-    // terminal's ENTIRE history: reset first so it is never appended to bytes
-    // the broadcast desktop lane may already have delivered for this pty.
+    // terminal's ENTIRE history: it must land on a cleared screen so it is never
+    // appended to bytes the broadcast desktop lane already delivered for this pty.
+    //
+    // The clear is IN-BAND (RIS, `ESC c`) rather than `term.reset()` on purpose.
+    // `Terminal.write()` is DEFERRED — xterm queues into its WriteBuffer and
+    // drains on a later task — while `reset()` runs SYNCHRONOUSLY and does not
+    // discard that queue. So `reset(); write(replay)` in a batch that also
+    // carried a live chunk resets an empty screen and then draws live+replay,
+    // duplicating scrollback in exactly the race this flag exists to close.
+    // RIS is parsed in stream order, so it clears precisely the bytes ahead of it.
     const unsub = window.api.onTerminalData(({ terminalId: id, data, replay }) => {
       if (id !== terminalId) return
-      if (replay) term.reset()
-      term.write(data)
+      term.write(replay ? `\x1bc${data}` : data)
     })
 
     // Multi-attach: subscribe this client to the live PTY. Registered AFTER the

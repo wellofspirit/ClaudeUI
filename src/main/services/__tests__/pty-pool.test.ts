@@ -39,7 +39,7 @@ vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { PtyManager } from '../pty-manager'
+import { PtyManager, MAX_POOL_INDEX } from '../pty-manager'
 
 const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 25))
 
@@ -134,6 +134,26 @@ describe('PtyManager — per-cwd terminal pool', () => {
     await new Promise((r) => queueMicrotask(() => r(undefined)))
   })
 
+  // The cold sweep calls kill-by-cwd with the store's NORMALIZED group key
+  // (`normalizeCwd` strips a trailing slash), while the pty was spawned with the
+  // session's raw cwd. An exact-match sweep therefore kills nothing for such a
+  // cwd AND drops the group, so no later sweep retries — the shells leak until
+  // the window closes, in the one directory where the Shift-click kill is
+  // already out of reach (the tab is gone by then).
+  // The cwd is unique to this case (every case gets a fresh PtyManager, whose
+  // pools/ptys are instance state — this just makes cross-case interference
+  // impossible by construction rather than by convention).
+  it('killByCwd matches the same directory however it was spelled', async () => {
+    const trailing = manager.open('/n4-repo/', 0, vi.fn(), vi.fn())
+    // A second surface names the same directory differently and lands in the
+    // same pool, so `entry.cwd` is whichever spelling SPAWNED it.
+    expect(manager.open('/n4-repo', 0, vi.fn(), vi.fn()).id).toBe(trailing.id)
+
+    expect(manager.killByCwd('/n4-repo')).toEqual([trailing.id])
+    expect(manager.poolOf('/n4-repo')).toEqual([])
+    await new Promise((r) => queueMicrotask(() => r(undefined)))
+  })
+
   it('an indexless open always spawns into the next free slot (old-client compat)', () => {
     // What a bundle that predates the pool sends: create(cwd) with no index. It
     // must keep getting SOME terminal — never silently attach to the operator's
@@ -165,6 +185,27 @@ describe('PtyManager — per-cwd terminal pool', () => {
     expect(() => manager.open('/repo', -1, vi.fn(), vi.fn())).toThrow(/non-negative integer/)
     expect(() => manager.open('/repo', 1.5, vi.fn(), vi.fn())).toThrow(/non-negative integer/)
     expect(ptyStub.spawned).toHaveLength(0)
+  })
+
+  // A huge index is not a malformed one — it is a MEMORY BOMB: claimSlot pads
+  // the pool array up to the requested slot, so an unclamped
+  // `terminal:create(cwd, 2**31-1)` hangs/OOMs the main process before a pty is
+  // ever spawned. Same refusal shape as a malformed index, and nothing is
+  // allocated: the pool for that cwd must not even exist afterwards.
+  it('refuses an index past the pool bound instead of padding the array', () => {
+    expect(() => manager.open('/repo', MAX_POOL_INDEX + 1, vi.fn(), vi.fn())).toThrow(
+      /non-negative integer/
+    )
+    expect(() => manager.open('/repo', 2 ** 31 - 1, vi.fn(), vi.fn())).toThrow(
+      `no greater than ${MAX_POOL_INDEX}`
+    )
+    expect(ptyStub.spawned).toHaveLength(0)
+    expect(manager.poolOf('/repo')).toEqual([])
+
+    // The bound itself is usable — this is a clamp, not an off-by-one fence.
+    const last = manager.open('/repo', MAX_POOL_INDEX, vi.fn(), vi.fn())
+    expect(last.index).toBe(MAX_POOL_INDEX)
+    expect(manager.terminalAt('/repo', MAX_POOL_INDEX)).toBe(last.id)
   })
 
   it('an attaching surface can read the scrollback of a pty it never spawned', async () => {

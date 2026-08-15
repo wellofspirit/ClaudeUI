@@ -55,14 +55,27 @@ export interface PtyEntry {
  * accidental ways one string can differ from another naming the same directory
  * (separator flavour, a trailing slash, and — on Windows only — case).
  *
- * Deliberately NOT applied to {@link PtyManager.killByCwd}, whose exact-match
- * semantics are load-bearing for the cold-session sweep and unchanged here.
+ * {@link PtyManager.killByCwd} matches through this too: it used to compare the
+ * raw strings, which silently stranded every pty whose spawner spelled the cwd
+ * differently from the sweep's caller (see the note there).
  */
 function poolKeyFor(cwd: string): string {
   let key = cwd.replace(/\\/g, '/')
   while (key.length > 1 && key.endsWith('/')) key = key.slice(0, -1)
   return os.platform() === 'win32' ? key.toLowerCase() : key
 }
+
+/**
+ * Highest pool slot an open may name.
+ *
+ * The bound is a DoS gate, not a product limit: `claimSlot` pads its array up to
+ * the requested index, so a single unclamped `terminal:create(cwd, 2**31-1)` —
+ * one wire message from any stepped-up remote client — would hang or OOM the
+ * MAIN process before a pty was ever spawned. 64 terminals per directory is far
+ * past any real use of the panel, and asking for more is refused with the same
+ * error a malformed index gets.
+ */
+export const MAX_POOL_INDEX = 64
 
 /** What {@link PtyManager.open} resolved to. */
 export interface PtyOpenResult {
@@ -201,8 +214,13 @@ export class PtyManager {
     const poolKey = poolKeyFor(cwd)
     const pool = this.pools.get(poolKey) ?? []
     if (index !== null && index !== undefined) {
-      if (!Number.isInteger(index) || index < 0) {
-        throw new Error(`A terminal index must be a non-negative integer (got ${String(index)})`)
+      // One shape of refusal for every index we will not honour: malformed, and
+      // out of range (see MAX_POOL_INDEX — an unbounded index is a main-process
+      // memory bomb, reachable from one wire message).
+      if (!Number.isInteger(index) || index < 0 || index > MAX_POOL_INDEX) {
+        throw new Error(
+          `A terminal index must be a non-negative integer no greater than ${MAX_POOL_INDEX} (got ${String(index)})`
+        )
       }
       const existing = pool[index]
       // Attach-to-existing: the caller gets the id of a pty it did not spawn,
@@ -356,11 +374,23 @@ export class PtyManager {
     this.freeSlot(entry)
   }
 
-  /** Kill all PTYs spawned with a given cwd. Returns the killed terminal IDs. */
+  /**
+   * Kill all PTYs of a given cwd. Returns the killed terminal IDs.
+   *
+   * Matched through {@link poolKeyFor}, i.e. by DIRECTORY rather than by string:
+   * `entry.cwd` is whichever spelling the surface that SPAWNED the pty used,
+   * while the cold sweep calls this with the renderer's normalized group key. An
+   * exact match therefore killed nothing whenever the two spellings differed
+   * (trailing slash, separator flavour, Windows case) and the sweep then dropped
+   * the group, so nothing ever retried — the shells leaked until window close.
+   * Normalizing only ever widens to strings naming the same directory, which is
+   * exactly the set the pool already treats as one.
+   */
   killByCwd(cwd: string): string[] {
     const killed: string[] = []
+    const key = poolKeyFor(cwd)
     for (const [id, entry] of this.ptys) {
-      if (entry.cwd === cwd) {
+      if (poolKeyFor(entry.cwd) === key) {
         this.kill(id)
         killed.push(id)
       }
@@ -431,6 +461,8 @@ export class PtyManager {
 
   private claimSlot(poolKey: string, index: number, id: string): void {
     const pool = this.pools.get(poolKey) ?? []
+    // Padding is bounded by {@link MAX_POOL_INDEX}, which `open` enforces before
+    // any caller reaches here — never pad to an attacker-chosen length.
     while (pool.length < index) pool.push(null)
     pool[index] = id
     this.pools.set(poolKey, pool)

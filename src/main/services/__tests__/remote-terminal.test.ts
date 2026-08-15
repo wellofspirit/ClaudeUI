@@ -462,6 +462,29 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     await expect(client.invoke('terminal:create', '/repo', 0)).rejects.toThrow('terminal-disabled')
   })
 
+  it('refuses an out-of-range slot from the WIRE, spawning nothing', async () => {
+    // The index is attacker-controlled data on a stepped-up socket, and the pool
+    // pads its array up to whatever slot is named — so an unclamped
+    // `terminal:create(cwd, 2**31-1)` is a main-process hang/OOM from ONE frame.
+    // A grant is deliberately in hand here: this must be refused by the bound,
+    // not by the gates that happen to sit in front of it.
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const client = await connect()
+    await stepUp(client)
+
+    await expect(client.invoke('terminal:create', '/repo', 2 ** 31 - 1)).rejects.toThrow(
+      /no greater than/
+    )
+    await expect(client.invoke('terminal:create', '/repo', 65)).rejects.toThrow(
+      /non-negative integer/
+    )
+    expect(ptyStub.spawned).toHaveLength(0)
+
+    // …and the socket is still perfectly usable for a legitimate open.
+    await expect(client.invoke('terminal:create', '/repo', 0)).resolves.toBeTruthy()
+    expect(ptyStub.spawned).toHaveLength(1)
+  })
+
   // -------------------------------------------------------------------------
   // Test 2 — step-up specifics
   // -------------------------------------------------------------------------

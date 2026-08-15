@@ -30,6 +30,7 @@ const CWD = '/d/repo'
 describe('TerminalPanel FC', () => {
   let app: TestApp
   let createCalls: Array<{ cwd: string; index?: number }>
+  let killCalls: string[]
   /** Stands in for the main-process terminal pool: `cwd#index` → pty id. */
   let pool: Map<string, string>
   let spawnCount: number
@@ -49,7 +50,10 @@ describe('TerminalPanel FC', () => {
       pool.set(key, id)
       return id
     })
-    app.bridge.ipcMain.handle('terminal:kill', async () => {})
+    killCalls = []
+    app.bridge.ipcMain.handle('terminal:kill', async (_e, id: string) => {
+      killCalls.push(id)
+    })
 
     useSessionStore.getState().createNewSession(ROUTE, CWD)
     useSessionStore.setState({
@@ -145,9 +149,44 @@ describe('TerminalPanel FC', () => {
       viewProps.onCloseTab('term-x')
     })
 
-    // closeTerminalTab keeps the tab mounted but sets a flag — safe to just check the API
-    // was invoked without crashing; further state is an implementation detail.
-    expect(viewProps.visibleTabs.length).toBeGreaterThanOrEqual(0)
+    // A plain close DETACHES: the pty may still be open on another surface, so
+    // the tab goes and the shell stays.
+    expect(killCalls).toEqual([])
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs.find((t) => t.id === 'term-x')).toBeUndefined()
+  })
+
+  // Shift-click is the ONLY UI path that stops a runaway process: a plain close
+  // detaches, and the cold sweep never reaps the cwd you are actively working
+  // in. The tab must go either way — the kill is best-effort on top.
+  it('onCloseTab with the kill flag kills the pty and still closes the tab', async () => {
+    useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
+    await renderFC()
+
+    await act(async () => {
+      viewProps.onCloseTab('term-x', true)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(killCalls).toEqual(['term-x'])
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs.find((t) => t.id === 'term-x')).toBeUndefined()
+  })
+
+  it('closes the tab even when the kill is refused', async () => {
+    app.bridge.ipcMain.handle('terminal:kill', async () => {
+      throw new Error('needs-step-up')
+    })
+    useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
+    await renderFC()
+
+    await act(async () => {
+      viewProps.onCloseTab('term-x', true)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs.find((t) => t.id === 'term-x')).toBeUndefined()
   })
 
   it('onSelectTab updates the active terminal', async () => {

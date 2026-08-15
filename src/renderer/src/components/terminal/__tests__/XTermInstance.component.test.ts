@@ -155,8 +155,17 @@ describe('XTermInstance', () => {
 
   // A `replay` chunk is the server's scrollback ring — the terminal's WHOLE
   // history. The desktop lane is a broadcast, so some of those bytes may already
-  // be on screen; reset-then-write makes the delivery idempotent either way.
-  it('resets before writing a replay chunk, and appends live chunks after it', async () => {
+  // be on screen, and the clear that makes the delivery idempotent must travel
+  // IN THE STREAM (RIS, `ESC c`), not as an out-of-band `term.reset()`.
+  //
+  // Why the shape and not just the effect: xterm's `write()` is deferred (it
+  // queues into a WriteBuffer drained on a later task) while `reset()` is
+  // synchronous and does NOT discard that queue. `reset(); write(replay)` in a
+  // batch that also carried a live chunk therefore clears an empty screen and
+  // then draws live+replay — double scrollback in exactly the race the flag
+  // exists to close. A mock cannot reproduce that timing, so this pins the only
+  // thing that distinguishes the two implementations: WHAT is written.
+  it('prefixes a replay chunk with RIS in-band instead of calling reset()', async () => {
     await renderFC('term-xyz')
     const term = termInstances[0]
     term.write.mockClear()
@@ -168,8 +177,17 @@ describe('XTermInstance', () => {
       app.emit('terminal:data', { terminalId: 'term-xyz', data: 'after' })
     })
 
-    expect(term.reset).toHaveBeenCalledTimes(1)
-    expect(term.write.mock.calls.map((c) => c[0])).toEqual(['live', 'live+history', 'after'])
+    // The out-of-band reset is the bug — its absence is the fix.
+    expect(term.reset).not.toHaveBeenCalled()
+
+    const written = term.write.mock.calls.map((c) => c[0] as string)
+    expect(written).toHaveLength(3)
+    // Live chunks go through verbatim: no clear, nothing prepended.
+    expect(written[0]).toBe('live')
+    expect(written[2]).toBe('after')
+    // The replay carries its own clear, ahead of the history it replaces.
+    expect(written[1].startsWith('\x1bc')).toBe(true)
+    expect(written[1]).toBe('\x1bclive+history')
   })
 
   // Attach is what makes a tab render a pty it did not spawn (per-cwd pool), and
