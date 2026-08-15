@@ -268,6 +268,72 @@ describe('ClaudeSession queue — consumed correlation (ADR-053)', () => {
       expect.objectContaining({ itemId: second, state: 'queued' })
     ])
   })
+
+  /**
+   * F8. `queued_command_consumed` carries the attachment's `prompt` VERBATIM
+   * (patch `queue-control`: `yield{...,prompt:wr.prompt,...}`), and that prompt
+   * is the pushed message's `message.content` — an ARRAY of content blocks
+   * whenever the queued prompt carried an image or a PDF.
+   *
+   * PRE-FIX: `onPromptDelivered(msg.prompt || '')` handed the array to
+   * `consumeByText`, whose comparison is `item.text === text`, so it never
+   * matched. The item stayed 'queued' through the injection cli.js had just
+   * announced and was only swept by the turn-end `result` flush — which is why
+   * the owner saw an image steer that the model had plainly already answered
+   * appear as a user bubble at the very END of the turn.
+   */
+  it('correlates an ATTACHMENT-carrying steer at the moment cli.js injects it', async () => {
+    const { session, sent, handle } = await startBusySession('r-queue-image')
+
+    session.enqueuePrompt('look at this', [
+      { mediaType: 'image/png', base64Data: 'AAAA', fileName: 'shot.png' }
+    ])
+    const [itemId] = session.queuedItems.map((i) => i.itemId)
+
+    // Exactly what the wire sends for that item: cli.js queued
+    // `message.content`, which ClaudeSession.run built as [image, text].
+    handle.emit({
+      type: 'system',
+      subtype: 'queued_command_consumed',
+      prompt: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+        { type: 'text', text: 'look at this' }
+      ],
+      session_id: 's1',
+      uuid: 'u1'
+    })
+
+    // Consumed NOW — mid-turn — not at the turn-end flush.
+    await vi.waitFor(() => expect(session.queuedItems).toEqual([]))
+    const last = queueBroadcasts(sent).at(-1)!
+    expect(last).toEqual([
+      expect.objectContaining({ itemId, text: 'look at this', state: 'consumed' })
+    ])
+    // The attachments ride the consumed entry, so every replica renders the
+    // synthesized `steer-<itemId>` bubble with its image.
+    expect(last[0].attachments).toHaveLength(1)
+  })
+
+  it('an attachments-ONLY steer (no text) still correlates', async () => {
+    const { session, handle } = await startBusySession('r-queue-image-only')
+
+    session.enqueuePrompt('', [
+      { mediaType: 'image/png', base64Data: 'BBBB', fileName: 'only.png' }
+    ])
+    handle.emit({
+      type: 'system',
+      subtype: 'queued_command_consumed',
+      // No text block at all — cli.js's own extractor yields '' here, and so
+      // does ours, which is what makes the empty-text item matchable.
+      prompt: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'BBBB' } }
+      ],
+      session_id: 's1',
+      uuid: 'u2'
+    })
+
+    await vi.waitFor(() => expect(session.queuedItems).toEqual([]))
+  })
 })
 
 describe('ClaudeSession queue — turn-end flush (ADR-053 addendum)', () => {

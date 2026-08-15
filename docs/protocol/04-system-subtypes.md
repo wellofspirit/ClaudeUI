@@ -357,12 +357,35 @@ Mid-turn queued steer consumed as an attachment.
 {
   "type": "system",
   "subtype": "queued_command_consumed",
+  // string OR ContentBlockParam[] — see the warning below
   "prompt": "the queued user text",
   "source_uuid": "...",
   "session_id": "...",
   "uuid": "..."
 }
 ```
+
+**`prompt` is NOT always a string.** The patch yields `prompt: <attachment>.prompt`
+verbatim, and `attachment.prompt` is whatever was pushed into the queue — which is the
+pushed message's `message.content`. That is a plain string for a text-only prompt and a
+**content-block array** (`[{type:'image',…}, {type:'text',text}]`) whenever the prompt
+carried an image or a PDF. cli.js branches on this at every read site rather than
+normalizing at the emit site:
+
+```js
+ZPe(e) = typeof e === "string" ? e
+       : Array.isArray(e) ? e.filter(t => t.type === "text" && typeof t.text === "string")
+                             .map(t => t.text).join("
+")
+       : ""
+```
+
+The `dequeue_message` matcher uses the same rule under a different name
+(`VV_(v) = typeof v === "string" ? v : Lu(v,"
+")`, `Lu` keeping `text` blocks), which
+is why taking an image-carrying queued message BACK always worked while noticing it had
+been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does it in
+`src/main/sdk/queued-command-text.ts`.
 
 **Ordering:** Followed by a `user` message with `isReplay: true` when `replayUserMessages=true`. UI uses this to dismiss the "queued" card and show the text as a normal user message.
 

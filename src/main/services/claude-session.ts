@@ -1,4 +1,5 @@
 import { query as sdkQuery } from '../sdk'
+import { queuedCommandText } from '../sdk/queued-command-text'
 import type {
   QueryHandle,
   SDKMessage,
@@ -1242,7 +1243,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       // turn (docs/protocol/04-system-subtypes.md §4.10). Text correlation is
       // all the wire gives us — ADR-053 pins first-match, duplicates being
       // interchangeable.
-      this.onPromptDelivered(msg.prompt || '')
+      //
+      // `msg.prompt` is the queued attachment's prompt VERBATIM, so it is an
+      // ARRAY of content blocks whenever the queued message carried images or a
+      // PDF. Passing that straight to `consumeByText` could never match (the
+      // comparison is `item.text === text`), so an attachment-carrying steer was
+      // only ever detected as consumed by the turn-end flush — and its bubble
+      // appeared after the whole turn, below the answer it had prompted.
+      // `queuedCommandText` is cli.js's own normalization, which the recall half
+      // of this protocol (`dequeue_message`) has always applied.
+      this.onPromptDelivered(queuedCommandText(msg.prompt))
       return
     }
     if (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback') {

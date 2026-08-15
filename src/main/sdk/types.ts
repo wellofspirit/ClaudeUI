@@ -132,8 +132,14 @@ export interface SystemMessage extends BaseSDKMessage {
     tool_uses?: number
     duration_ms?: number
   } | null
-  /** queued_command_consumed-only field */
-  prompt?: string
+  /**
+   * `queued_command_consumed`-only. NOT always a string: it is the queued
+   * attachment's `prompt` verbatim, which is the pushed message's
+   * `message.content` — an array of content blocks whenever the queued prompt
+   * carried images or a PDF. Normalize with `sdk/queued-command-text.ts`
+   * (cli.js's own `ZPe`/`VV_` rule) before comparing it to anything.
+   */
+  prompt?: string | Array<{ type?: string; text?: string }>
   /** model_refusal_fallback / model_fallback fields (docs/protocol/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'
