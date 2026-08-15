@@ -233,6 +233,8 @@ export class RemoteConnection {
    * whenever a socket goes away, so it never describes a dead connection.
    */
   private authMethodValue?: RemoteAuthMethod
+  /** `auth-response.authDisabled` — the effective policy is `off`. */
+  private authDisabledValue = false
   /**
    * `/remote/auth-info` advertised `webauthn` for this origin — i.e. at least
    * one credential is enrolled AND this Host can do WebAuthn. Set by the page
@@ -332,6 +334,22 @@ export class RemoteConnection {
    */
   getAuthMethod(): RemoteAuthMethod | undefined {
     return this.authMethodValue
+  }
+
+  /**
+   * Is this connection running against a server with authentication turned OFF
+   * (security.md §Policy modes)? The app owes a permanent warning banner while
+   * it is true.
+   *
+   * Two keys, one answer. `authDisabled` is the real one and covers every
+   * method — including the `tailnet-identity` accept the owner's own phone gets
+   * under `off`, which is the client that most needs warning and the one
+   * `method` alone never flags. `method === 'none'` is kept for compatibility
+   * with a server built before the field existed: it is the only method that
+   * server could report under `off`, so it is exactly the right fallback.
+   */
+  isAuthDisabled(): boolean {
+    return this.authDisabledValue || this.authMethodValue === 'none'
   }
 
   /**
@@ -650,6 +668,7 @@ export class RemoteConnection {
     }
     this.settleAssertion(new Error('Connection destroyed'))
     this.authMethodValue = undefined
+    this.authDisabledValue = false
   }
 
   /** Get the current last sequence number (for debugging). */
@@ -822,6 +841,7 @@ export class RemoteConnection {
     // close handler, and a stale `registeredOnThisSocket` would make the next
     // `enrollThisDevice` skip the registration it actually owes.
     this.authMethodValue = undefined
+    this.authDisabledValue = false
     this.registeredOnThisSocket = false
 
     try {
@@ -876,6 +896,7 @@ export class RemoteConnection {
       // described THAT connection, and leaving it set would have the app render
       // an `off`-mode banner (or offer a passkey step-up) for a dead socket.
       this.authMethodValue = undefined
+      this.authDisabledValue = false
       // Per-socket, like the method above: a new socket carries a new token and
       // starts the enrollment over from registration.
       this.registeredOnThisSocket = false
@@ -941,6 +962,7 @@ export class RemoteConnection {
       case 'auth-response':
         if (msg.ok) {
           this.authMethodValue = msg.method
+          this.authDisabledValue = msg.authDisabled === true
           this.settleAssertion(null)
           if (msg.method === 'enroll-token') {
             // The server consumed the token to answer this frame — it is

@@ -117,6 +117,25 @@ export interface WsAuthResponse {
    * definitive.
    */
   retryable?: boolean
+  /**
+   * Success only: the effective policy is `off`, so NOTHING was actually
+   * checked — render the persistent warning banner (security.md §Policy modes
+   * hard requirement 2).
+   *
+   * Separate from `method` because the two answer different questions. `method`
+   * says how this socket was admitted, and under `off` that is frequently
+   * `tailnet-identity`: ambient identity is still evaluated (it is worth having
+   * in the audit trail, and suppressing it would cost attribution for no gain),
+   * so it authenticates at connection time and `method:'none'` never appears
+   * for the single most common client — the owner's own phone. Keying the
+   * banner on the method alone therefore left exactly that client unwarned.
+   *
+   * ABSENT rather than `false` when authentication is on, so presence is the
+   * whole test and an older bundle that ignores the field is unaffected. A
+   * mid-session flip is covered by the existing auth-surface disconnect (4009):
+   * every live client reconnects and gets a fresh `auth-response`.
+   */
+  authDisabled?: true
 }
 
 /**

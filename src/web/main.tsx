@@ -14,12 +14,8 @@ import { EnrollPrompt, dismissEnrollPrompt, enrollPromptDismissed } from './comp
 import { NoAuthBanner } from './components/NoAuthBanner'
 import { MissingCredential } from './components/MissingCredential'
 import { readCachedProof, writeCachedProof, clearCachedProof } from './password-proof'
-import type {
-  FullStateSnapshot,
-  RemoteAuthInfo,
-  RemoteAuthMethod,
-  RemoteKdfParams
-} from '../shared/remote-protocol'
+import { decideAuthEntry, type PasswordParams } from './auth-entry'
+import type { FullStateSnapshot, RemoteAuthInfo, RemoteAuthMethod } from '../shared/remote-protocol'
 
 // The access token, the optional E2E key AND a one-time enrollment token all
 // ride the URL fragment. Browsers never send the fragment to the server, so
@@ -90,8 +86,6 @@ function stripEnrollFragment(): void {
   window.history.replaceState(null, '', `${pathname}${search}${rest ? `#${rest}` : ''}`)
 }
 
-type PasswordParams = { saltHex: string; kdf: RemoteKdfParams }
-
 /** What the pre-connection auth flow is currently doing. */
 type AuthPhase =
   /** Fetching /remote/auth-info (no fragment token to go on). */
@@ -148,6 +142,13 @@ function RemoteApp(): React.JSX.Element {
    * because it is the connection's fact, not the state machine's.
    */
   const [authMethod, setAuthMethod] = useState<RemoteAuthMethod>()
+  /**
+   * The server reported that authentication is OFF for this connection. Kept
+   * separate from {@link authMethod} because it is true for EVERY method under
+   * `off` — most importantly `tailnet-identity`, which is what the owner's own
+   * phone is admitted as (see `RemoteConnection.isAuthDisabled`).
+   */
+  const [authDisabled, setAuthDisabled] = useState(false)
   /** The device already said "not now" to the enrollment offer. */
   const [enrollOffered, setEnrollOffered] = useState(!enrollPromptDismissed())
   /** Latest advertised password params, so a rejection can re-show the form
@@ -165,6 +166,7 @@ function RemoteApp(): React.JSX.Element {
     setConnState(state)
     setError(err)
     setAuthMethod(connection.getAuthMethod())
+    setAuthDisabled(connection.isAuthDisabled())
     // Every connect path — fragment token, tailnet identity, password proof —
     // goes through connection.connect(), which emits 'connecting' before it
     // opens the socket, and nothing else emits it. So this starts the App
@@ -328,8 +330,7 @@ function RemoteApp(): React.JSX.Element {
      * factor — which is why it is recorded even on the fragment-credential path
      * that needs no discovery to connect.
      */
-    const noteAdvertisement = (info: RemoteAuthInfo): void => {
-      const advertised = Boolean(info.webauthn)
+    const noteAdvertisement = (advertised: boolean): void => {
       passkeyAdvertised.current = advertised
       connection.setWebauthnAdvertised(advertised)
     }
@@ -346,7 +347,7 @@ function RemoteApp(): React.JSX.Element {
       // a credential in hand, and a failed probe must not break one either.
       void fetchAuthInfo().then(
         (info) => {
-          if (!cancelled) noteAdvertisement(info)
+          if (!cancelled) noteAdvertisement(decideAuthEntry(info).passkeyAdvertised)
         },
         () => {}
       )
@@ -358,56 +359,52 @@ function RemoteApp(): React.JSX.Element {
       try {
         const info = await fetchAuthInfo()
         if (cancelled) return
-        if (info.version !== 1) {
-          setPhase({
-            kind: 'unavailable',
-            detail: 'This server speaks a newer remote protocol — update the desktop app.'
-          })
-          return
+        const decision = decideAuthEntry(info)
+        // Remembered on EVERY route, not just the one that shows a form: it is
+        // what the passkey screen's break-glass link falls back to and what an
+        // `auth-rejected` recovers onto, and on the tailnet origin — the phone —
+        // those are the only ways a lost authenticator is recoverable at all.
+        pwParams.current = decision.passwordParams
+        // From the DECISION, not the raw payload: it zeroes both fields for an
+        // unsupported protocol version, so nothing is believed from a bundle we
+        // have already declared we cannot read.
+        noteAdvertisement(decision.passkeyAdvertised)
+        switch (decision.route) {
+          case 'unsupported':
+            setPhase({
+              kind: 'unavailable',
+              detail: 'This server speaks a newer remote protocol — update the desktop app.'
+            })
+            return
+          case 'tailnet':
+            // Nothing to collect: connect with an empty credential and let the
+            // server's unsolicited auth-response drive the rest.
+            connection.setCredential({})
+            setPhase({ kind: 'connecting' })
+            connection.connect()
+            return
+          case 'passkey':
+            setPhase({ kind: 'passkey' })
+            return
+          case 'unavailable':
+            setPhase({ kind: 'unavailable' })
+            return
+          case 'password': {
+            const params = decision.passwordParams
+            if (!params) {
+              setPhase({ kind: 'unavailable' })
+              return
+            }
+            // Same tab, already signed in this session: skip the form entirely.
+            const cached = readCachedProof(params.saltHex)
+            if (cached) {
+              connectWithProof(cached)
+              return
+            }
+            setPhase({ kind: 'password', params })
+            return
+          }
         }
-        noteAdvertisement(info)
-        // Tailnet identity (Phase 3). A non-null `login` means the server already
-        // recognises THIS browser as the node owner from the `tailscale serve`
-        // identity headers, so there is no credential to collect: connect with an
-        // empty credential and let the server's unsolicited auth-response drive
-        // the rest. A null `login` (advertised but not us — tagged device, a
-        // colleague, or a request that didn't come through serve) falls through to
-        // the password flow, which is exactly what such a caller needs.
-        if (info.methods?.includes('tailnet-identity') && info.identity?.login) {
-          connection.setCredential({})
-          setPhase({ kind: 'connecting' })
-          connection.connect()
-          return
-        }
-        const params: PasswordParams | null = info.password
-          ? { saltHex: info.password.saltHex, kdf: info.password.kdf }
-          : null
-        // Recorded even when we lead with the passkey: it is what the
-        // break-glass link falls back to, and what an `auth-rejected` recovers
-        // onto without a second discovery round trip.
-        if (params && info.methods?.includes('password')) pwParams.current = params
-        // Passkey-first (ADR-052). An advertisement means ≥1 credential is
-        // enrolled AND this Host can do WebAuthn, so a one-tap sign-in is the
-        // right lead. The POLICY is deliberately not advertised, so this cannot
-        // know whether the server will actually accept a ceremony — if it
-        // refuses (`passkey-unavailable` under `legacy`), the rejection path
-        // drops back to the password form, which is why the params above are
-        // captured first.
-        if (info.webauthn) {
-          setPhase({ kind: 'passkey' })
-          return
-        }
-        if (!pwParams.current || !params) {
-          setPhase({ kind: 'unavailable' })
-          return
-        }
-        // Same tab, already signed in this session: skip the form entirely.
-        const cached = readCachedProof(params.saltHex)
-        if (cached) {
-          connectWithProof(cached)
-          return
-        }
-        setPhase({ kind: 'password', params })
       } catch (err) {
         if (cancelled) return
         setPhase({
@@ -488,7 +485,7 @@ function RemoteApp(): React.JSX.Element {
 
   return (
     <>
-      {authMethod === 'none' && <NoAuthBanner />}
+      {authDisabled && <NoAuthBanner />}
       {offerEnroll && (
         <EnrollPrompt
           onEnroll={() => connection.enrollThisDevice(null)}

@@ -253,6 +253,50 @@ describe('RemoteConnection — passkey handshake', () => {
     conn.destroy()
   })
 
+  it('the off-mode banner keys on authDisabled, for EVERY method (GUARD)', () => {
+    // Under `off` the owner's phone on the tailnet is admitted as
+    // `tailnet-identity`, so `method:'none'` never reaches the most common
+    // client and keying the banner on the method alone left it unwarned.
+    const { conn, internals } = makeConn({ token: 'tok' })
+    internals.handleMessage({
+      type: 'auth-response',
+      ok: true,
+      method: 'tailnet-identity',
+      identity: { login: 'owner@example.com' },
+      authDisabled: true
+    })
+    expect(conn.isAuthDisabled()).toBe(true)
+    conn.destroy()
+  })
+
+  it('still keys on method:none, for a server built before the field', () => {
+    // `none` is the only method such a server could report under `off`, which
+    // makes it exactly the right compatibility fallback.
+    const { conn, internals } = makeConn({ token: 'tok' })
+    internals.handleMessage({ type: 'auth-response', ok: true, method: 'none' })
+    expect(conn.isAuthDisabled()).toBe(true)
+    conn.destroy()
+  })
+
+  it('no banner while authentication is on, and none for a dead socket', () => {
+    const { conn, internals } = makeConn({ token: 'tok' })
+    internals.handleMessage({
+      type: 'auth-response',
+      ok: true,
+      method: 'tailnet-identity',
+      identity: { login: 'owner@example.com' }
+    })
+    expect(conn.isAuthDisabled()).toBe(false)
+
+    // A flip mid-session arrives as 4009; the banner must not survive the
+    // socket that reported it, or it would describe a connection that is gone.
+    internals.handleMessage({ type: 'auth-response', ok: true, method: 'none' })
+    expect(conn.isAuthDisabled()).toBe(true)
+    internals.ws?.close(4009)
+    expect(conn.isAuthDisabled()).toBe(false)
+    conn.destroy()
+  })
+
   it('close 4009 reconnects immediately and forgets the old auth method', () => {
     const { conn, internals } = makeConn({ token: 'tok' })
     internals.handleMessage({ type: 'auth-response', ok: true, method: 'webauthn' })

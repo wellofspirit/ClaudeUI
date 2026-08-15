@@ -835,6 +835,44 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     await expect(invoke(client, 'webauthn:register-options')).rejects.toThrow(/Permission denied/)
   })
 
+  // security.md §Policy modes hard requirement 2: a persistent warning on every
+  // connected web client for as long as the mode is active. `method:'none'`
+  // alone cannot carry that — under `off` an owner's phone on the tailnet is
+  // accepted at CONNECTION time as `tailnet-identity`, so the single most
+  // common client would see no warning at all while all auth is disabled.
+  it('off: EVERY accept carries authDisabled, whatever the method (GUARD)', async () => {
+    await boot('off')
+    forceServeUp(OWNER_LOGIN)
+
+    // The case that was silently unwarned: ambient tailnet identity.
+    const tailnet = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    expect(await tailnet.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'tailnet-identity',
+      authDisabled: true
+    })
+
+    // ...and the bare frame that `off` also accepts.
+    const bare = await connect()
+    bare.send({ type: 'auth' })
+    expect(await bare.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'none',
+      authDisabled: true
+    })
+  })
+
+  it('the flag is absent once authentication is back on', async () => {
+    await boot('legacy')
+    forceServeUp(OWNER_LOGIN)
+    const client = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    const response = await client.waitFor('auth-response')
+    expect(response).toMatchObject({ ok: true, method: 'tailnet-identity' })
+    // Absent, not `false`: a client keying on presence must never see a stale
+    // warning, and an older client that ignores the field is unaffected.
+    expect(response).not.toHaveProperty('authDisabled')
+  })
+
   it('off: logs a startup warning naming the mode', async () => {
     await boot('off')
     const warnings = vi.mocked(logger.warn).mock.calls.map((c) => String(c[1]))
@@ -929,6 +967,10 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
     const creds = (await invoke(client, 'webauthn:credentials')) as Array<{ nickname: string }>
     expect(creds.map((c) => c.nickname)).toEqual(['New tablet'])
+    // ...and the status row names it. Left null, the operator watching for
+    // their new phone to appear sees a blank entry until its next sign-in —
+    // exactly when they are looking for confirmation that it worked.
+    expect(server.getStatus().clientLogins).toEqual(['New tablet'])
   })
 
   // -------------------------------------------------------------------------

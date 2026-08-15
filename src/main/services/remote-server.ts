@@ -2092,7 +2092,13 @@ export class RemoteServer {
           type: 'auth-response',
           ok: true,
           method,
-          ...(login ? { identity: { login } } : {})
+          ...(login ? { identity: { login } } : {}),
+          // Every accept under `off` says so, whatever the method. Ambient
+          // tailnet identity is still evaluated (it is worth having in the
+          // audit trail), so under `off` the owner's own phone is admitted as
+          // `tailnet-identity` and `method:'none'` never reaches it — which is
+          // exactly the client security.md most needs to warn.
+          ...(auth.policy === 'off' ? { authDisabled: true } : {})
         })
       )
       logger.info(
@@ -2768,7 +2774,11 @@ export class RemoteServer {
     // audit log, and no terminal/git-watch ownership to migrate.
     const label = credentialLabel(result.credential.nickname, result.credential.credId)
     client.authMethod = 'webauthn'
-    client.login = null
+    // The credential nickname, matching what the HANDSHAKE webauthn path stores.
+    // `null` here left `RemoteStatus.clientLogins` reading `[null]` for a device
+    // right after it enrolled — the one moment the operator is watching that row
+    // to confirm the new phone arrived — until its next sign-in.
+    client.login = label
     client.connection.identity = { method: 'webauthn', label, connectedAt: Date.now() }
 
     // RE-SNAPSHOT the policy. This is a re-authentication moment, and the
@@ -2813,7 +2823,11 @@ export class RemoteServer {
       type: 'auth-response',
       ok: true,
       method: 'webauthn',
-      identity: { login: label }
+      identity: { login: label },
+      // Same rule as the handshake accept — this frame is a re-authentication
+      // result and a client must be able to read it the same way. `fresh` is
+      // the policy re-read a few lines up, not the connect-time snapshot.
+      ...(fresh.policy === 'off' ? { authDisabled: true as const } : {})
     })
     this.notifyStatus()
   }
