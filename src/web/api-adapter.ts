@@ -373,6 +373,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // `shell` channel) until the three gates hold — the caller treats a refusal
     // as "nothing known", never as "nothing running".
     terminalPool: (cwd) => connection.invoke('terminal:pool', cwd) as Promise<number[]>,
+    watchStreams: async (sessionIds) => {
+      await connection.invoke('stream:watch', { sessionIds })
+    },
     terminalStepUp: async (password, intent) => {
       // Proof params come from `terminal:availability`, NOT `/remote/auth-info`:
       // auth-info advertises authentication methods, and over the tunnel the

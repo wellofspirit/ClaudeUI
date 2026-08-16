@@ -4,7 +4,8 @@
  * The renderer stops being a specially-delivered window and becomes **client #1**:
  * it subscribes over a `MessagePortMain` pair and speaks the same four frames the
  * WebSocket clients speak, byte for byte
- * (`{type:'sync'}` → `{type:'sync-full'|'sync-catchup'}`, then `{type:'event'}`).
+ * (`{type:'sync'}` → `{type:'sync-full'|'sync-catchup'}`, then `{type:'event'}` —
+ * plus, since phase 5 S1, `{type:'stream'}` for the volatile lane).
  * Nothing about the protocol is desktop-specific; **the port IS the trust**, so
  * there are no auth frames on it.
  *
@@ -34,7 +35,8 @@
  */
 
 import { MessageChannelMain, type BrowserWindow, type MessagePortMain } from 'electron'
-import { syncCore, addSyncSubscriber } from './sync-host'
+import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
+import { desktopConnection } from '../ipc/command-registry'
 import { logger } from './logger'
 
 const LOG_SOURCE = 'sync-port'
@@ -46,6 +48,8 @@ export const SYNC_PORT_CHANNEL = 'sync-port'
 interface PortSession {
   port: MessagePortMain
   unsubscribe: (() => void) | null
+  /** The volatile lane's sink for this load (phase 5 S1). */
+  unsubscribeStream: (() => void) | null
 }
 
 /**
@@ -60,6 +64,7 @@ export function attachSyncPort(win: BrowserWindow): void {
   const teardown = (): void => {
     if (!active) return
     active.unsubscribe?.()
+    active.unsubscribeStream?.()
     try {
       active.port.close()
     } catch {
@@ -74,7 +79,7 @@ export function attachSyncPort(win: BrowserWindow): void {
     teardown()
 
     const { port1, port2 } = new MessageChannelMain()
-    const session: PortSession = { port: port1, unsubscribe: null }
+    const session: PortSession = { port: port1, unsubscribe: null, unsubscribeStream: null }
     active = session
 
     port1.on('message', (event) => {
@@ -122,6 +127,15 @@ function handleFrame(session: PortSession, frame: unknown): void {
     session.unsubscribe = addSyncSubscriber((seq, channel, args) => {
       post(session, { type: 'event', seq, channel, args })
     })
+    // The volatile lane (phase 5 S1). Registered alongside — and, like a WS
+    // client's, it starts watching NOTHING: the renderer's watch effect sends
+    // `stream:watch` for whatever session it is showing. The desktop's
+    // connection id is the process-wide `desktopConnection()`, which is the same
+    // identity its `stream:watch` invoke dispatches under.
+    session.unsubscribeStream = addStreamSubscriber(
+      desktopConnection().connectionId,
+      (streamFrame) => post(session, streamFrame)
+    )
   }
 }
 
@@ -137,5 +151,7 @@ function post(session: PortSession, frame: unknown): void {
     )
     session.unsubscribe?.()
     session.unsubscribe = null
+    session.unsubscribeStream?.()
+    session.unsubscribeStream = null
   }
 }

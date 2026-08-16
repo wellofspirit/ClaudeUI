@@ -38,7 +38,12 @@
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { connectRemoteClient, ephemeralPort, type RemoteClient } from '@test/helpers/ws-test-client'
-import type { WsServerMessage, WsEvent, FullStateSnapshot } from '../../shared/remote-protocol'
+import type {
+  WsServerMessage,
+  WsEvent,
+  FullStateSnapshot,
+  StreamFrame
+} from '../../shared/remote-protocol'
 import type { QueuedItem } from '../../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -342,6 +347,11 @@ function eventsOn(channel: string): WsEvent[] {
   return frames.filter((f): f is WsEvent => f.type === 'event' && f.channel === channel)
 }
 
+/** Volatile-lane frames, oldest first (phase 5 S1). */
+function streamFrames(): StreamFrame[] {
+  return frames.filter((f): f is StreamFrame => f.type === 'stream')
+}
+
 function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
   return vi.waitFor(() => expect(predicate()).toBe(true), { timeout: timeoutMs, interval: 10 })
 }
@@ -499,26 +509,44 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     await waitFor(() => engines.length === 1)
     const engine = engines[0]
 
+    // Deltas ride the VOLATILE lane since phase 5 S1, and it is
+    // subscription-scoped: without a `stream:watch` this socket sees none of
+    // them. Asserted first, because "no watch ⇒ no frames" is the property the
+    // lane exists for — the ring stays free of tokens.
     engine.emit(delta({ type: 'thinking_delta', thinking: 'weighing it up' }))
-    await waitFor(() => eventsOn('session:stream').length >= 1)
-    // Canonical folds the same delta the wire carried — one reducer, so the
-    // snapshot a reconnect would get already agrees with the stream.
+    await waitFor(
+      () => syncCore.getCanonicalState().sessions[ROUTING_ID].streamingThinking !== ''
+    )
+    expect(streamFrames()).toEqual([])
+    // Canonical folded it all the same — one interpretation, so the snapshot a
+    // reconnect would get already agrees with what a watching client sees.
     expect(syncCore.getCanonicalState().sessions[ROUTING_ID].streamingThinking).toContain(
       'weighing it up'
     )
+    // And nothing entered the ring: no `session:stream` event, on any seq.
+    expect(eventsOn('session:stream')).toEqual([])
 
+    // Now watch. The replay carries the accumulation this socket missed, at
+    // offset 0 — the self-heal that replaces catchup for this lane.
+    await client.invoke('stream:watch', { sessionIds: [ROUTING_ID] })
+    await waitFor(() => streamFrames().length >= 2)
+    // The replay states every stream of the session at offset 0, empty ones
+    // included — the thinking buffer is the one with content here.
+    expect(streamFrames().map((f) => [f.streamId, f.chunk])).toEqual([
+      [`${ROUTING_ID}/text`, ''],
+      [`${ROUTING_ID}/thinking`, 'weighing it up']
+    ])
+    expect(streamFrames().every((f) => f.offset === 0)).toBe(true)
+
+    const beforeText = streamFrames().length
     engine.emit(delta({ type: 'text_delta', text: 'on it' }))
-    await waitFor(() => eventsOn('session:stream').length >= 2)
-
-    const streams = eventsOn('session:stream')
-    expect(streams.map((f) => (f.args[1] as { type: string }).type)).toEqual(
-      expect.arrayContaining(['thinking', 'text'])
-    )
-    // Monotonic, ring-assigned, and never re-numbered per subscriber — the
-    // property a catchup depends on.
-    const seqs = streams.map((f) => f.seq)
-    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs)
-    expect(new Set(seqs).size).toBe(seqs.length)
+    await waitFor(() => streamFrames().length > beforeText)
+    const live = streamFrames()[beforeText]
+    expect(live).toMatchObject({ streamId: `${ROUTING_ID}/text`, offset: 0, chunk: 'on it' })
+    // (offset 0 because the text buffer really was empty — this is a turn's first
+    // text chunk, not a replay, and it is what seals the thinking span.)
+    // No seq anywhere on this lane — that is what "leaves the event system" means.
+    expect('seq' in live).toBe(false)
 
     const canonical = syncCore.getCanonicalState().sessions[ROUTING_ID]
     expect(canonical.streamingText).toContain('on it')

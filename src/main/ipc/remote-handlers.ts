@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
+import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { SessionManager } from '../services/session-manager'
 import {
   loadSessionHistory,
@@ -346,6 +347,10 @@ export function registerRemoteHandlers(
       )
     }
   })
+
+  // The volatile lane's subscription verb (phase 5 S1). Same declaration the
+  // desktop transport registers — see `ipc/stream-watch.ts`.
+  handleRemote(STREAM_WATCH_COMMAND)
 
   handleRemote({
     channel: 'session:rekey',

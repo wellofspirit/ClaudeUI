@@ -1189,6 +1189,12 @@ export class RemoteConnection {
         this.sync.receiveEvent(msg as WsEvent)
         break
 
+      case 'stream':
+        // The volatile lane (phase 5 S1). Never touches the cursor: a stream
+        // frame carries no seq, and the client validates the shape.
+        this.sync.receiveStreamFrame(msg)
+        break
+
       case 'invoke-response':
         {
           const resp = msg as WsInvokeResponse

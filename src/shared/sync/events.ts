@@ -41,10 +41,8 @@ import type {
   SessionStatus,
   SlashCommandInfo,
   StatusLineData,
-  StreamDelta,
   SubagentMessageBatchData,
   SubagentMessageData,
-  SubagentStreamDelta,
   SubagentToolResultData,
   TaskNotification,
   TaskProgress,
@@ -153,7 +151,6 @@ export interface SyncEventMap {
       images?: ToolResultImage[]
     }
   ) => void
-  'session:stream': (routingId: string, delta: StreamDelta) => void
   'session:status': (routingId: string, status: SessionStatus) => void
   'session:result': (routingId: string, result: SessionResult) => void
 
@@ -171,7 +168,6 @@ export interface SyncEventMap {
   'session:task-notification': (routingId: string, data: TaskNotification) => void
   /** Task exists and is running — see TaskStartedData for why this is needed. */
   'session:task-started': (routingId: string, data: TaskStartedData) => void
-  'session:subagent-stream': (routingId: string, data: SubagentStreamDelta) => void
   'session:subagent-message': (routingId: string, data: SubagentMessageData) => void
   'session:subagent-message-batch': (routingId: string, data: SubagentMessageBatchData) => void
   'session:subagent-tool-result': (routingId: string, data: SubagentToolResultData) => void

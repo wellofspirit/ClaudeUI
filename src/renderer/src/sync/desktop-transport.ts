@@ -4,7 +4,8 @@
  * Mirror image of `src/web/connection.ts`: that file owns a WebSocket, this one
  * owns a `MessagePort`, and both feed the SAME phase-0 {@link SyncClient}. The
  * frames are identical — `{type:'sync'}` out, `{type:'sync-full'|'sync-catchup'}`
- * and `{type:'event'}` in — so the renderer is client #1 in the literal sense:
+ * and `{type:'event'}` in, plus `{type:'stream'}` for the volatile lane — so the
+ * renderer is client #1 in the literal sense:
  * nothing about its protocol is desktop-specific, and there is no auth on it
  * because the port itself is the capability.
  *
@@ -94,6 +95,11 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
         if (typeof frame.seq === 'number' && typeof frame.channel === 'string') {
           client.receiveEvent({ seq: frame.seq, channel: frame.channel, args: frame.args ?? [] })
         }
+        return
+      case 'stream':
+        // The volatile lane (phase 5 S1). Validated inside the client, so this
+        // decoder stays a router; it never touches the cursor.
+        client.receiveStreamFrame(frame)
         return
       default:
         // An unknown frame is a version skew between preload and renderer, which

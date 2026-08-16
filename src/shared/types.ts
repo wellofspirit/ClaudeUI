@@ -717,6 +717,15 @@ export interface AskUserQuestionInput {
   questions: AskUserQuestion[]
 }
 
+/**
+ * The payload `BaseSession.send('session:stream', …)` carries.
+ *
+ * NOT a `SyncEventMap` entry any more (phase 5 S1): this channel left the event
+ * lane, so nothing subscribes to it — the deltas arrive as `StreamFrame`s and
+ * fold through `shared/sync/stream.ts`. The type survives because the EMITTERS
+ * still speak it and `streamFrameFrom` still parses it; it is the wire shape of
+ * an emission, not of a subscription.
+ */
 export interface StreamDelta {
   type: 'text' | 'thinking'
   text: string
@@ -801,6 +810,7 @@ export interface TaskNotification {
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
 }
 
+/** The subagent twin of {@link StreamDelta} — same phase-5 note applies. */
 export interface SubagentStreamDelta {
   toolUseId: string
   type: 'text' | 'thinking'
@@ -1299,6 +1309,16 @@ interface TerminalAPI {
    * information", never as "no shells here".
    */
   terminalPool(cwd: string): Promise<number[]>
+  /**
+   * Replace this connection's volatile-stream subscription set (phase 5 S1).
+   *
+   * REPLACE, never additive — the client sends the set it wants. The host
+   * answers by pushing the coalesced value of every non-empty stream of those
+   * sessions as `offset: 0` frames, which is what makes re-sending the same set
+   * the cure for a mid-connection offset mismatch. Bounded server-side
+   * (`MAX_STREAM_WATCH`); an over-long set is refused rather than clipped.
+   */
+  watchStreams(sessionIds: string[]): Promise<void>
   /**
    * Run the step-up ceremony with the operator's remote-access password.
    * Desktop resolves `{ok:true}` without a ceremony — there is nothing to step

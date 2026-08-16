@@ -6,7 +6,7 @@ import * as fs from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { BrowserWindow } from 'electron'
 import { app } from 'electron'
-import { syncCore, addSyncSubscriber } from './sync-host'
+import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
   LEGACY_REMOTE_GRANTS,
@@ -484,6 +484,13 @@ interface AuthenticatedClient {
   e2e: E2ECrypto | null
   /** Promise chain to preserve message ordering with async encryption. */
   sendQueue: Promise<void>
+  /**
+   * Unregister for this connection's VOLATILE STREAM sink (phase 5 S1). Held on
+   * the client so it dies with the socket exactly like the ping timer does —
+   * a subscription that outlived its connection would keep pushing a
+   * disconnected phone's deltas into a closed socket.
+   */
+  unsubscribeStream?: () => void
 }
 
 /**
@@ -924,6 +931,9 @@ export class RemoteServer {
       // `close` handler: `this.clients` is cleared on the next line, so by the
       // time those run there is no connection id left to release.
       terminalService.detachConnection(client.connection.connectionId)
+      // Same reasoning for the stream lane: the registry is keyed by connection
+      // id, and this map is cleared on the next line.
+      client.unsubscribeStream?.()
       closed.push(closeSocket(ws))
     }
 
@@ -2243,9 +2253,23 @@ export class RemoteServer {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
         }, PING_INTERVAL_MS),
         e2e: null,
-        sendQueue: Promise.resolve()
+        sendQueue: Promise.resolve(),
+        unsubscribeStream: undefined
       }
       this.clients.set(ws, newClient)
+      // The volatile stream lane (phase 5 S1). One sink per connection, watching
+      // NOTHING until the client sends `stream:watch` — and torn down with the
+      // socket, which is what keeps a stream subscription inside the same
+      // lifetime as every other authority this connection holds (ADR-054's 4010
+      // max-age cut ends it because the cut closes the socket).
+      //
+      // BACKPRESSURE IS S2 SCOPE, deliberately absent here: the per-connection
+      // budget (drop + resnapshot from the accumulation, the way `term-data`
+      // drops a slow consumer) lands with the tails, and the coalesced value is
+      // already the resnapshot it would need.
+      newClient.unsubscribeStream = addStreamSubscriber(connectionId, (frame) =>
+        this.sendTo(ws, frame)
+      )
       // ARM-ON-AUTH (ADR-054 decision 2) — this is what kills the double
       // ceremony: a login that IS a presence proof arms what its tier would
       // otherwise step-up-gate seconds later. A passkey assertion qualifies.
@@ -2770,6 +2794,7 @@ export class RemoteServer {
       const client = this.clients.get(ws)
       if (client?.pingTimer) clearInterval(client.pingTimer)
       if (client?.maxAgeTimer) clearTimeout(client.maxAgeTimer)
+      client?.unsubscribeStream?.()
       // Release every PTY attachment this socket held — a phone that sleeps or
       // a closed tab never sends terminal:detach, and a leaked attachment would
       // keep measuring a dead socket for backpressure.

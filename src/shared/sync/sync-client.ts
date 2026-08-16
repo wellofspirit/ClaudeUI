@@ -1,4 +1,5 @@
 import type { FullStateSnapshot } from '../remote-protocol'
+import { isStreamFrame, type StreamFrame } from './stream'
 
 /** One domain event as a transport hands it over (frame envelope stripped). */
 export interface SyncEvent {
@@ -11,6 +12,10 @@ export type SyncListener = (...args: unknown[]) => void
 export type SyncFullStateHandler = (state: FullStateSnapshot) => void
 /** Raw-event tap (SyncCore phase 4c) — see {@link SyncClient.onAnyEvent}. */
 export type SyncEventTap = (event: SyncEvent) => void
+/** Volatile-lane tap (phase 5 S1) — see {@link SyncClient.onStreamFrame}. */
+export type SyncStreamTap = (frame: StreamFrame) => void
+/** Fired whenever a `sync` was ANSWERED — see {@link SyncClient.onSyncAnswered}. */
+export type SyncAnsweredTap = () => void
 
 export interface SyncClientOptions {
   /**
@@ -57,6 +62,8 @@ const DEFAULT_BUFFER_LIMIT = 5000
 export class SyncClient {
   private readonly listeners = new Map<string, Set<SyncListener>>()
   private readonly taps = new Set<SyncEventTap>()
+  private readonly streamTaps = new Set<SyncStreamTap>()
+  private readonly answeredTaps = new Set<SyncAnsweredTap>()
   private readonly requestResync: () => void
   private readonly bufferLimit: number
   /** Pre-ready (and mid-flush) events, kept in seq order. */
@@ -118,6 +125,39 @@ export class SyncClient {
     }
   }
 
+  /**
+   * Subscribe to the VOLATILE STREAM lane (phase 5 S1).
+   *
+   * Deliberately separate from {@link onAnyEvent}: a stream frame is not an
+   * event. It carries no seq, so it must NOT touch `lastSeq`, the pre-ready
+   * buffer or gap detection — a delta that advanced the cursor would make the
+   * client claim it had applied events it never saw, which is the exact hole the
+   * ack discipline exists to prevent.
+   */
+  onStreamFrame(cb: SyncStreamTap): () => void {
+    this.streamTaps.add(cb)
+    return () => {
+      this.streamTaps.delete(cb)
+    }
+  }
+
+  /**
+   * Fired after every ANSWERED `sync` — the initial one, every resync, and every
+   * reconnect.
+   *
+   * It is what the stream lane's watch effect keys on: subscriptions are
+   * per-connection and die with the socket, so a client that reconnects holds no
+   * watch at all until it re-sends one. There is no cheaper signal — the
+   * transports own the socket and the store owns the selection, and neither can
+   * see the other.
+   */
+  onSyncAnswered(cb: SyncAnsweredTap): () => void {
+    this.answeredTaps.add(cb)
+    return () => {
+      this.answeredTaps.delete(cb)
+    }
+  }
+
   /** Set the handler for full snapshots (initial sync and every resync). */
   setFullStateHandler(cb: SyncFullStateHandler): void {
     this.fullStateHandler = cb
@@ -153,6 +193,29 @@ export class SyncClient {
   }
 
   /**
+   * A volatile stream frame (phase 5 S1). Validated here so a transport cannot
+   * hand a malformed one to the replica.
+   *
+   * **Pre-ready frames are DROPPED, not buffered — a deliberate loss.** The
+   * readiness gate exists because an EVENT dropped before the listeners mount is
+   * a permanent hole in a seq-ordered stream. A stream frame is not: the
+   * post-ready `stream:watch` replays the whole accumulation at `offset: 0`,
+   * which supersedes anything that arrived early by construction. Buffering them
+   * would mean applying deltas at offsets the replay has already invalidated.
+   */
+  receiveStreamFrame(frame: unknown): void {
+    if (!this.ready) return
+    if (!isStreamFrame(frame)) return
+    for (const tap of this.streamTaps) {
+      try {
+        tap(frame)
+      } catch {
+        /* one broken tap must not stop the others */
+      }
+    }
+  }
+
+  /**
    * A catchup batch (reconnect). Replayed through the same dispatch path as
    * live events so a reconnect can't silently discard the disconnect window.
    *
@@ -165,6 +228,7 @@ export class SyncClient {
   applyCatchup(events: readonly SyncEvent[], epoch: string): void {
     this.epoch = epoch
     for (const event of events) this.ingest(event, false)
+    this.announceAnswered()
   }
 
   /**
@@ -188,6 +252,17 @@ export class SyncClient {
     this.epoch = epoch
     this.lastSeq = seq
     this.fullStateHandler?.(state)
+    this.announceAnswered()
+  }
+
+  private announceAnswered(): void {
+    for (const tap of this.answeredTaps) {
+      try {
+        tap()
+      } catch {
+        /* one broken tap must not stop the others */
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

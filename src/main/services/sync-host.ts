@@ -12,6 +12,9 @@
  *    (`services/remote-server.ts`) and the plugin bridge
  *    (`services/plugin-manager.ts`) all register the same way;
  *  - the delivery callback, which routes by the channel's CLASS and nothing else;
+ *  - the **stream registry** (phase 5 S1) — the volatile lane's parallel: one
+ *    sink per CONNECTION plus that connection's `stream:watch` set, so a delta
+ *    reaches only the clients looking at that session;
  *  - {@link emitEvent}, the one emission helper.
  *
  * ## What 4c deleted
@@ -46,6 +49,7 @@
 
 import type { BrowserWindow } from 'electron'
 import { SyncCore, type Delivery } from '../sync/sync-core'
+import { sessionIdOfStream, type StreamFrame } from '../../shared/sync/stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
@@ -90,6 +94,168 @@ export function clearSyncSubscribersForTests(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Stream registry (SyncCore phase 5 S1)
+// ---------------------------------------------------------------------------
+//
+// The volatile lane's parallel to {@link addSyncSubscriber}, and deliberately NOT
+// the same registry: an event subscriber receives everything, always, while a
+// stream sink receives only the sessions its connection asked for. Keyed by
+// `connectionId` because the watch set is PER CONNECTION and dies with the socket
+// — which is what preserves ADR-054's promise that a 4010 max-age cut ends every
+// authority the socket held, this one included.
+
+/** One connection's stream sink. */
+export type StreamSink = (frame: StreamFrame) => void
+
+interface StreamSubscriber {
+  sink: StreamSink
+  /** Routing ids this connection is watching — a REPLACE set, never additive. */
+  watch: Set<string>
+}
+
+const streamSubscribers = new Map<string, StreamSubscriber>()
+
+/**
+ * Register a connection's stream sink. Returns the unregister, which the
+ * transport calls on socket close (WS) or port teardown (desktop).
+ *
+ * Registering does NOT subscribe to anything: the connection starts watching
+ * nothing and must send `stream:watch`.
+ */
+export function addStreamSubscriber(connectionId: string, sink: StreamSink): () => void {
+  streamSubscribers.set(connectionId, { sink, watch: new Set() })
+  return () => {
+    streamSubscribers.delete(connectionId)
+  }
+}
+
+/**
+ * Apply a `stream:watch` — REPLACE semantics, so the call is idempotent and a
+ * client never has to track what it previously asked for.
+ *
+ * Pushes the replay for every newly-watched session immediately (the
+ * terminal-attach symmetry): one `offset: 0` frame per non-empty accumulation,
+ * which is a REPLACE by construction and is therefore the lane's self-heal. The
+ * replay goes out for the WHOLE new set, not just the added ids: re-sending the
+ * same set is exactly how a client cures a mismatch.
+ *
+ * Returns the number of frames pushed (diagnostics + tests). A no-op for an
+ * unregistered connection — the desktop's own port registers on first sync, and a
+ * socket can close between the frame landing and this running.
+ */
+export function setStreamWatch(
+  connectionId: string,
+  sessionIds: readonly string[],
+  options: { replay?: boolean } = {}
+): number {
+  const entry = streamSubscribers.get(connectionId)
+  if (!entry) return 0
+  entry.watch = new Set(sessionIds)
+  // `replay: false` exists for ONE caller — the engine-test stub window, which
+  // re-watches after every emission and would otherwise re-deliver every
+  // already-watched session's accumulation as duplicate deltas. No production
+  // path uses it: the replay IS the self-heal, and a client that skipped it would
+  // have no way back from a mismatch.
+  if (options.replay === false) return 0
+  let pushed = 0
+  for (const routingId of entry.watch) {
+    for (const frame of syncCore.streamReplay(routingId)) {
+      try {
+        entry.sink(frame)
+        pushed++
+      } catch (err) {
+        logger.error(
+          LOG_SOURCE,
+          `stream sink threw during replay of ${routingId}: ` +
+            `${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    }
+  }
+  return pushed
+}
+
+/** What `connectionId` is watching (diagnostics + tests). */
+export function streamWatchOf(connectionId: string): string[] {
+  return [...(streamSubscribers.get(connectionId)?.watch ?? [])].sort()
+}
+
+/** How many connections hold a stream sink (diagnostics + tests). */
+export function streamSubscriberCount(): number {
+  return streamSubscribers.size
+}
+
+/** Drop every stream sink. Test seam only. */
+export function clearStreamSubscribersForTests(): void {
+  streamSubscribers.clear()
+}
+
+/**
+ * IN-PROCESS observers of the stream lane — every frame, no watch set.
+ *
+ * Deliberately a SECOND list rather than a fake connection in
+ * {@link streamSubscribers}. A watch set is a remote client's statement about
+ * what it is looking at; an in-process observer has no session selection, no
+ * socket to die with, and no capability to check. Conflating them would mean
+ * inventing a connection id for something that is not a connection, and every
+ * `stream:watch` bound would then have to reason about entries no client owns.
+ *
+ * The one production consumer is the ADR-005 plugin bridge, which was a
+ * subscriber of `session:stream` before phase 5 S1 moved those channels off the
+ * event lane. Restoring it here keeps a plugin's contract unchanged by a lane
+ * change it has no part in — the alternative was silently deleting token deltas
+ * from every plugin.
+ */
+const streamObservers = new Set<StreamSink>()
+
+/** Register an in-process observer of every stream frame. Returns the removal. */
+export function addStreamObserver(sink: StreamSink): () => void {
+  streamObservers.add(sink)
+  return () => {
+    streamObservers.delete(sink)
+  }
+}
+
+/** Drop every stream observer. Test seam only — the leak net the other two registries have. */
+export function clearStreamObserversForTests(): void {
+  streamObservers.clear()
+}
+
+/**
+ * The stream fan-out: every connection whose watch set names the frame's session,
+ * and nobody else. Fenced per sink for the same reason the event lane is — one
+ * dead socket must not stop the others.
+ */
+function streamDelivery(frame: StreamFrame): void {
+  const routingId = sessionIdOfStream(frame.streamId)
+  if (!routingId) return
+  for (const entry of [...streamSubscribers.values()]) {
+    if (!entry.watch.has(routingId)) continue
+    try {
+      entry.sink(frame)
+    } catch (err) {
+      logger.error(
+        LOG_SOURCE,
+        `stream sink threw delivering ${frame.streamId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+  // In-process observers see every frame — they have no watch set to filter by.
+  for (const observer of [...streamObservers]) {
+    try {
+      observer(frame)
+    } catch (err) {
+      logger.error(
+        LOG_SOURCE,
+        `stream observer threw on ${frame.streamId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Delivery
 // ---------------------------------------------------------------------------
 
@@ -105,6 +271,9 @@ function sendToWindow(win: BrowserWindow | null, channel: string, args: unknown[
  *    nowhere at all, when the app runs windowless). Not sync; not ringed; never
  *    reaches a subscriber.
  *  - everything else → EVERY subscriber, always.
+ *
+ * `volatile` channels never arrive here at all: `SyncCore.process` returns before
+ * delivery for them and calls {@link streamDelivery} instead.
  *
  * Each subscriber is fenced: the desktop port and the WS broadcaster must not be
  * able to break each other (a destroyed port throwing on `postMessage` used to
@@ -156,6 +325,19 @@ export const syncCore = new SyncCore({
 })
 
 syncCore.setDelivery(hostDelivery)
+syncCore.setStreamDelivery(streamDelivery)
+
+// A rekey moves the session's identity, and the watch sets are keyed by routing
+// id — so they move with it, in the same tick canonical does. The alternative
+// (waiting for each client's own watch effect to re-fire on the new id) would
+// drop every delta of the rest of the turn on the floor, which is precisely the
+// mid-stream rekey case (`session-rekey-mid-stream.e2e.test.ts`).
+syncCore.onRekey((oldId, newId) => {
+  for (const entry of streamSubscribers.values()) {
+    if (!entry.watch.delete(oldId)) continue
+    entry.watch.add(newId)
+  }
+})
 
 /**
  * Emit a domain event through the funnel.

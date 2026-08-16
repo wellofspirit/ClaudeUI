@@ -12,6 +12,14 @@
  * provably contains every event through N, which is what kills the as-built
  * watermark race by construction rather than by under-claiming.
  *
+ * **Phase 5 S1 added a second lane, chosen by the channel's CLASS.** A `volatile`
+ * channel (`session:stream`, `session:subagent-stream`) takes none of the three
+ * steps above: it is translated into a `{streamId, turnId, offset, chunk}` frame,
+ * folded into canonical through `shared/sync/stream.ts`, and delivered only to
+ * connections that subscribed with `stream:watch`. No ring entry, no seq, no
+ * cursor — which is what stops one turn of tokens from flushing a 5000-entry ring
+ * and forcing a `sync-full` on every reconnect. Emitters are unchanged.
+ *
  * **Phase 4b made canonical state the state of record.** `getSnapshot()` is what
  * every `sync-full` carries (`services/remote-server.ts`), and the renderer-pull
  * that used to serve it is gone — a busy, hung or absent renderer can no longer
@@ -29,6 +37,12 @@ import { EventRing } from './event-ring'
 import type { EventEntry, FullStateSnapshot } from '../../shared/remote-protocol'
 import { channelSpec, type ChannelClass } from '../../shared/sync/channels'
 import { applyEvent, emptyAux, rekeyTargetFor, type ReducerAux } from '../../shared/sync/reducer'
+import {
+  applyStreamFrame,
+  streamFrameFrom,
+  streamReplayFrames,
+  type StreamFrame
+} from '../../shared/sync/stream'
 import {
   emptyCanonicalState,
   toSnapshot,
@@ -68,6 +82,15 @@ export type DeliverFn = (
   delivery: Delivery & { cls: ChannelClass }
 ) => void
 
+/**
+ * The host's stream fan-out (SyncCore phase 5 S1). Invoked once per stream frame
+ * AFTER canonical has folded it. Separate from {@link DeliverFn} because the two
+ * lanes have nothing in common: a stream frame has no seq, never rings, and goes
+ * only to the connections that asked for that session
+ * (`services/sync-host.ts` §"Stream registry").
+ */
+export type StreamDeliverFn = (frame: StreamFrame) => void
+
 /** Fired when core rekeys a session, so the host registry can follow in-tick. */
 export type RekeyObserver = (oldId: string, newId: string) => void
 
@@ -92,6 +115,7 @@ export class SyncCore {
   private state: CanonicalState = emptyCanonicalState()
   private readonly aux: ReducerAux = emptyAux()
   private deliver: DeliverFn | null = null
+  private deliverStream: StreamDeliverFn | null = null
   private rekeyObservers: RekeyObserver[] = []
   private readonly onUnclassified: (channel: string) => void
   private readonly onApplyError: (channel: string, err: unknown) => void
@@ -121,6 +145,21 @@ export class SyncCore {
   /** Install the host's fan-out. Replaces any previous callback. */
   setDelivery(fn: DeliverFn | null): void {
     this.deliver = fn
+  }
+
+  /** Install the host's STREAM fan-out (phase 5 S1). Replaces any previous one. */
+  setStreamDelivery(fn: StreamDeliverFn | null): void {
+    this.deliverStream = fn
+  }
+
+  /**
+   * The coalesced value of every non-empty stream of `routingId`, as `offset: 0`
+   * REPLACE frames — what a `stream:watch` pushes immediately.
+   *
+   * Lives here because the generations live in `aux`, which is core-internal.
+   */
+  streamReplay(routingId: string): StreamFrame[] {
+    return streamReplayFrames(this.state, this.aux, routingId)
   }
 
   /**
@@ -197,6 +236,28 @@ export class SyncCore {
       // Fail-closed: an unclassified channel is a missing decision, not a
       // default. Refuse it loudly instead of guessing at replication.
       this.onUnclassified(channel)
+      return
+    }
+
+    // The VOLATILE lane (phase 5 S1). No ring, no seq, no reducer, no event
+    // fan-out: the delta becomes a stream frame, folds into canonical through the
+    // one shared interpretation, and reaches only the connections watching this
+    // session. The emitters are untouched — `BaseSession.send('session:stream', …)`
+    // still calls `emit`; the CLASS is what routes it.
+    if (spec.cls === 'volatile') {
+      const frame = streamFrameFrom(this.state, this.aux, channel, args)
+      // No frame ⇒ a malformed delta or a session canonical has never met. Both
+      // were honest no-ops in the deleted reducer branches; they stay no-ops, and
+      // nothing is delivered for a frame nobody could place.
+      if (!frame) return
+      try {
+        const outcome = applyStreamFrame(this.state, this.aux, frame)
+        this.state = outcome.state
+      } catch (err) {
+        this.onApplyError(channel, err)
+        return
+      }
+      this.deliverStream?.(frame)
       return
     }
 
@@ -375,5 +436,6 @@ export class SyncCore {
   resetCanonicalForTests(): void {
     this.state = emptyCanonicalState()
     this.aux.thinkingOpen = {}
+    this.aux.streamTurn = {}
   }
 }

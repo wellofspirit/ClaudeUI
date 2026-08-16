@@ -15,6 +15,7 @@
  * | Class | Ring | Canonical | Delivery |
  * | --- | --- | --- | --- |
  * | `replicated` | yes | where the snapshot carries the field | every subscriber |
+ * | `volatile` | **no** | yes (through `applyStreamFrame`) | WATCHING connections only |
  * | `volatile-pending-phase-5` | today's behavior, verbatim | only where snapshot parity requires | every subscriber |
  * | `host-local` | no | no | owning desktop window only |
  *
@@ -27,6 +28,8 @@
  * uniform subscriber — so the column became derivable and was removed:
  *
  *  - `host-local` ⇒ the owning `BrowserWindow` only, by targeted send;
+ *  - `volatile` ⇒ the stream lane: only connections whose `stream:watch` set
+ *    names the session (phase 5 S1);
  *  - anything else ⇒ every registered subscriber, always.
  *
  * Two consequences 4c accepts deliberately (both recorded in
@@ -41,18 +44,32 @@
  *    remote clients live, which is what a reconnecting client already replayed
  *    from the ring. That was 4a's "catchup leak" wrinkle; it dies here.
  *
- * ## The one surviving 4a rule (binding)
+ * ## Rule 1 is RETIRED (phase 5 S1)
  *
- * **Never reduce ring membership.** A channel that rings today still rings, even
- * where that is clearly wrong (`session:stream`). Removing entries is phase-5
- * work with its own migration.
+ * 4a's surviving rule was **never reduce ring membership** — "a channel that
+ * rings today still rings, even where that is clearly wrong (`session:stream`);
+ * removing entries is phase-5 work with its own migration". This IS that
+ * migration, for the two canonical-backed stream channels. They are class
+ * `volatile` now: `ring: false`, no seq, no reducer branch, and delivery through
+ * the subscription-scoped stream lane (`shared/sync/stream.ts`) instead of the
+ * event fan-out. The owner waived backward compatibility for cached client
+ * bundles, so there is no dual-emission lane — desktop and web ship with the
+ * server.
+ *
+ * The tails (`session:bash-output`, `session:background-output`,
+ * `automation:stream-event`) are S2 and keep `volatile-pending-phase-5` until
+ * then, which is why both classes exist side by side.
  *
  * {@link ChannelSpec.deliveryDelta} still records the 4a-sanctioned visibility
  * additions, and the funnel guard still pins that set exactly.
  */
 
 /** How an event is treated by the ring, canonical state, and the fan-out. */
-export type ChannelClass = 'replicated' | 'volatile-pending-phase-5' | 'host-local'
+export type ChannelClass =
+  | 'replicated'
+  | 'volatile'
+  | 'volatile-pending-phase-5'
+  | 'host-local'
 
 export interface ChannelSpec {
   cls: ChannelClass
@@ -303,19 +320,22 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   },
 
   // -------------------------------------------------------------------------
-  // Session domain — volatile lane (phase 5 separates these out)
+  // Session domain — the volatile lane.
+  //
+  // The first two are SEPARATED (phase 5 S1): off the ring, onto the stream
+  // frames. The two tails below still ring, pending S2.
   // -------------------------------------------------------------------------
   'session:stream': {
-    cls: 'volatile-pending-phase-5',
-    ring: true,
+    cls: 'volatile',
+    ring: false,
     canonical: true,
-    why: 'Text/thinking deltas. Rings today (which is exactly the buffer-poisoning phase 5 fixes) — canonical accumulates because streamingText/streamingThinking are snapshot fields.'
+    why: 'Text/thinking deltas. Phase 5 S1 took them off the ring entirely: they ride the stream lane (`{streamId, turnId, offset, chunk}`) to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields.'
   },
   'session:subagent-stream': {
-    cls: 'volatile-pending-phase-5',
-    ring: true,
+    cls: 'volatile',
+    ring: false,
     canonical: true,
-    why: 'Per-subagent deltas; the subagentStreaming* maps are snapshot fields.'
+    why: 'Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.'
   },
   'session:bash-output': {
     cls: 'volatile-pending-phase-5',
@@ -523,6 +543,26 @@ export function isClassified(channel: string): boolean {
 export function ringedChannels(): string[] {
   return Object.entries(CHANNEL_SPECS)
     .filter(([, spec]) => spec.ring)
+    .map(([channel]) => channel)
+    .sort()
+}
+
+/**
+ * Does this channel ride the STREAM lane rather than the event lane (phase 5 S1)?
+ *
+ * The single source every dispatch point reads: `SyncCore.process` routes on it,
+ * `applyEvent` refuses on it, the replica's fold skips on it, and the
+ * classification-invariant test asserts the consequences from it. A second
+ * `channel === 'session:stream' || …` anywhere would be the drift this replaces.
+ */
+export function isVolatileStream(channel: string): boolean {
+  return channelSpec(channel)?.cls === 'volatile'
+}
+
+/** Every channel on the stream lane, sorted. */
+export function volatileStreamChannels(): string[] {
+  return Object.entries(CHANNEL_SPECS)
+    .filter(([, spec]) => spec.cls === 'volatile')
     .map(([channel]) => channel)
     .sort()
 }

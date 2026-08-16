@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { emitEvent, clearSyncSubscribersForTests } from '../sync-host'
+import { emitEvent, clearSyncSubscribersForTests, syncCore } from '../sync-host'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -201,6 +201,12 @@ function fireSessionEventViaBridge(
   routingId: string,
   data: unknown
 ): void {
+  // Canonical must KNOW the session, on BOTH lanes: since phase 5 S1 a stream
+  // delta is placed by OFFSET, and there is no length to measure against a
+  // session that does not exist — so core drops it rather than delivering an
+  // unplaceable frame. Production gets the entry from the `session:created` that
+  // `prepareAndCreateSession` emits at spawn; this seed is that, minus the spawn.
+  if (!syncCore.getCanonicalState().sessions[routingId]) syncCore.seedSession(routingId, {})
   emitEvent(channel, [routingId, data])
 }
 
@@ -474,6 +480,57 @@ describe('PluginManager', () => {
       delete (global as any).__sessionEvents
     })
 
+    it('forwards VOLATILE-lane deltas with the pre-phase-5 payload shape (parity guard)', async () => {
+      // `session:stream` / `session:subagent-stream` stopped being events in
+      // phase 5 S1. A plugin's contract predates that split and must not change
+      // because of it, so the bridge observes the stream lane in-process and
+      // re-materializes the emission through the SHARED inverse. This test is the
+      // guard: it fails if the observer, the gate or the inverse regresses.
+      s = scaffold({ sessionIdFor: (rid) => (rid === 'R-1' ? 'SID-1' : null) })
+
+      writePlugin({
+        id: 'delta-listener',
+        entryJs: `
+          module.exports = {
+            activate: (ctx) => {
+              global.__deltas = []
+              ctx.on('session:stream', (evt) => { global.__deltas.push(['parent', evt]) })
+              ctx.on('session:subagent-stream', (evt) => { global.__deltas.push(['sub', evt]) })
+            }
+          }
+        `
+      })
+      await s.manager.loadAll()
+
+      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', {
+        type: 'thinking',
+        text: 'weighing'
+      })
+      fireSessionEventViaBridge(s.manager, 'session:subagent-stream', 'R-1', {
+        toolUseId: 'tu-1',
+        type: 'text',
+        text: 'sub output'
+      })
+
+      const deltas = (global as any).__deltas as any[]
+      expect(deltas).toHaveLength(2)
+      expect(deltas[0]).toEqual([
+        'parent',
+        { routingId: 'R-1', sessionId: 'SID-1', type: 'thinking', text: 'weighing' }
+      ])
+      expect(deltas[1]).toEqual([
+        'sub',
+        {
+          routingId: 'R-1',
+          sessionId: 'SID-1',
+          type: 'text',
+          toolUseId: 'tu-1',
+          text: 'sub output'
+        }
+      ])
+      delete (global as any).__deltas
+    })
+
     it('emits sessionId: null when SessionManager has no mapping yet (ADR-005 early events)', async () => {
       s = scaffold({ sessionIdFor: () => null })
 
@@ -490,13 +547,13 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
 
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-temp', { chunk: 'hi' })
+      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-temp', { type: 'text', text: 'hi' })
 
       const events = (global as any).__early as any[]
       expect(events).toHaveLength(1)
       expect(events[0].routingId).toBe('R-temp')
       expect(events[0].sessionId).toBeNull()
-      expect(events[0].chunk).toBe('hi')
+      expect(events[0].text).toBe('hi')
       delete (global as any).__early
     })
 
@@ -516,7 +573,7 @@ describe('PluginManager', () => {
       await s.manager.loadAll()
 
       fireSessionEventViaBridge(s.manager, 'session:result', 'R-1', { cost: 1 })
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', { chunk: 'x' })
+      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', { type: 'text', text: 'x' })
 
       expect((global as any).__streamHits).toBe(1)
       expect((global as any).__resultHits).toBe(0)

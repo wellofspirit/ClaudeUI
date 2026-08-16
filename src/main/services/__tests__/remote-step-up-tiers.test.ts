@@ -118,6 +118,8 @@ import { terminalService } from '../terminal-service'
 import { registerRemoteHandlers } from '../../ipc/remote-handlers'
 import { registerTerminalIpc } from '../../ipc/terminal.ipc'
 import { commandRegistry, registerCommand } from '../../ipc/command-registry'
+import { emitEvent, streamSubscriberCount, syncCore } from '../sync-host'
+import { MAX_STREAM_WATCH, type StreamFrame } from '../../../shared/sync/stream'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -796,6 +798,189 @@ describe('ADR-054 step-up tiers over the socket', () => {
       await boot({ stepUpTier: 'strong' }, 60)
       await new Promise((r) => setTimeout(r, 200))
       expect(auditChannels()).not.toContain('auth:session-expired')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // The volatile stream lane's subscription verb (SyncCore phase 5 S1)
+  // -------------------------------------------------------------------------
+
+  describe('stream:watch', () => {
+    const RID = 'rid-watch'
+    const OTHER = 'rid-other'
+
+    /** Stand up two sessions in canonical, mid-turn, with content to replay. */
+    function seedSessions(): void {
+      syncCore.resetCanonicalForTests()
+      syncCore.clearRing()
+      emitEvent('session:created', [RID, { cwd: '/repo' }])
+      emitEvent('session:created', [OTHER, { cwd: '/repo' }])
+      emitEvent('session:stream', [RID, { type: 'text', text: 'hello' }])
+      emitEvent('session:stream', [OTHER, { type: 'text', text: 'other' }])
+    }
+
+    const streamsOf = (c: RawClient): StreamFrame[] =>
+      c.frames.filter((f): f is StreamFrame => f.type === 'stream')
+
+    afterEach(() => {
+      syncCore.resetCanonicalForTests()
+      syncCore.clearRing()
+    })
+
+    it('replays the coalesced accumulation on subscribe, and only for watched sessions', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      c.frames.length = 0
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      // Every stream of the session, at offset 0, empty ones included — a stream
+      // the replay stayed silent about is one a re-watch could never correct.
+      expect(streamsOf(c)).toEqual([
+        { type: 'stream', streamId: `${RID}/text`, turnId: 0, offset: 0, chunk: 'hello' },
+        { type: 'stream', streamId: `${RID}/thinking`, turnId: 0, offset: 0, chunk: '' }
+      ])
+
+      // A live delta on the WATCHED session arrives; one on the other does not.
+      c.frames.length = 0
+      emitEvent('session:stream', [RID, { type: 'text', text: '!' }])
+      emitEvent('session:stream', [OTHER, { type: 'text', text: '!' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(streamsOf(c)).toEqual([
+        {
+          type: 'stream',
+          streamId: `${RID}/text`,
+          turnId: 0,
+          offset: 'hello'.length,
+          chunk: '!'
+        }
+      ])
+    })
+
+    it('is a REPLACE set, not an accumulation', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      c.frames.length = 0
+      // Switching sessions is one call. The previous id must STOP being watched,
+      // or a phone that visits ten sessions ends up receiving all ten.
+      await invoke(c, 'stream:watch', { sessionIds: [OTHER] })
+      expect(streamsOf(c).map((f) => f.streamId)).toEqual([
+        `${OTHER}/text`,
+        `${OTHER}/thinking`
+      ])
+      c.frames.length = 0
+      emitEvent('session:stream', [RID, { type: 'text', text: 'ignored' }])
+      emitEvent('session:stream', [OTHER, { type: 'text', text: 'kept' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(streamsOf(c).map((f) => f.chunk)).toEqual(['kept'])
+
+      // The empty set is legal and means "nothing" — how a client stops watching.
+      await invoke(c, 'stream:watch', { sessionIds: [] })
+      c.frames.length = 0
+      emitEvent('session:stream', [OTHER, { type: 'text', text: 'gone' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(streamsOf(c)).toEqual([])
+    })
+
+    it('refuses an over-long set rather than clipping it', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      const tooMany = Array.from({ length: MAX_STREAM_WATCH + 1 }, (_, i) => `s-${i}`)
+      await expect(invoke(c, 'stream:watch', { sessionIds: tooMany })).rejects.toThrow(
+        /at most 32 sessions/
+      )
+      // A clipped set would leave the client believing it watches sessions it
+      // does not; the refusal is what makes the cap honest. And the previous
+      // (valid) subscription is untouched by the rejected call.
+      await invoke(c, 'stream:watch', {
+        sessionIds: Array.from({ length: MAX_STREAM_WATCH }, () => RID)
+      })
+      c.frames.length = 0
+      emitEvent('session:stream', [RID, { type: 'text', text: 'x' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(streamsOf(c).map((f) => f.chunk)).toEqual(['x'])
+    })
+
+    it('rejects a malformed payload', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      await expect(invoke(c, 'stream:watch', { sessionIds: RID })).rejects.toThrow(
+        /must be an array/
+      )
+      await expect(invoke(c, 'stream:watch', { sessionIds: [1, 2] })).rejects.toThrow(
+        /non-empty strings/
+      )
+    })
+
+    it('is PER CONNECTION — one client watching leaks nothing to another', async () => {
+      await boot()
+      seedSessions()
+      const a = await connectWithToken()
+      const b = await connectWithToken()
+      await invoke(a, 'stream:watch', { sessionIds: [RID] })
+      a.frames.length = 0
+      b.frames.length = 0
+      emitEvent('session:stream', [RID, { type: 'text', text: 'private' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(streamsOf(a).map((f) => f.chunk)).toEqual(['private'])
+      expect(streamsOf(b)).toEqual([])
+    })
+
+    it('dies with the socket', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      expect(streamSubscriberCount()).toBe(1)
+      await c.close()
+      // The registry is keyed by connection id and the sink is released on close,
+      // so a subscription can never outlive the authority that created it — which
+      // is what makes the max-age cut below sufficient.
+      await vi.waitFor(() => expect(streamSubscriberCount()).toBe(0), { timeout: 3000 })
+      // And emitting into the void does not throw.
+      emitEvent('session:stream', [RID, { type: 'text', text: 'after' }])
+    })
+
+    it('the 4010 max-age cut takes the watch with it', async () => {
+      await boot({ stepUpTier: 'strong' }, 500)
+      seedSessions()
+      const c = await connectWithToken()
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      expect(await c.waitForClose(3000)).toBe(4010)
+      await vi.waitFor(() => expect(streamSubscriberCount()).toBe(0), { timeout: 3000 })
+    })
+
+    it('is READ-class: it never slides the strong tier mutation window', async () => {
+      // Mirrors the `terminal:pool` rule (sync-core.md §Terminal): the watch
+      // effect re-fires on every reconnect and every session switch, so a
+      // refreshing read would let a tab nobody is using renew its own step-up
+      // forever.
+      await boot({ stepUpTier: 'strong', stepUpMutationIdleMinutes: 10 })
+      seedSessions()
+      const c = await connectWithToken()
+      expect(await stepUp(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'probe:mutate')).resolves.toBe('mutated')
+
+      advance(6)
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      advance(6)
+      // 12 minutes since the last MUTATION, with a watch in the middle. If the
+      // watch had refreshed, this would still be inside the 10-minute window.
+      await expect(invoke(c, 'probe:mutate')).rejects.toThrow('needs-step-up')
+      // …while the read itself stays free, on a connection whose window lapsed.
+      await expect(invoke(c, 'stream:watch', { sessionIds: [RID] })).resolves.toBeUndefined()
+    })
+
+    it('is unaudited (a subscription toggle is not a command)', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      auditRows.length = 0
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      expect(auditChannels()).not.toContain('stream:watch')
     })
   })
 

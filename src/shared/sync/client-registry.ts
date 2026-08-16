@@ -22,18 +22,55 @@
  * invisible.
  */
 
-import type { SyncClient, SyncListener, SyncEventTap } from './sync-client'
+import type {
+  SyncClient,
+  SyncListener,
+  SyncEventTap,
+  SyncStreamTap,
+  SyncAnsweredTap
+} from './sync-client'
 import type { SyncEventMap } from './events'
 
 let client: SyncClient | null = null
 
+/** Which of the client's taps a deferred registration belongs to. */
+type DeferredKind = 'channel' | 'any-event' | 'stream' | 'answered'
+
 interface DeferredListener {
-  /** `null` ⇒ a channel-agnostic tap (see {@link onSyncAnyEvent}). */
+  kind: DeferredKind
+  /** Non-null only for `kind: 'channel'`. */
   channel: string | null
-  cb: SyncListener | SyncEventTap
+  cb: SyncListener | SyncEventTap | SyncStreamTap | SyncAnsweredTap
   /** The real unsubscribe, once a client exists to register against. */
   off: (() => void) | null
   cancelled: boolean
+}
+
+function attach(next: SyncClient, entry: DeferredListener): () => void {
+  switch (entry.kind) {
+    case 'channel':
+      return next.on(entry.channel as string)(entry.cb as SyncListener)
+    case 'any-event':
+      return next.onAnyEvent(entry.cb as SyncEventTap)
+    case 'stream':
+      return next.onStreamFrame(entry.cb as SyncStreamTap)
+    case 'answered':
+      return next.onSyncAnswered(entry.cb as SyncAnsweredTap)
+  }
+}
+
+function defer(entry: Omit<DeferredListener, 'off' | 'cancelled'>): () => void {
+  const full: DeferredListener = { ...entry, off: null, cancelled: false }
+  if (client) {
+    const off = attach(client, full)
+    return off
+  }
+  deferred.push(full)
+  return () => {
+    full.cancelled = true
+    full.off?.()
+    full.off = null
+  }
 }
 
 /** Listeners registered before the transport installed its client. */
@@ -47,10 +84,7 @@ export function setSyncClient(next: SyncClient): void {
   client = next
   for (const entry of deferred.splice(0)) {
     if (entry.cancelled) continue
-    entry.off =
-      entry.channel === null
-        ? next.onAnyEvent(entry.cb as SyncEventTap)
-        : next.on(entry.channel)(entry.cb as SyncListener)
+    entry.off = attach(next, entry)
   }
 }
 
@@ -71,15 +105,7 @@ export function onSyncEvent<K extends keyof SyncEventMap>(
   channel: K,
   cb: SyncEventMap[K]
 ): () => void {
-  const listener = cb as SyncListener
-  if (client) return client.on(channel)(listener)
-  const entry: DeferredListener = { channel, cb: listener, off: null, cancelled: false }
-  deferred.push(entry)
-  return () => {
-    entry.cancelled = true
-    entry.off?.()
-    entry.off = null
-  }
+  return defer({ kind: 'channel', channel, cb: cb as SyncListener })
 }
 
 /**
@@ -89,14 +115,26 @@ export function onSyncEvent<K extends keyof SyncEventMap>(
  * the transport runs (the web client imports it lazily, after `sync-full`).
  */
 export function onSyncAnyEvent(cb: SyncEventTap): () => void {
-  if (client) return client.onAnyEvent(cb)
-  const entry: DeferredListener = { channel: null, cb, off: null, cancelled: false }
-  deferred.push(entry)
-  return () => {
-    entry.cancelled = true
-    entry.off?.()
-    entry.off = null
-  }
+  return defer({ kind: 'any-event', channel: null, cb })
+}
+
+/**
+ * Subscribe to the VOLATILE STREAM lane (phase 5 S1) — the replica's second
+ * feed. Deferred identically to {@link onSyncAnyEvent}, and for the same reason:
+ * the replica is installed by the store module, which the web client imports
+ * lazily.
+ */
+export function onSyncStreamFrame(cb: SyncStreamTap): () => void {
+  return defer({ kind: 'stream', channel: null, cb })
+}
+
+/**
+ * Run `cb` after every answered `sync` — initial, resync and reconnect. The
+ * stream lane's watch effect keys on it, because a watch set dies with the
+ * socket that held it.
+ */
+export function onSyncAnswered(cb: SyncAnsweredTap): () => void {
+  return defer({ kind: 'answered', channel: null, cb })
 }
 
 /**

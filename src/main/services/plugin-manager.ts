@@ -8,7 +8,8 @@ import { SessionManager } from './session-manager'
 import { AutomationManager } from './automation-manager'
 import { RemoteDispatcher } from './remote-dispatcher'
 import { commandRegistry, desktopConnection, registerCommand } from '../ipc/command-registry'
-import { addSyncSubscriber } from './sync-host'
+import { addStreamObserver, addSyncSubscriber } from './sync-host'
+import { streamFrameToEmission } from '../../shared/sync/stream'
 import type {
   ClaudeUIPlugin,
   PluginContext,
@@ -61,6 +62,8 @@ export class PluginManager {
   private eventListeners = new Map<string, Set<(...args: unknown[]) => void>>()
   /** Unsubscribe for this manager's funnel sink (SyncCore phase 4c). */
   private unsubscribeSync: (() => void) | null = null
+  /** Removal for this manager's volatile-lane observer (phase 5 S1). */
+  private unsubscribeStream: (() => void) | null = null
   private win: BrowserWindow
   private sessionManager: SessionManager
   private automationManager: AutomationManager
@@ -80,9 +83,7 @@ export class PluginManager {
 
     // Subscribe to the funnel's fan-out (SyncCore phase 4c — the fake-BrowserWindow
     // `PluginBridge` is gone; a plugin surface is one subscriber like every other
-    // client). The event SET is unchanged: extras used to receive every
-    // replicated + volatile channel and never a host-local one, which is exactly
-    // what a subscriber receives now.
+    // client).
     //
     // Session events arrive as (channel, routingId, data) from BaseSession.send().
     // We wrap them into an object with { routingId, sessionId, ...data } so plugins
@@ -91,19 +92,52 @@ export class PluginManager {
       if (this.tracing) {
         logger.debug(LOG_SOURCE, `[trace] ${channel} ${JSON.stringify(args).slice(0, 200)}`)
       }
-      if (channel.startsWith('session:') && args.length >= 2) {
-        const routingId = args[0] as string
-        const data = args[1]
-        const sessionId = this.sessionManager.getSessionId(routingId)
-        this.fireEvent(channel, {
-          routingId,
-          sessionId,
-          ...(data && typeof data === 'object' ? (data as Record<string, unknown>) : { data })
-        })
-      } else {
-        this.fireEvent(channel, ...args)
-      }
+      this.fireSessionScoped(channel, args)
     })
+
+    // The VOLATILE LANE (phase 5 S1). `session:stream` / `session:subagent-stream`
+    // stopped being events, so a plain sync subscriber no longer sees them — but a
+    // plugin's contract predates the lane split and must not change because of it.
+    // An in-process OBSERVER receives every frame (it has no session selection to
+    // filter by, unlike a remote connection), and one shared helper turns the frame
+    // back into the emission shape plugins have always been handed.
+    //
+    // GATED on someone actually listening: with no plugin subscribed to these two
+    // channels the synthesis is skipped entirely, so the token firehose costs
+    // nothing on a machine with no plugins — which is every machine by default.
+    this.unsubscribeStream = addStreamObserver((frame) => {
+      if (!this.hasStreamListeners()) return
+      const emission = streamFrameToEmission(frame)
+      if (!emission) return
+      if (this.tracing) {
+        logger.debug(LOG_SOURCE, `[trace] ${emission.channel} ${frame.streamId}`)
+      }
+      this.fireSessionScoped(emission.channel, [emission.routingId, emission.data])
+    })
+  }
+
+  /** Is any plugin listening to the volatile lane's two channels? */
+  private hasStreamListeners(): boolean {
+    return (
+      (this.eventListeners.get('session:stream')?.size ?? 0) > 0 ||
+      (this.eventListeners.get('session:subagent-stream')?.size ?? 0) > 0
+    )
+  }
+
+  /** One wrapper for both lanes — see the ADR-005 event shape note above. */
+  private fireSessionScoped(channel: string, args: unknown[]): void {
+    if (channel.startsWith('session:') && args.length >= 2) {
+      const routingId = args[0] as string
+      const data = args[1]
+      const sessionId = this.sessionManager.getSessionId(routingId)
+      this.fireEvent(channel, {
+        routingId,
+        sessionId,
+        ...(data && typeof data === 'object' ? (data as Record<string, unknown>) : { data })
+      })
+      return
+    }
+    this.fireEvent(channel, ...args)
   }
 
   // -------------------------------------------------------------------------
@@ -158,6 +192,8 @@ export class PluginManager {
     }
     this.unsubscribeSync?.()
     this.unsubscribeSync = null
+    this.unsubscribeStream?.()
+    this.unsubscribeStream = null
   }
 
   listPlugins(): PluginInfo[] {

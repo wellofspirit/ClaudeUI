@@ -43,6 +43,8 @@ distinguished fan-out target, other clients had to masquerade as fake `BrowserWi
 knew. Delivery is now a function of the channel's **class** and nothing else:
 
 - `host-local` ⇒ the owning `BrowserWindow` only, by targeted `webContents.send`;
+- `volatile` ⇒ the STREAM LANE: only connections whose `stream:watch` set names the
+  session (§The stream lane);
 - `replicated` / `volatile-pending-phase-5` ⇒ **every subscriber, always**.
 
 A column that can only ever restate the class is a column that can only ever drift, so it
@@ -52,18 +54,27 @@ was deleted rather than pinned.
 
 - **`replicated`** — rings, fans out to every client, and (where the snapshot has a
   field) folds into canonical state. The default for anything that is state.
-- **`volatile-pending-phase-5`** — streaming deltas. These ring **today**, which is
-  exactly the buffer-poisoning phase 5 removes; 4a records that behavior verbatim
-  rather than fixing it early (see the rules below).
+- **`volatile`** — streaming deltas that have LEFT the event system (phase 5 S1).
+  No ring, no seq, no reducer branch, no cursor: they ride the stream lane's own
+  frame family and reach only the connections that subscribed to that session.
+  Canonical still accumulates them, through `applyStreamFrame`, because
+  `streamingText` / `streamingThinking` are snapshot fields. See §The stream lane.
+- **`volatile-pending-phase-5`** — the streaming TAILS (bash / background /
+  automation). These still ring, which is exactly the buffer-poisoning S2
+  removes; 4a records that behavior verbatim rather than fixing it early.
 - **`host-local`** — the owning desktop window only: window chrome, native pickers,
   voice capture, OAuth browser flows, PTY bytes, the log-viewer window.
 
 ## The rules, and which one 4c retired
 
-1. **Never reduce ring membership.** (Still binding.) A channel that rings today still
-   rings, even where that is clearly wrong (`session:stream`). Removing entries is phase-5
-   work with its own migration; doing it early would break catchup for clients that are
-   mid-reconnect across the upgrade.
+1. ~~**Never reduce ring membership.**~~ **Retired by phase 5 S1** — by the migration it
+   always named. `session:stream` and `session:subagent-stream` are class `volatile` now:
+   `ring: no`, and their deltas are not events at all. The rule's stated cost (breaking
+   catchup for clients mid-reconnect across the upgrade) was **waived by the owner**:
+   there is no dual-emission lane and no compatibility shim, because the desktop and web
+   bundles ship with the server. A cached older bundle sees a session whose text updates
+   only at message boundaries — never a broken transcript. The rule still binds the S2
+   tails, which have not migrated.
 2. ~~**Never widen delivery.**~~ **Retired by 4c**, deliberately and in a bounded way. 4a
    bound itself to today's targets so the funnel could be reviewed as a pure refactor; 4c's
    whole purpose was to delete the privilege those targets encoded. The classes did not
@@ -189,8 +200,8 @@ snapshot fields that already existed.
 | `automation:stream-event`        | volatile-pending-phase-5 | yes  | no        | —     | Run streaming deltas — same volatile shape as session:stream, same phase-5 destination.                                                                                                                |
 | `session:background-output`      | volatile-pending-phase-5 | yes  | no        | —     | Background-task tail. Same as bash-output.                                                                                                                                                             |
 | `session:bash-output`            | volatile-pending-phase-5 | yes  | no        | —     | Live bash tail. Rings today; no snapshot field, so canonical stays out of it.                                                                                                                          |
-| `session:stream`                 | volatile-pending-phase-5 | yes  | yes       | —     | Text/thinking deltas. Rings today (which is exactly the buffer-poisoning phase 5 fixes) — canonical accumulates because streamingText/streamingThinking are snapshot fields.                           |
-| `session:subagent-stream`        | volatile-pending-phase-5 | yes  | yes       | —     | Per-subagent deltas; the subagentStreaming* maps are snapshot fields.                                                                                                                                  |
+| `session:stream`                 | volatile                 | no   | yes       | —     | Text/thinking deltas. **Off the ring as of phase 5 S1** — they ride the stream lane to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields. |
+| `session:subagent-stream`        | volatile                 | no   | yes       | —     | Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.                                                                                                    |
 | `account:changed`                | host-local               | no   | no        | —     | Main-window-only today (remote.md defect 5). Promoting it is a deliberate later step, not a 4a side effect.                                                                                            |
 | `account:respawn-sessions`       | host-local               | no   | no        | —     | A command to the hosting renderer, not state.                                                                                                                                                          |
 | `app:before-quit`                | host-local               | no   | no        | —     | Host lifecycle handshake with the owning renderer.                                                                                                                                                     |
@@ -210,9 +221,93 @@ snapshot fields that already existed.
 at runtime: `host-local`, no ring, owning-window only. Plugin-declared capabilities
 are the follow-up that decides whether plugin surfaces may replicate. The plugin bridge
 itself is a plain funnel SUBSCRIBER as of 4c (the fake `BrowserWindow` it used to be is
-deleted); the event SET it receives is unchanged, because extras always got every
-replicated + volatile channel and never a host-local one — which is exactly what a
-subscriber gets.
+deleted); the event SET it receives is unchanged. **Phase 5 S1 kept that true across the
+lane split:** `session:stream` and `session:subagent-stream` stopped being events, so a
+sync subscriber no longer sees them — the bridge registers an in-process stream OBSERVER
+instead (`addStreamObserver`, unfiltered, since a plugin has no session selection to
+filter by) and re-materializes each frame through the shared `streamFrameToEmission`. A
+plugin's payload is byte-identical to what it received before the split. The synthesis is
+GATED on a plugin actually subscribing to those two channels, so it costs nothing on a
+machine with no plugins.
+
+
+## The stream lane (phase 5 S1)
+
+Two lanes now leave the funnel, and a channel's CLASS picks which.
+
+The **event lane** is unchanged: ring → canonical → every subscriber,
+`{seq, channel, args}`, cursor and catchup as before.
+
+The **stream lane** carries the two `volatile` channels and nothing else:
+
+```
+{ type: 'stream', streamId, turnId, offset, chunk }
+```
+
+- **`streamId`** — `<routingId>/text`, `<routingId>/thinking`,
+  `<routingId>/sub/<toolUseId>/text`, `<routingId>/sub/<toolUseId>/thinking`. One
+  exported helper (`src/shared/sync/stream.ts`) builds and parses it; the server, both
+  clients and the tests import the same one.
+- **`offset`** — the accumulated length (JS string units) of that stream BEFORE this
+  chunk. A frame whose offset does not match the receiver's local length is a NO-OP that
+  signals `mismatch`: applying it anyway would silently corrupt the text.
+- **In-process observers** (`addStreamObserver`) see every frame with no watch set, and
+  are a SEPARATE list from the connection-keyed subscribers. An observer has no session
+  selection, no socket to die with and no capability to check; giving one a synthetic
+  connection id would make every `stream:watch` bound reason about entries no client owns.
+  The one production consumer is the plugin bridge.
+- **`turnId`** — a per-stream generation, bumped by the EVENT lane whenever it clears
+  that stream's accumulation (message seal, retraction, conversation clear, disconnect,
+  subagent upsert). Within one socket frames are FIFO, and a cleared stream restarts at
+  length 0, so the field is redundant today; it rides because contract 3 names it, and a
+  mismatch on it is treated exactly like an offset mismatch.
+- **Never logged.** Same rule as `term-data` ([security.md](security.md) §Audit). On a
+  tunnel these are ordinary server→client frames and ride the existing encrypt path.
+
+**`stream:watch` is the subscription.** A registry QUERY (`chat`, unaudited — a
+subscription toggle has no domain effect), payload `{ sessionIds: string[] }`, **REPLACE**
+semantics, capped at 32 (`MAX_STREAM_WATCH`; an over-long set is refused, not clipped —
+a clipped set would leave the client believing it watches sessions it does not). The set
+is per CONNECTION and dies with the socket, which keeps a subscription inside the same
+lifetime as every other authority that connection holds — ADR-054's 4010 max-age cut ends
+it because the cut closes the socket. It classifies `read`, so it is free on every tier
+and **refreshes nothing**: the watch effect re-fires on every reconnect and every session
+switch, so a refreshing read would let an idle tab renew its own step-up window forever
+(the `terminal:pool` rule, generalised).
+
+**Replay-on-subscribe is the self-heal** — the same shape `terminal:attach`'s
+`replay: true` uses for a PTY. On watch, the server immediately pushes one frame per
+stream of the session at `offset: 0` — **including the EMPTY ones**. Offset 0 onto a
+NON-EMPTY buffer is a REPLACE by construction; offset 0 onto an EMPTY one is just a turn's
+first chunk and keeps the ordinary append semantics (which is what seals an open thinking
+span). The replay is ordered **text before thinking**, because a text frame landing on an
+empty buffer seals — replaying thinking first would hand that seal the value it had just
+restored.
+
+**Why the empty frames are not noise.** A replay is a claim about the SESSION, not about
+the streams that happen to be non-empty in it. Omitting an empty one leaves a buffer
+canonical CLEARED uncorrectable by re-watching, and that is reachable by ordinary use:
+watch a session mid-thinking-span, switch away, its first text delta seals the span on
+canonical, switch back — the replica keeps a phantom thinking block above the assistant
+text, with an open span whose ticker keeps running, until the next message seal. The
+subagent form is one switch away, since subagent text supersedes its thinking on every
+chunk. The count stays bounded (two per session plus two per toolUseId that has actually
+streamed), and a frame that changes nothing is identity-stable, so the projection does not
+re-render for it.
+
+A client cures a mid-connection mismatch by re-sending the same watch set; a client that
+reconnects re-watches, because subscriptions are per-connection. There is no third
+recovery path, and no cursor to repair.
+
+**Sessions nobody watches still converge**, at message boundaries, over the event lane —
+the accumulation is a snapshot field, so the coalesced answer always arrives. Only the
+token-by-token animation is subscription-scoped. That is the design, not a gap.
+
+**One interpretation, both sides.** `applyStreamFrame` is to this lane what `applyEvent`
+is to the event lane: core folds it against canonical, `renderer/src/stores/replica.ts`
+folds it against the replica, and the streaming fields stay SEALED. The reducer branches
+for these two channels are DELETED — `applyEvent` refuses a `volatile` channel outright
+rather than keeping a fossil that could race the lane.
 
 ## Reducer purity deltas
 

@@ -62,6 +62,14 @@ import {
   SEND_USER_FILE_TOOL
 } from '../derive-session'
 import { channelSpec } from './channels'
+import {
+  bumpStreamTurn,
+  dropStreamTurn,
+  dropStreamTurns,
+  rekeyStreamTurns,
+  streamIdFor,
+  type StreamKind
+} from './stream'
 import { emptySession, type CanonicalSessionState, type CanonicalState } from './state'
 
 /** One event as the ring holds it (the frame envelope, minus transport bits). */
@@ -84,10 +92,18 @@ export interface ReducerEvent {
 export interface ReducerAux {
   /** Is a thinking span currently open? The clock-free stand-in for `thinkingStartedAt`. */
   thinkingOpen: Record<string, boolean>
+  /**
+   * Per-streamId generation for the volatile lane (phase 5 S1), keyed by the
+   * `shared/sync/stream.ts` streamId scheme. Bumped by the event-lane branches
+   * that CLEAR a streaming buffer, so the next frame core emits carries the new
+   * `turnId` — see that module's note on why the field rides even though FIFO
+   * makes it redundant today.
+   */
+  streamTurn: Record<string, number>
 }
 
 export function emptyAux(): ReducerAux {
-  return { thinkingOpen: {} }
+  return { thinkingOpen: {}, streamTurn: {} }
 }
 
 /**
@@ -161,6 +177,29 @@ function ensured(state: CanonicalState, routingId: string): CanonicalState {
     ...state,
     sessions: { ...state.sessions, [routingId]: emptySession(routingId) }
   }
+}
+
+/**
+ * A session's own accumulation was cleared — start that stream's next generation
+ * (phase 5 S1). The event lane owns every CLEAR; the stream lane owns every
+ * append, and reads the generation this bumps.
+ */
+function bumpSelfStream(aux: ReducerAux, routingId: string, kind: StreamKind): void {
+  bumpStreamTurn(aux, streamIdFor(routingId, kind))
+}
+
+/**
+ * A subagent's buffers were blanked and its key retired — DROP both generations
+ * rather than bumping them.
+ *
+ * The bound this buys is real: toolUseIds are minted per tool call, so bumping
+ * would accrete two `streamTurn` entries per subagent for the session's whole
+ * life. See {@link dropStreamTurn} for why dropping is sound (both folds drop it,
+ * a missing key reads as 0, and the buffer is empty on both sides).
+ */
+function dropSubStreams(aux: ReducerAux, routingId: string, toolUseId: string): void {
+  dropStreamTurn(aux, streamIdFor(routingId, 'text', toolUseId))
+  dropStreamTurn(aux, streamIdFor(routingId, 'thinking', toolUseId))
 }
 
 function arg<T>(event: ReducerEvent, index: number): T | undefined {
@@ -326,6 +365,12 @@ export function applyEvent(
 ): CanonicalState {
   const spec = channelSpec(event.channel)
   if (!spec || !spec.canonical) return state
+  // The volatile lane is canonical-backed but is NOT an event: its deltas arrive
+  // as stream frames and fold through `applyStreamFrame`, which is the one
+  // interpretation of them (phase 5 S1). A `session:stream` reaching here would
+  // mean something re-routed it onto the event lane — refuse rather than grow a
+  // second accumulator.
+  if (spec.cls === 'volatile') return state
 
   switch (event.channel) {
     // -----------------------------------------------------------------------
@@ -390,6 +435,7 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       if (!routingId) return state
       delete aux.thinkingOpen[routingId]
+      dropStreamTurns(aux, routingId)
 
       const hadSession = state.sessions[routingId] !== undefined
       const { [routingId]: _dropped, ...sessions } = state.sessions
@@ -460,6 +506,15 @@ export function applyEvent(
       const session = state.sessions[routingId]
       if (!session) return state
       aux.thinkingOpen[routingId] = false
+      // Every one of this session's accumulations is blanked, subagents included.
+      bumpSelfStream(aux, routingId, 'text')
+      bumpSelfStream(aux, routingId, 'thinking')
+      for (const toolUseId of new Set([
+        ...Object.keys(session.subagentStreamingText),
+        ...Object.keys(session.subagentStreamingThinking)
+      ])) {
+        dropSubStreams(aux, routingId, toolUseId)
+      }
       const fresh = emptySession(routingId, session.cwd)
       return withSession(state, routingId, (s) => ({
         ...fresh,
@@ -544,6 +599,9 @@ export function applyEvent(
           : session.messages.map((m, i) => (i === idx ? committed : m))
 
       if (sealsThinking) aux.thinkingOpen[routingId] = false
+      // The seal is a CLEAR of the live buffers, so both streams turn over.
+      bumpSelfStream(aux, routingId, 'text')
+      if (sealsThinking) bumpSelfStream(aux, routingId, 'thinking')
 
       next = withSession(next, routingId, () => ({
         messages,
@@ -570,6 +628,8 @@ export function applyEvent(
       if (!routingId) return state
       const messageIds = data?.messageIds ?? []
       aux.thinkingOpen[routingId] = false
+      bumpSelfStream(aux, routingId, 'text')
+      bumpSelfStream(aux, routingId, 'thinking')
       return withSession(state, routingId, (s) => ({
         messages:
           messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
@@ -639,52 +699,12 @@ export function applyEvent(
       return next
     }
 
-    // -----------------------------------------------------------------------
-    // Streaming accumulation (volatile lane until phase 5)
-    // -----------------------------------------------------------------------
-    case 'session:stream': {
-      const routingId = routingIdOf(event)
-      const data = arg<{ type?: string; text?: string }>(event, 1)
-      if (!routingId || typeof data?.text !== 'string') return state
-      // `withSession` (not `ensured`) — and the aux writes are gated on the
-      // session existing too, or a stream delta for a removed id would leave an
-      // orphan `thinkingOpen` flag behind that a same-id respawn would inherit.
-      if (!state.sessions[routingId]) return state
-      if (data.type === 'thinking') {
-        aux.thinkingOpen[routingId] = true
-        return withSession(state, routingId, (s) => ({
-          streamingThinking: s.streamingThinking + data.text
-        }))
-      }
-      const sealing = aux.thinkingOpen[routingId] === true
-      if (sealing) aux.thinkingOpen[routingId] = false
-      return withSession(state, routingId, (s) => ({
-        streamingText: s.streamingText + data.text,
-        ...(sealing ? { streamingThinking: '' } : {})
-      }))
-    }
-
-    case 'session:subagent-stream': {
-      const routingId = routingIdOf(event)
-      const data = arg<{ type?: string; toolUseId?: string; text?: string }>(event, 1)
-      if (!routingId || !data?.toolUseId || typeof data.text !== 'string') return state
-      const toolUseId = data.toolUseId
-      if (data.type === 'thinking') {
-        return withSession(state, routingId, (s) => ({
-          subagentStreamingThinking: {
-            ...s.subagentStreamingThinking,
-            [toolUseId]: (s.subagentStreamingThinking[toolUseId] || '') + data.text
-          }
-        }))
-      }
-      return withSession(state, routingId, (s) => ({
-        subagentStreamingText: {
-          ...s.subagentStreamingText,
-          [toolUseId]: (s.subagentStreamingText[toolUseId] || '') + data.text
-        },
-        subagentStreamingThinking: { ...s.subagentStreamingThinking, [toolUseId]: '' }
-      }))
-    }
+    // The `session:stream` / `session:subagent-stream` branches lived here until
+    // phase 5 S1 and are DELETED, not kept as fossils: those channels are class
+    // `volatile` now and never reach `applyEvent` at all (see the guard above).
+    // Their accumulation logic — including the thinking-span open/seal rule this
+    // aux tracks — moved verbatim into `applyStreamFrame`, which core and every
+    // replica fold over the stream lane's frames.
 
     // -----------------------------------------------------------------------
     // Subagent transcripts
@@ -694,14 +714,14 @@ export function applyEvent(
       const data = arg<{ toolUseId?: string; message?: ChatMessage }>(event, 1)
       if (!routingId || !data?.toolUseId || !data.message) return state
       // `upsertSubagentMessages` already no-ops on an unknown id.
-      return upsertSubagentMessages(state, routingId, data.toolUseId, [data.message])
+      return upsertSubagentMessages(state, routingId, data.toolUseId, [data.message], aux)
     }
 
     case 'session:subagent-message-batch': {
       const routingId = routingIdOf(event)
       const data = arg<{ toolUseId?: string; messages?: ChatMessage[] }>(event, 1)
       if (!routingId || !data?.toolUseId || !Array.isArray(data.messages)) return state
-      return upsertSubagentMessages(state, routingId, data.toolUseId, data.messages)
+      return upsertSubagentMessages(state, routingId, data.toolUseId, data.messages, aux)
     }
 
     case 'session:subagent-tool-result': {
@@ -780,9 +800,15 @@ export function applyEvent(
       const target = rekeyTargetFor(state, routingId, status)
       let next = target ? rekeyCanonical(state, routingId, target) : state
       const id = target ?? routingId
-      if (target && aux.thinkingOpen[routingId] !== undefined) {
-        aux.thinkingOpen[target] = aux.thinkingOpen[routingId]
-        delete aux.thinkingOpen[routingId]
+      if (target) {
+        if (aux.thinkingOpen[routingId] !== undefined) {
+          aux.thinkingOpen[target] = aux.thinkingOpen[routingId]
+          delete aux.thinkingOpen[routingId]
+        }
+        // The accumulations moved with the entry, so their generations must move
+        // too — otherwise every post-rekey frame would read as a stale turn and
+        // every watching client would re-watch in a loop.
+        rekeyStreamTurns(aux, routingId, target)
       }
       if (!next.sessions[id]) return next
 
@@ -791,6 +817,7 @@ export function applyEvent(
         // transitions are NOT inferred here (ADR-053) — the session's own
         // disconnect path recalls and broadcasts.
         aux.thinkingOpen[id] = false
+        bumpSelfStream(aux, id, 'thinking')
         return withSession(next, id, () => ({
           status: { ...status, state: 'idle' as const },
           sdkActive: false,
@@ -800,14 +827,17 @@ export function applyEvent(
       }
 
       const sealing = status.state === 'idle' && aux.thinkingOpen[id] === true
-      if (sealing) aux.thinkingOpen[id] = false
+      if (sealing) {
+        aux.thinkingOpen[id] = false
+        bumpSelfStream(aux, id, 'thinking')
+      }
       next = withSession(next, id, (s) => ({
         status,
         ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {}),
         ...(sealing ? { streamingThinking: '' } : {})
       }))
 
-      if (status.state === 'idle') next = clearForegroundSubagentBuffers(next, id)
+      if (status.state === 'idle') next = clearForegroundSubagentBuffers(next, id, aux)
 
       // Worktree exit: cwd returned to the recorded original.
       const wt = next.worktreeInfoMap[id]
@@ -1073,10 +1103,14 @@ function upsertSubagentMessages(
   state: CanonicalState,
   routingId: string,
   toolUseId: string,
-  incoming: ChatMessage[]
+  incoming: ChatMessage[],
+  aux: ReducerAux
 ): CanonicalState {
   const session = state.sessions[routingId]
   if (!session) return state
+  // The message supersedes both live buffers for this subagent (below). Their
+  // generations are DROPPED rather than bumped — see {@link dropSubStreams}.
+  dropSubStreams(aux, routingId, toolUseId)
   const current = [...(session.subagentMessages[toolUseId] || [])]
   for (const message of incoming) {
     const idx = current.findIndex((m) => m.id === message.id)
@@ -1100,7 +1134,11 @@ function upsertSubagentMessages(
  * streaming past the parent's turn and are left alone. Verbatim from the
  * renderer's `setStatus`.
  */
-function clearForegroundSubagentBuffers(state: CanonicalState, routingId: string): CanonicalState {
+function clearForegroundSubagentBuffers(
+  state: CanonicalState,
+  routingId: string,
+  aux: ReducerAux
+): CanonicalState {
   const s = state.sessions[routingId]
   if (!s) return state
   const ids = new Set([
@@ -1134,6 +1172,7 @@ function clearForegroundSubagentBuffers(state: CanonicalState, routingId: string
       if (text === s.subagentStreamingText) text = { ...text }
       text[id] = ''
     }
+    dropSubStreams(aux, routingId, id)
   }
   if (thinking === s.subagentStreamingThinking && text === s.subagentStreamingText) return state
   return withSession(state, routingId, () => ({

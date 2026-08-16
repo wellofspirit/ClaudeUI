@@ -34,8 +34,11 @@ import {
   patchLocalSession,
   patchLocalApp,
   getReplicaState,
+  getReplicaAux,
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
+import { isVolatileStream } from '../../shared/sync/channels'
+import { streamFrameFrom } from '../../shared/sync/stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import type { CanonicalSessionState } from '../../shared/sync/state'
 import type {
@@ -107,9 +110,26 @@ export function advanceSeqTo(value: number): void {
   if (value > seq) seq = value
 }
 
-/** Deliver one event, exactly as a transport would. */
+/**
+ * Deliver one emission, exactly as a transport would — routed by the channel's
+ * CLASS, exactly as `SyncCore.process` routes it.
+ *
+ * A `volatile` channel (phase 5 S1) is NOT an event: it never reaches
+ * `receiveEvent`, takes no seq, and arrives as a `{streamId, turnId, offset,
+ * chunk}` frame instead. Building that frame from the REPLICA's own state is the
+ * same computation core does against canonical — the offsets agree because a
+ * test has only one state.
+ */
 export function emitSync(channel: string, args: unknown[]): void {
-  client().receiveEvent({ seq: ++seq, channel, args })
+  const c = client()
+  if (isVolatileStream(channel)) {
+    const frame = streamFrameFrom(getReplicaState(), getReplicaAux(), channel, args)
+    // No frame ⇒ a malformed delta, or a session the replica has never met —
+    // the same honest no-op core applies.
+    if (frame) c.receiveStreamFrame(frame)
+    return
+  }
+  c.receiveEvent({ seq: ++seq, channel, args })
 }
 
 /**

@@ -31,6 +31,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { SyncCore, type Delivery } from '../sync-core'
 import { applyEvent, auxFromCanonical, checkDerivedFields } from '../../../shared/sync/reducer'
+import { isVolatileStream } from '../../../shared/sync/channels'
+import { applyStreamFrame } from '../../../shared/sync/stream'
 import { fromSnapshot, type CanonicalState } from '../../../shared/sync/state'
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 
@@ -152,7 +154,21 @@ const EXTRA_EVENTS: PoolEvent[] = [
   ]
 ].map(([channel, ...args]) => ({ channel: channel as string, args }))
 
-const POOL: PoolEvent[] = [...fixtureEvents(), ...EXTRA_EVENTS]
+/**
+ * The pool is the EVENT lane, and only the event lane.
+ *
+ * The invariant this file pins is `restore(snapshot@N) + fold(events N+1..head)
+ * === canonical@head`, which is a statement about things that RING. Since phase 5
+ * S1 the streaming deltas do not: they carry no seq, a catchup cannot replay
+ * them, and their accumulation is healed by re-watching (`SyncCore.streamReplay`)
+ * instead. Leaving them in the pool would not test the invariant — it would
+ * assert that catchup reproduces something catchup deliberately no longer
+ * carries. The stream lane's own version of the property is the mid-turn test
+ * below.
+ */
+const POOL: PoolEvent[] = [...fixtureEvents(), ...EXTRA_EVENTS].filter(
+  (e) => !isVolatileStream(e.channel)
+)
 
 /** Every routing id the pool can address — created up-front so no sample is a no-op on an unknown session. */
 const POOL_ROUTING_IDS = ['rid', 'temp-1', 'uuid-9', 'watched-1', 'a']
@@ -281,9 +297,10 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
     // invariant check below — on an almost-empty state.
     const channels = new Set(POOL.map((e) => e.channel))
     expect(POOL.length).toBeGreaterThan(40)
+    // `session:stream` is deliberately ABSENT — see the POOL note.
+    expect(channels.has('session:stream')).toBe(false)
     for (const required of [
       'session:message',
-      'session:stream',
       'session:status',
       'session:queue-changed',
       'session:user-message',
@@ -335,6 +352,57 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
     expect(live.streamingThinking).toBe('')
     const block = live.messages[0].content.find((b) => b.type === 'thinking')
     expect(block?.type === 'thinking' ? block.durationMs : null).toBe(900)
+  })
+
+  it('the STREAM lane heals by replay, not by catchup (phase 5 S1)', () => {
+    // The volatile lane's version of the same invariant, and the reason the pool
+    // excludes those channels: a snapshot plus the ring's tail cannot reproduce
+    // deltas that never entered the ring. `stream:watch`'s replay is what closes
+    // the gap, and it must close it EXACTLY — the replica ends holding canonical's
+    // accumulation, not an approximation of it.
+    const core = new SyncCore()
+    core.emit('session:created', ['rid', { cwd: '/repo' }], ALL)
+    core.emit('session:stream', ['rid', { type: 'thinking', text: 'weighing ' }], ALL)
+    const snapshot = core.getSnapshot()
+
+    // Everything after the snapshot rides the stream lane and therefore reaches a
+    // reconnecting client through NOTHING the ring carries.
+    core.emit('session:stream', ['rid', { type: 'thinking', text: 'the options' }], ALL)
+    core.emit('session:stream', ['rid', { type: 'text', text: 'here you go' }], ALL)
+    core.emit('session:subagent-stream', ['rid', { toolUseId: 'tu-1', type: 'text', text: 'sub' }], ALL)
+
+    const { state: restored, aux } = restore(snapshot)
+    // Catchup alone leaves it at the snapshot's value — stated, not assumed.
+    expect(restored.sessions['rid'].streamingThinking).toBe('weighing ')
+    expect(restored.sessions['rid'].streamingText).toBe('')
+
+    // Give the replica text of its own before healing. Without this the thinking
+    // buffer is cleared by the SEAL that the text frame's append path performs,
+    // so the test would pass whether or not the replay can state an EMPTY stream
+    // — which is exactly the hole the empty-frame rule closes.
+    const diverged: CanonicalState = {
+      ...restored,
+      sessions: {
+        ...restored.sessions,
+        rid: { ...restored.sessions['rid'], streamingText: 'stale partial' }
+      }
+    }
+
+    let healed = diverged
+    for (const frame of core.streamReplay('rid')) {
+      const outcome = applyStreamFrame(healed, aux, frame)
+      expect(outcome.result, `replay frame ${frame.streamId} was refused`).toBe('applied')
+      healed = outcome.state
+    }
+
+    const live = core.getCanonicalState().sessions['rid']
+    const after = healed.sessions['rid']
+    expect(after.streamingThinking).toBe(live.streamingThinking)
+    expect(after.streamingText).toBe(live.streamingText)
+    expect(after.subagentStreamingText).toEqual(live.subagentStreamingText)
+    // Non-vacuity: the live state really is mid-turn with both buffers occupied.
+    expect(live.streamingText).toBe('here you go')
+    expect(live.streamingThinking).toBe('')
   })
 
   it('holds for a snapshot taken mid-reentrancy-drain (snapshots land between applies)', () => {

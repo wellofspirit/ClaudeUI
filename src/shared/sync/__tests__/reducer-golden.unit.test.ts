@@ -17,6 +17,8 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import { applyEvent, emptyAux, checkDerivedFields } from '../reducer'
+import { isVolatileStream } from '../channels'
+import { applyStreamFrame, streamFrameFrom } from '../stream'
 import { emptyCanonicalState, type CanonicalState } from '../state'
 
 interface Fixture {
@@ -40,10 +42,24 @@ function loadFixtures(): Array<{ file: string; fixture: Fixture }> {
     }))
 }
 
+/**
+ * Replay a fixture the way the HOST does — routed by the channel's class.
+ *
+ * A fixture records an EMISSION stream, not an event stream, so a `volatile`
+ * channel (phase 5 S1) belongs on the stream lane rather than in `applyEvent`.
+ * Routing here instead of deleting those lines keeps `mid-stream-rekey.json`
+ * honest: its deltas are what make the rekey a MID-STREAM one, and they still
+ * exercise the aux the two lanes share.
+ */
 function replay(fixture: Fixture): CanonicalState {
   const aux = emptyAux()
   let state = emptyCanonicalState()
   fixture.events.forEach((event, i) => {
+    if (isVolatileStream(event.channel)) {
+      const frame = streamFrameFrom(state, aux, event.channel, event.args)
+      if (frame) state = applyStreamFrame(state, aux, frame).state
+      return
+    }
     state = applyEvent(state, { channel: event.channel, args: event.args, seq: i + 1 }, aux)
   })
   return state

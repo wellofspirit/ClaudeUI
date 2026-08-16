@@ -7,6 +7,7 @@ import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
+import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { getHostWindow } from '../services/host-window'
 import {
   seedCanonicalAppState,
@@ -378,6 +379,9 @@ async function fetchModels(): Promise<ModelInfo[]> {
 }
 
 const SESSION_IPC_CHANNELS = [
+  // The volatile lane's subscription verb (phase 5 S1) — registered below like
+  // every other channel here, so it must be removable like every other one too.
+  'stream:watch',
   'session:pick-folder',
   'session:create',
   'session:rekey',
@@ -690,6 +694,10 @@ export function registerSessionIpc(): SessionManager {
 
   const manager = new SessionManager()
   sharedManager = manager
+
+  // The volatile lane's subscription verb (phase 5 S1). Same declaration the
+  // remote transport registers — see `ipc/stream-watch.ts`.
+  handleIpc(STREAM_WATCH_COMMAND)
 
   handleIpc({
     channel: 'session:pick-folder',

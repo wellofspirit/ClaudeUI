@@ -16,7 +16,26 @@
 import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
-import { CHANNEL_SPECS, channelSpec, deliveryDeltas } from '../../../shared/sync/channels'
+import {
+  CHANNEL_SPECS,
+  channelSpec,
+  deliveryDeltas,
+  volatileStreamChannels
+} from '../../../shared/sync/channels'
+import { applyEvent, emptyAux } from '../../../shared/sync/reducer'
+import {
+  sessionIdOfStream,
+  streamFrameFrom,
+  streamFrameToEmission
+} from '../../../shared/sync/stream'
+import { emptyCanonicalState, emptySession, type CanonicalState } from '../../../shared/sync/state'
+import { STREAM_WATCH_COMMAND } from '../stream-watch'
+
+/** A canonical state holding one session — the minimum a stream frame needs. */
+function stateWithSession(routingId: string): CanonicalState {
+  const base = emptyCanonicalState()
+  return { ...base, sessions: { [routingId]: emptySession(routingId, '/repo') } }
+}
 
 const REPO = process.cwd()
 
@@ -406,12 +425,16 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     ])
   })
 
-  it('a canonical channel is never host-local (they would contradict)', () => {
+  it('an EVENT-lane canonical channel always rings (they would contradict)', () => {
+    // Canonical-without-ring on the EVENT lane would mean core applies an event a
+    // reconnecting client can never replay — the snapshot and the stream would
+    // disagree. The `volatile` class is the sanctioned exception and the reason
+    // this test names a lane: its channels are canonical-backed AND ringless by
+    // design, because their frames are not events at all (phase 5 S1). The
+    // classification-invariant suite below is what holds them to that.
     const contradictions = Object.entries(CHANNEL_SPECS)
-      .filter(([, s]) => s.canonical && !s.ring)
+      .filter(([, s]) => s.canonical && !s.ring && s.cls !== 'volatile')
       .map(([c]) => c)
-    // Canonical-without-ring would mean core applies an event a reconnecting
-    // client can never replay — the snapshot and the stream would disagree.
     expect(contradictions).toEqual([])
   })
 
@@ -420,6 +443,157 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
       .filter(([, s]) => !s.why || s.why.length < 20)
       .map(([c]) => c)
     expect(missing).toEqual([])
+  })
+})
+
+describe('the volatile stream lane (phase 5 S1)', () => {
+  // The single-source rule, enforced as a property of the TABLE rather than of
+  // any one dispatch site: everything that treats a channel as a stream reads
+  // `cls === 'volatile'`, so if the table and the dispatch could disagree these
+  // assertions are where it shows.
+  const volatile = volatileStreamChannels()
+
+  it('is exactly the two canonical-backed stream channels (S2 tails excluded)', () => {
+    expect(volatile).toEqual(['session:stream', 'session:subagent-stream'])
+    // The tails are S2. They must still be classified, and must NOT have been
+    // dragged onto the lane by a broad find-and-replace.
+    for (const tail of [
+      'session:bash-output',
+      'session:background-output',
+      'automation:stream-event'
+    ]) {
+      expect(channelSpec(tail)?.cls).toBe('volatile-pending-phase-5')
+      expect(channelSpec(tail)?.ring).toBe(true)
+    }
+  })
+
+  it('volatile ⇒ never rings, is canonical-backed, and has a streamId', () => {
+    for (const channel of volatile) {
+      const spec = channelSpec(channel)!
+      // No ring ⇒ no seq ⇒ a turn of tokens cannot flush the 5000-entry ring and
+      // force a `sync-full` on the next reconnect. That IS the phase-5 exit
+      // criterion.
+      expect(spec.ring, `${channel} still rings`).toBe(false)
+      // Canonical-backed: the accumulation is a snapshot field, which is what
+      // makes an unwatched session still converge at message boundaries.
+      expect(spec.canonical, `${channel} lost its canonical backing`).toBe(true)
+      // And the streamId helper covers it — a channel on the lane with no frame
+      // translation would be silently dropped by `SyncCore.process`.
+      const frame = streamFrameFrom(
+        stateWithSession('rid'),
+        emptyAux(),
+        channel,
+        ['rid', { type: 'text', text: 'hi', toolUseId: 'tu-1' }]
+      )
+      expect(frame, `${channel} has no streamId translation`).not.toBeNull()
+      expect(sessionIdOfStream(frame!.streamId)).toBe('rid')
+    }
+  })
+
+  it('volatile ⇒ no reducer branch, and applyEvent refuses one', () => {
+    // Both halves matter. The SOURCE half: a `case 'session:stream':` growing
+    // back would be a second accumulator racing `applyStreamFrame`.
+    const reducerSrc = readCode('src/shared/sync/reducer.ts')
+    for (const channel of volatile) {
+      expect(reducerSrc).not.toContain(`case '${channel}':`)
+    }
+    // The BEHAVIORAL half: even routed onto the event lane by mistake, the fold
+    // is identity-stable rather than a duplicate append.
+    const before = stateWithSession('rid')
+    for (const channel of volatile) {
+      const after = applyEvent(
+        before,
+        { channel, args: ['rid', { type: 'text', text: 'hi', toolUseId: 't' }], seq: 1 },
+        emptyAux()
+      )
+      expect(after, `applyEvent still folds ${channel}`).toBe(before)
+    }
+  })
+
+  it('replicated channels are untouched by the migration', () => {
+    // The bounded half of the claim: S1 moved TWO rows and nothing else. Any
+    // `replicated` row that stopped ringing would be an unnoticed lane change.
+    const broken = Object.entries(CHANNEL_SPECS)
+      .filter(([, s]) => s.cls === 'replicated' && !s.ring)
+      .map(([c]) => c)
+    expect(broken).toEqual([])
+  })
+
+  it('the two channels have left SyncEventMap (nothing can subscribe to them)', () => {
+    // The typed map IS the subscription contract. Leaving an entry for a channel
+    // that can never be dispatched would advertise a listener that never fires.
+    const declared = [...read('src/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
+      (m) => m[1]
+    )
+    expect(declared.length).toBeGreaterThan(30)
+    for (const channel of volatile) {
+      expect(declared, `${channel} is still declared as a subscribable event`).not.toContain(
+        channel
+      )
+    }
+  })
+
+  it('in-process consumers keep their pre-split payload through ONE shared inverse', () => {
+    // The plugin bridge (ADR-005) and the engine tests' stub window both consumed
+    // these channels before the split. They still do — through an OBSERVER on the
+    // lane, not a connection — and both go through the same `streamFrameToEmission`,
+    // so there is one answer to "what did the emitter send".
+    expect(streamFrameToEmission({
+      type: 'stream',
+      streamId: 'rid/thinking',
+      turnId: 0,
+      offset: 0,
+      chunk: 'weighing'
+    })).toEqual({
+      channel: 'session:stream',
+      routingId: 'rid',
+      data: { type: 'thinking', text: 'weighing' }
+    })
+    expect(streamFrameToEmission({
+      type: 'stream',
+      streamId: 'rid/sub/tu-1/text',
+      turnId: 0,
+      offset: 0,
+      chunk: 'out'
+    })).toEqual({
+      channel: 'session:subagent-stream',
+      routingId: 'rid',
+      data: { type: 'text', toolUseId: 'tu-1', text: 'out' }
+    })
+    expect(streamFrameToEmission({
+      type: 'stream',
+      streamId: 'bogus',
+      turnId: 0,
+      offset: 0,
+      chunk: 'x'
+    })).toBeNull()
+
+    // Both consumers import it rather than hand-rolling the reconstruction.
+    for (const rel of [
+      'src/main/services/plugin-manager.ts',
+      'src/test/helpers/sync-subscriber-window.ts'
+    ]) {
+      expect(readCode(rel), `${rel} does not use the shared inverse`).toMatch(
+        /streamFrameToEmission/
+      )
+    }
+    // And the plugin bridge observes the lane instead of pretending to be a client.
+    expect(readCode('src/main/services/plugin-manager.ts')).toMatch(/addStreamObserver\(/)
+  })
+
+  it('the stream lane never reaches the audit log or the event fan-out', () => {
+    // `stream:watch` is a QUERY, and the registry does not audit queries — the
+    // structural reason a subscription toggle leaves no row. Pinned against the
+    // declaration rather than against a log, because the log is what would be
+    // empty either way.
+    expect(STREAM_WATCH_COMMAND.kind).toBe('query')
+    expect(STREAM_WATCH_COMMAND.capability).toBe('chat')
+    expect(STREAM_WATCH_COMMAND.withConnection).toBe(true)
+    // And the frames go out through the stream registry, never `addSyncSubscriber`.
+    const host = readCode('src/main/services/sync-host.ts')
+    expect(host).toMatch(/syncCore\.setStreamDelivery\(streamDelivery\)/)
+    const core = readCode('src/main/sync/sync-core.ts')
+    expect(core).toMatch(/spec\.cls === 'volatile'/)
   })
 })
 

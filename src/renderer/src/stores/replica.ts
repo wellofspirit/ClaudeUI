@@ -30,7 +30,9 @@
  * ## The three ways state gets in
  *
  * 1. **The fold** — `onSyncAnyEvent` → `applyEvent` → project. The default, and
- *    the only path for anything an event carries.
+ *    the only path for anything an event carries. Since phase 5 S1 there is a
+ *    SECOND feed on the same path: `onSyncStreamFrame` → `applyStreamFrame` →
+ *    project, carrying the streaming deltas that left the event lane.
  * 2. **Hydration** — `sync-full` → `fromSnapshot` + `auxFromCanonical` → project
  *    everything. Carries ADR-041's local selection resolution (see
  *    {@link resolveActiveSessionId}).
@@ -49,8 +51,13 @@
  * the `canonical: false` channels are NOT in it.
  */
 
-import { onSyncAnyEvent } from '../../../shared/sync/client-registry'
+import { onSyncAnyEvent, onSyncStreamFrame } from '../../../shared/sync/client-registry'
 import { channelSpec } from '../../../shared/sync/channels'
+import {
+  applyStreamFrame,
+  dropStreamTurns,
+  type StreamFrame
+} from '../../../shared/sync/stream'
 import {
   applyEvent,
   auxFromCanonical,
@@ -86,6 +93,8 @@ let canonical: CanonicalState = emptyCanonicalState()
 let aux: ReducerAux = emptyAux()
 /** The installed raw-event tap's unsubscribe, or null — see {@link startReplica}. */
 let tapOff: (() => void) | null = null
+/** The volatile lane's tap (phase 5 S1). */
+let streamTapOff: (() => void) | null = null
 
 /** Post-apply observers — see {@link onReplicaApplied}. */
 type PostApplyObserver = (channel: string, args: unknown[]) => void
@@ -97,6 +106,14 @@ const observers = new Set<PostApplyObserver>()
  */
 export function getReplicaState(): CanonicalState {
   return canonical
+}
+
+/**
+ * The replica's reducer aux (thinking spans + stream generations). Diagnostics +
+ * tests only — in production the only reader is the fold itself.
+ */
+export function getReplicaAux(): ReducerAux {
+  return aux
 }
 
 /**
@@ -126,7 +143,7 @@ export function startReplica(): () => void {
   // Idempotent: the web entry can only reach this after its lazy store import, so
   // it calls it on every `sync-full` rather than once at page load. A second tap
   // would fold every event twice.
-  if (tapOff) return tapOff
+  if (tapOff) return stopReplica
   tapOff = onSyncAnyEvent((event) => {
     // The CLASSIFICATION decides, not a per-event guess: a channel with no
     // snapshot field has nothing to fold into, and its transient store writer
@@ -153,7 +170,69 @@ export function startReplica(): () => void {
       }
     }
   })
-  return tapOff
+  // The volatile lane's fold (phase 5 S1). A second feed, not a second writer:
+  // `applyStreamFrame` writes the same sealed streaming fields the reducer used
+  // to, through the same `commit` + identity-diffed projection.
+  streamTapOff = onSyncStreamFrame(foldStreamFrame)
+  return stopReplica
+}
+
+/** Detach both feeds. One function so the idempotent early return can hand it back. */
+function stopReplica(): void {
+  tapOff?.()
+  tapOff = null
+  streamTapOff?.()
+  streamTapOff = null
+}
+
+// ---------------------------------------------------------------------------
+// The volatile stream lane (phase 5 S1)
+// ---------------------------------------------------------------------------
+
+/** Re-send the current `stream:watch` set — installed by the watch effect. */
+let rewatch: (() => void) | null = null
+let rewatchTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Register the cure for a stream mismatch.
+ *
+ * The replica is what DETECTS a mismatch (it holds the offsets), and the watch
+ * effect is what knows the current set, so the two are wired here rather than
+ * either one guessing at the other's job.
+ */
+export function setStreamRewatch(fn: (() => void) | null): void {
+  rewatch = fn
+}
+
+/**
+ * A frame whose offset or generation does not fit is a NO-OP, and the cure is to
+ * re-send the watch set: the server answers with the coalesced value at
+ * `offset: 0`, which is a REPLACE by construction.
+ *
+ * Debounced, because a mismatch is usually the FIRST of a burst — one dropped
+ * frame invalidates every later offset of that stream — and one re-watch heals
+ * all of them.
+ */
+function scheduleRewatch(): void {
+  if (rewatchTimer !== null) return
+  rewatchTimer = setTimeout(() => {
+    rewatchTimer = null
+    rewatch?.()
+  }, STREAM_REWATCH_DEBOUNCE_MS)
+}
+
+const STREAM_REWATCH_DEBOUNCE_MS = 50
+
+function foldStreamFrame(frame: StreamFrame): void {
+  const outcome = applyStreamFrame(canonical, aux, frame)
+  if (outcome.result === 'mismatch') {
+    scheduleRewatch()
+    return
+  }
+  // `unknown` is an honest no-op: a frame for a session this client has never
+  // heard of (a delete it already folded, a watch that outlived a selection).
+  if (outcome.result === 'unknown') return
+  commit(outcome.state)
 }
 
 /**
@@ -402,6 +481,7 @@ export function dropLocalSessions(routingIds: readonly string[]): void {
     if (sessions === canonical.sessions) sessions = { ...sessions }
     delete sessions[id]
     delete aux.thinkingOpen[id]
+    dropStreamTurns(aux, id)
   }
   if (sessions === canonical.sessions) return
   commit({ ...canonical, sessions })
@@ -433,6 +513,10 @@ export function evictLocalSessions(routingIds: readonly string[]): void {
       seeded: false
     }
     delete aux.thinkingOpen[id]
+    // The stripped buffers are back to length 0, so their generations restart —
+    // otherwise the next live delta would arrive at an offset this entry no
+    // longer has and cost a re-watch round trip.
+    dropStreamTurns(aux, id)
   }
   if (sessions === canonical.sessions) return
   commit({ ...canonical, sessions })
@@ -472,8 +556,12 @@ export function resetReplicaForTests(): void {
   aux = emptyAux()
   locallyCreated.clear()
   observers.clear()
-  tapOff?.()
-  tapOff = null
+  rewatch = null
+  if (rewatchTimer !== null) {
+    clearTimeout(rewatchTimer)
+    rewatchTimer = null
+  }
+  stopReplica()
 }
 
 // ---------------------------------------------------------------------------

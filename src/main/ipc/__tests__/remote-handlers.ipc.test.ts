@@ -1266,6 +1266,9 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'shared-provider:list',
   'shared-provider:models',
   'shared-provider:statuses',
+  // The volatile lane's subscription verb (SyncCore phase 5 S1). `chat`, and a
+  // QUERY — a subscription toggle with no domain effect, so it is unaudited.
+  'stream:watch',
   'usage:fetch',
   'usage:fetch-block',
   'usage:fetch-dispatched',

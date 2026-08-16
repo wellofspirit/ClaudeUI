@@ -14,8 +14,11 @@ import {
   emptyAux,
   auxFromCanonical,
   checkDerivedFields,
-  rekeyTargetFor
+  rekeyTargetFor,
+  type ReducerAux
 } from '../reducer'
+import { isVolatileStream } from '../channels'
+import { applyStreamFrame, streamFrameFrom } from '../stream'
 import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../types'
 
@@ -32,14 +35,28 @@ function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
   } as SessionStatus
 }
 
-/** Fold a list of `[channel, ...args]` tuples, assigning seqs 1..n. */
+/**
+ * Fold a list of `[channel, ...args]` tuples, assigning seqs 1..n — routed by the
+ * channel's CLASS exactly as `SyncCore.process` routes it.
+ *
+ * A `volatile` channel (phase 5 S1) never reaches `applyEvent`: it is translated
+ * into a stream frame and folded by `applyStreamFrame`. Keeping ONE fold helper
+ * that knows both lanes is deliberate — the seal/clear interplay between them
+ * (a text delta seals a thinking span; a `session:message` clears the buffer and
+ * bumps its generation) is only testable if a test can express both.
+ */
 function fold(
   events: Array<[string, ...unknown[]]>,
-  initial: CanonicalState = emptyCanonicalState()
+  initial: CanonicalState = emptyCanonicalState(),
+  aux: ReducerAux = emptyAux()
 ): CanonicalState {
-  const aux = emptyAux()
   let state = initial
   events.forEach(([channel, ...args], i) => {
+    if (isVolatileStream(channel)) {
+      const frame = streamFrameFrom(state, aux, channel, args)
+      if (frame) state = applyStreamFrame(state, aux, frame).state
+      return
+    }
     state = applyEvent(state, { channel, args, seq: i + 1 }, aux)
   })
   return state
@@ -274,19 +291,20 @@ describe('reducer — session:removed (explicit delete)', () => {
 
   it('drops the thinking-span bookkeeping, so a same-id respawn starts clean', () => {
     const aux = emptyAux()
-    let state = applyEvent(
+    // The span is opened by the STREAM lane (phase 5 S1) and dropped by the event
+    // lane's removal branch — the aux is what the two share.
+    const state = fold(
+      [created(), ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }]],
       emptyCanonicalState(),
-      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 1 },
-      aux
-    )
-    state = applyEvent(
-      state,
-      { channel: 'session:stream', args: ['rid', { type: 'thinking', text: 'hmm' }], seq: 2 },
       aux
     )
     expect(aux.thinkingOpen['rid']).toBe(true)
+    expect(aux.streamTurn).not.toEqual({})
     applyEvent(state, { channel: 'session:removed', args: ['rid'], seq: 3 }, aux)
     expect(aux.thinkingOpen['rid']).toBeUndefined()
+    // The stream generations go with it, or a same-id respawn's first frame would
+    // be judged against a dead session's turn counter.
+    expect(aux.streamTurn).toEqual({})
   })
 
   it('a late engine event after a removal cannot resurrect the session (F7)', () => {
@@ -1174,11 +1192,7 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
     const aux = auxFromCanonical(restored)
     expect(aux.thinkingOpen['rid']).toBe(true)
 
-    const sealed = applyEvent(
-      restored,
-      { channel: 'session:stream', args: ['rid', { type: 'text', text: 'answer' }], seq: 3 },
-      aux
-    )
+    const sealed = fold([['session:stream', 'rid', { type: 'text', text: 'answer' }]], restored, aux)
     expect(sealed.sessions['rid'].streamingThinking).toBe('')
     // And an idle session restores with no open span at all.
     expect(auxFromCanonical(fromSnapshot(toSnapshot(fold([created()]), 1))).thinkingOpen).toEqual({})

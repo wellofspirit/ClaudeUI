@@ -232,6 +232,10 @@ const api: ClaudeAPI = {
   // pool is main-process state, and the desktop is just as capable of reopening
   // a slot whose shell is still running as a phone is.
   terminalPool: (cwd: string) => ipcRenderer.invoke('terminal:pool', cwd),
+  // The volatile lane's subscription verb (phase 5 S1). Real IPC on the desktop
+  // too: the renderer is client #1 and its deltas ride the same watched lane a
+  // phone's do — there is no privileged local path any more.
+  watchStreams: (sessionIds: string[]) => ipcRenderer.invoke('stream:watch', { sessionIds }),
   // Step-up is a REMOTE concept (SyncCore phase 2): the desktop renderer is the
   // host surface, already holding a non-decaying `shell` grant, so there is
   // nothing to step up to. Local no-op, deliberately not an IPC round trip.
