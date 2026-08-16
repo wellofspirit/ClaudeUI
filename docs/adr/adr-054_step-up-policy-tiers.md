@@ -75,6 +75,16 @@ What the password may **never** reach is the `off` switch — that is host-ancho
 
 **The read verb.** `authcfg:get` (a `query`, `admin`, no freshness demand) was added during implementation because the decision is unimplementable without it: a settings pane cannot administer a surface it cannot render, and demanding a ceremony before the tier can be DISPLAYED would put the ceremony in front of its own explanation. It answers the same sanitized object `remote:get-config` does — one sanitizer, so no field can be exposed on one transport and forgotten on the other.
 
+**Amendment (2026-08-16, owner-directed): the settings session replaces the mutation window for this area.** The as-shipped gating (each `authcfg` mutation checks the 60-minute mutation window) left administering as a long-lived *ambient* capability — invisible while held, wide open to accidental exposure, and it forced the timing dials to stay desktop-only as a compensating restriction. Replaced by an explicit, bounded **settings-editing session**:
+
+- The pane is **read-only by default** (a clean view state — the knob sprawl collapses into a summary). One "Edit settings" action; on the web it runs the standard step-up ceremony carrying a `settings` intent; on success the server marks *that connection* as holding a live settings session, **TTL 5 minutes** — server-side connection state, deliberately not a wire token (the connection is already authenticated and the ceremony just ran on it; a bearer string adds leakable surface without adding proof).
+- Every `authcfg` **mutation requires the live session** (the mutation-window check for this class is retired). Save applies the edited set as **one batch** (`authcfg:apply`) — validated together, one audit row whose `detail` carries the diff, one 4009 re-admission sweep (except-actor, actor re-snapshots in place). Save, Cancel, pane close, disconnect, or TTL expiry **revokes the session immediately** — no residue.
+- **Every auth-settings change is gated, regardless of direction** — tier upgrades included. Deliberateness is the property; direction special-casing added nothing.
+- The **timing dials (re-check idle, session max-age) and retention become web-editable** inside a session — the ambient-exposure argument that kept them desktop-only is void once administering is a bounded mode.
+- The **desktop** pane has the same view/edit states but unlocks without a ceremony and without a TTL (host anchor); the `off` master switch and its typed confirm remain desktop-only inside the edit mode.
+- **Tier `off` and the session:** opening the editor always costs the ceremony on the web — the pane is the only path to these settings, so the §3/§6 ordering ratification stands, re-mechanized: the ceremony moved from "every verb" to "the door."
+- **Headless bootstrap, step 2 revised:** the first passkey ceremony signs the device in; opening the settings editor then runs one deliberate unlock ceremony (rather than riding arm-on-auth's ambient window). One extra tap, and the chain's other steps stand unchanged.
+
 ## Consequences
 
 - `passkey-for-grants` disappears from the mode UI; stored values migrate to `legacy` + `medium` (one-time, in the same migration as `stepUpTier` and audit v12).
