@@ -373,7 +373,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // `shell` channel) until the three gates hold — the caller treats a refusal
     // as "nothing known", never as "nothing running".
     terminalPool: (cwd) => connection.invoke('terminal:pool', cwd) as Promise<number[]>,
-    terminalStepUp: async (password) => {
+    terminalStepUp: async (password, intent) => {
       // Proof params come from `terminal:availability`, NOT `/remote/auth-info`:
       // auth-info advertises authentication methods, and over the tunnel the
       // server (correctly) refuses password auth, so it omits `password` there —
@@ -406,27 +406,29 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         availability.stepUp.saltHex,
         availability.stepUp.kdf
       )
-      const response = await connection.stepUp(proof)
+      const response = await connection.stepUp(proof, intent)
       return {
         ok: response.ok,
         error: response.error,
         code: response.code,
         retryable: response.retryable,
-        expiresAt: response.expiresAt
+        expiresAt: response.expiresAt,
+        settingsSessionExpiresAt: response.settingsSessionExpiresAt
       }
     },
     // Passkey step-up (ADR-052 decision 5). No local pre-checks at all, unlike
     // the password path above: the challenge request IS the probe, and its
     // refusal codes (`passkey-unavailable`, `throttled`) are what the prompt
     // branches on. Guessing client-side would only be able to guess wrong.
-    terminalStepUpPasskey: async () => {
-      const response = await connection.stepUpWithPasskey()
+    terminalStepUpPasskey: async (intent) => {
+      const response = await connection.stepUpWithPasskey(intent)
       return {
         ok: response.ok,
         error: response.error,
         code: response.code,
         retryable: response.retryable,
-        expiresAt: response.expiresAt
+        expiresAt: response.expiresAt,
+        settingsSessionExpiresAt: response.settingsSessionExpiresAt
       }
     },
     attachTerminal: (id) => connection.invoke('terminal:attach', id) as Promise<boolean>,
@@ -664,16 +666,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     clearRemotePassword: async () => {
       throw new Error('Not available in remote mode')
     },
-    // ADR-054 decision 6 — the routine remote-access settings, behind `admin`
-    // AND a presence proof inside the mutation window on every tier. A stale
-    // proof answers `needs-step-up`, which the connection's step-up gate turns
-    // into one ceremony and a single retry before the caller sees it.
-    authcfgSetTier: (tier) =>
-      connection.invoke('authcfg:set-tier', tier) as ReturnType<ClaudeAPI['authcfgSetTier']>,
-    authcfgSetAuthMode: (mode) =>
-      connection.invoke('authcfg:set-auth-mode', mode) as ReturnType<
-        ClaudeAPI['authcfgSetAuthMode']
-      >,
+    // ADR-054 §6 — the routine remote-access settings, behind `admin` AND a live
+    // settings-editing session. A locked editor answers the typed
+    // `needs-settings-session`, which the connection's step-up gate deliberately
+    // does NOT intercept: unlocking is the operator pressing Edit, not an
+    // ambient retry, so this rejection reaches the pane and re-locks it.
+    authcfgApply: (patch) =>
+      connection.invoke('authcfg:apply', patch) as ReturnType<ClaudeAPI['authcfgApply']>,
+    authcfgEnd: () => connection.invoke('authcfg:end') as ReturnType<ClaudeAPI['authcfgEnd']>,
     // Success and disconnection are the SAME event here when the caller is
     // password-authenticated: the server drops every socket holding the old
     // password — the actor included — before the invoke response goes out. So
@@ -701,10 +701,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >
       return Promise.race([answered, rotatedAndDisconnected])
     },
-    authcfgSetRetention: (days) =>
-      connection.invoke('authcfg:set-retention', days) as ReturnType<
-        ClaudeAPI['authcfgSetRetention']
-      >,
+
     detectTailscale: async () => {
       throw new Error('Not available in remote mode')
     },

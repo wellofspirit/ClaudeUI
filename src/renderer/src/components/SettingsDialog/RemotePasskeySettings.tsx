@@ -4,70 +4,20 @@ import {
   LAST_CREDENTIAL_LOCKOUT_ERROR
 } from '../../../../shared/remote-protocol'
 import type {
-  RemoteAuthPolicy,
   RemoteConfig,
   WebauthnCredential,
   WebauthnEnrollToken
 } from '../../../../shared/types'
-import { SelectMenu } from '../shared/SelectMenu'
 import { SessionSecuritySettings } from './SessionSecuritySettings'
-import { isWebClient, writeAuthMode } from './remote-settings-transport'
+import { isWebClient } from './remote-settings-transport'
 
 const inputClass =
   'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
 
-/**
- * The exact words the operator must type to disable authentication
- * (security.md §Policy modes, hard requirement 1: "explicit desktop-side opt-in
- * with a typed confirmation").
- *
- * A phrase rather than a second click: `off` is the one setting here that hands
- * the machine to anyone who can reach the port, and the whole point of a typed
- * confirmation is that it cannot be reached by muscle memory.
- */
-export const DISABLE_AUTH_PHRASE = 'disable remote authentication'
-
-/** UI value for the policy control — `'auto'` stands in for a NULL column. */
-type PolicyChoice = RemoteAuthPolicy | 'auto'
-
-const POLICY_OPTIONS: { value: PolicyChoice; label: string }[] = [
-  { value: 'auto', label: 'Automatic (recommended)' },
-  { value: 'passkey-always', label: 'Passkey for every sign-in' },
-  // `passkey-for-grants` is gone (ADR-054): it was "legacy sign-in + medium
-  // step-up tier" written as one knob, and the two axes are independent now.
-  // Stored values migrated to `legacy`; the tier lives in SessionSecuritySettings.
-  { value: 'legacy', label: 'Password / link only' },
-  { value: 'off', label: 'No authentication' }
-]
-
-/**
- * The same list MINUS the master switch, for a web client (ADR-054 decision 6).
- *
- * Auth-DISABLING operations are host-anchor only, FOREVER — never the web, not
- * even behind a fresh ceremony, because a stolen stepped-up session must not be
- * able to turn authentication off. The server enforces it (`authcfg:set-auth-mode`
- * refuses `off` with a typed error and writes nothing); the option is absent here
- * so the refusal is never something an operator has to discover by trying.
- */
-const WEB_POLICY_OPTIONS = POLICY_OPTIONS.filter((option) => option.value !== 'off')
-
-/**
- * What each mode actually does, in the operator's terms. Sourced from
- * `auth-policy.ts` (`resolveAuthPolicy`, `ceremonyRequiredForAuth`,
- * `passwordStepUpAllowed`) rather than invented — a settings pane that
- * paraphrases the enforcement loosely is how people end up locked out.
- */
-const POLICY_HINTS: Record<PolicyChoice, string> = {
-  auto: 'Password / link until you enroll a passkey, then a passkey for every sign-in. Enrolling your first passkey turns it on; revoking your last one turns it back off.',
-  'passkey-always':
-    'Connections from an address that can use passkeys are asked for the fingerprint / face check instead of the URL link or Tailscale identity. Nothing is demanded until at least one passkey is enrolled, and the backup password below still gets in while it is allowed. Other addresses (plain LAN, tunnel) keep using the password or link.',
-  legacy: 'The original stack: URL token, password, and Tailscale identity. No passkey anywhere.',
-  off: 'Authentication is disabled entirely. Anyone who can reach this machine on the network has full control of it.'
-}
-
-function toChoice(config: RemoteConfig): PolicyChoice {
-  return config.authPolicy ?? 'auto'
-}
+// The sign-in-requirement OPTIONS, their hints, and the typed `off` confirmation
+// moved to `SessionSecuritySettings` with the rest of the editable set (ADR-054
+// §6 amendment). They belong wherever the editing MODE is, and there is exactly
+// one of those.
 
 function formatTime(ms: number | null): string {
   if (!ms) return 'never'
@@ -110,15 +60,6 @@ export function RemotePasskeySettings({
   const [renaming, setRenaming] = useState<{ credId: string; value: string } | null>(null)
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
   const [revokeError, setRevokeError] = useState<string | null>(null)
-  /** Typed-confirmation buffer for the `off` switch; null = not being armed. */
-  const [offDraft, setOffDraft] = useState<string | null>(null)
-  /**
-   * Why the last sign-in-requirement write failed. Reported rather than
-   * swallowed because the web path can be refused for a reason the operator can
-   * act on — a dismissed step-up, a stale presence proof — and a picker that
-   * silently snapped back would read as the click having missed.
-   */
-  const [policyError, setPolicyError] = useState<string | null>(null)
   const [enroll, setEnroll] = useState<{
     url: string
     expiresAt: number
@@ -181,40 +122,11 @@ export function RemotePasskeySettings({
   const writeConfig = useCallback(
     async (partial: Parameters<typeof window.api.setRemoteConfig>[0]): Promise<void> => {
       setBusy(true)
-      setPolicyError(null)
       try {
         onConfigChange(await window.api.setRemoteConfig(partial))
-      } catch (err) {
-        setPolicyError(err instanceof Error ? err.message : String(err))
       } finally {
         setBusy(false)
       }
-    },
-    [onConfigChange]
-  )
-
-  const handlePolicyChange = useCallback(
-    (choice: string): void => {
-      // `off` never writes from the picker. It arms the typed confirmation and
-      // waits — the write happens only once the phrase matches. Unreachable from
-      // a web client, where the option is not offered and the server refuses it.
-      if (choice === 'off') {
-        setOffDraft('')
-        return
-      }
-      setOffDraft(null)
-      const mode = choice === 'auto' ? null : (choice as RemoteAuthPolicy)
-      setBusy(true)
-      setPolicyError(null)
-      void writeAuthMode(mode)
-        .then(onConfigChange)
-        .catch((err: unknown) => {
-          // Includes the refusal a dismissed step-up produces on the web path:
-          // the gate rethrows the server's `needs-step-up` rather than
-          // pretending the write landed.
-          setPolicyError(err instanceof Error ? err.message : String(err))
-        })
-        .finally(() => setBusy(false))
     },
     [onConfigChange]
   )
@@ -345,7 +257,6 @@ export function RemotePasskeySettings({
     window.open(minted.url, '_blank')
   }, [mintLink])
 
-  const choice = toChoice(config)
   const authOff = config.effectiveAuthPolicy === 'off'
   // Not the host anchor: the master switch is absent, and the two toggles below
   // (break-glass, tailnet exemption) have no web-reachable writer.
@@ -371,95 +282,13 @@ export function RemotePasskeySettings({
         </div>
       )}
 
-      <div>
-        <div className="mb-1">Sign-in requirement</div>
-        <SelectMenu
-          testid="RemotePasskeySettings.policy"
-          value={offDraft !== null ? 'off' : choice}
-          disabled={busy}
-          onChange={handlePolicyChange}
-          options={web ? WEB_POLICY_OPTIONS : POLICY_OPTIONS}
-          triggerClassName={`${inputClass} w-full`}
-        />
-        <div
-          data-testid="RemotePasskeySettings.policyHint"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-        >
-          {POLICY_HINTS[offDraft !== null ? 'off' : choice]}
-        </div>
-        {choice === 'auto' && (
-          <div
-            data-testid="RemotePasskeySettings.effectivePolicy"
-            className="text-[10px] text-text-muted/60 mt-0.5"
-          >
-            Right now: {config.effectiveAuthPolicy === 'legacy' ? 'password / link' : 'passkey'} (
-            {config.credentialCount} passkey{config.credentialCount === 1 ? '' : 's'} enrolled)
-          </div>
-        )}
-        {policyError && (
-          <div
-            data-testid="RemotePasskeySettings.policyError"
-            className="text-[10px] text-red-400 mt-1 leading-snug"
-          >
-            {policyError}
-          </div>
-        )}
-        {/* Say WHY the option is missing rather than letting an operator hunt
-            for it. The rule is structural, not a permission this device is
-            short of: no remote client may ever disable authentication. */}
-        {web && (
-          <div
-            data-testid="RemotePasskeySettings.offHostAnchorNote"
-            className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-          >
-            Turning authentication off is not offered here, and never will be — it can only be done
-            on the machine itself. A signed-in remote session must not be able to remove the lock it
-            just came through.
-          </div>
-        )}
-
-        {offDraft !== null && (
-          <div className="mt-2 space-y-1">
-            <div
-              data-testid="RemotePasskeySettings.offConfirmPrompt"
-              className="text-[10px] text-red-300 leading-snug"
-            >
-              Type <span className="font-mono">{DISABLE_AUTH_PHRASE}</span> to confirm you want
-              every reachable client to have operator-level access to this machine.
-            </div>
-            <input
-              data-testid="RemotePasskeySettings.offConfirmInput"
-              type="text"
-              autoComplete="off"
-              value={offDraft}
-              onChange={(e) => setOffDraft(e.target.value)}
-              placeholder={DISABLE_AUTH_PHRASE}
-              className={`${inputClass} w-full`}
-            />
-            <div className="flex items-center gap-2">
-              <button
-                data-testid="RemotePasskeySettings.offConfirmSubmit"
-                disabled={busy || offDraft !== DISABLE_AUTH_PHRASE}
-                onClick={() => {
-                  setOffDraft(null)
-                  void writeConfig({ authPolicy: 'off' })
-                }}
-                className="rounded bg-red-500/15 px-2 py-1 text-red-400 hover:bg-red-500/25 disabled:opacity-40 text-[11px]"
-              >
-                Turn authentication off
-              </button>
-              <button
-                data-testid="RemotePasskeySettings.offConfirmCancel"
-                onClick={() => setOffDraft(null)}
-                className="rounded px-2 py-1 text-text-muted hover:text-text-secondary text-[11px]"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
+      {/* The SIGN-IN REQUIREMENT, the step-up tier, the timing dials, the audit
+          window and the password all live in the settings EDITOR below
+          (ADR-054 §6 amendment): they are one set an operator changes together,
+          inside one bounded editing mode, and splitting them across two panes
+          was what made the old surface a wall of always-live knobs. What stays
+          here is what is NOT part of that set — the two admission toggles and
+          the credential list, which are per-credential rather than policy. */}
       {/* Break-glass password. `passwordAuthAllowed()`: the toggle is only
           consulted under the passkey modes, and only on an origin that can
           actually do WebAuthn — say so, or people will think they turned the

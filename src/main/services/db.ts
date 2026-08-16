@@ -2162,7 +2162,7 @@ export function listAuditLog(opts: { limit?: number; before?: number } = {}): Au
  * days, configurable with a hard 30-day FLOOR.
  *
  * The floor is not decoration. Retention is settable from a web client now
- * (`authcfg:set-retention`), so "0 days" would otherwise be a one-call erase of
+ * (`authcfg:apply`), so "0 days" would otherwise be a one-call erase of
  * the trail that records the erasure — a stepped-up but stolen session must not
  * be able to do that. 30 days is short enough to be a real privacy knob and long
  * enough that an incident is still reconstructable.

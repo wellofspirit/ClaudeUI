@@ -45,10 +45,10 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *  - `enroll` / `admin` (ADR-052 passkeys) — reachable only from a passkey or
  *    break-glass-password connection, or (for the two `enroll` verbs) a
  *    one-time enrollment link. A token/tailnet connection never holds either.
- *  - `admin` (ADR-054 decision 6, `authcfg:*`) — the routine remote-access
- *    settings. Same reachability as the passkey management verbs, PLUS a
- *    presence proof inside the mutation window on every tier for the writes.
- *    The `off` master switch is deliberately not among them: it stays in
+ *  - `admin` (ADR-054 §6, `authcfg:*`) — the routine remote-access settings.
+ *    Same reachability as the passkey management verbs, PLUS a live
+ *    settings-editing session for the mutations (`apply`, `set-password`). The
+ *    `off` master switch is deliberately not among them: it stays in
  *    `remote:set-config`, which has no remote registration at all.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
@@ -57,11 +57,10 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  * reachability nobody thought about.
  */
 const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
+  'authcfg:apply',
+  'authcfg:end',
   'authcfg:get',
-  'authcfg:set-auth-mode',
   'authcfg:set-password',
-  'authcfg:set-retention',
-  'authcfg:set-tier',
   'terminal:attach',
   'terminal:create',
   'terminal:detach',

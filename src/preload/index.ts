@@ -235,6 +235,11 @@ const api: ClaudeAPI = {
   // Step-up is a REMOTE concept (SyncCore phase 2): the desktop renderer is the
   // host surface, already holding a non-decaying `shell` grant, so there is
   // nothing to step up to. Local no-op, deliberately not an IPC round trip.
+  //
+  // That covers the `settings` intent too (ADR-054 §6): the host anchor's editor
+  // unlocks with no ceremony and has no TTL, so this answers `ok` with NO
+  // `settingsSessionExpiresAt` — and the pane reads that absence as "no
+  // countdown", which is the truth here rather than a missing field.
   terminalStepUp: async () => ({ ok: true }),
   // Same reasoning for the passkey factor: nothing to prove when you are the
   // host surface, and this renderer could not run a ceremony anyway (no RP ID
@@ -459,17 +464,17 @@ const api: ClaudeAPI = {
   detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
   forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
-  // Remote-access settings, the ROUTINE subset (ADR-054 decision 6). Real IPC
-  // here rather than a refusal: the channels are registered on BOTH transports
+  // Remote-access settings, the ROUTINE subset (ADR-054 §6). Real IPC here
+  // rather than a refusal: the channels are registered on BOTH transports
   // (authcfg.ipc.ts) precisely so the capability/kind declaration is one
   // reviewed fact, and the desktop connection — being the host anchor — is
-  // exempt from the freshness gate, so they behave here exactly as
-  // `remote:set-config` does. The `off` master switch is NOT among them and
-  // stays in `setRemoteConfig` with its typed confirmation.
-  authcfgSetTier: (tier) => ipcRenderer.invoke('authcfg:set-tier', tier),
-  authcfgSetAuthMode: (mode) => ipcRenderer.invoke('authcfg:set-auth-mode', mode),
+  // exempt from the settings-session gate, so they behave here exactly as
+  // `remote:set-config` does. The desktop pane nonetheless SAVES through
+  // `setRemoteConfig`: it is the host path, and it is the only writer of the
+  // `off` master switch (with its typed confirmation).
+  authcfgApply: (patch) => ipcRenderer.invoke('authcfg:apply', patch),
+  authcfgEnd: () => ipcRenderer.invoke('authcfg:end'),
   authcfgSetPassword: (password: string) => ipcRenderer.invoke('authcfg:set-password', password),
-  authcfgSetRetention: (days: number) => ipcRenderer.invoke('authcfg:set-retention', days),
 
   // Passkeys (ADR-052) — MANAGEMENT ONLY on this transport. `webauthn.ipc.ts`
   // registers exactly these four channels; the two register verbs below are

@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import type { TerminalStepUpResult } from '../../../../shared/types'
+import type { StepUpIntent, TerminalStepUpResult } from '../../../../shared/types'
 
 /**
  * THE step-up ceremony (ADR-052 decision 5, generalised by ADR-054 series 2).
@@ -32,8 +32,15 @@ import type { TerminalStepUpResult } from '../../../../shared/types'
  *    ceremony instead of re-prompting for a secret that cannot work.
  */
 interface Props {
-  /** Called after the server confirms a fresh proof. */
-  onGranted: () => void
+  /**
+   * Called after the server confirms a fresh proof.
+   *
+   * `settingsSessionExpiresAt` is the SERVER's deadline for the editing session
+   * a `settings`-intent ceremony just opened — absent for an ordinary step-up,
+   * and absent on the desktop, whose editor has no TTL at all. A caller that
+   * renders a countdown must tick from this rather than from its own clock.
+   */
+  onGranted: (settingsSessionExpiresAt?: number) => void
   /**
    * Dismiss without proving anything. Absent ⇒ no dismiss affordance, which is
    * right for the terminal panel (the prompt IS the panel's resting state) and
@@ -48,6 +55,16 @@ interface Props {
   passkey?: boolean
   /** One line: what is being unlocked. */
   title: string
+  /**
+   * What this ceremony is FOR (ADR-054 §6 amendment).
+   *
+   * `'settings'` makes the same proof additionally open the five-minute
+   * settings-editing session, and the resulting deadline is handed to
+   * {@link Props.onGranted}. Absent for the terminal, which wants an ordinary
+   * step-up — the intent is a consequence selector, not a request for extra
+   * authority, so a caller that omits it loses nothing it was entitled to.
+   */
+  intent?: StepUpIntent
   /** The sentence under the title while the PASSKEY factor is showing. */
   passkeyHint: string
   /** The same, for the password factor. */
@@ -67,6 +84,7 @@ export function StepUpPrompt({
   onGranted,
   onCancel,
   passkey,
+  intent,
   title,
   passkeyHint,
   passwordHint,
@@ -83,7 +101,7 @@ export function StepUpPrompt({
       if (result.ok) {
         setPassword('')
         setError(null)
-        onGranted()
+        onGranted(result.settingsSessionExpiresAt)
         return
       }
       if (result.code === 'passkey-unavailable') {
@@ -107,20 +125,20 @@ export function StepUpPrompt({
     setBusy(true)
     setError(null)
     try {
-      apply(await window.api.terminalStepUpPasskey())
+      apply(await window.api.terminalStepUpPasskey(intent))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
-  }, [busy, apply])
+  }, [busy, apply, intent])
 
   const submitPassword = useCallback(async (): Promise<void> => {
     if (busy || password.length === 0) return
     setBusy(true)
     setError(null)
     try {
-      const result = await window.api.terminalStepUp(password)
+      const result = await window.api.terminalStepUp(password, intent)
       // Never keep the password around — the proof lives server-side as a grant
       // with a deadline, and that is the only thing that should persist.
       if (result.ok) setPassword('')
@@ -130,7 +148,7 @@ export function StepUpPrompt({
     } finally {
       setBusy(false)
     }
-  }, [busy, password, apply])
+  }, [busy, password, apply, intent])
 
   return (
     <div

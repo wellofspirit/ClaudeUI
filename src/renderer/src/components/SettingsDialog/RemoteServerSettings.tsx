@@ -2,13 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
 import { RemotePasskeySettings } from './RemotePasskeySettings'
 import { SelectMenu } from '../shared/SelectMenu'
-import { isWebClient, rotateRemotePassword } from './remote-settings-transport'
-
-// Mirrors remote-auth.ts's MIN_PASSWORD_LENGTH — kept as a local literal
-// because that module is main-only (imports node:crypto) and can't be
-// imported into the renderer bundle. The authoritative check still happens
-// in main (setRemotePassword throws), this is just fast inline feedback.
-const MIN_PASSWORD_LENGTH = 12
+import { isWebClient } from './remote-settings-transport'
 
 const inputClass =
   'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
@@ -31,12 +25,6 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [tlsPortError, setTlsPortError] = useState<string | null>(null)
   const [idleInput, setIdleInput] = useState('')
   const [idleError, setIdleError] = useState<string | null>(null)
-  const [passwordDraft, setPasswordDraft] = useState('')
-  const [passwordConfirm, setPasswordConfirm] = useState('')
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  /** Confirmation for the web rotation path, whose success may arrive as a
-   *  socket close rather than a response (see handleSetPassword). */
-  const [passwordNotice, setPasswordNotice] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
   /** Actionable message from the last failed `detectTailscale()` probe. */
@@ -166,52 +154,6 @@ export function RemoteServerSettings(): React.JSX.Element {
     setConfig(updated)
     setIdleInput(String(updated.shellGrantIdleMinutes))
   }, [idleInput])
-
-  /**
-   * Provision or rotate the break-glass password.
-   *
-   * TRANSPORT-AWARE (ADR-054 decision 6): the desktop writes it directly, a web
-   * client rides `authcfg:set-password` behind a fresh presence proof. The web
-   * path has a shape nothing else here does — the rotation DISCONNECTS every
-   * socket holding the old password, and when the caller is one of them the
-   * server closes it before the response goes out. The api-adapter races the
-   * close against the response, so this resolves either way; what it must NOT do
-   * afterwards is assume it still has a connection, hence the confirmation
-   * message instead of a `reload()` that would hang on a socket that has gone.
-   */
-  const handleSetPassword = useCallback(async (): Promise<void> => {
-    setPasswordError(null)
-    setPasswordNotice(null)
-    if (passwordDraft.length < MIN_PASSWORD_LENGTH) {
-      setPasswordError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
-      return
-    }
-    if (passwordDraft !== passwordConfirm) {
-      setPasswordError('Passwords do not match')
-      return
-    }
-    setBusy(true)
-    try {
-      await rotateRemotePassword(passwordDraft)
-      setPasswordDraft('')
-      setPasswordConfirm('')
-      if (isWebClient()) {
-        setPasswordNotice(
-          // "Sent", not "updated": on the web this can resolve because the socket
-          // was CLOSED rather than because a response arrived, and a close says
-          // "the password this socket held is gone" — strong evidence for this
-          // rotation, not proof of it (see the race in api-adapter.ts).
-          'Password change sent. Any device signed in with the old password — possibly this one — has been signed out and needs the new one.'
-        )
-        return
-      }
-      await reload()
-    } catch (err) {
-      setPasswordError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }, [passwordDraft, passwordConfirm, reload])
 
   const handleClearPassword = useCallback(async (): Promise<void> => {
     if (!confirmClear) {
@@ -471,86 +413,30 @@ export function RemoteServerSettings(): React.JSX.Element {
         </>
       )}
 
-      {/* Password */}
-      <div>
-        <div className="mb-1">Password</div>
-        <div
-          data-testid="RemoteServerSettings.passwordStatus"
-          className="text-[10px] text-text-muted/70 mb-1"
-        >
-          {config.passwordSet
-            ? `Set${config.passwordUpdatedAt ? ` · updated ${new Date(config.passwordUpdatedAt).toLocaleString()}` : ''}`
-            : 'Not set'}
-        </div>
-        <div className="space-y-1">
-          <input
-            data-testid="RemoteServerSettings.passwordInput"
-            type="password"
-            placeholder="New password"
-            value={passwordDraft}
-            onChange={(e) => setPasswordDraft(e.target.value)}
-            className={`${inputClass} w-full`}
-          />
-          <input
-            data-testid="RemoteServerSettings.passwordConfirm"
-            type="password"
-            placeholder="Confirm password"
-            value={passwordConfirm}
-            onChange={(e) => setPasswordConfirm(e.target.value)}
-            className={`${inputClass} w-full`}
-          />
-        </div>
-        {passwordError && (
-          <div
-            data-testid="RemoteServerSettings.passwordError"
-            className="text-[10px] text-red-400 mt-0.5"
-          >
-            {passwordError}
-          </div>
-        )}
-        {passwordNotice && (
-          <div
-            data-testid="RemoteServerSettings.passwordNotice"
-            role="status"
-            className="text-[10px] text-accent mt-0.5 leading-snug"
-          >
-            {passwordNotice}
-          </div>
-        )}
-        <div className="flex items-center gap-2 mt-1.5">
-          <button
-            data-testid="RemoteServerSettings.setPassword"
-            disabled={busy}
-            onClick={() => void handleSetPassword()}
-            className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
-          >
-            {config.passwordSet ? 'Change' : 'Set'}
-          </button>
-          {/* CLEARING the credential is host-anchor only: `remote:clear-password`
-              has no remote registration, and removing the last way back in over
-              the network is close enough to disabling authentication to belong
-              on the same side of the line. */}
-          {config.passwordSet && !web && (
+      {/* CLEARING the break-glass credential stays here, and only here: it is
+          host-anchor only (`remote:clear-password` has no remote registration),
+          and removing the last way back in over the network belongs beside the
+          transport controls rather than inside an editor a phone can open.
+          SETTING / rotating it moved into the security editor below, where it is
+          one of the six facts an operator reviews and changes together. */}
+      {config.passwordSet && !web && (
+        <div>
+          <div className="mb-1">Break-glass password</div>
+          <div className="flex items-center gap-2">
             <button
               data-testid="RemoteServerSettings.clearPassword"
               disabled={busy}
               onClick={() => void handleClearPassword()}
               className="rounded px-2 py-1 text-red-400 hover:bg-red-500/10 disabled:opacity-40 text-[11px]"
             >
-              {confirmClear ? 'Confirm clear?' : 'Clear'}
+              {confirmClear ? 'Confirm clear?' : 'Clear password'}
             </button>
-          )}
+          </div>
+          <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">
+            Removes the password entirely. Change it in the security section below.
+          </div>
         </div>
-        {/* Transport honesty (ADR-030 spirit): the password proof is a bearer
-            secret, so it is only as private as the network it crosses. */}
-        <div
-          data-testid="RemoteServerSettings.passwordTransportNote"
-          className="text-[10px] text-text-muted/60 mt-1.5 leading-snug"
-        >
-          Password sign-in is only as private as the network between your browser and this machine.
-          Use it over Tailscale or a trusted LAN — not open Wi-Fi.
-        </div>
-      </div>
+      )}
 
       {/* Passkeys + the auth-policy switch (ADR-052). Its own component: this
           block owns credential state that changes without any local action

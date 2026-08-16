@@ -145,11 +145,30 @@ export interface CommandConnection {
   armedEver?: boolean
   /**
    * ADR-054 — expiry of the NON-shell mutation window (the `strong` tier's
-   * 60-minute default, and the window the settings-area `authcfg:*` verbs demand
-   * on every tier). Same three-state convention as
+   * 60-minute default). Same three-state convention as
    * {@link CommandConnection.shellGrantExpiresAt}.
+   *
+   * It no longer governs the settings area: the ADR-054 §6 amendment
+   * (2026-08-16) replaced that with an explicit
+   * {@link CommandConnection.settingsSessionExpiresAt}.
    */
   mutationExpiresAt?: number | null
+  /**
+   * ADR-054 §6 amendment — expiry of an open SETTINGS-EDITING SESSION.
+   *
+   * Armed only by a step-up ceremony that carried `intent: 'settings'`, and
+   * revoked by `authcfg:end`, by disconnect, or by its own 5-minute TTL (checked
+   * lazily at dispatch — a bounded mode nobody is watching needs no timer).
+   *
+   * Deliberately a per-connection FLAG rather than a bearer token on the wire:
+   * the connection is already authenticated and the ceremony just ran on it, so
+   * a token would add leakable surface without adding proof.
+   *
+   * Same three-state convention as the two windows above — `undefined` on the
+   * exempt desktop connection, which is the host anchor and needs no session at
+   * all.
+   */
+  settingsSessionExpiresAt?: number | null
   /**
    * ADR-054 — the step-up tier this connection was ADMITTED under, resolved once
    * at authentication like the policy and for the same reason: authority that
@@ -272,6 +291,9 @@ export function makeRemoteConnection(
     // authentication.
     shellGrantExpiresAt: null,
     mutationExpiresAt: null,
+    // No settings session either: it is opened by a DELIBERATE unlock, never by
+    // authentication and never by an ordinary step-up (ADR-054 §6 amendment).
+    settingsSessionExpiresAt: null,
     armedEver: false,
     stepUpTier: opts?.stepUpTier ?? 'medium'
   }

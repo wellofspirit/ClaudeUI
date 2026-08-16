@@ -42,7 +42,11 @@ describe('TerminalStepUpPrompt', () => {
       target: { value: 'hunter2hunter2' }
     })
     fireEvent.click(screen.getByTestId('TerminalStepUpPrompt.submit'))
-    await waitFor(() => expect(api.terminalStepUp).toHaveBeenCalledWith('hunter2hunter2'))
+    // `undefined` intent: the terminal wants an ORDINARY step-up, not the
+    // settings-editor unlock (ADR-054 §6 amendment).
+    await waitFor(() =>
+      expect(api.terminalStepUp).toHaveBeenCalledWith('hunter2hunter2', undefined)
+    )
     await waitFor(() => expect(onGranted).toHaveBeenCalled())
   })
 

@@ -327,7 +327,7 @@ export const ENROLL_UNAVAILABLE_ERROR = 'enroll-unavailable'
 export const LAST_CREDENTIAL_LOCKOUT_ERROR = 'last-credential-lockout'
 
 /**
- * Error `authcfg:set-auth-mode` throws for `off` — THE host-anchor rule
+ * Error `authcfg:apply` throws for an `off` auth-mode — THE host-anchor rule
  * (ADR-054 decision 6).
  *
  * Auth-DISABLING operations are host-anchor only, forever: the desktop renderer
@@ -406,6 +406,28 @@ export interface WsStepUpRequest {
    * probe both on one socket.
    */
   assertion?: AuthenticationResponseJSON
+  /**
+   * What this ceremony is FOR (ADR-054 §6 amendment, 2026-08-16).
+   *
+   * Absent — an ordinary step-up: it arms presence (and, where the terminal
+   * toggle allows, the shell) exactly as before.
+   *
+   * `'settings'` — the settings-editor UNLOCK. On success the server marks this
+   * connection as holding a live settings-editing session (5 minutes), which is
+   * what every `authcfg` mutation now demands in place of the old mutation
+   * window. It also does the ordinary arming: a step-up is a step-up, and
+   * splitting "which proof counts for what" by intent would be a second rule
+   * about the same ceremony.
+   *
+   * ADDITIVE and optional, so an older bundle's frame stays byte-compatible —
+   * it simply never opens a session, which is the correct outcome for a client
+   * that has no editor to open.
+   *
+   * Deliberately NOT a request for elevated authority: the intent selects a
+   * consequence of a proof the server verifies either way, so a client asserting
+   * `settings` on a ceremony that fails gets nothing at all.
+   */
+  intent?: StepUpIntent
 }
 
 /**
@@ -477,6 +499,19 @@ export interface WsStepUpResponse {
    * documented so the next one does not infer a shell from it.
    */
   expiresAt?: number
+  /**
+   * Success only, and only for a ceremony that carried `intent: 'settings'`:
+   * the epoch-ms deadline of the settings-editing session just opened (ADR-054
+   * §6 amendment).
+   *
+   * The editor renders its countdown from THIS rather than from
+   * `now + 5 minutes`, so the pane and the server cannot disagree about when the
+   * mode ends — the client's clock, the round trip and any delay between the
+   * ceremony and the render are all excluded by construction.
+   *
+   * Absent on an ordinary step-up, which opens no session at all.
+   */
+  settingsSessionExpiresAt?: number
 }
 
 /**
@@ -494,6 +529,23 @@ export const NEEDS_STEP_UP_ERROR = 'needs-step-up'
  * must NOT prompt for a password.
  */
 export const TERMINAL_DISABLED_ERROR = 'terminal-disabled'
+
+/**
+ * Error an `authcfg` MUTATION throws when this connection holds no live
+ * settings-editing session (ADR-054 §6 amendment).
+ *
+ * Typed separately from {@link NEEDS_STEP_UP_ERROR}, and the distinction is the
+ * whole point of the amendment. `needs-step-up` means "prove presence and I will
+ * transparently retry what you asked for" — the generic gate does exactly that,
+ * ambiently, and must NOT do it here. Opening the settings editor is a
+ * DELIBERATE act with a visible bounded mode behind it; a ceremony that appeared
+ * because a stale pane happened to fire a write would re-create the ambient
+ * administering authority the amendment exists to remove.
+ *
+ * So the client's contract for this code is: do not retry, re-lock the editor,
+ * and let the operator press Edit again.
+ */
+export const NEEDS_SETTINGS_SESSION_ERROR = 'needs-settings-session'
 
 function messageIncludes(message: unknown, needle: string): boolean {
   const text =
@@ -513,6 +565,16 @@ export function isNeedsStepUpError(message: unknown): boolean {
 /** True for the error a shell dispatch throws while the terminal toggle is OFF. */
 export function isTerminalDisabledError(message: unknown): boolean {
   return messageIncludes(message, TERMINAL_DISABLED_ERROR)
+}
+
+/**
+ * True for the refusal an `authcfg` mutation produces with no live settings
+ * session. Checked BEFORE {@link isNeedsStepUpError} wherever both are handled:
+ * the two strings are distinct, but a future reword that made one a substring of
+ * the other would silently route settings refusals into the ambient retry path.
+ */
+export function isNeedsSettingsSessionError(message: unknown): boolean {
+  return messageIncludes(message, NEEDS_SETTINGS_SESSION_ERROR)
 }
 
 /**
@@ -669,7 +731,8 @@ import type {
   EngineId,
   ModelRef,
   MeteringSnapshot,
-  RemoteAuthMethod
+  RemoteAuthMethod,
+  StepUpIntent
 } from './types'
 
 export interface PerSessionSnapshot {
@@ -766,5 +829,7 @@ export interface FullStateSnapshot {
   hiddenProjects?: string[]
 }
 
-// Re-export RemoteStatus / RemoteAuthMethod from the main types (canonical definition)
-export type { RemoteStatus, RemoteAuthMethod } from './types'
+// Re-export RemoteStatus / RemoteAuthMethod / StepUpIntent from the main types
+// (canonical definition). `StepUpIntent` rides along so the wire frame below and
+// the `ClaudeAPI` surface cannot drift about what a ceremony may be FOR.
+export type { RemoteStatus, RemoteAuthMethod, StepUpIntent } from './types'

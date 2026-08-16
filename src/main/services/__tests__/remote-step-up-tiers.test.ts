@@ -364,6 +364,22 @@ describe('ADR-054 step-up tiers over the socket', () => {
     return (await client.waitFor('step-up-response')) as unknown as Record<string, unknown>
   }
 
+  /**
+   * The SERVER's per-connection policy snapshot for the only live client.
+   *
+   * Reaches into a private map, which is the point: "was the actor re-derived?"
+   * is a question about state no wire frame reports, and the alternative —
+   * inferring it from a timer the harness itself overrides — would pass for the
+   * wrong reason.
+   */
+  function actorPolicyCtx(): Record<string, unknown> | null {
+    const clients = (
+      server as unknown as { clients: Map<unknown, { policyCtx: Record<string, unknown> }> }
+    ).clients
+    for (const client of clients.values()) return client.policyCtx
+    return null
+  }
+
   /** Resolves to the close code, or `null` if the socket is still open at `ms`. */
   async function closeCodeWithin(client: RawClient, ms: number): Promise<number | null> {
     try {
@@ -776,9 +792,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
   // The settings verbs (decision 6)
   // -------------------------------------------------------------------------
 
-  describe('authcfg:* — the host-anchor split', () => {
-    /** A connection holding `admin` but never armed: password under a passkey mode. */
-    async function adminUnarmed(
+  describe('authcfg:* — the host anchor and the settings-editing SESSION', () => {
+    /** A connection holding `admin` but with the settings editor LOCKED. */
+    async function adminLocked(
       over: Partial<RemoteConfigRow> = {},
       maxAgeMs?: number
     ): Promise<RawClient> {
@@ -786,55 +802,247 @@ describe('ADR-054 step-up tiers over the socket', () => {
       return await connectWithPassword()
     }
 
+    /** Run the UNLOCK ceremony: a password step-up carrying the settings intent. */
+    async function unlock(client: RawClient): Promise<Record<string, unknown>> {
+      client.frames.length = 0
+      client.send({ type: 'step-up', pwProof: PROOF, intent: 'settings' })
+      return (await client.waitFor('step-up-response')) as unknown as Record<string, unknown>
+    }
+
     for (const tier of ['off', 'medium', 'strong'] as const satisfies StepUpTier[]) {
-      it(`demands a fresh proof on tier \`${tier}\``, async () => {
-        // Strong-tier freshness for this area REGARDLESS of tier — these verbs
-        // change who may connect and how, so `medium` is not an option for them.
-        const c = await adminUnarmed({ stepUpTier: tier })
-        await expect(invoke(c, 'authcfg:set-tier', 'strong')).rejects.toThrow('needs-step-up')
-        expect(await stepUp(c)).toMatchObject({ ok: true })
-        await expect(invoke(c, 'authcfg:set-tier', 'strong')).resolves.toMatchObject({ ok: true })
+      it(`demands an unlocked editor on tier \`${tier}\``, async () => {
+        // The area is gated REGARDLESS of tier — these verbs change who may
+        // connect and how, so `medium` is not an option for them. The 2026-08-16
+        // amendment re-mechanized that rule without changing it: the ceremony
+        // moved from every verb to the door.
+        const c = await adminLocked({ stepUpTier: tier })
+        await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'strong' })).rejects.toThrow(
+          'needs-settings-session'
+        )
+        expect(await unlock(c)).toMatchObject({ ok: true })
+        await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'strong' })).resolves.toMatchObject({
+          ok: true
+        })
       })
     }
 
-    it('refuses `off` with a typed error and writes nothing', async () => {
-      // THE host-anchor rule: a stolen stepped-up session must not be able to
-      // turn authentication off, on either form factor.
-      const c = await adminUnarmed()
-      expect(await stepUp(c)).toMatchObject({ ok: true })
-      configWrites.length = 0
-      await expect(invoke(c, 'authcfg:set-auth-mode', 'off')).rejects.toThrow(
-        'auth-off-is-host-anchor-only'
+    it('an ORDINARY step-up does not open the editor — a fresh window is not a session', async () => {
+      // THE guard for the amendment. The as-shipped gate was "armed AND a fresh
+      // mutation window", which is exactly what a plain step-up produces — so
+      // this connection would have sailed through. Administering is a mode you
+      // enter deliberately now, and nothing ambient may enter it.
+      const c = await adminLocked()
+      expect(await stepUp(c), 'a plain step-up still arms presence').toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'strong' })).rejects.toThrow(
+        'needs-settings-session'
       )
       expect(configWrites).toEqual([])
+
+      // …and the very same ceremony WITH the intent does open it.
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'strong' })).resolves.toMatchObject({
+        ok: true
+      })
+    })
+
+    it('answers the unlock with the SERVER deadline, and audits the open', async () => {
+      const c = await adminLocked()
+      auditRows.length = 0
+      const response = await unlock(c)
+      // The editor ticks from this rather than starting its own clock, so the
+      // pill and the gate cannot disagree about when the mode ends.
+      expect(response.settingsSessionExpiresAt).toBeGreaterThan(Date.now())
+      expect(response.settingsSessionExpiresAt).toBeLessThanOrEqual(Date.now() + 5 * 60_000)
+      const row = auditRow('auth:settings-session')
+      expect(row).toMatchObject({ capability: 'admin', outcome: 'ok' })
+      expect(row!.detail).toMatch(/settings-editing session opened via break-glass password/)
+    })
+
+    it('expires LAZILY on its TTL — no timer, just a deadline that stops counting', async () => {
+      const c = await adminLocked()
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { auditRetentionDays: 90 })).resolves.toMatchObject({
+        ok: true
+      })
+
+      // Walk past the five minutes without touching anything. Nothing clears the
+      // field; the table simply stops honouring it.
+      advance(6)
+      await expect(invoke(c, 'authcfg:apply', { auditRetentionDays: 120 })).rejects.toThrow(
+        'needs-settings-session'
+      )
+      expect(remoteConfigRef.current!.auditRetentionDays).toBe(90)
+
+      // A fresh unlock reopens it.
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { auditRetentionDays: 120 })).resolves.toMatchObject({
+        ok: true
+      })
+    })
+
+    it('`authcfg:end` closes it, and is a no-op success when nothing is open', async () => {
+      const c = await adminLocked()
+      // Idempotent with nothing open: a client that lost track must be able to
+      // say "I am done" without proving it ever started.
+      await expect(invoke(c, 'authcfg:end')).resolves.toMatchObject({ ok: true })
+
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:end')).resolves.toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'strong' })).rejects.toThrow(
+        'needs-settings-session'
+      )
+    })
+
+    it('refuses an `off` auth-mode with a typed error and writes NOTHING at all', async () => {
+      // THE host-anchor rule: a stolen session must not be able to turn
+      // authentication off, on either form factor. Checked before anything else
+      // so a batch carrying it changes none of its other fields either.
+      const c = await adminLocked()
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      configWrites.length = 0
+      await expect(
+        invoke(c, 'authcfg:apply', { authMode: 'off', stepUpTier: 'strong' })
+      ).rejects.toThrow('auth-off-is-host-anchor-only')
+      expect(configWrites).toEqual([])
+      expect(remoteConfigRef.current!.stepUpTier).not.toBe('strong')
+    })
+
+    it('validates the WHOLE batch before writing any of it', async () => {
+      // The property per-field verbs could not have: a Save with one bad value
+      // leaves the surface exactly as it was, rather than half-moved with the
+      // operator disconnected by the 4009 from field two.
+      const c = await adminLocked()
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      configWrites.length = 0
+      await expect(
+        invoke(c, 'authcfg:apply', { stepUpTier: 'strong', sessionMaxAgeHours: 720 })
+      ).rejects.toThrow(/between 1 and 168/)
+      expect(configWrites).toEqual([])
+      expect(remoteConfigRef.current!.stepUpTier).not.toBe('strong')
     })
 
     it('accepts the non-off modes, including AUTO', async () => {
-      const c = await adminUnarmed()
-      expect(await stepUp(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:set-auth-mode', 'legacy')).resolves.toMatchObject({
-        ok: true,
-        mode: 'legacy'
+      const c = await adminLocked()
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { authMode: 'legacy' })).resolves.toMatchObject({
+        ok: true
       })
       expect(remoteConfigRef.current!.authPolicy).toBe('legacy')
-      await expect(invoke(c, 'authcfg:set-auth-mode', null)).resolves.toMatchObject({ mode: null })
+      await expect(invoke(c, 'authcfg:apply', { authMode: null })).resolves.toMatchObject({
+        ok: true
+      })
       expect(remoteConfigRef.current!.authPolicy).toBeNull()
     })
 
-    it('a tier change audits with detail and drops everyone EXCEPT the actor (4009)', async () => {
-      const actor = await adminUnarmed()
-      expect(await stepUp(actor)).toMatchObject({ ok: true })
+    it('one batch = ONE audit row carrying the diff, and ONE 4009 sweep', async () => {
+      const actor = await adminLocked({ stepUpTier: 'medium' })
+      expect(await unlock(actor)).toMatchObject({ ok: true })
       const bystander = await connectWithPassword()
 
       auditRows.length = 0
-      await expect(invoke(actor, 'authcfg:set-tier', 'strong')).resolves.toMatchObject({ ok: true })
+      await expect(
+        invoke(actor, 'authcfg:apply', {
+          stepUpTier: 'strong',
+          authMode: 'legacy',
+          auditRetentionDays: 90
+        })
+      ).resolves.toMatchObject({ ok: true })
 
       expect(await bystander.waitForClose(2000)).toBe(4009)
       expect(actor.ws.readyState).toBe(WebSocket.OPEN)
+      expect(auditRows.filter((r) => r.channel === 'auth:policy-change')).toHaveLength(1)
       const row = auditRow('auth:policy-change')
-      expect(row).toBeDefined()
       expect(row!.detail).toMatch(/step-up tier medium→strong/)
-      expect(row!.detail).toMatch(/authcfg:set-tier/)
+      expect(row!.detail).toMatch(/authcfg:apply/)
+      // Retention is not part of the auth surface, so it rides its own row and
+      // disconnects nobody — but it is still a settings change and still owes one.
+      expect(auditRow('auth:settings-change')!.detail).toMatch(/audit retention .*→90 days/)
+      // ONE write, not three.
+      expect(configWrites).toHaveLength(1)
+    })
+
+    it('a DIAL-only apply re-admits everyone, like any other admission rule', async () => {
+      // The dials ARE admission rules: `stepUpMutationIdleMinutes` and
+      // `sessionMaxAgeHours` are snapshotted into `policyCtx` at authentication
+      // and read from that snapshot for the connection's whole life. A change
+      // that did not sweep would leave every live bystander running on the OLD
+      // windows and the OLD max-age until they happened to reconnect — and the
+      // editor's own footer ("Everyone else signed in re-authenticates") would
+      // be false for exactly the two fields the amendment made web-editable.
+      const actor = await adminLocked({ stepUpMutationIdleMinutes: 60 })
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      const bystander = await connectWithPassword()
+
+      auditRows.length = 0
+      await expect(
+        invoke(actor, 'authcfg:apply', { stepUpMutationIdleMinutes: 15 })
+      ).resolves.toMatchObject({ ok: true })
+
+      expect(await bystander.waitForClose(2000)).toBe(4009)
+      expect(actor.ws.readyState).toBe(WebSocket.OPEN)
+      const rows = auditRows.filter((r) => r.channel === 'auth:policy-change')
+      expect(rows).toHaveLength(1)
+      expect(rows[0].detail).toMatch(/idle re-check 60→15 min/)
+      expect(rows[0].detail).toMatch(/authcfg:apply/)
+    })
+
+    it('a MIXED save names the dials in the same diff as the tier', async () => {
+      const actor = await adminLocked({ stepUpTier: 'medium', sessionMaxAgeHours: 4 })
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+
+      auditRows.length = 0
+      await expect(
+        invoke(actor, 'authcfg:apply', { stepUpTier: 'strong', sessionMaxAgeHours: 8 })
+      ).resolves.toMatchObject({ ok: true })
+
+      const row = auditRow('auth:policy-change')
+      expect(row!.detail).toMatch(/step-up tier medium→strong/)
+      expect(row!.detail).toMatch(/session max-age 4→8 h/)
+    })
+
+    it('the ACTOR re-derives its snapshot from the NEW dials, in place', async () => {
+      // The actor is spared the sweep, so without the re-snapshot it would keep
+      // running on the numbers it was ADMITTED with — the one socket in the
+      // deployment not governed by what the operator just typed.
+      //
+      // Asserted on `policyCtx` directly rather than on the timer, deliberately:
+      // the test harness injects `sessionMaxAgeMs`, so a cut proves only that
+      // `armMaxAgeCut` re-ran, not that it re-derived from the dial. The context
+      // is what every later read — window sizing and the next re-arm alike —
+      // actually consults.
+      const actor = await adminLocked({ stepUpTier: 'strong', sessionMaxAgeHours: 4 }, 400)
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      expect(actorPolicyCtx()).toMatchObject({
+        sessionMaxAgeHours: 4,
+        stepUpMutationIdleMinutes: 60
+      })
+
+      await expect(
+        invoke(actor, 'authcfg:apply', { sessionMaxAgeHours: 8, stepUpMutationIdleMinutes: 15 })
+      ).resolves.toMatchObject({ ok: true })
+
+      expect(actorPolicyCtx()).toMatchObject({
+        sessionMaxAgeHours: 8,
+        stepUpMutationIdleMinutes: 15
+      })
+      // …and the cut it was admitted under is re-armed, not cancelled.
+      expect(await actor.waitForClose(3000)).toBe(4010)
+    })
+
+    it('a ZERO-CHANGE apply succeeds, writes no audit row and drops nobody', async () => {
+      const actor = await adminLocked({ stepUpTier: 'medium' })
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      const bystander = await connectWithPassword()
+
+      auditRows.length = 0
+      await expect(
+        invoke(actor, 'authcfg:apply', { stepUpTier: 'medium' })
+      ).resolves.toMatchObject({ ok: true })
+
+      await new Promise((r) => setTimeout(r, 200))
+      expect(bystander.ws.readyState).toBe(WebSocket.OPEN)
+      expect(auditChannels()).not.toContain('auth:policy-change')
+      expect(auditChannels()).not.toContain('auth:settings-change')
     })
 
     it('the ACTOR is re-snapshotted in place: medium→strong arms its own max-age cut', async () => {
@@ -843,85 +1051,52 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // was ADMITTED under. Without a re-snapshot, an operator flipping to
       // `strong` leaves their own session as the one socket in the deployment
       // that never expires — the exact opposite of what they just asked for.
-      const actor = await adminUnarmed({ stepUpTier: 'medium' }, 400)
-      expect(await stepUp(actor)).toMatchObject({ ok: true })
-      await expect(invoke(actor, 'authcfg:set-tier', 'strong')).resolves.toMatchObject({ ok: true })
-      // No reconnect anywhere in this test: the live socket takes the cut.
+      const actor = await adminLocked({ stepUpTier: 'medium' }, 400)
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      await expect(invoke(actor, 'authcfg:apply', { stepUpTier: 'strong' })).resolves.toMatchObject(
+        { ok: true }
+      )
       expect(await actor.waitForClose(3000)).toBe(4010)
     })
 
     it('the ACTOR is re-snapshotted in place: strong→off cancels its max-age cut', async () => {
-      const actor = await adminUnarmed({ stepUpTier: 'strong' }, 1200)
-      expect(await stepUp(actor)).toMatchObject({ ok: true })
-      await expect(invoke(actor, 'authcfg:set-tier', 'off')).resolves.toMatchObject({ ok: true })
-      // Well past the budget the socket was admitted with.
+      const actor = await adminLocked({ stepUpTier: 'strong' }, 1200)
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      await expect(invoke(actor, 'authcfg:apply', { stepUpTier: 'off' })).resolves.toMatchObject({
+        ok: true
+      })
       await new Promise((r) => setTimeout(r, 1600))
       expect(actor.ws.readyState).toBe(WebSocket.OPEN)
       expect(auditChannels()).not.toContain('auth:session-expired')
     })
 
-    it('audits the password step-up for what it ACTUALLY armed, both ways', async () => {
-      // The row must not overclaim. With the toggle ON a step-up arms the shell
-      // and the mutation window; with it OFF it arms the mutation window only,
-      // and a hardcoded `capability: 'shell'` + "shell + mutation grants armed"
-      // detail would put a shell this session never held into the forensic
-      // record. Both shapes are pinned so neither can drift back.
-      const withShell = await adminUnarmed({ allowTerminal: true })
-      auditRows.length = 0
-      expect(await stepUp(withShell)).toMatchObject({ ok: true })
-      expect(auditRow('auth:step-up')).toMatchObject({ capability: 'shell' })
-      expect(auditRow('auth:step-up')!.detail).toBe(
-        'shell + mutation grants armed via break-glass password step-up'
-      )
-
-      const withoutShell = await adminUnarmed({ allowTerminal: false })
-      auditRows.length = 0
-      expect(await stepUp(withoutShell)).toMatchObject({ ok: true })
-      expect(auditRow('auth:step-up')).toMatchObject({ capability: 'admin' })
-      expect(auditRow('auth:step-up')!.detail).toBe(
-        'mutation grant armed via break-glass password step-up (terminal toggle off — no shell conferred)'
-      )
-    })
-
-    it('is administrable while the TERMINAL TOGGLE is off — the default setting', async () => {
-      // REGRESSION GUARD (series 2). `handleStepUp` used to refuse the entire
-      // ceremony with `terminal-disabled` + `retryable: false` whenever the
-      // desktop "Allow remote terminal" toggle was off — correct under ADR-052,
-      // where step-up existed only for the shell, and a lockout under ADR-054,
-      // where the same ceremony is the ONLY way to satisfy this gate. The
-      // terminal ships OFF, so this was the default configuration: an operator's
-      // window lapses, they try to change a setting from their phone, and they
-      // are told a terminal they never asked for is disabled, with the client
-      // instructed not to retry. The headless bootstrap chain dies with it.
-      const c = await adminUnarmed({ allowTerminal: false })
-      await expect(invoke(c, 'authcfg:set-tier', 'strong')).rejects.toThrow('needs-step-up')
-
-      expect(await stepUp(c), 'the ceremony must not be refused by the terminal toggle').toMatchObject(
-        { ok: true }
-      )
-      await expect(invoke(c, 'authcfg:set-tier', 'strong')).resolves.toMatchObject({ ok: true })
-
-      // …and the toggle still withdraws the shell just as completely: the proof
-      // records presence, it does not confer a terminal.
-      await expect(invoke(c, 'terminal:create', '/tmp/x')).rejects.toThrow('terminal-disabled')
-      await expect(invoke(c, 'terminal:attach', 'anything')).rejects.toThrow('terminal-disabled')
-    })
-
-    it('a RETENTION change audits WITHOUT disconnecting (not an admission rule)', async () => {
-      const actor = await adminUnarmed()
-      expect(await stepUp(actor)).toMatchObject({ ok: true })
+    it('a RETENTION-only change audits WITHOUT disconnecting (not an admission rule)', async () => {
+      const actor = await adminLocked()
+      expect(await unlock(actor)).toMatchObject({ ok: true })
       const bystander = await connectWithPassword()
 
       auditRows.length = 0
-      await expect(invoke(actor, 'authcfg:set-retention', 90)).resolves.toMatchObject({
-        ok: true,
-        days: 90
-      })
+      await expect(invoke(actor, 'authcfg:apply', { auditRetentionDays: 90 })).resolves.toMatchObject(
+        { ok: true }
+      )
       await new Promise((r) => setTimeout(r, 200))
       expect(bystander.ws.readyState).toBe(WebSocket.OPEN)
       expect(auditChannels()).toContain('auth:settings-change')
       expect(auditChannels()).not.toContain('auth:policy-change')
       expect(auditRow('auth:settings-change')!.detail).toMatch(/audit retention .*→90 days/)
+    })
+
+    it('REFUSES a retention below the 30-day floor rather than clamping it silently', async () => {
+      // A silent clamp was defensible when this arrived as a one-field verb. It
+      // is not defensible from an editor the operator is looking at: storing
+      // something other than what they typed, with no word about it, is worse
+      // than telling them the floor exists.
+      const c = await adminLocked()
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { auditRetentionDays: 1 })).rejects.toThrow(
+        /between 30 and 36500/
+      )
+      expect(remoteConfigRef.current!.auditRetentionDays).not.toBe(1)
     })
 
     it('rotates the password end to end, disconnecting the ACTOR along with everyone else', async () => {
@@ -930,34 +1105,20 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // password, so it is dropped by its own write (4008, "credentials
       // changed") — correct rather than unfortunate, since it is holding a
       // credential that no longer exists.
-      const actor = await adminUnarmed()
-      expect(await stepUp(actor)).toMatchObject({ ok: true })
+      const actor = await adminLocked()
+      expect(await unlock(actor)).toMatchObject({ ok: true })
       const bystander = await connectWithPassword()
       auditRows.length = 0
 
       // Fired WITHOUT awaiting the reply, because there is no reply: the write's
       // own `disconnectPasswordClients()` closes this socket before the
-      // invoke-response can go out. That is the honest shape of a
-      // password-authenticated client rotating the password — series 2's UI has
-      // to treat "socket closed 4008" as the success signal here rather than
-      // waiting on an answer that cannot arrive.
+      // invoke-response can go out.
       actor.send({
         type: 'invoke',
         id: 'rotate-1',
         channel: 'authcfg:set-password',
-        args: ['a-perfectly-fine-password']
+        args: ['a-brand-new-password']
       })
-      await new Promise((r) => setTimeout(r, 200))
-
-      // The real `provisionPassword` ran: a write reached the CREDENTIAL
-      // columns (salt + hash) and none reached the config ones.
-      expect(passwordWrites).toHaveLength(1)
-      expect(passwordWrites[0]!.hash).toMatch(/^[0-9a-f]{64}$/)
-      expect(configWrites).toEqual([])
-      expect(auditRow('auth:settings-change')!.detail).toMatch(/password rotated/)
-      // Rotation is NOT an auth-surface change — the METHODS did not move, only
-      // the secret — so nobody gets 4009.
-      expect(auditChannels()).not.toContain('auth:policy-change')
 
       for (const [name, c] of [
         ['actor', actor],
@@ -965,52 +1126,50 @@ describe('ADR-054 step-up tiers over the socket', () => {
       ] as const) {
         expect(await closeCodeWithin(c, 2000), name).toBe(4008)
       }
+      expect(auditChannels()).toContain('auth:settings-change')
+      expect(auditChannels()).not.toContain('auth:policy-change')
     })
 
-    it('clamps retention to the 30-day floor', async () => {
-      const c = await adminUnarmed()
-      expect(await stepUp(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:set-retention', 1)).resolves.toMatchObject({ days: 30 })
-      expect(remoteConfigRef.current!.auditRetentionDays).toBe(30)
-    })
-
-    it('under auth-mode `off`: needs-step-up FIRST, then Permission denied', async () => {
+    it('under auth-mode `off`: needs-settings-session FIRST, then Permission denied', async () => {
       // The exact order both walls fire in, pinned because the natural way to
       // describe this ("the capability gate refuses it first") is FALSE:
-      // `assertStepUp` runs ahead of `dispatcher.handle`, so freshness is in
-      // front and capability is behind it.
+      // `assertStepUp` runs ahead of `dispatcher.handle`, so the session check is
+      // in front and capability is behind it.
       //
-      // What the pair proves is that ADR-054 decision 3's flat waiver never
-      // lets an unauthenticated deployment administer itself: under auth-mode
-      // `off` a connection is admitted with the as-built grant set, which has no
-      // `admin`, and a step-up (which `off` still permits — the master switch
-      // disables AUTHENTICATION, not this authorization ceremony) buys freshness
+      // What the pair proves is that ADR-054 decision 3's flat waiver never lets
+      // an unauthenticated deployment administer itself: under auth-mode `off` a
+      // connection is admitted with the as-built grant set, which has no `admin`,
+      // and unlocking the editor (which `off` still permits — the master switch
+      // disables AUTHENTICATION, not this authorization ceremony) buys the mode
       // and nothing else.
       await boot({ authPolicy: 'off' })
       const c = await connect()
       c.send({ type: 'auth' })
       expect(await c.waitFor('auth-response')).toMatchObject({ ok: true, authDisabled: true })
 
-      // Wall 1: freshness.
-      await expect(invoke(c, 'authcfg:set-auth-mode', 'legacy')).rejects.toThrow('needs-step-up')
+      // Wall 1: the settings session.
+      await expect(invoke(c, 'authcfg:apply', { authMode: 'legacy' })).rejects.toThrow(
+        'needs-settings-session'
+      )
 
-      // Wall 2: capability, now that freshness is satisfied.
-      expect(await stepUp(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:set-auth-mode', 'legacy')).rejects.toThrow(
+      // Wall 2: capability, now that the editor is open.
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { authMode: 'legacy' })).rejects.toThrow(
         /Permission denied/
       )
-      // Nothing was written on either attempt.
       expect(configWrites).toEqual([])
       expect(remoteConfigRef.current!.authPolicy).toBe('off')
     })
 
-    it('is unreachable from a token connection even after a step-up (capability, not freshness)', async () => {
+    it('is unreachable from a token connection even with the editor open (capability, not the session)', async () => {
       // Under `legacy` the token connection holds the as-built set, which has no
-      // `admin` — and arming does not widen capabilities, only freshness.
+      // `admin` — and unlocking does not widen capabilities, only the mode.
       await boot({ authPolicy: 'legacy' })
       const c = await connectWithToken()
-      expect(await stepUp(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:set-tier', 'off')).rejects.toThrow(/Permission denied/)
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'off' })).rejects.toThrow(
+        /Permission denied/
+      )
     })
   })
 })

@@ -1,8 +1,8 @@
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../../../shared/types'
 
 /**
- * WHICH WRITER the remote-settings pane uses (ADR-054 decision 6 — the host
- * anchor).
+ * WHICH WRITER the remote-settings pane uses (ADR-054 §6 — the host anchor, as
+ * re-mechanized by the 2026-08-16 amendment).
  *
  * The settings components are shared: the same React tree renders in the desktop
  * renderer and in the web bundle. What is NOT shared is how a write reaches the
@@ -11,17 +11,17 @@ import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../../../sha
  *  - **Host anchor** (`remote:set-config`) — the desktop renderer today, the
  *    server's own console/config on a headless box. It is the ONLY writer that
  *    can reach the `off` master switch, and it has no remote registration at
- *    all, so that is a STRUCTURAL guarantee rather than a capability check.
- *  - **Web** (`authcfg:*`) — the routine subset: tier, auth mode among the
- *    non-`off` modes, password rotation, audit retention. Each demands `admin`
- *    plus a presence proof inside the mutation window on every tier; a stale
- *    proof answers `needs-step-up`, which the web transport turns into one
- *    ceremony and a single retry before any of these promises settle.
+ *    all, so that is a STRUCTURAL guarantee rather than a capability check. Its
+ *    editor unlocks with no ceremony and no TTL.
+ *  - **Web** (`authcfg:apply`) — the routine set, in ONE batch, inside an open
+ *    settings-editing session. A locked editor answers `needs-settings-session`,
+ *    which the transport does NOT cure ambiently: the pane re-locks and the
+ *    operator presses Edit again.
  *
- * Every function here answers with a FRESH {@link RemoteConfig} so callers hold
- * one shape whichever writer ran. On the desktop that is what the IPC returns;
- * on the web it costs one extra `authcfg:get` — a query, so it is free of any
- * freshness demand and cannot itself provoke a second ceremony.
+ * The editor is a MODE on both transports, which is why there is one save
+ * function rather than one per field: the pane collects edits locally and
+ * commits them together, so a refused field changes nothing and one Save is one
+ * audit row.
  */
 
 /**
@@ -35,52 +35,71 @@ export function isWebClient(): boolean {
   return window.api?.platform === 'web'
 }
 
-/** Re-read the config after a write that does not return one. */
-function reread(): Promise<RemoteConfig> {
-  return window.api.getRemoteConfig()
-}
-
-/** Post-login freshness tier. */
-export async function writeStepUpTier(tier: StepUpTier): Promise<RemoteConfig> {
-  if (!isWebClient()) return window.api.setRemoteConfig({ stepUpTier: tier })
-  await window.api.authcfgSetTier(tier)
-  return reread()
+/** The editable set. Absent field ⇒ untouched, on both transports. */
+export interface SettingsDraft {
+  /** `null` restores AUTO; `'off'` is desktop-only and never sent from the web. */
+  authMode?: RemoteAuthPolicy | null
+  stepUpTier?: StepUpTier
+  stepUpMutationIdleMinutes?: number
+  sessionMaxAgeHours?: number
+  auditRetentionDays?: number
 }
 
 /**
- * Login ceremony mode. `null` restores AUTO.
+ * Commit the whole draft.
  *
- * `'off'` must never reach here from a web client — the picker does not offer it
- * there — and if it somehow did, the server refuses it with
- * `auth-off-is-host-anchor-only` and writes nothing. The desktop's `off` path
- * deliberately stays on `setRemoteConfig` with its typed confirmation, so this
- * function never carries the master switch on either transport.
- */
-export async function writeAuthMode(mode: RemoteAuthPolicy | null): Promise<RemoteConfig> {
-  if (!isWebClient()) return window.api.setRemoteConfig({ authPolicy: mode })
-  await window.api.authcfgSetAuthMode(mode)
-  return reread()
-}
-
-/**
- * Audit-log retention window. The server clamps to the 30-day FLOOR and returns
- * the EFFECTIVE value, so the re-read is what the field should show — not what
- * was asked for.
- */
-export async function writeAuditRetention(days: number): Promise<RemoteConfig> {
-  if (!isWebClient()) return window.api.setRemoteConfig({ auditRetentionDays: days })
-  await window.api.authcfgSetRetention(days)
-  return reread()
-}
-
-/**
- * Rotate the break-glass password.
+ * WEB — one `authcfg:apply`, which validates every field before writing any of
+ * them, produces one audit row carrying the diff, and fires one 4009 sweep. It
+ * answers with the fresh config, so no re-read is needed.
  *
- * Resolves `{ rotated: true }` on both transports. On the web this can resolve
- * because the socket was CLOSED (4008) rather than because a response arrived:
- * the rotation drops every client holding the old password, the actor included,
- * and the api-adapter races the two. The caller must therefore not assume it
- * still has a connection afterwards.
+ * DESKTOP — `remote:set-config`, unchanged. Not `authcfg:apply`, even though the
+ * desktop connection would pass its gate: the host anchor's writer is the one
+ * that can carry `authPolicy: 'off'`, and routing the desktop pane through a
+ * verb that refuses the master switch would mean two save paths for one Save
+ * button. One writer per transport, and the one with more authority stays on the
+ * host.
+ */
+export async function saveSettingsDraft(draft: SettingsDraft): Promise<RemoteConfig> {
+  if (!isWebClient()) {
+    return window.api.setRemoteConfig({
+      ...('authMode' in draft ? { authPolicy: draft.authMode ?? null } : {}),
+      ...('stepUpTier' in draft ? { stepUpTier: draft.stepUpTier } : {}),
+      ...('stepUpMutationIdleMinutes' in draft
+        ? { stepUpMutationIdleMinutes: draft.stepUpMutationIdleMinutes }
+        : {}),
+      ...('sessionMaxAgeHours' in draft ? { sessionMaxAgeHours: draft.sessionMaxAgeHours } : {}),
+      ...('auditRetentionDays' in draft ? { auditRetentionDays: draft.auditRetentionDays } : {})
+    })
+  }
+  const { config } = await window.api.authcfgApply(draft)
+  return config
+}
+
+/**
+ * Close the settings-editing session.
+ *
+ * Best-effort and never throws: it is called from Save, from Cancel and from the
+ * pane unmounting, and none of those may fail because the socket went away or
+ * the TTL already lapsed — the session is gone in all of those cases anyway.
+ * Inert on the desktop, which has no session to close.
+ */
+export async function endSettingsSession(): Promise<void> {
+  if (!isWebClient()) return
+  try {
+    await window.api.authcfgEnd()
+  } catch {
+    /* the editor is closing either way — see above */
+  }
+}
+
+/**
+ * Rotate the break-glass password. Session-gated on the web like the rest of the
+ * area.
+ *
+ * On the web this can resolve because the socket was CLOSED (4008) rather than
+ * because a response arrived: the rotation drops every client holding the old
+ * password, the actor included, and the api-adapter races the two. The caller
+ * must therefore not assume it still has a connection afterwards.
  */
 export async function rotateRemotePassword(password: string): Promise<void> {
   if (!isWebClient()) {
@@ -88,22 +107,4 @@ export async function rotateRemotePassword(password: string): Promise<void> {
     return
   }
   await window.api.authcfgSetPassword(password)
-}
-
-/**
- * The dials that only the host anchor may write: the strong tier's mutation
- * window and its session max-age.
- *
- * Deliberately NOT given `authcfg:*` verbs. ADR-054 decision 6 makes the routine
- * settings web-reachable so a headless box is administrable day to day; these
- * two are the *shape* of the freshness policy rather than day-to-day
- * administration, and every verb added to that namespace is another thing a
- * stolen stepped-up session can reach. A web client renders them read-only and
- * says where to change them.
- */
-export function writeHostAnchorDials(partial: {
-  stepUpMutationIdleMinutes?: number
-  sessionMaxAgeHours?: number
-}): Promise<RemoteConfig> {
-  return window.api.setRemoteConfig(partial)
 }

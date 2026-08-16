@@ -80,8 +80,11 @@ bundle's frames stay byte-compatible), the optional `webauthn` block on
 `GET /remote/auth-info`, and close code **4009** for "the auth surface changed, reconnect
 and re-authenticate". ADR-054 adds one more close code to this layer — **4010**, "the
 strong tier reached this session's absolute max-age; the stream is cut, reconnect and
-expect a ceremony" — plus the `authcfg:*` command namespace (a `query` read and four
-`admin` writes), which is ordinary invoke traffic and needs nothing new on the wire.
+expect a ceremony" — plus the `authcfg:*` command namespace (a `query` read, two gated
+`admin` writes and a free `admin` close), which is ordinary invoke traffic. The
+only wire change it needed is an additive optional `intent` on the existing
+`step-up` frame, which asks the server to open a bounded settings-editing session
+on the connection the ceremony just ran on.
 Everything about what any of those mean lives in security.md, not here.
 
 **One thing phase 4d added to this layer's contract:** the listener no longer depends on

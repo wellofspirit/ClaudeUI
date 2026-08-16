@@ -55,27 +55,37 @@ vi.mock('../../services/logger', () => ({
 }))
 
 import {
+  authcfgApply,
+  authcfgEnd,
   authcfgGet,
-  authcfgSetAuthMode,
   authcfgSetPassword,
-  authcfgSetRetention,
-  authcfgSetTier,
   type AuthcfgHost
 } from '../authcfg-commands'
 import { desktopConnection, makeRemoteConnection, type CommandConnection } from '../command-registry'
 import { AUTH_MODE_OFF_HOST_ANCHOR_ERROR } from '../../../shared/remote-protocol'
 
-/** A remote connection with a fresh presence proof. */
-function armedConn(): CommandConnection {
+/** A remote connection with the settings editor UNLOCKED (the amendment). */
+function unlockedConn(): CommandConnection {
   const conn = makeRemoteConnection('password', null, new Set(['admin']))
   conn.armedEver = true
   conn.mutationExpiresAt = Date.now() + 600_000
   conn.shellGrantExpiresAt = Date.now() + 600_000
+  conn.settingsSessionExpiresAt = Date.now() + 300_000
   return conn
 }
 
-/** A remote connection that authenticated but never proved presence. */
-function unarmedConn(): CommandConnection {
+/**
+ * Armed with a FRESH MUTATION WINDOW but no settings session — precisely what
+ * used to satisfy this area, and what must not any more.
+ */
+function armedNoSessionConn(): CommandConnection {
+  const conn = unlockedConn()
+  conn.settingsSessionExpiresAt = null
+  return conn
+}
+
+/** A remote connection that authenticated and proved nothing. */
+function lockedConn(): CommandConnection {
   return makeRemoteConnection('password', null, new Set(['admin']))
 }
 
@@ -120,121 +130,179 @@ beforeEach(() => {
   }
 })
 
-describe('the freshness backstop', () => {
+describe('the settings-session backstop', () => {
   const verbs: Array<[string, (c: CommandConnection) => Promise<unknown>]> = [
-    ['authcfg:set-tier', (c) => authcfgSetTier(c, 'strong')],
-    ['authcfg:set-auth-mode', (c) => authcfgSetAuthMode(c, 'legacy')],
-    ['authcfg:set-password', (c) => authcfgSetPassword(c, 'a-long-enough-password')],
-    ['authcfg:set-retention', (c) => authcfgSetRetention(c, 90)]
+    ['authcfg:apply', (c) => authcfgApply(c, { stepUpTier: 'strong' })],
+    ['authcfg:set-password', (c) => authcfgSetPassword(c, 'a-long-enough-password')]
   ]
 
-  it.each(verbs)('%s refuses an UNARMED connection with needs-step-up', async (_name, call) => {
-    await expect(call(unarmedConn())).rejects.toThrow('needs-step-up')
+  it.each(verbs)('%s refuses a LOCKED editor with needs-settings-session', async (_n, call) => {
+    await expect(call(lockedConn())).rejects.toThrow('needs-settings-session')
     expect(configWrites).toEqual([])
     expect(provisionSpy).not.toHaveBeenCalled()
   })
 
-  it.each(verbs)('%s refuses a DECAYED proof', async (_name, call) => {
-    const conn = armedConn()
-    conn.mutationExpiresAt = Date.now() - 1
-    await expect(call(conn)).rejects.toThrow('needs-step-up')
+  it.each(verbs)('%s refuses a fresh MUTATION WINDOW with no session', async (_n, call) => {
+    // THE guard for the 2026-08-16 amendment, at the body layer. This exact
+    // connection — armed, mutation window fresh — was what the as-shipped gate
+    // accepted, which made administering an ambient capability. It must now be
+    // refused, and refused with the typed error the client will not auto-cure.
+    await expect(call(armedNoSessionConn())).rejects.toThrow('needs-settings-session')
+    expect(configWrites).toEqual([])
+    expect(provisionSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(verbs)('%s refuses an EXPIRED session', async (_n, call) => {
+    const conn = unlockedConn()
+    conn.settingsSessionExpiresAt = Date.now() - 1
+    await expect(call(conn)).rejects.toThrow('needs-settings-session')
     expect(configWrites).toEqual([])
   })
 
-  it.each(verbs)('%s accepts a fresh proof', async (_name, call) => {
-    await expect(call(armedConn())).resolves.toMatchObject({ ok: true })
+  it.each(verbs)('%s accepts an unlocked editor', async (_n, call) => {
+    await expect(call(unlockedConn())).resolves.toMatchObject({ ok: true })
   })
 
-  it('the DESKTOP connection is exempt — it IS the host anchor', async () => {
-    await expect(authcfgSetTier(desktopConnection(), 'strong')).resolves.toMatchObject({ ok: true })
+  it.each(verbs)('%s lets the DESKTOP through — it is the host anchor', async (_n, call) => {
+    await expect(call(desktopConnection())).resolves.toMatchObject({ ok: true })
   })
 })
 
-describe('authcfgSetAuthMode — the host-anchor rule', () => {
-  it('refuses `off` with a typed error and writes nothing', async () => {
+describe('authcfgApply — the batch', () => {
+  it('refuses `off` before writing anything, with the typed error', async () => {
     const host = makeHost()
-    await expect(authcfgSetAuthMode(armedConn(), 'off', host)).rejects.toThrow(
+    await expect(
+      authcfgApply(unlockedConn(), { authMode: 'off', stepUpTier: 'strong' }, host)
+    ).rejects.toThrow(AUTH_MODE_OFF_HOST_ANCHOR_ERROR)
+    expect(configWrites).toEqual([])
+    expect(host.disconnects).toEqual([])
+  })
+
+  it('refuses `off` from the DESKTOP body too — the host anchor is not a bypass', async () => {
+    // The desktop connection is exempt from the SESSION gate, and that exemption
+    // must not be read as an exemption from the rule. `authcfg:apply` refuses an
+    // `off` auth-mode on every transport; the desktop's own `off` path is
+    // `remote:set-config` with its typed confirmation, which is a different
+    // writer with a different ceremony — not this verb being lenient at home.
+    await expect(authcfgApply(desktopConnection(), { authMode: 'off' })).rejects.toThrow(
       AUTH_MODE_OFF_HOST_ANCHOR_ERROR
     )
     expect(configWrites).toEqual([])
+  })
+
+  it('writes NULL for AUTO, never the string "auto"', async () => {
+    // The pane's picker uses `'auto'` as its UI value for a NULL column, so the
+    // mapping is a real place to get this wrong — and storing the literal string
+    // would resolve as an UNKNOWN policy on the next read, which fails closed to
+    // `legacy` and silently turns passkey enforcement off.
+    await expect(authcfgApply(unlockedConn(), { authMode: null })).resolves.toMatchObject({
+      ok: true
+    })
+    expect(configWrites).toEqual([{ authPolicy: null }])
+  })
+
+  it('validates EVERY field before writing ANY of them', async () => {
+    // The property the per-field verbs could not have. A batch with one bad
+    // value leaves the surface exactly as it was — rather than half-moved, with
+    // the operator disconnected by the sweep from an earlier field.
+    for (const bad of [
+      { stepUpTier: 'strong' as const, sessionMaxAgeHours: 720 },
+      { stepUpTier: 'strong' as const, stepUpMutationIdleMinutes: 0 },
+      { stepUpTier: 'strong' as const, auditRetentionDays: 7 },
+      { stepUpTier: 'nonsense' as never }
+    ]) {
+      configWrites.length = 0
+      await expect(authcfgApply(unlockedConn(), bad)).rejects.toThrow()
+      expect(configWrites, JSON.stringify(bad)).toEqual([])
+    }
+  })
+
+  it('writes ONCE and reacts ONCE for a multi-field save', async () => {
+    const host = makeHost()
+    const conn = unlockedConn()
+    await expect(
+      authcfgApply(conn, { authMode: 'legacy', stepUpTier: 'strong', auditRetentionDays: 90 }, host)
+    ).resolves.toMatchObject({ ok: true })
+    expect(configWrites).toHaveLength(1)
+    expect(configWrites[0]).toMatchObject({
+      authPolicy: 'legacy',
+      stepUpTier: 'strong',
+      auditRetentionDays: 90
+    })
+    // One auth-surface reaction: one policy row, one sweep that spares the actor.
+    expect(auditRows.filter((r) => r.channel === 'auth:policy-change')).toHaveLength(1)
+    expect(host.disconnects).toEqual([{ exceptConnectionId: conn.connectionId }])
+    // …and the actor is re-derived in place, so it is governed by what it chose.
+    expect(host.resnapshotted).toEqual([conn.connectionId])
+  })
+
+  it('audits RETENTION separately — it is not an admission rule', async () => {
+    const host = makeHost()
+    await expect(authcfgApply(unlockedConn(), { auditRetentionDays: 90 }, host)).resolves.toMatchObject(
+      { ok: true }
+    )
+    expect(auditRows.filter((r) => r.channel === 'auth:policy-change')).toEqual([])
     expect(host.disconnects).toEqual([])
+    expect(auditRows.find((r) => r.channel === 'auth:settings-change')!.detail).toMatch(
+      /audit retention 365→90 days/
+    )
+  })
+
+  it('a ZERO-CHANGE apply writes no audit row and disconnects nobody', async () => {
+    // The no-op discipline `withAuthSurfaceReaction` already had, extended to the
+    // retention row: an operator who opens the editor, changes their mind and
+    // saves has done nothing, and the trail should say nothing.
+    const host = makeHost()
+    await expect(
+      authcfgApply(unlockedConn(), { stepUpTier: 'medium', auditRetentionDays: 365 }, host)
+    ).resolves.toMatchObject({ ok: true })
+    expect(auditRows).toEqual([])
+    expect(host.disconnects).toEqual([])
+  })
+
+  it('an EMPTY patch is legal — the editor may have been opened for the password only', async () => {
+    const host = makeHost()
+    await expect(authcfgApply(unlockedConn(), {}, host)).resolves.toMatchObject({ ok: true })
+    expect(auditRows).toEqual([])
+    expect(host.disconnects).toEqual([])
+  })
+
+  it('answers with the FRESH config, so the pane needs no second round trip', async () => {
+    const result = await authcfgApply(unlockedConn(), { stepUpTier: 'strong' })
+    expect(result.config).toMatchObject({ stepUpTier: 'strong' })
+  })
+})
+
+describe('authcfgEnd', () => {
+  it('closes an open session and audits it', async () => {
+    const conn = unlockedConn()
+    await expect(authcfgEnd(conn)).resolves.toEqual({ ok: true })
+    expect(conn.settingsSessionExpiresAt).toBeNull()
+    // `auth:settings-session`, not `auth:settings-change`: an end is a SESSION
+    // event — nothing about the configuration moved, only who may move it.
+    expect(auditRows.find((r) => r.channel === 'auth:settings-session')!.detail).toMatch(
+      /settings session ended via authcfg:end/
+    )
+    expect(auditRows.filter((r) => r.channel === 'auth:settings-change')).toEqual([])
+  })
+
+  it('is a NO-OP SUCCESS with nothing open, and writes no row', async () => {
+    // A client that lost track — a reconnect, a re-render, a Cancel after the
+    // TTL already lapsed — must be able to say "I am done" without proving it
+    // was ever editing. Turning that into an error would only teach clients to
+    // swallow it, and a trail of clients tidying up after themselves is noise.
+    const conn = lockedConn()
+    await expect(authcfgEnd(conn)).resolves.toEqual({ ok: true })
+    expect(conn.settingsSessionExpiresAt ?? null).toBeNull()
     expect(auditRows).toEqual([])
   })
 
-  it('refuses `off` even from the DESKTOP body call — the refusal is the verb’s, not the gate’s', async () => {
-    // The desktop reaches the same host-anchor write through
-    // `remote:set-config`; this namespace never carries it, on either transport,
-    // so there is exactly one code path that can disable authentication.
-    await expect(authcfgSetAuthMode(desktopConnection(), 'off')).rejects.toThrow(
-      AUTH_MODE_OFF_HOST_ANCHOR_ERROR
-    )
-  })
-
-  it('accepts the non-off modes and AUTO, and reacts to the surface change', async () => {
-    const host = makeHost()
-    const conn = armedConn()
-    await expect(authcfgSetAuthMode(conn, 'passkey-always', host)).resolves.toMatchObject({
-      ok: true,
-      mode: 'passkey-always'
-    })
-    expect(configWrites).toEqual([{ authPolicy: 'passkey-always' }])
-    // The actor is spared its own re-admission disconnect.
-    expect(host.disconnects).toEqual([{ exceptConnectionId: conn.connectionId }])
-    const row = auditRows.find((r) => r.channel === 'auth:policy-change')
-    expect(row).toBeDefined()
-    expect(row!.detail).toMatch(/authcfg:set-auth-mode/)
-  })
-
-  it('rejects an unknown mode', async () => {
-    await expect(
-      authcfgSetAuthMode(armedConn(), 'passkey-for-grants' as never)
-    ).rejects.toThrow(/Unknown remote auth policy/)
-    expect(configWrites).toEqual([])
-  })
-})
-
-describe('authcfgSetTier', () => {
-  it('rejects an unknown tier without writing', async () => {
-    await expect(authcfgSetTier(armedConn(), 'paranoid' as never)).rejects.toThrow(
-      /Unknown step-up tier/
-    )
-    expect(configWrites).toEqual([])
-  })
-
-  it('is a no-op for the reaction when the tier does not actually move', async () => {
-    // Writing a setting back to itself must not spam the audit log or drop every
-    // socket — the reaction compares VALUES, not "was the field present".
-    const host = makeHost()
-    await authcfgSetTier(armedConn(), 'medium', host)
-    expect(host.disconnects).toEqual([])
-    expect(auditRows.filter((r) => r.channel === 'auth:policy-change')).toEqual([])
-  })
-})
-
-describe('authcfgSetRetention', () => {
-  it('clamps to the 30-day floor and reports the EFFECTIVE value', async () => {
-    await expect(authcfgSetRetention(armedConn(), 1)).resolves.toEqual({ ok: true, days: 30 })
-    expect(configWrites).toEqual([{ auditRetentionDays: 30 }])
-  })
-
-  it('caps a nonsense value rather than overflowing the cutoff arithmetic', async () => {
-    await expect(authcfgSetRetention(armedConn(), 1e12)).resolves.toEqual({ ok: true, days: 36_500 })
-  })
-
-  it('rejects a non-number', async () => {
-    await expect(authcfgSetRetention(armedConn(), 'lots' as never)).rejects.toThrow(
-      /must be a number of days/
-    )
-  })
-
-  it('audits WITHOUT disconnecting — retention is not an admission rule', async () => {
-    const host = makeHost()
-    await authcfgSetRetention(armedConn(), 90)
-    expect(host.disconnects).toEqual([])
-    const row = auditRows.find((r) => r.channel === 'auth:settings-change')
-    expect(row).toBeDefined()
-    expect(row!.detail).toMatch(/audit retention 365→90 days/)
-    expect(auditRows.some((r) => r.channel === 'auth:policy-change')).toBe(false)
+  it('is idempotent', async () => {
+    const conn = unlockedConn()
+    await authcfgEnd(conn)
+    auditRows.length = 0
+    await expect(authcfgEnd(conn)).resolves.toEqual({ ok: true })
+    expect(auditRows).toEqual([])
   })
 })
 
@@ -242,7 +310,7 @@ describe('authcfgSetPassword', () => {
   it('delegates validation to provisionPassword and disconnects password clients', async () => {
     const host = makeHost()
     await expect(
-      authcfgSetPassword(armedConn(), 'a-perfectly-fine-password', host)
+      authcfgSetPassword(unlockedConn(), 'a-perfectly-fine-password', host)
     ).resolves.toEqual({ ok: true })
     expect(provisionSpy).toHaveBeenCalledWith('a-perfectly-fine-password')
     expect(host.passwordDisconnects).toBe(1)
@@ -256,20 +324,20 @@ describe('authcfgSetPassword', () => {
     provisionSpy.mockImplementation(() => {
       throw new Error('Password must be at least 12 characters')
     })
-    await expect(authcfgSetPassword(armedConn(), 'short', host)).rejects.toThrow(/12 characters/)
+    await expect(authcfgSetPassword(unlockedConn(), 'short', host)).rejects.toThrow(/12 characters/)
     expect(host.passwordDisconnects).toBe(0)
     expect(auditRows).toEqual([])
   })
 })
 
-describe('authcfgGet — the READ half (ADR-054 series 2)', () => {
-  it('answers an UNARMED connection: reads are free on every tier', async () => {
+describe('authcfgGet — the READ half', () => {
+  it('answers a LOCKED editor: the pane\'s default state IS the read', async () => {
     // Deliberately NOT behind the freshness backstop the four writes share. A
     // pane that had to run a ceremony before it could render the tier would put
     // the ceremony in front of its own explanation — and reads are free on every
     // tier by ADR-054 decision 1, so demanding one here would also be the only
     // place in the codebase where a `query` costs a presence proof.
-    await expect(authcfgGet(unarmedConn())).resolves.toMatchObject({
+    await expect(authcfgGet(lockedConn())).resolves.toMatchObject({
       stepUpTier: 'medium',
       effectiveStepUpTier: 'medium',
       auditRetentionDays: 365
@@ -288,7 +356,7 @@ describe('authcfgGet — the READ half (ADR-054 series 2)', () => {
       kdfParams: '{"N":32768}',
       passwordUpdatedAt: 1234
     }
-    const view = (await authcfgGet(armedConn())) as unknown as Record<string, unknown>
+    const view = (await authcfgGet(unlockedConn())) as unknown as Record<string, unknown>
     // The `passwordSet` boolean is the ONLY thing a client learns about the
     // credential. This assertion is the whole reason one sanitizer is shared
     // between `remote:get-config` and this verb.
@@ -304,7 +372,7 @@ describe('authcfgGet — the READ half (ADR-054 series 2)', () => {
     // `effectiveStepUpTier` rather than deriving it, which is what keeps the
     // displayed posture from drifting from the enforced one.
     configRef.current = { ...configRef.current, authPolicy: 'off', stepUpTier: 'strong' }
-    await expect(authcfgGet(armedConn())).resolves.toMatchObject({
+    await expect(authcfgGet(unlockedConn())).resolves.toMatchObject({
       stepUpTier: 'strong',
       effectiveStepUpTier: 'off',
       effectiveAuthPolicy: 'off'

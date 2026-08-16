@@ -47,7 +47,7 @@
  * this gate there, so the desktop path is not merely inert — it does not exist.
  */
 
-import { isNeedsStepUpError } from '../shared/remote-protocol'
+import { isNeedsSettingsSessionError, isNeedsStepUpError } from '../shared/remote-protocol'
 
 /** What the UI is being asked for while a ceremony is pending. */
 export interface StepUpDemand {
@@ -116,6 +116,15 @@ export function createStepUpGate(): StepUpGate {
       try {
         return await attempt()
       } catch (err) {
+        // NEVER cure a locked settings editor (ADR-054 §6 amendment). The typed
+        // `needs-settings-session` means "the operator must deliberately unlock
+        // the settings pane" — turning it into an ambient ceremony-and-retry
+        // would re-create exactly the invisible administering authority the
+        // amendment removed: a stale pane firing a save would raise a biometric
+        // prompt the operator did not ask for, and a tap would silently reopen
+        // the mode. Checked BEFORE the step-up predicate because both are
+        // substring matches and only their order guarantees which one wins.
+        if (isNeedsSettingsSessionError(err)) throw err
         if (!isNeedsStepUpError(err)) throw err
         const granted = await ceremony(channel)
         // Rethrow the ORIGINAL refusal rather than a synthesised "cancelled":

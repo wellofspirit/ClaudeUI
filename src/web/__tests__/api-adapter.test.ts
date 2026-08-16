@@ -170,12 +170,16 @@ describe('web api-adapter — remote-access settings (ADR-054 decision 6)', () =
   })
 
   it('maps the routine verbs to their channels', async () => {
-    await api.authcfgSetTier('strong')
-    expect(connection.invoke).toHaveBeenCalledWith('authcfg:set-tier', 'strong')
-    await api.authcfgSetAuthMode(null)
-    expect(connection.invoke).toHaveBeenCalledWith('authcfg:set-auth-mode', null)
-    await api.authcfgSetRetention(90)
-    expect(connection.invoke).toHaveBeenCalledWith('authcfg:set-retention', 90)
+    // ONE save verb, not one per field (ADR-054 §6 amendment): the editor is a
+    // mode, so a Save is a batch.
+    connection.invoke.mockResolvedValueOnce({ ok: true, config: { stepUpTier: 'strong' } })
+    await api.authcfgApply({ stepUpTier: 'strong', auditRetentionDays: 90 })
+    expect(connection.invoke).toHaveBeenCalledWith('authcfg:apply', {
+      stepUpTier: 'strong',
+      auditRetentionDays: 90
+    })
+    await api.authcfgEnd()
+    expect(connection.invoke).toHaveBeenCalledWith('authcfg:end')
   })
 
   describe('password rotation — success and disconnection are the same event', () => {

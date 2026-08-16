@@ -248,6 +248,7 @@ import {
 } from '../command-registry'
 import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
+  AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
   SHELL_ACT_VERBS,
   SHELL_READ_VERBS
 } from '../../services/step-up-tier'
@@ -1363,27 +1364,22 @@ const PASSKEY_CHANNELS = [
  * master switch. Auth-DISABLING operations stay host-anchor only and stay in
  * `remote:set-config`, which has no remote registration at all (pinned below).
  */
-const AUTHCFG_WRITE_CHANNELS = [
-  'authcfg:set-auth-mode',
-  'authcfg:set-password',
-  'authcfg:set-retention',
-  'authcfg:set-tier'
-] as const
+const AUTHCFG_WRITE_CHANNELS = ['authcfg:apply', 'authcfg:set-password'] as const
 
 /**
- * The READ half (series 2). Same `admin` gate, but a `query` — so
- * `classifyDispatch` calls it `read` and it demands no freshness: an operator
- * has to be able to SEE the tier before being asked to prove presence in order
- * to change it, and reads are free on every tier (ADR-054 decision 1).
+ * The FREE half. Same `admin` gate, but no settings session demanded:
+ * `authcfg:get` READS (the pane's default state is the read), and `authcfg:end`
+ * only ever gives authority back — gating a revocation would let an operator
+ * open an editor under `strong` and then be refused permission to close it.
  *
- * Listed apart from the writes because the two pins below say different things
- * about them: both are registered and both need `admin`, but only the writes may
+ * Listed apart from the writes because the pins below say different things about
+ * them: all four are registered and all need `admin`, but only the writes may
  * appear in the classifier's `AUTHCFG_CHANNELS`.
  */
-const AUTHCFG_READ_CHANNELS = ['authcfg:get'] as const
+const AUTHCFG_FREE_CHANNELS_PIN = ['authcfg:end', 'authcfg:get'] as const
 
 /** Everything in the namespace, for the registration pins. */
-const AUTHCFG_CHANNELS = [...AUTHCFG_READ_CHANNELS, ...AUTHCFG_WRITE_CHANNELS] as const
+const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNELS] as const
 
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
@@ -1486,7 +1482,7 @@ describe('remote surface parity (phase 1 port)', () => {
     expect(both, `classified BOTH ways: ${both.join(', ')}`).toEqual([])
   })
 
-  it('the CLASSIFIER knows exactly the authcfg WRITES that are registered', () => {
+  it('the CLASSIFIER knows exactly the authcfg MUTATIONS that are registered', () => {
     // The coupling that makes the namespace's freshness rule real: a verb
     // registered here but missing from `AUTHCFG_CHANNELS` in step-up-tier.ts
     // would be classified `mutation` — i.e. silently FREE under the default
@@ -1496,28 +1492,33 @@ describe('remote surface parity (phase 1 port)', () => {
     expect([...CLASSIFIED_AUTHCFG_CHANNELS].sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
   })
 
-  it('everything in the authcfg namespace is a `command` EXCEPT the declared reads', () => {
-    // The guard that keeps "outside the classifier set" from ever meaning
-    // "accidentally free". Series 2 added `authcfg:get`, and the moment one
-    // member of the namespace is legitimately exempt from the freshness gate,
-    // "is it in AUTHCFG_CHANNELS?" stops being a complete question on its own.
+  it('every registered authcfg channel is in EXACTLY ONE classifier set', () => {
+    // The guard that keeps "outside the gated set" from ever meaning
+    // "accidentally free". Two members of this namespace are legitimately exempt
+    // (`authcfg:get` reads; `authcfg:end` only revokes), so "is it in
+    // AUTHCFG_CHANNELS?" stopped being a complete question on its own — and a
+    // new verb added to NEITHER set would be classified `mutation`, i.e.
+    // reachable with no unlocked editor at all under the default tier.
     //
-    // So the namespace is pinned BOTH ways: every `command` here must be
-    // classified `authcfg` (i.e. demand a proof), and the only channels that may
-    // sit outside that set are the ones declared `query`. A new WRITE that
-    // someone forgets to add to the classifier fails this test even if they also
-    // forget to add it to this file's write list — because it would have to be
-    // declared a `query` to pass, which is a lie a reviewer can see.
+    // So the namespace is pinned as a partition: every registered channel is in
+    // one set or the other, never both and never neither, and this file's own
+    // literal lists say which. A verb someone forgets to classify fails here even
+    // if they also forget to update these lists.
     const registered = commandRegistry.channels('remote').filter((c) => c.startsWith('authcfg:'))
-    const commands = registered.filter(
-      (c) => commandRegistry.declaration(c)!.kind === 'command'
-    )
-    const queries = registered.filter((c) => commandRegistry.declaration(c)!.kind === 'query')
-    expect(commands.sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
-    expect(queries.sort()).toEqual([...AUTHCFG_READ_CHANNELS].sort())
-    // …and the classifier agrees about which is which.
-    for (const channel of commands) expect(CLASSIFIED_AUTHCFG_CHANNELS.has(channel)).toBe(true)
-    for (const channel of queries) expect(CLASSIFIED_AUTHCFG_CHANNELS.has(channel)).toBe(false)
+    const gated = registered.filter((c) => CLASSIFIED_AUTHCFG_CHANNELS.has(c))
+    const free = registered.filter((c) => CLASSIFIED_AUTHCFG_FREE_CHANNELS.has(c))
+    expect(gated.sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
+    expect(free.sort()).toEqual([...AUTHCFG_FREE_CHANNELS_PIN].sort())
+    expect([...gated, ...free].sort()).toEqual([...registered].sort())
+    for (const channel of registered) {
+      expect(
+        CLASSIFIED_AUTHCFG_CHANNELS.has(channel) && CLASSIFIED_AUTHCFG_FREE_CHANNELS.has(channel),
+        `${channel} is in BOTH sets`
+      ).toBe(false)
+    }
+    // The one that must never be gated, stated on its own so the reason survives
+    // a future edit to the lists above: Cancel has to work unconditionally.
+    expect(CLASSIFIED_AUTHCFG_CHANNELS.has('authcfg:end')).toBe(false)
   })
 
   it('no remotely-registered channel can write the auth-DISABLING switch', () => {
@@ -1525,7 +1526,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // `authPolicy: 'off'`, and it has no remote registration — so the host anchor
     // holds by construction rather than by a capability check (a passkey
     // connection DOES hold `admin`). The settings verbs that ARE web-reachable
-    // live in their own namespace, and `authcfg:set-auth-mode` refuses `off`
+    // live in their own namespace, and `authcfg:apply` refuses an `off` auth-mode
     // with a typed error (asserted in authcfg-commands.test.ts).
     expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([])
     expect(commandRegistry.channels('remote').filter((c) => c.startsWith('authcfg:')).sort()).toEqual(

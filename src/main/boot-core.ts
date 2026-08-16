@@ -319,7 +319,7 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
         }
       }
       // ADR-054's second axis. This handler keeps writing EVERYTHING — it is the
-      // host anchor, so unlike `authcfg:set-*` it has no refusals to make.
+      // host anchor, so unlike `authcfg:apply` it has no refusals to make.
       if (partial.stepUpTier !== undefined && !STEP_UP_TIERS.includes(partial.stepUpTier)) {
         throw new Error(
           `Unknown step-up tier "${String(partial.stepUpTier)}" — expected one of ${STEP_UP_TIERS.join(', ')}`

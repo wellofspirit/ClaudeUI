@@ -12,6 +12,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
   RemoteAuthMethod,
+  StepUpIntent,
   WsClientMessage,
   WsServerMessage,
   WsEvent,
@@ -658,8 +659,8 @@ export class RemoteConnection {
    * Resolves with the server's verdict rather than rejecting on refusal — the
    * caller renders `error`/`code` inline in the prompt.
    */
-  stepUp(pwProof: string): Promise<WsStepUpResponse> {
-    return this.sendStepUp({ type: 'step-up', pwProof })
+  stepUp(pwProof: string, intent?: StepUpIntent): Promise<WsStepUpResponse> {
+    return this.sendStepUp({ type: 'step-up', pwProof, ...(intent ? { intent } : {}) })
   }
 
   /**
@@ -672,7 +673,7 @@ export class RemoteConnection {
    * a server refusal are the same thing to the prompt, which renders `error`
    * and branches on `code`.
    */
-  async stepUpWithPasskey(): Promise<WsStepUpResponse> {
+  async stepUpWithPasskey(intent?: StepUpIntent): Promise<WsStepUpResponse> {
     if (this.ws?.readyState !== WebSocket.OPEN || this.state !== 'connected') {
       return { type: 'step-up-response', ok: false, error: 'Not connected', retryable: true }
     }
@@ -680,7 +681,11 @@ export class RemoteConnection {
     if (outcome.kind === 'refused') return outcome.response
     try {
       const assertion = await startAuthentication({ optionsJSON: outcome.options })
-      return await this.sendStepUp({ type: 'step-up', assertion })
+      return await this.sendStepUp({
+        type: 'step-up',
+        assertion,
+        ...(intent ? { intent } : {})
+      })
     } catch (err) {
       return {
         type: 'step-up-response',

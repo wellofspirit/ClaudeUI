@@ -19,6 +19,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   AUTHCFG_CHANNELS,
+  AUTHCFG_FREE_CHANNELS,
   SHELL_ACT_VERBS,
   SHELL_READ_VERBS,
   TERM_INPUT_CLASS,
@@ -56,6 +57,9 @@ function armed(over: Partial<PresenceState> = {}): PresenceState {
     armedEver: true,
     shellActExpiresAt: NOW + 60_000,
     mutationExpiresAt: NOW + 600_000,
+    // Locked by default: the settings editor is a mode you ENTER, so "everything
+    // armed" must not quietly include it (ADR-054 §6 amendment).
+    settingsSessionExpiresAt: null,
     ...over
   }
 }
@@ -65,7 +69,8 @@ const NEVER_ARMED: PresenceState = {
   exempt: false,
   armedEver: false,
   shellActExpiresAt: null,
-  mutationExpiresAt: null
+  mutationExpiresAt: null,
+  settingsSessionExpiresAt: null
 }
 
 /** Armed once, then both windows elapsed. */
@@ -73,7 +78,17 @@ const DECAYED: PresenceState = {
   exempt: false,
   armedEver: true,
   shellActExpiresAt: NOW - 1,
-  mutationExpiresAt: NOW - 1
+  mutationExpiresAt: NOW - 1,
+  settingsSessionExpiresAt: null
+}
+
+/** Armed AND holding an open settings-editing session (the 2026-08-16 amendment). */
+const UNLOCKED: PresenceState = {
+  exempt: false,
+  armedEver: true,
+  shellActExpiresAt: NOW + 60_000,
+  mutationExpiresAt: NOW + 600_000,
+  settingsSessionExpiresAt: NOW + 300_000
 }
 
 /** Armed, shell act window elapsed, mutation window still fresh. */
@@ -81,7 +96,8 @@ const ACT_DECAYED: PresenceState = {
   exempt: false,
   armedEver: true,
   shellActExpiresAt: NOW - 1,
-  mutationExpiresAt: NOW + 600_000
+  mutationExpiresAt: NOW + 600_000,
+  settingsSessionExpiresAt: null
 }
 
 const decide = (tier: StepUpTier, cls: DispatchClass, presence: PresenceState) =>
@@ -126,10 +142,9 @@ describe('classifyDispatch', () => {
     ['terminal:kill', 'shell', 'command', 'shell-act'],
     ['terminal:kill-by-cwd', 'shell', 'command', 'shell-act'],
     // The settings area.
-    ['authcfg:set-tier', 'admin', 'command', 'authcfg'],
-    ['authcfg:set-auth-mode', 'admin', 'command', 'authcfg'],
+    ['authcfg:apply', 'admin', 'command', 'authcfg'],
+    ['authcfg:end', 'admin', 'command', 'read'],
     ['authcfg:set-password', 'admin', 'command', 'authcfg'],
-    ['authcfg:set-retention', 'admin', 'command', 'authcfg'],
     // Ordinary mutations and reads.
     ['session:send', 'chat', 'command', 'mutation'],
     ['git:commit', 'git', 'command', 'mutation'],
@@ -193,13 +208,12 @@ describe('classifyDispatch', () => {
     )
   })
 
-  it('the authcfg namespace is exactly the four settings verbs', () => {
-    expect([...AUTHCFG_CHANNELS].sort()).toEqual([
-      'authcfg:set-auth-mode',
-      'authcfg:set-password',
-      'authcfg:set-retention',
-      'authcfg:set-tier'
-    ])
+  it('the authcfg namespace splits into GATED mutations and FREE verbs', () => {
+    // `authcfg:get` reads, and `authcfg:end` only gives authority back — gating
+    // a revocation would mean an operator whose mutation window had lapsed could
+    // open an editor under `strong` and then be refused permission to close it.
+    expect([...AUTHCFG_CHANNELS].sort()).toEqual(['authcfg:apply', 'authcfg:set-password'])
+    expect([...AUTHCFG_FREE_CHANNELS].sort()).toEqual(['authcfg:end', 'authcfg:get'])
   })
 })
 
@@ -256,7 +270,10 @@ describe('evaluateStepUp — the tier × class × state matrix', () => {
       // real socket in remote-step-up-tiers.test.ts.
       expect(decide('off', 'authcfg', NEVER_ARMED).allow).toBe(false)
       expect(decide('off', 'authcfg', DECAYED).allow).toBe(false)
-      expect(decide('off', 'authcfg', armed()).allow).toBe(true)
+      // The 2026-08-16 amendment: a live EDITING SESSION is the test now, not
+      // the window. `armed()` deliberately leaves the editor locked.
+      expect(decide('off', 'authcfg', armed()).allow).toBe(false)
+      expect(decide('off', 'authcfg', UNLOCKED).allow).toBe(true)
     })
   })
 
@@ -338,35 +355,59 @@ describe('evaluateStepUp — the tier × class × state matrix', () => {
     })
   })
 
-  describe('the settings area (`authcfg`) behaves strong-tier on EVERY tier', () => {
-    for (const tier of ['medium', 'strong'] as const) {
-      it(`${tier}: refused without a fresh mutation-window proof`, () => {
-        expect(decide(tier, 'authcfg', armed()).allow).toBe(true)
+  describe('the settings area (`authcfg`) demands a live EDITING SESSION on EVERY tier', () => {
+    for (const tier of ['medium', 'strong', 'off'] as const) {
+      it(`${tier}: only an unlocked editor gets through`, () => {
+        expect(decide(tier, 'authcfg', UNLOCKED).allow).toBe(true)
+        expect(decide(tier, 'authcfg', armed()).allow).toBe(false)
         expect(decide(tier, 'authcfg', DECAYED).allow).toBe(false)
         expect(decide(tier, 'authcfg', NEVER_ARMED).allow).toBe(false)
       })
     }
 
-    it('cannot be walked open by ordinary traffic on an UNARMED connection', () => {
-      // THE cell that makes the refresh-only-if-armed rule load-bearing. Under
-      // `medium` a mutation is allowed for an unarmed connection — if that also
-      // slid the mutation window, a password connection (which arms nothing at
-      // login, by decision) could send chat messages and then walk straight
-      // through the settings gate without ever proving presence.
-      let presence = NEVER_ARMED
-      for (let i = 0; i < 5; i++) {
-        const d = decide('medium', 'mutation', presence)
-        expect(d.allow).toBe(true)
-        expect(d.refresh).toEqual([])
-        // Model the transport applying whatever the decision asked for.
-        for (const target of d.refresh) {
-          presence =
-            target === 'mutation'
-              ? { ...presence, mutationExpiresAt: NOW + 600_000 }
-              : { ...presence, shellActExpiresAt: NOW + 60_000 }
+    it('a FRESH MUTATION WINDOW does not open it — the amendment, in one cell', () => {
+      // THE regression this amendment exists to make impossible. Before it, this
+      // exact presence — armed, mutation window fresh — WAS the whole test, which
+      // made administering an ambient capability held by any connection that had
+      // recently done anything at all. A session is the only key now, and a
+      // window cannot be mistaken for one.
+      const windowFresh = armed({ mutationExpiresAt: NOW + 600_000 })
+      expect(decide('medium', 'mutation', windowFresh).allow).toBe(true)
+      expect(decide('medium', 'authcfg', windowFresh).allow).toBe(false)
+      expect(decide('strong', 'authcfg', windowFresh).allow).toBe(false)
+    })
+
+    it('an EXPIRED session is refused — expiry is lazy, not remembered', () => {
+      // No timer clears the field; the table simply stops honouring it. A
+      // deadline one millisecond in the past is a locked editor.
+      expect(
+        decide('medium', 'authcfg', armed({ settingsSessionExpiresAt: NOW - 1 })).allow
+      ).toBe(false)
+      expect(
+        decide('medium', 'authcfg', armed({ settingsSessionExpiresAt: NOW + 1 })).allow
+      ).toBe(true)
+    })
+
+    it('refuses with `settings-session`, never with the ambient `step-up`', () => {
+      // The client's generic gate cures `step-up` transparently and must NOT
+      // cure this one. The table names the refusal so the transport cannot pair
+      // the wrong two.
+      for (const tier of ['medium', 'strong', 'off'] as const) {
+        expect(decide(tier, 'authcfg', NEVER_ARMED).refusal, tier).toBe('settings-session')
+      }
+      expect(decide('strong', 'mutation', DECAYED).refusal).toBe('step-up')
+      expect(decide('medium', 'shell-act', DECAYED).refusal).toBe('step-up')
+    })
+
+    it('nothing REFRESHES the session — it is a fixed-length mode', () => {
+      // A sliding session would be the ambient authority again, wearing a
+      // countdown. No decision may ever ask for one.
+      for (const tier of ['medium', 'strong', 'off'] as const) {
+        for (const cls of ['read', 'shell-read', 'shell-act', 'authcfg', 'mutation'] as const) {
+          const d = decide(tier, cls, UNLOCKED)
+          expect(d.refresh as readonly string[], `${tier}/${cls}`).not.toContain('settings')
         }
       }
-      expect(decide('medium', 'authcfg', presence).allow).toBe(false)
     })
   })
 
@@ -393,7 +434,8 @@ describe('presenceOf / tierOf', () => {
       exempt: false,
       armedEver: false,
       shellActExpiresAt: null,
-      mutationExpiresAt: null
+      mutationExpiresAt: null,
+      settingsSessionExpiresAt: null
     })
     expect(tierOf(conn)).toBe('medium')
   })

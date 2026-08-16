@@ -234,6 +234,26 @@ export interface AuthSurfaceSnapshot {
    * anyone's session.
    */
   stepUpTier: StepUpTier
+  /**
+   * The two TIMING DIALS join it for the same reason the tier does, and the
+   * reason is the same word: SNAPSHOT. Both are read into `policyCtx` at
+   * authentication and consulted from that snapshot for the connection's whole
+   * life — `applyStepUp` sizes every refreshed mutation window from
+   * `stepUpMutationIdleMinutes`, and `armMaxAgeCut` arms the strong tier's cut
+   * from `sessionMaxAgeHours`. A change that did not re-admit would therefore
+   * leave every live bystander running on the OLD numbers until it happened to
+   * reconnect, which is precisely the "I changed it and nothing happened"
+   * failure the disconnect exists to prevent — and it would make the settings
+   * editor's own footer ("Everyone else signed in re-authenticates") false for
+   * exactly the two fields the §6 amendment made web-editable.
+   *
+   * The ACTOR is spared the sweep as always and re-snapshots in place instead,
+   * so it too ends up governed by what it just typed. Its max-age keeps
+   * measuring from `connectedAt`: the age is absolute, and re-arming must not
+   * hand a socket a fresh full budget it could renew by editing a dial.
+   */
+  stepUpMutationIdleMinutes: number
+  sessionMaxAgeHours: number
 }
 
 /**
@@ -259,7 +279,9 @@ export function authSurfaceChanged(
     before.effectiveAuthPolicy !== after.effectiveAuthPolicy ||
     before.passwordBreakGlass !== after.passwordBreakGlass ||
     before.passkeyTailnetExempt !== after.passkeyTailnetExempt ||
-    before.stepUpTier !== after.stepUpTier
+    before.stepUpTier !== after.stepUpTier ||
+    before.stepUpMutationIdleMinutes !== after.stepUpMutationIdleMinutes ||
+    before.sessionMaxAgeHours !== after.sessionMaxAgeHours
   )
 }
 
@@ -293,6 +315,14 @@ export function describeAuthSurfaceChange(
   if (before.passkeyTailnetExempt !== after.passkeyTailnetExempt) {
     parts.push(`tailnet exemption ${before.passkeyTailnetExempt ? 'on' : 'off'}→${after.passkeyTailnetExempt ? 'on' : 'off'}`)
   }
+  if (before.stepUpMutationIdleMinutes !== after.stepUpMutationIdleMinutes) {
+    parts.push(
+      `idle re-check ${before.stepUpMutationIdleMinutes}→${after.stepUpMutationIdleMinutes} min`
+    )
+  }
+  if (before.sessionMaxAgeHours !== after.sessionMaxAgeHours) {
+    parts.push(`session max-age ${before.sessionMaxAgeHours}→${after.sessionMaxAgeHours} h`)
+  }
   return parts.length > 0 ? parts.join('; ') : null
 }
 
@@ -301,9 +331,9 @@ export function describeAuthSurfaceChange(
  *
  * The config write path takes its snapshots from `sanitizedRemoteConfig()`
  * (which is a superset of this shape); the CREDENTIAL write path has no such
- * object, and it needs the same four fields — because enrolling the first
- * passkey or revoking the last one moves AUTO between `legacy` and
- * `passkey-always` without touching the config at all.
+ * object, and it needs the same fields — because enrolling the first passkey or
+ * revoking the last one moves AUTO between `legacy` and `passkey-always`
+ * without touching the config at all.
  */
 export function readAuthSurface(): AuthSurfaceSnapshot {
   const ctx = readAuthPolicyContext()
@@ -316,7 +346,9 @@ export function readAuthSurface(): AuthSurfaceSnapshot {
     // come from `sanitizedRemoteConfig()`, which carries the same raw value, so
     // the two producers of this shape must agree on which one it is. The
     // effective tier is a derived fact both can compute from the policy.
-    stepUpTier: ctx.stepUpTier
+    stepUpTier: ctx.stepUpTier,
+    stepUpMutationIdleMinutes: ctx.stepUpMutationIdleMinutes,
+    sessionMaxAgeHours: ctx.sessionMaxAgeHours
   }
 }
 

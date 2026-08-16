@@ -80,14 +80,13 @@ import {
   type RegisterVerifyResult
 } from './webauthn-commands'
 import {
+  authcfgApply,
+  authcfgEnd,
   authcfgGet,
-  authcfgSetAuthMode,
   authcfgSetPassword,
-  authcfgSetRetention,
-  authcfgSetTier,
+  type AuthcfgApplyPatch,
   type AuthcfgHost
 } from './authcfg-commands'
-import type { RemoteAuthPolicy, StepUpTier } from '../../shared/types'
 import type { RegistrationResponseJSON } from '@simplewebauthn/server'
 import {
   sendPrompt,
@@ -1448,16 +1447,17 @@ export function registerRemoteHandlers(
   // Remote-access settings (ADR-054 decision 6 — the host anchor)
   // -------------------------------------------------------------------------
   //
-  // The THIRD deliberate widening of the remote surface. Every verb declares
+  // The THIRD deliberate widening of the remote surface. Every mutation declares
   // `admin` (outside the base grant set, so authenticating never suffices) AND
-  // is gated on a presence proof inside the mutation window on every tier — the
-  // transport classifies this namespace as `authcfg` and refuses a stale one
-  // with `needs-step-up`.
+  // requires a live SETTINGS-EDITING SESSION on the calling connection (ADR-054
+  // §6 amendment) — the transport classifies this namespace as `authcfg` and
+  // refuses a locked editor with the typed `needs-settings-session`, which the
+  // client must NOT cure ambiently.
   //
   // What is NOT here is the point: the `off` master switch. Auth-DISABLING
   // operations stay host-anchor only, and they stay in `remote:set-config`,
-  // which has no remote registration at all. `authcfg:set-auth-mode` refuses
-  // `off` with a typed error rather than silently dropping it.
+  // which has no remote registration at all. `authcfg:apply` refuses an `off`
+  // auth-mode with a typed error rather than silently dropping it.
 
   // The READ half. A `query`, so it is classified `read` and costs no ceremony:
   // an operator must be able to SEE the tier before being asked to prove
@@ -1471,22 +1471,27 @@ export function registerRemoteHandlers(
     handler: async (connection: CommandConnection) => authcfgGet(connection)
   })
 
+  // The SAVE. One batch, validated together and written once, so a refused
+  // field changes nothing and one operator action produces one audit row and
+  // one 4009 sweep (ADR-054 §6 amendment). It replaces `set-tier` /
+  // `set-auth-mode` / `set-retention`, which are gone.
   handleRemote({
-    channel: 'authcfg:set-tier',
+    channel: 'authcfg:apply',
     capability: 'admin',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection, tier: StepUpTier) =>
-      authcfgSetTier(connection, tier, enrollTokens ?? null)
+    handler: async (connection: CommandConnection, patch: AuthcfgApplyPatch) =>
+      authcfgApply(connection, patch, enrollTokens ?? null)
   })
 
+  // Closing the editor. Idempotent and callable without a session — a client
+  // that lost track must be able to say "I am done" without proving it started.
   handleRemote({
-    channel: 'authcfg:set-auth-mode',
+    channel: 'authcfg:end',
     capability: 'admin',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection, mode: RemoteAuthPolicy | null) =>
-      authcfgSetAuthMode(connection, mode, enrollTokens ?? null)
+    handler: async (connection: CommandConnection) => authcfgEnd(connection)
   })
 
   handleRemote({
@@ -1496,15 +1501,6 @@ export function registerRemoteHandlers(
     withConnection: true,
     handler: async (connection: CommandConnection, password: string) =>
       authcfgSetPassword(connection, password, enrollTokens ?? null)
-  })
-
-  handleRemote({
-    channel: 'authcfg:set-retention',
-    capability: 'admin',
-    kind: 'command',
-    withConnection: true,
-    handler: async (connection: CommandConnection, days: number) =>
-      authcfgSetRetention(connection, days)
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)

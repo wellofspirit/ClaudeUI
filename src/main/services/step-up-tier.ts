@@ -86,21 +86,55 @@ export const SHELL_ACT_VERBS: ReadonlySet<string> = new Set([
 /**
  * The settings-area namespace (ADR-054 decision 6 — the host anchor).
  *
- * Routine remote-access settings (tier selection, password rotation, auth-mode
- * changes among the NON-off modes) are web-reachable behind a fresh step-up, so
- * a headless deployment is administrable without SSH. They get their own
- * namespace because the structural guard has to survive: no `remote:*` channel
- * is ever registered on the remote transport, and the `off` writer stays in
+ * Routine remote-access settings are web-reachable behind a step-up, so a
+ * headless deployment is administrable without SSH. They get their own namespace
+ * because the structural guard has to survive: no `remote:*` channel is ever
+ * registered on the remote transport, and the `off` writer stays in
  * `remote:set-config` where only the host anchor can reach it.
  *
- * These verbs behave STRONG-TIER on every tier — see {@link evaluateStepUp}.
+ * Every member demands a live SETTINGS-EDITING SESSION (the §6 amendment) — see
+ * {@link evaluateStepUp}.
  */
 export const AUTHCFG_CHANNELS: ReadonlySet<string> = new Set([
-  'authcfg:set-tier',
-  'authcfg:set-auth-mode',
-  'authcfg:set-password',
-  'authcfg:set-retention'
+  'authcfg:apply',
+  'authcfg:set-password'
 ])
+
+/**
+ * The two `authcfg:*` channels that are FREE — no session, no freshness, on
+ * every tier. Both because of what they do, not as a convenience:
+ *
+ * - `authcfg:get` READS. The pane's default state is the read, so demanding an
+ *   unlock to display the current settings would put the ceremony in front of
+ *   its own explanation. (It is also a `query`, so it would classify `read`
+ *   anyway; naming it here makes the exemption a decision rather than a side
+ *   effect of a `kind` someone could change.)
+ * - `authcfg:end` only ever GIVES AUTHORITY BACK. Gating a revocation is
+ *   backwards twice over: Cancel and pane-close must work unconditionally, and
+ *   under the `strong` tier an unclassified `command` would demand the mutation
+ *   window — so an operator whose window had lapsed could open an editor and
+ *   then be refused permission to close it. The body is idempotent, so calling
+ *   it with nothing open is a no-op success rather than an error.
+ *
+ * Classified `read` (i.e. free) rather than left to fall through, so the reason
+ * is stated once, here, instead of being inferred from a `kind` declaration two
+ * files away.
+ */
+export const AUTHCFG_FREE_CHANNELS: ReadonlySet<string> = new Set([
+  'authcfg:get',
+  'authcfg:end'
+])
+
+/**
+ * How long an unlocked settings editor stays open (ADR-054 §6 amendment).
+ *
+ * Five minutes, fixed and deliberately not configurable: it is the length of the
+ * BOUNDED MODE the amendment introduced, not a policy dial, and a dial for it
+ * would be one more setting reachable from inside the mode it governs. Long
+ * enough to read the pane, change several things and press Save; short enough
+ * that an editor left open on an unattended screen closes itself.
+ */
+export const SETTINGS_SESSION_TTL_MS = 5 * 60_000
 
 /**
  * What a dispatch costs, freshness-wise. The ONE vocabulary the enforcement
@@ -110,7 +144,8 @@ export const AUTHCFG_CHANNELS: ReadonlySet<string> = new Set([
  *                 stream are free even in `strong`).
  * - `shell-read`— a shell verb that only watches: one arming proof ever.
  * - `shell-act` — a shell verb that acts: the 10-minute act window.
- * - `authcfg`   — the settings area: the mutation window, on EVERY tier.
+ * - `authcfg`   — the settings area: a live settings-editing SESSION, on every
+ *                 tier (§6 amendment — this used to be the mutation window).
  * - `mutation`  — any other `command`: free below `strong`, the mutation window
  *                 at `strong`.
  */
@@ -136,6 +171,9 @@ export function classifyDispatch(args: {
   capability: Capability | undefined
   kind: CommandKind | undefined
 }): DispatchClass {
+  // Order matters: the free set is checked FIRST so a channel can never be both,
+  // and so `authcfg:end` cannot be caught by a future widening of the gated set.
+  if (AUTHCFG_FREE_CHANNELS.has(args.channel)) return 'read'
   if (AUTHCFG_CHANNELS.has(args.channel)) return 'authcfg'
   if (args.capability === 'shell') {
     // The explicit set wins over `kind` in BOTH directions: `terminal:attach` is
@@ -179,6 +217,18 @@ export interface PresenceState {
   shellActExpiresAt: number | null
   /** Deadline of the non-shell MUTATION window, or null when nothing is armed. */
   mutationExpiresAt: number | null
+  /**
+   * Deadline of an open SETTINGS-EDITING SESSION, or null when the editor is
+   * locked (§6 amendment).
+   *
+   * A SEPARATE scalar from `mutationExpiresAt` on purpose, rather than a longer
+   * lease on the same one: the mutation window is ambient (any mutation slides
+   * it, so it is held without anyone noticing), and the amendment's whole point
+   * is that administering must be a mode you entered deliberately. Sharing the
+   * field would have made "am I editing settings?" answerable by having sent a
+   * chat message recently.
+   */
+  settingsSessionExpiresAt: number | null
 }
 
 /** Read {@link PresenceState} off a connection. */
@@ -187,7 +237,8 @@ export function presenceOf(conn: CommandConnection): PresenceState {
     exempt: conn.shellGrantExpiresAt === undefined,
     armedEver: conn.armedEver === true,
     shellActExpiresAt: conn.shellGrantExpiresAt ?? null,
-    mutationExpiresAt: conn.mutationExpiresAt ?? null
+    mutationExpiresAt: conn.mutationExpiresAt ?? null,
+    settingsSessionExpiresAt: conn.settingsSessionExpiresAt ?? null
   }
 }
 
@@ -205,14 +256,27 @@ function fresh(deadline: number | null, now: number): boolean {
 // ---------------------------------------------------------------------------
 
 export interface StepUpDecision {
-  /** False ⇒ the caller answers `needs-step-up`. */
+  /** False ⇒ the caller refuses — see {@link StepUpDecision.refusal}. */
   allow: boolean
   /** Windows to slide forward — only ever non-empty when `allow` is true. */
   refresh: readonly RefreshTarget[]
+  /**
+   * WHICH refusal, when `allow` is false.
+   *
+   * `step-up` — prove presence; the client's generic gate cures this
+   * transparently and retries.
+   *
+   * `settings-session` — open the settings editor; the client must NOT cure this
+   * ambiently (§6 amendment). Carried in the decision rather than decided by the
+   * caller so the one table that knows a dispatch is `authcfg` is also the one
+   * that names the error, and the transport cannot pair the wrong two.
+   */
+  refusal?: 'step-up' | 'settings-session'
 }
 
 const ALLOW: StepUpDecision = { allow: true, refresh: [] }
-const DENY: StepUpDecision = { allow: false, refresh: [] }
+const DENY: StepUpDecision = { allow: false, refresh: [], refusal: 'step-up' }
+const DENY_NO_SESSION: StepUpDecision = { allow: false, refresh: [], refusal: 'settings-session' }
 const ALLOW_REFRESH_BOTH: StepUpDecision = { allow: true, refresh: ['shellAct', 'mutation'] }
 const ALLOW_REFRESH_MUTATION: StepUpDecision = { allow: true, refresh: ['mutation'] }
 
@@ -232,11 +296,15 @@ const ALLOW_REFRESH_MUTATION: StepUpDecision = { allow: true, refresh: ['mutatio
  *    the operator merely left open renew its own grant forever with no shell use
  *    at all. The same argument applies to `terminal:attach` on a reconnect.
  *  - An UNARMED connection refreshes nothing. Refreshes EXTEND a proof; they
- *    never create one. Without this rule a `medium`-tier connection could walk
- *    its mutation window forward with ordinary chat traffic and then walk
- *    straight through the `authcfg` gate, which demands the mutation window on
- *    every tier — an unarmed password connection would have bypassed the
- *    settings step-up by sending messages.
+ *    never create one — a window that could be created by ordinary traffic
+ *    would be a proof nobody ever gave.
+ *  - NOTHING refreshes the settings SESSION. It is a fixed-length mode opened by
+ *    one deliberate ceremony and it does not slide: that is the difference
+ *    between a bounded editor and the ambient administering authority the §6
+ *    amendment replaced. (Before the amendment this list had to explain why a
+ *    `medium`-tier connection could not walk its mutation window forward with
+ *    chat traffic and then walk through the settings gate. The gate no longer
+ *    reads that window at all, so the hazard is structural rather than argued.)
  *  - Tier `off` refreshes nothing either: it gates nothing, so the windows are
  *    meaningless and writing to them would be noise in the state a reviewer
  *    reads.
@@ -258,13 +326,14 @@ export function evaluateStepUp(args: {
 
   // THE SETTINGS AREA OUTRANKS THE TIER — including tier `off`.
   //
-  // ADR-054 decision 6 says these verbs carry strong-tier freshness "regardless
-  // of tier", and decision 3 says tier `off` gates nothing. Read literally the
-  // two collide on an explicitly-`off` tier, so the order is decided here, in
-  // favour of decision 6: an operator choosing "don't nag me post-login" is
-  // choosing it for their chat and their shell, not for the surface that decides
-  // who may connect at all. A session that can silently rewrite the auth mode is
-  // the one thing tier `off` must not buy.
+  // ADR-054 decision 6 says these verbs are gated "regardless of tier", and
+  // decision 3 says tier `off` gates nothing. Read literally the two collide on
+  // an explicitly-`off` tier, so the order is decided here, in favour of
+  // decision 6: an operator choosing "don't nag me post-login" is choosing it
+  // for their chat and their shell, not for the surface that decides who may
+  // connect at all. A session that can silently rewrite the auth mode is the one
+  // thing tier `off` must not buy. The §6 amendment RE-MECHANIZED that rule
+  // without changing it — the ceremony moved from every verb to the door.
   //
   // Decision 3's flat waiver is not weakened in SUBSTANCE, because under
   // auth-MODE `off` a connection holds the as-built grant set and never
@@ -272,12 +341,19 @@ export function evaluateStepUp(args: {
   //
   // Note the ORDER precisely, because the obvious statement of this is wrong:
   // the transport runs `assertStepUp` (freshness) BEFORE
-  // `dispatcher.handle` (capability), so such a connection meets
-  // `needs-step-up` FIRST and only hits `Permission denied` if it goes on to
-  // complete a step-up. Both walls hold; the freshness one is simply in front.
-  // Pinned end to end in remote-step-up-tiers.test.ts ("auth-mode `off`").
+  // `dispatcher.handle` (capability), so such a connection meets the refusal
+  // FIRST and only hits `Permission denied` if it goes on to unlock. Both walls
+  // hold; the freshness one is simply in front. Pinned end to end in
+  // remote-step-up-tiers.test.ts ("auth-mode `off`").
+  //
+  // NOTE what is NOT read here any more: `armedEver` and `mutationExpiresAt`.
+  // A live session is the whole test, because a session can only exist if a
+  // ceremony produced it — so the arming check would be a weaker restatement of
+  // a stronger fact, and reading the mutation window would re-admit exactly the
+  // ambient authority the amendment removed. A connection with a perfectly fresh
+  // mutation window and no session is refused, and that is the point.
   if (cls === 'authcfg') {
-    return armed && fresh(presence.mutationExpiresAt, now) ? ALLOW_REFRESH_MUTATION : DENY
+    return fresh(presence.settingsSessionExpiresAt, now) ? ALLOW : DENY_NO_SESSION
   }
 
   // Tier `off`: nothing else is gated post-login. The terminal's OTHER two gates
@@ -339,9 +415,10 @@ export function shellActAllowed(conn: CommandConnection, now = Date.now()): bool
 }
 
 /**
- * May this connection reach the settings-area verbs right now? The bodies in
- * `authcfg-commands.ts` assert this themselves so a future transport that
- * forgets the gate still cannot write the auth surface with a stale proof.
+ * Does this connection hold a live settings-editing session (or is it the exempt
+ * host anchor)? The bodies in `authcfg-commands.ts` assert this themselves so a
+ * future transport that forgets the gate still cannot write the auth surface
+ * with the editor locked.
  */
 export function authcfgAllowed(conn: CommandConnection, now = Date.now()): boolean {
   return evaluateStepUp({
@@ -350,6 +427,34 @@ export function authcfgAllowed(conn: CommandConnection, now = Date.now()): boole
     presence: presenceOf(conn),
     now
   }).allow
+}
+
+/**
+ * Open (or re-open) the settings-editing session on one connection.
+ *
+ * Called from exactly one place — a step-up ceremony that carried
+ * `intent: 'settings'` — and living here so the TTL is applied where it is
+ * defined. Re-unlocking mid-session simply restarts the five minutes, which is
+ * what an operator pressing Edit again means; the session never slides on its
+ * own (see the refresh discipline).
+ *
+ * Returns the new deadline so the caller can report it to the client, which
+ * renders the countdown from it rather than starting its own clock.
+ */
+export function openSettingsSession(conn: CommandConnection, now = Date.now()): number {
+  const expiresAt = now + SETTINGS_SESSION_TTL_MS
+  conn.settingsSessionExpiresAt = expiresAt
+  return expiresAt
+}
+
+/**
+ * Close it. Idempotent, and deliberately a plain assignment: there is no timer
+ * to cancel because expiry is checked lazily at dispatch — a bounded mode nobody
+ * is watching costs nothing to leave lying around, and a timer would be a second
+ * thing that has to agree with the deadline.
+ */
+export function endSettingsSession(conn: CommandConnection): void {
+  conn.settingsSessionExpiresAt = null
 }
 
 // ---------------------------------------------------------------------------

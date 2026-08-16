@@ -11,11 +11,13 @@
  * declaration is channel-GLOBAL. Registering both transports is what makes the
  * capability/kind declaration a single reviewed fact rather than a remote-only
  * one, and it gives the desktop settings surface the same audited path a phone
- * takes. The desktop connection is exempt from the freshness gate (it IS the
- * host anchor), so the verbs behave there exactly as `remote:set-config` does.
+ * takes. The desktop connection is exempt from the SESSION gate (it IS the host
+ * anchor — its editor unlocks with no ceremony and no TTL), so the verbs behave
+ * there exactly as `remote:set-config` does.
  *
  * `remote:set-config` is deliberately NOT retired: it stays the host-anchor-only
- * writer, and it is the ONLY writer of the `off` master switch.
+ * writer — the desktop pane's actual save path — and it is the ONLY writer of
+ * the `off` master switch.
  */
 
 import { ipcMain } from 'electron'
@@ -27,41 +29,34 @@ import {
   type CommandRegistration
 } from './command-registry'
 import {
+  authcfgApply,
+  authcfgEnd,
   authcfgGet,
-  authcfgSetAuthMode,
   authcfgSetPassword,
-  authcfgSetRetention,
-  authcfgSetTier,
+  type AuthcfgApplyPatch,
   type AuthcfgHost
 } from './authcfg-commands'
-import { AUTHCFG_CHANNELS } from '../services/step-up-tier'
-import type { RemoteAuthPolicy, StepUpTier } from '../../shared/types'
+import { AUTHCFG_CHANNELS, AUTHCFG_FREE_CHANNELS } from '../services/step-up-tier'
 
 /**
- * The channels to clear before re-registering — the MUTATING set read from the
- * CLASSIFIER, not restated here, plus the one READ verb.
+ * The channels to clear before re-registering — both classifier sets, read from
+ * the CLASSIFIER rather than restated here.
  *
  * That import is the point: `AUTHCFG_CHANNELS` is what `classifyDispatch` uses
- * to give this namespace strong-tier freshness on every tier. A new WRITE verb
- * registered below without being added there would be classified `mutation`
- * instead — i.e. silently free under the default `medium` tier — which is
- * exactly the "two places restating one rule" failure this codebase has already
- * paid for once. Sharing the constant makes that a visible edit rather than a
- * silent downgrade.
+ * to demand a settings-editing session, and `AUTHCFG_FREE_CHANNELS` is the
+ * explicit list of the two that are free. A new verb registered below and added
+ * to NEITHER set would be classified `mutation` — i.e. silently reachable
+ * without an unlocked editor — which is exactly the "two places restating one
+ * rule" failure this codebase has already paid for once. Sharing the constants
+ * makes that a visible edit rather than a silent downgrade.
  *
- * `authcfg:get` is deliberately OUTSIDE that set: it is a `query`, reads are
- * free on every tier (ADR-054 decision 1), and demanding a ceremony to render
- * the settings pane would put the ceremony in front of its own explanation. So
- * that "outside the set" can only ever mean "a deliberate read", the guard in
- * `__tests__/remote-handlers.ipc.test.ts` pins the namespace both ways: every
- * `command`-kind `authcfg:*` channel is in `AUTHCFG_CHANNELS`, and every member
- * of that set is registered as a `command`.
- *
- * The parity test in `__tests__/remote-handlers.ipc.test.ts` keeps its own
- * literal list on purpose: an independent pin is worth nothing if it imports
- * the thing it is pinning.
+ * The guard in `__tests__/remote-handlers.ipc.test.ts` pins the namespace both
+ * ways: every registered `authcfg:*` channel is in exactly one of the two sets,
+ * and every member of the gated set is registered. It keeps its own literal
+ * lists on purpose — an independent pin is worth nothing if it imports the thing
+ * it is pinning.
  */
-const AUTHCFG_IPC_CHANNELS = ['authcfg:get', ...AUTHCFG_CHANNELS]
+const AUTHCFG_IPC_CHANNELS = [...AUTHCFG_FREE_CHANNELS, ...AUTHCFG_CHANNELS]
 
 function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'desktop' })
@@ -92,21 +87,20 @@ export function registerAuthcfgIpc(host: AuthcfgHost | null): void {
   })
 
   handleIpc({
-    channel: 'authcfg:set-tier',
+    channel: 'authcfg:apply',
     capability: 'admin',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection, tier: StepUpTier) =>
-      authcfgSetTier(connection, tier, host)
+    handler: async (connection: CommandConnection, patch: AuthcfgApplyPatch) =>
+      authcfgApply(connection, patch, host)
   })
 
   handleIpc({
-    channel: 'authcfg:set-auth-mode',
+    channel: 'authcfg:end',
     capability: 'admin',
     kind: 'command',
     withConnection: true,
-    handler: async (connection: CommandConnection, mode: RemoteAuthPolicy | null) =>
-      authcfgSetAuthMode(connection, mode, host)
+    handler: async (connection: CommandConnection) => authcfgEnd(connection)
   })
 
   handleIpc({
@@ -116,14 +110,5 @@ export function registerAuthcfgIpc(host: AuthcfgHost | null): void {
     withConnection: true,
     handler: async (connection: CommandConnection, password: string) =>
       authcfgSetPassword(connection, password, host)
-  })
-
-  handleIpc({
-    channel: 'authcfg:set-retention',
-    capability: 'admin',
-    kind: 'command',
-    withConnection: true,
-    handler: async (connection: CommandConnection, days: number) =>
-      authcfgSetRetention(connection, days)
   })
 }

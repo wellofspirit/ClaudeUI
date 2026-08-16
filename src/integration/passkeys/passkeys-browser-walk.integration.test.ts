@@ -408,7 +408,10 @@ const SHORT_SESSION_MAX_AGE_MS = 45_000
  * `ClaudeAPI` type does not exist.
  */
 interface WalkPageApi {
-  authcfgSetTier(tier: string): Promise<{ ok: boolean; tier?: string }>
+  authcfgApply(patch: Record<string, unknown>): Promise<{ ok: boolean }>
+  authcfgEnd(): Promise<{ ok: boolean }>
+  /** The UNLOCK ceremony: a step-up carrying the `settings` intent. */
+  terminalStepUpPasskey(intent?: string): Promise<Record<string, unknown>>
   loadSettings(): Promise<unknown>
   saveSettings(settings: unknown): Promise<void>
   terminalAvailability(): Promise<Record<string, unknown>>
@@ -969,14 +972,12 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     offTailnetPage = null
     offLoopbackPage = null
 
-    // Step 6 left the tab on the one-tap screen (its 4009). Get back in.
-    await signInOnLoginPage('step7-resume')
-    await until('exactly one client to remain connected', () => status().connectedClients === 1)
-
-    // Shorten the mutation window to its 1-minute FLOOR before switching tiers.
-    // Not part of the auth surface, so this causes no 4009 — and the window has
-    // to be short before the tier is armed, or 7b would wait an hour for a proof
-    // to go stale.
+    // Shorten the mutation window to its 1-minute FLOOR before signing back in.
+    // The order matters: the DIAL is part of the auth surface, so this write
+    // sweeps every live client with a 4009 — the fix for F1, and the reason the
+    // sign-in comes AFTER it rather than before. (It also has to be short before
+    // the tier is armed, or 7b would idle for an hour waiting for a proof to go
+    // stale.)
     //
     // The terminal toggle stays OFF through 7a–7c, deliberately: that is the
     // DEFAULT, and it is the configuration in which the ceremony used to be
@@ -985,31 +986,79 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     // Every prompt below therefore runs on a server offering no shell at all.
     await setConfig({ stepUpMutationIdleMinutes: 1, allowTerminal: false })
 
-    // ── 7a: set the tier FROM THE BROWSER, and prove arm-on-auth ────────────
-    // A passkey login IS a presence proof, so this settings write — which
-    // demands a fresh proof on every tier — goes through with NO ceremony. That
-    // is the whole point of arm-on-auth: ADR-052 asked for a second ceremony
-    // seconds after the first, and ADR-054 does not.
-    const tierWrite = await evalOnPage<{ ok: boolean; tier?: string; error?: string }>(
-      loginPage!,
-      async (api) => {
-        try {
-          return await api.authcfgSetTier('strong')
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) }
-        }
-      }
-    )
-    expect(tierWrite, 'a freshly-armed passkey session must not be asked to prove itself again')
-      .toMatchObject({ ok: true, tier: 'strong' })
-    expect((await getConfig()).stepUpTier).toBe('strong')
-    expect(await hasTestId(loginPage!.page, 'StepUpOverlay')).toBe(false)
-    const shotTier = await shot(loginPage!.page, '12-tier-strong-set-from-web')
-    note(`step 7a: authcfg:set-tier('strong') from the BROWSER, no ceremony (arm-on-auth) → ${shotTier}`)
+    // Step 6 left the tab on the one-tap screen (its 4009), and the dial write
+    // above put it back there if it had recovered in between. Get back in.
+    await signInOnLoginPage('step7-resume')
+    await until('exactly one client to remain connected', () => status().connectedClients === 1)
 
-    // The tier write is an auth-surface change: everyone but the actor is
-    // dropped, and the actor is re-snapshotted IN PLACE — so this tab is
-    // deliberately still signed in, and the tolerant mode is the right one.
+    // ── 7a: the SETTINGS-EDITING SESSION, from the browser ─────────────────
+    //
+    // The 2026-08-16 amendment: administering is a bounded MODE, not an ambient
+    // capability. A freshly-armed passkey session — which under the old rule
+    // could write settings for the next hour without another thought — is
+    // refused until the editor is deliberately unlocked.
+    const lockedAttempt = await evalOnPage<string>(loginPage!, async (api) => {
+      try {
+        await api.authcfgApply({ stepUpTier: 'strong' })
+        return 'ok'
+      } catch (err) {
+        return `err:${err instanceof Error ? err.message : String(err)}`
+      }
+    })
+    expect(
+      lockedAttempt,
+      'a signed-in session must not be able to write settings without unlocking'
+    ).toContain('needs-settings-session')
+    expect((await getConfig()).stepUpTier).not.toBe('strong')
+    // …and the generic step-up gate did NOT quietly cure it: no ceremony ran.
+    expect(await hasTestId(loginPage!.page, 'StepUpOverlay')).toBe(false)
+    note('step 7a: authcfg:apply refused with needs-settings-session — the editor was locked')
+
+    // The UNLOCK: the same ceremony the terminal uses, carrying the settings
+    // intent. One real WebAuthn assertion through the virtual authenticator.
+    const unlocked = await evalOnPage<Record<string, unknown>>(loginPage!, (api) =>
+      api.terminalStepUpPasskey('settings')
+    )
+    expect(unlocked).toMatchObject({ ok: true })
+    expect(
+      unlocked.settingsSessionExpiresAt as number,
+      'the editor ticks from the SERVER deadline'
+    ).toBeGreaterThan(Date.now())
+
+    // …and now the batch lands: one apply, carrying everything at once,
+    // including the DIALS the old model kept desktop-only.
+    const applied = await evalOnPage<string>(loginPage!, async (api) => {
+      try {
+        await api.authcfgApply({ stepUpTier: 'strong', sessionMaxAgeHours: 5 })
+        return 'ok'
+      } catch (err) {
+        return `err:${err instanceof Error ? err.message : String(err)}`
+      }
+    })
+    expect(applied).toBe('ok')
+    const afterApply = await getConfig()
+    expect(afterApply.stepUpTier).toBe('strong')
+    expect(afterApply.sessionMaxAgeHours, 'the dials are web-editable now').toBe(5)
+    const shotTier = await shot(loginPage!.page, '12-settings-session-apply')
+    note(`step 7a: unlock ceremony → one authcfg:apply (tier + dial) from the BROWSER → ${shotTier}`)
+
+    // Closing the editor is the operator's action, not only the TTL's.
+    await evalOnPage(loginPage!, (api) => api.authcfgEnd())
+    const afterEnd = await evalOnPage<string>(loginPage!, async (api) => {
+      try {
+        await api.authcfgApply({ stepUpTier: 'medium' })
+        return 'ok'
+      } catch (err) {
+        return `err:${err instanceof Error ? err.message : String(err)}`
+      }
+    })
+    expect(afterEnd, 'authcfg:end really closes the mode').toContain('needs-settings-session')
+    expect((await getConfig()).stepUpTier).toBe('strong')
+    note('step 7a: authcfg:end closed the session — the next write is refused again')
+
+    // The apply is an auth-surface change: everyone but the actor is dropped,
+    // and the actor is re-snapshotted IN PLACE — so this tab is deliberately
+    // still signed in, and the tolerant mode is the right one.
     await signInOnLoginPage('step7a-after-tier', 'tolerant')
     expect(status().connectedClients, 'the actor is spared its own 4009').toBe(1)
 
@@ -1115,7 +1164,12 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     note(`step 7d: under tier off the terminal is granted at accept, zero prompts → ${shotOff}`)
 
     // ── 7e: restore the default posture ────────────────────────────────────
-    await setConfig({ stepUpTier: 'medium', stepUpMutationIdleMinutes: 60, allowTerminal: false })
+    await setConfig({
+      stepUpTier: 'medium',
+      stepUpMutationIdleMinutes: 60,
+      sessionMaxAgeHours: 4,
+      allowTerminal: false
+    })
     const restored = await getConfig()
     expect(restored.stepUpTier).toBe('medium')
     expect(restored.effectiveStepUpTier).toBe('medium')

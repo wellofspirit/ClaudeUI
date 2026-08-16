@@ -131,7 +131,7 @@ describe('TerminalPanel — web availability gate', () => {
       fireEvent.click(screen.getByTestId('TerminalStepUpPrompt.submit'))
     })
 
-    expect(api.terminalStepUp).toHaveBeenCalledWith('correct horse battery staple')
+    expect(api.terminalStepUp).toHaveBeenCalledWith('correct horse battery staple', undefined)
     await waitFor(() => expect(screen.getByTestId('TerminalPanelView')).toBeTruthy())
   })
 

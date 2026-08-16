@@ -28,10 +28,12 @@ import {
   classifyDispatch,
   evaluateStepUp,
   mutationIdleMs,
+  openSettingsSession,
   presenceOf,
   resolveStepUpTier,
   sessionMaxAgeMs,
   MAX_TIMER_MS,
+  SETTINGS_SESSION_TTL_MS,
   TERM_INPUT_CLASS,
   TERM_RESIZE_CLASS,
   type DispatchClass,
@@ -73,6 +75,7 @@ import {
 import {
   ENROLL_UNAVAILABLE_ERROR,
   CLOSE_SESSION_EXPIRED,
+  NEEDS_SETTINGS_SESSION_ERROR,
   NEEDS_STEP_UP_ERROR,
   PASSKEY_FAILED_ERROR,
   PASSKEY_REQUIRED_ERROR,
@@ -3025,7 +3028,17 @@ export class RemoteServer {
       presence: presenceOf(client.connection),
       now
     })
-    if (!decision.allow) throw new Error(NEEDS_STEP_UP_ERROR)
+    if (!decision.allow) {
+      // WHICH refusal comes from the table, not from here: the one place that
+      // knows a dispatch is `authcfg` is the one that names the error, so the
+      // transport cannot pair a settings refusal with the ambient code the
+      // client's generic gate would silently retry (ADR-054 §6 amendment).
+      throw new Error(
+        decision.refusal === 'settings-session'
+          ? NEEDS_SETTINGS_SESSION_ERROR
+          : NEEDS_STEP_UP_ERROR
+      )
+    }
     for (const target of decision.refresh) {
       if (target === 'shellAct') {
         client.connection.shellGrantExpiresAt = now + shellGrantIdleMs()
@@ -3117,6 +3130,33 @@ export class RemoteServer {
       armedShell
         ? `shell + mutation grants armed via ${factor} step-up`
         : `mutation grant armed via ${factor} step-up (terminal toggle off — no shell conferred)`
+
+    // THE SETTINGS-EDITOR UNLOCK (ADR-054 §6 amendment).
+    //
+    // A ceremony carrying `intent: 'settings'` opens a five-minute editing
+    // session on THIS connection, in addition to the ordinary arming above — a
+    // step-up is a step-up, and splitting which proof counts for what by intent
+    // would be a second rule about one ceremony. The intent selects a
+    // CONSEQUENCE of a proof the server verifies either way, so asserting it on
+    // a ceremony that fails buys nothing.
+    //
+    // Returned to the client as `settingsSessionExpiresAt` so the editor's
+    // countdown ticks from the SERVER's deadline rather than starting its own
+    // clock at the moment the response happened to arrive.
+    const openSettingsIfAsked = (factor: string): number | undefined => {
+      if (msg.intent !== 'settings') return undefined
+      const expiresAt = openSettingsSession(client.connection)
+      this.auditAuth({
+        channel: 'auth:settings-session',
+        connectionId: client.connection.connectionId,
+        method: client.connection.identity.method,
+        label: client.connection.identity.label,
+        capability: 'admin',
+        outcome: 'ok',
+        detail: `settings-editing session opened via ${factor} step-up (${SETTINGS_SESSION_TTL_MS / 60_000} min)`
+      })
+      return expiresAt
+    }
 
     // A narrow-grant socket may not step UP into a surface it was never given
     // (`holdsBaseRemoteSurface`): an enrollment link that also knows the
@@ -3224,7 +3264,7 @@ export class RemoteServer {
         outcome: 'ok',
         detail: armedDetail('passkey')
       })
-      respond({ ok: true, expiresAt })
+      respond({ ok: true, expiresAt, settingsSessionExpiresAt: openSettingsIfAsked('passkey') })
       return
     }
 
@@ -3325,7 +3365,11 @@ export class RemoteServer {
       outcome: 'ok',
       detail: armedDetail('break-glass password')
     })
-    respond({ ok: true, expiresAt })
+    respond({
+      ok: true,
+      expiresAt,
+      settingsSessionExpiresAt: openSettingsIfAsked('break-glass password')
+    })
   }
 
   /**

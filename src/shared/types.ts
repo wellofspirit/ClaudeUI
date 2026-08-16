@@ -1303,8 +1303,16 @@ interface TerminalAPI {
    * Run the step-up ceremony with the operator's remote-access password.
    * Desktop resolves `{ok:true}` without a ceremony — there is nothing to step
    * up to when you are already at the machine.
+   *
+   * `intent: 'settings'` additionally opens the settings-editing session
+   * (ADR-054 §6 amendment); the deadline comes back on
+   * `settingsSessionExpiresAt`. The two members keep their terminal-flavoured
+   * NAMES from ADR-052, when the terminal was the only thing a step-up could
+   * buy — a rename would touch the preload, the adapter, the harness API and
+   * every mock, for no behavioral gain. The doc comments carry the truth: this
+   * is THE ceremony surface.
    */
-  terminalStepUp(password: string): Promise<TerminalStepUpResult>
+  terminalStepUp(password: string, intent?: StepUpIntent): Promise<TerminalStepUpResult>
   /**
    * Run the step-up ceremony with a PASSKEY (ADR-052 decision 5: step-up is
    * passkey-first, password only as fallback). Fetches a fresh `step-up`-kind
@@ -1317,7 +1325,7 @@ interface TerminalAPI {
    * (`passkey-unavailable`) or to keep insisting on the passkey
    * (`passkey-required` from the password path).
    */
-  terminalStepUpPasskey(): Promise<TerminalStepUpResult>
+  terminalStepUpPasskey(intent?: StepUpIntent): Promise<TerminalStepUpResult>
   /**
    * Subscribe this client to a live PTY (server-side scrollback replays first).
    * Real on BOTH surfaces since the terminal pool landed: a desktop tab can
@@ -1601,7 +1609,24 @@ export interface TerminalStepUpResult {
   code?: string
   retryable?: boolean
   expiresAt?: number
+  /**
+   * Success only, and only when the ceremony carried the `settings` intent: the
+   * server-side deadline of the settings-editing session it just opened
+   * (ADR-054 §6 amendment). The editor's countdown ticks from this, so the pane
+   * and the server cannot disagree about when the mode ends.
+   */
+  settingsSessionExpiresAt?: number
 }
+
+/**
+ * What a step-up ceremony is FOR.
+ *
+ * `'settings'` additionally opens the five-minute settings-editing session on
+ * this connection. Absent means an ordinary step-up (presence, and the shell
+ * where the toggle allows) — which is what every caller but the settings pane
+ * wants.
+ */
+export type StepUpIntent = 'settings'
 
 interface RemoteAPI {
   getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
@@ -1657,30 +1682,44 @@ interface RemoteAPI {
     auditRetentionDays?: number
   }): Promise<RemoteConfig>
   /**
-   * ADR-054 decision 6 — the ROUTINE remote-access settings, reachable from a
-   * web client behind a fresh presence proof (the mutation window, on every
-   * tier including `off`). That freshness demand is the server's; a stale proof
-   * comes back as `needs-step-up`, which the web transport turns into one
-   * ceremony and a single retry before the caller ever sees it.
+   * ADR-054 §6 — the ROUTINE remote-access settings, reachable from a web client
+   * inside an open **settings-editing session**: one deliberate step-up carrying
+   * `intent: 'settings'` unlocks the editor for five minutes, and every mutation
+   * here demands it. A locked editor answers the typed
+   * `needs-settings-session`, which the web transport deliberately does NOT cure
+   * ambiently — unlocking is the operator pressing Edit, not a retry.
    *
    * Registered on BOTH transports so the capability/kind declaration is a single
-   * reviewed fact. The desktop connection is exempt from the freshness gate — it
-   * IS the host anchor — so these behave there exactly as `setRemoteConfig` does.
+   * reviewed fact. The desktop connection is exempt — it IS the host anchor, so
+   * its editor needs no ceremony and has no TTL — and its pane saves through
+   * `setRemoteConfig` regardless, which is the only writer of the `off` switch.
    *
-   * What is deliberately ABSENT is the point: nothing here can disable
-   * authentication.
+   * SAVE: the whole edited set as one batch. Validated together and written
+   * once, so a refused field changes nothing; one audit row carrying the diff;
+   * one 4009 re-admission sweep (except the actor, which re-snapshots in place).
+   * A patch that changes nothing is a success that writes no row and drops
+   * nobody. `'off'` as an auth mode is refused with
+   * `auth-off-is-host-anchor-only`.
    */
-  authcfgSetTier(tier: StepUpTier): Promise<{ ok: true; tier: StepUpTier }>
+  authcfgApply(patch: {
+    /** `null` restores AUTO. `'off'` is refused — host anchor only. */
+    authMode?: RemoteAuthPolicy | null
+    stepUpTier?: StepUpTier
+    /** 1–1440. */
+    stepUpMutationIdleMinutes?: number
+    /** 1–168 (the one-week `setTimeout` ceiling). */
+    sessionMaxAgeHours?: number
+    /** ≥30 — the audit floor is a refusal here, not a silent clamp. */
+    auditRetentionDays?: number
+  }): Promise<{ ok: true; config: RemoteConfig }>
   /**
-   * Auth mode, MINUS the master switch. `null` restores AUTO; `'off'` is refused
-   * with `auth-off-is-host-anchor-only` and no write, on both transports — the
-   * desktop's own `off` path stays `setRemoteConfig` with its typed confirm.
+   * Close the editor: Save, Cancel, and pane unmount all call it, so the bounded
+   * mode ends on the operator's action rather than only on its TTL. Idempotent —
+   * calling it with no session open is a no-op success.
    */
-  authcfgSetAuthMode(
-    mode: RemoteAuthPolicy | null
-  ): Promise<{ ok: true; mode: RemoteAuthPolicy | null }>
+  authcfgEnd(): Promise<{ ok: true }>
   /**
-   * Rotate the break-glass password.
+   * Rotate the break-glass password. Session-gated like the rest of the area.
    *
    * NOTE for web callers: this disconnects every socket that authenticated with
    * the OLD password — which can include the caller. A password-authenticated
@@ -1689,9 +1728,6 @@ interface RemoteAPI {
    * response.
    */
   authcfgSetPassword(password: string): Promise<{ ok: true }>
-  /** Audit-log retention in days. Clamped to the 30-day floor; returns the
-   *  EFFECTIVE value, which may differ from what was asked for. */
-  authcfgSetRetention(days: number): Promise<{ ok: true; days: number }>
   /**
    * Re-run `tailscale serve` enablement for the running server with
    * `force: true` — it CLAIMS the pinned HTTPS port, overwriting whatever

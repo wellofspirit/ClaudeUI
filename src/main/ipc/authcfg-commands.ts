@@ -24,27 +24,32 @@
  * guard ("no `remote:*` channel is ever registered on the remote transport")
  * survives intact, and the `off` writer is on the other side of it.
  *
- * ## Freshness
+ * ## The settings-editing SESSION (ADR-054 §6 amendment, 2026-08-16)
  *
- * Every WRITE here demands a presence proof inside the MUTATION window on EVERY
- * tier — they behave strong-tier for everyone. The transport gate does this
- * ahead of dispatch (`classifyDispatch` → `authcfg`); the bodies assert it again
- * through the same table, so a future transport that forgets the gate still
- * cannot rewrite the auth surface with a stale proof. Same backstop discipline
- * as `terminal-service.assertAllowed`.
+ * Every WRITE here demands a live settings-editing session on the calling
+ * connection — opened by one deliberate step-up carrying `intent: 'settings'`,
+ * five minutes, revoked by {@link authcfgEnd}, by disconnect, or by its own TTL.
+ * This REPLACED the mutation-window check the verbs shipped with: that made
+ * administering an ambient capability, invisible while held, and it is why the
+ * timing dials had to stay desktop-only as a compensating restriction. A bounded
+ * mode makes them safe to expose.
+ *
+ * The transport gate does this ahead of dispatch (`classifyDispatch` →
+ * `authcfg`); the bodies assert it again through the same table, so a future
+ * transport that forgets the gate still cannot rewrite the auth surface with the
+ * editor locked. Same backstop discipline as `terminal-service.assertAllowed`.
  *
  * {@link authcfgGet} is the ONE exception and deliberately so: it is a `query`,
- * classified `read`, and therefore free on every tier. Reads are free in ADR-054
- * (decision 1) and a settings pane that demanded a ceremony before it could even
- * RENDER the current tier would put the ceremony in front of the explanation of
- * why there is a ceremony. It stays behind `admin` — the same capability the
- * writes and `webauthn:credentials` declare — so only a passkey / break-glass
- * connection sees it at all.
+ * classified `read`, and therefore free. The pane's default state IS the read —
+ * demanding an unlock before the current settings can be DISPLAYED would put the
+ * ceremony in front of the explanation of why there is a ceremony. It stays
+ * behind `admin` — the same capability the writes and `webauthn:credentials`
+ * declare — so only a passkey / break-glass connection sees it at all.
  */
 
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
-  NEEDS_STEP_UP_ERROR
+  NEEDS_SETTINGS_SESSION_ERROR
 } from '../../shared/remote-protocol'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../shared/types'
 import {
@@ -62,7 +67,11 @@ import {
 import { logger } from '../services/logger'
 import { provisionPassword } from '../services/remote-auth'
 import { sanitizedRemoteConfig } from '../services/remote-config-view'
-import { authcfgAllowed } from '../services/step-up-tier'
+import {
+  MAX_SESSION_MAX_AGE_HOURS as MAX_SESSION_MAX_AGE_HOURS_LIMIT,
+  authcfgAllowed,
+  endSettingsSession
+} from '../services/step-up-tier'
 import type { CommandConnection } from './command-registry'
 
 /**
@@ -86,17 +95,33 @@ export interface AuthcfgHost extends AuthSurfaceDisconnector {
 }
 
 /**
- * The freshness backstop. Throws {@link NEEDS_STEP_UP_ERROR} — the same
- * actionable refusal the transport produces, so a client that somehow reached a
- * body directly still gets an answer it can turn into a ceremony rather than an
- * opaque failure.
+ * The session backstop. Throws {@link NEEDS_SETTINGS_SESSION_ERROR} — the same
+ * typed refusal the transport produces, so a client that somehow reached a body
+ * directly still gets the answer that means "re-lock and let the operator press
+ * Edit", rather than the ambient `needs-step-up` its generic gate would silently
+ * cure.
  */
-function assertFresh(connection: CommandConnection): void {
-  if (!authcfgAllowed(connection)) throw new Error(NEEDS_STEP_UP_ERROR)
+function assertSettingsSession(connection: CommandConnection): void {
+  if (!authcfgAllowed(connection)) throw new Error(NEEDS_SETTINGS_SESSION_ERROR)
 }
 
 /** Audit a settings write that is NOT an admission-rule change (no disconnect). */
 function auditSettingsChange(connection: CommandConnection, detail: string): void {
+  auditAuthcfg(connection, 'auth:settings-change', detail)
+}
+
+/**
+ * Audit a SESSION event — the editor opening or closing. Its own channel
+ * because it is not a settings WRITE: nothing about the configuration moved,
+ * only who is currently allowed to move it. (The OPEN row is written by the
+ * transport, which is where the ceremony completes; this file writes the
+ * explicit close.)
+ */
+function auditSettingsSession(connection: CommandConnection, detail: string): void {
+  auditAuthcfg(connection, 'auth:settings-session', detail)
+}
+
+function auditAuthcfg(connection: CommandConnection, channel: string, detail: string): void {
   try {
     appendAuditLog({
       ts: Date.now(),
@@ -105,7 +130,7 @@ function auditSettingsChange(connection: CommandConnection, detail: string): voi
       label: connection.identity.label,
       capability: 'admin',
       kind: 'command',
-      channel: 'auth:settings-change',
+      channel,
       sessionId: null,
       outcome: 'ok',
       detail
@@ -113,7 +138,7 @@ function auditSettingsChange(connection: CommandConnection, detail: string): voi
   } catch (err) {
     logger.error(
       'authcfg',
-      `settings-change audit append failed: ${err instanceof Error ? err.message : String(err)}`
+      `${channel} audit append failed: ${err instanceof Error ? err.message : String(err)}`
     )
   }
 }
@@ -147,81 +172,178 @@ export async function authcfgGet(_connection: CommandConnection): Promise<Remote
 }
 
 /**
- * `authcfg:set-tier` — choose the post-login freshness posture.
- *
- * A tier change IS an admission rule (a connection's tier is snapshotted at
- * authentication), so it rides the shared auth-surface reaction: one audit row
- * plus a 4009 re-admission disconnect for everyone but the actor. The actor
- * keeps its own pre-change snapshot for the rest of its socket — the same
- * deliberate trade the policy path makes, and the snapshot it keeps is the one
- * it just chose.
+ * What one `authcfg:apply` may carry. Every field optional; absent means
+ * "leave alone", which is what lets the pane send only what the operator moved.
  */
-export async function authcfgSetTier(
-  connection: CommandConnection,
-  tier: StepUpTier,
-  host: AuthcfgHost | null = null
-): Promise<{ ok: true; tier: StepUpTier }> {
-  assertFresh(connection)
-  if (typeof tier !== 'string' || !(STEP_UP_TIERS as readonly string[]).includes(tier)) {
-    throw new Error(
-      `Unknown step-up tier "${String(tier)}" — expected one of ${STEP_UP_TIERS.join(', ')}`
-    )
+export interface AuthcfgApplyPatch {
+  /** `null` restores AUTO. `'off'` is refused — host anchor only, forever. */
+  authMode?: RemoteAuthPolicy | null
+  stepUpTier?: StepUpTier
+  stepUpMutationIdleMinutes?: number
+  sessionMaxAgeHours?: number
+  auditRetentionDays?: number
+}
+
+/** Bounds mirrored from `boot-core.ts`'s host-anchor writer — one rule, two doors. */
+const MIN_IDLE_MINUTES = 1
+const MAX_IDLE_MINUTES = 1440
+const MIN_SESSION_MAX_AGE_HOURS = 1
+const MAX_AUDIT_RETENTION_DAYS = 36_500
+
+function assertInteger(value: unknown, label: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${label} must be a whole number between ${min} and ${max}`)
   }
-  await withAuthSurfaceReaction({
-    connection,
-    host,
-    via: 'authcfg:set-tier',
-    mutate: () => setRemoteConfig({ stepUpTier: tier })
-  })
-  // The actor kept its old snapshot (it is spared the re-admission disconnect),
-  // so re-derive it in place — otherwise the one session guaranteed NOT to be
-  // governed by the new tier is the one that chose it.
-  host?.resnapshotConnection(connection.connectionId)
-  return { ok: true, tier }
+  return value
 }
 
 /**
- * `authcfg:set-auth-mode` — the login ceremony axis, MINUS the master switch.
+ * `authcfg:apply` — the settings editor's SAVE (ADR-054 §6 amendment).
  *
- * `null` restores AUTO. `off` is refused with a typed error and no write: it is
- * the auth-DISABLING operation, so it is host-anchor only forever (see this
- * file's header). The refusal is checked before anything else so the mode is
- * never partially applied, and it is deliberately not a generic validation
- * failure — series 2's settings UI has to be able to explain WHY the option is
- * absent from a web client but present on the desktop.
+ * Replaces `set-tier` / `set-auth-mode` / `set-retention`, which were one series
+ * old and are gone rather than deprecated. Three properties the per-field verbs
+ * could not have:
+ *
+ *  - **Validated together, written once.** Every field is checked before
+ *    anything is stored, so a batch with one bad value changes nothing at all.
+ *    A pane that saved four fields through four verbs could leave the surface
+ *    half-moved, with the operator's own connection dropped by the 4009 from
+ *    field two and fields three and four never sent.
+ *  - **One audit row for one operator action.** The reader sees the whole diff
+ *    the human intended, not a scatter of rows to correlate by timestamp.
+ *  - **One re-admission sweep.** Four verbs meant up to four 4009 storms for a
+ *    single Save.
+ *
+ * A zero-change apply is a success that writes nothing and disconnects nobody —
+ * `withAuthSurfaceReaction` already has that discipline (it compares the surface
+ * before and after), and retention-only changes audit without a sweep because
+ * how long the trail is kept does not change who may connect.
  */
-export async function authcfgSetAuthMode(
+export async function authcfgApply(
   connection: CommandConnection,
-  mode: RemoteAuthPolicy | null,
+  patch: AuthcfgApplyPatch,
   host: AuthcfgHost | null = null
-): Promise<{ ok: true; mode: RemoteAuthPolicy | null }> {
-  assertFresh(connection)
-  if (mode === 'off') {
-    logger.warn(
-      'authcfg',
-      `Refused authcfg:set-auth-mode("off") from ${connection.identity.label}: ` +
-        'disabling authentication is host-anchor only (ADR-054 decision 6)'
-    )
-    throw new Error(AUTH_MODE_OFF_HOST_ANCHOR_ERROR)
+): Promise<{ ok: true; config: RemoteConfig }> {
+  assertSettingsSession(connection)
+  if (patch === null || typeof patch !== 'object') {
+    throw new Error('authcfg:apply expects an object of settings to change')
   }
-  if (mode !== null && !(REMOTE_AUTH_POLICIES as readonly string[]).includes(mode)) {
-    throw new Error(
-      `Unknown remote auth policy "${String(mode)}" — expected null (auto) or one of ` +
-        REMOTE_AUTH_POLICIES.filter((p) => p !== 'off').join(', ')
+
+  // ── Validate EVERYTHING first ─────────────────────────────────────────────
+  const write: Parameters<typeof setRemoteConfig>[0] = {}
+
+  if ('authMode' in patch) {
+    const mode = patch.authMode
+    // Checked before anything else, and by identity rather than by falling out
+    // of the generic validation, so the refusal can say WHY: the settings UI has
+    // to explain that this option is absent from a browser and present on the
+    // desktop, not render a shrug.
+    if (mode === 'off') {
+      logger.warn(
+        'authcfg',
+        `Refused authcfg:apply{authMode:"off"} from ${connection.identity.label}: ` +
+          'disabling authentication is host-anchor only (ADR-054 decision 6)'
+      )
+      throw new Error(AUTH_MODE_OFF_HOST_ANCHOR_ERROR)
+    }
+    if (mode !== null && !(REMOTE_AUTH_POLICIES as readonly string[]).includes(mode as string)) {
+      throw new Error(
+        `Unknown remote auth policy "${String(mode)}" — expected null (auto) or one of ` +
+          REMOTE_AUTH_POLICIES.filter((p) => p !== 'off').join(', ')
+      )
+    }
+    write.authPolicy = mode ?? null
+  }
+
+  if ('stepUpTier' in patch) {
+    const tier = patch.stepUpTier
+    if (typeof tier !== 'string' || !(STEP_UP_TIERS as readonly string[]).includes(tier)) {
+      throw new Error(
+        `Unknown step-up tier "${String(tier)}" — expected one of ${STEP_UP_TIERS.join(', ')}`
+      )
+    }
+    write.stepUpTier = tier
+  }
+
+  if ('stepUpMutationIdleMinutes' in patch) {
+    write.stepUpMutationIdleMinutes = assertInteger(
+      patch.stepUpMutationIdleMinutes,
+      'Idle re-check',
+      MIN_IDLE_MINUTES,
+      MAX_IDLE_MINUTES
     )
   }
+
+  if ('sessionMaxAgeHours' in patch) {
+    // The one-week ceiling is not cosmetic: the value becomes a `setTimeout`
+    // delay, and past the signed-32-bit ms limit it wraps and fires at once —
+    // cutting every strong-tier socket at accept.
+    write.sessionMaxAgeHours = assertInteger(
+      patch.sessionMaxAgeHours,
+      'Session length',
+      MIN_SESSION_MAX_AGE_HOURS,
+      MAX_SESSION_MAX_AGE_HOURS_LIMIT
+    )
+  }
+
+  if ('auditRetentionDays' in patch) {
+    // The 30-day FLOOR is a refusal here, not a silent clamp: this arrives from
+    // an editor the operator is looking at, and quietly storing something other
+    // than what they typed is worse than telling them the floor exists.
+    write.auditRetentionDays = assertInteger(
+      patch.auditRetentionDays,
+      'Log retention',
+      MIN_AUDIT_RETENTION_DAYS,
+      MAX_AUDIT_RETENTION_DAYS
+    )
+  }
+
+  // ── Apply atomically, then react ONCE ─────────────────────────────────────
+  const before = getRemoteConfig()?.auditRetentionDays ?? null
   await withAuthSurfaceReaction({
     connection,
     host,
-    via: 'authcfg:set-auth-mode',
-    mutate: () => setRemoteConfig({ authPolicy: mode })
+    via: 'authcfg:apply',
+    mutate: () => setRemoteConfig(write)
   })
-  // Same reason as `authcfg:set-tier`, and it reaches the tier too: auth-mode
-  // `off` FORCES tier `off`, so a mode change can move the actor's EFFECTIVE
-  // tier without the tier column being touched. (The other two verbs in this
-  // namespace move neither the mode nor the tier, so they need no re-snapshot.)
+  // Retention is NOT part of the auth surface (it does not change who may
+  // connect), so the reaction above ignores it — but it is still a settings
+  // change and still owes a row. Only when it actually moved.
+  if (write.auditRetentionDays !== undefined && write.auditRetentionDays !== before) {
+    auditSettingsChange(
+      connection,
+      `audit retention ${before ?? 'default'}→${write.auditRetentionDays} days via authcfg:apply`
+    )
+  }
+  // The actor is spared the re-admission disconnect, so it would otherwise keep
+  // the snapshot it was ADMITTED under — leaving the one session not governed by
+  // the settings that session just chose. Reaches the tier too: auth-mode `off`
+  // FORCES tier `off`, so a mode change can move the effective tier without the
+  // tier column being touched.
   host?.resnapshotConnection(connection.connectionId)
-  return { ok: true, mode }
+  return { ok: true, config: sanitizedRemoteConfig() }
+}
+
+/**
+ * `authcfg:end` — close the settings editor.
+ *
+ * Called on Save, on Cancel, and on the pane unmounting, so the bounded mode
+ * really is bounded by the operator's action rather than only by its TTL. No
+ * session is required to call it and calling it without one is a no-op success:
+ * a client that lost track (a reconnect, a re-render, a Cancel after the TTL
+ * already lapsed) must be able to say "I am done" without having to prove it was
+ * ever editing, and turning that into an error would only teach clients to
+ * swallow it.
+ *
+ * Audited on `auth:settings-session` (an end is a session event, not a settings
+ * write) and only when there WAS something to close — a trail of clients tidying
+ * up after themselves is noise.
+ */
+export async function authcfgEnd(connection: CommandConnection): Promise<{ ok: true }> {
+  const had = (connection.settingsSessionExpiresAt ?? null) !== null
+  endSettingsSession(connection)
+  if (had) auditSettingsSession(connection, 'settings session ended via authcfg:end')
+  return { ok: true }
 }
 
 /**
@@ -238,46 +360,26 @@ export async function authcfgSetAuthMode(
  * secret), so it does not ride the 4009 reaction; it gets its own audit row.
  * `provisionPassword` owns the strength validation, so there is one rule for
  * both transports.
+ *
+ * Kept as its own verb rather than folded into {@link authcfgApply}: a password
+ * is not a config field — it is write-only, it is never read back, and its
+ * disconnect semantics (4008 to the password clients, possibly including the
+ * caller) are nothing like a settings diff's 4009 sweep. It is session-gated
+ * like the rest of the area since the §6 amendment.
  */
 export async function authcfgSetPassword(
   connection: CommandConnection,
   password: string,
   host: AuthcfgHost | null = null
 ): Promise<{ ok: true }> {
-  assertFresh(connection)
+  assertSettingsSession(connection)
   provisionPassword(password)
   auditSettingsChange(connection, 'break-glass password rotated via authcfg:set-password')
   host?.disconnectPasswordClients()
   return { ok: true }
 }
 
-/**
- * `authcfg:set-retention` — audit-log retention window, in days.
- *
- * Clamped to the 30-day FLOOR here as well as on read: retention is now settable
- * from a web client, so "0 days" would otherwise be a one-call erase of the very
- * trail that records the erasure. Returns the EFFECTIVE value so a UI shows what
- * was actually stored rather than what it asked for.
- *
- * Audited but NOT an auth-surface change: how long the trail is kept does not
- * change who may connect, so nobody is disconnected for it.
- */
-export async function authcfgSetRetention(
-  connection: CommandConnection,
-  days: number
-): Promise<{ ok: true; days: number }> {
-  assertFresh(connection)
-  if (typeof days !== 'number' || !Number.isFinite(days)) {
-    throw new Error('Audit retention must be a number of days')
-  }
-  // Upper bound is "effectively keep-all" rather than a policy: it only exists so
-  // a nonsense value cannot overflow the cutoff arithmetic.
-  const effective = Math.min(Math.max(Math.trunc(days), MIN_AUDIT_RETENTION_DAYS), 36_500)
-  const before = getRemoteConfig()?.auditRetentionDays ?? null
-  setRemoteConfig({ auditRetentionDays: effective })
-  auditSettingsChange(
-    connection,
-    `audit retention ${before ?? 'default'}→${effective} days via authcfg:set-retention`
-  )
-  return { ok: true, days: effective }
-}
+// `authcfg:set-retention` is GONE — folded into `authcfg:apply` above, like
+// `set-tier` and `set-auth-mode`. Retention was the one field of the three that
+// never rode the auth-surface reaction, and keeping a separate verb for it would
+// have left the pane with two save paths for one Save button.

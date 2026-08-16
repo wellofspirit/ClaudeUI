@@ -340,7 +340,9 @@ describe('authSurfaceChanged', () => {
     effectiveAuthPolicy: 'legacy',
     passwordBreakGlass: true,
     passkeyTailnetExempt: false,
-    stepUpTier: 'medium'
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4
   }
 
   it('is false for a no-op write (no audit spam, no gratuitous disconnects)', () => {
@@ -391,7 +393,9 @@ describe('authSurfaceChanged', () => {
       effectiveAuthPolicy: 'passkey-always',
       passwordBreakGlass: false,
       passkeyTailnetExempt: false,
-      stepUpTier: 'strong'
+      stepUpTier: 'strong',
+      stepUpMutationIdleMinutes: 15,
+      sessionMaxAgeHours: 1
     }
     expect(authSurfaceChanged(base, tightened)).toBe(true)
     expect(authSurfaceChanged(tightened, base)).toBe(true)
@@ -406,6 +410,8 @@ describe('authSurfaceChanged', () => {
       'effectiveAuthPolicy',
       'passkeyTailnetExempt',
       'passwordBreakGlass',
+      'sessionMaxAgeHours',
+      'stepUpMutationIdleMinutes',
       'stepUpTier'
     ])
     for (const field of fields) {
@@ -413,6 +419,11 @@ describe('authSurfaceChanged', () => {
       if (field === 'authPolicy') flipped.authPolicy = 'off'
       else if (field === 'effectiveAuthPolicy') flipped.effectiveAuthPolicy = 'off'
       else if (field === 'stepUpTier') flipped.stepUpTier = 'strong'
+      // The two DIALS are numbers, not booleans: they joined the surface because
+      // they are snapshotted per connection exactly like the tier, so a change
+      // that skipped the sweep would leave live sockets on the old numbers.
+      else if (field === 'stepUpMutationIdleMinutes') flipped.stepUpMutationIdleMinutes = 15
+      else if (field === 'sessionMaxAgeHours') flipped.sessionMaxAgeHours = 8
       else flipped[field] = !base[field]
       expect(authSurfaceChanged(base, flipped), field).toBe(true)
     }

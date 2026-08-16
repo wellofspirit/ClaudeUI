@@ -13,7 +13,10 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { createStepUpGate } from '../step-up-gate'
-import { NEEDS_STEP_UP_ERROR } from '../../shared/remote-protocol'
+import {
+  NEEDS_SETTINGS_SESSION_ERROR,
+  NEEDS_STEP_UP_ERROR
+} from '../../shared/remote-protocol'
 
 /** An attempt that fails with `needs-step-up` the first `failures` times. */
 function flaky(failures: number): { attempt: () => Promise<string>; calls: () => number } {
@@ -68,9 +71,9 @@ describe('createStepUpGate', () => {
     const demands: (string | null)[] = []
     gate.subscribe((d) => demands.push(d?.channel ?? null))
 
-    const result = gate.intercept('authcfg:set-tier', attempt)
+    const result = gate.intercept('authcfg:apply', attempt)
     await tick()
-    expect(demands).toEqual([null, 'authcfg:set-tier'])
+    expect(demands).toEqual([null, 'authcfg:apply'])
     gate.settle(true)
 
     await expect(result).resolves.toBe('ok')
@@ -136,10 +139,10 @@ describe('createStepUpGate', () => {
     gate.subscribe((d) => {
       if (d) demand = d.channel
     })
-    fireAndForget(gate.intercept('authcfg:set-tier', flaky(1).attempt))
+    fireAndForget(gate.intercept('authcfg:apply', flaky(1).attempt))
     fireAndForget(gate.intercept('session:send', flaky(1).attempt))
     await tick()
-    expect(demand).toBe('authcfg:set-tier')
+    expect(demand).toBe('authcfg:apply')
     gate.settle(false)
   })
 
@@ -150,14 +153,14 @@ describe('createStepUpGate', () => {
       if (d) opened.push(d.channel)
     })
 
-    const first = gate.intercept('authcfg:set-tier', flaky(1).attempt)
+    const first = gate.intercept('authcfg:apply', flaky(1).attempt)
     await tick()
     gate.settle(true)
     await first
 
     const second = gate.intercept('terminal:create', flaky(1).attempt)
     await tick()
-    expect(opened).toEqual(['authcfg:set-tier', 'terminal:create'])
+    expect(opened).toEqual(['authcfg:apply', 'terminal:create'])
     gate.settle(false)
     await expect(second).rejects.toThrow(NEEDS_STEP_UP_ERROR)
   })
@@ -210,11 +213,50 @@ describe('createStepUpGate', () => {
     // by the very first invoke would be invisible to a subscriber that only
     // heard about future changes.
     const gate = createStepUpGate()
-    fireAndForget(gate.intercept('authcfg:set-tier', flaky(1).attempt))
+    fireAndForget(gate.intercept('authcfg:apply', flaky(1).attempt))
     await tick()
     const seen: (string | null)[] = []
     gate.subscribe((d) => seen.push(d?.channel ?? null))
-    expect(seen).toEqual(['authcfg:set-tier'])
+    expect(seen).toEqual(['authcfg:apply'])
     gate.settle(false)
+  })
+})
+
+describe('the settings editor is NEVER cured ambiently (ADR-054 §6 amendment)', () => {
+  it('passes `needs-settings-session` straight through, opening no ceremony', async () => {
+    // THE distinction the amendment turns on. `needs-step-up` means "prove
+    // presence and I will retry what you asked for" — which is exactly what the
+    // gate does, ambiently. Opening the settings editor must never work that
+    // way: a stale pane firing a save would raise a biometric prompt nobody
+    // asked for, and a tap would silently re-enter the administering mode the
+    // amendment exists to bound.
+    const gate = createStepUpGate()
+    let demanded = false
+    gate.subscribe((d) => {
+      if (d) demanded = true
+    })
+    let calls = 0
+    await expect(
+      gate.intercept('authcfg:apply', async () => {
+        calls++
+        throw new Error(NEEDS_SETTINGS_SESSION_ERROR)
+      })
+    ).rejects.toThrow(NEEDS_SETTINGS_SESSION_ERROR)
+
+    expect(demanded, 'no ceremony may be opened for a locked editor').toBe(false)
+    expect(calls, 'and nothing may be retried').toBe(1)
+  })
+
+  it('still cures an ordinary `needs-step-up` on the SAME namespace', async () => {
+    // The two are not "authcfg is exempt": the class of refusal decides, not the
+    // channel. A settings verb refused for staleness of PRESENCE (it cannot be,
+    // today — but the gate must not encode that assumption) is still curable.
+    const gate = createStepUpGate()
+    const { attempt, calls } = flaky(1)
+    const result = gate.intercept('authcfg:apply', attempt)
+    await tick()
+    gate.settle(true)
+    await expect(result).resolves.toBe('ok')
+    expect(calls()).toBe(2)
   })
 })
