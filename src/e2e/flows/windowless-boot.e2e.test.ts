@@ -379,11 +379,11 @@ beforeAll(async () => {
   client.onMessage((msg) => frames.push(msg))
 }, 30000)
 
-afterAll(() => {
-  client?.close()
+afterAll(async () => {
+  await client?.close()
   for (const engine of engines) engine.end()
   getSessionManager()?.cancelAll()
-  core?.remoteServer.stop()
+  await core?.remoteServer.stop()
   core?.automationManager.stopAll()
   if (priorHome.HOME === undefined) delete process.env.HOME
   else process.env.HOME = priorHome.HOME

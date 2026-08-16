@@ -194,7 +194,8 @@ interface RawClient {
     timeoutMs?: number
   ) => Promise<Extract<WsServerMessage, { type: T }>>
   waitForClose: (timeoutMs?: number) => Promise<number>
-  close: () => void
+  /** Resolves once the socket handle is gone, so a teardown can await it. */
+  close: () => Promise<void>
 }
 
 async function rawConnect(port: number): Promise<RawClient> {
@@ -249,11 +250,21 @@ async function rawConnect(port: number): Promise<RawClient> {
       }
     },
     close: () => {
-      try {
-        ws.close()
-      } catch {
-        /* ignore */
-      }
+      if (ws.readyState === WebSocket.CLOSED) return Promise.resolve()
+      return new Promise<void>((resolve) => {
+        // Bounded: a peer that never answers the close handshake must not hang
+        // a teardown, so force the handle shut after a short grace.
+        const grace = setTimeout(() => ws.terminate(), 250)
+        ws.once('close', () => {
+          clearTimeout(grace)
+          resolve()
+        })
+        try {
+          ws.close()
+        } catch {
+          /* ignore */
+        }
+      })
     }
   }
 }
@@ -443,11 +454,11 @@ describe('ADR-054 step-up tiers over the socket', () => {
     terminalService.setWindow(fakeWin as never)
   })
 
-  afterEach(() => {
-    for (const c of clients) c.close()
+  afterEach(async () => {
+    await Promise.all(clients.map((c) => c.close()))
     terminalService.killAll()
     terminalService.setRemoteSink(null)
-    server.stop()
+    await server.stop()
     vi.restoreAllMocks()
   })
 

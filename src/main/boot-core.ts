@@ -243,7 +243,16 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     }
   )
   ipcMain.handle('remote:stop', () => {
-    remoteServer.stop()
+    // Deliberately NOT awaited: every state change the renderer cares about has
+    // already happened synchronously, while the promise only tracks socket
+    // handles closing — which a hostile or sleeping peer can drag out. The
+    // renderer therefore never sees a teardown failure, so log it here.
+    remoteServer.stop().catch((err: unknown) => {
+      logger.error(
+        'boot-core',
+        `Remote server teardown failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    })
   })
   ipcMain.handle('remote:status', () => {
     return remoteServer.getStatus()

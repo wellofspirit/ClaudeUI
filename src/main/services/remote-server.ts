@@ -373,6 +373,64 @@ function holdsBaseRemoteSurface(grants: ReadonlySet<Capability>): boolean {
   return true
 }
 
+/**
+ * How long a teardown waits for a peer's close handshake before forcing the
+ * handle shut. Deliberately short: a stopping server owes nobody a graceful
+ * goodbye, and an unbounded wait would make teardown hostage to a peer that
+ * never answers.
+ */
+const TEARDOWN_GRACE_MS = 250
+
+/**
+ * Budget for the servers themselves. Twice the socket grace, because the socket
+ * sweep may spend the whole of that grace before it forces a handle shut and the
+ * server's own callback can only fire afterwards.
+ */
+const TEARDOWN_SERVER_GRACE_MS = 2 * TEARDOWN_GRACE_MS
+
+/** Close a client socket, resolving once its handle is actually gone. */
+function closeSocket(ws: WebSocket): Promise<void> {
+  if (ws.readyState === WebSocket.CLOSED) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const grace = setTimeout(() => ws.terminate(), TEARDOWN_GRACE_MS)
+    ws.once('close', () => {
+      clearTimeout(grace)
+      resolve()
+    })
+    ws.close(1001, 'Server stopping')
+  })
+}
+
+/** Close the WebSocket server, resolving once ws-lib lets go of it. */
+function closeWsServer(wss: WebSocketServer): Promise<void> {
+  return new Promise<void>((resolve) => {
+    // `close()` defers its callback until every socket ws-lib TRACKS has closed,
+    // which includes pre-auth ones the server never admitted. The caller sweeps
+    // those; this grace keeps a straggler from outliving the teardown anyway.
+    const grace = setTimeout(resolve, TEARDOWN_SERVER_GRACE_MS)
+    wss.close(() => {
+      clearTimeout(grace)
+      resolve()
+    })
+  })
+}
+
+/** Close the HTTP listener, resolving once every connection on it is gone. */
+function closeHttpServer(server: http.Server): Promise<void> {
+  return new Promise<void>((resolve) => {
+    // `close()` alone waits for idle keep-alive sockets to time out; the grace
+    // timer bounds that without cutting off a response that is nearly done.
+    // NOTE: `closeAllConnections()` cannot reach UPGRADED sockets (they leave
+    // the HTTP server's connection list), so this bound holds only because
+    // stop()'s wss.clients sweep terminates every websocket first.
+    const grace = setTimeout(() => server.closeAllConnections(), TEARDOWN_GRACE_MS)
+    server.close(() => {
+      clearTimeout(grace)
+      resolve()
+    })
+  })
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
@@ -777,8 +835,17 @@ export class RemoteServer {
     return { port: this.port, token: this.token, lanUrl: this.tlsServe?.url ?? lanUrl }
   }
 
-  /** Stop the server and disconnect all clients. */
-  stop(): void {
+  /**
+   * Stop the server and disconnect all clients.
+   *
+   * Every observable side effect (timers cleared, clients dropped, git-watch
+   * owner released, status notified) happens synchronously, exactly as before —
+   * callers that do not await keep the old semantics. The returned promise adds
+   * one thing on top: it resolves once the underlying handles (client sockets,
+   * the WebSocket server, the HTTP listener) have actually closed, so a caller
+   * that needs a quiet event loop afterwards (tests, teardown) can wait for it.
+   */
+  async stop(): Promise<void> {
     // Stop tunnel first
     this.tunnel.stop()
     this.e2eKey = null
@@ -849,6 +916,7 @@ export class RemoteServer {
     }
 
     // Disconnect all clients
+    const closed: Array<Promise<void>> = []
     for (const [ws, client] of this.clients) {
       if (client.pingTimer) clearInterval(client.pingTimer)
       if (client.maxAgeTimer) clearTimeout(client.maxAgeTimer)
@@ -856,7 +924,18 @@ export class RemoteServer {
       // `close` handler: `this.clients` is cleared on the next line, so by the
       // time those run there is no connection id left to release.
       terminalService.detachConnection(client.connection.connectionId)
-      ws.close(1001, 'Server stopping')
+      closed.push(closeSocket(ws))
+    }
+
+    // Sweep the sockets ws-lib tracks that `this.clients` does not: one still in
+    // its pre-auth window, or refused at the connection cap / throttle before any
+    // handler was wired, is in neither map — and `wss.close()` waits on all of
+    // them. Their own `'close'` handler clears the pre-auth deadline (see the
+    // handler at the end of handleConnection), so no timer outlives this either.
+    if (this.wss) {
+      for (const ws of this.wss.clients) {
+        if (!this.clients.has(ws)) closed.push(closeSocket(ws))
+      }
     }
     this.clients.clear()
 
@@ -870,11 +949,11 @@ export class RemoteServer {
 
     // Close servers
     if (this.wss) {
-      this.wss.close()
+      closed.push(closeWsServer(this.wss))
       this.wss = null
     }
     if (this.httpServer) {
-      this.httpServer.close()
+      closed.push(closeHttpServer(this.httpServer))
       this.httpServer = null
     }
 
@@ -893,6 +972,8 @@ export class RemoteServer {
     this.lastStartError = null
     logger.info('remote-server', 'Remote server stopped')
     this.notifyStatus()
+
+    await Promise.all(closed)
   }
 
   // ---------------------------------------------------------------------------

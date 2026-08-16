@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import WebSocket from 'ws'
 import * as http from 'node:http'
+import * as net from 'node:net'
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -353,6 +354,37 @@ async function waitUntil(pred: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
+/**
+ * Await `server.stop()` under a bound. A teardown that never resolves — the
+ * exact failure mode a socket ws-lib still tracks produces — then fails as an
+ * assertion instead of hanging the whole file until vitest's own timeout.
+ */
+async function stopWithin(
+  server: RemoteServer,
+  ms: number
+): Promise<'resolved' | 'still pending'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      // `Promise.resolve(...)` rather than `.then` directly: the assertions that
+      // follow — not a TypeError here — are what must catch a stop() that stops
+      // returning a promise.
+      Promise.resolve(server.stop()).then(() => 'resolved' as const),
+      new Promise<'still pending'>((resolve) => {
+        timer = setTimeout(() => resolve('still pending'), ms)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The sockets ws-lib itself tracks — the set `wss.close()` waits on. */
+function trackedSockets(server: RemoteServer): Set<WebSocket> {
+  const { wss } = server as unknown as { wss: { clients: Set<WebSocket> } | null }
+  return wss?.clients ?? new Set()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -367,9 +399,9 @@ describe('RemoteServer', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -511,6 +543,48 @@ describe('RemoteServer', () => {
     // getStatus after stop() should reflect zero clients.
     expect(server.getStatus().connectedClients).toBe(0)
   })
+
+  // The clients are deliberately NOT closed from the test side in either guard
+  // below: stop() alone has to drain them, which is the whole point of it being
+  // awaitable. Closing them here would prove nothing about stop().
+  it('stop() resolves only once every socket it tracks has closed', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await Promise.all([c1.ready, c2.ready])
+    const tracked = trackedSockets(server)
+    expect(tracked.size).toBe(2)
+
+    expect(await stopWithin(server, 3000)).toBe('resolved')
+
+    // Empty, not merely emptying: a worker fork exiting right here has a quiet
+    // event loop rather than two sockets mid-handshake.
+    expect(tracked.size).toBe(0)
+
+    // The listener is released too — the port takes a fresh bind immediately.
+    await new Promise<void>((resolve, reject) => {
+      const probe = net.createServer()
+      probe.once('error', (err) => probe.close(() => reject(err)))
+      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()))
+    })
+  })
+
+  it('stop() drains a PRE-AUTH socket, which is in no client map', async () => {
+    await server.start(port, '127.0.0.1')
+    // Never sends an auth frame: ws-lib tracks it, `this.clients` never does,
+    // and it holds a pre-auth deadline timer the close handler has to clear.
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    const tracked = trackedSockets(server)
+    await waitUntil(() => tracked.size === 1)
+    expect(server.getStatus().connectedClients).toBe(0)
+
+    expect(await stopWithin(server, 3000)).toBe('resolved')
+    expect(tracked.size).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -532,10 +606,10 @@ describe('RemoteServer — git watch owner release', () => {
     releaseSpy = vi.spyOn(gitWatchRegistry, 'releaseOwner')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     releaseSpy.mockRestore()
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -652,7 +726,7 @@ describe('RemoteServer — remote git watching end-to-end', () => {
     gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     gitWatchRegistry.init(null)
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -740,9 +814,9 @@ describe('RemoteServer — mockup HTTP route', () => {
     )
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -906,9 +980,9 @@ describe('RemoteServer — static asset encoding + caching', () => {
     await server.start(port, '127.0.0.1')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1076,9 +1150,9 @@ describe('RemoteServer — /sent-file route', () => {
     fs.writeFileSync(path.join(cwd, 'secret.txt'), 'never delivered')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1226,9 +1300,9 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1393,9 +1467,9 @@ describe('RemoteServer — sync epoch (R7)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1492,9 +1566,9 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
     syncCore.resetCanonicalForTests()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1612,9 +1686,9 @@ describe('RemoteServer — listen failure resets state (M-RM2)', () => {
       const res = await victim.start(freePort, '127.0.0.1')
       expect(res.port).toBe(freePort)
       expect(victim.getStatus().running).toBe(true)
-      victim.stop()
+      await victim.stop()
     } finally {
-      occupant.stop()
+      await occupant.stop()
     }
   })
 })
@@ -1656,7 +1730,7 @@ describe('RemoteServer — lastError (RemoteStatus)', () => {
       await server.start(freePort, '127.0.0.1')
       expect(server.getStatus().lastError).toBeNull()
     } finally {
-      server.stop()
+      await server.stop()
       await new Promise<void>((resolve) => occupant.close(() => resolve()))
     }
   })
@@ -1669,7 +1743,7 @@ describe('RemoteServer — lastError (RemoteStatus)', () => {
     try {
       await expect(server.start(occupiedPort, '127.0.0.1')).rejects.toThrow()
       expect(server.getStatus().lastError).not.toBeNull()
-      server.stop()
+      await server.stop()
       expect(server.getStatus().lastError).toBeNull()
     } finally {
       await new Promise<void>((resolve) => occupant.close(() => resolve()))
@@ -1690,9 +1764,9 @@ describe('RemoteServer — WS origin + limits (M-RM3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1776,9 +1850,9 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1957,7 +2031,7 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     expect(server.getStatus().authMethods).toEqual(['token'])
     provisionPassword(PW, PW_SALT)
     expect(server.getStatus().authMethods).toEqual(['token', 'password'])
-    server.stop()
+    await server.stop()
     expect(server.getStatus().authMethods).toEqual([])
   })
 
@@ -1982,7 +2056,7 @@ describe('RemoteServer — password auth (Phase 2)', () => {
       expect(resp).toMatchObject({ ok: true, method: 'password' })
       ws.close()
     } finally {
-      injected.stop()
+      await injected.stop()
     }
   })
 })
@@ -2001,9 +2075,9 @@ describe('RemoteServer — password throttle budget (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -2078,9 +2152,9 @@ describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -2198,9 +2272,9 @@ describe('RemoteServer — Host allowlist (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -2568,13 +2642,15 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Real timers BEFORE the await: stop() falls back on a real grace timer to
+    // force stubborn handles shut, and a frozen clock would never fire it.
+    vi.useRealTimers()
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
-    vi.useRealTimers()
   })
 
   it('binds loopback (ignoring the requested host) and points serve at the bound port', async () => {
@@ -2726,7 +2802,7 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
 
   it('stop() turns off OUR serve port and clears the retry timer', async () => {
     await server.start(port, '127.0.0.1', { tls: true })
-    server.stop()
+    await server.stop()
     // Fire-and-forget: let the microtask run.
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
@@ -2739,7 +2815,9 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     ts.detection = { state: 'daemon-down', message: 'daemon down' }
     await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
     expect(ts.detectCalls).toBe(1)
-    server.stop()
+    // NOT awaited: fake timers are armed in this test, so stop()'s real-timer
+    // grace fallback could never fire and the await would hang.
+    void server.stop()
     await vi.advanceTimersByTimeAsync(15_000 * 6)
     expect(ts.detectCalls).toBe(1)
   })
@@ -2810,13 +2888,15 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
     remoteConfigRef.current = remoteConfigRow()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Real timers BEFORE the await: stop() falls back on a real grace timer to
+    // force stubborn handles shut, and a frozen clock would never fire it.
+    vi.useRealTimers()
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
-    vi.useRealTimers()
     remoteConfigRef.current = null
   })
 
@@ -2839,7 +2919,7 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
   it('clears the record after a CONFIRMED disable on stop()', async () => {
     await server.start(port, '127.0.0.1', { tls: true })
     serveRecordWrites.length = 0
-    server.stop()
+    await server.stop()
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
     expect(serveRecordWrites).toEqual(['clear'])
@@ -2854,7 +2934,7 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
 
     // The disable exec parks: stop() returns with the CLI call still pending.
     ts.holdDisable = true
-    server.stop()
+    await server.stop()
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
 
@@ -2902,7 +2982,7 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
     await server.start(port, '127.0.0.1', { tls: true })
     serveRecordWrites.length = 0
     ts.disableFailure = new TailscaleServeError('exec-failed', 'daemon went away')
-    server.stop()
+    await server.stop()
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
     expect(serveRecordWrites).toEqual([])
@@ -3176,9 +3256,9 @@ describe('RemoteServer — tailnet identity auth (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -3310,9 +3390,9 @@ describe('RemoteServer — Funnel hard reject (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -3355,9 +3435,9 @@ describe('RemoteServer — Host allowlist in TLS mode (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server?.stop()
+      await server?.stop()
     } catch {
       /* already stopped */
     }
@@ -3420,9 +3500,9 @@ describe('RemoteServer — throttle keying on X-Forwarded-For (Phase 3)', () => 
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server?.stop()
+      await server?.stop()
     } catch {
       /* already stopped */
     }
@@ -3488,9 +3568,9 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }

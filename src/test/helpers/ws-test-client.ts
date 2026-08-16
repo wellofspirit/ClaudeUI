@@ -24,12 +24,15 @@
  *   })
  *   await client.ready
  *   const res = await client.invoke('some:channel', arg1, arg2)
- *   client.close()
+ *   await client.close()
  */
 
 import WebSocket from 'ws'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import type { WsServerMessage, WsInvokeResponse, WsEvent } from '../../shared/remote-protocol'
+
+/** How long `close()` waits for the close handshake before terminating. */
+const CLOSE_GRACE_MS = 250
 
 export interface ConnectOptions {
   url: string
@@ -50,7 +53,12 @@ export interface RemoteClient {
   onMessage: (cb: (msg: WsServerMessage) => void) => () => void
   /** Send a raw WsClientMessage (encrypts if E2E is active). */
   send: (msg: unknown) => Promise<void>
-  close: () => void
+  /**
+   * Close the socket. Resolves once the handle is actually gone, so a teardown
+   * can await it; callers that ignore the promise keep the old fire-and-forget
+   * behavior.
+   */
+  close: () => Promise<void>
   /** Resolves once the auth handshake (and optional E2E activation) is done. */
   ready: Promise<void>
   /** True after the server's auth-response (ok:true) has been received. */
@@ -242,16 +250,26 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
       rawListeners.add(cb)
       return () => rawListeners.delete(cb)
     },
-    close() {
+    close(): Promise<void> {
       for (const [id, req] of pending) {
         req.reject(new Error('Connection closed'))
         pending.delete(id)
       }
-      try {
-        ws.close()
-      } catch {
-        /* ignore */
-      }
+      if (ws.readyState === WebSocket.CLOSED) return Promise.resolve()
+      return new Promise<void>((resolve) => {
+        // Bounded: a peer that never answers the close handshake must not hang
+        // a teardown, so force the handle shut after a short grace.
+        const grace = setTimeout(() => ws.terminate(), CLOSE_GRACE_MS)
+        ws.once('close', () => {
+          clearTimeout(grace)
+          resolve()
+        })
+        try {
+          ws.close()
+        } catch {
+          /* ignore */
+        }
+      })
     }
   }
 

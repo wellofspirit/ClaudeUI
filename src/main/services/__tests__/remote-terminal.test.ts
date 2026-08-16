@@ -234,12 +234,12 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     token = started.token
   })
 
-  afterEach(() => {
-    for (const c of clients) c.close()
+  afterEach(async () => {
+    await Promise.all(clients.map((c) => c.close()))
     terminalService.killAll()
     terminalService.setRemoteSink(null)
     terminalService.setWindow(null)
-    server.stop()
+    await server.stop()
     vi.restoreAllMocks()
   })
 
@@ -257,9 +257,9 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
    * to the server — read the same way remote-server.test.ts does.
    */
   async function restartInTunnelMode(): Promise<string> {
-    for (const c of clients) c.close()
+    await Promise.all(clients.map((c) => c.close()))
     clients.length = 0
-    server.stop()
+    await server.stop()
     server = new RemoteServer(
       new RemoteDispatcher(),
       passwordProvider() as never,
@@ -648,7 +648,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
 
   it('refuses step-up with an actionable message when no password is configured', async () => {
     remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
-    server.stop()
+    await server.stop()
     const dispatcher = new RemoteDispatcher()
     server = new RemoteServer(dispatcher, passwordProvider(false) as never, tailscaleStub as never)
     terminalService.setRemoteSink(server.terminalSink())

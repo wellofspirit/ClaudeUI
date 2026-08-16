@@ -577,7 +577,7 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     await browser?.close().catch(() => {})
 
     try {
-      core?.remoteServer.stop()
+      await core?.remoteServer.stop()
       const { getSessionManager } = await import('../../main/ipc/session.ipc')
       getSessionManager()?.cancelAll()
       core?.automationManager.stopAll()

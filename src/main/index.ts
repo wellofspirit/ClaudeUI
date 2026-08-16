@@ -688,7 +688,7 @@ app.whenReady().then(() => {
       currentPluginManager?.stopAll()
       core?.automationManager.stopAll()
       credentialSync.stop()
-      core?.remoteServer.stop()
+      void core?.remoteServer.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       serviceSession.stop()
       // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
