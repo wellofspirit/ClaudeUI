@@ -90,8 +90,13 @@ function remoteDeclarations(): Map<string, Capability> {
   // (`handleRemote(STREAM_WATCH_COMMAND)`) is still a remote registration; the
   // constant exists precisely so the two surfaces cannot declare it differently,
   // and a scan that only read the inline form would report it as missing.
-  const src =
-    read('src/main/ipc/remote-handlers.ts') + '\n' + read('src/main/ipc/stream-watch.ts')
+  const src = [
+    'src/main/ipc/remote-handlers.ts',
+    'src/main/ipc/stream-watch.ts',
+    'src/main/ipc/git-watch.ts'
+  ]
+    .map(read)
+    .join('\n')
   const map = new Map<string, Capability>()
   const re = /channel:\s*['"]([^'"]+)['"],\s*capability:\s*['"]([^'"]+)['"]/g
   for (let m = re.exec(src); m; m = re.exec(src)) map.set(m[1], m[2] as Capability)

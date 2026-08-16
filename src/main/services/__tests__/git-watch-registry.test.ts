@@ -4,11 +4,12 @@
  * Layer 1 unit tests for GitWatchRegistry.
  *
  * gitServiceManager is mocked: what matters here is the arbitration between
- * owners (who starts the poller, who merely attaches, when it is torn down), not
- * real git output. The mock also lets us assert the invariant that motivated the
- * registry — `GitService.startPolling()` holds a SINGLE callback, so a second
- * `startPolling()` on the same cwd would silently clobber the first owner's
- * broadcast.
+ * per-connection interest sets (whose set starts the poller, who merely joins,
+ * when the union empties), not real git output. The mock also lets us assert the
+ * two invariants the mobile git pill depends on — `GitService.startPolling()`
+ * holds a SINGLE callback, so a second `startPolling()` on the same cwd would
+ * silently clobber the other surface's broadcast, and every watch answers with a
+ * status rather than waiting for the tree to change.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -90,61 +91,78 @@ beforeEach(() => {
 
 const svcFor = (cwd: string): FakeService => managerMock.services.get(cwd)!
 
-describe('GitWatchRegistry — start / attach', () => {
-  it('the first owner of a cwd starts the poller', () => {
-    registry.startWatching(CWD, 'desktop')
+describe('GitWatchRegistry — the union drives the poller', () => {
+  it('the first watcher of a cwd starts the one poller', () => {
+    registry.setWatch('c1', [CWD])
     expect(managerMock.get).toHaveBeenCalledWith(CWD)
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)
     expect(svcFor(CWD).startPolling.mock.calls[0][1]).toBe(5000)
-    expect(registry.ownersOf(CWD)).toEqual(['desktop'])
+    expect(registry.watchersOf(CWD)).toEqual(['c1'])
+    expect(registry.watchedCwds()).toEqual([CWD])
   })
 
   it('broadcasts every poll to the injected fan-out', () => {
-    registry.startWatching(CWD, 'desktop')
+    registry.setWatch('c1', [CWD])
     svcFor(CWD).tick(status({ linesAdded: 3 }))
     expect(seen).toEqual([{ cwd: CWD, status: status({ linesAdded: 3 }) }])
   })
 
-  it('a second owner does NOT restart the poller but DOES get the current status', () => {
-    registry.startWatching(CWD, 'desktop')
+  it('a second connection does NOT restart the poller but DOES get the current status', () => {
+    registry.setWatch('desktop', [CWD])
     svcFor(CWD).tick(status({ linesAdded: 7 }))
     seen = []
 
-    registry.startWatching(CWD, 'remote')
+    registry.setWatch('phone', [CWD])
 
-    // The critical assertion: a second startPolling() would have replaced the
-    // desktop's callback.
+    // THE CLOBBER GUARD: a second startPolling() would have replaced the
+    // desktop's callback, which is the bug this registry exists for.
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)
-    expect(registry.ownersOf(CWD).sort()).toEqual(['desktop', 'remote'])
+    expect(registry.watchersOf(CWD).sort()).toEqual(['desktop', 'phone'])
     // Replayed immediately — the poller only fires on CHANGE from here on, so a
-    // late joiner would otherwise be blind until the tree moves.
+    // late joiner would otherwise be blind until the tree moves. This is the
+    // half of always-emit-first the fingerprint reset cannot cover.
     expect(seen).toEqual([{ cwd: CWD, status: status({ linesAdded: 7 }) }])
   })
 
-  it('a second owner joining before the first poll lands replays nothing (the poll delivers)', () => {
-    registry.startWatching(CWD, 'desktop')
-    registry.startWatching(CWD, 'remote')
+  it('RE-STATING an unchanged set still emits (a renderer reload keeps its id)', () => {
+    registry.setWatch('desktop', [CWD])
+    svcFor(CWD).tick(status({ linesAdded: 7 }))
+    seen = []
+
+    registry.setWatch('desktop', [CWD])
+
+    expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)
+    // A reloaded renderer has an empty store and the SAME connection id. If an
+    // unchanged set were a silent no-op its git pill would stay blank until the
+    // working tree next changed — the regression class the pill fix closed.
+    expect(seen).toEqual([{ cwd: CWD, status: status({ linesAdded: 7 }) }])
+  })
+
+  it('a second connection joining before the first poll lands replays nothing (the poll delivers)', () => {
+    registry.setWatch('c1', [CWD])
+    registry.setWatch('c2', [CWD])
     expect(seen).toEqual([])
 
     svcFor(CWD).tick(status({ linesAdded: 1 }))
     expect(seen).toHaveLength(1)
   })
 
-  it('both owners keep receiving broadcasts after the second joins (CLOBBER GUARD)', () => {
-    registry.startWatching(CWD, 'desktop')
-    const desktopCb = svcFor(CWD).startPolling.mock.calls[0][0] as (s: GitStatusData) => void
-    registry.startWatching(CWD, 'remote')
+  it('every watcher keeps receiving after another joins (one callback per cwd)', () => {
+    registry.setWatch('desktop', [CWD])
+    const theOnlyCallback = svcFor(CWD).startPolling.mock.calls[0][0] as (
+      s: GitStatusData
+    ) => void
+    registry.setWatch('phone', [CWD])
 
-    // Only one callback ever existed, and it is still the live one.
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)
     seen = []
-    desktopCb(status({ linesAdded: 2 }))
+    theOnlyCallback(status({ linesAdded: 2 }))
     expect(seen).toEqual([{ cwd: CWD, status: status({ linesAdded: 2 }) }])
   })
 
-  it('tracks cwds independently', () => {
-    registry.startWatching(CWD, 'desktop')
-    registry.startWatching(OTHER, 'remote')
+  it('tracks cwds independently, and one connection may watch several', () => {
+    registry.setWatch('c1', [CWD, OTHER])
+    expect(registry.watchedCwds()).toEqual([CWD, OTHER].sort())
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)
     expect(svcFor(OTHER).startPolling).toHaveBeenCalledTimes(1)
     svcFor(OTHER).tick(status({ branch: 'dev' }))
@@ -152,119 +170,122 @@ describe('GitWatchRegistry — start / attach', () => {
   })
 })
 
-describe('GitWatchRegistry — stop', () => {
-  it('a partial stop keeps the poller running for the remaining owner', () => {
-    registry.startWatching(CWD, 'desktop')
-    registry.startWatching(CWD, 'remote')
+describe('GitWatchRegistry — a shrinking union stops polling', () => {
+  it('dropping a cwd from one set keeps the poller for the remaining watcher', () => {
+    registry.setWatch('desktop', [CWD])
+    registry.setWatch('phone', [CWD])
 
-    registry.stopWatching(CWD, 'remote')
+    registry.setWatch('phone', [])
 
     expect(svcFor(CWD).stopPolling).not.toHaveBeenCalled()
     expect(managerMock.release).not.toHaveBeenCalled()
-    expect(registry.ownersOf(CWD)).toEqual(['desktop'])
+    expect(registry.watchersOf(CWD)).toEqual(['desktop'])
 
     seen = []
     svcFor(CWD).tick(status({ linesAdded: 4 }))
     expect(seen).toHaveLength(1)
   })
 
-  it('the last stop tears down: stopPolling + manager release + dropped cache', () => {
-    registry.startWatching(CWD, 'desktop')
+  it('the last watcher leaving tears down: stopPolling + release + dropped cache', () => {
+    registry.setWatch('desktop', [CWD])
     svcFor(CWD).tick(status({ linesAdded: 5 }))
     const svc = svcFor(CWD)
 
-    registry.stopWatching(CWD, 'desktop')
+    registry.setWatch('desktop', [])
 
     expect(svc.stopPolling).toHaveBeenCalledTimes(1)
     expect(managerMock.release).toHaveBeenCalledWith(CWD)
-    expect(registry.ownersOf(CWD)).toEqual([])
+    expect(registry.watchersOf(CWD)).toEqual([])
+    expect(registry.watchedCwds()).toEqual([])
 
-    // The cached status went with the entry: re-watching starts a fresh poller
-    // rather than replaying stale state (GitService's own fingerprint reset
-    // guarantees that poller emits).
+    // The cached status went with the entry: re-watching starts a FRESH poller
+    // rather than replaying stale state, and GitService's own fingerprint reset
+    // guarantees that poller emits on its first tick.
     seen = []
-    registry.startWatching(CWD, 'desktop')
+    registry.setWatch('desktop', [CWD])
     expect(seen).toEqual([])
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(2)
   })
 
-  it('an owner that started twice needs two stops (refcounted per owner)', () => {
-    registry.startWatching(CWD, 'desktop')
-    registry.startWatching(CWD, 'desktop')
+  it('a set is REPLACED, not merged — switching cwd stops the old one', () => {
+    registry.setWatch('c1', [CWD])
+    registry.setWatch('c1', [OTHER])
 
-    registry.stopWatching(CWD, 'desktop')
-    expect(svcFor(CWD).stopPolling).not.toHaveBeenCalled()
-    expect(registry.ownersOf(CWD)).toEqual(['desktop'])
-
-    registry.stopWatching(CWD, 'desktop')
     expect(svcFor(CWD).stopPolling).toHaveBeenCalledTimes(1)
-    expect(managerMock.release).toHaveBeenCalledWith(CWD)
+    expect(registry.watchedCwds()).toEqual([OTHER])
+    expect(registry.watchersOf(OTHER)).toEqual(['c1'])
   })
 
   it('a tick that settles after teardown is dropped', () => {
-    registry.startWatching(CWD, 'desktop')
+    registry.setWatch('c1', [CWD])
     const svc = svcFor(CWD)
-    registry.stopWatching(CWD, 'desktop')
+    registry.setWatch('c1', [])
     seen = []
     svc.tick(status({ linesAdded: 9 }))
     expect(seen).toEqual([])
   })
 
-  it('stopWatching is a no-op for an unknown cwd or an owner that never started', () => {
-    registry.startWatching(CWD, 'desktop')
-    expect(() => registry.stopWatching('/nope', 'desktop')).not.toThrow()
-    registry.stopWatching(CWD, 'remote')
+  it('an empty set from a connection that watches nothing is a no-op', () => {
+    registry.setWatch('desktop', [CWD])
+    expect(() => registry.setWatch('phone', [])).not.toThrow()
     expect(svcFor(CWD).stopPolling).not.toHaveBeenCalled()
     expect(managerMock.release).not.toHaveBeenCalled()
-    expect(registry.ownersOf(CWD)).toEqual(['desktop'])
+    expect(registry.watchersOf(CWD)).toEqual(['desktop'])
   })
 })
 
-describe('GitWatchRegistry — releaseOwner', () => {
-  it('drops the owner from every cwd it holds and tears down the orphans', () => {
-    registry.startWatching(CWD, 'remote')
-    registry.startWatching(CWD, 'desktop')
-    registry.startWatching(OTHER, 'remote')
-    registry.startWatching(OTHER, 'remote') // count 2 — releaseOwner ignores counts
+describe('GitWatchRegistry — releaseConnection (the socket died)', () => {
+  it('drops the connection from every cwd it held and tears down the orphans', () => {
+    registry.setWatch('phone', [CWD, OTHER])
+    registry.setWatch('desktop', [CWD])
     const svcOther = svcFor(OTHER)
 
-    registry.releaseOwner('remote')
+    registry.releaseConnection('phone')
 
-    // CWD still has the desktop owner → poller survives.
+    // CWD still has the desktop -> poller survives.
     expect(svcFor(CWD).stopPolling).not.toHaveBeenCalled()
-    expect(registry.ownersOf(CWD)).toEqual(['desktop'])
-    // OTHER had only the remote owner → torn down despite the refcount of 2.
+    expect(registry.watchersOf(CWD)).toEqual(['desktop'])
+    // OTHER had only the phone -> torn down. Under the retired collective-owner
+    // model this could only happen once the LAST client disconnected.
     expect(svcOther.stopPolling).toHaveBeenCalledTimes(1)
     expect(managerMock.release).toHaveBeenCalledWith(OTHER)
-    expect(registry.ownersOf(OTHER)).toEqual([])
+    expect(registry.watchersOf(OTHER)).toEqual([])
   })
 
-  it('releasing an owner that holds nothing is a no-op', () => {
-    registry.startWatching(CWD, 'desktop')
-    expect(() => registry.releaseOwner('remote')).not.toThrow()
+  it('releasing a connection that holds nothing is a no-op', () => {
+    registry.setWatch('desktop', [CWD])
+    expect(() => registry.releaseConnection('phone')).not.toThrow()
     expect(svcFor(CWD).stopPolling).not.toHaveBeenCalled()
     expect(managerMock.release).not.toHaveBeenCalled()
-    expect(registry.ownersOf(CWD)).toEqual(['desktop'])
+    expect(registry.watchersOf(CWD)).toEqual(['desktop'])
   })
 
   it('releasing on an empty registry is a no-op', () => {
-    expect(() => registry.releaseOwner('remote')).not.toThrow()
+    expect(() => registry.releaseConnection('phone')).not.toThrow()
     expect(managerMock.release).not.toHaveBeenCalled()
+  })
+
+  it('a re-watch after release starts a fresh poller (reconnect)', () => {
+    registry.setWatch('phone', [CWD])
+    registry.releaseConnection('phone')
+    registry.setWatch('phone-2', [CWD])
+    expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(2)
+    expect(registry.watchersOf(CWD)).toEqual(['phone-2'])
   })
 })
 
 describe('GitWatchRegistry — fan-out injection', () => {
-  it('tracks owners and polls even before init() installs a broadcast', () => {
+  it('tracks watchers and polls even before init() installs a broadcast', () => {
     const bare = new GitWatchRegistry()
-    bare.startWatching(CWD, 'remote')
+    bare.setWatch('c1', [CWD])
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)
     // No broadcaster yet: the tick must not throw, and the status is cached so a
-    // later owner still gets it.
+    // later watcher still gets it.
     expect(() => svcFor(CWD).tick(status({ linesAdded: 6 }))).not.toThrow()
 
     const later: GitStatusData[] = []
     bare.init((_cwd, s) => later.push(s))
-    bare.startWatching(CWD, 'desktop')
+    bare.setWatch('c2', [CWD])
     expect(later).toEqual([status({ linesAdded: 6 })])
   })
 })

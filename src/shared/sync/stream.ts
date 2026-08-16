@@ -73,15 +73,74 @@ export interface StreamFrame {
 }
 
 /**
+ * One PASS-THROUGH emission on the wire — the lane's second flavor (phase 5 S2).
+ *
+ * The three TAILS (`session:bash-output`, `session:background-output`,
+ * `automation:stream-event`) are volatile for exactly the reason the deltas are —
+ * a noisy command emits thousands of them and every one used to take a ring seq —
+ * but they are NOT text-offset streams: they carry counters and objects
+ * (`{toolUseId, output, totalLines, totalBytes}`), replace rather than
+ * accumulate, and have no canonical field to accumulate INTO. Forcing them into
+ * {@link StreamFrame}'s model would mean inventing an accumulation nothing reads.
+ *
+ * So they ride the lane verbatim: the emission `(channel, args)` exactly as the
+ * emitter sent it, filtered by the same per-connection watch set, never ringed,
+ * never logged, encrypted on tunnels like every frame. The client dispatches it
+ * into the SAME per-channel listener registry the event lane uses, so the
+ * existing listeners keep working unchanged — only the transport moved.
+ *
+ * **Honest-lossy, by contract.** There is no offset, so there is no replay and no
+ * refetch: a chunk that was dropped (pre-ready, backpressure, an unwatched
+ * moment) is simply gone. That is safe because a tail is a PREVIEW — the durable
+ * record is the event lane's `session:tool-result` / `automation:run-message`,
+ * which always survives, is ringed, and is what a reconnecting client replays.
+ */
+export interface StreamEventFrame {
+  type: 'stream-ev'
+  channel: string
+  args: unknown[]
+}
+
+/** Either flavor of the volatile lane. Both transports carry both. */
+export type LaneFrame = StreamFrame | StreamEventFrame
+
+/** Structural validation for an inbound pass-through frame (single source). */
+export function isStreamEventFrame(value: unknown): value is StreamEventFrame {
+  if (!value || typeof value !== 'object') return false
+  const f = value as Record<string, unknown>
+  return f.type === 'stream-ev' && typeof f.channel === 'string' && Array.isArray(f.args)
+}
+
+/**
  * Cap on a connection's watch set.
  *
  * The same reasoning as `MAX_POOL_INDEX` (sync-core.md §Terminal): the payload is
  * an array a remote client chooses the length of, and the server keeps it for the
  * socket's lifetime, so an unbounded one is a main-process memory bomb reachable
  * from a single frame. 32 is far above any real client — the UI watches ONE
- * session — and small enough that 100 sockets cost nothing.
+ * session — and small enough that 100 sockets cost nothing. Applied to EACH set
+ * of a `stream:watch` (sessions, automations) independently.
  */
 export const MAX_STREAM_WATCH = 32
+
+/**
+ * Per-connection outbound budget for the stream lane (phase 5 S2).
+ *
+ * The same high-water mark the remote PTY uses
+ * (`REMOTE_BACKPRESSURE_HIGH_WATER_BYTES`, pty-manager.ts) — a socket queueing a
+ * megabyte is not keeping up, and the frames behind it are being generated at
+ * token rate. The PTY answers by pausing the child; a stream lane cannot pause an
+ * LLM, so it DROPS instead, and only on this lane:
+ *
+ *  - a text-stream frame drops safely because the next delivered frame's offset
+ *    will not match and the client's re-watch replays the coalesced value (the S1
+ *    cure, already built);
+ *  - a tail frame drops safely because it is lossy by contract, and its durable
+ *    record rides the event lane;
+ *  - the EVENT lane is never dropped. A missing event is a permanent hole in a
+ *    seq-ordered stream, which is what the ring and the cursor exist to prevent.
+ */
+export const STREAM_BACKPRESSURE_BYTES = 1024 * 1024
 
 /**
  * Structural validation for an inbound frame. The single source both transports
@@ -149,6 +208,44 @@ export function parseStreamId(streamId: string): ParsedStreamId | null {
 /** The session a frame belongs to — what the per-connection watch set filters on. */
 export function sessionIdOfStream(streamId: string): string | null {
   return parseStreamId(streamId)?.routingId ?? null
+}
+
+/**
+ * What a connection has to be watching to receive a pass-through frame.
+ *
+ * Two scopes, because the tails answer to two different selections: the two
+ * session tails belong to the session the client is looking at (the same set
+ * `stream:watch`'s `sessionIds` already carries), and the automation tail belongs
+ * to the automation surface.
+ *
+ * **`automation:stream-event` is scoped by AUTOMATION, not by run.** Its payload
+ * is `{automationId, type, text}` and carries no run id — the renderer derives
+ * "is this the run I am viewing" from its own store (`useAutomationEvents`'s
+ * `viewingLiveStream`), which it can still do because every frame is delivered
+ * verbatim. Minting a per-run identity here would mean inventing one the emitter
+ * does not have. The coarser granularity is recorded in
+ * docs/architecture/sync-channels.md rather than papered over.
+ *
+ * Returns null for a payload that names no scope — a malformed emission, which is
+ * dropped rather than broadcast.
+ */
+export type LaneScope =
+  | { kind: 'session'; id: string }
+  | { kind: 'automation'; id: string }
+
+export function streamEventScopeOf(frame: StreamEventFrame): LaneScope | null {
+  if (frame.channel === 'automation:stream-event') {
+    const data = frame.args[0] as { automationId?: unknown } | undefined
+    return typeof data?.automationId === 'string' && data.automationId !== ''
+      ? { kind: 'automation', id: data.automationId }
+      : null
+  }
+  // Every other pass-through channel is `session:*` and session-scoped by
+  // position (`args[0] = routingId`), the wire encoding contract 2 defines.
+  const routingId = frame.args[0]
+  return typeof routingId === 'string' && routingId !== ''
+    ? { kind: 'session', id: routingId }
+    : null
 }
 
 // ---------------------------------------------------------------------------

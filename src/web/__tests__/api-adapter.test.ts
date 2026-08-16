@@ -4,8 +4,9 @@
  * Focus: the git live-watching methods. They used to be `async () => {}`
  * no-ops ("Git polling not supported in remote"), so `gitStatus` in the store
  * stayed null forever and GitChangesPill — which bails on a null status — never
- * rendered on the remote web client at any width. They now invoke the real
- * channels, which the remote server routes into the shared gitWatchRegistry.
+ * rendered on the remote web client at any width. They are now one replace-set
+ * verb (`git:watch`, phase 5 S2) which the remote server routes into the shared
+ * gitWatchRegistry as this connection'''s interest.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -59,19 +60,19 @@ beforeEach(() => {
 })
 
 describe('web api-adapter — git live watching', () => {
-  it('gitStartWatching invokes git:start-watching with the cwd (GUARD)', async () => {
-    await api.gitStartWatching('/repo/app')
-    expect(connection.invoke).toHaveBeenCalledWith('git:start-watching', '/repo/app')
+  it('watchGit invokes git:watch with the cwd set (GUARD)', async () => {
+    await api.watchGit(['/repo/app'])
+    expect(connection.invoke).toHaveBeenCalledWith('git:watch', { cwds: ['/repo/app'] })
   })
 
-  it('gitStopWatching invokes git:stop-watching with the cwd (GUARD)', async () => {
-    await api.gitStopWatching('/repo/app')
-    expect(connection.invoke).toHaveBeenCalledWith('git:stop-watching', '/repo/app')
+  it('an empty set is how a client stops watching — there is no stop verb', async () => {
+    await api.watchGit([])
+    expect(connection.invoke).toHaveBeenCalledWith('git:watch', { cwds: [] })
   })
 
   it('surfaces a safeHandler error envelope as a rejection', async () => {
     connection.invoke.mockResolvedValueOnce({ ok: false, error: 'not a repo' })
-    await expect(api.gitStartWatching('/repo/app')).rejects.toThrow('not a repo')
+    await expect(api.watchGit(['/repo/app'])).rejects.toThrow('not a repo')
   })
 
   // The `git:status-update` DELIVERY test moved out of this file with SyncCore

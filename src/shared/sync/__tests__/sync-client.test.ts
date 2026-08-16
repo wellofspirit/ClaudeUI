@@ -289,3 +289,79 @@ describe('SyncClient — catchup and full state', () => {
     expect(client.getLastSeq()).toBe(43)
   })
 })
+
+describe('SyncClient — the volatile lane (phase 5)', () => {
+  const tail = (channel: string, ...args: unknown[]): unknown => ({
+    type: 'stream-ev',
+    channel,
+    args
+  })
+
+  it('dispatches a pass-through frame into the ORDINARY per-channel listeners', () => {
+    // The whole point of the flavor: the three tails changed transport, not
+    // meaning, so a listener written before phase 5 keeps working verbatim.
+    const { client, dispatched, subscribe } = makeClient()
+    subscribe('session:bash-output')
+    client.markReady()
+
+    client.receiveStreamEvent(tail('session:bash-output', 'rid-1', { output: 'hi' }))
+
+    expect(dispatched).toEqual([['session:bash-output', 'rid-1', { output: 'hi' }]])
+  })
+
+  it('never touches the cursor, the gap check, or the raw-event taps', () => {
+    // A tail carries no seq. Advancing `lastSeq` for one would make the client
+    // claim it had applied events it never saw — the exact hole the ack
+    // discipline exists to prevent — and feeding the replica's fold would hand
+    // `applyEvent` a channel that has no branch.
+    const { client, requestResync } = makeClient()
+    const taps: unknown[] = []
+    client.onAnyEvent((e) => taps.push(e))
+    client.applyFullState(snapshot(7), 'epoch-A', 7)
+    client.markReady()
+
+    client.receiveStreamEvent(tail('session:bash-output', 'rid-1', { output: 'hi' }))
+
+    expect(client.getLastSeq()).toBe(7)
+    expect(taps).toEqual([])
+    expect(requestResync).not.toHaveBeenCalled()
+  })
+
+  it('DROPS pre-ready frames — a deliberate loss, unlike an event', () => {
+    // There is no replay to supersede a missed tail (it has no accumulation), so
+    // this really is a loss. It is the honest one: the durable record is the
+    // tool_result on the event lane, which IS buffered by the gate.
+    const { client, dispatched, subscribe } = makeClient()
+    subscribe('session:bash-output')
+
+    client.receiveStreamEvent(tail('session:bash-output', 'rid-1', { output: 'early' }))
+    client.markReady()
+
+    expect(dispatched).toEqual([])
+  })
+
+  it('refuses a malformed frame rather than dispatching a broken payload', () => {
+    const { client, dispatched, subscribe } = makeClient()
+    subscribe('session:bash-output')
+    client.markReady()
+
+    client.receiveStreamEvent({ type: 'stream-ev', channel: 'session:bash-output' })
+    client.receiveStreamEvent({ type: 'stream', streamId: 'rid-1/text' })
+    client.receiveStreamEvent(null)
+
+    expect(dispatched).toEqual([])
+  })
+
+  it('a throwing listener cannot stop the others (same fence as an event)', () => {
+    const { client, dispatched, subscribe } = makeClient()
+    client.on('session:bash-output')(() => {
+      throw new Error('boom')
+    })
+    subscribe('session:bash-output')
+    client.markReady()
+
+    client.receiveStreamEvent(tail('session:bash-output', 'rid-1', { output: 'hi' }))
+
+    expect(dispatched).toEqual([['session:bash-output', 'rid-1', { output: 'hi' }]])
+  })
+})

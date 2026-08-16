@@ -1224,8 +1224,17 @@ interface GitAPI {
   gitPushWithUpstream(cwd: string, branch: string): Promise<void>
   gitPull(cwd: string): Promise<{ summary: string }>
   gitFetch(cwd: string): Promise<void>
-  gitStartWatching(cwd: string): Promise<void>
-  gitStopWatching(cwd: string): Promise<void>
+  /**
+   * Replace this connection's set of git-watched cwds (phase 5 S2).
+   *
+   * The union of every connection's set drives the host's polling, so `[]` is how
+   * a client stops watching and there is no separate stop verb. Per-connection:
+   * the set dies with the socket, which is why the watcher re-sends on every
+   * answered `sync`. Bounded server-side (`MAX_GIT_WATCH`); an over-long set is
+   * refused rather than clipped. Answering always emits a `git:status-update` for
+   * every cwd in the set — a fresh poller's first tick, or the cached status.
+   */
+  watchGit(cwds: string[]): Promise<void>
 }
 
 interface McpAPI {
@@ -1317,8 +1326,13 @@ interface TerminalAPI {
    * sessions as `offset: 0` frames, which is what makes re-sending the same set
    * the cure for a mid-connection offset mismatch. Bounded server-side
    * (`MAX_STREAM_WATCH`); an over-long set is refused rather than clipped.
+   *
+   * `automationIds` is the lane's second scope (phase 5 S2) — what
+   * `automation:stream-event` is filtered by. Replaced independently, so omitting
+   * it leaves the automation set alone; pass `[]` to stop watching automations.
+   * Automation-level, not run-level: the emission carries no run id.
    */
-  watchStreams(sessionIds: string[]): Promise<void>
+  watchStreams(sessionIds: string[], automationIds?: string[]): Promise<void>
   /**
    * Run the step-up ceremony with the operator's remote-access password.
    * Desktop resolves `{ok:true}` without a ceremony — there is nothing to step

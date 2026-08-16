@@ -1,9 +1,18 @@
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { onSyncAnswered } from '../../../shared/sync/client-registry'
 import { useSessionStore, useActiveSession } from '../stores/session-store'
 
 /**
  * Watches the active session's cwd for git repo status.
- * Starts/stops polling and checks if the directory is a git repo.
+ *
+ * States this client's INTEREST as a replace set (`git:watch {cwds}`, phase 5
+ * S2); the union of every connection's set is what the host polls. That is why
+ * there is no "stop" call — an empty set IS the stop, and a socket that dies takes
+ * its interest with it.
+ *
+ * Re-sent on every answered `sync` for exactly the reason `useStreamWatch` is: the
+ * set is per-CONNECTION, so a phone that backgrounded and reconnected holds none,
+ * and its git pill would sit on stale state until the working tree next changed.
  */
 export function useGitWatcher(): void {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -15,9 +24,9 @@ export function useGitWatcher(): void {
   useEffect(() => {
     if (!cwd || !activeSessionId) return
 
-    // Just check if it's a git repo — don't fetch status here.
-    // gitStartWatching does an initial poll immediately, so status
-    // will arrive via the git:status-update event without the extra call.
+    // Just check if it's a git repo — don't fetch status here. A `git:watch`
+    // always answers with a status (a fresh poller's first tick, or the cached
+    // one), so it arrives via the git:status-update event without the extra call.
     window.api
       .gitCheckRepo(cwd)
       .then((isRepo) => {
@@ -28,13 +37,18 @@ export function useGitWatcher(): void {
       })
   }, [cwd, activeSessionId, setIsGitRepo])
 
-  // Start/stop git polling when cwd changes
-  useEffect(() => {
-    if (!cwd || !isGitRepo) return
+  // Bumped by every answered sync — the initial one, a resync, and every
+  // reconnect. A counter, so two reconnects in a row both re-fire the effect.
+  const [connectionGeneration, setConnectionGeneration] = useState(0)
+  const watched = useRef<string | null>(null)
+  watched.current = cwd && isGitRepo ? cwd : null
 
-    window.api.gitStartWatching(cwd)
-    return () => {
-      window.api.gitStopWatching(cwd)
-    }
-  }, [cwd, isGitRepo])
+  useEffect(() => onSyncAnswered(() => setConnectionGeneration((n) => n + 1)), [])
+
+  useEffect(() => {
+    void window.api.watchGit(watched.current ? [watched.current] : []).catch(() => {
+      // A refusal leaves this client without live git status; the next answered
+      // sync retries. Silent on purpose — a toast for a missing pill is noise.
+    })
+  }, [cwd, isGitRepo, connectionGeneration])
 }

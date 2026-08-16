@@ -252,7 +252,7 @@ import {
   SHELL_ACT_VERBS,
   SHELL_READ_VERBS
 } from '../../services/step-up-tier'
-import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../../services/git-watch-registry'
+import { gitWatchRegistry } from '../../services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
 import { setProxyEnv } from '../../sdk/proxy'
@@ -385,8 +385,8 @@ describe('registerRemoteHandlers', () => {
 
   afterEach(() => {
     // gitWatchRegistry is a module singleton shared with the desktop IPC path —
-    // unwind the remote owner so watch state can't leak between tests.
-    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+    // unwind this connection's interest so watch state can't leak between tests.
+    gitWatchRegistry.releaseConnection(remoteConn.connectionId)
     clearSyncSubscribersForTests()
     vi.clearAllMocks()
   })
@@ -807,9 +807,8 @@ describe('registerRemoteHandlers', () => {
         'git:fetch',
         // Live watching: previously unregistered web no-ops, which is why the
         // remote client's gitStatus stayed null and its changes pill never
-        // rendered. Now routed through the shared gitWatchRegistry.
-        'git:start-watching',
-        'git:stop-watching'
+        // rendered. Now a per-connection interest set on the shared registry.
+        'git:watch'
       ]) {
         // Exposure now means "registered for the remote transport"; that the
         // capability is also granted is pinned by the parity block at the
@@ -818,17 +817,17 @@ describe('registerRemoteHandlers', () => {
       }
     })
 
-    it('git:start-watching registers the remote owner and starts exactly one poller', async () => {
+    it('git:watch registers this connection and starts exactly one poller', async () => {
       await expect(
-        dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
+        dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
       expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
-      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([GIT_WATCH_OWNER_REMOTE])
+      expect(gitWatchRegistry.watchersOf('/tmp/proj')).toEqual([remoteConn.connectionId])
 
-      // A second remote client on the same cwd attaches; it must NOT re-start the
-      // poller (that would replace the live callback).
-      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
+      // Re-stating the same set must NOT re-start the poller (that would replace
+      // the live callback and silence every other watcher).
+      await dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
       expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
     })
 
@@ -840,7 +839,7 @@ describe('registerRemoteHandlers', () => {
       // broadcast for every later test in this file.
       gitWatchRegistry.init((cwd, status) => pushed.push({ cwd, status }))
       try {
-        await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
+        await dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
         const emit = gitSvcStub.startPolling.mock.calls[0][0] as (s: unknown) => void
         emit({ files: [], branch: 'main' })
         expect(pushed).toEqual([{ cwd: '/tmp/proj', status: { files: [], branch: 'main' } }])
@@ -849,19 +848,19 @@ describe('registerRemoteHandlers', () => {
       }
     })
 
-    it('git:stop-watching releases the remote owner and stops the poller', async () => {
-      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'), remoteConn)
+    it('an empty git:watch set releases the cwd and stops the poller', async () => {
+      await dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
       await expect(
-        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/proj'), remoteConn)
+        dispatcher.handle(makeRequest('git:watch', { cwds: [] }), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitSvcStub.stopPolling).toHaveBeenCalledTimes(1)
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
-      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([])
+      expect(gitWatchRegistry.watchersOf('/tmp/proj')).toEqual([])
     })
 
-    it('git:stop-watching for a cwd nobody watches is a no-op', async () => {
+    it('an empty git:watch from a connection watching nothing is a no-op', async () => {
       await expect(
-        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/never'), remoteConn)
+        dispatcher.handle(makeRequest('git:watch', { cwds: [] }), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitSvcStub.stopPolling).not.toHaveBeenCalled()
     })
@@ -1205,9 +1204,8 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'git:push-with-upstream',
   'git:stage-all',
   'git:stage-file',
-  'git:start-watching',
   'git:status',
-  'git:stop-watching',
+  'git:watch',
   'git:unstage-all',
   'git:unstage-file',
   'mcp:load-servers',
@@ -1406,7 +1404,7 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   afterEach(() => {
-    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+    gitWatchRegistry.releaseConnection(remoteConn.connectionId)
   })
 
   it('exposes exactly the pre-port channel set plus the phase-2 terminal and passkey channels', () => {

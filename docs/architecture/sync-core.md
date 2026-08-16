@@ -1,6 +1,6 @@
 # SyncCore — sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); **phase 5 S1 (the volatile stream lane) is landed** (2026-08-16), S2 and the named follow-on phase are not started — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); **phase 5 S1 + S2 (the volatile stream lane, the lossy tails, backpressure and the git-watch retirement) are landed** (2026-08-17), the named follow-on phase is not started — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
 
 **Phase 4 complete (4a → 4d).** Canonical state in the main process is the state of
 record: one emission funnel appends every domain event to the ring and applies it
@@ -79,7 +79,7 @@ Every feature must express each interaction as exactly one of these. There is no
    **Wire encoding (as realized in 4a).** Contract 2 is transported as `{seq, channel, args}` — the as-built frame shape, kept byte-identical so no client needed a change. The mapping: `channel ≡ type`, and session scoping is **positional** (`args[0]` is the routing id for every session-scoped channel, which is what `BaseSession.send` has always sent) rather than a named `sessionId` field. `causedBy` is **not** added yet: it exists for optimistic-apply reconciliation, and nothing opts into optimistic apply until that lands, so adding the field now would be an unused wire change. `src/shared/sync/channels.ts` is the closed, fail-closed set of legal `channel` values.
 3. **Volatile streams** (core → subscribers): streaming text/thinking deltas, PTY bytes, background bash output, log batches. Subscription-scoped, **never logged** — a delta stream is fully summarized by its accumulation, which lives in canonical state, so replay is pointless and buffer-poisoning (as-built, stream deltas flush the ring and force sync-fulls). Frames carry `{streamId, turnId, offset, chunk}`; a client whose local length ≠ offset refetches the coalesced value and continues — the snapshot↔stream seam is self-healing by construction.
 
-   **AS BUILT for S1 scope** (phase 5 S1, 2026-08-16): `session:stream` and `session:subagent-stream` are off the ring, ride the frame family above, and are delivered only to connections that subscribed with `stream:watch` (a replace-set query, capped at 32, per-connection, read-class). "Refetches the coalesced value" is realized as **replay-on-subscribe**: the server pushes EVERY stream of the watched session at `offset: 0`, empty ones included, which is a REPLACE by construction — so a mismatch is cured by re-sending the same watch set and a reconnect is cured by the re-watch it performs anyway. The empty frames are load-bearing rather than defensive: a replay that only spoke about non-empty buffers could never correct one canonical had CLEARED, which is the ordinary "watch, switch away across the seal, switch back" case. `shared/sync/stream.ts` is the one interpretation, folded by core and by every replica. **S2 remains:** the tails (`session:bash-output`, `session:background-output`, `automation:stream-event`) still ring, and PTY bytes keep their own dedicated lane (`term-data`). Per-channel consequences: [sync-channels.md](sync-channels.md) §The stream lane.
+   **AS BUILT for S1 scope** (phase 5 S1, 2026-08-16): `session:stream` and `session:subagent-stream` are off the ring, ride the frame family above, and are delivered only to connections that subscribed with `stream:watch` (a replace-set query, capped at 32, per-connection, read-class). "Refetches the coalesced value" is realized as **replay-on-subscribe**: the server pushes EVERY stream of the watched session at `offset: 0`, empty ones included, which is a REPLACE by construction — so a mismatch is cured by re-sending the same watch set and a reconnect is cured by the re-watch it performs anyway. The empty frames are load-bearing rather than defensive: a replay that only spoke about non-empty buffers could never correct one canonical had CLEARED, which is the ordinary "watch, switch away across the seal, switch back" case. `shared/sync/stream.ts` is the one interpretation, folded by core and by every replica. **AS BUILT for S2 scope** (2026-08-17): the three tails (`session:bash-output`, `session:background-output`, `automation:stream-event`) are off the ring too, on the lane's second flavor — a PASS-THROUGH frame `{type:'stream-ev', channel, args}` carrying the emission verbatim, which the client dispatches into the same per-channel listeners it always had. They are deliberately NOT forced into the frame family above: they carry counters and objects, have no accumulation and no snapshot field, so there is nothing to offset and nothing to replay. They are **honest-lossy** — a missed chunk is missed, and the durable record is the event lane's `session:tool-result` / `automation:run-message`. The automation tail is scoped by AUTOMATION rather than by run (its payload carries no run id); a second replace-set, `automationRuns`, carries that scope on the same `stream:watch`. PTY bytes keep their own dedicated lane (`term-data`). Per-channel consequences: [sync-channels.md](sync-channels.md) §The stream lane.
 
    **Owner ruling, recorded:** there is NO backward-compatibility lane for cached client bundles — no dual emission, no shim. The desktop and web clients ship with the server; an older cached bundle sees text update at message boundaries instead of token by token, which is a degraded animation rather than a broken transcript.
 4. **Queries** (client ↔ core, RPC): reads — history loads, git reads, catalogs, directory listings. No state effects.
@@ -90,7 +90,7 @@ Every feature must express each interaction as exactly one of these. There is no
 - **Canonical state in core:** per-session domain state + app-level registry. Per-session eviction mirrors today's renderer eviction; evicted sessions rehydrate from transcripts via queries.
 - **Client stores split:** a *replica store* (reducer output only — no local writes) and a *view store* (selection, drafts, layout, scroll — per-client by design; ADR-041's lesson, now type-enforced).
 - **Cursor discipline:** `lastSeq` advances only after an event is **applied**; pre-mount events buffer; a detected gap requests resync. `sync`/`sync-catchup`/`sync-full` + per-process `epoch` semantics carry over unchanged from the as-built protocol.
-- **Ring sizing:** domain events only (streams excluded — **true as of phase 5 S1** for the two canonical-backed stream channels) — 5000 entries ≈ hours of catchup instead of minutes. Memory-only (see Persistence).
+- **Ring sizing:** domain events only (streams excluded — **true as of phase 5 S2**: neither the two canonical-backed delta channels nor the three tails take a seq) — 5000 entries ≈ hours of catchup instead of minutes. Memory-only (see Persistence).
 - **Optimistic apply:** opt-in per command via `causedBy` reconcile; the default is round-trip (in-process for desktop, tailnet-RTT for phones — both fine).
 
 ## State classification
@@ -188,7 +188,7 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up. **Indexed per-cwd pool added afterwards** (see §Terminal): 2's fan-out and ring were real but every open still spawned, so the two surfaces never actually shared a pty |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
 | 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **landed** — all four stages; invariant test green, windowless smoke green (`windowless-boot.e2e.test.ts`) |
-| 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | **S1 landed** — `session:stream` / `session:subagent-stream` off the ring, onto the `stream:watch` lane; exit criterion pinned by `src/e2e/flows/stream-lane-reconnect.e2e.test.ts`. S2 (the bash / background / automation tails) not started |
+| 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | **LANDED** — S1: `session:stream` / `session:subagent-stream` off the ring onto the `stream:watch` lane (`src/e2e/flows/stream-lane-reconnect.e2e.test.ts`); S2: the three tails off the ring on the pass-through flavor, a 1 MB per-connection backpressure cap, and `git:watch` per-connection interest replacing the collective owner (`src/e2e/flows/stream-tails-lossy.e2e.test.ts`) |
 
 Phase 4 lands as a strangler in four stages:
 
@@ -463,12 +463,37 @@ refetch), so a 10-minute background reconnect catches up without a `sync-full`.
   (gated on a plugin actually listening, so it costs nothing by default); and **an
   unwatched session updates only at message boundaries**, which is the design (the
   accumulation is a snapshot field, so the answer always arrives).
-- **S2 remains**: the lossy tails — `session:bash-output`, `session:background-output`,
-  `automation:stream-event` — plus the voice surface's lane split. They still ring, so
-  4a's rule 1 still binds them. **Backpressure is S2 too, deliberately:** S1 ships no
-  per-connection budget on the stream lane (a slow socket is not dropped and
-  resnapshotted the way `term-data` drops one). It belongs with the tails, and the
-  coalesced accumulation is already the resnapshot such a policy would send.
+- **S2 is landed** (2026-08-17): the lossy tails, backpressure, and the git-watch
+  retirement. Three parts, one theme — a client asks for what it is looking at, and the
+  host stops broadcasting what nobody asked for:
+  - **The tails leave the ring** on a PASS-THROUGH flavor of the same lane
+    (`{type:'stream-ev', channel, args}`), dispatched client-side into the SAME
+    per-channel listener registry — so every existing listener kept working verbatim and
+    no payload was reinterpreted. They are honest-lossy by ruling: no accumulation, no
+    replay, no refetch; the durable record is the event lane's tool_result /
+    run-message, and the exit criterion for it is
+    `src/e2e/flows/stream-tails-lossy.e2e.test.ts`. `automation:stream-event` is scoped
+    by AUTOMATION, not by run — the payload has no run id, and inventing one at the
+    boundary would be a second answer to a question the emitter never asked.
+  - **Backpressure**: a 1 MB per-connection budget at the WS stream sink
+    (`STREAM_BACKPRESSURE_BYTES`, the PTY's high-water mark), measured on
+    `ws.bufferedAmount`. Over budget, STREAM frames are skipped for that connection —
+    text streams heal on the next offset mismatch via the S1 re-watch cure, tails just
+    lose. The EVENT lane is never dropped, and the desktop `MessagePort` sink is exempt
+    (no socket, nothing to measure).
+  - **The git-watch collective owner is retired** — the thing ADR-052 named
+    per-client subscriptions as the fix for. `git:start-watching` / `git:stop-watching`
+    and the `'desktop'` / `'remote'` owner ids are DELETED; `git:watch {cwds}` is a
+    per-connection replace set (`git`, query, same capability git reads already needed),
+    and the UNION of every connection's set is what is polled. A socket's death releases
+    its set, so the union shrinks on disconnect instead of on last-disconnect. Both
+    invariants the mobile git pill depends on survive and are guard-tested: ONE
+    `startPolling` callback per cwd, and every watch answers with a status (a fresh
+    poller's fingerprint-reset first tick, or the cached one re-emitted to a joiner —
+    including a renderer that reloaded under the same connection id). `git:status-update`
+    is unchanged on the wire: still replicated, still ringed, still broadcast.
+- **The voice surface's lane split remains** — `voice:error` still rings because one of
+  its two emitters is `BaseSession.send` (see the note in `shared/sync/channels.ts`).
 
 **Command-registry completeness** (the `command()` migration, ADR-051 contract 1):
 

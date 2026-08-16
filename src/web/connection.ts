@@ -1195,6 +1195,12 @@ export class RemoteConnection {
         this.sync.receiveStreamFrame(msg)
         break
 
+      case 'stream-ev':
+        // The lane's pass-through flavor (phase 5 S2) — a tail, dispatched into
+        // the ordinary per-channel listeners. Also cursor-free.
+        this.sync.receiveStreamEvent(msg)
+        break
+
       case 'invoke-response':
         {
           const resp = msg as WsInvokeResponse

@@ -101,6 +101,11 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
         // decoder stays a router; it never touches the cursor.
         client.receiveStreamFrame(frame)
         return
+      case 'stream-ev':
+        // The lane's pass-through flavor (phase 5 S2) — a tail, dispatched into
+        // the ordinary per-channel listeners. Also cursor-free.
+        client.receiveStreamEvent(frame)
+        return
       default:
         // An unknown frame is a version skew between preload and renderer, which
         // cannot happen inside one build. Ignore rather than throw: a throw here

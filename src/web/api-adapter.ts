@@ -373,8 +373,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // `shell` channel) until the three gates hold — the caller treats a refusal
     // as "nothing known", never as "nothing running".
     terminalPool: (cwd) => connection.invoke('terminal:pool', cwd) as Promise<number[]>,
-    watchStreams: async (sessionIds) => {
-      await connection.invoke('stream:watch', { sessionIds })
+    watchStreams: async (sessionIds, automationIds) => {
+      await connection.invoke('stream:watch', { sessionIds, automationRuns: automationIds })
     },
     terminalStepUp: async (password, intent) => {
       // Proof params come from `terminal:availability`, NOT `/remote/auth-info`:
@@ -478,8 +478,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Live watching is real over remote: the server shares one poller per cwd
     // with the desktop (gitWatchRegistry) and pushes git:status-update over the
     // bridge. Without these the pill never rendered — gitStatus stayed null.
-    gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
-    gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
+    watchGit: (cwds) => unwrap('git:watch', { cwds }),
 
     // File ops
     listDir: (dirPath) =>

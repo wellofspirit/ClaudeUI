@@ -25,15 +25,22 @@
  * CLIENTS never use that inverse: they fold `applyStreamFrame`, which is what the
  * offsets are for. It exists only for in-process consumers whose contract
  * predates the lane split.
+ *
+ * S2 moved the three TAILS (`session:bash-output`, `session:background-output`,
+ * `automation:stream-event`) onto the same lane in the PASS-THROUGH flavor. Those
+ * need no inverse at all — the frame carries `(channel, args)` verbatim — but
+ * they do need the unfiltered delivery they had as events, so they arrive through
+ * a stream OBSERVER rather than through the watch-filtered sink.
  */
 
 import {
+  addStreamObserver,
   addStreamSubscriber,
   addSyncSubscriber,
   setStreamWatch,
   syncCore
 } from '../../main/services/sync-host'
-import { streamFrameToEmission, type StreamFrame } from '../../shared/sync/stream'
+import { streamFrameToEmission, type LaneFrame } from '../../shared/sync/stream'
 
 interface WindowLike {
   webContents: { send: (channel: string, ...args: unknown[]) => void }
@@ -48,13 +55,26 @@ export function subscribeWindowToSync(win: WindowLike): () => void {
   })
 
   const connectionId = `test-stub-${nextStubConnection++}`
-  const offStream = addStreamSubscriber(connectionId, (frame: StreamFrame) => {
+  const offStream = addStreamSubscriber(connectionId, (frame: LaneFrame) => {
+    if (frame.type === 'stream-ev') return // delivered through the observer below
     // The SHARED inverse — the same one the plugin bridge uses. Hand-rolling it
     // here would be a second answer to "what did the emitter send", in the one
     // place nobody would think to look for it.
     const emission = streamFrameToEmission(frame)
     if (!emission) return
     win.webContents.send(emission.channel, emission.routingId, emission.data)
+  })
+
+  // The PASS-THROUGH flavor (phase 5 S2) rides the OBSERVER list instead, and
+  // that is not a shortcut: these three channels were unfiltered `replicated`
+  // events until S2, so the stub received every one of them regardless of which
+  // session it was. An observer reproduces exactly that, while the watch-filtered
+  // sink above would silently drop a tail for a session the re-watch below has
+  // not caught up with yet — turning a lane change into hundreds of failed engine
+  // assertions about output the engine did emit.
+  const offTails = addStreamObserver((frame: LaneFrame) => {
+    if (frame.type !== 'stream-ev') return
+    win.webContents.send(frame.channel, ...frame.args)
   })
 
   // A stub has no watch effect, so it re-watches whatever canonical currently
@@ -87,6 +107,7 @@ export function subscribeWindowToSync(win: WindowLike): () => void {
   return () => {
     offEvents()
     offStream()
+    offTails()
     offWatch()
   }
 }

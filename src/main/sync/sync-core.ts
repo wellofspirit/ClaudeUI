@@ -20,6 +20,11 @@
  * cursor — which is what stops one turn of tokens from flushing a 5000-entry ring
  * and forcing a `sync-full` on every reconnect. Emitters are unchanged.
  *
+ * **S2 completed it with the pass-through flavor.** The three tails
+ * (`session:bash-output`, `session:background-output`, `automation:stream-event`)
+ * flooded the ring identically but carry no accumulation, so they ride the lane
+ * as `{type:'stream-ev', channel, args}` — verbatim, unfolded, honest-lossy.
+ *
  * **Phase 4b made canonical state the state of record.** `getSnapshot()` is what
  * every `sync-full` carries (`services/remote-server.ts`), and the renderer-pull
  * that used to serve it is gone — a busy, hung or absent renderer can no longer
@@ -41,6 +46,7 @@ import {
   applyStreamFrame,
   streamFrameFrom,
   streamReplayFrames,
+  type LaneFrame,
   type StreamFrame
 } from '../../shared/sync/stream'
 import {
@@ -89,7 +95,7 @@ export type DeliverFn = (
  * only to the connections that asked for that session
  * (`services/sync-host.ts` §"Stream registry").
  */
-export type StreamDeliverFn = (frame: StreamFrame) => void
+export type StreamDeliverFn = (frame: LaneFrame) => void
 
 /** Fired when core rekeys a session, so the host registry can follow in-tick. */
 export type RekeyObserver = (oldId: string, newId: string) => void
@@ -239,12 +245,20 @@ export class SyncCore {
       return
     }
 
-    // The VOLATILE lane (phase 5 S1). No ring, no seq, no reducer, no event
-    // fan-out: the delta becomes a stream frame, folds into canonical through the
-    // one shared interpretation, and reaches only the connections watching this
-    // session. The emitters are untouched — `BaseSession.send('session:stream', …)`
-    // still calls `emit`; the CLASS is what routes it.
+    // The VOLATILE lane (phase 5). No ring, no seq, no reducer, no event fan-out:
+    // the emission becomes a lane frame and reaches only the connections watching
+    // it. The emitters are untouched — `BaseSession.send('session:stream', …)`
+    // still calls `emit`; the CLASS is what routes it, and the FLAVOR is what
+    // decides which frame it becomes.
     if (spec.cls === 'volatile') {
+      if (spec.volatileFlavor === 'pass-through') {
+        // A TAIL. Nothing to fold — it has no canonical field and no
+        // accumulation — so the emission rides verbatim and the client dispatches
+        // it into the same per-channel listeners it always had. Dropping it under
+        // congestion is the contract, not a failure (shared/sync/stream.ts).
+        this.deliverStream?.({ type: 'stream-ev', channel, args })
+        return
+      }
       const frame = streamFrameFrom(this.state, this.aux, channel, args)
       // No frame ⇒ a malformed delta or a session canonical has never met. Both
       // were honest no-ops in the deleted reducer branches; they stay no-ops, and

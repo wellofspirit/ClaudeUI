@@ -672,17 +672,18 @@ export interface WsTermDetached {
 }
 
 // ---------------------------------------------------------------------------
-// Volatile stream lane (SyncCore phase 5 S1)
+// Volatile stream lane (SyncCore phase 5)
 // ---------------------------------------------------------------------------
 //
-// `StreamFrame` is declared in `shared/sync/stream.ts` — with the streamId
-// scheme, the validator and the one reducer that interprets it — and re-exported
-// here so the frame unions stay the single list of what may cross a socket.
-// Like `term-data`, these never enter the event ring and never reach the audit
-// log (security.md §Audit): a delta stream is fully summarized by the
-// accumulation in canonical state.
-export type { StreamFrame } from './sync/stream'
-import type { StreamFrame } from './sync/stream'
+// Both flavors are declared in `shared/sync/stream.ts` — with the streamId
+// scheme, the validators and the one reducer that interprets a text frame — and
+// re-exported here so the frame unions stay the single list of what may cross a
+// socket. Like `term-data`, neither enters the event ring and neither reaches the
+// audit log (security.md §Audit): a delta stream is fully summarized by the
+// accumulation in canonical state, and a tail (`stream-ev`, S2) is a lossy
+// preview whose durable record is the event lane.
+export type { StreamFrame, StreamEventFrame } from './sync/stream'
+import type { StreamFrame, StreamEventFrame } from './sync/stream'
 
 export type WsClientMessage =
   | WsAuthRequest
@@ -713,6 +714,7 @@ export type WsServerMessage =
   | WsTermExit
   | WsTermDetached
   | StreamFrame
+  | StreamEventFrame
 
 // ---------------------------------------------------------------------------
 // Event Log

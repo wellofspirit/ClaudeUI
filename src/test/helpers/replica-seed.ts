@@ -37,7 +37,7 @@ import {
   getReplicaAux,
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
-import { isVolatileStream } from '../../shared/sync/channels'
+import { isVolatileStream, volatileFlavorOf } from '../../shared/sync/channels'
 import { streamFrameFrom } from '../../shared/sync/stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import type { CanonicalSessionState } from '../../shared/sync/state'
@@ -114,15 +114,23 @@ export function advanceSeqTo(value: number): void {
  * Deliver one emission, exactly as a transport would — routed by the channel's
  * CLASS, exactly as `SyncCore.process` routes it.
  *
- * A `volatile` channel (phase 5 S1) is NOT an event: it never reaches
- * `receiveEvent`, takes no seq, and arrives as a `{streamId, turnId, offset,
- * chunk}` frame instead. Building that frame from the REPLICA's own state is the
- * same computation core does against canonical — the offsets agree because a
- * test has only one state.
+ * A `volatile` channel is NOT an event: it never reaches `receiveEvent` and takes
+ * no seq. Which FRAME it becomes is the channel's flavor, exactly as in
+ * `SyncCore.process`:
+ *
+ *  - `text-stream` (S1) → `{streamId, turnId, offset, chunk}`. Building it from
+ *    the REPLICA's own state is the same computation core does against canonical
+ *    — the offsets agree because a test has only one state.
+ *  - `pass-through` (S2, the tails) → `{type:'stream-ev', channel, args}`, the
+ *    emission verbatim, dispatched back into the per-channel listeners.
  */
 export function emitSync(channel: string, args: unknown[]): void {
   const c = client()
   if (isVolatileStream(channel)) {
+    if (volatileFlavorOf(channel) === 'pass-through') {
+      c.receiveStreamEvent({ type: 'stream-ev', channel, args })
+      return
+    }
     const frame = streamFrameFrom(getReplicaState(), getReplicaAux(), channel, args)
     // No frame ⇒ a malformed delta, or a session the replica has never met —
     // the same honest no-op core applies.

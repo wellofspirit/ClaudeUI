@@ -531,6 +531,80 @@ describe('PluginManager', () => {
       delete (global as any).__deltas
     })
 
+    it('forwards the VOLATILE TAILS with their pre-phase-5 payload shape (parity guard)', async () => {
+      // The S2 half of the same promise: `session:bash-output`,
+      // `session:background-output` and `automation:stream-event` left the event
+      // lane too, so a plain sync subscriber no longer sees them. They ride the
+      // lane in the PASS-THROUGH flavor — the emission verbatim — so the bridge
+      // needs no inverse for them, only the observer. This fails if the observer
+      // stops forwarding `stream-ev`, which would silently delete bash output
+      // from every plugin that watches a command run.
+      s = scaffold({ sessionIdFor: (rid) => (rid === 'R-1' ? 'SID-1' : null) })
+
+      writePlugin({
+        id: 'tail-listener',
+        entryJs: `
+          module.exports = {
+            activate: (ctx) => {
+              global.__tails = []
+              ctx.on('session:bash-output', (evt) => { global.__tails.push(['bash', evt]) })
+              ctx.on('session:background-output', (evt) => { global.__tails.push(['bg', evt]) })
+              ctx.on('automation:stream-event', (evt) => { global.__tails.push(['auto', evt]) })
+            }
+          }
+        `
+      })
+      await s.manager.loadAll()
+
+      fireSessionEventViaBridge(s.manager, 'session:bash-output', 'R-1', {
+        toolUseId: 'tu-1',
+        output: 'hello\n',
+        totalLines: 1,
+        totalBytes: 6
+      })
+      fireSessionEventViaBridge(s.manager, 'session:background-output', 'R-1', {
+        toolUseId: 'tu-1',
+        tail: 'bg\n',
+        totalSize: 3,
+        done: false
+      })
+      // The automation tail is NOT session-scoped: one arg, no routingId, so the
+      // bridge hands it through unwrapped exactly as it always did.
+      emitEvent('automation:stream-event', [
+        { automationId: 'auto-1', type: 'text', text: 'tok' }
+      ])
+
+      const tails = (global as any).__tails as any[]
+      expect(tails).toHaveLength(3)
+      expect(tails[0]).toEqual([
+        'bash',
+        {
+          routingId: 'R-1',
+          sessionId: 'SID-1',
+          toolUseId: 'tu-1',
+          output: 'hello\n',
+          totalLines: 1,
+          totalBytes: 6
+        }
+      ])
+      expect(tails[1]).toEqual([
+        'bg',
+        {
+          routingId: 'R-1',
+          sessionId: 'SID-1',
+          toolUseId: 'tu-1',
+          tail: 'bg\n',
+          totalSize: 3,
+          done: false
+        }
+      ])
+      expect(tails[2]).toEqual([
+        'auto',
+        { automationId: 'auto-1', type: 'text', text: 'tok' }
+      ])
+      delete (global as any).__tails
+    })
+
     it('emits sessionId: null when SessionManager has no mapping yet (ADR-005 early events)', async () => {
       s = scaffold({ sessionIdFor: () => null })
 

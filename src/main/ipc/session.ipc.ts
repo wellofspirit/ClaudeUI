@@ -8,6 +8,7 @@ import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
+import { GIT_WATCH_COMMAND } from './git-watch'
 import { getHostWindow } from '../services/host-window'
 import {
   seedCanonicalAppState,
@@ -50,7 +51,7 @@ import {
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
-import { gitWatchRegistry, GIT_WATCH_OWNER_DESKTOP } from '../services/git-watch-registry'
+import { gitWatchRegistry } from '../services/git-watch-registry'
 import {
   createWorktree,
   getWorktreeStatus,
@@ -462,8 +463,7 @@ const SESSION_IPC_CHANNELS = [
   'git:push-with-upstream',
   'git:pull',
   'git:fetch',
-  'git:start-watching',
-  'git:stop-watching',
+  'git:watch',
   'file:list-dir',
   'usage:fetch',
   'usage:fetch-block',
@@ -2029,30 +2029,18 @@ export function registerSessionIpc(): SessionManager {
 
   // Git polling — one poller per cwd, shared with the remote path through
   // gitWatchRegistry. GitService.startPolling() holds a SINGLE callback, so two
-  // independent starts on one cwd would silently clobber each other; the
-  // registry is what keeps desktop and remote owners coexisting. This is also
-  // the only place that knows the window fan-out, so it installs it.
+  // independent starts on one cwd would silently clobber each other; the registry
+  // is what keeps every connection's interest coexisting on one poller. This is
+  // also the only place that knows the fan-out, so it installs it.
   gitWatchRegistry.init((cwd, status) => {
     emitEvent('git:status-update', [{ cwd, status }])
   })
 
-  handleIpc({
-    channel: 'git:start-watching',
-    capability: 'git',
-    kind: 'query',
-    handler: async (cwd: string) => {
-      gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
-    }
-  })
-
-  handleIpc({
-    channel: 'git:stop-watching',
-    capability: 'git',
-    kind: 'query',
-    handler: async (cwd: string) => {
-      gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_DESKTOP)
-    }
-  })
+  // Per-connection interest (phase 5 S2). Same declaration the remote transport
+  // registers — see `ipc/git-watch.ts`. The desktop is a connection like any
+  // other: it dispatches under the process-wide `desktopConnection()` id, which is
+  // what its watch set is keyed by.
+  handleIpc(GIT_WATCH_COMMAND)
 
   // -------------------------------------------------------------------------
   // Worktree IPC handlers

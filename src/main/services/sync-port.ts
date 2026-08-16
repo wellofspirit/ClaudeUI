@@ -132,6 +132,13 @@ function handleFrame(session: PortSession, frame: unknown): void {
     // `stream:watch` for whatever session it is showing. The desktop's
     // connection id is the process-wide `desktopConnection()`, which is the same
     // identity its `stream:watch` invoke dispatches under.
+    //
+    // NO BACKPRESSURE CAP HERE (unlike the WS sink, phase 5 S2). A `MessagePort`
+    // has no `bufferedAmount` to measure — there is no socket, no network, and no
+    // encryption queue; a post is a structured clone handed to the renderer's
+    // event loop in the same process. The condition the cap exists for (a remote
+    // link too slow for the token rate) cannot arise, and dropping frames on the
+    // guess would cost the desktop its live typing for nothing.
     session.unsubscribeStream = addStreamSubscriber(
       desktopConnection().connectionId,
       (streamFrame) => post(session, streamFrame)

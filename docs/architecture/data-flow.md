@@ -26,7 +26,7 @@ User prompt → InputBox → addUserMessage() (Zustand) → window.api.sendPromp
 - **Tool results arrive as synthetic `type: 'user'` messages**, extracted by `extractToolResults()`.
 - **Multi-session routing** — every session has a `routingId`; events are routed by it. On engine init the temporary routingId is **rekeyed** to the engine's session UUID.
 - **cli.js message order** (with partial messages on): `assistant` (partials) → `user` (tool_result) → `assistant` → `result`; `result` cost fields are **cumulative per process** and reset on `--resume`.
-- **Git status polling** — `useGitWatcher` starts/stops polling via the shared `gitWatchRegistry` per active session cwd.
+- **Git status polling** — `useGitWatcher` states this client's interest (`git:watch {cwds}`, a replace set) for the active session cwd; the union of every connection's set drives the shared `gitWatchRegistry`'s one poller per cwd.
 - **Terminal grouping** — terminals group by normalized cwd, survive session switches, cleaned up after 10 min cold (ADR-003).
 - **projectKey** — a derived one-way render/identity token from `shared/project-key.ts`; both engines' sessions for one cwd group under one sidebar project (ADR-025).
 

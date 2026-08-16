@@ -49,7 +49,7 @@
 
 import type { BrowserWindow } from 'electron'
 import { SyncCore, type Delivery } from '../sync/sync-core'
-import { sessionIdOfStream, type StreamFrame } from '../../shared/sync/stream'
+import { sessionIdOfStream, streamEventScopeOf, type LaneFrame } from '../../shared/sync/stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
@@ -104,13 +104,21 @@ export function clearSyncSubscribersForTests(): void {
 // — which is what preserves ADR-054's promise that a 4010 max-age cut ends every
 // authority the socket held, this one included.
 
-/** One connection's stream sink. */
-export type StreamSink = (frame: StreamFrame) => void
+/** One connection's stream sink. Carries BOTH lane flavors (phase 5 S2). */
+export type StreamSink = (frame: LaneFrame) => void
 
 interface StreamSubscriber {
   sink: StreamSink
   /** Routing ids this connection is watching — a REPLACE set, never additive. */
   watch: Set<string>
+  /**
+   * Automation ids this connection is watching (phase 5 S2) — the second scope
+   * the lane filters on, because `automation:stream-event` belongs to the
+   * automation surface rather than to a session. Kept SEPARATE rather than merged
+   * into one id space: a session id and an automation id are minted by different
+   * subsystems, and a collision would silently cross-deliver.
+   */
+  automationWatch: Set<string>
 }
 
 const streamSubscribers = new Map<string, StreamSubscriber>()
@@ -123,7 +131,7 @@ const streamSubscribers = new Map<string, StreamSubscriber>()
  * nothing and must send `stream:watch`.
  */
 export function addStreamSubscriber(connectionId: string, sink: StreamSink): () => void {
-  streamSubscribers.set(connectionId, { sink, watch: new Set() })
+  streamSubscribers.set(connectionId, { sink, watch: new Set(), automationWatch: new Set() })
   return () => {
     streamSubscribers.delete(connectionId)
   }
@@ -139,6 +147,11 @@ export function addStreamSubscriber(connectionId: string, sink: StreamSink): () 
  * replay goes out for the WHOLE new set, not just the added ids: re-sending the
  * same set is exactly how a client cures a mismatch.
  *
+ * `automationRuns` is the SECOND set (phase 5 S2), replaced independently: it is
+ * `undefined` when the caller said nothing about automations, and an absent set
+ * is silence, not a clear. There is nothing to replay for it — pass-through
+ * frames have no accumulation to re-state, which is what "honest-lossy" means.
+ *
  * Returns the number of frames pushed (diagnostics + tests). A no-op for an
  * unregistered connection — the desktop's own port registers on first sync, and a
  * socket can close between the frame landing and this running.
@@ -146,11 +159,12 @@ export function addStreamSubscriber(connectionId: string, sink: StreamSink): () 
 export function setStreamWatch(
   connectionId: string,
   sessionIds: readonly string[],
-  options: { replay?: boolean } = {}
+  options: { replay?: boolean; automationRuns?: readonly string[] } = {}
 ): number {
   const entry = streamSubscribers.get(connectionId)
   if (!entry) return 0
   entry.watch = new Set(sessionIds)
+  if (options.automationRuns) entry.automationWatch = new Set(options.automationRuns)
   // `replay: false` exists for ONE caller — the engine-test stub window, which
   // re-watches after every emission and would otherwise re-deliver every
   // already-watched session's accumulation as duplicate deltas. No production
@@ -202,9 +216,10 @@ export function clearStreamSubscribersForTests(): void {
  *
  * The one production consumer is the ADR-005 plugin bridge, which was a
  * subscriber of `session:stream` before phase 5 S1 moved those channels off the
- * event lane. Restoring it here keeps a plugin's contract unchanged by a lane
- * change it has no part in — the alternative was silently deleting token deltas
- * from every plugin.
+ * event lane — and of the three TAILS before S2 moved those. Restoring it here
+ * keeps a plugin's contract unchanged by a lane change it has no part in — the
+ * alternative was silently deleting token deltas and bash output from every
+ * plugin.
  */
 const streamObservers = new Set<StreamSink>()
 
@@ -226,17 +241,36 @@ export function clearStreamObserversForTests(): void {
  * and nobody else. Fenced per sink for the same reason the event lane is — one
  * dead socket must not stop the others.
  */
-function streamDelivery(frame: StreamFrame): void {
-  const routingId = sessionIdOfStream(frame.streamId)
-  if (!routingId) return
+function streamDelivery(frame: LaneFrame): void {
+  // One predicate for both flavors: a text frame names its session in the
+  // streamId, a pass-through frame names its scope in the payload. Derived from
+  // the ONE shared parser in each case — a second answer here about "who is this
+  // for" is exactly the drift `shared/sync/stream.ts` exists to prevent.
+  let wants: (entry: StreamSubscriber) => boolean
+  let label: string
+  if (frame.type === 'stream-ev') {
+    const scope = streamEventScopeOf(frame)
+    if (!scope) return
+    wants =
+      scope.kind === 'automation'
+        ? (entry) => entry.automationWatch.has(scope.id)
+        : (entry) => entry.watch.has(scope.id)
+    label = `${frame.channel} (${scope.kind} ${scope.id})`
+  } else {
+    const routingId = sessionIdOfStream(frame.streamId)
+    if (!routingId) return
+    wants = (entry) => entry.watch.has(routingId)
+    label = frame.streamId
+  }
+
   for (const entry of [...streamSubscribers.values()]) {
-    if (!entry.watch.has(routingId)) continue
+    if (!wants(entry)) continue
     try {
       entry.sink(frame)
     } catch (err) {
       logger.error(
         LOG_SOURCE,
-        `stream sink threw delivering ${frame.streamId}: ` +
+        `stream sink threw delivering ${label}: ` +
           `${err instanceof Error ? err.message : String(err)}`
       )
     }
@@ -248,7 +282,7 @@ function streamDelivery(frame: StreamFrame): void {
     } catch (err) {
       logger.error(
         LOG_SOURCE,
-        `stream observer threw on ${frame.streamId}: ` +
+        `stream observer threw on ${label}: ` +
           `${err instanceof Error ? err.message : String(err)}`
       )
     }

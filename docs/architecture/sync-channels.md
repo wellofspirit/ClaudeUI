@@ -44,8 +44,8 @@ knew. Delivery is now a function of the channel's **class** and nothing else:
 
 - `host-local` ⇒ the owning `BrowserWindow` only, by targeted `webContents.send`;
 - `volatile` ⇒ the STREAM LANE: only connections whose `stream:watch` set names the
-  session (§The stream lane);
-- `replicated` / `volatile-pending-phase-5` ⇒ **every subscriber, always**.
+  session — or, for the automation tail, the automation (§The stream lane);
+- `replicated` ⇒ **every subscriber, always**.
 
 A column that can only ever restate the class is a column that can only ever drift, so it
 was deleted rather than pinned.
@@ -54,27 +54,35 @@ was deleted rather than pinned.
 
 - **`replicated`** — rings, fans out to every client, and (where the snapshot has a
   field) folds into canonical state. The default for anything that is state.
-- **`volatile`** — streaming deltas that have LEFT the event system (phase 5 S1).
-  No ring, no seq, no reducer branch, no cursor: they ride the stream lane's own
-  frame family and reach only the connections that subscribed to that session.
-  Canonical still accumulates them, through `applyStreamFrame`, because
-  `streamingText` / `streamingThinking` are snapshot fields. See §The stream lane.
-- **`volatile-pending-phase-5`** — the streaming TAILS (bash / background /
-  automation). These still ring, which is exactly the buffer-poisoning S2
-  removes; 4a records that behavior verbatim rather than fixing it early.
+- **`volatile`** — streaming output that has LEFT the event system (phase 5). No
+  ring, no seq, no cursor: it rides the stream lane and reaches only the
+  connections that subscribed. Two FLAVORS, recorded per row as `volatileFlavor`:
+  - **`text-stream`** (S1: `session:stream`, `session:subagent-stream`) — an
+    accumulating `{streamId, turnId, offset, chunk}` frame. Canonical accumulates
+    it through `applyStreamFrame`, because `streamingText` / `streamingThinking`
+    are snapshot fields, and an offset mismatch self-heals by re-watching.
+  - **`pass-through`** (S2: `session:bash-output`, `session:background-output`,
+    `automation:stream-event`) — the emission `(channel, args)` verbatim in a
+    `{type:'stream-ev'}` frame, dispatched client-side into the ordinary
+    per-channel listeners. Not canonical, not accumulating, and HONEST-LOSSY: no
+    replay and no refetch, because the durable record of what a tail previews is
+    the event lane's `session:tool-result` / `automation:run-message`.
+
+  See §The stream lane.
 - **`host-local`** — the owning desktop window only: window chrome, native pickers,
   voice capture, OAuth browser flows, PTY bytes, the log-viewer window.
 
 ## The rules, and which one 4c retired
 
-1. ~~**Never reduce ring membership.**~~ **Retired by phase 5 S1** — by the migration it
-   always named. `session:stream` and `session:subagent-stream` are class `volatile` now:
-   `ring: no`, and their deltas are not events at all. The rule's stated cost (breaking
-   catchup for clients mid-reconnect across the upgrade) was **waived by the owner**:
-   there is no dual-emission lane and no compatibility shim, because the desktop and web
-   bundles ship with the server. A cached older bundle sees a session whose text updates
-   only at message boundaries — never a broken transcript. The rule still binds the S2
-   tails, which have not migrated.
+1. ~~**Never reduce ring membership.**~~ **Retired by phase 5** — by the migration it
+   always named. S1 moved `session:stream` and `session:subagent-stream`; S2 moved the
+   three tails and with them the last member of the interim `volatile-pending-phase-5`
+   class, which is now DELETED rather than left as an empty option. All five are class
+   `volatile`: `ring: no`, and their payloads are not events at all. The rule's stated cost
+   (breaking catchup for clients mid-reconnect across the upgrade) was **waived by the
+   owner**: there is no dual-emission lane and no compatibility shim, because the desktop
+   and web bundles ship with the server. A cached older bundle sees a session whose text
+   updates only at message boundaries and no live bash tail — never a broken transcript.
 2. ~~**Never widen delivery.**~~ **Retired by 4c**, deliberately and in a bounded way. 4a
    bound itself to today's targets so the funnel could be reviewed as a pure refactor; 4c's
    whole purpose was to delete the privilege those targets encoded. The classes did not
@@ -159,7 +167,7 @@ snapshot fields that already existed.
 | `automation:run-update`          | replicated               | yes  | no        | —     | Run lifecycle; no snapshot field.                                                                                                                                                                      |
 | `config:sessions-changed`        | replicated               | yes  | yes       | —     | Session registry config (recent / pinned / titles / worktrees / hidden / sessionEngines). Per-key presence semantics (H15) are honored by the reducer.                                                 |
 | `config:settings-changed`        | replicated               | yes  | yes       | —     | App settings. 4c made the desktop save path echo back to the saver too (uniform delivery); the reducer applies a replace, so the echo is a no-op there.                                                                                          |
-| `git:status-update`              | replicated               | yes  | no        | —     | Per-cwd git summary. Fans out today; FullStateSnapshot carries no git summaries in 4a, so canonical does not hold them (recorded gap — sync-core.md lists them as replicated state for a later stage). |
+| `git:status-update`              | replicated               | yes  | no        | —     | Per-cwd git summary. Fans out today; FullStateSnapshot carries no git summaries in 4a, so canonical does not hold them (recorded gap — sync-core.md lists them as replicated state for a later stage). **Ring-hygiene note (S2, deliberate):** `git:watch` re-emits the CACHED status for every cwd in the set, and clients re-state their set on every answered sync — so a flapping phone costs one redundant ring entry per watched cwd per reconnect. Accepted: that re-emit is the always-emit-first invariant the mobile git pill depends on (the poller is change-only after its first tick), and the bound is one small payload per cwd per reconnect, not per poll. |
 | `mockup:file-changed`            | replicated               | yes  | no        | —     | Mockup live-reload notify. 4c made both watchers (desktop in session.ipc.ts, remote in remote-handlers.ts) reach every subscriber — the notify a reconnecting client already replayed from the ring.                                                   |
 | `session:approval-dismiss`       | replicated               | yes  | yes       | —     | The other half of the event-driven approval lifecycle (externally resolved approvals).                                                                                                                 |
 | `session:approval-request`       | replicated               | yes  | yes       | —     | Approval lifecycle is event-driven ONLY (ADR-038) — never inferred from turn state.                                                                                                                    |
@@ -197,11 +205,11 @@ snapshot fields that already existed.
 | `usage:block-data`               | replicated               | yes  | no        | —     | Block analytics. Fans out today; no snapshot field.                                                                                                                                                    |
 | `usage:data`                     | replicated               | yes  | no        | —     | Account rate-limit usage. Fans out today; no snapshot field.                                                                                                                                           |
 | `voice:error`                    | replicated               | yes  | no        | —     | Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. 4c had to route VoiceClient's through emitEvent — its targeted send would have landed nowhere. The lane split belongs to the phase-5 work on the voice surface.                               |
-| `automation:stream-event`        | volatile-pending-phase-5 | yes  | no        | —     | Run streaming deltas — same volatile shape as session:stream, same phase-5 destination.                                                                                                                |
-| `session:background-output`      | volatile-pending-phase-5 | yes  | no        | —     | Background-task tail. Same as bash-output.                                                                                                                                                             |
-| `session:bash-output`            | volatile-pending-phase-5 | yes  | no        | —     | Live bash tail. Rings today; no snapshot field, so canonical stays out of it.                                                                                                                          |
-| `session:stream`                 | volatile                 | no   | yes       | —     | Text/thinking deltas. **Off the ring as of phase 5 S1** — they ride the stream lane to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields. |
-| `session:subagent-stream`        | volatile                 | no   | yes       | —     | Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.                                                                                                    |
+| `automation:stream-event`        | volatile (pass-through)  | no   | no        | —     | Run streaming deltas. **Off the ring as of phase 5 S2.** Scoped by AUTOMATION, not by run: the payload carries `automationId` and no run id, and the renderer already narrows to the viewed run from its own store. |
+| `session:background-output`      | volatile (pass-through)  | no   | no        | —     | Background-task tail. Same lane, same flavor, same durable record as bash-output.                                                                                                                       |
+| `session:bash-output`            | volatile (pass-through)  | no   | no        | —     | Live bash tail. **Off the ring as of phase 5 S2** — a noisy command emitted thousands of chunks and every one took a seq. No snapshot field, so losing one is honest; the tool_result is the record.     |
+| `session:stream`                 | volatile (text-stream)   | no   | yes       | —     | Text/thinking deltas. **Off the ring as of phase 5 S1** — they ride the stream lane to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields. |
+| `session:subagent-stream`        | volatile (text-stream)   | no   | yes       | —     | Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.                                                                                                    |
 | `account:changed`                | host-local               | no   | no        | —     | Main-window-only today (remote.md defect 5). Promoting it is a deliberate later step, not a 4a side effect.                                                                                            |
 | `account:respawn-sessions`       | host-local               | no   | no        | —     | A command to the hosting renderer, not state.                                                                                                                                                          |
 | `app:before-quit`                | host-local               | no   | no        | —     | Host lifecycle handshake with the owning renderer.                                                                                                                                                     |
@@ -221,24 +229,34 @@ snapshot fields that already existed.
 at runtime: `host-local`, no ring, owning-window only. Plugin-declared capabilities
 are the follow-up that decides whether plugin surfaces may replicate. The plugin bridge
 itself is a plain funnel SUBSCRIBER as of 4c (the fake `BrowserWindow` it used to be is
-deleted); the event SET it receives is unchanged. **Phase 5 S1 kept that true across the
-lane split:** `session:stream` and `session:subagent-stream` stopped being events, so a
-sync subscriber no longer sees them — the bridge registers an in-process stream OBSERVER
-instead (`addStreamObserver`, unfiltered, since a plugin has no session selection to
-filter by) and re-materializes each frame through the shared `streamFrameToEmission`. A
-plugin's payload is byte-identical to what it received before the split. The synthesis is
-GATED on a plugin actually subscribing to those two channels, so it costs nothing on a
-machine with no plugins.
+deleted); the event SET it receives is unchanged. **Phase 5 kept that true across the lane
+split:** all five `volatile` channels stopped being events, so a sync subscriber no longer
+sees them — the bridge registers an in-process stream OBSERVER instead
+(`addStreamObserver`, unfiltered, since a plugin has no session selection to filter by) and
+re-materializes each frame in the way its flavor calls for: a `text-stream` frame through
+the shared `streamFrameToEmission`, a `pass-through` frame by reading `(channel, args)`
+straight back off it (it never stopped being the emission). A plugin's payload is
+byte-identical to what it received before the split.
+
+The synthesis is GATED on a plugin actually listening, so it costs nothing on a machine
+with no plugins — but by two different mechanisms, because the two flavors know different
+amounts about themselves. A text frame carries a `streamId`, not a channel, so the gate
+cannot be per-channel: `hasStreamListeners()` asks whether ANY plugin listens to either of
+the two delta channels, and the shared inverse then decides which one the frame was. A
+pass-through frame names its own channel, so it is gated exactly — `hasListeners(frame.channel)`
+— and a plugin listening only to `session:bash-output` never pays for the automation tail.
 
 
-## The stream lane (phase 5 S1)
+## The stream lane (phase 5 S1 + S2)
 
-Two lanes now leave the funnel, and a channel's CLASS picks which.
+Two lanes now leave the funnel, a channel's CLASS picks which, and — on the stream lane —
+its FLAVOR picks what a frame means.
 
 The **event lane** is unchanged: ring → canonical → every subscriber,
 `{seq, channel, args}`, cursor and catchup as before.
 
-The **stream lane** carries the two `volatile` channels and nothing else:
+The **stream lane** carries the five `volatile` channels and nothing else. The
+`text-stream` flavor (S1) carries:
 
 ```
 { type: 'stream', streamId, turnId, offset, chunk }
@@ -264,10 +282,57 @@ The **stream lane** carries the two `volatile` channels and nothing else:
 - **Never logged.** Same rule as `term-data` ([security.md](security.md) §Audit). On a
   tunnel these are ordinary server→client frames and ride the existing encrypt path.
 
+### The pass-through flavor — the tails (S2)
+
+The three tails flooded the ring exactly as the deltas did (a `bun run build` inside a Bash
+tool call emits a chunk per poll), but they are not text-offset streams: they carry
+counters and objects, replace rather than accumulate, and have no canonical field to
+accumulate into. Forcing them into the frame above would mean inventing an accumulation
+nothing reads. So they ride the lane verbatim:
+
+```
+{ type: 'stream-ev', channel, args }
+```
+
+- Same delivery path: per-connection watch filter, never ringed, never logged, encrypted
+  on tunnels like every frame.
+- The client dispatches it into the **same per-channel listener registry the event lane
+  uses**, so every existing `onSyncEvent('session:bash-output', …)` listener keeps working
+  unchanged. That is the point of the flavor: the transport moved, the meaning did not, and
+  there is no second interpretation of the payload to drift.
+- **Honest-lossy.** No offset ⇒ no replay, no refetch. A chunk missed (pre-ready, dropped
+  under backpressure, or emitted while nobody was watching) is simply gone. That is safe
+  because a tail is a PREVIEW: the durable record is the event lane's
+  `session:tool-result` / `automation:run-message`, which rings, replicates and replays.
+- **Scope.** The two session tails are session-scoped by position (`args[0] = routingId`)
+  and ride the `sessionIds` set. `automation:stream-event` rides a second set,
+  `automationRuns`, whose entries are **automation ids, not run ids** — the emission
+  carries `{automationId, type, text}` and no run identity, so run-level scoping would have
+  to be invented at the boundary. The renderer already narrows to the run it is viewing
+  from its own store (`useAutomationEvents`'s `viewingLiveStream`), which still works
+  because every frame is delivered verbatim. Recorded here as the coarser granularity it
+  is.
+
+### Backpressure (S2)
+
+At the WebSocket sink, a connection whose `ws.bufferedAmount` exceeds
+`STREAM_BACKPRESSURE_BYTES` (1 MB — the same high-water mark the remote PTY uses) has its
+stream frames **SKIPPED** until it drains, with one log line per congestion episode rather
+than per frame. The PTY answers the same measurement by pausing the child; a stream lane
+cannot pause an LLM, so it drops. Both flavors recover by design — a text stream heals on
+the next offset mismatch, a tail is lossy by contract — and **the event lane is never
+dropped**, because a missing event is a permanent hole in a seq-ordered stream. The desktop
+`MessagePort` sink is exempt: there is no socket, no `bufferedAmount` and no network, so
+the condition cannot arise.
+
 **`stream:watch` is the subscription.** A registry QUERY (`chat`, unaudited — a
-subscription toggle has no domain effect), payload `{ sessionIds: string[] }`, **REPLACE**
-semantics, capped at 32 (`MAX_STREAM_WATCH`; an over-long set is refused, not clipped —
-a clipped set would leave the client believing it watches sessions it does not). The set
+subscription toggle has no domain effect), payload
+`{ sessionIds: string[], automationRuns?: string[] }`, **REPLACE**
+semantics per set, each capped at 32 (`MAX_STREAM_WATCH`; an over-long set is refused, not
+clipped — a clipped set would leave the client believing it watches sessions it does not).
+`automationRuns` is replaced independently and its ABSENCE is silence, not a clear, so one
+surface can state its scope without erasing the other's; `[]` is how a client stops
+watching. The set
 is per CONNECTION and dies with the socket, which keeps a subscription inside the same
 lifetime as every other authority that connection holds — ADR-054's 4010 max-age cut ends
 it because the cut closes the socket. It classifies `read`, so it is free on every tier
@@ -301,13 +366,23 @@ recovery path, and no cursor to repair.
 
 **Sessions nobody watches still converge**, at message boundaries, over the event lane —
 the accumulation is a snapshot field, so the coalesced answer always arrives. Only the
-token-by-token animation is subscription-scoped. That is the design, not a gap.
+token-by-token animation is subscription-scoped. That is the design, not a gap. A TAIL
+nobody watches does not converge at all — there is nothing to converge to — and that too is
+the design: the tool_result completes the transcript either way.
 
-**One interpretation, both sides.** `applyStreamFrame` is to this lane what `applyEvent`
-is to the event lane: core folds it against canonical, `renderer/src/stores/replica.ts`
-folds it against the replica, and the streaming fields stay SEALED. The reducer branches
-for these two channels are DELETED — `applyEvent` refuses a `volatile` channel outright
-rather than keeping a fossil that could race the lane.
+**One interpretation, both sides.** `applyStreamFrame` is to the text-stream flavor what
+`applyEvent` is to the event lane: core folds it against canonical,
+`renderer/src/stores/replica.ts` folds it against the replica, and the streaming fields stay
+SEALED. The reducer branches for those two channels are DELETED — `applyEvent` refuses a
+`volatile` channel outright rather than keeping a fossil that could race the lane. A
+pass-through frame has nothing to fold: it is dispatched, not applied, which is why the
+three tails KEEP their `SyncEventMap` entries while the two delta channels lost theirs.
+
+**In-process consumers keep their pre-split contract.** The ADR-005 plugin bridge and the
+engine tests' stub window subscribed to all five channels before the split. They receive
+them from the observer list instead: a text frame through the shared
+`streamFrameToEmission` inverse, a pass-through frame by reading `(channel, args)` straight
+back off it.
 
 ## Reducer purity deltas
 

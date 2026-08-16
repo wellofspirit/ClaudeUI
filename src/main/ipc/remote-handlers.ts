@@ -3,6 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
+import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import {
   loadSessionHistory,
@@ -13,7 +14,6 @@ import {
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
-import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../services/git-watch-registry'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { accountManager } from '../services/account-manager'
 import {
@@ -1010,33 +1010,16 @@ export function registerRemoteHandlers(
   // Same gitServiceManager the desktop git:* IPC handlers use (get/release).
   //
   // Live watching goes through gitWatchRegistry, the SAME registry the desktop
-  // `git:start-watching` IPC handler uses, under a separate owner id. It must not
-  // start its own poller: GitService.startPolling() holds a single callback, so
-  // that would replace the desktop's broadcast. The registry starts at most one
-  // poller per cwd, fans `git:status-update` out to the main window AND every
-  // extra window (the remote bridge is registered as one, so remote clients get
-  // it over the existing forwarding), and replays the cached status to a
-  // late-joining owner — the previous model, "driven by the desktop's own
-  // polling broadcast", was dead because that broadcast only fires on CHANGE and
-  // exists at all only if the desktop happens to be watching the same cwd.
+  // `git:watch` handler uses. Neither side may start its own poller:
+  // GitService.startPolling() holds a single callback, so a second start would
+  // replace the other surface's broadcast. The registry runs at most one poller
+  // per cwd, driven by the UNION of every connection's interest set, and fans
+  // `git:status-update` out as an ordinary replicated event.
   // -------------------------------------------------------------------------
 
-  handleRemote({
-    channel: 'git:start-watching',
-    capability: 'git',
-    kind: 'query',
-    handler: async (cwd: string) => {
-      gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
-    }
-  })
-  handleRemote({
-    channel: 'git:stop-watching',
-    capability: 'git',
-    kind: 'query',
-    handler: async (cwd: string) => {
-      gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
-    }
-  })
+  // Per-connection interest (phase 5 S2). Same declaration the desktop transport
+  // registers — see `ipc/git-watch.ts`.
+  handleRemote(GIT_WATCH_COMMAND)
 
   handleRemote({
     channel: 'git:check-repo',

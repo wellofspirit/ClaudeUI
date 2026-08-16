@@ -19,7 +19,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { applyEvent, emptyAux, type ReducerAux } from '../reducer'
 import {
   MAX_STREAM_WATCH,
+  STREAM_BACKPRESSURE_BYTES,
   applyStreamFrame,
+  isStreamEventFrame,
+  streamEventScopeOf,
   bumpStreamTurn,
   dropStreamTurns,
   isStreamFrame,
@@ -711,5 +714,73 @@ describe('purity (the same contract applyEvent carries)', () => {
 
   it('the watch cap is a named bound, not a magic number at the call site', () => {
     expect(MAX_STREAM_WATCH).toBe(32)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The PASS-THROUGH flavor (phase 5 S2)
+// ---------------------------------------------------------------------------
+
+describe('pass-through frames (the tails)', () => {
+  it('validates structurally, and rejects the text flavor', () => {
+    expect(
+      isStreamEventFrame({ type: 'stream-ev', channel: 'session:bash-output', args: [] })
+    ).toBe(true)
+    // `args` must be an array — the frame IS the emission, and an emission is
+    // positional (`(routingId, data)`). Anything else cannot be dispatched.
+    expect(isStreamEventFrame({ type: 'stream-ev', channel: 'x' })).toBe(false)
+    expect(isStreamEventFrame({ type: 'stream-ev', args: [] })).toBe(false)
+    expect(isStreamEventFrame({ type: 'stream', streamId: 'a/text' })).toBe(false)
+    expect(isStreamEventFrame(null)).toBe(false)
+    // …and the two validators do not accept each other's frames, or a decoder
+    // could route one flavor into the other's fold.
+    expect(isStreamFrame({ type: 'stream-ev', channel: 'c', args: [] })).toBe(false)
+  })
+
+  it('scopes the session tails by routingId and the automation tail by automationId', () => {
+    expect(
+      streamEventScopeOf({
+        type: 'stream-ev',
+        channel: 'session:bash-output',
+        args: [RID, { toolUseId: 'tu-1', output: 'x' }]
+      })
+    ).toEqual({ kind: 'session', id: RID })
+    expect(
+      streamEventScopeOf({
+        type: 'stream-ev',
+        channel: 'session:background-output',
+        args: [RID, { toolUseId: 'tu-1', tail: 'x' }]
+      })
+    ).toEqual({ kind: 'session', id: RID })
+    // Automation-scoped, NOT run-scoped: the payload carries no run id, and
+    // inventing one here would be a second answer to "which run is this".
+    expect(
+      streamEventScopeOf({
+        type: 'stream-ev',
+        channel: 'automation:stream-event',
+        args: [{ automationId: 'auto-1', type: 'text', text: 'x' }]
+      })
+    ).toEqual({ kind: 'automation', id: 'auto-1' })
+  })
+
+  it('refuses to scope a malformed payload (delivered to nobody, never broadcast)', () => {
+    const cases = [
+      { channel: 'session:bash-output', args: [] },
+      { channel: 'session:bash-output', args: [42] },
+      { channel: 'session:bash-output', args: [''] },
+      { channel: 'automation:stream-event', args: [{}] },
+      { channel: 'automation:stream-event', args: [{ automationId: '' }] },
+      { channel: 'automation:stream-event', args: [] }
+    ]
+    for (const c of cases) {
+      expect(
+        streamEventScopeOf({ type: 'stream-ev', ...c }),
+        `${c.channel} ${JSON.stringify(c.args)}`
+      ).toBeNull()
+    }
+  })
+
+  it('the backpressure budget is a named bound matching the PTY high-water mark', () => {
+    expect(STREAM_BACKPRESSURE_BYTES).toBe(1024 * 1024)
   })
 })

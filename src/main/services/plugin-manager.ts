@@ -95,17 +95,27 @@ export class PluginManager {
       this.fireSessionScoped(channel, args)
     })
 
-    // The VOLATILE LANE (phase 5 S1). `session:stream` / `session:subagent-stream`
-    // stopped being events, so a plain sync subscriber no longer sees them — but a
-    // plugin's contract predates the lane split and must not change because of it.
-    // An in-process OBSERVER receives every frame (it has no session selection to
-    // filter by, unlike a remote connection), and one shared helper turns the frame
-    // back into the emission shape plugins have always been handed.
+    // The VOLATILE LANE (phase 5 S1, extended by S2). The two delta channels and
+    // then the three tails stopped being events, so a plain sync subscriber no
+    // longer sees them — but a plugin's contract predates the lane split and must
+    // not change because of it. An in-process OBSERVER receives every frame (it
+    // has no session selection to filter by, unlike a remote connection) and it is
+    // re-materialized into the emission shape plugins have always been handed: a
+    // text frame through the shared inverse, a PASS-THROUGH frame by simply
+    // reading `(channel, args)` back off it — it never stopped being the emission.
     //
-    // GATED on someone actually listening: with no plugin subscribed to these two
+    // GATED on someone actually listening: with no plugin subscribed to these
     // channels the synthesis is skipped entirely, so the token firehose costs
     // nothing on a machine with no plugins — which is every machine by default.
     this.unsubscribeStream = addStreamObserver((frame) => {
+      if (frame.type === 'stream-ev') {
+        if (!this.hasListeners(frame.channel)) return
+        if (this.tracing) {
+          logger.debug(LOG_SOURCE, `[trace] ${frame.channel} (volatile)`)
+        }
+        this.fireSessionScoped(frame.channel, frame.args)
+        return
+      }
       if (!this.hasStreamListeners()) return
       const emission = streamFrameToEmission(frame)
       if (!emission) return
@@ -116,12 +126,14 @@ export class PluginManager {
     })
   }
 
-  /** Is any plugin listening to the volatile lane's two channels? */
+  /** Is any plugin listening to `channel`? */
+  private hasListeners(channel: string): boolean {
+    return (this.eventListeners.get(channel)?.size ?? 0) > 0
+  }
+
+  /** Is any plugin listening to the lane's two TEXT-STREAM channels? */
   private hasStreamListeners(): boolean {
-    return (
-      (this.eventListeners.get('session:stream')?.size ?? 0) > 0 ||
-      (this.eventListeners.get('session:subagent-stream')?.size ?? 0) > 0
-    )
+    return this.hasListeners('session:stream') || this.hasListeners('session:subagent-stream')
   }
 
   /** One wrapper for both lanes — see the ADR-005 event shape note above. */

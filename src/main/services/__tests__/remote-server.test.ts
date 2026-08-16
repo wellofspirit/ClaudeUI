@@ -141,7 +141,8 @@ vi.mock('../tunnel-manager', () => {
 import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import { registerCommand } from '../../ipc/command-registry'
-import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../git-watch-registry'
+import { GIT_WATCH_COMMAND } from '../../ipc/git-watch'
+import { gitWatchRegistry } from '../git-watch-registry'
 import { emitEvent, syncCore } from '../sync-host'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
@@ -590,12 +591,13 @@ describe('RemoteServer', () => {
 // ---------------------------------------------------------------------------
 // Git watching lifecycle — a departed client must not leave a 5s poller behind.
 //
-// A remote client that drops abruptly (phone sleeps, tab closed) never sends
-// git:stop-watching, so the collective 'remote' owner in gitWatchRegistry has to
-// be released by the server itself once the last client is gone.
+// A remote client that drops abruptly (phone sleeps, tab closed) never states an
+// empty set, so its interest is released by the server itself, keyed to the
+// SOCKET (phase 5 S2). The retired collective-owner model could only do this once
+// the LAST client left; a per-connection set shrinks the union immediately.
 // ---------------------------------------------------------------------------
 
-describe('RemoteServer — git watch owner release', () => {
+describe('RemoteServer — git watch release on disconnect', () => {
   let server: RemoteServer
   let port: number
   let releaseSpy: ReturnType<typeof vi.spyOn>
@@ -603,7 +605,7 @@ describe('RemoteServer — git watch owner release', () => {
   beforeEach(async () => {
     server = new RemoteServer(new RemoteDispatcher())
     port = await ephemeralPort()
-    releaseSpy = vi.spyOn(gitWatchRegistry, 'releaseOwner')
+    releaseSpy = vi.spyOn(gitWatchRegistry, 'releaseConnection')
   })
 
   afterEach(async () => {
@@ -615,7 +617,7 @@ describe('RemoteServer — git watch owner release', () => {
     }
   })
 
-  it("releases the 'remote' owner only when the LAST client disconnects", async () => {
+  it('releases EACH connection as its own socket closes, not just the last', async () => {
     const res = await server.start(port, '127.0.0.1')
     const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
     const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
@@ -625,26 +627,30 @@ describe('RemoteServer — git watch owner release', () => {
     c1.close()
     await waitForTerminal(c1.ws)
     await waitUntil(() => server.getStatus().connectedClients === 1)
-    // One client still connected — its watch must survive.
-    expect(releaseSpy).not.toHaveBeenCalled()
+    // THE S2 CHANGE: the departed client's interest is released immediately. Under
+    // the collective owner this call could not happen while c2 was still here, so
+    // c1's cwd kept a 5 s poller alive for nobody.
+    await waitUntil(() => releaseSpy.mock.calls.length === 1)
 
     c2.close()
     await waitForTerminal(c2.ws)
-    await waitUntil(() => releaseSpy.mock.calls.length > 0)
-    expect(releaseSpy).toHaveBeenCalledWith(GIT_WATCH_OWNER_REMOTE)
+    await waitUntil(() => releaseSpy.mock.calls.length === 2)
+    // Two distinct connection ids — never the same one twice.
+    const ids = releaseSpy.mock.calls.map((c) => c[0])
+    expect(new Set(ids).size).toBe(2)
   })
 
-  it('releases the owner on stop() without waiting for the sockets to close', async () => {
+  it('releases every live connection on stop() without waiting for the sockets', async () => {
     const res = await server.start(port, '127.0.0.1')
     const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
     await c1.ready
     releaseSpy.mockClear()
 
     server.stop()
-    expect(releaseSpy).toHaveBeenCalledWith(GIT_WATCH_OWNER_REMOTE)
+    expect(releaseSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('releasing an owner that holds nothing is harmless (no throw, real registry)', async () => {
+  it('releasing a connection that holds nothing is harmless (no throw, real registry)', async () => {
     releaseSpy.mockRestore()
     const res = await server.start(port, '127.0.0.1')
     const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
@@ -652,7 +658,7 @@ describe('RemoteServer — git watch owner release', () => {
     c1.close()
     await waitForTerminal(c1.ws)
     await waitUntil(() => server.getStatus().connectedClients === 0)
-    expect(gitWatchRegistry.ownersOf('/anything')).toEqual([])
+    expect(gitWatchRegistry.watchersOf('/anything')).toEqual([])
   })
 })
 
@@ -678,30 +684,13 @@ describe('RemoteServer — remote git watching end-to-end', () => {
 
   beforeEach(async () => {
     const dispatcher = new RemoteDispatcher()
-    // The live-watch pair, registered exactly as remote-handlers.ts does.
-    // `registerRemoteHandlers()` itself cannot be loaded in this file — it pulls
-    // the entire session/engine/auth service graph, which this file deliberately
-    // does not mock. That single hop (the registry registration and its owner
-    // id) is covered by remote-handlers.ipc.test.ts; everything DOWNSTREAM of the
-    // handler here is the real production path.
-    registerCommand({
-      channel: 'git:start-watching',
-      capability: 'git',
-      kind: 'query',
-      transport: 'remote',
-      handler: async (cwd: string) => {
-        gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
-      }
-    })
-    registerCommand({
-      channel: 'git:stop-watching',
-      capability: 'git',
-      kind: 'query',
-      transport: 'remote',
-      handler: async (cwd: string) => {
-        gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
-      }
-    })
+    // The live-watch verb, registered from the SAME shared declaration
+    // remote-handlers.ts spreads. `registerRemoteHandlers()` itself cannot be
+    // loaded in this file — it pulls the entire session/engine/auth service graph,
+    // which this file deliberately does not mock. That single hop (the
+    // registration) is covered by remote-handlers.ipc.test.ts; everything
+    // DOWNSTREAM of the handler here is the real production path.
+    registerCommand({ ...GIT_WATCH_COMMAND, transport: 'remote' })
 
     server = new RemoteServer(dispatcher)
     port = await ephemeralPort()
@@ -723,7 +712,6 @@ describe('RemoteServer — remote git watching end-to-end', () => {
   })
 
   afterEach(async () => {
-    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     gitWatchRegistry.init(null)
     try {
       await server.stop()
@@ -734,7 +722,7 @@ describe('RemoteServer — remote git watching end-to-end', () => {
   })
 
   it(
-    'pushes a real git:status-update frame to an authenticated client after git:start-watching',
+    'pushes a real git:status-update frame to an authenticated client after git:watch',
     async () => {
       const res = await server.start(port, '127.0.0.1')
       const client = await connectRemoteClient({
@@ -750,8 +738,8 @@ describe('RemoteServer — remote git watching end-to-end', () => {
         if (msg.type === 'event' && msg.channel === 'git:status-update') frames.push(msg)
       })
 
-      await client.invoke('git:start-watching', repo.path)
-      expect(gitWatchRegistry.ownersOf(repo.path)).toEqual([GIT_WATCH_OWNER_REMOTE])
+      await client.invoke('git:watch', { cwds: [repo.path] })
+      expect(gitWatchRegistry.watchersOf(repo.path)).toHaveLength(1)
 
       // No 5s wait: the poller's FIRST poll always emits (the fingerprint-reset
       // invariant in GitService.stopPolling()). Generous ceiling only because a
@@ -766,10 +754,10 @@ describe('RemoteServer — remote git watching end-to-end', () => {
       expect(payload.status.files.some((f) => f.path === 'tracked.txt')).toBe(true)
       expect(payload.status.linesAdded).toBeGreaterThan(0)
 
-      // Tearing down removes the only owner, so the poller is stopped and the
+      // An empty set removes the only watcher, so the poller is stopped and the
       // GitService released.
-      await client.invoke('git:stop-watching', repo.path)
-      expect(gitWatchRegistry.ownersOf(repo.path)).toEqual([])
+      await client.invoke('git:watch', { cwds: [] })
+      expect(gitWatchRegistry.watchersOf(repo.path)).toEqual([])
 
       const framesAfterStop = frames.length
       client.close()

@@ -119,7 +119,16 @@ import { registerRemoteHandlers } from '../../ipc/remote-handlers'
 import { registerTerminalIpc } from '../../ipc/terminal.ipc'
 import { commandRegistry, registerCommand } from '../../ipc/command-registry'
 import { emitEvent, streamSubscriberCount, syncCore } from '../sync-host'
-import { MAX_STREAM_WATCH, type StreamFrame } from '../../../shared/sync/stream'
+import {
+  MAX_STREAM_WATCH,
+  applyStreamFrame,
+  type StreamApplyResult,
+  type StreamEventFrame,
+  type StreamFrame
+} from '../../../shared/sync/stream'
+import { auxFromCanonical } from '../../../shared/sync/reducer'
+import { fromSnapshot } from '../../../shared/sync/state'
+import { SyncClient } from '../../../shared/sync/sync-client'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -288,6 +297,88 @@ async function invoke(client: RawClient, channel: string, ...args: unknown[]): P
 }
 
 const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 40))
+
+/**
+ * Drive the stream lane's BACKPRESSURE branch (phase 5 S2).
+ *
+ * The sink reads `ws.bufferedAmount` — the same measurement the remote PTY uses
+ * for its high-water decision — so forcing that number is what exercises the
+ * production path rather than a test-only seam. Patched on the `ws` PROTOTYPE
+ * because the server-side socket lives inside RemoteServer's private map; a real
+ * megabyte of unread bytes would depend on OS socket buffers and be flaky.
+ *
+ * **What is and is not undone.** The prototype patch is installed once at module
+ * load and stays installed for the worker's lifetime — nothing restores the
+ * original descriptor. What `afterEach` resets is the OVERRIDE VALUE, so every
+ * other test reads the real `bufferedAmount` through this getter and no test ever
+ * inherits a congested socket. That is sufficient because vitest's fork isolation
+ * gives this file its own worker, so the patch cannot reach another file's
+ * sockets; `REAL_BUFFERED` is kept as the delegate rather than as a restore
+ * handle.
+ */
+const REAL_BUFFERED = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!
+let bufferedOverride: number | null = null
+Object.defineProperty(WebSocket.prototype, 'bufferedAmount', {
+  configurable: true,
+  get(this: WebSocket): number {
+    return bufferedOverride ?? (REAL_BUFFERED.get as () => number).call(this)
+  }
+})
+const congest = (bytes: number): void => {
+  bufferedOverride = bytes > 0 ? bytes : null
+}
+
+/**
+ * A REAL client replica behind a raw socket: `SyncClient` fed by the frames the
+ * server actually sent, folding `applyStreamFrame` the way `stores/replica.ts`
+ * does.
+ *
+ * Deliberately the production pieces and not a hand-rolled accumulator — the
+ * point of the lane is that ONE interpretation runs on both sides, so a test that
+ * re-implemented the fold could agree with itself while disagreeing with the
+ * client that ships. The starting state comes from `getSnapshot()` for the same
+ * reason: that is the `sync-full` a real client hydrated from.
+ */
+function makeReplicaFold(client: RawClient, routingId: string): {
+  streams: StreamFrame[]
+  results: StreamApplyResult[]
+  text: () => string
+  settle: () => Promise<void>
+  reset: () => void
+} {
+  let state = fromSnapshot(syncCore.getSnapshot())
+  const aux = auxFromCanonical(state)
+  const sync = new SyncClient({ requestResync: () => {} })
+  // The gate is a one-way latch and stream frames are DROPPED while it is closed;
+  // a mounted app is what this stands in for.
+  sync.markReady()
+  const streams: StreamFrame[] = []
+  const results: StreamApplyResult[] = []
+  sync.onStreamFrame((frame) => {
+    streams.push(frame)
+    const outcome = applyStreamFrame(state, aux, frame)
+    state = outcome.state
+    results.push(outcome.result)
+  })
+  let consumed = 0
+  return {
+    streams,
+    results,
+    text: () => state.sessions[routingId].streamingText,
+    settle: async () => {
+      await new Promise((r) => setTimeout(r, 50))
+      // Feed only what has not been fed, in arrival order — the transport's job.
+      for (; consumed < client.frames.length; consumed++) {
+        const frame = client.frames[consumed]
+        if (frame.type === 'stream') sync.receiveStreamFrame(frame)
+      }
+    },
+    reset: () => {
+      streams.length = 0
+      results.length = 0
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 
@@ -825,6 +916,8 @@ describe('ADR-054 step-up tiers over the socket', () => {
     afterEach(() => {
       syncCore.resetCanonicalForTests()
       syncCore.clearRing()
+      // Never leave a congested socket behind for the next test.
+      congest(0)
     })
 
     it('replays the coalesced accumulation on subscribe, and only for watched sessions', async () => {
@@ -981,6 +1074,144 @@ describe('ADR-054 step-up tiers over the socket', () => {
       auditRows.length = 0
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       expect(auditChannels()).not.toContain('stream:watch')
+    })
+
+    // -----------------------------------------------------------------------
+    // The PASS-THROUGH flavor and the automation scope (phase 5 S2)
+    // -----------------------------------------------------------------------
+
+    const tailsOf = (c: RawClient): StreamEventFrame[] =>
+      c.frames.filter((f): f is StreamEventFrame => f.type === 'stream-ev')
+
+    it('delivers the session tails on the session set, verbatim', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      c.frames.length = 0
+
+      emitEvent('session:bash-output', [RID, { toolUseId: 'tu-1', output: 'mine' }])
+      emitEvent('session:bash-output', [OTHER, { toolUseId: 'tu-2', output: 'theirs' }])
+      await new Promise((r) => setTimeout(r, 50))
+
+      // Verbatim: the whole point of the flavor is that the client's existing
+      // per-channel listener keeps working with no rewiring.
+      expect(tailsOf(c)).toEqual([
+        {
+          type: 'stream-ev',
+          channel: 'session:bash-output',
+          args: [RID, { toolUseId: 'tu-1', output: 'mine' }]
+        }
+      ])
+    })
+
+    it('scopes automation:stream-event by its own set, independently replaced', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+      // A session watch that says NOTHING about automations must not clear them,
+      // or the two scopes could never be stated by one call each.
+      await invoke(c, 'stream:watch', { sessionIds: [RID], automationRuns: ['auto-1'] })
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      c.frames.length = 0
+
+      emitEvent('automation:stream-event', [{ automationId: 'auto-1', type: 'text', text: 'a' }])
+      emitEvent('automation:stream-event', [{ automationId: 'auto-2', type: 'text', text: 'b' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(tailsOf(c).map((f) => (f.args[0] as { text: string }).text)).toEqual(['a'])
+
+      // …and an explicit empty set IS the stop.
+      await invoke(c, 'stream:watch', { sessionIds: [RID], automationRuns: [] })
+      c.frames.length = 0
+      emitEvent('automation:stream-event', [{ automationId: 'auto-1', type: 'text', text: 'c' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(tailsOf(c)).toEqual([])
+    })
+
+    it('the automation set is PER CONNECTION and bounded like the session set', async () => {
+      await boot()
+      seedSessions()
+      const a = await connectWithToken()
+      const b = await connectWithToken()
+      await invoke(a, 'stream:watch', { sessionIds: [], automationRuns: ['auto-1'] })
+      a.frames.length = 0
+      b.frames.length = 0
+      emitEvent('automation:stream-event', [{ automationId: 'auto-1', type: 'text', text: 'x' }])
+      await new Promise((r) => setTimeout(r, 50))
+      expect(tailsOf(a)).toHaveLength(1)
+      expect(tailsOf(b)).toEqual([])
+
+      const tooMany = Array.from({ length: MAX_STREAM_WATCH + 1 }, (_, i) => `a-${i}`)
+      await expect(
+        invoke(a, 'stream:watch', { sessionIds: [], automationRuns: tooMany })
+      ).rejects.toThrow(/at most 32 automations/)
+      await expect(
+        invoke(a, 'stream:watch', { sessionIds: [], automationRuns: [1] })
+      ).rejects.toThrow(/non-empty strings/)
+    })
+
+    it('drops STREAM frames under backpressure — never events — and heals after relief', async () => {
+      await boot()
+      seedSessions()
+      const c = await connectWithToken()
+
+      // A REAL client replica behind this socket, fed the way a transport feeds
+      // one. The heal is a claim about what a CLIENT ends up holding, so proving
+      // it at the wire level ("the replay frame looks right") would leave the
+      // load-bearing half — that the dropped chunk makes the next frame
+      // unplaceable, and that the replay places it anyway — unexercised.
+      const replica = makeReplicaFold(c, RID)
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      await replica.settle()
+      // The replay hydrated it: snapshot value, re-stated at offset 0.
+      expect(replica.text()).toBe('hello')
+      expect(replica.results).toEqual(['applied', 'applied'])
+      replica.reset()
+
+      // Simulate a socket that is not keeping up. `bufferedAmount` is the real
+      // measurement the sink reads (the same one the remote PTY uses), so
+      // controlling it drives the production branch rather than a test seam.
+      congest(2 * 1024 * 1024)
+      emitEvent('session:stream', [RID, { type: 'text', text: 'LOST' }])
+      emitEvent('session:bash-output', [RID, { toolUseId: 'tu-1', output: 'also lost' }])
+      // THE EVENT LANE IS NEVER DROPPED. A missing event is a permanent hole in a
+      // seq-ordered stream; this is the tool_result that makes losing the tail
+      // above honest rather than lossy-with-consequences.
+      emitEvent('session:tool-result', [RID, { toolUseId: 'tu-1', result: 'done' }])
+      await replica.settle()
+
+      expect(replica.streams).toEqual([])
+      expect(tailsOf(c)).toEqual([])
+      expect(
+        c.frames.filter((f) => f.type === 'event' && f.channel === 'session:tool-result')
+      ).toHaveLength(1)
+      // Canonical moved on without the client, which is the whole hazard.
+      expect(replica.text()).toBe('hello')
+      expect(syncCore.getCanonicalState().sessions[RID].streamingText).toBe('helloLOST')
+
+      // Relief. The next delta IS delivered, but its offset counts the chunk that
+      // was dropped, so the client cannot place it: the fold is a no-op returning
+      // `mismatch`, and that signal — not a timer, not a heuristic — is what
+      // triggers the S1 cure. Silently appending here is the corruption the offset
+      // guard exists to make impossible.
+      congest(0)
+      emitEvent('session:stream', [RID, { type: 'text', text: 'kept' }])
+      await replica.settle()
+      expect(replica.streams).toHaveLength(1)
+      expect(replica.streams[0].offset).toBe('helloLOST'.length)
+      expect(replica.results).toEqual(['mismatch'])
+      expect(replica.text()).toBe('hello')
+
+      // The cure: re-send the same watch set (what `setStreamRewatch` does on a
+      // mismatch). The replay states the coalesced value at `offset: 0`, which is
+      // a REPLACE by construction, so the fold converges on exactly what canonical
+      // holds — including the chunk that was dropped and the one that mismatched.
+      replica.reset()
+      await invoke(c, 'stream:watch', { sessionIds: [RID] })
+      await replica.settle()
+      expect(replica.results.every((r) => r === 'applied')).toBe(true)
+      expect(replica.text()).toBe('helloLOSTkept')
+      expect(replica.text()).toBe(syncCore.getCanonicalState().sessions[RID].streamingText)
     })
   })
 

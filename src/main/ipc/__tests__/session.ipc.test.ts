@@ -294,11 +294,8 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { registerSessionIpc } from '../session.ipc'
 import { gitServiceManager } from '../../services/git-service'
-import {
-  gitWatchRegistry,
-  GIT_WATCH_OWNER_DESKTOP,
-  GIT_WATCH_OWNER_REMOTE
-} from '../../services/git-watch-registry'
+import { gitWatchRegistry } from '../../services/git-watch-registry'
+import { desktopConnection } from '../command-registry'
 import { addSyncSubscriber } from '../../services/sync-host'
 import { setHostWindow } from '../../services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
@@ -574,20 +571,22 @@ describe('session.ipc', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Git watching — the desktop side of the shared gitWatchRegistry.
+  // Git watching — the desktop side of the shared gitWatchRegistry (phase 5 S2:
+  // per-connection interest sets, not a collective owner).
   // -------------------------------------------------------------------------
 
   describe('git watching', () => {
     const CWD = '/tmp/watched'
+    const PHONE = 'conn-phone'
 
     afterEach(() => {
       // The registry is a module singleton shared with the remote path; unwind
-      // both owners so state can't leak into the next test.
-      gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_DESKTOP)
-      gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+      // both connections so state can't leak into the next test.
+      gitWatchRegistry.releaseConnection(desktopConnection().connectionId)
+      gitWatchRegistry.releaseConnection(PHONE)
     })
 
-    it('git:start-watching starts one poller and broadcasts to every subscriber', async () => {
+    it('git:watch starts one poller and broadcasts to every subscriber', async () => {
       // 4c: `git:status-update` is replicated, so it reaches SUBSCRIBERS — there is
       // no "main window AND extras" any more, just clients. A second subscriber
       // stands in for the WebSocket broadcaster, which is the hop that carries this
@@ -597,7 +596,7 @@ describe('session.ipc', () => {
         if (channel === 'git:status-update') other.push(args)
       })
 
-      await harness.call('git:start-watching', CWD)
+      await harness.call('git:watch', { cwds: [CWD] })
       expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
       expect(gitSvcSpies.startPolling.mock.calls[0][1]).toBe(5000)
 
@@ -613,16 +612,17 @@ describe('session.ipc', () => {
       expect(other).toEqual([[{ cwd: CWD, status }]])
     })
 
-    it('a remote owner attaches to the desktop poller instead of clobbering it (CLOBBER GUARD)', async () => {
-      await harness.call('git:start-watching', CWD)
+    it('a remote connection joins the desktop poller instead of clobbering it (CLOBBER GUARD)', async () => {
+      await harness.call('git:watch', { cwds: [CWD] })
       const emit = gitSvcSpies.startPolling.mock.calls[0][0] as (s: unknown) => void
       emit({ files: [], branch: 'main' })
 
-      // The remote dispatcher path calls the same registry under its own owner.
-      gitWatchRegistry.startWatching(CWD, GIT_WATCH_OWNER_REMOTE)
+      // The remote dispatcher path reaches the same registry under its own
+      // connection id — the union grows, the poller does not.
+      gitWatchRegistry.setWatch(PHONE, [CWD])
       expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
 
-      // The desktop's callback is still the live one.
+      // The one callback is still the live one.
       const received: unknown[][] = []
       const off = harness.onEvent('git:status-update', (...args) => received.push(args))
       emit({ files: [], branch: 'dev' })
@@ -630,25 +630,31 @@ describe('session.ipc', () => {
       expect(received).toEqual([[{ cwd: CWD, status: { files: [], branch: 'dev' } }]])
     })
 
-    it('git:stop-watching keeps the poller alive while the remote owner remains', async () => {
-      await harness.call('git:start-watching', CWD)
-      gitWatchRegistry.startWatching(CWD, GIT_WATCH_OWNER_REMOTE)
+    it('the desktop clearing its set keeps the poller alive while a phone watches', async () => {
+      await harness.call('git:watch', { cwds: [CWD] })
+      gitWatchRegistry.setWatch(PHONE, [CWD])
 
-      await harness.call('git:stop-watching', CWD)
+      await harness.call('git:watch', { cwds: [] })
       expect(gitSvcSpies.stopPolling).not.toHaveBeenCalled()
-      expect(gitWatchRegistry.ownersOf(CWD)).toEqual([GIT_WATCH_OWNER_REMOTE])
+      expect(gitWatchRegistry.watchersOf(CWD)).toEqual([PHONE])
     })
 
-    it('git:stop-watching tears down when it is the only owner', async () => {
-      await harness.call('git:start-watching', CWD)
-      await harness.call('git:stop-watching', CWD)
+    it('the union emptying tears the poller down', async () => {
+      await harness.call('git:watch', { cwds: [CWD] })
+      await harness.call('git:watch', { cwds: [] })
       expect(gitSvcSpies.stopPolling).toHaveBeenCalledTimes(1)
-      expect(gitWatchRegistry.ownersOf(CWD)).toEqual([])
+      expect(gitWatchRegistry.watchersOf(CWD)).toEqual([])
     })
 
-    it('git:stop-watching for an unwatched cwd is a no-op', async () => {
-      await expect(harness.call('git:stop-watching', '/tmp/never')).resolves.toBeUndefined()
+    it('an empty set from a connection that watches nothing is a no-op', async () => {
+      await expect(harness.call('git:watch', { cwds: [] })).resolves.toBeUndefined()
       expect(gitSvcSpies.stopPolling).not.toHaveBeenCalled()
+    })
+
+    it('refuses a set larger than the cap rather than clipping it', async () => {
+      const many = Array.from({ length: 33 }, (_, i) => `/tmp/many-${i}`)
+      await expect(harness.call('git:watch', { cwds: many })).rejects.toThrow(/at most 32/)
+      expect(gitSvcSpies.startPolling).not.toHaveBeenCalled()
     })
   })
 

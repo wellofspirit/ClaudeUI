@@ -2,62 +2,82 @@ import { gitServiceManager } from './git-service'
 import type { GitStatusData } from '../../shared/types'
 
 /**
- * Shared owner-keyed registry for git status polling.
+ * Per-connection interest registry for git status polling.
  *
- * Why this exists: `GitService.startPolling()` stores a SINGLE callback and
+ * Why this exists at all: `GitService.startPolling()` stores a SINGLE callback and
  * calls `stopPolling()` first, and `gitServiceManager` hands out ONE GitService
- * per cwd (refcounted). So a second, independent `startPolling()` on the same
- * cwd silently REPLACES the first caller's callback. Before this registry the
- * desktop IPC path owned that callback outright, which is why the remote path
- * could not simply start its own poller — it would have clobbered the desktop's
- * broadcast (and vice versa).
+ * per cwd (refcounted). So a second, independent `startPolling()` on the same cwd
+ * silently REPLACES the first caller's callback. Before this registry the desktop
+ * IPC path owned that callback outright, which is why the remote path could not
+ * simply start its own poller — it would have clobbered the desktop's broadcast
+ * (and vice versa). **One callback per cwd is the invariant this module holds**,
+ * and the fan-out is a single broadcast injected once via {@link init}.
  *
- * Every consumer therefore watches through this registry, identified by an
- * opaque owner id (`'desktop'` for the local IPC handlers, `'remote'` for the
- * web clients collectively). The first owner of a cwd starts the poller; later
- * owners attach to it and are handed the cached status immediately.
+ * ## What phase 5 S2 changed: interest, not ownership
  *
- * The registry deliberately knows nothing about Electron windows: the fan-out is
- * injected once via {@link GitWatchRegistry.init} by whoever owns the window
- * handles (session.ipc.ts). That keeps this module unit-testable and stops it
- * from reaching into window state ad hoc.
+ * The registry used to be keyed by an opaque OWNER id — `'desktop'` for the local
+ * IPC handlers and `'remote'` for every web client COLLECTIVELY, with refcounted
+ * start/stop calls. That was a workaround for a dispatcher that handed handlers no
+ * client identity, and it had the failure ADR-052 predicted: a browser reloading
+ * its tab never ran React cleanup, so its `git:stop-watching` was lost, the
+ * collective owner's count crept up, and a poller stayed alive for a cwd nobody
+ * was viewing until the LAST client disconnected.
  *
- * KNOWN BOUND (accepted): every remote client shares the single `'remote'` owner
- * rather than one owner per socket, because `RemoteDispatcher` handlers receive
- * no client identity — giving each socket its own owner id would mean plumbing
- * that identity through the WS protocol and every handler signature. The visible
- * consequence: a browser reloading its tab never runs React cleanup, so its
- * `git:stop-watching` is lost and the owner's count for that cwd creeps up,
- * keeping a poller alive for a cwd nobody is viewing. It is bounded — at most one
- * 5s `git status` per stale cwd, and only while SOME client is connected, since
- * `releaseOwner('remote')` fires on last-disconnect and on server stop.
+ * Now every connection states its own interest — `git:watch {cwds}`, a REPLACE set
+ * exactly like `stream:watch` — and the UNION of those sets is what is polled. A
+ * connection that vanishes has its set released with the socket
+ * ({@link releaseConnection}), so the union shrinks on disconnect rather than on
+ * last-disconnect, and a lost cleanup message costs nothing because there is no
+ * count to leak: re-stating a set IS the correction.
+ *
+ * ## The always-emit-first invariant (do not break this)
+ *
+ * `GitService.startPolling()` clears the change-detection fingerprint, so the
+ * FIRST poll after a (re)start always emits. That is what makes a freshly
+ * connected client's git pill render at all — the poller is change-only after its
+ * first tick. Two paths preserve it here:
+ *
+ *  - a cwd's first watcher starts the poller, which resets the fingerprint;
+ *  - a watcher joining a cwd somebody else already polls is handed the CACHED
+ *    status immediately, and so is a connection that re-states a set it already
+ *    held (a renderer reload keeps its connection id, so "no change" must not mean
+ *    "no status").
+ *
+ * The broadcast is one fan-out to every client, so a replay reaches all of them
+ * rather than just the joiner. Harmless — a status update is a replace in every
+ * consumer — and far simpler than per-connection channels.
  */
 
 /** Poll cadence for every watched cwd. */
 const POLL_INTERVAL_MS = 5000
 
-/** Owner id for the desktop renderer's `git:start-watching` IPC calls. */
-export const GIT_WATCH_OWNER_DESKTOP = 'desktop'
-/** Owner id for the remote web clients, collectively. */
-export const GIT_WATCH_OWNER_REMOTE = 'remote'
+/**
+ * Cap on one connection's watch set — the same bound and the same reasoning as
+ * `MAX_STREAM_WATCH`: the array's length is chosen by a remote client and the
+ * result is held for the socket's lifetime, and each entry costs a `git status`
+ * every 5 seconds. Refused rather than truncated.
+ */
+export const MAX_GIT_WATCH = 32
 
 /** Fan-out for one status update. */
 export type GitStatusBroadcast = (cwd: string, status: GitStatusData) => void
 
 interface WatchEntry {
-  /** ownerId → number of un-stopped `startWatching` calls from that owner. */
-  owners: Map<string, number>
+  /** Connection ids currently interested in this cwd. */
+  watchers: Set<string>
   /**
-   * Last status the poller produced for this cwd, replayed to a late-joining
-   * owner. Required, not an optimisation: the poller emits only on CHANGE after
-   * its first tick, so without the replay a client that connects to a quiet
-   * working tree stays blind until the tree next changes.
+   * Last status the poller produced for this cwd, replayed to a joining watcher.
+   * Required, not an optimisation: the poller emits only on CHANGE after its
+   * first tick, so without the replay a client that connects to a quiet working
+   * tree stays blind until the tree next changes.
    */
   lastStatus: GitStatusData | null
 }
 
 export class GitWatchRegistry {
   private entries = new Map<string, WatchEntry>()
+  /** connectionId → the cwds it last asked for. The other half of `entries`. */
+  private interests = new Map<string, Set<string>>()
   private broadcast: GitStatusBroadcast | null = null
 
   /**
@@ -71,72 +91,78 @@ export class GitWatchRegistry {
   }
 
   /**
-   * Register `ownerId` as a watcher of `cwd`, starting the poller if nobody was
-   * watching yet.
-   *
-   * A later owner must NOT call `startPolling()` again — that would replace the
-   * running callback. It gets the cached status re-broadcast instead. If no poll
-   * has completed yet there is nothing to replay, and the in-flight first poll
-   * delivers to everyone anyway.
-   *
-   * Note that the broadcast is a single fan-out to every window, so a replay
-   * reaches all of them, not just the new owner. That is harmless (a status
-   * update is idempotent in the renderer store) and far simpler than per-owner
-   * channels.
+   * Replace `connectionId`'s interest set. Starts pollers for newly-interesting
+   * cwds, stops them for cwds that just lost their last watcher, and re-emits the
+   * cached status for every cwd in the set (see the always-emit-first note).
    */
-  startWatching(cwd: string, ownerId: string): void {
-    const existing = this.entries.get(cwd)
-    if (existing) {
-      existing.owners.set(ownerId, (existing.owners.get(ownerId) ?? 0) + 1)
-      if (existing.lastStatus) this.emit(cwd, existing.lastStatus)
-      return
+  setWatch(connectionId: string, cwds: readonly string[]): void {
+    const next = new Set(cwds)
+    const previous = this.interests.get(connectionId) ?? new Set<string>()
+
+    for (const cwd of previous) {
+      if (!next.has(cwd)) this.drop(cwd, connectionId)
     }
 
-    const entry: WatchEntry = { owners: new Map([[ownerId, 1]]), lastStatus: null }
-    this.entries.set(cwd, entry)
-    const svc = gitServiceManager.get(cwd)
-    svc.startPolling((status) => {
-      // A tick can settle after teardown (GitService retires the generation, but
-      // guard anyway so a stale tick can never resurrect a dropped cache entry).
-      if (this.entries.get(cwd) !== entry) return
-      entry.lastStatus = status
-      this.emit(cwd, status)
-    }, POLL_INTERVAL_MS)
+    if (next.size === 0) {
+      this.interests.delete(connectionId)
+    } else {
+      this.interests.set(connectionId, next)
+    }
+
+    for (const cwd of next) {
+      const existing = this.entries.get(cwd)
+      if (existing) {
+        existing.watchers.add(connectionId)
+        // Cached status to a joiner OR a re-stater. The poller is change-only
+        // after its first tick, so this is the only thing that can answer a
+        // client that arrived while the working tree was quiet.
+        if (existing.lastStatus) this.emit(cwd, existing.lastStatus)
+        continue
+      }
+      const entry: WatchEntry = { watchers: new Set([connectionId]), lastStatus: null }
+      this.entries.set(cwd, entry)
+      const svc = gitServiceManager.get(cwd)
+      // ONE `startPolling` per cwd, ever — a second would replace this callback
+      // and silence every other watcher. It also clears the fingerprint, which is
+      // what makes the first tick emit unconditionally.
+      svc.startPolling((status) => {
+        // A tick can settle after teardown (GitService retires the generation, but
+        // guard anyway so a stale tick can never resurrect a dropped cache entry).
+        if (this.entries.get(cwd) !== entry) return
+        entry.lastStatus = status
+        this.emit(cwd, status)
+      }, POLL_INTERVAL_MS)
+    }
   }
 
   /**
-   * Drop one `startWatching` from `ownerId`. Tears the poller down only when the
-   * last owner of the cwd is gone. Unknown cwd / unknown owner is a no-op.
+   * Drop everything `connectionId` was watching — the socket closed, or the
+   * server is stopping. A phone that sleeps or a closed tab never says so itself,
+   * which is exactly why this is keyed to the connection's lifetime rather than to
+   * a cleanup message. Releasing a connection that holds nothing is a no-op.
    */
-  stopWatching(cwd: string, ownerId: string): void {
+  releaseConnection(connectionId: string): void {
+    const held = this.interests.get(connectionId)
+    if (!held) return
+    this.interests.delete(connectionId)
+    for (const cwd of held) this.drop(cwd, connectionId)
+  }
+
+  /** Connections currently watching `cwd`. Diagnostic / test seam. */
+  watchersOf(cwd: string): string[] {
+    return [...(this.entries.get(cwd)?.watchers ?? [])]
+  }
+
+  /** Every cwd currently polled — the union. Diagnostic / test seam. */
+  watchedCwds(): string[] {
+    return [...this.entries.keys()].sort()
+  }
+
+  private drop(cwd: string, connectionId: string): void {
     const entry = this.entries.get(cwd)
     if (!entry) return
-    const count = entry.owners.get(ownerId)
-    if (count === undefined) return
-    if (count > 1) {
-      entry.owners.set(ownerId, count - 1)
-      return
-    }
-    entry.owners.delete(ownerId)
-    if (entry.owners.size === 0) this.teardown(cwd)
-  }
-
-  /**
-   * Drop `ownerId` from every cwd it watches, regardless of how many
-   * `startWatching` calls it made. For consumers that vanish without unwinding —
-   * an abruptly disconnected remote client never sends `git:stop-watching`.
-   * Releasing an owner that holds nothing is a no-op.
-   */
-  releaseOwner(ownerId: string): void {
-    for (const [cwd, entry] of [...this.entries]) {
-      if (!entry.owners.delete(ownerId)) continue
-      if (entry.owners.size === 0) this.teardown(cwd)
-    }
-  }
-
-  /** Owners currently watching `cwd`. Diagnostic / test seam. */
-  ownersOf(cwd: string): string[] {
-    return [...(this.entries.get(cwd)?.owners.keys() ?? [])]
+    entry.watchers.delete(connectionId)
+    if (entry.watchers.size === 0) this.teardown(cwd)
   }
 
   private teardown(cwd: string): void {

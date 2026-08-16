@@ -53,7 +53,8 @@ import {
 } from './terminal-service'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
-import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from './git-watch-registry'
+import { gitWatchRegistry } from './git-watch-registry'
+import { STREAM_BACKPRESSURE_BYTES } from '../../shared/sync/stream'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
@@ -491,6 +492,14 @@ interface AuthenticatedClient {
    * disconnected phone's deltas into a closed socket.
    */
   unsubscribeStream?: () => void
+  /**
+   * Is this connection currently OVER the stream-lane budget (phase 5 S2)?
+   *
+   * Held so the congestion notice is logged once per EPISODE. A stalled socket
+   * receiving deltas at token rate would otherwise write a log line per dropped
+   * frame — thousands of them, about a condition that is one fact.
+   */
+  streamCongested?: boolean
 }
 
 /**
@@ -934,6 +943,8 @@ export class RemoteServer {
       // Same reasoning for the stream lane: the registry is keyed by connection
       // id, and this map is cleared on the next line.
       client.unsubscribeStream?.()
+      // And the git interest set, for the same reason.
+      gitWatchRegistry.releaseConnection(client.connection.connectionId)
       closed.push(closeSocket(ws))
     }
 
@@ -948,10 +959,6 @@ export class RemoteServer {
       }
     }
     this.clients.clear()
-
-    // Drop the git-watch owner synchronously rather than waiting on each
-    // socket's async `close` handler — the server is going away now.
-    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
 
     // Stop receiving the funnel's fan-out.
     this.unsubscribeSync?.()
@@ -2263,13 +2270,18 @@ export class RemoteServer {
       // lifetime as every other authority this connection holds (ADR-054's 4010
       // max-age cut ends it because the cut closes the socket).
       //
-      // BACKPRESSURE IS S2 SCOPE, deliberately absent here: the per-connection
-      // budget (drop + resnapshot from the accumulation, the way `term-data`
-      // drops a slow consumer) lands with the tails, and the coalesced value is
-      // already the resnapshot it would need.
-      newClient.unsubscribeStream = addStreamSubscriber(connectionId, (frame) =>
+      // BACKPRESSURE (phase 5 S2): a socket queueing more than
+      // STREAM_BACKPRESSURE_BYTES is not keeping up, and the frames behind it are
+      // being produced at token rate. The PTY answers the same measurement by
+      // pausing the child; a stream lane cannot pause an LLM, so it DROPS — and
+      // only here, on this lane. Both flavors recover by design: a text stream
+      // heals on the next offset mismatch (the client re-watches and gets the
+      // coalesced value), a tail is lossy by contract. The EVENT lane below is
+      // never dropped.
+      newClient.unsubscribeStream = addStreamSubscriber(connectionId, (frame) => {
+        if (this.streamCongested(ws, newClient)) return
         this.sendTo(ws, frame)
-      )
+      })
       // ARM-ON-AUTH (ADR-054 decision 2) — this is what kills the double
       // ceremony: a login that IS a presence proof arms what its tier would
       // otherwise step-up-gate seconds later. A passkey assertion qualifies.
@@ -2799,6 +2811,12 @@ export class RemoteServer {
       // a closed tab never sends terminal:detach, and a leaked attachment would
       // keep measuring a dead socket for backpressure.
       if (client) terminalService.detachConnection(client.connection.connectionId)
+      // Same lifetime rule for the git poller: a phone that sleeps or a closed
+      // tab never states an empty set, so the socket's death is what releases its
+      // interest. The union shrinking here is what stops the 5 s poller for a cwd
+      // nobody is viewing — under the retired collective-owner model that could
+      // only happen when the LAST client left.
+      gitWatchRegistry.releaseConnection(connectionId)
       this.clients.delete(ws)
       if (authenticated) {
         logger.info(
@@ -2807,12 +2825,6 @@ export class RemoteServer {
         )
         this.notifyStatus()
       }
-      // Nobody left ⇒ drop the collective 'remote' git-watch owner. A client that
-      // drops abruptly (phone sleeps, tab closed) never sends git:stop-watching,
-      // so without this the 5 s poller would run forever. Also covers the
-      // disconnectPasswordClients() and checkIdleClients() paths, which both
-      // delegate their cleanup to this handler. No-op when nothing is held.
-      if (this.clients.size === 0) gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     })
 
     ws.on('error', (err) => {
@@ -3761,6 +3773,36 @@ export class RemoteServer {
       return null
     }
     return client
+  }
+
+  /**
+   * Is this connection's outbound queue over the stream-lane budget?
+   *
+   * The measurement is `ws.bufferedAmount` — the same one the remote PTY uses for
+   * its high-water decision (pty-manager.ts), and the only honest one: it is what
+   * the socket has accepted but not yet written. E2E encryption happens inside
+   * {@link sendTo}'s send queue, so a frame skipped here never enters that queue
+   * at all, which is the point — encrypting a frame we are about to drop is the
+   * work congestion is trying to shed.
+   *
+   * Transitions are what get logged, not frames; see
+   * {@link AuthenticatedClient.streamCongested}.
+   */
+  private streamCongested(ws: WebSocket, client: AuthenticatedClient): boolean {
+    if (ws.bufferedAmount <= STREAM_BACKPRESSURE_BYTES) {
+      client.streamCongested = false
+      return false
+    }
+    if (!client.streamCongested) {
+      client.streamCongested = true
+      logger.warn(
+        'remote-server',
+        `Stream lane congested for ${client.ip} (${ws.bufferedAmount} bytes queued > ` +
+          `${STREAM_BACKPRESSURE_BYTES}); dropping stream frames until it drains. ` +
+          `Text streams heal on the next re-watch; tails are lossy by contract.`
+      )
+    }
+    return true
   }
 
   /**

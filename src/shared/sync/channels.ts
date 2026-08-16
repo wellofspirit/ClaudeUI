@@ -15,8 +15,7 @@
  * | Class | Ring | Canonical | Delivery |
  * | --- | --- | --- | --- |
  * | `replicated` | yes | where the snapshot carries the field | every subscriber |
- * | `volatile` | **no** | yes (through `applyStreamFrame`) | WATCHING connections only |
- * | `volatile-pending-phase-5` | today's behavior, verbatim | only where snapshot parity requires | every subscriber |
+ * | `volatile` | **no** | text-stream flavor only | WATCHING connections only |
  * | `host-local` | no | no | owning desktop window only |
  *
  * ## Delivery is a function of CLASS as of 4c
@@ -44,37 +43,50 @@
  *    remote clients live, which is what a reconnecting client already replayed
  *    from the ring. That was 4a's "catchup leak" wrinkle; it dies here.
  *
- * ## Rule 1 is RETIRED (phase 5 S1)
+ * ## Rule 1 is RETIRED (phase 5 S1 + S2)
  *
  * 4a's surviving rule was **never reduce ring membership** — "a channel that
  * rings today still rings, even where that is clearly wrong (`session:stream`);
  * removing entries is phase-5 work with its own migration". This IS that
- * migration, for the two canonical-backed stream channels. They are class
- * `volatile` now: `ring: false`, no seq, no reducer branch, and delivery through
- * the subscription-scoped stream lane (`shared/sync/stream.ts`) instead of the
- * event fan-out. The owner waived backward compatibility for cached client
+ * migration. S1 moved the two canonical-backed delta channels; S2 moved the three
+ * TAILS (`session:bash-output`, `session:background-output`,
+ * `automation:stream-event`), and with them the last member of the interim
+ * `volatile-pending-phase-5` class — which is therefore DELETED, not left as an
+ * empty option. The owner waived backward compatibility for cached client
  * bundles, so there is no dual-emission lane — desktop and web ship with the
  * server.
  *
- * The tails (`session:bash-output`, `session:background-output`,
- * `automation:stream-event`) are S2 and keep `volatile-pending-phase-5` until
- * then, which is why both classes exist side by side.
+ * ## Two flavors of `volatile` ({@link ChannelSpec.volatileFlavor})
+ *
+ *  - `text-stream` — a `{streamId, turnId, offset, chunk}` frame folded into
+ *    canonical by `applyStreamFrame`. Accumulating, offset-guarded, self-healing
+ *    (a mismatch is cured by re-watching, which replays the coalesced value).
+ *  - `pass-through` — the emission `(channel, args)` verbatim in a
+ *    `{type:'stream-ev'}` frame, dispatched client-side into the ordinary
+ *    per-channel listener registry. NOT canonical, NOT accumulating, and
+ *    HONEST-LOSSY: no replay, no refetch, because the durable record of what a
+ *    tail previews is the event lane's tool_result / run-message.
+ *
+ * Both ride the same watch-filtered lane and neither ever rings, which is the
+ * property the phase-5 exit criterion is about; the flavor decides only what a
+ * frame MEANS. `shared/sync/stream.ts` owns both interpretations.
  *
  * {@link ChannelSpec.deliveryDelta} still records the 4a-sanctioned visibility
  * additions, and the funnel guard still pins that set exactly.
  */
 
 /** How an event is treated by the ring, canonical state, and the fan-out. */
-export type ChannelClass =
-  | 'replicated'
-  | 'volatile'
-  | 'volatile-pending-phase-5'
-  | 'host-local'
+export type ChannelClass = 'replicated' | 'volatile' | 'host-local'
+
+/** Which interpretation a `volatile` channel's frames carry (phase 5). */
+export type VolatileFlavor = 'text-stream' | 'pass-through'
 
 export interface ChannelSpec {
   cls: ChannelClass
   /** Does the emission append to the event ring? Must equal today's behavior. */
   ring: boolean
+  /** Required iff `cls === 'volatile'`; meaningless otherwise. */
+  volatileFlavor?: VolatileFlavor
   /**
    * Does `applyEvent` change canonical state? `false` for channels whose payload
    * has no field in `FullStateSnapshot` — recording that honestly is the point:
@@ -320,34 +332,36 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   },
 
   // -------------------------------------------------------------------------
-  // Session domain — the volatile lane.
-  //
-  // The first two are SEPARATED (phase 5 S1): off the ring, onto the stream
-  // frames. The two tails below still ring, pending S2.
+  // Session domain — the volatile lane. Nothing here rings (phase 5 S1 + S2);
+  // the flavor is what decides how a frame is interpreted.
   // -------------------------------------------------------------------------
   'session:stream': {
     cls: 'volatile',
+    volatileFlavor: 'text-stream',
     ring: false,
     canonical: true,
     why: 'Text/thinking deltas. Phase 5 S1 took them off the ring entirely: they ride the stream lane (`{streamId, turnId, offset, chunk}`) to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields.'
   },
   'session:subagent-stream': {
     cls: 'volatile',
+    volatileFlavor: 'text-stream',
     ring: false,
     canonical: true,
     why: 'Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.'
   },
   'session:bash-output': {
-    cls: 'volatile-pending-phase-5',
-    ring: true,
+    cls: 'volatile',
+    volatileFlavor: 'pass-through',
+    ring: false,
     canonical: false,
-    why: 'Live bash tail. Rings today; no snapshot field, so canonical stays out of it.'
+    why: 'Live bash tail. Phase 5 S2 took it off the ring: a noisy command emitted thousands of chunks and every one took a seq. Pass-through (the payload carries counters, not an accumulation) and honest-lossy — the durable record is the tool_result on the event lane.'
   },
   'session:background-output': {
-    cls: 'volatile-pending-phase-5',
-    ring: true,
+    cls: 'volatile',
+    volatileFlavor: 'pass-through',
+    ring: false,
     canonical: false,
-    why: 'Background-task tail. Same as bash-output.'
+    why: 'Background-task tail. Same lane, same flavor, same durable record as bash-output.'
   },
 
   // -------------------------------------------------------------------------
@@ -412,10 +426,11 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     why: 'Run transcript message; no snapshot field.'
   },
   'automation:stream-event': {
-    cls: 'volatile-pending-phase-5',
-    ring: true,
+    cls: 'volatile',
+    volatileFlavor: 'pass-through',
+    ring: false,
     canonical: false,
-    why: 'Run streaming deltas — same volatile shape as session:stream, same phase-5 destination.'
+    why: 'Run streaming deltas. Phase 5 S2 moved them onto the lane, scoped by AUTOMATION rather than by run — the payload carries `automationId` and no run id, and the renderer already derives the viewed run from its own store.'
   },
   'automation:processing': {
     cls: 'replicated',
@@ -548,7 +563,7 @@ export function ringedChannels(): string[] {
 }
 
 /**
- * Does this channel ride the STREAM lane rather than the event lane (phase 5 S1)?
+ * Does this channel ride the VOLATILE lane rather than the event lane (phase 5)?
  *
  * The single source every dispatch point reads: `SyncCore.process` routes on it,
  * `applyEvent` refuses on it, the replica's fold skips on it, and the
@@ -559,10 +574,20 @@ export function isVolatileStream(channel: string): boolean {
   return channelSpec(channel)?.cls === 'volatile'
 }
 
-/** Every channel on the stream lane, sorted. */
-export function volatileStreamChannels(): string[] {
+/**
+ * Which interpretation this channel's lane frames carry, or null when it is not
+ * on the lane at all. The ONE thing `SyncCore.process` branches on to decide
+ * between a text frame and a pass-through frame.
+ */
+export function volatileFlavorOf(channel: string): VolatileFlavor | null {
+  const spec = channelSpec(channel)
+  return spec?.cls === 'volatile' ? (spec.volatileFlavor ?? null) : null
+}
+
+/** Every channel on the volatile lane, sorted; optionally one flavor of it. */
+export function volatileStreamChannels(flavor?: VolatileFlavor): string[] {
   return Object.entries(CHANNEL_SPECS)
-    .filter(([, spec]) => spec.cls === 'volatile')
+    .filter(([, spec]) => spec.cls === 'volatile' && (!flavor || spec.volatileFlavor === flavor))
     .map(([channel]) => channel)
     .sort()
 }

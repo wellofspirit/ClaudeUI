@@ -235,7 +235,8 @@ const api: ClaudeAPI = {
   // The volatile lane's subscription verb (phase 5 S1). Real IPC on the desktop
   // too: the renderer is client #1 and its deltas ride the same watched lane a
   // phone's do — there is no privileged local path any more.
-  watchStreams: (sessionIds: string[]) => ipcRenderer.invoke('stream:watch', { sessionIds }),
+  watchStreams: (sessionIds: string[], automationIds?: string[]) =>
+    ipcRenderer.invoke('stream:watch', { sessionIds, automationRuns: automationIds }),
   // Step-up is a REMOTE concept (SyncCore phase 2): the desktop renderer is the
   // host surface, already holding a non-decaying `shell` grant, so there is
   // nothing to step up to. Local no-op, deliberately not an IPC round trip.
@@ -291,8 +292,10 @@ const api: ClaudeAPI = {
     unwrap('git:push-with-upstream', cwd, branch),
   gitPull: (cwd: string) => unwrap('git:pull', cwd),
   gitFetch: (cwd: string) => unwrap('git:fetch', cwd),
-  gitStartWatching: (cwd: string) => unwrap('git:start-watching', cwd),
-  gitStopWatching: (cwd: string) => unwrap('git:stop-watching', cwd),
+  // Per-connection git interest (phase 5 S2): a REPLACE set, not a
+  // start/stop pair. Real IPC on the desktop too — the renderer is one
+  // connection among several and its interest joins the same union.
+  watchGit: (cwds: string[]) => unwrap('git:watch', { cwds }),
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),

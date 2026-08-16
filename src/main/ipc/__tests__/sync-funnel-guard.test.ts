@@ -25,11 +25,13 @@ import {
 import { applyEvent, emptyAux } from '../../../shared/sync/reducer'
 import {
   sessionIdOfStream,
+  streamEventScopeOf,
   streamFrameFrom,
   streamFrameToEmission
 } from '../../../shared/sync/stream'
 import { emptyCanonicalState, emptySession, type CanonicalState } from '../../../shared/sync/state'
 import { STREAM_WATCH_COMMAND } from '../stream-watch'
+import { GIT_WATCH_COMMAND } from '../git-watch'
 
 /** A canonical state holding one session — the minimum a stream frame needs. */
 function stateWithSession(routingId: string): CanonicalState {
@@ -446,34 +448,51 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
   })
 })
 
-describe('the volatile stream lane (phase 5 S1)', () => {
+describe('the volatile lane (phase 5 S1 + S2)', () => {
   // The single-source rule, enforced as a property of the TABLE rather than of
-  // any one dispatch site: everything that treats a channel as a stream reads
-  // `cls === 'volatile'`, so if the table and the dispatch could disagree these
+  // any one dispatch site: everything that treats a channel as volatile reads
+  // `cls === 'volatile'`, and everything that decides WHICH frame it becomes
+  // reads `volatileFlavor`. If the table and the dispatch could disagree, these
   // assertions are where it shows.
   const volatile = volatileStreamChannels()
+  const textStreams = volatileStreamChannels('text-stream')
+  const passThrough = volatileStreamChannels('pass-through')
 
-  it('is exactly the two canonical-backed stream channels (S2 tails excluded)', () => {
-    expect(volatile).toEqual(['session:stream', 'session:subagent-stream'])
-    // The tails are S2. They must still be classified, and must NOT have been
-    // dragged onto the lane by a broad find-and-replace.
-    for (const tail of [
-      'session:bash-output',
+  it('is the two delta channels plus the three tails, split by flavor', () => {
+    expect(textStreams).toEqual(['session:stream', 'session:subagent-stream'])
+    expect(passThrough).toEqual([
+      'automation:stream-event',
       'session:background-output',
-      'automation:stream-event'
-    ]) {
-      expect(channelSpec(tail)?.cls).toBe('volatile-pending-phase-5')
-      expect(channelSpec(tail)?.ring).toBe(true)
+      'session:bash-output'
+    ])
+    // Every member has a flavor, and the two flavors partition the lane. A
+    // volatile channel with no flavor would be routed by `SyncCore.process`'s
+    // else-branch into `streamFrameFrom`, which returns null for it — a silent
+    // drop of the whole channel.
+    expect([...textStreams, ...passThrough].sort()).toEqual(volatile)
+  })
+
+  it('the interim `volatile-pending-phase-5` class is GONE, not merely empty', () => {
+    // Deletion is the retirement (4a rule 1). An empty option left in the union
+    // would let a future channel be parked there with no lane to ride.
+    expect(readCode('src/shared/sync/channels.ts')).not.toContain('volatile-pending-phase-5')
+    for (const spec of Object.values(CHANNEL_SPECS)) {
+      expect(['replicated', 'volatile', 'host-local']).toContain(spec.cls)
     }
   })
 
-  it('volatile ⇒ never rings, is canonical-backed, and has a streamId', () => {
+  it('volatile ⇒ NEVER rings, whichever flavor', () => {
     for (const channel of volatile) {
+      // No ring ⇒ no seq ⇒ neither a turn of tokens nor a noisy bash command can
+      // flush the 5000-entry ring and force a `sync-full` on the next reconnect.
+      // That IS the phase-5 exit criterion.
+      expect(channelSpec(channel)!.ring, `${channel} still rings`).toBe(false)
+    }
+  })
+
+  it('text-stream ⇒ canonical-backed, and has a streamId', () => {
+    for (const channel of textStreams) {
       const spec = channelSpec(channel)!
-      // No ring ⇒ no seq ⇒ a turn of tokens cannot flush the 5000-entry ring and
-      // force a `sync-full` on the next reconnect. That IS the phase-5 exit
-      // criterion.
-      expect(spec.ring, `${channel} still rings`).toBe(false)
       // Canonical-backed: the accumulation is a snapshot field, which is what
       // makes an unwatched session still converge at message boundaries.
       expect(spec.canonical, `${channel} lost its canonical backing`).toBe(true)
@@ -488,6 +507,40 @@ describe('the volatile stream lane (phase 5 S1)', () => {
       expect(frame, `${channel} has no streamId translation`).not.toBeNull()
       expect(sessionIdOfStream(frame!.streamId)).toBe('rid')
     }
+  })
+
+  it('pass-through ⇒ NOT canonical, and every one has a delivery scope', () => {
+    const payloads: Record<string, unknown[]> = {
+      'session:bash-output': ['rid', { toolUseId: 'tu-1', output: 'x' }],
+      'session:background-output': ['rid', { toolUseId: 'tu-1', tail: 'x' }],
+      'automation:stream-event': [{ automationId: 'auto-1', type: 'text', text: 'x' }]
+    }
+    for (const channel of passThrough) {
+      // A tail has no snapshot field: nothing accumulates it, which is exactly
+      // why losing one is honest rather than a hole.
+      expect(channelSpec(channel)!.canonical, `${channel} claims canonical backing`).toBe(false)
+      // A frame with no scope reaches NOBODY (sync-host drops it), so a channel
+      // the scope helper does not understand would be a silently dead lane.
+      const scope = streamEventScopeOf({ type: 'stream-ev', channel, args: payloads[channel] })
+      expect(scope, `${channel} has no delivery scope`).not.toBeNull()
+    }
+    // The two session tails are session-scoped by position; the automation tail
+    // is scoped by AUTOMATION (its payload carries no run id — see
+    // docs/architecture/sync-channels.md).
+    expect(
+      streamEventScopeOf({
+        type: 'stream-ev',
+        channel: 'session:bash-output',
+        args: payloads['session:bash-output']
+      })
+    ).toEqual({ kind: 'session', id: 'rid' })
+    expect(
+      streamEventScopeOf({
+        type: 'stream-ev',
+        channel: 'automation:stream-event',
+        args: payloads['automation:stream-event']
+      })
+    ).toEqual({ kind: 'automation', id: 'auto-1' })
   })
 
   it('volatile ⇒ no reducer branch, and applyEvent refuses one', () => {
@@ -511,25 +564,31 @@ describe('the volatile stream lane (phase 5 S1)', () => {
   })
 
   it('replicated channels are untouched by the migration', () => {
-    // The bounded half of the claim: S1 moved TWO rows and nothing else. Any
-    // `replicated` row that stopped ringing would be an unnoticed lane change.
+    // The bounded half of the claim: the lane took five rows and nothing else.
+    // Any `replicated` row that stopped ringing would be an unnoticed lane change.
     const broken = Object.entries(CHANNEL_SPECS)
       .filter(([, s]) => s.cls === 'replicated' && !s.ring)
       .map(([c]) => c)
     expect(broken).toEqual([])
   })
 
-  it('the two channels have left SyncEventMap (nothing can subscribe to them)', () => {
-    // The typed map IS the subscription contract. Leaving an entry for a channel
-    // that can never be dispatched would advertise a listener that never fires.
+  it('text-stream channels have left SyncEventMap; the TAILS deliberately stay', () => {
+    // The typed map IS the subscription contract. For a text stream, leaving an
+    // entry would advertise a listener that can never fire — the replica folds
+    // those frames instead. For a TAIL it is the opposite: the pass-through
+    // flavor exists so the existing per-channel listeners keep working verbatim,
+    // so an entry that vanished would delete a live subscription.
     const declared = [...read('src/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
       (m) => m[1]
     )
     expect(declared.length).toBeGreaterThan(30)
-    for (const channel of volatile) {
+    for (const channel of textStreams) {
       expect(declared, `${channel} is still declared as a subscribable event`).not.toContain(
         channel
       )
+    }
+    for (const channel of passThrough) {
+      expect(declared, `${channel} lost its listener contract`).toContain(channel)
     }
   })
 
@@ -579,9 +638,13 @@ describe('the volatile stream lane (phase 5 S1)', () => {
     }
     // And the plugin bridge observes the lane instead of pretending to be a client.
     expect(readCode('src/main/services/plugin-manager.ts')).toMatch(/addStreamObserver\(/)
+    // A PASS-THROUGH frame needs no inverse — it never stopped being the emission
+    // — but the bridge must still forward it, or every plugin silently loses the
+    // three tails it has always received.
+    expect(readCode('src/main/services/plugin-manager.ts')).toMatch(/frame\.type === 'stream-ev'/)
   })
 
-  it('the stream lane never reaches the audit log or the event fan-out', () => {
+  it('the volatile lane never reaches the audit log or the event fan-out', () => {
     // `stream:watch` is a QUERY, and the registry does not audit queries — the
     // structural reason a subscription toggle leaves no row. Pinned against the
     // declaration rather than against a log, because the log is what would be
@@ -590,10 +653,44 @@ describe('the volatile stream lane (phase 5 S1)', () => {
     expect(STREAM_WATCH_COMMAND.capability).toBe('chat')
     expect(STREAM_WATCH_COMMAND.withConnection).toBe(true)
     // And the frames go out through the stream registry, never `addSyncSubscriber`.
-    const host = readCode('src/main/services/sync-host.ts')
+    const host = readCode(DELIVERY_ADAPTER)
     expect(host).toMatch(/syncCore\.setStreamDelivery\(streamDelivery\)/)
     const core = readCode('src/main/sync/sync-core.ts')
     expect(core).toMatch(/spec\.cls === 'volatile'/)
+    expect(core).toMatch(/spec\.volatileFlavor === 'pass-through'/)
+  })
+
+  it('the WS sink drops stream frames under backpressure, and only stream frames', () => {
+    // The cap is stream-lane-only by construction: it is applied inside the
+    // stream sink's closure, not inside `sendTo`, so an event, a sync answer or a
+    // terminal frame cannot take that branch. A missing EVENT is a permanent hole
+    // in a seq-ordered stream; a missing stream frame heals or is lossy by
+    // contract.
+    const server = readCode('src/main/services/remote-server.ts')
+    expect(server).toMatch(/addStreamSubscriber\(connectionId, \(frame\) => \{/)
+    expect(server).toMatch(/if \(this\.streamCongested\(ws, newClient\)\) return/)
+    expect(server).toMatch(/STREAM_BACKPRESSURE_BYTES/)
+    // The desktop MessagePort sink is exempt — no socket, no `bufferedAmount` —
+    // and its source says why. Read RAW: the exemption is a comment, which is the
+    // honest form for "we deliberately did not do the thing next door does".
+    expect(read('src/main/services/sync-port.ts')).toMatch(/NO BACKPRESSURE CAP HERE/)
+    expect(readCode('src/main/services/sync-port.ts')).not.toMatch(/bufferedAmount/)
+  })
+
+  it('git:watch is a per-connection query at the capability git reads already need', () => {
+    // The retirement (phase 5 S2): the collective-owner refcount is gone, and the
+    // replacement must not have widened anything — both retired channels declared
+    // exactly this, so security.md needs no amendment.
+    expect(GIT_WATCH_COMMAND.channel).toBe('git:watch')
+    expect(GIT_WATCH_COMMAND.capability).toBe('git')
+    expect(GIT_WATCH_COMMAND.kind).toBe('query')
+    expect(GIT_WATCH_COMMAND.withConnection).toBe(true)
+    // The owner ids are DELETED, not merely unused — deletion is the retirement.
+    const registry = readCode('src/main/services/git-watch-registry.ts')
+    expect(registry).not.toMatch(/GIT_WATCH_OWNER/)
+    expect(registry).not.toMatch(/releaseOwner|startWatching|stopWatching/)
+    // And the wire event is untouched: still replicated, still ringed.
+    expect(channelSpec('git:status-update')).toMatchObject({ cls: 'replicated', ring: true })
   })
 })
 

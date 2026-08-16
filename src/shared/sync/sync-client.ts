@@ -1,5 +1,5 @@
 import type { FullStateSnapshot } from '../remote-protocol'
-import { isStreamFrame, type StreamFrame } from './stream'
+import { isStreamEventFrame, isStreamFrame, type StreamFrame } from './stream'
 
 /** One domain event as a transport hands it over (frame envelope stripped). */
 export interface SyncEvent {
@@ -213,6 +213,30 @@ export class SyncClient {
         /* one broken tap must not stop the others */
       }
     }
+  }
+
+  /**
+   * A PASS-THROUGH lane frame (phase 5 S2) — one of the three tails, carrying the
+   * emission verbatim.
+   *
+   * Dispatched into the SAME per-channel listener registry the event lane uses,
+   * which is the entire point of the flavor: `session:bash-output` and friends
+   * changed transport, not meaning, so every existing `onSyncEvent(...)` listener
+   * keeps working with no rewiring and there is no second interpretation of the
+   * payload to drift.
+   *
+   * It is NOT an event, so — exactly like {@link receiveStreamFrame} — it never
+   * touches `lastSeq`, the buffer, the gap check or the `onAnyEvent` taps (the
+   * replica folds those, and a tail has no canonical field to fold into).
+   *
+   * Pre-ready frames are DROPPED. There is no replay to supersede them the way
+   * there is for a text stream; a tail is lossy by contract and its durable
+   * record arrives on the event lane, which IS buffered.
+   */
+  receiveStreamEvent(frame: unknown): void {
+    if (!this.ready) return
+    if (!isStreamEventFrame(frame)) return
+    this.emit(frame.channel, frame.args)
   }
 
   /**

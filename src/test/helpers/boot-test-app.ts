@@ -190,7 +190,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     killTerminalsByCwd: (cwd) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
     terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
     terminalPool: (cwd) => ipcRenderer.invoke('terminal:pool', cwd),
-    watchStreams: (sessionIds) => ipcRenderer.invoke('stream:watch', { sessionIds }),
+    watchStreams: (sessionIds, automationIds) =>
+      ipcRenderer.invoke('stream:watch', { sessionIds, automationRuns: automationIds }),
     // Mirrors preload: step-up is remote-only, but attach/detach are real on the
     // desktop transport too (the terminal pool means a tab can resolve to a pty
     // this surface never spawned, and attach is what replays its scrollback).
@@ -232,8 +233,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
     gitPull: (cwd) => unwrap('git:pull', cwd),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
-    gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
-    gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
+    watchGit: (cwds) => unwrap('git:watch', { cwds }),
 
     deleteSession: (sessionId, projectKey, engineId?) =>
       ipcRenderer.invoke('session:delete-session', sessionId, projectKey, engineId),
