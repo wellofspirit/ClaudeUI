@@ -287,6 +287,46 @@ function dismissCompletedTodos(s: CanonicalSessionState): Partial<CanonicalSessi
   return s.todos.every((t) => t.status === 'completed') ? { todos: [] } : {}
 }
 
+/**
+ * The transcript a watched external session's file re-read produced.
+ *
+ * Named so the ONE rule for folding it lives in one place. Three callers apply
+ * it and they must agree byte for byte or the hydration-parity e2e fails:
+ * `SyncCore.seedWatchedSession` (canonical, main), `seedWatchedSession`
+ * (`stores/replica.ts`, every client's refetch), and the `session:watch-update`
+ * branch below for OLD-shape events that still carry content.
+ */
+export interface WatchedContent {
+  messages: ChatMessage[]
+  taskNotifications?: TaskNotification[]
+  statusLine?: StatusLineData | null
+}
+
+/**
+ * Apply a watched session's on-disk transcript to its entry — a REPLACE.
+ *
+ * A watched session's file IS the truth (nothing streams into it from here), so
+ * this overwrites rather than filling, completes any pending seed, re-derives the
+ * transcript-derived fields with the same helpers every other branch uses, and
+ * dismisses a fully-completed todo list — which a watched session gets no
+ * `session:result` to do for it.
+ */
+export function applyWatchedContent(
+  s: CanonicalSessionState,
+  content: WatchedContent
+): CanonicalSessionState {
+  const replaced: CanonicalSessionState = {
+    ...s,
+    messages: content.messages,
+    taskNotifications: content.taskNotifications ?? [],
+    seeded: true,
+    ...(content.statusLine ? { statusLine: content.statusLine } : {})
+  }
+  const withTodos = { ...replaced, ...rederiveTodos(replaced) }
+  const withFiles = { ...withTodos, ...rederiveSentFiles(withTodos) }
+  return { ...withFiles, ...dismissCompletedTodos(withFiles) }
+}
+
 /** Move a session entry (and every id-keyed app-level map) to a new routing id. */
 export function rekeyCanonical(
   state: CanonicalState,
@@ -994,7 +1034,7 @@ export function applyEvent(
     }
 
     // -----------------------------------------------------------------------
-    // Watched sessions (payload-heavy; phase-5 target: notify + refetch)
+    // Watched sessions — a NOTIFY since phase 5 S4 (the content is a seed).
     // -----------------------------------------------------------------------
     case 'session:watch-update': {
       const payload = arg<{
@@ -1005,27 +1045,32 @@ export function applyEvent(
         cwd?: string
       }>(event, 0)
       const routingId = payload?.routingId
-      if (!routingId || !Array.isArray(payload?.messages)) return state
+      if (!routingId) return state
       // The ONE surviving `ensured()` — see its doc comment. A watched session
       // has no birth event, so this IS the introduction, which is exactly why the
-      // payload had to start carrying `cwd`.
+      // payload had to start carrying `cwd`, and why the shrink to a notify could
+      // not also drop the bootstrap: git status, the sidebar/notification folder
+      // name and the per-cwd terminal group all need the entry to exist.
       let next = ensured(state, routingId)
-      next = withSession(next, routingId, () => ({
-        messages: payload.messages as ChatMessage[],
-        taskNotifications: payload.taskNotifications ?? [],
-        // A watched session's transcript IS the on-disk truth, so this update
-        // completes any pending seed.
-        seeded: true,
-        ...(payload.statusLine ? { statusLine: payload.statusLine } : {}),
-        // Old-shape events (no cwd) leave the existing value alone — never blank
-        // a cwd some other event already established.
-        ...(payload.cwd ? { cwd: payload.cwd } : {})
-      }))
-      next = withSession(next, routingId, rederiveTodos)
-      next = withSession(next, routingId, rederiveSentFiles)
-      // Watched sessions get no `session:result`, so the completed-list dismissal
-      // rides here (verbatim from useClaudeEvents.onWatchUpdate).
-      return withSession(next, routingId, dismissCompletedTodos)
+      // Old-shape events (no cwd) leave the existing value alone — never blank a
+      // cwd some other event already established. Written only when it actually
+      // CHANGES, so a repeat notify for a known session returns the same object
+      // and re-projects nothing (the replica's identity diff is load-bearing).
+      if (payload.cwd && next.sessions[routingId].cwd !== payload.cwd) {
+        next = withSession(next, routingId, () => ({ cwd: payload.cwd }))
+      }
+      // OLD-shape tolerance, not a second content path: committed golden fixtures
+      // and any ring a client catches up from across the S4 upgrade still carry a
+      // transcript, and folding it is strictly better than ignoring it. Nothing
+      // emits it any more — `session-watcher.ts` seeds instead.
+      if (!Array.isArray(payload.messages)) return next
+      return withSession(next, routingId, (s) =>
+        applyWatchedContent(s, {
+          messages: payload.messages as ChatMessage[],
+          taskNotifications: payload.taskNotifications,
+          statusLine: payload.statusLine
+        })
+      )
     }
 
     /**

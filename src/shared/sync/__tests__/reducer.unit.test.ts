@@ -1055,6 +1055,54 @@ describe('reducer — watched sessions', () => {
     expect(s.sessions['rid'].seeded).toBe(true)
   })
 
+  /**
+   * The S4 shape: a notify. The branch keeps the bootstrap (nothing else
+   * introduces a watched session) and stops writing content — which the WATCHER
+   * has already seeded into canonical, and every client refetches.
+   */
+  it('a NOTIFY-shaped update bootstraps with its cwd and touches no content', () => {
+    const s = fold([
+      [
+        'session:watch-update',
+        { routingId: 'watched', sessionId: 'uuid-w', projectKey: '-repo', cwd: '/repo' }
+      ]
+    ])
+    expect(s.sessions['watched'].cwd).toBe('/repo')
+    expect(s.sessions['watched'].messages).toEqual([])
+    // NOT seeded: the content is somebody else's job now, so claiming otherwise
+    // would tell a client its empty transcript is complete.
+    expect(s.sessions['watched'].seeded).toBe(false)
+  })
+
+  it('a notify never blanks a transcript a seed or the events already filled', () => {
+    let s = fold([
+      created('watched', '/repo'),
+      ['session:message', 'watched', assistant('m1', [{ type: 'text', text: 'kept' }])]
+    ])
+    s = applyEvent(s, {
+      channel: 'session:watch-update',
+      args: [{ routingId: 'watched', sessionId: 'uuid-w', projectKey: '-repo', cwd: '/repo' }],
+      seq: 9
+    })
+    expect(s.sessions['watched'].messages.map((m) => m.id)).toEqual(['m1'])
+  })
+
+  it('a repeat notify for a known session is identity-stable (nothing re-projects)', () => {
+    const before = fold([
+      created('watched', '/repo'),
+      [
+        'session:watch-update',
+        { routingId: 'watched', sessionId: 'uuid-w', projectKey: '-repo', cwd: '/repo' }
+      ]
+    ])
+    const after = applyEvent(before, {
+      channel: 'session:watch-update',
+      args: [{ routingId: 'watched', sessionId: 'uuid-w', projectKey: '-repo', cwd: '/repo' }],
+      seq: 9
+    })
+    expect(after).toBe(before)
+  })
+
   it('dismisses a completed watched list (watched sessions get no session:result)', () => {
     const s = fold([
       created(),

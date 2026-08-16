@@ -38,7 +38,8 @@
  *    {@link resolveActiveSessionId}).
  * 3. **Sanctioned local writes** — a small, named set for state that is genuinely
  *    client-originated or client-cached: cold history the host has never seen
- *    ({@link seedColdSession}), a session created before it has spawned
+ *    ({@link seedColdSession}), a watched session's re-read after its notify
+ *    ({@link seedWatchedSession}), a session created before it has spawned
  *    ({@link patchLocalSession}), the desktop's own boot read of the config files
  *    ({@link seedLocalApp}), and the renderer's heap-bounding eviction
  *    ({@link evictLocalSessions}). Each writes CANONICAL and re-projects, so the
@@ -60,10 +61,12 @@ import {
 } from '../../../shared/sync/stream'
 import {
   applyEvent,
+  applyWatchedContent,
   auxFromCanonical,
   emptyAux,
   rekeyTargetFor,
-  type ReducerAux
+  type ReducerAux,
+  type WatchedContent
 } from '../../../shared/sync/reducer'
 import {
   emptyCanonicalState,
@@ -441,6 +444,33 @@ export function seedColdSession(
       ...canonical.sessions,
       [routingId]: { ...base, ...seed, routingId, seeded: true }
     }
+  })
+}
+
+/**
+ * Seed a WATCHED external session's transcript — {@link seedColdSession}'s
+ * REPLACE twin, and the client half of `SyncCore.seedWatchedSession` (phase 5 S4).
+ *
+ * Same split, same reason, both sides of the wire: `seedColdSession` refuses to
+ * clobber a live transcript, because the session it seeds is spawned and a slow
+ * disk read resolving mid-turn would wipe the turn. A watched session spawns
+ * nothing — its `.jsonl` is the only writer, and the refetch this serves fires
+ * BECAUSE that file grew — so filling-only would freeze the transcript at its
+ * first read.
+ *
+ * Both sides apply {@link applyWatchedContent}, so canonical and this replica
+ * derive the same todos / sentFiles / dismissal from the same transcript, which is
+ * what keeps the hydration-parity e2e true.
+ *
+ * A no-op for an unknown id: the refetch is async, and a `session:removed` may
+ * have landed while it was in flight (F7 — a delete must not be re-minted).
+ */
+export function seedWatchedSession(routingId: string, content: WatchedContent): void {
+  const existing = canonical.sessions[routingId]
+  if (!existing) return
+  commit({
+    ...canonical,
+    sessions: { ...canonical.sessions, [routingId]: applyWatchedContent(existing, content) }
   })
 }
 

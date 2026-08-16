@@ -30,7 +30,12 @@
 import { useEffect } from 'react'
 import { onSyncEvent, markSyncReady } from '../../../shared/sync/client-registry'
 import { useSessionStore } from '../stores/session-store'
-import { onReplicaApplied, seedColdSession, getReplicaState } from '../stores/replica'
+import {
+  onReplicaApplied,
+  seedColdSession,
+  seedWatchedSession,
+  getReplicaState
+} from '../stores/replica'
 import type { SessionStatus, TaskNotification, SlashCommandInfo } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
@@ -72,6 +77,126 @@ export function deriveWorktreeName(wtPath: string, wtBranch: string): string {
  * else's session for the first time.
  */
 const wasResidentAtCreate = new Map<string, boolean>()
+
+// ---------------------------------------------------------------------------
+// The watched-session refetch (phase 5 S4)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a `session:watch-update` notify waits for its neighbours.
+ *
+ * A watched `.jsonl` is appended to line by line, and the WATCHER already
+ * debounces at 100 ms — but a catchup replays every notify the ring held, so a
+ * client coming back from a background can see N of them for one session in the
+ * same tick. One refetch heals all of them: the file read is not incremental, it
+ * always returns the whole current transcript.
+ */
+const WATCH_REFETCH_DEBOUNCE_MS = 150
+
+/**
+ * …and how long it may keep waiting.
+ *
+ * A trailing debounce alone STARVES exactly when it matters: the watcher emits
+ * every ~100 ms while a transcript is being written, so a reset-on-each-notify
+ * timer never fires for as long as the agent keeps writing — which is the whole
+ * period the user is watching. The bound keeps the coalescing (a quiet burst
+ * still costs one read) while guaranteeing a refetch no later than this after the
+ * FIRST deferred notify.
+ */
+const WATCH_REFETCH_MAX_WAIT_MS = 500
+
+interface PendingRefetch {
+  timer: ReturnType<typeof setTimeout>
+  /** When this burst's first notify arrived — the max-wait deadline's origin. */
+  firstDeferredAt: number
+}
+
+/** Pending refetches, keyed by routingId — see {@link scheduleWatchedRefetch}. */
+const watchRefetchTimers = new Map<string, PendingRefetch>()
+
+/**
+ * Answer a watch-update notify with ONE refetch through the cold-history path.
+ *
+ * Since S4 the event carries no transcript (the ring held hundreds of them), so
+ * the content comes from the same `session:load-history` query the sidebar's
+ * historical loads and the resumed-`session:created` observer use. Canonical was
+ * seeded before the notify was emitted, so this read cannot see less than the
+ * notify announced.
+ *
+ * Trailing debounce, bounded by {@link WATCH_REFETCH_MAX_WAIT_MS}: a catchup that
+ * replays N notifies costs one read, and a sustained cadence still gets served.
+ *
+ * Two guards, both about not inventing state:
+ *  - the session must still be resident when the read resolves — a delete may
+ *    have landed in between, and re-minting it is exactly what F7 forbids
+ *    (`seedWatchedSession` no-ops on an unknown id, and the pending timer is
+ *    cancelled on `session:removed`, so the race has to lose twice);
+ *  - no `sessionId`/`projectKey` on the payload (an old-shape event replayed from
+ *    a pre-S4 ring, which carried its content instead) means nothing to fetch —
+ *    the reducer already folded that content.
+ */
+function scheduleWatchedRefetch(
+  routingId: string,
+  sessionId: string,
+  projectKey: string,
+  isRetry = false
+): void {
+  const pending = watchRefetchTimers.get(routingId)
+  const firstDeferredAt = pending?.firstDeferredAt ?? Date.now()
+  if (pending) clearTimeout(pending.timer)
+  const wait = Math.max(
+    0,
+    Math.min(WATCH_REFETCH_DEBOUNCE_MS, firstDeferredAt + WATCH_REFETCH_MAX_WAIT_MS - Date.now())
+  )
+  const timer = setTimeout(() => {
+    watchRefetchTimers.delete(routingId)
+    void refetchWatchedSession(routingId, sessionId, projectKey, isRetry)
+  }, wait)
+  watchRefetchTimers.set(routingId, { timer, firstDeferredAt })
+}
+
+/**
+ * The read itself, plus ONE repair attempt.
+ *
+ * A refetch that simply gave up left a resident but un-seeded stub — an entry the
+ * sidebar's resident fast-path paints as an empty chat, with no further notify
+ * coming until the file changes again. One retry rides the same debounced path
+ * (so a notify arriving meanwhile still coalesces with it); a second failure logs
+ * and stops, because the next file change heals anyway and a self-feeding retry
+ * loop against a broken read would not.
+ */
+async function refetchWatchedSession(
+  routingId: string,
+  sessionId: string,
+  projectKey: string,
+  isRetry: boolean
+): Promise<void> {
+  try {
+    const { messages, taskNotifications, statusLine } = await window.api.loadSessionHistory(
+      sessionId,
+      projectKey
+    )
+    if (!getReplicaState().sessions[routingId]) return
+    seedWatchedSession(routingId, { messages, taskNotifications, statusLine })
+  } catch (err) {
+    window.api.logError(
+      'useClaudeEvents',
+      `Watched refetch failed for ${sessionId}${isRetry ? ' (retry)' : ''}: ${err}`
+    )
+    if (isRetry) return
+    // Nothing to repair if the session is gone (the delete race, again).
+    if (!getReplicaState().sessions[routingId]) return
+    scheduleWatchedRefetch(routingId, sessionId, projectKey, true)
+  }
+}
+
+/** Drop a pending refetch — the session is gone (delete) or no longer watched. */
+function cancelWatchedRefetch(routingId: string): void {
+  const pending = watchRefetchTimers.get(routingId)
+  if (pending === undefined) return
+  clearTimeout(pending.timer)
+  watchRefetchTimers.delete(routingId)
+}
 
 export function useClaudeEvents(): void {
   // Request notification permission on mount
@@ -321,6 +446,30 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
           if (customTitle) s.setCustomTitle(routingId, customTitle)
           s.markSessionLive(routingId)
         })
+      return
+    }
+
+    case 'session:watch-update': {
+      // The fold (bootstrap + cwd) has already run; the CONTENT is a refetch
+      // since S4. `args[0]` is the payload object here, not a routing id — this
+      // is the one channel whose session scoping lives inside its payload.
+      const payload = args[0] as
+        | { routingId?: string; sessionId?: string; projectKey?: string }
+        | undefined
+      const watchedId = payload?.routingId
+      if (!watchedId || !payload?.sessionId || !payload?.projectKey) return
+      // Evicted entries are skipped on purpose: their heavy arrays were dropped
+      // to bound the heap and a reselect re-hydrates them from the same disk
+      // read, so refetching one would undo the eviction it just paid for.
+      if (store.sessions[watchedId]?.evicted !== false) return
+      scheduleWatchedRefetch(watchedId, payload.sessionId, payload.projectKey)
+      return
+    }
+
+    case 'session:removed': {
+      // An in-flight refetch must not re-mint a deleted session (F7). The seed
+      // itself no-ops on an unknown id; this stops the read from even starting.
+      cancelWatchedRefetch(routingId)
       return
     }
 

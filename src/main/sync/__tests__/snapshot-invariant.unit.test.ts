@@ -73,6 +73,9 @@ function fixtureEvents(): PoolEvent[] {
  * tasks, subagents, and the app-level catalogs.
  */
 const EXTRA_EVENTS: PoolEvent[] = [
+  // OLD-shape (pre-S4): the payload carried the transcript. Kept because the
+  // committed fixtures and any ring caught up across the upgrade still contain
+  // this shape, and the reducer still folds it.
   [
     'session:watch-update',
     {
@@ -83,6 +86,13 @@ const EXTRA_EVENTS: PoolEvent[] = [
       taskNotifications: [],
       statusLine: { model: 'sonnet', totalCostUsd: 0.4 }
     }
+  ],
+  // NEW-shape (S4): the notify production actually emits. Its only fold effect is
+  // the bootstrap + cwd — the transcript is a seed — so the invariant has to hold
+  // for an event that carries an address and nothing else.
+  [
+    'session:watch-update',
+    { routingId: 'watched-2', sessionId: 'uuid-w2', projectKey: '-repo', cwd: '/repo/watched' }
   ],
   [
     'config:sessions-changed',
@@ -170,7 +180,12 @@ const POOL: PoolEvent[] = [...fixtureEvents(), ...EXTRA_EVENTS].filter(
   (e) => !isVolatileStream(e.channel)
 )
 
-/** Every routing id the pool can address — created up-front so no sample is a no-op on an unknown session. */
+/**
+ * Every routing id the pool can address — created up-front so no sample is a no-op
+ * on an unknown session. `watched-2` is DELIBERATELY absent: the S4 notify is the
+ * one event whose branch still bootstraps, so leaving its id uncreated is what
+ * puts that bootstrap inside the invariant.
+ */
 const POOL_ROUTING_IDS = ['rid', 'temp-1', 'uuid-9', 'watched-1', 'a']
 
 function bootstrap(core: SyncCore): void {

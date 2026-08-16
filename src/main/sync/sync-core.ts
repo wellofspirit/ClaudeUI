@@ -41,7 +41,14 @@
 import { EventRing } from './event-ring'
 import type { EventEntry, FullStateSnapshot } from '../../shared/remote-protocol'
 import { channelSpec, type ChannelClass } from '../../shared/sync/channels'
-import { applyEvent, emptyAux, rekeyTargetFor, type ReducerAux } from '../../shared/sync/reducer'
+import {
+  applyEvent,
+  applyWatchedContent,
+  emptyAux,
+  rekeyTargetFor,
+  type ReducerAux,
+  type WatchedContent
+} from '../../shared/sync/reducer'
 import {
   applyStreamFrame,
   streamFrameFrom,
@@ -417,6 +424,41 @@ export class SyncCore {
       sessions: {
         ...this.state.sessions,
         [routingId]: { ...base, ...seed, routingId, seeded: true }
+      }
+    }
+  }
+
+  /**
+   * Seed a WATCHED external session's transcript — {@link seedSession}'s REPLACE
+   * twin (phase 5 S4).
+   *
+   * Two methods rather than a flag because the two seeds answer different
+   * questions. `seedSession` fills a transcript canonical does not have yet and
+   * must never clobber a live one: the session it seeds is SPAWNED, so live events
+   * are streaming into the same entry and a slow disk read resolving mid-turn
+   * would wipe the turn. A watched session spawns nothing — its `.jsonl` is the
+   * only writer, and every change makes the file longer — so the only correct
+   * behaviour is to replace, and a fill-only guard would freeze the transcript at
+   * its first read.
+   *
+   * A seed, not an event (sync-core.md §"Seeds are not events"): the transcript
+   * never enters the ring. `session-watcher.ts` calls this BEFORE it emits the
+   * `session:watch-update` notify, so a client that refetches on the notify reads
+   * state that already contains what the notify announces — and a snapshot still
+   * carries watched sessions, so a fresh client needs no refetch at all.
+   *
+   * It BOOTSTRAPS, matching the notify's reducer branch: a watched session has no
+   * birth event, and the seed is what runs first.
+   */
+  seedWatchedSession(routingId: string, seed: WatchedContent & { cwd?: string }): void {
+    const existing = this.state.sessions[routingId]
+    const base = existing ?? emptySession(routingId, seed.cwd ?? '')
+    const withCwd = seed.cwd ? { ...base, cwd: seed.cwd } : base
+    this.state = {
+      ...this.state,
+      sessions: {
+        ...this.state.sessions,
+        [routingId]: applyWatchedContent(withCwd, seed)
       }
     }
   }

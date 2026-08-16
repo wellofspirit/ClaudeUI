@@ -15,7 +15,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { SyncCore, type Delivery } from '../sync-core'
-import type { SessionStatus } from '../../../shared/types'
+import type { ChatMessage, SessionStatus } from '../../../shared/types'
 
 /** Delivery no longer selects targets (4c) — the class does. */
 const ALL: Delivery = {}
@@ -377,5 +377,89 @@ describe('SyncCore.seedSession (item 5)', () => {
     core.emit('session:stream', ['rid', { type: 'thinking', text: 'fresh' }], ALL)
     core.emit('session:stream', ['rid', { type: 'text', text: 'answer' }], ALL)
     expect(core.getCanonicalState().sessions['rid'].streamingText).toBe('answer')
+  })
+})
+
+/**
+ * The REPLACE twin (phase 5 S4). `seedSession` fills only an empty transcript,
+ * because the session it seeds is spawned and live events must win; a watched
+ * session has no engine and its file only grows, so replacing is the only correct
+ * behaviour — and a fill-only guard would freeze it at its first read.
+ */
+describe('SyncCore.seedWatchedSession (phase 5 S4)', () => {
+  const message = (id: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: [],
+    timestamp: 1
+  })
+
+  it('bootstraps the entry with its cwd — a watched session has no birth event', () => {
+    const { core, delivered } = recordingCore()
+    core.seedWatchedSession('watched', { cwd: '/repo', messages: [message('w1')] })
+
+    const s = core.getCanonicalState().sessions['watched']
+    expect(s.cwd).toBe('/repo')
+    expect(s.messages.map((m) => m.id)).toEqual(['w1'])
+    expect(s.seeded).toBe(true)
+    // Seeds are not events: nothing rings, nothing is delivered.
+    expect(core.currentSeq()).toBe(0)
+    expect(delivered).toEqual([])
+  })
+
+  it('REPLACES on every later read, where seedSession would have frozen it', () => {
+    const { core } = recordingCore()
+    core.seedWatchedSession('watched', { cwd: '/repo', messages: [message('w1')] })
+    core.seedWatchedSession('watched', { cwd: '/repo', messages: [message('w1'), message('w2')] })
+    expect(core.getCanonicalState().sessions['watched'].messages.map((m) => m.id)).toEqual([
+      'w1',
+      'w2'
+    ])
+
+    // The contrast, on the same state: the fill-only twin would have kept the
+    // first read forever.
+    core.seedSession('watched', { messages: [message('w1')] })
+    expect(core.getCanonicalState().sessions['watched'].messages.map((m) => m.id)).toEqual([
+      'w1',
+      'w2'
+    ])
+  })
+
+  it('re-derives todos and dismisses a completed list (no session:result exists)', () => {
+    const { core } = recordingCore()
+    const todoWrite = (status: 'pending' | 'completed'): ChatMessage => ({
+      id: 'w1',
+      role: 'assistant',
+      timestamp: 1,
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId: 't',
+          toolName: 'TodoWrite',
+          toolInput: { todos: [{ content: 'watched', status, activeForm: 'w' }] }
+        }
+      ]
+    })
+
+    core.seedWatchedSession('watched', {
+      cwd: '/repo',
+      messages: [todoWrite('pending')]
+    })
+    expect(core.getCanonicalState().sessions['watched'].todos.map((t) => t.content)).toEqual([
+      'watched'
+    ])
+
+    core.seedWatchedSession('watched', {
+      cwd: '/repo',
+      messages: [todoWrite('completed')]
+    })
+    expect(core.getCanonicalState().sessions['watched'].todos).toEqual([])
+  })
+
+  it('an absent cwd leaves the established one alone (old 3-arg watch)', () => {
+    const { core } = recordingCore()
+    core.emit('session:created', ['watched', { cwd: '/repo' }], ALL)
+    core.seedWatchedSession('watched', { messages: [message('w1')] })
+    expect(core.getCanonicalState().sessions['watched'].cwd).toBe('/repo')
   })
 })

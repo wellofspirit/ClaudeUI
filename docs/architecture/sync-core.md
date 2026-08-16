@@ -1,6 +1,6 @@
 # SyncCore — sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); **phase 5 S1 + S2 (the volatile stream lane, the lossy tails, backpressure and the git-watch retirement) are landed** (2026-08-17), the named follow-on phase is not started — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); **phase 5 S1 + S2 + S4 (the volatile stream lane, the lossy tails, backpressure, the git-watch retirement and the watch-update notify) are landed** (2026-08-17), the named follow-on phase is not started — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
 
 **Phase 4 complete (4a → 4d).** Canonical state in the main process is the state of
 record: one emission funnel appends every domain event to the ring and applies it
@@ -188,7 +188,7 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up. **Indexed per-cwd pool added afterwards** (see §Terminal): 2's fan-out and ring were real but every open still spawned, so the two surfaces never actually shared a pty |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
 | 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **landed** — all four stages; invariant test green, windowless smoke green (`windowless-boot.e2e.test.ts`) |
-| 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | **LANDED** — S1: `session:stream` / `session:subagent-stream` off the ring onto the `stream:watch` lane (`src/e2e/flows/stream-lane-reconnect.e2e.test.ts`); S2: the three tails off the ring on the pass-through flavor, a 1 MB per-connection backpressure cap, and `git:watch` per-connection interest replacing the collective owner (`src/e2e/flows/stream-tails-lossy.e2e.test.ts`) |
+| 5 | Volatile-stream separation + per-client subscriptions | M | Reconnect after 10-min background catches up without sync-full | **LANDED** — S1: `session:stream` / `session:subagent-stream` off the ring onto the `stream:watch` lane (`src/e2e/flows/stream-lane-reconnect.e2e.test.ts`); S2: the three tails off the ring on the pass-through flavor, a 1 MB per-connection backpressure cap, and `git:watch` per-connection interest replacing the collective owner (`src/e2e/flows/stream-tails-lossy.e2e.test.ts`); S4: `session:watch-update` shrunk to a notify with the transcript moved to `SyncCore.seedWatchedSession` and a per-session debounced client refetch (`src/e2e/flows/watch-update-refetch.e2e.test.ts`) |
 
 Phase 4 lands as a strangler in four stages:
 
@@ -342,6 +342,14 @@ Seeds are **not** events: they are refreshes of query-shaped state
 client's state changes, because every client either read the file itself or will receive
 it in its next snapshot.
 
+Phase 5 S4 moved a WATCHED session's transcript into that category
+(`SyncCore.seedWatchedSession`, the REPLACE twin of `seedSession` — a watched `.jsonl`
+is its own only writer and only grows, so filling-only would freeze it at its first
+read). The file watcher seeds canonical and then emits a tiny
+`session:watch-update` notify, in that order, so a client that refetches on the notify
+cannot read less than the notify announced; the transcript never enters the ring, and a
+snapshot still carries it, so a fresh client never refetches at all.
+
 **The invariant that certifies the cutover.** `restore(snapshot@N) + fold(events N+1 …
 head) === canonical@head`, over seeded random interleavings drawn from the committed
 golden fixtures (`src/main/sync/__tests__/snapshot-invariant.unit.test.ts`). It replaces
@@ -492,6 +500,24 @@ refetch), so a 10-minute background reconnect catches up without a `sync-full`.
     poller's fingerprint-reset first tick, or the cached one re-emitted to a joiner —
     including a renderer that reloaded under the same connection id). `git:status-update`
     is unchanged on the wire: still replicated, still ringed, still broadcast.
+- **S4 is landed** (2026-08-17): `session:watch-update` is a NOTIFY. It was the last
+  payload-heavy channel on the ring — a watched external session re-read its whole
+  transcript into the event on every file change, so a 5000-entry ring could hold
+  hundreds of them and every reconnecting client replayed the lot. Now the watcher
+  SEEDS canonical (`SyncCore.seedWatchedSession`, ordered before the emission — see the
+  Seeds paragraph above) and the event carries `{routingId, sessionId, projectKey, cwd?}`:
+  the address, because `projectKey` is lossy-irreversible and `sessionId` need not equal
+  the routing id, so no client can derive either. Clients answer it with ONE debounced
+  refetch per session through the SAME `session:load-history` cold-history path the
+  sidebar and the resumed-`session:created` observer already use, applied through the
+  shared `applyWatchedContent` so canonical and every replica derive the same
+  todos/sentFiles from the same transcript. Three properties fall out: a catchup that
+  replays N notifies costs one refetch, which always heals; the reducer branch keeps its
+  unique bootstrap (nothing else introduces a watched session) and stays tolerant of
+  old-shape payloads that still carry content; and an in-flight refetch across a delete
+  cannot re-mint the entry (the F7 pairing, extended in
+  [sync-channels.md](sync-channels.md) §Eviction). Exit criterion:
+  `src/e2e/flows/watch-update-refetch.e2e.test.ts`.
 - **The voice surface's lane split remains** — `voice:error` still rings because one of
   its two emitters is `BaseSession.send` (see the note in `shared/sync/channels.ts`).
 

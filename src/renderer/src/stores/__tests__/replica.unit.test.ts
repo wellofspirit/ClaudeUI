@@ -28,6 +28,7 @@ import {
   hydrateReplica,
   patchLocalSession,
   seedColdSession,
+  seedWatchedSession,
   evictLocalSessions,
   dropLocalSessions,
   onReplicaApplied
@@ -233,6 +234,27 @@ describe('sanctioned local writes', () => {
     seedColdSession('r1', { messages: [makeAssistantMessage('stale from disk')] })
     expect(store().sessions['r1'].messages).toHaveLength(1)
     expect(store().sessions['r1'].messages[0].content[0]).toMatchObject({ text: 'live' })
+  })
+
+  it('seedWatchedSession REPLACES, where the cold seed would have frozen it', () => {
+    seed.created('r1', { cwd: '/p' })
+    seed.message('r1', makeAssistantMessage('live'))
+    // A watched session's `.jsonl` is its own only writer and only grows, so the
+    // refetch this serves must overwrite — the fill-only twin above would pin the
+    // transcript to whatever the first read returned.
+    seedWatchedSession('r1', { messages: [makeAssistantMessage('from disk')] })
+    expect(store().sessions['r1'].messages).toHaveLength(1)
+    expect(store().sessions['r1'].messages[0].content[0]).toMatchObject({ text: 'from disk' })
+  })
+
+  it('seedWatchedSession NO-OPS for an unknown id (a refetch racing a delete)', () => {
+    // The client half of the F7 pairing: the refetch is async, so a read can
+    // resolve after `session:removed` dropped the entry. Unlike the host's seed
+    // — which bootstraps, because a watched session has no birth event — this one
+    // is a refresh of something the client already has, never an introduction.
+    seedWatchedSession('never-seen-id', { messages: [makeAssistantMessage('from disk')] })
+    expect(store().sessions['never-seen-id']).toBeUndefined()
+    expect(getReplicaState().sessions['never-seen-id']).toBeUndefined()
   })
 
   it('evictLocalSessions strips the heavy arrays through the projection', () => {

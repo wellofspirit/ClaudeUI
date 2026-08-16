@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
-import { clearSyncSubscribersForTests } from '../sync-host'
+import { clearSyncSubscribersForTests, syncCore } from '../sync-host'
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -161,10 +161,108 @@ describe('session-watcher', () => {
         const [channel, payload] = win.webContents.send.mock.calls[0]
         expect(channel).toBe('session:watch-update')
         expect(payload.routingId).toBe('routing-1')
-        expect(Array.isArray(payload.messages)).toBe(true)
+        // The notify addresses the transcript; it no longer carries it (S4).
+        expect(payload.sessionId).toBe(ctx.sessionId)
+        expect(payload.projectKey).toBe(ctx.projectKey)
+        expect('messages' in payload).toBe(false)
       },
       { timeout: 3000 }
     )
+  })
+
+  /**
+   * S4's whole point: the RING entry is a notify, not a transcript.
+   *
+   * A watched session re-read its entire file into the event payload on every
+   * change, so a 5000-entry ring could hold hundreds of full transcripts and
+   * every reconnecting client replayed them. The content is a SEED now
+   * (`SyncCore.seedWatchedSession`, applied before the notify), and canonical
+   * still holds it — so this asserts both halves at once.
+   */
+  it('rings a NOTIFY, not the transcript, and canonical still holds the content', async () => {
+    const before = syncCore.currentSeq()
+    watchSession('routing-ring', ctx.sessionId, ctx.projectKey, '/repo/ring')
+
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+
+    await vi.waitFor(
+      () => {
+        const entries = syncCore.getAfter(before) ?? []
+        const entry = entries.find((e) => e.channel === 'session:watch-update')
+        expect(entry, 'no watch-update reached the ring').toBeDefined()
+        const payload = entry!.args[0] as Record<string, unknown>
+        // The bloat, gone: no transcript, no notifications, no status line.
+        expect(Object.keys(payload).sort()).toEqual([
+          'cwd',
+          'projectKey',
+          'routingId',
+          'sessionId'
+        ])
+      },
+      { timeout: 3000 }
+    )
+
+    // The content moved to the seed rather than being dropped, and the seed is
+    // ordered BEFORE the notify, so a client refetching on the notify reads
+    // state that already contains what the notify announces.
+    const session = syncCore.getCanonicalState().sessions['routing-ring']
+    expect(session.messages.map((m) => m.id)).toEqual(['m-1'])
+    expect(session.cwd).toBe('/repo/ring')
+    expect(session.seeded).toBe(true)
+  })
+
+  /**
+   * The post-await race, closed by S4.
+   *
+   * The debounce callback AWAITS the file read, and a delete can land inside that
+   * await — `handlers-core.deleteSession` unwatches first precisely because the
+   * unlink makes the watcher fire one more time, but nothing stopped a read that
+   * had ALREADY started. Its seed bootstraps by design and its notify's reducer
+   * branch is the one that still bootstraps, so the pair re-minted the session
+   * canonical had just removed: a `cwd`-carrying ghost in canonical and in every
+   * replica, which is exactly what the unwatch exists to prevent.
+   */
+  it('a delete landing DURING the read leaves no ghost and emits no notify', async () => {
+    const win = makeFakeWindow()
+    const before = syncCore.currentSeq()
+    let release: (() => void) | null = null
+    loadSessionHistoryMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              messages: [
+                { id: 'm-1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }
+              ],
+              taskNotifications: [],
+              customTitle: null,
+              agentIdToToolUseId: {},
+              statusLine: null,
+              _sessionId: ctx.sessionId,
+              _projectKey: ctx.projectKey
+            })
+        })
+    )
+
+    watchSession('routing-ghost', ctx.sessionId, ctx.projectKey, '/repo/ghost')
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+    await vi.waitFor(() => expect(loadSessionHistoryMock).toHaveBeenCalled(), { timeout: 3000 })
+
+    // The delete, in production order: unwatch, THEN remove.
+    unwatchSession('routing-ghost')
+    release!()
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(syncCore.getCanonicalState().sessions['routing-ghost']).toBeUndefined()
+    const entries = syncCore.getAfter(before) ?? []
+    expect(
+      entries.some(
+        (e) =>
+          e.channel === 'session:watch-update' &&
+          (e.args[0] as { routingId?: string }).routingId === 'routing-ghost'
+      )
+    ).toBe(false)
+    expect(win.webContents.send).not.toHaveBeenCalled()
   })
 
   /**

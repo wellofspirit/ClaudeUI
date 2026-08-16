@@ -286,7 +286,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: true,
     deliveryDelta: undefined,
-    why: 'Payload-heavy (a full re-read of the watched transcript). Funneled in 4a so canonical holds watched sessions — without that, 4b would drop them. Phase-5 target: replace with notify + refetch.'
+    why: 'A NOTIFY as of phase 5 S4: `{routingId, sessionId, projectKey, cwd?}`, no transcript. Funneled in 4a so canonical holds watched sessions (without that, 4b would drop them), but the payload was a full re-read, so a 5000-entry ring could hold hundreds of transcripts and every reconnecting client replayed them. The content is a seed now (`SyncCore.seedWatchedSession`, applied before this event); clients answer the notify with one debounced refetch through the cold-history path. Still canonical, and its branch keeps the ONE surviving bootstrap — a watched session has no birth event.'
   },
   'session:error': {
     cls: 'replicated',

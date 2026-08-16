@@ -694,6 +694,196 @@ describe('useClaudeEvents extended component tests', () => {
       expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(0)
     })
 
+    // -----------------------------------------------------------------------
+    // The S4 notify: no transcript on the wire, one debounced refetch per
+    // session through the cold-history path, and a delete that stays deleted.
+    // -----------------------------------------------------------------------
+
+    /** A notify as `session-watcher.ts` emits it since S4. */
+    function notify(routingId: string): void {
+      app.emit('session:watch-update', {
+        routingId,
+        sessionId: 'uuid-w',
+        projectKey: '-repo',
+        cwd: '/test'
+      })
+    }
+
+    function stubHistory(messages: unknown[]): ReturnType<typeof vi.fn> {
+      const load = vi.fn(async () => ({
+        messages,
+        taskNotifications: [],
+        customTitle: null,
+        agentIdToToolUseId: {},
+        statusLine: null,
+        warnings: []
+      }))
+      Object.assign(window.api, { loadSessionHistory: load })
+      return load
+    }
+
+    it('answers a BURST of notifies with exactly one refetch, and replaces', async () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      seed.message(routingId, makeAssistantMessage('old message'))
+      const load = stubHistory([makeAssistantMessage('from disk')])
+
+      notify(routingId)
+      notify(routingId)
+      notify(routingId)
+
+      await vi.waitFor(() => {
+        expect(
+          useSessionStore.getState().sessions[routingId].messages[0].content[0]
+        ).toEqual({ type: 'text', text: 'from disk' })
+      })
+      // One read for the whole burst: the file read is not incremental, so a
+      // catchup replaying N notifies costs one refetch that heals all of them.
+      expect(load).toHaveBeenCalledTimes(1)
+      expect(load).toHaveBeenCalledWith('uuid-w', '-repo')
+
+      // A LATER change refetches again and REPLACES — the fill-only cold seed
+      // would have frozen the transcript at the first read.
+      stubHistory([makeAssistantMessage('grown')])
+      notify(routingId)
+      await vi.waitFor(() => {
+        expect(
+          useSessionStore.getState().sessions[routingId].messages[0].content[0]
+        ).toEqual({ type: 'text', text: 'grown' })
+      })
+    })
+
+    it('refetches within the max-wait bound under a sustained notify cadence', async () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      const load = stubHistory([makeAssistantMessage('from disk')])
+
+      // The watcher emits every ~100 ms while a transcript is being written, and
+      // the client debounce is 150 ms — so a pure reset-on-each-notify debounce
+      // never fires for as long as the writing continues, which is exactly when
+      // the user is watching. The max-wait bound is what stops that starvation.
+      for (let i = 0; i < 6; i++) {
+        notify(routingId)
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      expect(load).toHaveBeenCalled()
+      expect(
+        useSessionStore.getState().sessions[routingId].messages[0].content[0]
+      ).toEqual({ type: 'text', text: 'from disk' })
+    })
+
+    it('retries ONCE when the refetch fails, then gives up', async () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      // A failed read leaves a resident, un-seeded stub that the sidebar's
+      // resident fast-path would paint as an empty chat, so one repair attempt
+      // rides here; the next file change heals anything past that.
+      const load = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('EBUSY'))
+        .mockResolvedValueOnce({
+          messages: [makeAssistantMessage('from disk')],
+          taskNotifications: [],
+          customTitle: null,
+          agentIdToToolUseId: {},
+          statusLine: null,
+          warnings: []
+        })
+      Object.assign(window.api, { loadSessionHistory: load })
+
+      notify(routingId)
+      await vi.waitFor(() => {
+        expect(
+          useSessionStore.getState().sessions[routingId].messages[0].content[0]
+        ).toEqual({ type: 'text', text: 'from disk' })
+      })
+      expect(load).toHaveBeenCalledTimes(2)
+    })
+
+    it('a delete inside the debounce window stops the read from ever starting', async () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      const load = stubHistory([makeAssistantMessage('from disk')])
+
+      notify(routingId)
+      // Inside the 150 ms window: the cancel is what has to work here, not the
+      // post-await residency check (nothing has been read yet).
+      app.emit('session:removed', routingId)
+
+      await new Promise((r) => setTimeout(r, 400))
+      expect(load).not.toHaveBeenCalled()
+      expect(useSessionStore.getState().sessions[routingId]).toBeUndefined()
+    })
+
+    it('a refetch in flight across a delete does not re-mint the session (F7)', async () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      let release: (() => void) | null = null
+      const load = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve({
+                messages: [makeAssistantMessage('from disk')],
+                taskNotifications: [],
+                customTitle: null,
+                agentIdToToolUseId: {},
+                statusLine: null,
+                warnings: []
+              })
+          })
+      )
+      Object.assign(window.api, { loadSessionHistory: load })
+
+      notify(routingId)
+      await vi.waitFor(() => expect(load).toHaveBeenCalled())
+
+      // The delete lands while the read is in flight. Unwatch-before-delete stops
+      // any FURTHER notify (handlers-core), but this read is already gone.
+      app.emit('session:removed', routingId)
+      expect(useSessionStore.getState().sessions[routingId]).toBeUndefined()
+
+      release!()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(useSessionStore.getState().sessions[routingId]).toBeUndefined()
+    })
+
+    it('a notify for a session this client does not hold refetches nothing', async () => {
+      const load = stubHistory([makeAssistantMessage('from disk')])
+      // The reducer bootstraps the entry, so "does not hold" means EVICTED here —
+      // the heap bound dropped its arrays and a reselect re-hydrates them from the
+      // same disk read, which is what refetching would undo.
+      const routingId = 'route-evicted'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      useSessionStore.setState((s) => ({
+        sessions: { ...s.sessions, [routingId]: { ...s.sessions[routingId], evicted: true } }
+      }))
+
+      notify(routingId)
+      await new Promise((r) => setTimeout(r, 250))
+      expect(load).not.toHaveBeenCalled()
+    })
+
+    it('an OLD-shape update refetches nothing — it carried its own content', async () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+      const load = stubHistory([makeAssistantMessage('from disk')])
+
+      app.emit('session:watch-update', {
+        routingId,
+        messages: [makeAssistantMessage('inline')],
+        taskNotifications: []
+      })
+
+      await new Promise((r) => setTimeout(r, 250))
+      expect(load).not.toHaveBeenCalled()
+      expect(useSessionStore.getState().sessions[routingId].messages[0].content[0]).toEqual({
+        type: 'text',
+        text: 'inline'
+      })
+    })
+
     it('keeps todos when not all completed on watch update', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')

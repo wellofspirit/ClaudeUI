@@ -851,11 +851,22 @@ export interface BashOutputData {
   totalBytes: number
 }
 
+/**
+ * A watched external session changed on disk — a NOTIFY since phase 5 S4.
+ *
+ * The payload used to carry a full re-read of the transcript, which put hundreds
+ * of transcripts in a 5000-entry ring and replayed every one of them to a
+ * reconnecting client. The content is a SEED now
+ * (`SyncCore.seedWatchedSession`, applied BEFORE this event is emitted), so what
+ * rides the wire is the ADDRESS of the thing that changed and nothing else.
+ *
+ * `messages` / `taskNotifications` / `statusLine` survive as OLD-shape fields:
+ * committed golden fixtures and any ring a client catches up from across the
+ * upgrade still carry them, and the reducer still folds them (see its branch).
+ * Nothing emits them any more.
+ */
 export interface WatchUpdate {
   routingId: string
-  messages: ChatMessage[]
-  taskNotifications: TaskNotification[]
-  statusLine?: StatusLineData | null
   /**
    * The watched session's working directory. Optional for OLD-shape events only
    * (a cached `/remote` bundle whose `watchSession` invoke sends three args) —
@@ -863,6 +874,22 @@ export interface WatchUpdate {
    * `main/services/session-watcher.ts` for why it has to ride the event.
    */
   cwd?: string
+  /**
+   * Where the transcript lives, so a client's refetch does not have to guess it.
+   * `routingId` is the sessionId today (the sidebar's eye passes
+   * `SessionInfo.sessionId` as both), but `watchSession` takes them separately,
+   * and `projectKey` is `cwdToProjectKey`'s lossy, irreversible output — a value
+   * only the emitter has. Absent on old-shape events; a client that has neither
+   * skips the refetch and heals on its next snapshot.
+   */
+  sessionId?: string
+  projectKey?: string
+  /** @deprecated OLD-shape only — see the interface comment. */
+  messages?: ChatMessage[]
+  /** @deprecated OLD-shape only — see the interface comment. */
+  taskNotifications?: TaskNotification[]
+  /** @deprecated OLD-shape only — see the interface comment. */
+  statusLine?: StatusLineData | null
 }
 
 export interface ModelInfo {
