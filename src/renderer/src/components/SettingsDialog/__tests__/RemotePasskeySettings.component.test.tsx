@@ -98,31 +98,10 @@ describe('RemotePasskeySettings', () => {
   // is what did not move: the admission toggles, the credential list, and the
   // off-mode BANNER (which is a warning about state, not a control for it).
 
-  describe('toggles', () => {
-    it('break-glass says what OFF actually does (not "passwords are gone")', async () => {
-      renderPane({ authPolicy: 'passkey-always', effectiveAuthPolicy: 'passkey-always' })
-      const note = await screen.findByTestId('RemotePasskeySettings.passwordBreakGlassNote')
-      // `passwordAuthAllowed()` never honours the toggle on a non-capable
-      // origin, and a pane that implied otherwise is how people lock themselves
-      // out of their own LAN.
-      expect(note).toHaveTextContent(/Plain-LAN and tunnel connections keep the password/i)
-      fireEvent.click(screen.getByTestId('RemotePasskeySettings.passwordBreakGlass'))
-      await waitFor(() =>
-        expect(api.setRemoteConfig).toHaveBeenCalledWith({ passwordBreakGlass: false })
-      )
-    })
-
-    it('tailnet exemption states the trade and the reduced grants', async () => {
-      renderPane()
-      const note = await screen.findByTestId('RemotePasskeySettings.passkeyTailnetExemptNote')
-      expect(note).toHaveTextContent(/unlocked device/i)
-      expect(note).toHaveTextContent(/never passkey-level/i)
-      fireEvent.click(screen.getByTestId('RemotePasskeySettings.passkeyTailnetExempt'))
-      await waitFor(() =>
-        expect(api.setRemoteConfig).toHaveBeenCalledWith({ passkeyTailnetExempt: true })
-      )
-    })
-  })
+  // The two ADMISSION TOGGLES moved into the settings editor
+  // (`SessionSecuritySettings`) under the owner's "the pane is the configuration
+  // of all these authentication settings" ruling, and are covered there. They
+  // were always auth-surface members; only their home changed.
 
   describe('credential list', () => {
     it('empty state points at the device-side enrollment, not a local button', async () => {
@@ -350,13 +329,13 @@ describe('RemotePasskeySettings', () => {
       api.platform = 'web'
     })
 
-    it('disables the two toggles that have no web-reachable writer', async () => {
-      // Break-glass and the tailnet exemption are not part of the settings
-      // editor's batch and have no `authcfg` verb: they stay host-anchor only.
+    it('no longer renders the admission toggles at all', async () => {
+      // They live in the settings editor now — on BOTH transports, since they
+      // ride `authcfg:apply` like the rest of the auth surface.
       renderPane()
       await screen.findByTestId('RemotePasskeySettings')
-      expect(screen.getByTestId('RemotePasskeySettings.passwordBreakGlass')).toBeDisabled()
-      expect(screen.getByTestId('RemotePasskeySettings.passkeyTailnetExempt')).toBeDisabled()
+      expect(screen.queryByTestId('RemotePasskeySettings.passwordBreakGlass')).toBeNull()
+      expect(screen.queryByTestId('RemotePasskeySettings.passkeyTailnetExempt')).toBeNull()
     })
 
     it('still shows the off-mode banner — the posture travels, the switch does not', async () => {

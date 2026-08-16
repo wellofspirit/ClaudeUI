@@ -42,7 +42,11 @@ export interface SettingsDraft {
   stepUpTier?: StepUpTier
   stepUpMutationIdleMinutes?: number
   sessionMaxAgeHours?: number
+  /** The terminal's own act window — the third dial (ADR-052 grant decay). */
+  shellGrantIdleMinutes?: number
   auditRetentionDays?: number
+  passwordBreakGlass?: boolean
+  passkeyTailnetExempt?: boolean
 }
 
 /**
@@ -68,7 +72,14 @@ export async function saveSettingsDraft(draft: SettingsDraft): Promise<RemoteCon
         ? { stepUpMutationIdleMinutes: draft.stepUpMutationIdleMinutes }
         : {}),
       ...('sessionMaxAgeHours' in draft ? { sessionMaxAgeHours: draft.sessionMaxAgeHours } : {}),
-      ...('auditRetentionDays' in draft ? { auditRetentionDays: draft.auditRetentionDays } : {})
+      ...('shellGrantIdleMinutes' in draft
+        ? { shellGrantIdleMinutes: draft.shellGrantIdleMinutes }
+        : {}),
+      ...('auditRetentionDays' in draft ? { auditRetentionDays: draft.auditRetentionDays } : {}),
+      ...('passwordBreakGlass' in draft ? { passwordBreakGlass: draft.passwordBreakGlass } : {}),
+      ...('passkeyTailnetExempt' in draft
+        ? { passkeyTailnetExempt: draft.passkeyTailnetExempt }
+        : {})
     })
   }
   const { config } = await window.api.authcfgApply(draft)

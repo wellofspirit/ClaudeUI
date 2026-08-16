@@ -102,12 +102,19 @@ describe('SessionSecuritySettings', () => {
       const fields = screen
         .getAllByTestId('SessionSecuritySettings.summaryRow')
         .map((row) => row.getAttribute('data-field'))
+      // Every member of the auth SURFACE, in the order the approved mockup
+      // reads them — including the terminal's own window (which the owner could
+      // not see or edit before) and the two admission toggles (which used to
+      // float outside the pane as always-live switches).
       expect(fields).toEqual([
         'authMode',
         'stepUpTier',
         'stepUpMutationIdleMinutes',
+        'shellGrantIdleMinutes',
         'sessionMaxAgeHours',
         'password',
+        'passwordBreakGlass',
+        'passkeyTailnetExempt',
         'auditRetentionDays'
       ])
 
@@ -126,7 +133,7 @@ describe('SessionSecuritySettings', () => {
         .getAllByTestId('SessionSecuritySettings.summaryRow')
         .find((r) => r.getAttribute('data-field') === 'authMode')!
       expect(row).toHaveTextContent(/Automatic/)
-      expect(row).toHaveTextContent(/password \/ link right now/)
+      expect(row).toHaveTextContent(/password \/ link/)
     })
 
     it('says when the tier is not in force because authentication is off', () => {
@@ -334,6 +341,9 @@ describe('SessionSecuritySettings', () => {
       expect(api.authcfgSetPassword).not.toHaveBeenCalled()
 
       await openEditor(true)
+      // The mockup renders the password as an affordance, not two always-open
+      // boxes: the common edit does not touch the credential.
+      fireEvent.click(screen.getByTestId('SessionSecuritySettings.changePassword'))
       fireEvent.change(screen.getByTestId('SessionSecuritySettings.password'), {
         target: { value: 'a-long-enough-password' }
       })
@@ -347,6 +357,54 @@ describe('SessionSecuritySettings', () => {
       // nothing important may be sequenced behind it.
       expect(api.authcfgApply).toHaveBeenCalled()
       expect(api.authcfgSetPassword).toHaveBeenCalledWith('a-long-enough-password')
+    })
+
+    it('stages the two ADMISSION TOGGLES and the terminal dial into the same batch', async () => {
+      // The owner's ruling: the pane is the configuration of ALL of these. The
+      // toggles were auth-surface members all along — they just used to live
+      // outside as always-live switches, which made two classes of one thing.
+      api.platform = 'web'
+      renderPane()
+      await openEditor(true)
+
+      fireEvent.change(screen.getByTestId('SessionSecuritySettings.shellGrantIdleMinutes'), {
+        target: { value: '2' }
+      })
+      fireEvent.click(screen.getByTestId('SessionSecuritySettings.passwordBreakGlass'))
+      fireEvent.click(screen.getByTestId('SessionSecuritySettings.passkeyTailnetExempt'))
+      expect(api.authcfgApply).not.toHaveBeenCalled()
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('SessionSecuritySettings.save'))
+      })
+      expect(api.authcfgApply).toHaveBeenCalledWith({
+        shellGrantIdleMinutes: 2,
+        passwordBreakGlass: false,
+        passkeyTailnetExempt: true
+      })
+    })
+
+    it('refuses an out-of-range TERMINAL dial locally', async () => {
+      renderPane()
+      await openEditor(false)
+      fireEvent.change(screen.getByTestId('SessionSecuritySettings.shellGrantIdleMinutes'), {
+        target: { value: '0' }
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('SessionSecuritySettings.save'))
+      })
+      expect(screen.getByTestId('SessionSecuritySettings.error')).toHaveTextContent(/1 and 1440/)
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+    })
+
+    it('the Strict hint names the terminal window instead of claiming it is shorter', async () => {
+      // The owner set the idle dial to 1 minute and expected the terminal to
+      // follow; it has its own window, and the hint used to assert the opposite.
+      renderPane({ stepUpTier: 'strong' })
+      await openEditor(false)
+      const hint = screen.getByTestId('SessionSecuritySettings.tierHint')
+      expect(hint).toHaveTextContent(/terminal has its own window, set below/i)
+      expect(hint.textContent ?? '').not.toMatch(/shorter/i)
     })
 
     it('Cancel closes the session and discards the draft', async () => {
@@ -404,6 +462,7 @@ describe('SessionSecuritySettings', () => {
       renderPane()
       await openEditor(true)
       chooseSelectMenuOption(screen.getByTestId('SessionSecuritySettings.tier'), 'strong')
+      fireEvent.click(screen.getByTestId('SessionSecuritySettings.changePassword'))
       fireEvent.change(screen.getByTestId('SessionSecuritySettings.password'), {
         target: { value: 'a-long-enough-password' }
       })
@@ -417,7 +476,10 @@ describe('SessionSecuritySettings', () => {
 
       api.authcfgApply.mockResolvedValue({ ok: true, config: baseConfig })
       await openEditor(true)
-      expect(screen.getByTestId('SessionSecuritySettings.password')).toHaveValue('')
+      // Back to the affordance, not a pre-filled box: the typed password never
+      // survives a re-lock.
+      expect(screen.queryByTestId('SessionSecuritySettings.password')).toBeNull()
+      expect(screen.getByTestId('SessionSecuritySettings.changePassword')).toBeInTheDocument()
       await act(async () => {
         fireEvent.click(screen.getByTestId('SessionSecuritySettings.save'))
       })
@@ -444,6 +506,7 @@ describe('SessionSecuritySettings', () => {
           await Promise.resolve()
         })
         chooseSelectMenuOption(screen.getByTestId('SessionSecuritySettings.tier'), 'strong')
+        fireEvent.click(screen.getByTestId('SessionSecuritySettings.changePassword'))
         fireEvent.change(screen.getByTestId('SessionSecuritySettings.password'), {
           target: { value: 'a-long-enough-password' }
         })
@@ -467,7 +530,7 @@ describe('SessionSecuritySettings', () => {
         await act(async () => {
           await Promise.resolve()
         })
-        expect(screen.getByTestId('SessionSecuritySettings.password')).toHaveValue('')
+        expect(screen.queryByTestId('SessionSecuritySettings.password')).toBeNull()
       } finally {
         vi.useRealTimers()
       }

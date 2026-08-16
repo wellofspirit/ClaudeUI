@@ -1709,8 +1709,13 @@ interface RemoteAPI {
     stepUpMutationIdleMinutes?: number
     /** 1–168 (the one-week `setTimeout` ceiling). */
     sessionMaxAgeHours?: number
+    /** The TERMINAL's own act window, 1–1440 (ADR-052's `shell` grant decay). */
+    shellGrantIdleMinutes?: number
     /** ≥30 — the audit floor is a refusal here, not a silent clamp. */
     auditRetentionDays?: number
+    /** The two admission toggles — auth-surface members, so they sweep too. */
+    passwordBreakGlass?: boolean
+    passkeyTailnetExempt?: boolean
   }): Promise<{ ok: true; config: RemoteConfig }>
   /**
    * Close the editor: Save, Cancel, and pane unmount all call it, so the bounded

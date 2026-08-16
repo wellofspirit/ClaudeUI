@@ -23,8 +23,6 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [portError, setPortError] = useState<string | null>(null)
   const [tlsPortInput, setTlsPortInput] = useState('')
   const [tlsPortError, setTlsPortError] = useState<string | null>(null)
-  const [idleInput, setIdleInput] = useState('')
-  const [idleError, setIdleError] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
   /** Actionable message from the last failed `detectTailscale()` probe. */
@@ -40,7 +38,6 @@ export function RemoteServerSettings(): React.JSX.Element {
     setConfig(nextConfig)
     setPortInput(nextConfig.port ? String(nextConfig.port) : '')
     setTlsPortInput(String(nextConfig.tlsHttpsPort))
-    setIdleInput(String(nextConfig.shellGrantIdleMinutes))
     setInterfaces(ifaces)
   }, [])
 
@@ -141,19 +138,6 @@ export function RemoteServerSettings(): React.JSX.Element {
     if (!config) return
     setConfig(await window.api.setRemoteConfig({ allowTerminal: !config.allowTerminal }))
   }, [config])
-
-  const commitIdleMinutes = useCallback(async (): Promise<void> => {
-    const trimmed = idleInput.trim()
-    const value = trimmed === '' ? 10 : Number(trimmed)
-    if (!Number.isInteger(value) || value < 1 || value > 1440) {
-      setIdleError('Timeout must be between 1 and 1440 minutes')
-      return
-    }
-    setIdleError(null)
-    const updated = await window.api.setRemoteConfig({ shellGrantIdleMinutes: value })
-    setConfig(updated)
-    setIdleInput(String(updated.shellGrantIdleMinutes))
-  }, [idleInput])
 
   const handleClearPassword = useCallback(async (): Promise<void> => {
     if (!confirmClear) {
@@ -379,36 +363,10 @@ export function RemoteServerSettings(): React.JSX.Element {
             >
               Lets a signed-in remote client open a real shell on this machine, running as you, with
               no per-command approval. Each client must re-enter the remote password to unlock it,
-              and access ends after the timeout below. You can watch any remote shell live from this
-              app.
+              and access ends after the terminal re-check window in the security section below. You
+              can watch any remote shell live from this app.
             </div>
 
-            <div className="mt-2">
-              <div className="mb-1 text-[12px] text-text-secondary">Terminal timeout (minutes)</div>
-              <input
-                data-testid="RemoteServerSettings.shellGrantIdleMinutes"
-                type="text"
-                inputMode="numeric"
-                value={idleInput}
-                placeholder="10"
-                disabled={!config.allowTerminal}
-                onChange={(e) => setIdleInput(e.target.value)}
-                onBlur={() => void commitIdleMinutes()}
-                className={`${inputClass} w-full ${config.allowTerminal ? '' : 'opacity-40'}`}
-              />
-              {idleError && (
-                <div
-                  data-testid="RemoteServerSettings.shellGrantIdleMinutesError"
-                  className="text-[10px] text-red-400 mt-0.5"
-                >
-                  {idleError}
-                </div>
-              )}
-              <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">
-                Idle time before a remote client must re-enter the password. Reading chat does not
-                keep a terminal unlocked — only terminal use does.
-              </div>
-            </div>
           </div>
         </>
       )}

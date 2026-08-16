@@ -126,6 +126,7 @@ beforeEach(() => {
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
+    shellGrantIdleMinutes: 10,
     auditRetentionDays: 365
   }
 })
@@ -209,6 +210,8 @@ describe('authcfgApply — the batch', () => {
       { stepUpTier: 'strong' as const, sessionMaxAgeHours: 720 },
       { stepUpTier: 'strong' as const, stepUpMutationIdleMinutes: 0 },
       { stepUpTier: 'strong' as const, auditRetentionDays: 7 },
+      { stepUpTier: 'strong' as const, shellGrantIdleMinutes: 0 },
+      { stepUpTier: 'strong' as const, passwordBreakGlass: 'yes' as never },
       { stepUpTier: 'nonsense' as never }
     ]) {
       configWrites.length = 0

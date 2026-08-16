@@ -31,6 +31,7 @@ vi.mock('../../services/db', () => ({
     countImpl.current ? countImpl.current() : credentialCountRef.current,
   // ADR-054 defaults — `auth-policy.ts` reads them for its fail-closed context.
   DEFAULT_STEP_UP_TIER: 'medium',
+  DEFAULT_SHELL_GRANT_IDLE_MINUTES: 10,
   DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES: 60,
   DEFAULT_SESSION_MAX_AGE_HOURS: 4
 }))

@@ -9,7 +9,6 @@ import type {
   WebauthnEnrollToken
 } from '../../../../shared/types'
 import { SessionSecuritySettings } from './SessionSecuritySettings'
-import { isWebClient } from './remote-settings-transport'
 
 const inputClass =
   'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
@@ -112,24 +111,6 @@ export function RemotePasskeySettings({
       unsubscribe()
     }
   }, [loadCredentials])
-
-  /**
-   * HOST-ANCHOR writes only (`remote:set-config`): the `off` master switch, the
-   * break-glass toggle and the tailnet exemption. None of them has an
-   * `authcfg:*` verb, so this path is desktop-only by construction and the
-   * controls that use it are disabled on a web client.
-   */
-  const writeConfig = useCallback(
-    async (partial: Parameters<typeof window.api.setRemoteConfig>[0]): Promise<void> => {
-      setBusy(true)
-      try {
-        onConfigChange(await window.api.setRemoteConfig(partial))
-      } finally {
-        setBusy(false)
-      }
-    },
-    [onConfigChange]
-  )
 
   const handleRename = useCallback(
     async (credId: string, nickname: string): Promise<void> => {
@@ -258,9 +239,6 @@ export function RemotePasskeySettings({
   }, [mintLink])
 
   const authOff = config.effectiveAuthPolicy === 'off'
-  // Not the host anchor: the master switch is absent, and the two toggles below
-  // (break-glass, tailnet exemption) have no web-reachable writer.
-  const web = isWebClient()
   // Only the in-flight request disables these. A "serve is down" refusal is
   // guidance the operator acts on right here (the Tailscale HTTPS toggle is a
   // few rows up), and disabling the button they need in order to find out
@@ -289,66 +267,12 @@ export function RemotePasskeySettings({
           was what made the old surface a wall of always-live knobs. What stays
           here is what is NOT part of that set — the two admission toggles and
           the credential list, which are per-credential rather than policy. */}
-      {/* Break-glass password. `passwordAuthAllowed()`: the toggle is only
-          consulted under the passkey modes, and only on an origin that can
-          actually do WebAuthn — say so, or people will think they turned the
-          password off on their LAN too. */}
-      <div>
-        <button
-          data-testid="RemotePasskeySettings.passwordBreakGlass"
-          disabled={busy || web}
-          onClick={() => void writeConfig({ passwordBreakGlass: !config.passwordBreakGlass })}
-          className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default disabled:opacity-50"
-        >
-          <span>Allow the password as a backup</span>
-          <span
-            className={`w-7 h-4 rounded-full relative transition-colors ${config.passwordBreakGlass ? 'bg-accent' : 'bg-text-muted/30'}`}
-          >
-            <span
-              className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.passwordBreakGlass ? 'left-3.5' : 'left-0.5'}`}
-            />
-          </span>
-        </button>
-        <div
-          data-testid="RemotePasskeySettings.passwordBreakGlassNote"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-        >
-          Off means passkey-only — but only from addresses that can use passkeys. Plain-LAN and
-          tunnel connections keep the password either way, because no browser can offer a passkey
-          there.
-        </div>
-      </div>
-
-      {/* `ceremonyRequiredForAuth()`: the exemption yields the LEGACY grant set,
-          never the passkey one — ambient network identity is not evidence of
-          device possession. */}
-      <div>
-        <button
-          data-testid="RemotePasskeySettings.passkeyTailnetExempt"
-          disabled={busy || web}
-          onClick={() => void writeConfig({ passkeyTailnetExempt: !config.passkeyTailnetExempt })}
-          className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default disabled:opacity-50"
-        >
-          <span>Skip the passkey for Tailscale sign-ins</span>
-          <span
-            className={`w-7 h-4 rounded-full relative transition-colors ${config.passkeyTailnetExempt ? 'bg-accent' : 'bg-text-muted/30'}`}
-          >
-            <span
-              className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.passkeyTailnetExempt ? 'left-3.5' : 'left-0.5'}`}
-            />
-          </span>
-        </button>
-        <div
-          data-testid="RemotePasskeySettings.passkeyTailnetExemptNote"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-        >
-          Lets a browser already signed in to your tailnet in without the fingerprint check. It
-          trades away the one thing a passkey covers that Tailscale does not: someone holding your
-          unlocked device. Such a connection gets the ordinary permissions, never passkey-level
-          ones.
-          {web && ' Set on the machine itself.'}
-        </div>
-      </div>
+      {/* The two ADMISSION TOGGLES — "allow the password as a backup" and "skip
+          the passkey for Tailscale sign-ins" — moved INTO the settings editor
+          below (owner ruling, 2026-08-16). They were always members of the auth
+          SURFACE: they sweep and audit through the same machinery as the tier,
+          so leaving them outside as always-live switches made two classes of one
+          thing. The editor is the configuration of all of it. */}
 
       {/* ADR-054's SECOND axis: how fresh a presence proof has to stay AFTER
           sign-in. Directly under the sign-in requirement because the two are

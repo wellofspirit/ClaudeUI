@@ -181,7 +181,18 @@ export interface AuthcfgApplyPatch {
   stepUpTier?: StepUpTier
   stepUpMutationIdleMinutes?: number
   sessionMaxAgeHours?: number
+  /** The TERMINAL's own act window (ADR-052) — the third dial. */
+  shellGrantIdleMinutes?: number
   auditRetentionDays?: number
+  /**
+   * The two ADMISSION toggles. They were always members of the auth surface —
+   * the same class of setting as the tier, sweeping and auditing through the
+   * same machinery — but they used to live outside the editor as always-live
+   * switches. The owner's ruling folded them in: the pane is the configuration
+   * of ALL of these, so they are staged, saved and swept with the rest.
+   */
+  passwordBreakGlass?: boolean
+  passkeyTailnetExempt?: boolean
 }
 
 /** Bounds mirrored from `boot-core.ts`'s host-anchor writer — one rule, two doors. */
@@ -272,6 +283,23 @@ export async function authcfgApply(
       MIN_IDLE_MINUTES,
       MAX_IDLE_MINUTES
     )
+  }
+
+  if ('shellGrantIdleMinutes' in patch) {
+    write.shellGrantIdleMinutes = assertInteger(
+      patch.shellGrantIdleMinutes,
+      'Terminal re-check',
+      MIN_IDLE_MINUTES,
+      MAX_IDLE_MINUTES
+    )
+  }
+
+  for (const flag of ['passwordBreakGlass', 'passkeyTailnetExempt'] as const) {
+    if (!(flag in patch)) continue
+    if (typeof patch[flag] !== 'boolean') {
+      throw new Error(`${flag} must be true or false`)
+    }
+    write[flag] = patch[flag]
   }
 
   if ('sessionMaxAgeHours' in patch) {

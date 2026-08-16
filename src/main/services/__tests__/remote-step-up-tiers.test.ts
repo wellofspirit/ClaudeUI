@@ -986,6 +986,47 @@ describe('ADR-054 step-up tiers over the socket', () => {
       expect(rows[0].detail).toMatch(/authcfg:apply/)
     })
 
+    it('a SHELL-dial-only apply re-admits everyone too — all three dials are one class', async () => {
+      // The owner set "re-check after idle" to a minute under Strict and expected
+      // the TERMINAL to re-check after a minute. It did not: terminal acts are
+      // governed by their own window (ADR-052's shell grant decay), which the
+      // pane neither showed nor edited. It is a dial now, and it re-admits like
+      // the other two — one class of setting, one machinery, one audit row.
+      const actor = await adminLocked({ shellGrantIdleMinutes: 10 })
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      const bystander = await connectWithPassword()
+
+      auditRows.length = 0
+      await expect(
+        invoke(actor, 'authcfg:apply', { shellGrantIdleMinutes: 1 })
+      ).resolves.toMatchObject({ ok: true })
+
+      expect(await bystander.waitForClose(2000)).toBe(4009)
+      const rows = auditRows.filter((r) => r.channel === 'auth:policy-change')
+      expect(rows).toHaveLength(1)
+      expect(rows[0].detail).toMatch(/terminal re-check 10→1 min/)
+    })
+
+    it('the two ADMISSION TOGGLES ride apply, and sweep like everything else', async () => {
+      // They were always auth-surface members; the owner's ruling moved their UI
+      // into the editor, so the verb has to carry them.
+      const actor = await adminLocked({ passwordBreakGlass: true, passkeyTailnetExempt: false })
+      expect(await unlock(actor)).toMatchObject({ ok: true })
+      const bystander = await connectWithPassword()
+
+      auditRows.length = 0
+      await expect(
+        invoke(actor, 'authcfg:apply', { passwordBreakGlass: false, passkeyTailnetExempt: true })
+      ).resolves.toMatchObject({ ok: true })
+
+      expect(await bystander.waitForClose(2000)).toBe(4009)
+      const row = auditRow('auth:policy-change')
+      expect(row!.detail).toMatch(/break-glass password on→off/)
+      expect(row!.detail).toMatch(/tailnet exemption off→on/)
+      expect(remoteConfigRef.current!.passwordBreakGlass).toBe(false)
+      expect(remoteConfigRef.current!.passkeyTailnetExempt).toBe(true)
+    })
+
     it('a MIXED save names the dials in the same diff as the tier', async () => {
       const actor = await adminLocked({ stepUpTier: 'medium', sessionMaxAgeHours: 4 })
       expect(await unlock(actor)).toMatchObject({ ok: true })

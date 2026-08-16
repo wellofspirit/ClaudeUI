@@ -30,6 +30,7 @@ import {
   countWebauthnCredentials,
   getRemoteConfig,
   DEFAULT_SESSION_MAX_AGE_HOURS,
+  DEFAULT_SHELL_GRANT_IDLE_MINUTES,
   DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
   DEFAULT_STEP_UP_TIER
 } from './db'
@@ -61,6 +62,17 @@ export interface AuthPolicyContext {
   stepUpMutationIdleMinutes: number
   /** Strong-tier absolute session lifetime, in hours (default 4). */
   sessionMaxAgeHours: number
+  /**
+   * The TERMINAL's own act window, in minutes (ADR-052, default 10).
+   *
+   * Carried here so the auth surface can see it. Note the asymmetry with the
+   * two windows above, because it is the reason this field is easy to get wrong:
+   * those are snapshotted per connection and consulted from the snapshot, while
+   * the shell window is re-read from the config at every arming
+   * (`readTerminalPolicy`). So a change to it reaches live connections on their
+   * next shell act by itself.
+   */
+  shellGrantIdleMinutes: number
 }
 
 /** The context a server should assume when the DB cannot be read. */
@@ -78,6 +90,7 @@ export const FAIL_CLOSED_POLICY_CONTEXT: AuthPolicyContext = {
   // out of their own terminal nor a silent loosening on a DB hiccup.
   stepUpTier: DEFAULT_STEP_UP_TIER,
   stepUpMutationIdleMinutes: DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
+  shellGrantIdleMinutes: DEFAULT_SHELL_GRANT_IDLE_MINUTES,
   sessionMaxAgeHours: DEFAULT_SESSION_MAX_AGE_HOURS
 }
 
@@ -97,6 +110,7 @@ export function readAuthPolicyContext(): AuthPolicyContext {
       stepUpTier: config?.stepUpTier ?? DEFAULT_STEP_UP_TIER,
       stepUpMutationIdleMinutes:
         config?.stepUpMutationIdleMinutes ?? DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
+      shellGrantIdleMinutes: config?.shellGrantIdleMinutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
       sessionMaxAgeHours: config?.sessionMaxAgeHours ?? DEFAULT_SESSION_MAX_AGE_HOURS
     }
   } catch (err) {
@@ -254,6 +268,18 @@ export interface AuthSurfaceSnapshot {
    */
   stepUpMutationIdleMinutes: number
   sessionMaxAgeHours: number
+  /**
+   * The TERMINAL's act window joins for the owner's stated reason: all three
+   * dials are one class of setting and are edited together in one pane, so they
+   * audit and re-admit together. The mechanics differ slightly and the
+   * difference is worth knowing rather than glossing — this one is re-read at
+   * every arming rather than snapshotted, so a change already reached live
+   * connections on their next shell act. What the sweep adds is that an
+   * ALREADY-ARMED deadline, computed under the old value, does not outlive the
+   * change by up to a full window; and that one operator action produces one
+   * audit row naming everything that moved.
+   */
+  shellGrantIdleMinutes: number
 }
 
 /**
@@ -281,7 +307,8 @@ export function authSurfaceChanged(
     before.passkeyTailnetExempt !== after.passkeyTailnetExempt ||
     before.stepUpTier !== after.stepUpTier ||
     before.stepUpMutationIdleMinutes !== after.stepUpMutationIdleMinutes ||
-    before.sessionMaxAgeHours !== after.sessionMaxAgeHours
+    before.sessionMaxAgeHours !== after.sessionMaxAgeHours ||
+    before.shellGrantIdleMinutes !== after.shellGrantIdleMinutes
   )
 }
 
@@ -323,6 +350,11 @@ export function describeAuthSurfaceChange(
   if (before.sessionMaxAgeHours !== after.sessionMaxAgeHours) {
     parts.push(`session max-age ${before.sessionMaxAgeHours}→${after.sessionMaxAgeHours} h`)
   }
+  if (before.shellGrantIdleMinutes !== after.shellGrantIdleMinutes) {
+    parts.push(
+      `terminal re-check ${before.shellGrantIdleMinutes}→${after.shellGrantIdleMinutes} min`
+    )
+  }
   return parts.length > 0 ? parts.join('; ') : null
 }
 
@@ -348,7 +380,8 @@ export function readAuthSurface(): AuthSurfaceSnapshot {
     // effective tier is a derived fact both can compute from the policy.
     stepUpTier: ctx.stepUpTier,
     stepUpMutationIdleMinutes: ctx.stepUpMutationIdleMinutes,
-    sessionMaxAgeHours: ctx.sessionMaxAgeHours
+    sessionMaxAgeHours: ctx.sessionMaxAgeHours,
+    shellGrantIdleMinutes: ctx.shellGrantIdleMinutes
   }
 }
 

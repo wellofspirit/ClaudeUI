@@ -31,6 +31,7 @@ vi.mock('../db', () => ({
   },
   // ADR-054 defaults — the fail-closed context is built from them.
   DEFAULT_STEP_UP_TIER: 'medium',
+  DEFAULT_SHELL_GRANT_IDLE_MINUTES: 10,
   DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES: 60,
   DEFAULT_SESSION_MAX_AGE_HOURS: 4,
   appendAuditLog: vi.fn()
@@ -65,6 +66,7 @@ function ctx(over: Partial<AuthPolicyContext> = {}): AuthPolicyContext {
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
+    shellGrantIdleMinutes: 10,
     ...over
   }
 }
@@ -114,7 +116,10 @@ describe('readAuthPolicyContext', () => {
       passkeyTailnetExempt: true,
       stepUpTier: 'strong',
       stepUpMutationIdleMinutes: 15,
-      sessionMaxAgeHours: 2
+      sessionMaxAgeHours: 2,
+      // The terminal's own act window joined the context when it joined the
+      // auth surface (owner ruling): all three dials are one class of setting.
+      shellGrantIdleMinutes: 10
     })
   })
 
@@ -129,7 +134,8 @@ describe('readAuthPolicyContext', () => {
       // stricter or looser stance than the operator did.
       stepUpTier: 'medium',
       stepUpMutationIdleMinutes: 60,
-      sessionMaxAgeHours: 4
+      sessionMaxAgeHours: 4,
+      shellGrantIdleMinutes: 10
     })
   })
 
@@ -342,7 +348,8 @@ describe('authSurfaceChanged', () => {
     passkeyTailnetExempt: false,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
-    sessionMaxAgeHours: 4
+    sessionMaxAgeHours: 4,
+    shellGrantIdleMinutes: 10
   }
 
   it('is false for a no-op write (no audit spam, no gratuitous disconnects)', () => {
@@ -395,7 +402,8 @@ describe('authSurfaceChanged', () => {
       passkeyTailnetExempt: false,
       stepUpTier: 'strong',
       stepUpMutationIdleMinutes: 15,
-      sessionMaxAgeHours: 1
+      sessionMaxAgeHours: 1,
+      shellGrantIdleMinutes: 2
     }
     expect(authSurfaceChanged(base, tightened)).toBe(true)
     expect(authSurfaceChanged(tightened, base)).toBe(true)
@@ -411,6 +419,7 @@ describe('authSurfaceChanged', () => {
       'passkeyTailnetExempt',
       'passwordBreakGlass',
       'sessionMaxAgeHours',
+      'shellGrantIdleMinutes',
       'stepUpMutationIdleMinutes',
       'stepUpTier'
     ])
@@ -424,6 +433,7 @@ describe('authSurfaceChanged', () => {
       // that skipped the sweep would leave live sockets on the old numbers.
       else if (field === 'stepUpMutationIdleMinutes') flipped.stepUpMutationIdleMinutes = 15
       else if (field === 'sessionMaxAgeHours') flipped.sessionMaxAgeHours = 8
+      else if (field === 'shellGrantIdleMinutes') flipped.shellGrantIdleMinutes = 2
       else flipped[field] = !base[field]
       expect(authSurfaceChanged(base, flipped), field).toBe(true)
     }

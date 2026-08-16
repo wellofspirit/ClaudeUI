@@ -51,28 +51,14 @@ const POLICY_OPTIONS: { value: PolicyChoice; label: string }[] = [
  */
 const WEB_POLICY_OPTIONS = POLICY_OPTIONS.filter((option) => option.value !== 'off')
 
-/**
- * What each mode actually does, in the operator's terms. Sourced from
- * `auth-policy.ts` (`resolveAuthPolicy`, `ceremonyRequiredForAuth`,
- * `passwordStepUpAllowed`) rather than invented — a pane that paraphrases the
- * enforcement loosely is how people end up locked out.
- */
-const POLICY_HINTS: Record<PolicyChoice, string> = {
-  auto: 'Password / link until you enroll a passkey, then a passkey for every sign-in. Enrolling your first passkey turns it on; revoking your last one turns it back off.',
-  'passkey-always':
-    'Connections from an address that can use passkeys are asked for the fingerprint / face check instead of the URL link or Tailscale identity. Nothing is demanded until at least one passkey is enrolled, and the backup password still gets in while it is allowed. Other addresses (plain LAN, tunnel) keep using the password or link.',
-  legacy: 'The original stack: URL token, password, and Tailscale identity. No passkey anywhere.',
-  off: 'Authentication is disabled entirely. Anyone who can reach this machine on the network has full control of it.'
-}
-
 const POLICY_LABELS: Record<PolicyChoice, string> = Object.fromEntries(
   POLICY_OPTIONS.map((o) => [o.value, o.label])
 ) as Record<PolicyChoice, string>
 
 const TIER_OPTIONS: { value: StepUpTier; label: string }[] = [
   { value: 'strong', label: 'Strict — re-check before acting' },
-  { value: 'medium', label: 'Balanced (recommended)' },
-  { value: 'off', label: 'Never re-check' }
+  { value: 'medium', label: 'Standard — terminal and these settings' },
+  { value: 'off', label: 'Off — never re-check' }
 ]
 
 const TIER_LABELS: Record<StepUpTier, string> = Object.fromEntries(
@@ -84,11 +70,16 @@ const TIER_LABELS: Record<StepUpTier, string> = Object.fromEntries(
  * table rather than invented.
  */
 const TIER_HINTS: Record<StepUpTier, string> = {
+  // NOTE what this does NOT say any more. It used to claim the terminal keeps a
+  // "shorter" window — which is false the moment the idle dial is set below the
+  // terminal's own, and the owner hit exactly that (idle 1 min, terminal still
+  // 10). The honest statement is that the terminal has a SEPARATE window, and
+  // the field for it is right there.
   strong:
-    'Reading and the live stream stay free, but anything that CHANGES something — sending a message, a git action, opening or typing in a shell — asks you to confirm it is you if you have been idle. Sessions also end after a fixed time and have to be signed in again.',
+    'Reading and the live stream stay free, but anything that CHANGES something — sending a message, a git action, opening a shell — asks you to confirm it is you if you have been idle. The terminal has its own window, set below. Sessions also end after a fixed time.',
   medium:
-    'Confirmation is asked for the terminal only. Everything else rides your sign-in for as long as the connection lives.',
-  off: 'Nothing is re-checked after sign-in — a signed-in session stays fully able to act until it disconnects.'
+    'Confirmation is asked for the terminal and for these settings. Everything else rides your sign-in for as long as the connection lives.',
+  off: 'Nothing is re-checked after sign-in — a signed-in session stays fully able to act until it disconnects. These settings are the one exception: from a browser, changing any of them always asks.'
 }
 
 /**
@@ -98,10 +89,11 @@ const TIER_HINTS: Record<StepUpTier, string> = {
  * these only keep the editor from proposing a value it already knows is refused.
  */
 const BOUNDS = {
-  stepUpMutationIdleMinutes: { min: 1, max: 1440, label: 'Idle re-check' },
+  stepUpMutationIdleMinutes: { min: 1, max: 1440, label: 'Re-check after idle' },
   /** One WEEK, and not cosmetic — see `MAX_SESSION_MAX_AGE_HOURS` in step-up-tier.ts. */
-  sessionMaxAgeHours: { min: 1, max: 168, label: 'Session length' },
-  auditRetentionDays: { min: 30, max: 36_500, label: 'Log retention' }
+  sessionMaxAgeHours: { min: 1, max: 168, label: 'Sessions end after' },
+  shellGrantIdleMinutes: { min: 1, max: 1440, label: 'Terminal re-check' },
+  auditRetentionDays: { min: 30, max: 36_500, label: 'Audit history' }
 } as const
 
 type NumericField = keyof typeof BOUNDS
@@ -131,15 +123,30 @@ interface Props {
   onConfigChange: (config: RemoteConfig) => void
 }
 
-function formatTime(ms: number | null): string {
+function formatDate(ms: number | null): string {
   if (!ms) return 'never'
-  return new Date(ms).toLocaleString()
+  return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+
+/** "1 minute" / "2 minutes" — the owner's live config has a 1-minute dial. */
+function plural(n: number, unit: string): string {
+  return `${n} ${unit}${n === 1 ? '' : 's'}`
 }
 
 /** `m:ss` for the countdown pill. Clamped at zero — a negative clock reads as broken. */
 function formatCountdown(msLeft: number): string {
   const total = Math.max(0, Math.ceil(msLeft / 1000))
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+/** The mockup's padlock, at two sizes. */
+function LockIcon({ size = 13 }: { size?: number }): React.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+      <path d="M12 11c1.7 0 3-1.3 3-3V6a3 3 0 0 0-6 0v2c0 1.7 1.3 3 3 3z" />
+      <path d="M5 11h14v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-9z" />
+    </svg>
+  )
 }
 
 /**
@@ -154,17 +161,28 @@ function formatCountdown(msLeft: number): string {
  * desktop-only as a compensating restriction. The amendment replaces it with a
  * bounded editing SESSION, which is what makes the dials safe to expose here.
  *
- * ## The three states
+ * ## The three states (owner-approved mockup)
  *
- * 1. **View** (default, both transports) — a read-only summary of the six facts
- *    and one "Edit settings" button. No inputs are mounted at all: the pane a
- *    passer-by sees cannot be typed into.
- * 2. **Unlock** (web only) — the shared {@link StepUpPrompt}, carrying
- *    `intent: 'settings'`, which opens the five-minute server session. The
- *    desktop skips this entirely: it IS the host anchor.
- * 3. **Edit** — the same pane with fields live, a countdown pill (web), and
- *    Save / Cancel. Nothing is written until Save, which commits the whole draft
- *    as ONE batch and then closes the session.
+ * 1. **View** (default, both transports) — a card: title + description top-left,
+ *    "Edit settings" top-right, a two-column definition grid of the facts, one
+ *    footnote. No inputs are mounted at all: the pane a passer-by sees cannot be
+ *    typed into.
+ * 2. **Unlock** (web only) — the shared {@link StepUpPrompt} in a centred card,
+ *    carrying `intent: 'settings'`, which opens the five-minute server session.
+ *    The desktop skips this entirely: it IS the host anchor.
+ * 3. **Edit** — the SAME card and the SAME grid with fields live, the countdown
+ *    where the button was, and a footer bar carrying the consequence note and
+ *    Cancel / Save.
+ *
+ * ## What lives here
+ *
+ * Every member of the auth SURFACE (`auth-policy.ts`): the sign-in requirement,
+ * the step-up tier, all three timing dials, the two admission toggles, the
+ * break-glass password, and the audit window. They are one class of setting —
+ * they audit and re-admit through one machinery — so they are edited in one
+ * place, together, and saved as one batch. The transport block above (port,
+ * interface, TLS, the terminal master switch) is NOT auth surface and stays
+ * where it is.
  *
  * Local edits survive a re-lock deliberately: a session that lapses mid-edit
  * drops the pane back to View with a notice, and unlocking again restores what
@@ -176,12 +194,15 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
   const [mode, setMode] = useState<Mode>({ kind: 'view' })
   const [draft, setDraft] = useState<Draft>({})
   const [passwordConfirm, setPasswordConfirm] = useState('')
+  const [changingPassword, setChangingPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   /** Typed-confirmation buffer for the `off` switch; null = not being armed. */
   const [offDraft, setOffDraft] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  /** Numeric fields are held as STRINGS while editing so a half-typed value survives. */
+  const [numericText, setNumericText] = useState<Partial<Record<NumericField, string>>>({})
 
   /**
    * Closing the session when the pane goes away, without making the effect
@@ -199,15 +220,6 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       if (editingRef.current) void endSettingsSession()
     }
   }, [])
-
-  /** The countdown ticks only while there is something to count. */
-  const expiresAt = mode.kind === 'edit' ? mode.expiresAt : null
-  useEffect(() => {
-    if (expiresAt === null) return
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    setNow(Date.now())
-    return () => clearInterval(id)
-  }, [expiresAt])
 
   /**
    * Leave the editor.
@@ -228,6 +240,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     setMode({ kind: 'view' })
     setOffDraft(null)
     setPasswordConfirm('')
+    setChangingPassword(false)
     setDraft((prev) => {
       if (discard) return {}
       const { password: _dropped, ...rest } = prev
@@ -235,6 +248,15 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     })
     if (discard) setNumericText({})
   }, [])
+
+  /** The countdown ticks only while there is something to count. */
+  const expiresAt = mode.kind === 'edit' ? mode.expiresAt : null
+  useEffect(() => {
+    if (expiresAt === null) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    setNow(Date.now())
+    return () => clearInterval(id)
+  }, [expiresAt])
 
   // TTL reached: re-lock, keep the draft, and SAY so. Silently reverting would
   // read as the pane having broken.
@@ -250,9 +272,9 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
   const policyChoice: PolicyChoice =
     'authMode' in draft ? (draft.authMode ?? 'auto') : (config.authPolicy ?? 'auto')
   const tierValue = effective('stepUpTier', config.stepUpTier) as StepUpTier
+  const breakGlass = effective('passwordBreakGlass', config.passwordBreakGlass) as boolean
+  const tailnetExempt = effective('passkeyTailnetExempt', config.passkeyTailnetExempt) as boolean
 
-  /** Numeric fields are held as STRINGS while editing so a half-typed value survives. */
-  const [numericText, setNumericText] = useState<Partial<Record<NumericField, string>>>({})
   const numericValue = (field: NumericField): string =>
     numericText[field] ?? String(config[field as keyof RemoteConfig] as number)
 
@@ -353,13 +375,40 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     [draft, numericText]
   )
 
+  /** The card shell: same chrome in every state, so unlocking does not re-layout. */
+  const card = (state: Mode['kind'], action: React.ReactNode, body: React.ReactNode) => (
+    <div
+      data-testid="SessionSecuritySettings"
+      data-state={state}
+      className={`rounded-lg border p-4 ${
+        state === 'edit' ? 'border-accent/40 bg-bg-secondary/40' : 'border-border/60'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div>
+          <div className="text-[13px] font-semibold text-text-primary">Session security</div>
+          <div className="text-[10px] text-text-muted/70 mt-0.5">
+            How signing in and staying signed in works for remote devices.
+          </div>
+        </div>
+        {action}
+      </div>
+      {body}
+    </div>
+  )
+
   // ---------------------------------------------------------------------------
   // 2. UNLOCK (web only)
   // ---------------------------------------------------------------------------
   if (mode.kind === 'unlocking') {
-    return (
-      <div data-testid="SessionSecuritySettings" data-state="unlocking" className="space-y-3">
-        <div className="rounded border border-border/40 py-4">
+    return card(
+      'unlocking',
+      null,
+      <div className="flex justify-center py-2">
+        <div className="w-full max-w-[300px] rounded-lg border border-border/60 bg-bg-primary/40 px-5 py-6 text-center">
+          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-accent/40 bg-accent/10 text-accent">
+            <LockIcon size={20} />
+          </div>
           <StepUpPrompt
             testid="SessionSecuritySettings.prompt"
             intent="settings"
@@ -379,113 +428,143 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
   // 1. VIEW (default)
   // ---------------------------------------------------------------------------
   if (mode.kind === 'view') {
-    const rows: { field: string; label: string; value: string }[] = [
+    const rows: { field: string; label: string; value: string; muted?: string }[] = [
       {
         field: 'authMode',
         label: 'Sign-in requirement',
-        value:
+        value: config.authPolicy === null ? 'Automatic' : POLICY_LABELS[config.authPolicy],
+        muted:
           config.authPolicy === null
-            ? `Automatic — ${config.effectiveAuthPolicy === 'legacy' ? 'password / link' : 'passkey'} right now (${config.credentialCount} passkey${config.credentialCount === 1 ? '' : 's'})`
-            : POLICY_LABELS[config.authPolicy]
+            ? `· ${config.effectiveAuthPolicy === 'legacy' ? 'password / link' : 'passkey'}, ${config.credentialCount} enrolled`
+            : undefined
       },
       {
         field: 'stepUpTier',
         label: 'Re-check that it is you',
-        value:
+        value: TIER_LABELS[config.stepUpTier].split(' — ')[0],
+        muted:
           config.effectiveStepUpTier === config.stepUpTier
-            ? TIER_LABELS[config.stepUpTier]
-            : `${TIER_LABELS[config.stepUpTier]} — not in force while authentication is off`
+            ? `· ${TIER_LABELS[config.stepUpTier].split(' — ')[1] ?? ''}`
+            : '· not in force while authentication is off'
       },
       {
         field: 'stepUpMutationIdleMinutes',
         label: 'Re-check after idle',
-        value: `${config.stepUpMutationIdleMinutes} minutes`
+        value: plural(config.stepUpMutationIdleMinutes, 'minute')
+      },
+      {
+        field: 'shellGrantIdleMinutes',
+        label: 'Terminal re-check after idle',
+        value: plural(config.shellGrantIdleMinutes, 'minute')
       },
       {
         field: 'sessionMaxAgeHours',
-        label: 'End sessions after',
-        value: `${config.sessionMaxAgeHours} hours`
+        label: 'Sessions end after',
+        value: plural(config.sessionMaxAgeHours, 'hour')
       },
       {
         field: 'password',
-        label: 'Break-glass password',
-        value: config.passwordSet
-          ? `Set · updated ${formatTime(config.passwordUpdatedAt)}`
-          : 'Not set'
+        label: 'Backup password',
+        value: config.passwordSet ? 'Set' : 'Not set',
+        muted: config.passwordSet ? `· updated ${formatDate(config.passwordUpdatedAt)}` : undefined
+      },
+      {
+        field: 'passwordBreakGlass',
+        label: 'Password as a backup',
+        value: config.passwordBreakGlass ? 'Allowed' : 'Not allowed'
+      },
+      {
+        field: 'passkeyTailnetExempt',
+        label: 'Skip passkey for Tailscale',
+        value: config.passkeyTailnetExempt ? 'On' : 'Off'
       },
       {
         field: 'auditRetentionDays',
-        label: 'Keep the activity log for',
-        value: `${config.auditRetentionDays} days`
+        label: 'Audit history kept for',
+        value: plural(config.auditRetentionDays, 'day')
       }
     ]
 
-    return (
-      <div data-testid="SessionSecuritySettings" data-state="view" className="space-y-3">
-        <div data-testid="SessionSecuritySettings.summary" className="space-y-1">
+    return card(
+      'view',
+      <button
+        data-testid="SessionSecuritySettings.edit"
+        disabled={busy}
+        onClick={handleEditClick}
+        className="shrink-0 flex items-center gap-1.5 rounded bg-accent/15 px-2.5 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
+      >
+        <LockIcon />
+        Edit settings
+      </button>,
+      <>
+        <dl
+          data-testid="SessionSecuritySettings.summary"
+          className="grid grid-cols-2 gap-x-6 gap-y-3"
+        >
           {rows.map((row) => (
             <div
               key={row.field}
               data-testid="SessionSecuritySettings.summaryRow"
               data-field={row.field}
-              className="flex items-baseline justify-between gap-3 text-[12px]"
             >
-              <span className="text-text-muted/80 shrink-0">{row.label}</span>
-              <span className="text-text-secondary text-right">{row.value}</span>
+              <dt className="text-[10px] text-text-muted/70 mb-0.5">{row.label}</dt>
+              <dd className="text-[12px] text-text-secondary">
+                {row.value}
+                {row.muted && <span className="text-text-muted/60"> {row.muted}</span>}
+              </dd>
             </div>
           ))}
-        </div>
+        </dl>
 
         {notice && (
           <div
             data-testid="SessionSecuritySettings.notice"
             role="status"
-            className="text-[10px] text-amber-400/80 leading-snug"
+            className="text-[10px] text-amber-400/80 leading-snug mt-4"
           >
             {notice}
           </div>
         )}
-
-        <div className="flex items-center gap-2">
-          <button
-            data-testid="SessionSecuritySettings.edit"
-            disabled={busy}
-            onClick={handleEditClick}
-            className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
+        {dirty && (
+          <div
+            data-testid="SessionSecuritySettings.pendingEdits"
+            className="text-[10px] text-text-muted/70 mt-2"
           >
-            Edit settings
-          </button>
-          {dirty && (
-            <span
-              data-testid="SessionSecuritySettings.pendingEdits"
-              className="text-[10px] text-text-muted/70"
-            >
-              Unsaved changes kept
-            </span>
-          )}
-        </div>
+            Unsaved changes kept
+          </div>
+        )}
 
         <div
           data-testid="SessionSecuritySettings.footnote"
-          className="text-[10px] text-text-muted/60 leading-snug"
+          className="text-[10px] text-text-muted/60 leading-snug mt-4 flex items-start gap-1.5"
         >
-          Changing these from a browser asks for your passkey first. Turning authentication off
-          entirely is only possible on the desktop app.
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className="mt-[3px] shrink-0"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 8v4M12 16h.01" />
+          </svg>
+          <span>
+            Changing these from a browser asks for your passkey first. Turning authentication off
+            entirely is only possible on the desktop app.
+          </span>
         </div>
-      </div>
+      </>
     )
   }
 
   // ---------------------------------------------------------------------------
   // 3. EDIT
   // ---------------------------------------------------------------------------
-  const numericField = (
-    field: NumericField,
-    label: string,
-    hint: string
-  ): React.JSX.Element => (
+  const numericField = (field: NumericField, label: string, hint?: string): React.JSX.Element => (
     <div>
-      <div className="mb-1 text-[12px] text-text-secondary">{label}</div>
+      <label className="block text-[10px] text-text-muted/70 mb-1">{label}</label>
       <input
         data-testid={`SessionSecuritySettings.${field}`}
         type="text"
@@ -495,207 +574,257 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
         onChange={(e) => setNumericText((prev) => ({ ...prev, [field]: e.target.value }))}
         className={`${inputClass} w-full`}
       />
-      <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">{hint}</div>
+      {hint && <div className="text-[10px] text-text-muted/50 mt-1 leading-snug">{hint}</div>}
     </div>
   )
 
-  return (
-    <div data-testid="SessionSecuritySettings" data-state="edit" className="space-y-3">
-      {mode.expiresAt !== null && (
-        <div className="flex items-center justify-between">
-          <span
-            data-testid="SessionSecuritySettings.countdown"
-            className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent"
-          >
-            Editing · {formatCountdown(mode.expiresAt - now)}
-          </span>
-        </div>
-      )}
-
-      {/* Sign-in requirement */}
-      <div>
-        <div className="mb-1">Sign-in requirement</div>
-        <SelectMenu
-          testid="SessionSecuritySettings.authMode"
-          value={offDraft !== null ? 'off' : policyChoice}
-          disabled={busy}
-          onChange={(value) => {
-            // `off` never sets the draft from the picker: it arms the typed
-            // confirmation and waits. Unreachable on the web, where the option
-            // is not offered and the server refuses it anyway.
-            if (value === 'off') {
-              setOffDraft('')
-              return
-            }
-            setOffDraft(null)
-            setDraft((prev) => ({ ...prev, authMode: value === 'auto' ? null : (value as RemoteAuthPolicy) }))
-          }}
-          options={web ? WEB_POLICY_OPTIONS : POLICY_OPTIONS}
-          triggerClassName={`${inputClass} w-full`}
-        />
-        <div
-          data-testid="SessionSecuritySettings.authModeHint"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
+  const toggleField = (
+    testid: string,
+    label: string,
+    value: boolean,
+    onToggle: () => void,
+    hint: string
+  ): React.JSX.Element => (
+    <div>
+      <label className="block text-[10px] text-text-muted/70 mb-1">{label}</label>
+      <button
+        data-testid={testid}
+        data-checked={value ? 'true' : 'false'}
+        disabled={busy}
+        onClick={onToggle}
+        className={`${inputClass} w-full flex items-center justify-between disabled:opacity-40`}
+      >
+        <span>{value ? 'On' : 'Off'}</span>
+        <span
+          className={`w-7 h-4 rounded-full relative transition-colors ${value ? 'bg-accent' : 'bg-text-muted/30'}`}
         >
-          {POLICY_HINTS[offDraft !== null ? 'off' : policyChoice]}
+          <span
+            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${value ? 'left-3.5' : 'left-0.5'}`}
+          />
+        </span>
+      </button>
+      <div className="text-[10px] text-text-muted/50 mt-1 leading-snug">{hint}</div>
+    </div>
+  )
+
+  return card(
+    'edit',
+    mode.expiresAt !== null ? (
+      <span
+        data-testid="SessionSecuritySettings.countdown"
+        className="shrink-0 flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[10px] text-accent"
+      >
+        <LockIcon size={11} />
+        Editing · <span className="tabular-nums font-semibold">
+          {formatCountdown(mode.expiresAt - now)}
+        </span>
+      </span>
+    ) : null,
+    <>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+        {/* Sign-in requirement */}
+        <div>
+          <label className="block text-[10px] text-text-muted/70 mb-1">Sign-in requirement</label>
+          <SelectMenu
+            testid="SessionSecuritySettings.authMode"
+            value={offDraft !== null ? 'off' : policyChoice}
+            disabled={busy}
+            onChange={(value) => {
+              // `off` never sets the draft from the picker: it arms the typed
+              // confirmation and waits. Unreachable on the web, where the option
+              // is not offered and the server refuses it anyway.
+              if (value === 'off') {
+                setOffDraft('')
+                return
+              }
+              setOffDraft(null)
+              setDraft((prev) => ({
+                ...prev,
+                authMode: value === 'auto' ? null : (value as RemoteAuthPolicy)
+              }))
+            }}
+            options={web ? WEB_POLICY_OPTIONS : POLICY_OPTIONS}
+            triggerClassName={`${inputClass} w-full`}
+          />
+          {web && (
+            <div
+              data-testid="SessionSecuritySettings.authModeHint"
+              className="text-[10px] text-text-muted/50 mt-1 leading-snug"
+            >
+              “No authentication” is only available on the desktop app.
+            </div>
+          )}
         </div>
 
-        {offDraft !== null && (
-          <div className="mt-2 space-y-1">
-            <div
-              data-testid="SessionSecuritySettings.offConfirmPrompt"
-              className="text-[10px] text-red-300 leading-snug"
-            >
-              Type <span className="font-mono">{DISABLE_AUTH_PHRASE}</span> to confirm you want
-              every reachable client to have operator-level access to this machine.
-            </div>
-            <input
-              data-testid="SessionSecuritySettings.offConfirmInput"
-              type="text"
-              autoComplete="off"
-              value={offDraft}
-              onChange={(e) => setOffDraft(e.target.value)}
-              placeholder={DISABLE_AUTH_PHRASE}
-              className={`${inputClass} w-full`}
-            />
-            <div className="flex items-center gap-2">
-              <button
-                data-testid="SessionSecuritySettings.offConfirmSubmit"
-                disabled={busy || offDraft !== DISABLE_AUTH_PHRASE}
-                onClick={() => {
-                  // Stages it like every other field — the write happens on Save,
-                  // so "changes apply together" stays true of the one change that
-                  // matters most.
-                  setOffDraft(null)
-                  setDraft((prev) => ({ ...prev, authMode: 'off' }))
-                }}
-                className="rounded bg-red-500/15 px-2 py-1 text-red-400 hover:bg-red-500/25 disabled:opacity-40 text-[11px]"
-              >
-                Turn authentication off
-              </button>
-              <button
-                data-testid="SessionSecuritySettings.offConfirmCancel"
-                onClick={() => setOffDraft(null)}
-                className="rounded px-2 py-1 text-text-muted hover:text-text-secondary text-[11px]"
-              >
-                Cancel
-              </button>
-            </div>
+        {/* Step-up tier */}
+        <div>
+          <label className="block text-[10px] text-text-muted/70 mb-1">
+            Re-check that it is you
+          </label>
+          <SelectMenu
+            testid="SessionSecuritySettings.tier"
+            value={tierValue}
+            disabled={busy}
+            onChange={(value) => setDraft((prev) => ({ ...prev, stepUpTier: value as StepUpTier }))}
+            options={TIER_OPTIONS}
+            triggerClassName={`${inputClass} w-full`}
+          />
+          <div
+            data-testid="SessionSecuritySettings.tierHint"
+            className="text-[10px] text-text-muted/50 mt-1 leading-snug"
+          >
+            {TIER_HINTS[tierValue]}
           </div>
+        </div>
+
+        {numericField('stepUpMutationIdleMinutes', 'Re-check after idle (minutes)')}
+        {numericField(
+          'shellGrantIdleMinutes',
+          'Terminal re-check after idle (minutes)',
+          'The terminal keeps its own window — typing in a shell after this long asks again.'
+        )}
+        {numericField('sessionMaxAgeHours', 'Sessions end after (hours)')}
+
+        {/* Break-glass password */}
+        <div>
+          <label className="block text-[10px] text-text-muted/70 mb-1">Backup password</label>
+          {changingPassword ? (
+            <div className="space-y-1">
+              <input
+                data-testid="SessionSecuritySettings.password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="New password"
+                value={draft.password ?? ''}
+                disabled={busy}
+                autoFocus
+                onChange={(e) => setDraft((prev) => ({ ...prev, password: e.target.value }))}
+                className={`${inputClass} w-full`}
+              />
+              <input
+                data-testid="SessionSecuritySettings.passwordConfirm"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Confirm password"
+                value={passwordConfirm}
+                disabled={busy}
+                onChange={(e) => setPasswordConfirm(e.target.value)}
+                className={`${inputClass} w-full`}
+              />
+            </div>
+          ) : (
+            <button
+              data-testid="SessionSecuritySettings.changePassword"
+              disabled={busy}
+              onClick={() => setChangingPassword(true)}
+              className={`${inputClass} w-full text-left disabled:opacity-40`}
+            >
+              {config.passwordSet ? 'Change password…' : 'Set a password…'}
+            </button>
+          )}
+          <div className="text-[10px] text-text-muted/50 mt-1 leading-snug">
+            Only as private as the network between your browser and this machine.
+          </div>
+        </div>
+
+        {numericField('auditRetentionDays', 'Audit history kept for (days)')}
+
+        {toggleField(
+          'SessionSecuritySettings.passwordBreakGlass',
+          'Password as a backup',
+          breakGlass,
+          () => setDraft((prev) => ({ ...prev, passwordBreakGlass: !breakGlass })),
+          'Off means passkey-only — but only from addresses that can use passkeys. Plain-LAN and tunnel connections keep the password either way.'
+        )}
+        {toggleField(
+          'SessionSecuritySettings.passkeyTailnetExempt',
+          'Skip passkey for Tailscale sign-ins',
+          tailnetExempt,
+          () => setDraft((prev) => ({ ...prev, passkeyTailnetExempt: !tailnetExempt })),
+          'Trades away the one thing a passkey covers that Tailscale does not: someone holding your unlocked device. Such a connection gets the ordinary permissions.'
         )}
       </div>
 
-      {/* Step-up tier */}
-      <div>
-        <div className="mb-1">Re-check that it is you</div>
-        <SelectMenu
-          testid="SessionSecuritySettings.tier"
-          value={tierValue}
-          disabled={busy}
-          onChange={(value) => setDraft((prev) => ({ ...prev, stepUpTier: value as StepUpTier }))}
-          options={TIER_OPTIONS}
-          triggerClassName={`${inputClass} w-full`}
-        />
-        <div
-          data-testid="SessionSecuritySettings.tierHint"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-        >
-          {TIER_HINTS[tierValue]}
-        </div>
-      </div>
-
-      {numericField(
-        'stepUpMutationIdleMinutes',
-        'Re-check after idle (minutes)',
-        'Under “Strict”, how long a confirmation lasts for ordinary changes. The terminal keeps its own, shorter window.'
-      )}
-      {numericField(
-        'sessionMaxAgeHours',
-        'End sessions after (hours)',
-        `Under “Strict”, a connection is cut this long after it signed in — live view included — and has to sign in again. Maximum ${BOUNDS.sessionMaxAgeHours.max} hours.`
-      )}
-
-      {/* Break-glass password */}
-      <div>
-        <div className="mb-1">Break-glass password</div>
-        <div
-          data-testid="SessionSecuritySettings.passwordStatus"
-          className="text-[10px] text-text-muted/70 mb-1"
-        >
-          {config.passwordSet
-            ? `Set · updated ${formatTime(config.passwordUpdatedAt)}`
-            : 'Not set'}
-        </div>
-        <div className="space-y-1">
+      {offDraft !== null && (
+        <div className="mt-4 space-y-1">
+          <div
+            data-testid="SessionSecuritySettings.offConfirmPrompt"
+            className="text-[10px] text-red-300 leading-snug"
+          >
+            Type <span className="font-mono">{DISABLE_AUTH_PHRASE}</span> to confirm you want every
+            reachable client to have operator-level access to this machine.
+          </div>
           <input
-            data-testid="SessionSecuritySettings.password"
-            type="password"
-            autoComplete="new-password"
-            placeholder="New password (leave blank to keep)"
-            value={draft.password ?? ''}
-            disabled={busy}
-            onChange={(e) => setDraft((prev) => ({ ...prev, password: e.target.value }))}
+            data-testid="SessionSecuritySettings.offConfirmInput"
+            type="text"
+            autoComplete="off"
+            value={offDraft}
+            onChange={(e) => setOffDraft(e.target.value)}
+            placeholder={DISABLE_AUTH_PHRASE}
             className={`${inputClass} w-full`}
           />
-          {(draft.password ?? '').length > 0 && (
-            <input
-              data-testid="SessionSecuritySettings.passwordConfirm"
-              type="password"
-              autoComplete="new-password"
-              placeholder="Confirm password"
-              value={passwordConfirm}
-              disabled={busy}
-              onChange={(e) => setPasswordConfirm(e.target.value)}
-              className={`${inputClass} w-full`}
-            />
-          )}
+          <div className="flex items-center gap-2">
+            <button
+              data-testid="SessionSecuritySettings.offConfirmSubmit"
+              disabled={busy || offDraft !== DISABLE_AUTH_PHRASE}
+              onClick={() => {
+                // Stages it like every other field — the write happens on Save,
+                // so "changes apply together" stays true of the one change that
+                // matters most.
+                setOffDraft(null)
+                setDraft((prev) => ({ ...prev, authMode: 'off' }))
+              }}
+              className="rounded bg-red-500/15 px-2 py-1 text-red-400 hover:bg-red-500/25 disabled:opacity-40 text-[11px]"
+            >
+              Turn authentication off
+            </button>
+            <button
+              data-testid="SessionSecuritySettings.offConfirmCancel"
+              onClick={() => setOffDraft(null)}
+              className="rounded px-2 py-1 text-text-muted hover:text-text-secondary text-[11px]"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
-        <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">
-          Password sign-in is only as private as the network between your browser and this machine.
-          Use it over Tailscale or a trusted LAN — not open Wi-Fi.
-        </div>
-      </div>
-
-      {numericField(
-        'auditRetentionDays',
-        'Keep the activity log for (days)',
-        `Sign-ins, settings changes and remote commands are recorded on this machine and removed after this many days. Minimum ${BOUNDS.auditRetentionDays.min} days — a log that can be erased on demand is not a log.`
       )}
 
       {error && (
         <div
           data-testid="SessionSecuritySettings.error"
-          className="text-[10px] text-red-400 leading-snug"
+          className="text-[10px] text-red-400 leading-snug mt-3"
         >
           {error}
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        <button
-          data-testid="SessionSecuritySettings.save"
-          disabled={busy}
-          onClick={() => void handleSave()}
-          className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
+      {/* Footer bar — the consequence note left, the actions right. */}
+      <div className="flex items-center justify-between gap-3 mt-5 pt-3 border-t border-border/50">
+        <div
+          data-testid="SessionSecuritySettings.editFootnote"
+          className="text-[10px] text-text-muted/60 leading-snug"
         >
-          {busy ? 'Saving…' : 'Save'}
-        </button>
-        <button
-          data-testid="SessionSecuritySettings.cancel"
-          disabled={busy}
-          onClick={handleCancel}
-          className="rounded px-2 py-1 text-text-muted hover:text-text-secondary disabled:opacity-40 text-[11px]"
-        >
-          Cancel
-        </button>
+          Changes apply together when you save. Everyone else signed in re-authenticates.
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            data-testid="SessionSecuritySettings.cancel"
+            disabled={busy}
+            onClick={handleCancel}
+            className="rounded px-2 py-1 text-text-muted hover:text-text-secondary disabled:opacity-40 text-[11px]"
+          >
+            Cancel
+          </button>
+          <button
+            data-testid="SessionSecuritySettings.save"
+            disabled={busy}
+            onClick={() => void handleSave()}
+            className="rounded bg-accent/15 px-3 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
+          >
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
       </div>
-
-      <div
-        data-testid="SessionSecuritySettings.editFootnote"
-        className="text-[10px] text-text-muted/60 leading-snug"
-      >
-        Changes apply together when you save. Everyone else signed in re-authenticates.
-      </div>
-    </div>
+    </>
   )
 }
