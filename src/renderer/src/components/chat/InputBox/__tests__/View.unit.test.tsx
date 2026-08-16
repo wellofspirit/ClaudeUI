@@ -265,3 +265,114 @@ describe('EffortPicker', () => {
     expect(onSelectEffort).not.toHaveBeenCalled()
   })
 })
+
+describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
+  /**
+   * The bug this pins: the button was mouse-only, and a mobile browser
+   * synthesizes the compatibility mouse pair only AFTER `touchend`. A
+   * press-and-hold on a phone therefore produced mousedown+mouseup back to back
+   * — a zero-length capture — which made remote voice input, whose stated
+   * purpose is speaking into a phone, unusable. `onMouseLeave` never fired
+   * either, so the mouse-only escape hatch was gone too.
+   *
+   * jsdom does not synthesize compatibility mouse events itself, so the
+   * suppression cannot be observed directly. What CAN be pinned, and is what
+   * actually matters, is the two halves of the contract: touchstart calls
+   * `preventDefault` (which is what suppresses them in a real browser), and the
+   * handlers are wired so that even if a synthesized pair DID arrive, the
+   * observable effect stays one start and one stop per gesture.
+   *
+   * The preventDefault assertion is load-bearing and NOT ceremony: React
+   * registers `touchstart` as a PASSIVE root listener, so the obvious
+   * implementation — a React `onTouchStart` calling `e.preventDefault()` — is
+   * silently ignored by the browser. The first version of this button did
+   * exactly that and this test failed (`expected true to be false`), which is
+   * how the trap was found. The button now binds a native listener with
+   * `{ passive: false }`; anyone who "simplifies" it back to the React handler
+   * fails here.
+   */
+  function renderVoice(overrides: Partial<InputBoxViewProps> = {}) {
+    const onVoiceStart = vi.fn()
+    const onVoiceStop = vi.fn()
+    render(
+      <InputBoxView {...makeProps({ voiceEnabled: true, onVoiceStart, onVoiceStop, ...overrides })} />
+    )
+    return { button: screen.getByTestId('InputBox.voice'), onVoiceStart, onVoiceStop }
+  }
+
+  it('a touch press-and-release produces exactly one start and one stop', () => {
+    const { button, onVoiceStart, onVoiceStop } = renderVoice()
+
+    fireEvent.touchStart(button)
+    expect(onVoiceStart).toHaveBeenCalledTimes(1)
+    expect(onVoiceStop).not.toHaveBeenCalled()
+
+    fireEvent.touchEnd(button)
+    expect(onVoiceStart).toHaveBeenCalledTimes(1)
+    expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+
+  it('touchstart calls preventDefault — the thing that suppresses the synthesized mouse pair', () => {
+    const { button } = renderVoice()
+    // `fireEvent` returns false when a handler called preventDefault.
+    expect(fireEvent.touchStart(button)).toBe(false)
+  })
+
+  it('a synthesized mouse pair arriving after touchend starts no second capture', () => {
+    // The belt to preventDefault's braces: this is what a browser that ignored
+    // the preventDefault would deliver. The button must not begin a second
+    // capture — and the CONTROLLER is the backstop that guarantees it, since the
+    // renderer's own `voiceState` guard cannot see a state that is still a round
+    // trip away (pinned in web/__tests__/voice-capture.unit.test.ts:
+    // "a second start() while capturing is a no-op", and api-adapter's
+    // `isActive()` short-circuit).
+    //
+    // Here the button is already in the state the first press put it in, which
+    // is what a real second press would meet.
+    const { button, onVoiceStart, onVoiceStop } = renderVoice({ voiceState: 'recording' })
+
+    fireEvent.touchStart(button)
+    fireEvent.touchEnd(button)
+    expect(onVoiceStart).toHaveBeenCalledTimes(1)
+    expect(onVoiceStop).toHaveBeenCalledTimes(1)
+
+    // …now the compatibility events a non-conforming browser would fire.
+    fireEvent.mouseDown(button)
+    fireEvent.mouseUp(button)
+    // The handlers ran (the DOM cannot refuse them), so the guard that matters
+    // is downstream: `handleVoiceStart` returns early on a non-idle state, and
+    // the capture controller no-ops a start while active. What this pins is that
+    // the touch wiring adds no EXTRA path — the counts move by exactly the one
+    // synthesized pair, never by two.
+    expect(onVoiceStart).toHaveBeenCalledTimes(2)
+    expect(onVoiceStop).toHaveBeenCalledTimes(2)
+  })
+
+  it('a cancelled gesture (incoming call, system swipe) still stops the capture', () => {
+    const { button, onVoiceStart, onVoiceStop } = renderVoice()
+
+    fireEvent.touchStart(button)
+    // No touchend ever arrives for a cancelled gesture.
+    fireEvent.touchCancel(button)
+    expect(onVoiceStart).toHaveBeenCalledTimes(1)
+    expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the mouse path working, and the DOM shape unchanged', () => {
+    const { button, onVoiceStart, onVoiceStop } = renderVoice()
+
+    fireEvent.mouseDown(button)
+    fireEvent.mouseUp(button)
+    expect(onVoiceStart).toHaveBeenCalledTimes(1)
+    expect(onVoiceStop).toHaveBeenCalledTimes(1)
+
+    // No design change: same testid, same affordance text.
+    expect(button).toHaveAttribute('title', 'Hold to record')
+  })
+
+  it('mouseleave mid-recording still stops (the desktop escape hatch)', () => {
+    const { button, onVoiceStop } = renderVoice({ voiceState: 'recording' })
+    fireEvent.mouseLeave(button)
+    expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+})

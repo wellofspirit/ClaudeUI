@@ -701,6 +701,18 @@ export class RemoteConnection {
     this.send({ type: 'term-input', termId: terminalId, dataB64: textToBase64(data) })
   }
 
+  /**
+   * One batch of microphone PCM for an open voice capture (phase 5 S3).
+   *
+   * Fire-and-forget on the same reasoning as `term-input`: ~7 a second, and a
+   * response would carry nothing. `dataB64` is base64 of raw 16 kHz i16LE mono
+   * bytes — NOT `textToBase64`, which UTF-8-encodes first and would corrupt every
+   * sample.
+   */
+  sendVoiceAudio(dataB64: string): void {
+    this.send({ type: 'voice-audio', dataB64 })
+  }
+
   /** Viewport size for an attached terminal. */
   sendTerminalResize(terminalId: string, cols: number, rows: number): void {
     this.send({ type: 'term-resize', termId: terminalId, cols, rows })

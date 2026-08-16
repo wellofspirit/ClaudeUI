@@ -88,4 +88,6 @@ Key modules in `src/main/services/`:
 | `logger.ts` / `log-viewer.ts` | File + ring-buffer logging; debug window                                                              |
 | `mermaid-tool.ts` / `mockup-tool.ts` | Hosted MCP tools for diagram + UI-mockup rendering (ADR-007)                                   |
 | `tunnel-manager.ts` / `socks-bridge.ts` | Cloudflare tunnel; HTTP CONNECT bridge for SOCKS5 proxies                                   |
-| `voice-capture.ts` / `voice-client.ts` | Native audio capture + streaming to the in-cli.js transcription server                       |
+| `voice-capture.ts` / `voice-client.ts` | Native (host microphone) audio capture + streaming to the in-cli.js transcription server      |
+| `voice-stream-client.ts`     | The cli.js voice-server TCP protocol, shared by the host microphone and a remote browser capture       |
+| `remote-voice.ts`            | Remote browser voice: audio in on the `voice-audio` lane frame, transcripts back to that connection    |

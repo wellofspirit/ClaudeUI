@@ -1382,6 +1382,22 @@ const AUTHCFG_FREE_CHANNELS_PIN = ['authcfg:end', 'authcfg:get'] as const
 /** Everything in the namespace, for the registration pins. */
 const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNELS] as const
 
+/**
+ * SyncCore phase 5 S3 — remote browser voice input. Listed separately for the
+ * same reason every other widening is: it must read as its own decision.
+ *
+ * Unlike the three above, these declare `chat` — INSIDE
+ * {@link LEGACY_REMOTE_GRANTS} — so they widen what an ordinary token/tailnet
+ * connection can do, and that is deliberate: a capture produces a draft message,
+ * which is exactly what `session:send` already lets the same connection do. What
+ * makes it a narrow widening rather than a broad one is what these verbs
+ * DON'T reach: no host device (the microphone is the browser's), no filesystem,
+ * no shell. The audio never comes through the registry at all — it rides the
+ * `voice-audio` lane frame, accepted only while one of these has bound a capture
+ * to the connection.
+ */
+const VOICE_CHANNELS = ['voice:start', 'voice:stop'] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1415,7 +1431,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...POST_PHASE2_TERMINAL_CHANNELS,
         ...POST_PORT_CHANNELS,
         ...PASSKEY_CHANNELS,
-        ...AUTHCFG_CHANNELS
+        ...AUTHCFG_CHANNELS,
+        ...VOICE_CHANNELS
       ].sort()
     )
   })

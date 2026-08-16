@@ -54,6 +54,7 @@ import {
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
+import { remoteVoice } from './remote-voice'
 import { STREAM_BACKPRESSURE_BYTES } from '../../shared/sync/stream'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
@@ -90,6 +91,7 @@ import {
   type WsStepUpResponse,
   type WsTermInput,
   type WsTermResize,
+  type WsVoiceAudio,
   type TermDetachReason,
   type RemoteStatus,
   type RemoteAuthInfo,
@@ -945,6 +947,9 @@ export class RemoteServer {
       client.unsubscribeStream?.()
       // And the git interest set, for the same reason.
       gitWatchRegistry.releaseConnection(client.connection.connectionId)
+      // And the microphone: a capture whose socket is gone has nowhere to send a
+      // transcript, and it holds a Deepgram stream open inside the engine.
+      remoteVoice.releaseConnection(client.connection.connectionId)
       closed.push(closeSocket(ws))
     }
 
@@ -2770,6 +2775,9 @@ export class RemoteServer {
         case 'term-input':
           this.handleTermInput(ws, msg)
           break
+        case 'voice-audio':
+          this.handleVoiceAudio(ws, msg)
+          break
         case 'term-resize':
           this.handleTermResize(ws, msg)
           break
@@ -2817,6 +2825,11 @@ export class RemoteServer {
       // nobody is viewing — under the retired collective-owner model that could
       // only happen when the LAST client left.
       gitWatchRegistry.releaseConnection(connectionId)
+      // Same lifetime rule for the microphone (phase 5 S3), and the one ADR-054
+      // cares about: the 4010 max-age cut ends a session by CLOSING the socket,
+      // so this is what guarantees a capture cannot outlive the authority that
+      // started it. A phone that sleeps mid-sentence lands here too.
+      remoteVoice.releaseConnection(connectionId)
       this.clients.delete(ws)
       if (authenticated) {
         logger.info(
@@ -3721,6 +3734,37 @@ export class RemoteServer {
     } catch (err) {
       logger.warn('remote-server', `term-input dropped: ${err instanceof Error ? err.message : err}`)
     }
+  }
+
+  /**
+   * One batch of microphone audio from a remote browser (phase 5 S3).
+   *
+   * Deliberately UNLIKE {@link RemoteServer.handleTermInput} in what it checks.
+   * A keystroke is an act against the host and is judged by the step-up table on
+   * every frame; a voice frame is the continuation of a capture the connection
+   * already opened through an audited `voice:start`, and re-judging each 150 ms
+   * batch would mean a presence window expiring MID-SENTENCE and silently
+   * truncating the transcript — the same reason ADR-054's read/act split leaves
+   * an attached terminal's output flowing when the act window decays. The
+   * authority check is at `voice:start`; the capture's existence is the scope.
+   *
+   * Stated honestly, because the reviewer checked it: that argument covers the
+   * DECAY half only. The other half — "a capture ends when the capability is
+   * withdrawn" — has no code path behind it today, because nothing withdraws
+   * `chat` from a live connection (the terminal's `revokeShellGrant` has no
+   * counterpart here). The only revocation that exists is closing the socket,
+   * and that DOES end the capture (`remoteVoice.releaseConnection` in the close
+   * handler and in `stop()`). If a `chat`-revoking path is ever added, it has to
+   * release captures the way `revokeShellGrant` detaches terminals.
+   *
+   * Nothing is answered and nothing about the payload is logged: the registry
+   * drops a frame with no live capture in silence, so a prober learns nothing
+   * from sending one.
+   */
+  private handleVoiceAudio(ws: WebSocket, msg: WsVoiceAudio): void {
+    const client = this.clients.get(ws)
+    if (!client) return
+    remoteVoice.feed(client.connection.connectionId, msg.dataB64)
   }
 
   private handleTermResize(ws: WebSocket, msg: WsTermResize): void {

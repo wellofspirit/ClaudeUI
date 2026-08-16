@@ -17,6 +17,7 @@ import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
 import { derivePasswordProof } from './password-proof'
 import type { RemoteConnection } from './connection'
+import { BrowserVoiceCapture } from './voice-capture'
 
 declare global {
   interface Window {
@@ -38,6 +39,13 @@ function sharedProviderRemoteMutation(..._args: unknown[]): Promise<never> {
 }
 
 export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
+  // One microphone per client, matching the server's one-capture-per-connection
+  // rule (services/remote-voice.ts). Constructed eagerly and cheaply — it touches
+  // no device until `start()`.
+  const voiceCapture = new BrowserVoiceCapture({
+    sendAudio: (dataB64) => connection.sendVoiceAudio(dataB64)
+  })
+
   // Listener registration mirrors preload's onEvent(). The registry itself
   // lives in the connection's SyncClient — it has to be the thing that knows an
   // event was dispatched, or the cursor advances past events nobody applied
@@ -740,11 +748,50 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['webauthnRegisterVerify']
       >,
 
-    // Voice input — not available on web (audio hardware is on the server)
+    // Voice input — SyncCore phase 5 S3. It USED to be four no-ops here ("audio
+    // hardware is on the server"), which left the mic button rendered and inert
+    // on web. It is now a real capture: the browser's AudioWorklet produces the
+    // 16 kHz i16LE PCM the cli.js voice server wants, `voice:start` binds this
+    // connection's audio to the session, and the transcripts come back as lane
+    // frames targeted at this socket — landing in `on('voice:transcript')` below,
+    // which is the same listener the desktop's host-local send feeds.
+    //
+    // The two SERVER verbs stay no-ops: starting and stopping the transcription
+    // server inside cli.js is `voice:start`'s business, and nothing on the web
+    // client calls them (the desktop's InputBox does not either — ClaudeSession
+    // starts the server lazily from voiceStartRecording).
     voiceStartServer: async () => {},
     voiceStopServer: async () => {},
-    voiceStartRecording: async () => {},
-    voiceStopRecording: async () => {},
+    voiceStartRecording: async (routingId, language) => {
+      // IDEMPOTENT, defensively. `BrowserVoiceCapture.start()` already no-ops
+      // while active, but that alone is not enough: a second call would still
+      // reach `voice:start`, and the server answers that by tearing the live
+      // capture down and building a new one — an interrupted sentence. The mic
+      // button's own `voiceState !== 'idle'` guard cannot cover this, because
+      // that state arrives from the server a round trip later, so two presses
+      // inside the window both see `idle`. This is the check that holds.
+      if (voiceCapture.isActive()) return
+      // Microphone FIRST, engine second: a denied permission must not spawn a
+      // cli.js child and open a Deepgram stream nobody will speak into. Blocks
+      // captured while `voice:start` is in flight are held by the controller and
+      // flushed on `arm()`, so the first second of speech is not lost to the
+      // round trip.
+      await voiceCapture.start()
+      try {
+        await connection.invoke('voice:start', routingId, language)
+      } catch (err) {
+        await voiceCapture.stop()
+        throw err
+      }
+      voiceCapture.arm()
+    },
+    voiceStopRecording: async () => {
+      await voiceCapture.stop()
+      // Always told, even if the capture was never armed: the server may be
+      // holding a stream open, and finalization is what flushes the last
+      // transcript back.
+      await connection.invoke('voice:stop')
+    },
     onVoiceTranscript: on('voice:transcript') as ClaudeAPI['onVoiceTranscript'],
     onVoiceState: on('voice:state') as ClaudeAPI['onVoiceState'],
 

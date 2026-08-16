@@ -484,28 +484,42 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Full ring dump on log-viewer open.'
   },
+  // The three voice channels are classified for the HOST microphone, and phase 5
+  // S3 left that classification untouched while adding a second capture that is
+  // not an emission at all. A remote browser's capture
+  // (`main/services/remote-voice.ts`) sends `voice:state` / `voice:transcript` /
+  // `voice:error` as TARGETED lane frames straight to the one connection holding
+  // the microphone — never through `emitEvent`, so no class here applies to them
+  // and none of them ring. The client cannot tell: a targeted `stream-ev` frame
+  // is dispatched into the same per-channel listeners a host-local
+  // `webContents.send` feeds, which is why the renderer needed no rewiring.
   'voice:state': {
     cls: 'host-local',
     ring: false,
     canonical: false,
-    why: 'Host microphone capture (security.md §Host-local).'
+    why: 'Host microphone capture (security.md §Host-local). A remote capture does not emit this channel at all — it targets the capturing connection on the volatile lane (phase 5 S3).'
   },
   'voice:transcript': {
     cls: 'host-local',
     ring: false,
     canonical: false,
-    why: 'Host microphone capture.'
+    why: 'Host microphone capture. Remote captures target the capturing connection on the volatile lane (phase 5 S3) — a transcript belongs to the microphone that produced it, not to everyone watching the session.'
   },
-  // NOTE the anomaly: `voice:error` is host-local in nature but ONE of its two
-  // emitters is `BaseSession.send` (claude-session.ts's early-capture failure),
-  // so today it rings and reaches every client. 4a rule 1 forbids reducing ring
-  // membership, so it is recorded as it behaves, not as it ought to behave. The
-  // fix belongs with the voice surface's phase-5 lane split.
+  // NOTE the anomaly, now BOUNDED rather than fixed. `voice:error` is host-local
+  // in nature but one of its emitters is `BaseSession.send` (claude-session.ts's
+  // early-capture failure), so it rings and reaches every client. 4a rule 1
+  // forbids reducing ring membership, so it stays recorded as it behaves.
+  //
+  // What phase 5 S3 could honestly do — and did — is refuse to make it worse: the
+  // remote capture, which would have been a THIRD emitter, does not emit this
+  // channel. Its failures are targeted lane frames to the capturing connection.
+  // Splitting the two existing emitters still needs the ring-membership change
+  // rule 1 forbids, so it remains open.
   'voice:error': {
     cls: 'replicated',
     ring: true,
     canonical: false,
-    why: 'Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. The lane split belongs to the phase-5 work on the voice surface.'
+    why: 'Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. Phase 5 S3 kept a remote capture OFF this channel (targeted lane frames instead) rather than adding a third emitter; splitting the two that remain still needs the ring-membership change rule 1 forbids.'
   },
   'terminal:data': {
     cls: 'host-local',

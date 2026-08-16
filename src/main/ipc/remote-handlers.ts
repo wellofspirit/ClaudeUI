@@ -65,6 +65,7 @@ import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
 import { prepareAndCreateSession } from './create-session'
 import { terminalService } from '../services/terminal-service'
+import { remoteVoice } from '../services/remote-voice'
 import {
   registerCommand,
   type CommandConnection,
@@ -1351,6 +1352,39 @@ export function registerRemoteHandlers(
     withConnection: true,
     handler: async (connection: CommandConnection, cwd: string) =>
       terminalService.poolSlots(connection, cwd)
+  })
+
+  // -------------------------------------------------------------------------
+  // Voice capture (phase 5 S3)
+  // -------------------------------------------------------------------------
+  //
+  // The audio itself never comes through here — it rides the `voice-audio` lane
+  // frame, because ~7 request/response round trips a second would be pure
+  // bookkeeping and the audit trail would be a wall of noise hiding the row that
+  // matters. These two verbs are that row: `chat`, `command`, audited, so "a
+  // microphone was opened on this session by this identity at this time" is in
+  // the trail while nothing about the speech ever is (security.md §Audit).
+  //
+  // `chat` and not something stronger: a capture produces a draft message, which
+  // is exactly what `session:send` already lets this connection do. `withConnection`
+  // because a capture belongs to the socket that started it — the audio arrives on
+  // it, the transcripts go back to it alone, and it is what the capture dies with.
+  handleRemote({
+    channel: 'voice:start',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    withConnection: true,
+    handler: async (connection: CommandConnection, routingId: string, language?: string) =>
+      remoteVoice.start(manager, connection, routingId, language)
+  })
+
+  handleRemote({
+    channel: 'voice:stop',
+    capability: 'chat',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => remoteVoice.stop(connection.connectionId)
   })
 
   // Capability honesty: the ONLY thing a web client needs to decide whether to

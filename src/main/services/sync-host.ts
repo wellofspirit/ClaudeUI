@@ -189,6 +189,43 @@ export function setStreamWatch(
   return pushed
 }
 
+/**
+ * Deliver ONE lane frame to ONE connection, bypassing the watch sets entirely
+ * (SyncCore phase 5 S3).
+ *
+ * The lane's third delivery rule, and the narrowest. {@link streamDelivery} asks
+ * "who is LOOKING at this session"; this asks "who is HOLDING this device". They
+ * are different questions, and the first is the wrong one for a remote voice
+ * capture: a phone and a laptop watching the same session would both receive the
+ * phone's interim transcripts and both type them into their own drafts, and the
+ * `voice:state` recording indicator would light up on a client whose microphone
+ * is not on. Transcription belongs to the connection whose microphone produced
+ * it, exactly as PTY bytes belong to the socket that attached
+ * (`RemoteServer.terminalSink`).
+ *
+ * Returns false when the connection has no sink — a socket that closed while a
+ * transcript was in flight, which is an ordinary race and not an error. The
+ * caller's cure is to stop the capture, which the socket's close handler is
+ * already doing.
+ *
+ * Same lane, same guarantees: never ringed, never logged, no seq, no replay.
+ */
+export function sendToStreamConnection(connectionId: string, frame: LaneFrame): boolean {
+  const entry = streamSubscribers.get(connectionId)
+  if (!entry) return false
+  try {
+    entry.sink(frame)
+    return true
+  } catch (err) {
+    logger.error(
+      LOG_SOURCE,
+      `stream sink threw delivering a targeted frame to ${connectionId}: ` +
+        `${err instanceof Error ? err.message : String(err)}`
+    )
+    return false
+  }
+}
+
 /** What `connectionId` is watching (diagnostics + tests). */
 export function streamWatchOf(connectionId: string): string[] {
   return [...(streamSubscribers.get(connectionId)?.watch ?? [])].sort()

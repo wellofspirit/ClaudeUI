@@ -1,240 +1,64 @@
 /**
- * Voice client service — manages the lifecycle of voice recording sessions.
+ * Voice client service — the DESKTOP capture: the host machine's microphone,
+ * streamed to the voice server running inside cli.js.
  *
- * Connects to the voice server running inside cli.js (started via the
- * voice-server patch) over a TCP socket with newline-delimited JSON protocol.
- * Audio data is base64-encoded in JSON messages.
+ * The socket, the newline-JSON protocol and the state machine are
+ * {@link VoiceStreamClient}'s; this class supplies the two halves that are
+ * specific to a host-local capture:
  *
- * Protocol (client → server):
- *   {"type":"voice_start","language":"en","keyterms":[]}
- *   {"type":"audio","data":"<base64 PCM>"}
- *   {"type":"voice_stop"}
+ *  - the AUDIO SOURCE — `voice-capture.ts`'s native NAPI module, which already
+ *    emits exactly 16 kHz i16LE mono PCM, so there is no conversion here at all
+ *    (the browser path's `shared/audio/pcm16.ts` exists precisely because a
+ *    browser cannot hand us that);
+ *  - the DELIVERY — `voice:state` / `voice:transcript` go to the owning window,
+ *    because microphone capture belongs to the machine with the microphone.
  *
- * Protocol (server → client):
- *   {"type":"ready"}
- *   {"type":"transcript","text":"...","isFinal":true|false}
- *   {"type":"error","message":"..."}
- *   {"type":"closed"}
+ * Since phase 5 S3 it is no longer the only implementation: a remote browser's
+ * capture is `services/remote-voice.ts`, and its transcripts ride the volatile
+ * lane to the one connection that started it.
  */
 
-import * as net from 'net'
-import { emitEvent } from './sync-host'
-import * as readline from 'readline'
 import type { BrowserWindow } from 'electron'
+import { emitEvent } from './sync-host'
 import { startRecording, stopRecording } from './voice-capture'
-import { logger } from './logger'
+import { VoiceStreamClient } from './voice-stream-client'
 import type { VoiceState } from '../../shared/types'
 
-interface VoiceServerConnection {
-  socket: net.Socket
-  rl: readline.Interface
-}
-
-export class VoiceClient {
-  private port: number
+export class VoiceClient extends VoiceStreamClient {
   private win: BrowserWindow
   private routingId: string
-  private conn: VoiceServerConnection | null = null
-  private state: VoiceState = 'idle'
-  private audioBuffer: Buffer[] = []
-  private streamReady = false
 
   constructor(port: number, win: BrowserWindow, routingId: string) {
-    this.port = port
+    super(port, 'VoiceClient')
     this.win = win
     this.routingId = routingId
   }
 
-  /** Update the voice server port (e.g., after reconnection) */
-  updatePort(port: number): void {
-    this.port = port
-  }
-
   /**
-   * Start a voice recording session.
-   * Native audio capture is already running (started by ClaudeSession for
-   * zero-latency buffering). earlyBuffer contains chunks captured while
-   * the SDK was spawning. This method connects to the voice server, flushes
-   * the early buffer, then takes over live audio forwarding.
+   * Take over live audio capture. Native recording is already active (started by
+   * `ClaudeSession.voiceStartRecording` for zero-latency buffering while the SDK
+   * spawns), so this swaps the callback rather than starting from cold.
    */
-  async startRecording(language: string, earlyBuffer: Buffer[] = []): Promise<void> {
-    // Only start from a clean idle state. Previously `connecting` was also
-    // admitted, but a second startRecording during the connect window builds a
-    // second socket that orphans the first; the first socket's eventual 'close'
-    // then runs handleDisconnect → cleanup and tears down the *active* session.
-    if (this.state !== 'idle') {
-      logger.warn('VoiceClient', `Cannot start recording in state: ${this.state}`)
-      return
-    }
-
-    this.setState('connecting')
-    this.audioBuffer = [...earlyBuffer]
-    this.streamReady = false
-
-    try {
-      // Connect to the voice server in cli.js
-      this.conn = await this.connect()
-
-      // Set up message handling
-      this.conn.rl.on('line', (line) => this.handleMessage(line))
-      this.conn.socket.on('close', () => this.handleDisconnect())
-      this.conn.socket.on('error', (err) => {
-        logger.error('VoiceClient', `Socket error: ${err.message}`)
-        this.sendError(`Connection error: ${err.message}`)
-        this.cleanup()
-      })
-
-      // Send voice_start command
-      this.sendToServer({ type: 'voice_start', language })
-
-      // Take over live audio capture — native recording is already active,
-      // just swap the callback to forward through VoiceClient
-      stopRecording()
-      const started = startRecording((buffer) => {
-        if (this.state !== 'recording' && this.state !== 'connecting') return
-
-        if (this.streamReady && this.conn) {
-          this.sendToServer({ type: 'audio', data: buffer.toString('base64') })
-        } else {
-          this.audioBuffer.push(buffer)
-        }
-      })
-
-      if (!started) {
-        this.sendError('Failed to restart audio capture. Check microphone access.')
-        this.cleanup()
-        return
-      }
-
-      // Will transition to 'recording' on 'ready' message from voice server
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      logger.error('VoiceClient', `Failed to start recording: ${msg}`)
-      this.sendError(`Failed to connect to voice server: ${msg}`)
-      this.cleanup()
-    }
-  }
-
-  /** Stop the current recording session */
-  async stopRecording(): Promise<void> {
-    if (this.state === 'idle') return
-
-    // Stop audio capture immediately
+  protected startAudioSource(): boolean {
     stopRecording()
-
-    if (this.conn && this.streamReady) {
-      this.setState('processing')
-      this.sendToServer({ type: 'voice_stop' })
-
-      // Safety: if cli.js doesn't send 'closed' within 8s, force cleanup.
-      // hb8's safety timeout is 5s, so 8s gives plenty of margin.
-      setTimeout(() => {
-        if (this.state === 'processing') {
-          logger.warn('VoiceClient', 'Finalization timeout — forcing cleanup')
-          this.cleanup()
-        }
-      }, 8000)
-      // The server will send remaining transcripts, then 'closed'
-    } else {
-      this.cleanup()
-    }
+    return startRecording((buffer) => this.pushAudio(buffer))
   }
 
-  /** Clean up and destroy this client */
-  destroy(): void {
+  protected stopAudioSource(): void {
     stopRecording()
-    this.cleanup()
   }
 
-  // -- Private methods --
-
-  private connect(): Promise<VoiceServerConnection> {
-    return new Promise((resolve, reject) => {
-      const socket = net.connect(this.port, '127.0.0.1')
-      const rl = readline.createInterface({ input: socket })
-
-      // Connection timeout — only for the initial handshake
-      const connectTimer = setTimeout(() => {
-        socket.destroy()
-        reject(new Error('Connection timeout'))
-      }, 5000)
-
-      socket.on('connect', () => {
-        clearTimeout(connectTimer)
-        // Disable idle timeout — the socket may be idle for seconds during
-        // voice finalization (Deepgram safety timeout is 5s)
-        socket.setTimeout(0)
-        resolve({ socket, rl })
-      })
-
-      socket.on('error', (err) => {
-        clearTimeout(connectTimer)
-        reject(err)
-      })
-    })
+  /** The shipped desktop wording — "restart", because capture was already running. */
+  protected audioSourceFailureMessage(): string {
+    return 'Failed to restart audio capture. Check microphone access.'
   }
 
-  private handleMessage(line: string): void {
-    let msg: { type: string; text?: string; isFinal?: boolean; message?: string }
-    try {
-      msg = JSON.parse(line)
-    } catch {
-      logger.warn('VoiceClient', `Invalid JSON from voice server: ${line.slice(0, 100)}`)
-      return
-    }
-
-    switch (msg.type) {
-      case 'ready':
-        this.streamReady = true
-        this.setState('recording')
-        // Flush buffered audio
-        if (this.conn) {
-          for (const buf of this.audioBuffer) {
-            this.sendToServer({ type: 'audio', data: buf.toString('base64') })
-          }
-        }
-        this.audioBuffer = []
-        break
-
-      case 'transcript':
-        if (msg.text !== undefined && msg.isFinal !== undefined) {
-          this.send('voice:transcript', this.routingId, {
-            text: msg.text,
-            isFinal: msg.isFinal
-          })
-        }
-        break
-
-      case 'error':
-        logger.error('VoiceClient', `Voice server error: ${msg.message}`)
-        this.sendError(msg.message || 'Unknown voice error')
-        break
-
-      case 'closed':
-        this.cleanup()
-        break
-
-      default:
-        break
-    }
-  }
-
-  private handleDisconnect(): void {
-    if (this.state !== 'idle') this.cleanup()
-  }
-
-  private sendToServer(msg: Record<string, unknown>): void {
-    if (!this.conn) return
-    try {
-      this.conn.socket.write(JSON.stringify(msg) + '\n')
-    } catch (err) {
-      logger.error('VoiceClient', `Failed to send to voice server: ${err}`)
-    }
-  }
-
-  private setState(state: VoiceState): void {
-    this.state = state
+  protected emitState(state: VoiceState): void {
     this.send('voice:state', this.routingId, state)
+  }
+
+  protected emitTranscript(text: string, isFinal: boolean): void {
+    this.send('voice:transcript', this.routingId, { text, isFinal })
   }
 
   /**
@@ -246,8 +70,14 @@ export class VoiceClient {
    * Since SyncCore phase 4c the desktop renderer subscribes to it on the sync
    * transport, so a targeted `webContents.send` would land nowhere: it has to go
    * through the funnel like every other replicated event.
+   *
+   * S3 did NOT change that. What it changed is the third emitter it might have
+   * added: a REMOTE capture's errors never come through here and never enter the
+   * event lane at all — they are targeted lane frames to the connection that is
+   * holding the microphone (`services/remote-voice.ts`). See the NOTE in
+   * `shared/sync/channels.ts`.
    */
-  private sendError(message: string): void {
+  protected emitError(message: string): void {
     emitEvent('voice:error', [this.routingId, message])
   }
 
@@ -255,7 +85,7 @@ export class VoiceClient {
    * Guarded webContents.send for this client's HOST-LOCAL channels
    * (`voice:state`, `voice:transcript` — microphone capture belongs to the machine
    * with the microphone). `voice:error` does NOT come through here; see
-   * {@link VoiceClient.sendError}.
+   * {@link VoiceClient.emitError}.
    *
    * The window can be destroyed while a voice session is still finalizing (user
    * closes the window mid-transcription); sending to a destroyed webContents throws
@@ -266,23 +96,5 @@ export class VoiceClient {
     const wc = this.win.webContents
     if (this.win.isDestroyed?.() || wc?.isDestroyed?.()) return
     wc.send(channel, ...args)
-  }
-
-  private cleanup(): void {
-    stopRecording()
-    this.streamReady = false
-    this.audioBuffer = []
-
-    if (this.conn) {
-      try {
-        this.conn.rl.close()
-        this.conn.socket.destroy()
-      } catch {
-        /* ignore */
-      }
-      this.conn = null
-    }
-
-    this.setState('idle')
   }
 }

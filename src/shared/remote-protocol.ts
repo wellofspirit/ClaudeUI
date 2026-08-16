@@ -672,6 +672,35 @@ export interface WsTermDetached {
 }
 
 // ---------------------------------------------------------------------------
+// Voice capture (SyncCore phase 5 S3) — the VOLATILE lane, client → server
+// ---------------------------------------------------------------------------
+//
+// Microphone audio from a remote browser, on its way to the transcription server
+// inside cli.js. A frame rather than an invoke for the same reason `term-input`
+// is one: ~7 of these a second, each a request/response round trip's worth of
+// bookkeeping for nothing, and the response would carry no information.
+//
+// Never logged, never audited, never ringed — audio is keystrokes (security.md
+// §Audit). The CONTROL verbs that open and close a capture (`voice:start` /
+// `voice:stop`) are ordinary registry commands and ARE audited: who turned a
+// microphone on is a security fact; what they said is not.
+//
+// Accepted ONLY from a connection that currently holds a live capture, which is
+// established by an audited `voice:start`. A frame that arrives without one is
+// dropped in silence rather than answered (services/remote-voice.ts).
+
+/**
+ * Client → Server: one batch of 16 kHz i16LE mono PCM, base64-encoded.
+ *
+ * `dataB64` is base64 of RAW BYTES here — not the UTF-8-then-base64 the terminal
+ * frames use, because this payload is not text and never was.
+ */
+export interface WsVoiceAudio {
+  type: 'voice-audio'
+  dataB64: string
+}
+
+// ---------------------------------------------------------------------------
 // Volatile stream lane (SyncCore phase 5)
 // ---------------------------------------------------------------------------
 //
@@ -698,6 +727,7 @@ export type WsClientMessage =
   | WsStepUpChallengeRequest
   | WsTermInput
   | WsTermResize
+  | WsVoiceAudio
 export type WsServerMessage =
   | WsAuthResponse
   | WsAuthWebauthnChallenge

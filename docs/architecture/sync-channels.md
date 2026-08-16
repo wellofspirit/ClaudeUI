@@ -206,7 +206,7 @@ snapshot fields that already existed.
 | `session:watch-update`           | replicated               | yes  | yes       | —     | **A NOTIFY as of phase 5 S4** — `{routingId, sessionId, projectKey, cwd?}`, no transcript. Funneled in 4a so canonical holds watched sessions (without that, 4b would drop them), but the payload was a full re-read: a 5000-entry ring could hold hundreds of transcripts and every reconnecting client replayed them. The content is a SEED now (`SyncCore.seedWatchedSession`, applied before the emission); every client answers the notify with one debounced refetch through the cold-history path. Its branch keeps the ONE surviving `ensured()` bootstrap — a watched session has no birth event. |
 | `usage:block-data`               | replicated               | yes  | no        | —     | Block analytics. Fans out today; no snapshot field.                                                                                                                                                    |
 | `usage:data`                     | replicated               | yes  | no        | —     | Account rate-limit usage. Fans out today; no snapshot field.                                                                                                                                           |
-| `voice:error`                    | replicated               | yes  | no        | —     | Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. 4c had to route VoiceClient's through emitEvent — its targeted send would have landed nowhere. The lane split belongs to the phase-5 work on the voice surface.                               |
+| `voice:error`                    | replicated               | yes  | no        | —     | Mixed emitters: VoiceClient and ClaudeSession (via BaseSession.send) both raise it. Rings, so it reaches every subscriber; no snapshot field. 4c had to route VoiceClient's through emitEvent — its targeted send would have landed nowhere. **Phase 5 S3 bounded the anomaly rather than closing it**: a REMOTE capture would have been a third emitter, and instead sends its failures as targeted lane frames (see §Remote voice). Splitting the two that remain still needs the ring-membership change rule 1 forbids. |
 | `automation:stream-event`        | volatile (pass-through)  | no   | no        | —     | Run streaming deltas. **Off the ring as of phase 5 S2.** Scoped by AUTOMATION, not by run: the payload carries `automationId` and no run id, and the renderer already narrows to the viewed run from its own store. |
 | `session:background-output`      | volatile (pass-through)  | no   | no        | —     | Background-task tail. Same lane, same flavor, same durable record as bash-output.                                                                                                                       |
 | `session:bash-output`            | volatile (pass-through)  | no   | no        | —     | Live bash tail. **Off the ring as of phase 5 S2** — a noisy command emitted thousands of chunks and every one took a seq. No snapshot field, so losing one is honest; the tool_result is the record.     |
@@ -223,8 +223,8 @@ snapshot fields that already existed.
 | `remote:status`                  | host-local               | no   | no        | —     | The remote server describing itself to its host. A remote client learns its own connectivity from the socket.                                                                                          |
 | `terminal:data`                  | host-local               | no   | no        | —     | Desktop PTY bytes, plus the scrollback replay a desktop `terminal:attach` pulls (`replay: true` = clear the screen and take this as the whole history; the client applies the clear IN BAND by writing `ESC c` ahead of the bytes, never `Terminal.reset()` — see sync-core.md §Terminal). Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit. |
 | `terminal:exit`                  | host-local               | no   | no        | —     | Desktop PTY lifecycle; the remote lane has its own `term-exit` frame.                                                                                                                                  |
-| `voice:state`                    | host-local               | no   | no        | —     | Host microphone capture (security.md §Host-local).                                                                                                                                                     |
-| `voice:transcript`               | host-local               | no   | no        | —     | Host microphone capture.                                                                                                                                                                               |
+| `voice:state`                    | host-local               | no   | no        | —     | Host microphone capture (security.md §Host-local). A REMOTE capture never emits this channel — see §Remote voice.                                                                                       |
+| `voice:transcript`               | host-local               | no   | no        | —     | Host microphone capture. A REMOTE capture never emits this channel — see §Remote voice.                                                                                                                 |
 | `window:maximized-change`        | host-local               | no   | no        | —     | Window chrome (`host` capability).                                                                                                                                                                     |
 
 `plugin:<id>:<event>` (ADR-005) is matched by PREFIX, since the names are generated
@@ -385,6 +385,39 @@ engine tests' stub window subscribed to all five channels before the split. They
 them from the observer list instead: a text frame through the shared
 `streamFrameToEmission` inverse, a pass-through frame by reading `(channel, args)` straight
 back off it.
+
+### Remote voice — the lane's TARGETED delivery (S3)
+
+Voice input is not host-only any more: headless mode has no microphone, and the owner's
+answer to "I want to do voice input remotely" is a browser capture. The audio path is
+`AudioWorklet → shared/audio/pcm16.ts → the voice-audio frame → main/services/remote-voice.ts
+→ the cli.js voice server`. What matters HERE is the return path, which is a third delivery
+rule on the same lane:
+
+- `streamDelivery` asks **who is looking at this session** (the `stream:watch` sets);
+- `sendToStreamConnection` asks **who is holding this microphone**, and delivers to that ONE
+  connection.
+
+They are different questions, and the watch sets answer the wrong one for a capture: a phone
+and a laptop watching the same session would BOTH receive the phone's interim transcripts and
+both type them into their own drafts, and the recording indicator would light up on a client
+whose microphone is off. Transcripts belong to the socket that produced them, exactly as PTY
+bytes belong to the socket that attached.
+
+So a remote capture's `voice:state` / `voice:transcript` / `voice:error` are **targeted
+pass-through frames**, not emissions: they never reach `emitEvent`, never take a seq, never
+ring, and are never logged (audio and its transcript are keystrokes — security.md §Audit).
+The client cannot tell the difference, because a `stream-ev` frame is dispatched into the
+same per-channel listeners a host-local `webContents.send` feeds — which is why the renderer
+needed no rewiring at all and the mic button drives both paths.
+
+The CONTROL verbs are ordinary registry commands and ARE audited: `voice:start
+{sessionId, language?}` and `voice:stop`, both `chat`/`command`/`withConnection`. Who opened a
+microphone on which session, and when, is a security fact; what was said is not. **One capture
+per connection** (starting a second stops the first — a browser has one microphone), and the
+capture dies with whatever it depends on: an explicit stop, the socket closing (which is how
+ADR-054's 4010 max-age cut ends it), or the engine dying, which closes the TCP socket to the
+voice server living inside it.
 
 ## Reducer purity deltas
 
