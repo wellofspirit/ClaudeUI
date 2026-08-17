@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react'
-import QRCode from 'qrcode'
 import type { RemoteStatus, NetworkInterfaceInfo } from '../../../../shared/types'
 import { RemoteAccessModalView } from './View'
 
@@ -10,18 +9,14 @@ interface RemoteAccessModalProps {
 export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JSX.Element {
   const [status, setStatus] = useState<RemoteStatus | null>(null)
   const [starting, setStarting] = useState(false)
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
   const [interfaces, setInterfaces] = useState<NetworkInterfaceInfo[]>([])
   const [selectedHost, setSelectedHost] = useState<string>('')
   const [tunnelMode, setTunnelMode] = useState(false)
 
-  // TLS mode first: it is the only URL that works when the server is bound to
-  // loopback, it needs no fragment at all (ADR-056: TLS is the channel and the
-  // identity is a passkey or a password), and it is stable enough to bookmark.
-  // The tunnel and LAN URLs below carry `#k=` — the CHANNEL key, never an access
-  // token — which is why the QR still has to encode the whole string.
-  const shareUrl = status?.tls?.url ?? status?.tunnelUrl ?? status?.lanUrl ?? null
+  // The link/QR presentation lives in `AccessLinks` (ADR-056 item C): there is
+  // no single share URL any more, because each origin carries a different
+  // channel and a different identity, and picking one for the whole modal was
+  // what hid that.
 
   useEffect(() => {
     window.api.getRemoteStatus().then(setStatus)
@@ -31,20 +26,6 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
     const cleanup = window.api.onRemoteStatus(setStatus)
     return cleanup
   }, [])
-
-  useEffect(() => {
-    if (!shareUrl) {
-      setQrDataUrl(null)
-      return
-    }
-    QRCode.toDataURL(shareUrl, {
-      width: 256,
-      margin: 2,
-      color: { dark: '#d1d5db', light: '#00000000' }
-    })
-      .then(setQrDataUrl)
-      .catch(() => setQrDataUrl(null))
-  }, [shareUrl])
 
   const handleStart = useCallback(async () => {
     setStarting(true)
@@ -68,13 +49,45 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
     setStatus(s)
   }, [])
 
-  const handleCopy = useCallback(() => {
-    if (shareUrl) {
-      navigator.clipboard.writeText(shareUrl)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
-  }, [shareUrl])
+  /**
+   * Turn the tunnel on or off for a RUNNING server.
+   *
+   * A restart, and it has to be: the tunnel's channel key is minted per run
+   * (`start()` refuses while a server is up), so there is no tunnel-only verb to
+   * call — this is the modal's own start/stop, re-parameterized. The card that
+   * calls it confirms the consequence first (connected devices are dropped).
+   * Errors propagate so the row can render them; `tunnelMode` follows, so the
+   * pre-start toggle agrees with what is running.
+   */
+  const handleSetTunnel = useCallback(
+    async (on: boolean): Promise<void> => {
+      setStarting(true)
+      try {
+        await window.api.stopRemoteServer()
+        const opts: { host?: string; tunnel?: boolean } = {}
+        if (selectedHost) opts.host = selectedHost
+        if (on) opts.tunnel = true
+        await window.api.startRemoteServer(Object.keys(opts).length > 0 ? opts : undefined)
+        setTunnelMode(on)
+        setStatus(await window.api.getRemoteStatus())
+      } finally {
+        setStarting(false)
+      }
+    },
+    [selectedHost]
+  )
+
+  /**
+   * Leave for the break-glass password field. The modal closes first: the field
+   * is in the settings dialog, which this modal would otherwise cover.
+   */
+  const handleSetPassword = useCallback(() => {
+    onClose()
+    // `remote` is the SECTION id (`SECTION_SCOPE_MAP` is keyed by those, not by
+    // the item keys inside them) — the password field lives in its remote-server
+    // block.
+    window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'remote' } }))
+  }, [onClose])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
@@ -88,8 +101,6 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
     <RemoteAccessModalView
       status={status}
       starting={starting}
-      qrDataUrl={qrDataUrl}
-      copied={copied}
       interfaces={interfaces}
       selectedHost={selectedHost}
       tunnelMode={tunnelMode}
@@ -97,7 +108,8 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
       onSetTunnelMode={setTunnelMode}
       onStart={handleStart}
       onStop={handleStop}
-      onCopy={handleCopy}
+      onSetTunnel={handleSetTunnel}
+      onSetPassword={handleSetPassword}
       onClose={onClose}
     />
   )

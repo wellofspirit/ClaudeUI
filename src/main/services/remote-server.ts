@@ -1511,7 +1511,22 @@ export class RemoteServer {
       // Null in TLS mode by construction: it binds loopback only, so there is no
       // LAN channel key and `lanLink()` has nothing to hand out — advertising the
       // 127.0.0.1 URL would send the user (and the QR code) to a dead end.
-      lanUrl: this.lanLink(),
+      //
+      // The tunnel suppression below is NARROW, and the narrowness is the point:
+      // the obvious rule ("no LAN link while a tunnel runs") would hide a link
+      // that works. Three cases, decided by `classifyConnectionOrigin`, whose
+      // non-loopback-peer arm runs BEFORE its `tunnelActive` arm:
+      //   1. LAN bind, no tunnel        → `#k=` link, origin `lan`            ✓
+      //   2. LAN bind, tunnel running   → `#k=` link, peer is non-loopback so
+      //      the socket still classifies `lan` and is measured against the LAN
+      //      key                                                              ✓
+      //   3. loopback bind, tunnel running → `lanLink()` is FRAGMENT-LESS (no
+      //      key is minted for a loopback bind), but a loopback peer with a
+      //      tunnel up classifies `tunnel` and therefore owes an E2E channel the
+      //      link cannot open — the socket is refused 4004. That is ADR-056 §52's
+      //      documented cost of the unconditional tunnel arm, and case 3 is the
+      //      only one where the URL is genuinely dead.
+      lanUrl: this.tunnelE2eKey !== null && this.lanE2eKey === null ? null : this.lanLink(),
       tunnelUrl,
       tunnelState: this.tunnelE2eKey !== null ? tunnelStatus.state : null,
       tunnelError: tunnelStatus.error,

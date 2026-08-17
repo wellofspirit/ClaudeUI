@@ -1,0 +1,590 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { AccessLinks } from '../AccessLinks'
+import {
+  ENROLL_UNAVAILABLE_ERROR,
+  LAN_LINK_UNAVAILABLE_ERROR,
+  NEEDS_SETTINGS_SESSION_ERROR
+} from '../../../../../shared/remote-protocol'
+import type { RemoteConfig, RemoteStatus } from '../../../../../shared/types'
+
+/**
+ * Access links (ADR-056 item C, series S1a-UI).
+ *
+ * What is worth pinning here is the DECISION each row makes, not its markup:
+ * which link a row is allowed to show, what it says when it may not show one,
+ * and that the two destructive/minting actions go through exactly one verb.
+ */
+
+vi.mock('qrcode', () => ({
+  default: { toDataURL: async () => 'data:image/png;base64,STUB' }
+}))
+
+const LAN_KEY = 'ab'.repeat(32)
+const LAN_LINK = `http://192.168.1.42:7365/remote#k=${LAN_KEY}`
+const TAILNET_URL = 'https://workstation.tail1234.ts.net:8443/remote'
+
+const baseConfig: RemoteConfig = {
+  port: 0,
+  bindHost: null,
+  autostart: false,
+  tlsMode: 0,
+  tlsHttpsPort: 443,
+  allowTerminal: true,
+  shellGrantIdleMinutes: 10,
+  authPolicy: null,
+  effectiveAuthPolicy: 'passkey-always',
+  credentialCount: 1,
+  passwordBreakGlass: true,
+  stepUpTier: 'medium',
+  effectiveStepUpTier: 'medium',
+  stepUpMutationIdleMinutes: 60,
+  sessionMaxAgeHours: 4,
+  auditRetentionDays: 365,
+  passwordSet: true,
+  passwordUpdatedAt: null
+}
+
+function makeStatus(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
+  return {
+    running: true,
+    port: 7365,
+    lanUrl: null,
+    tunnelUrl: null,
+    tunnelState: null,
+    tunnelError: null,
+    connectedClients: 0,
+    clientIps: [],
+    clientLogins: [],
+    tls: null,
+    lastError: null,
+    authMethods: [],
+    ...overrides
+  }
+}
+
+function tlsStatus(url: string | null): RemoteStatus['tls'] {
+  return {
+    mode: 1,
+    httpsPort: 443,
+    pinnedHttpsPort: 443,
+    serveError: null,
+    url,
+    detection: 'ok',
+    detectionMessage: null
+  }
+}
+
+const api = {
+  platform: 'darwin' as string,
+  getRemoteConfig: vi.fn(),
+  authcfgLanLink: vi.fn(),
+  authcfgRotateLanKey: vi.fn(),
+  webauthnMintEnrollToken: vi.fn()
+}
+
+const writeText = vi.fn()
+
+function renderCard(
+  status: RemoteStatus,
+  over: { onSetTunnel?: () => Promise<void>; onSetPassword?: () => void } = {}
+): { onSetTunnel: ReturnType<typeof vi.fn>; onSetPassword: ReturnType<typeof vi.fn> } {
+  const onSetTunnel = vi.fn(over.onSetTunnel ?? (async () => {}))
+  const onSetPassword = vi.fn(over.onSetPassword ?? (() => {}))
+  render(
+    <AccessLinks status={status} onSetTunnel={onSetTunnel} onSetPassword={onSetPassword} />
+  )
+  return { onSetTunnel, onSetPassword }
+}
+
+function row(id: string): HTMLElement | undefined {
+  return screen
+    .queryAllByTestId('AccessLinks.row')
+    .find((el) => el.getAttribute('data-id') === id)
+}
+
+function part(testid: string, id: string): HTMLElement | undefined {
+  return screen.queryAllByTestId(testid).find((el) => el.getAttribute('data-id') === id)
+}
+
+/** The config read is awaited on mount; let it land before asserting. */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
+describe('AccessLinks', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.platform = 'darwin'
+    api.getRemoteConfig.mockResolvedValue(baseConfig)
+    api.authcfgLanLink.mockResolvedValue({ url: LAN_LINK })
+    api.authcfgRotateLanKey.mockResolvedValue({ url: LAN_LINK })
+    api.webauthnMintEnrollToken.mockResolvedValue({
+      token: 'tok',
+      expiresAt: Date.now() + 60_000,
+      url: `${TAILNET_URL}#enroll=tok`
+    })
+    ;(window as unknown as { api: typeof api }).api = api
+    writeText.mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    })
+  })
+  afterEach(cleanup)
+
+  describe('the three rows', () => {
+    it('renders tailnet, LAN and tunnel from status', async () => {
+      renderCard(
+        makeStatus({
+          lanUrl: LAN_LINK,
+          tls: tlsStatus(TAILNET_URL),
+          tunnelState: 'stopped'
+        })
+      )
+      await settle()
+
+      // TLS mode hides the LAN row on the desktop: that run binds loopback, so
+      // the tailnet row IS its link.
+      expect(row('tailnet')).toBeTruthy()
+      expect(row('tunnel')).toBeTruthy()
+      expect(row('lan')).toBeFalsy()
+
+      expect(part('AccessLinks.url', 'tailnet')).toHaveTextContent(TAILNET_URL)
+      expect(row('tailnet')).toHaveTextContent(/PASSKEY/)
+      expect(row('tailnet')).toHaveTextContent(/No secret in the link/)
+      expect(row('tunnel')).toHaveTextContent(/LINK \+ PASSWORD/)
+      expect(row('tunnel')).toHaveTextContent(/off/)
+      expect(screen.getByTestId('AccessLinks.footer')).toHaveTextContent(
+        /Links are channels, not identity/
+      )
+    })
+
+    it('shows the LAN link with its rotate action, and copies the WHOLE link', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      expect(row('lan')).toHaveTextContent(/LINK \+ PASSWORD/)
+      // The fragment is a live secret: displayed masked, copied in full.
+      expect(part('AccessLinks.url', 'lan')?.textContent).not.toContain(LAN_KEY)
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'lan')!)
+      })
+      expect(writeText).toHaveBeenCalledWith(LAN_LINK)
+      expect(part('AccessLinks.rotate', 'lan')).toBeTruthy()
+    })
+
+    it('draws the QR from the row it was asked for, and toggles it off', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.qr', 'lan')!)
+      })
+      expect(part('AccessLinks.qrImage', 'lan')).toHaveAttribute(
+        'src',
+        'data:image/png;base64,STUB'
+      )
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.qr', 'lan')!)
+      })
+      expect(part('AccessLinks.qrImage', 'lan')).toBeFalsy()
+    })
+  })
+
+  /**
+   * The three cases `getStatus()` decides between — the reason its suppression
+   * is narrow rather than "no LAN link while a tunnel runs".
+   */
+  describe('LAN row · the tunnel truth table', () => {
+    it('loopback bind, no tunnel: the fragment-less link is shown, without Rotate', async () => {
+      renderCard(makeStatus({ lanUrl: 'http://127.0.0.1:7365/remote' }))
+      await settle()
+
+      expect(part('AccessLinks.url', 'lan')).toHaveTextContent('http://127.0.0.1:7365/remote')
+      expect(row('lan')).toHaveTextContent(/PASSWORD/)
+      expect(row('lan')).not.toHaveTextContent(/LINK \+ PASSWORD/)
+      // Nothing to rotate: a loopback bind mints no channel key.
+      expect(part('AccessLinks.rotate', 'lan')).toBeFalsy()
+    })
+
+    it('loopback bind + tunnel: suppressed, and the copy says why', async () => {
+      // The server answers lanUrl: null for exactly this case — a loopback peer
+      // with a tunnel up classifies `tunnel` and owes a channel the link cannot
+      // open.
+      renderCard(
+        makeStatus({
+          lanUrl: null,
+          tunnelState: 'connected',
+          tunnelUrl: 'https://t.example/remote#k=cd'
+        })
+      )
+      await settle()
+
+      expect(row('lan')).toHaveTextContent(/unavailable/)
+      expect(row('lan')).toHaveTextContent(/bound to loopback and the tunnel claims that address/)
+      expect(part('AccessLinks.copy', 'lan')).toBeFalsy()
+    })
+
+    it('LAN bind + tunnel: the #k= link is still shown', async () => {
+      renderCard(
+        makeStatus({
+          lanUrl: LAN_LINK,
+          tunnelState: 'connected',
+          tunnelUrl: 'https://t.example/remote#k=cd'
+        })
+      )
+      await settle()
+
+      expect(row('lan')).toHaveTextContent(/LINK \+ PASSWORD/)
+      expect(part('AccessLinks.copy', 'lan')).toBeTruthy()
+    })
+  })
+
+  describe('rotate', () => {
+    it('confirms first, then renders the link the verb returned', async () => {
+      const rotated = `http://192.168.1.42:7365/remote#k=${'cd'.repeat(32)}`
+      api.authcfgRotateLanKey.mockResolvedValue({ url: rotated })
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      fireEvent.click(part('AccessLinks.rotate', 'lan')!)
+      expect(screen.getByTestId('AccessLinks.rotateConfirm')).toHaveTextContent(
+        /Devices connected right now stay connected/
+      )
+      expect(api.authcfgRotateLanKey).not.toHaveBeenCalled()
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('AccessLinks.rotateConfirmSubmit'))
+      })
+
+      expect(api.authcfgRotateLanKey).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('AccessLinks.rotateConfirm')).toBeNull()
+      // Rendered from the RESPONSE — no refetch round trip.
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'lan')!)
+      })
+      expect(writeText).toHaveBeenCalledWith(rotated)
+    })
+
+    it('drops the Copied badge — the clipboard holds the RETIRED link', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'lan')!)
+      })
+      expect(part('AccessLinks.copy', 'lan')).toHaveTextContent('Copied')
+
+      fireEvent.click(part('AccessLinks.rotate', 'lan')!)
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('AccessLinks.rotateConfirmSubmit'))
+      })
+      // Red before the F3 fix: the badge kept saying Copied next to a link the
+      // clipboard no longer held.
+      expect(part('AccessLinks.copy', 'lan')).toHaveTextContent('Copy')
+    })
+
+    it('cancel closes the confirm and calls nothing', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      fireEvent.click(part('AccessLinks.rotate', 'lan')!)
+      fireEvent.click(screen.getByTestId('AccessLinks.rotateConfirmCancel'))
+      expect(screen.queryByTestId('AccessLinks.rotateConfirm')).toBeNull()
+      expect(api.authcfgRotateLanKey).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('the web transport', () => {
+    beforeEach(() => {
+      api.platform = 'web'
+    })
+
+    it('reads the link through authcfg:lan-link when the editor is open', async () => {
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+
+      expect(api.authcfgLanLink).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(row('lan')).toHaveTextContent(/LINK \+ PASSWORD/))
+    })
+
+    it('renders LOCKED — masked, no ceremony — when the editor is locked', async () => {
+      api.authcfgLanLink.mockRejectedValue(new Error(NEEDS_SETTINGS_SESSION_ERROR))
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+
+      await waitFor(() =>
+        expect(row('lan')).toHaveTextContent(/Unlock in Session security to reveal/)
+      )
+      expect(part('AccessLinks.url', 'lan')).toBeFalsy()
+      expect(part('AccessLinks.copy', 'lan')).toBeFalsy()
+      expect(part('AccessLinks.rotate', 'lan')).toBeFalsy()
+    })
+
+    it('re-locks rather than retrying when the session lapses under a rotate', async () => {
+      api.authcfgRotateLanKey.mockRejectedValue(new Error(NEEDS_SETTINGS_SESSION_ERROR))
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+      await waitFor(() => expect(part('AccessLinks.rotate', 'lan')).toBeTruthy())
+
+      fireEvent.click(part('AccessLinks.rotate', 'lan')!)
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('AccessLinks.rotateConfirmSubmit'))
+      })
+
+      expect(api.authcfgRotateLanKey).toHaveBeenCalledTimes(1)
+      expect(row('lan')).toHaveTextContent(/Unlock in Session security to reveal/)
+    })
+
+    it('says the run serves no LAN address on the typed unavailable refusal', async () => {
+      api.authcfgLanLink.mockRejectedValue(new Error(LAN_LINK_UNAVAILABLE_ERROR))
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+
+      await waitFor(() => expect(row('lan')).toHaveTextContent(/serves no LAN address/))
+    })
+
+    it('offers no tunnel Start: starting a listener is host-anchor work', async () => {
+      renderCard(makeStatus())
+      await settle()
+      expect(part('AccessLinks.tunnelToggle', 'tunnel')).toBeFalsy()
+    })
+  })
+
+  describe('the passkey-less first device (item D)', () => {
+    it('serve UP + zero passkeys: the share action mints an ENROLLMENT link', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, credentialCount: 0 })
+      renderCard(makeStatus({ tls: tlsStatus(TAILNET_URL) }))
+      await settle()
+
+      expect(row('tailnet')).toHaveTextContent(/ENROLL FIRST DEVICE/)
+      expect(row('tailnet')).toHaveTextContent(/single-use enrollment link/)
+
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'tailnet')!)
+      })
+      expect(api.webauthnMintEnrollToken).toHaveBeenCalledTimes(1)
+      expect(writeText).toHaveBeenCalledWith(`${TAILNET_URL}#enroll=tok`)
+
+      // Tokens are single-use, so each action mints its own.
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.qr', 'tailnet')!)
+      })
+      expect(api.webauthnMintEnrollToken).toHaveBeenCalledTimes(2)
+    })
+
+    it('shows NO transcribable URL: only a masked MINTED link, and only after a mint', async () => {
+      // Red before the F2 fix: the row rendered the plain serve URL above copy
+      // describing a different, minted link — a string an operator can hand-type
+      // straight into a credential-less sign-in screen, which is the trap this
+      // whole branch exists to prevent.
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, credentialCount: 0 })
+      renderCard(makeStatus({ tls: tlsStatus(TAILNET_URL) }))
+      await settle()
+
+      expect(part('AccessLinks.url', 'tailnet')).toBeFalsy()
+      expect(row('tailnet')).not.toHaveTextContent(TAILNET_URL)
+
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'tailnet')!)
+      })
+      const shown = part('AccessLinks.url', 'tailnet')!
+      expect(shown).toHaveTextContent('#enroll=…')
+      expect(shown.textContent).not.toContain('tok')
+    })
+
+    it('flips off the offer when a phone enrols, without waiting for a window blur', async () => {
+      // The enrolling device becomes a connected client, which is the only
+      // signal this card gets that the offer it is showing has been taken up.
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, credentialCount: 0 })
+      const view = render(
+        <AccessLinks
+          status={makeStatus({ tls: tlsStatus(TAILNET_URL) })}
+          onSetTunnel={vi.fn()}
+          onSetPassword={vi.fn()}
+        />
+      )
+      await settle()
+      expect(row('tailnet')).toHaveTextContent(/ENROLL FIRST DEVICE/)
+
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, credentialCount: 1 })
+      await act(async () => {
+        view.rerender(
+          <AccessLinks
+            status={makeStatus({ tls: tlsStatus(TAILNET_URL), connectedClients: 1 })}
+            onSetTunnel={vi.fn()}
+            onSetPassword={vi.fn()}
+          />
+        )
+      })
+      await waitFor(() => expect(row('tailnet')).toHaveTextContent(/PASSKEY/))
+      expect(row('tailnet')).not.toHaveTextContent(/ENROLL FIRST DEVICE/)
+    })
+
+    it('serve UP + credentials exist: the plain tailnet link, no mint', async () => {
+      renderCard(makeStatus({ tls: tlsStatus(TAILNET_URL) }))
+      await settle()
+
+      expect(row('tailnet')).toHaveTextContent(/PASSKEY/)
+      expect(row('tailnet')).not.toHaveTextContent(/ENROLL FIRST DEVICE/)
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'tailnet')!)
+      })
+      expect(api.webauthnMintEnrollToken).not.toHaveBeenCalled()
+      expect(writeText).toHaveBeenCalledWith(TAILNET_URL)
+    })
+
+    it('serve DOWN: no enrollment offer at all — minting cannot work there', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, credentialCount: 0 })
+      renderCard(makeStatus({ lanUrl: LAN_LINK, tls: null }))
+      await settle()
+
+      expect(row('tailnet')).toBeFalsy()
+      expect(screen.queryByText(/ENROLL FIRST DEVICE/)).toBeNull()
+      // The LAN row with password identity IS this install's path.
+      expect(row('lan')).toHaveTextContent(/LINK \+ PASSWORD/)
+    })
+
+    it('no passkeys, no password, no serve: says exactly that and withholds the links', async () => {
+      api.getRemoteConfig.mockResolvedValue({
+        ...baseConfig,
+        credentialCount: 0,
+        passwordSet: false
+      })
+      renderCard(makeStatus({ lanUrl: LAN_LINK, tunnelUrl: 'https://t.example/remote#k=cd' }))
+      await settle()
+
+      expect(screen.getByTestId('AccessLinks.deadEnd')).toHaveTextContent(
+        /Set a password or enable Tailscale HTTPS to connect a device/
+      )
+      expect(part('AccessLinks.url', 'lan')).toBeFalsy()
+      expect(part('AccessLinks.url', 'tunnel')).toBeFalsy()
+      // One warning, not two: the dead end is the stronger statement.
+      expect(screen.queryByTestId('AccessLinks.passwordWarning')).toBeNull()
+    })
+
+    it('reports a refused mint in the row rather than silently doing nothing', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, credentialCount: 0 })
+      api.webauthnMintEnrollToken.mockRejectedValue(new Error(ENROLL_UNAVAILABLE_ERROR))
+      renderCard(makeStatus({ tls: tlsStatus(TAILNET_URL) }))
+      await settle()
+
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.copy', 'tailnet')!)
+      })
+      expect(part('AccessLinks.error', 'tailnet')).toHaveTextContent(/need Tailscale HTTPS/)
+      expect(writeText).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('the shared password warning', () => {
+    it('appears when LAN/tunnel identity is missing, and leads to the setting', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, passwordSet: false })
+      // A LAN run: the origin whose identity IS the password. (A TLS run has no
+      // LAN row at all — see the F7 case below.)
+      const { onSetPassword } = renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      expect(screen.getByTestId('AccessLinks.passwordWarning')).toHaveTextContent(
+        /Tunnel and LAN sign-in require a password/
+      )
+      fireEvent.click(screen.getByTestId('AccessLinks.setPassword'))
+      expect(onSetPassword).toHaveBeenCalled()
+    })
+
+    it('stays away when a password is provisioned', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+      expect(screen.queryByTestId('AccessLinks.passwordWarning')).toBeNull()
+    })
+
+    it('stays away on a TLS-only install: no LAN link, no tunnel, nothing to warn about', async () => {
+      // Red before the F7 fix: a passkey-only tailnet install was nagged to
+      // provision a credential for two origins it does not serve.
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, passwordSet: false })
+      renderCard(makeStatus({ lanUrl: null, tls: tlsStatus(TAILNET_URL) }))
+      await settle()
+
+      expect(screen.queryByTestId('AccessLinks.passwordWarning')).toBeNull()
+      expect(screen.queryByTestId('AccessLinks.deadEnd')).toBeNull()
+    })
+  })
+
+  describe('the tunnel row', () => {
+    it('confirms the restart before switching the tunnel on', async () => {
+      const { onSetTunnel } = renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      fireEvent.click(part('AccessLinks.tunnelToggle', 'tunnel')!)
+      expect(screen.getByTestId('AccessLinks.tunnelConfirm')).toHaveTextContent(
+        /the remote server restarts/
+      )
+      expect(onSetTunnel).not.toHaveBeenCalled()
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('AccessLinks.tunnelConfirmSubmit'))
+      })
+      expect(onSetTunnel).toHaveBeenCalledWith(true)
+    })
+
+    it('TLS install: the confirm says the tailnet origin goes away with it', async () => {
+      // Red before the F1 fix. `RemoteServer.start` makes tunnel and
+      // `tailscale serve` mutually exclusive per run (tunnel wins), so on a TLS
+      // install this control silently trades away passkey sign-in AND the only
+      // origin an enrollment link can bind to.
+      renderCard(makeStatus({ tls: tlsStatus(TAILNET_URL) }))
+      await settle()
+
+      fireEvent.click(part('AccessLinks.tunnelToggle', 'tunnel')!)
+      expect(screen.getByTestId('AccessLinks.tunnelConfirmTlsCost')).toHaveTextContent(
+        /stops Tailscale HTTPS: passkey sign-in and adding a new device are unavailable/
+      )
+    })
+
+    it('no TLS configured: the confirm keeps the plain restart copy', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK, tls: null }))
+      await settle()
+
+      fireEvent.click(part('AccessLinks.tunnelToggle', 'tunnel')!)
+      expect(screen.getByTestId('AccessLinks.tunnelConfirm')).toHaveTextContent(
+        /the remote server restarts/
+      )
+      expect(screen.queryByTestId('AccessLinks.tunnelConfirmTlsCost')).toBeNull()
+    })
+
+    it('surfaces a failed restart in the row', async () => {
+      const { onSetTunnel } = renderCard(makeStatus({ lanUrl: LAN_LINK }), {
+        onSetTunnel: async () => {
+          throw new Error('listen EADDRINUSE')
+        }
+      })
+      await settle()
+
+      fireEvent.click(part('AccessLinks.tunnelToggle', 'tunnel')!)
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('AccessLinks.tunnelConfirmSubmit'))
+      })
+      expect(onSetTunnel).toHaveBeenCalled()
+      expect(part('AccessLinks.error', 'tunnel')).toHaveTextContent(/EADDRINUSE/)
+    })
+
+    it('offers Stop while the tunnel runs, and shows its link', async () => {
+      renderCard(
+        makeStatus({
+          lanUrl: LAN_LINK,
+          tunnelState: 'connected',
+          tunnelUrl: 'https://t.example/remote#k=cd'
+        })
+      )
+      await settle()
+
+      expect(part('AccessLinks.tunnelToggle', 'tunnel')).toHaveTextContent('Stop')
+      expect(part('AccessLinks.url', 'tunnel')).toHaveTextContent('https://t.example/remote')
+      expect(row('tunnel')).toHaveTextContent(/connected/)
+    })
+  })
+})

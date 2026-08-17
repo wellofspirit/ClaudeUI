@@ -3541,6 +3541,44 @@ describe('RemoteServer — the LAN channel key (ADR-056)', () => {
     expect(server.rotateLanKey()).toBeNull()
   })
 
+  /**
+   * `getStatus().lanUrl` while a tunnel runs — the THREE cases, because the
+   * obvious rule ("no LAN link while a tunnel runs") would hide a link that
+   * works. `classifyConnectionOrigin` consults its non-loopback-peer arm BEFORE
+   * `tunnelActive`, so only the loopback-bound run is genuinely dead.
+   *
+   * The tunnel is faked by setting the run-state flag `start({tunnel: true})`
+   * sets — the same private this file already reads for the LAN key — rather
+   * than launching cloudflared for a URL-shape assertion.
+   */
+  const setTunnelRunState = (): void => {
+    ;(server as unknown as { tunnelE2eKey: string | null }).tunnelE2eKey = 'ef'.repeat(32)
+  }
+
+  it('LOOPBACK bind, NO tunnel: the fragment-less link is offered', async () => {
+    await server.start(port, '127.0.0.1')
+    expect(server.getStatus().lanUrl).toBe(`http://127.0.0.1:${port}/remote`)
+  })
+
+  it('LOOPBACK bind + tunnel: suppressed — that origin owes the TUNNEL channel', async () => {
+    await server.start(port, '127.0.0.1')
+    setTunnelRunState()
+    // The URL itself still exists; what changed is that a loopback peer now
+    // classifies `tunnel` and would be refused 4004 for opening no channel, so
+    // the status must not advertise it.
+    expect(server.lanLink()).toBe(`http://127.0.0.1:${port}/remote`)
+    expect(server.getStatus().lanUrl).toBeNull()
+  })
+
+  it('LAN bind + tunnel: the #k= link keeps working and is still offered', async () => {
+    await server.start(port, '0.0.0.0')
+    setTunnelRunState()
+    // A LAN peer is non-loopback, so it takes the `lan` arm and is measured
+    // against the LAN key — the tunnel changes nothing for it.
+    expect(server.getStatus().lanUrl).toBe(server.lanLink())
+    expect(server.getStatus().lanUrl).toContain(`#k=${lanKey()}`)
+  })
+
   it('the key leaves MEMORY on stop but survives in the DB', async () => {
     await server.start(port, '0.0.0.0')
     const key = lanKey()!
