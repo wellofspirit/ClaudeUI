@@ -27,7 +27,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import { PI_BRIDGE_EXTENSION_SOURCE } from '../../main/pi/pi-bridge-source'
+import { PI_BRIDGE_EXTENSION_SOURCE } from '../../core/pi/pi-bridge-source'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'

@@ -6,7 +6,7 @@
  * model clause and the 15-id cap on the cached-list branch.
  */
 import { describe, it, expect } from 'vitest'
-import { describeDispatchModels } from '../dispatch-model-hint'
+import { describeDispatchModels } from '../../../core/services/dispatch-model-hint'
 
 describe('describeDispatchModels', () => {
   it('allowlist set: lists verbatim ids, uncapped, with no default clause when unset', () => {

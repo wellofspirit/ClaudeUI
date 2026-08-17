@@ -19,7 +19,7 @@ import {
   sanitizeHeaderFilename,
   sentFileDisposition,
   validateImagePreview
-} from '../sent-file-security'
+} from '../../core/sent-file-security'
 
 // A 1x1 transparent PNG.
 const PNG_BYTES = Buffer.from(

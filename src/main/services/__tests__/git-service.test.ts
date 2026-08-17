@@ -14,8 +14,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { GitService, gitServiceManager } from '../git-service'
-import { logger } from '../logger'
+import { GitService, gitServiceManager } from '../../../core/services/git-service'
+import { logger } from '../../../core/services/logger'
 import type { GitStatusData } from '../../../shared/types'
 import {
   makeTempGitRepo,

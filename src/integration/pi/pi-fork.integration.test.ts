@@ -43,7 +43,7 @@ import { existsSync, mkdtempSync, rmSync, readFileSync, readdirSync } from 'node
 import { createHash } from 'node:crypto'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { PiRpcClient } from '../../main/pi/PiRpcClient'
+import { PiRpcClient } from '../../core/pi/PiRpcClient'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'

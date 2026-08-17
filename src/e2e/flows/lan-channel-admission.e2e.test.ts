@@ -41,7 +41,7 @@ vi.mock('electron', () => ({
   app: { getAppPath: () => process.cwd(), isPackaged: false }
 }))
 
-vi.mock('../../main/services/logger', () => ({
+vi.mock('../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -49,7 +49,7 @@ vi.mock('../../main/services/logger', () => ({
  * No tunnel in this file: the LAN origin is reached through the `LanServer`
  * classification seam below, not by dressing a socket up as a tunnel client.
  */
-vi.mock('../../main/services/tunnel-manager', () => {
+vi.mock('../../core/services/tunnel-manager', () => {
   class StubTunnelManager {
     setStatusHandler(): void {}
     getStatus(): { state: 'stopped'; url: null; error: null } {
@@ -71,8 +71,8 @@ const { configRef } = vi.hoisted(() => ({
   configRef: { current: { authPolicy: null, lanE2eKey: null } as Record<string, unknown> }
 }))
 
-vi.mock('../../main/services/db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../main/services/db')>()
+vi.mock('../../core/services/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/db')>()
   return {
     ...actual,
     getRemoteConfig: () => configRef.current,
@@ -84,17 +84,17 @@ vi.mock('../../main/services/db', async (importOriginal) => {
   }
 })
 
-vi.mock('../../main/services/claude-session', () => ({
+vi.mock('../../core/services/claude-session', () => ({
   ClaudeSession: { addExtraWindow: vi.fn(), removeExtraWindow: vi.fn() }
 }))
 
-import { RemoteServer } from '../../main/services/remote-server'
-import { RemoteDispatcher } from '../../main/services/remote-dispatcher'
-import { commandRegistry } from '../../main/ipc/command-registry'
-import { computeStoredCredential } from '../../main/services/remote-auth'
-import { emitEvent, syncCore } from '../../main/services/sync-host'
-import type { ConnectionOrigin } from '../../main/services/remote-server'
-import type { PasswordAuthProvider } from '../../main/services/remote-auth'
+import { RemoteServer } from '../../core/services/remote-server'
+import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
+import { commandRegistry } from '../../core/ipc/command-registry'
+import { computeStoredCredential } from '../../core/services/remote-auth'
+import { emitEvent, syncCore } from '../../core/services/sync-host'
+import type { ConnectionOrigin } from '../../core/services/remote-server'
+import type { PasswordAuthProvider } from '../../core/services/remote-auth'
 import type { WsServerMessage, WsSyncFull } from '../../shared/remote-protocol'
 
 /**

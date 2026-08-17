@@ -14,24 +14,24 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: vi.fn(), release: vi.fn() }
 }))
-vi.mock('../../opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
+vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
 const { mockInvalidateOpencodeModelCache } = vi.hoisted(() => ({
   mockInvalidateOpencodeModelCache: vi.fn()
 }))
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/model-discovery', () => ({
   invalidateOpencodeModelCache: mockInvalidateOpencodeModelCache
 }))
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/fake/persisted'
 }))
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }
 }))
 
-import { OpencodeAuthProvider } from '../OpencodeAuthProvider'
+import { OpencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 
 describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
   let tmpDir: string

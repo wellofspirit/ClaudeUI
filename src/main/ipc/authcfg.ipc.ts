@@ -27,7 +27,7 @@ import {
   registerCommand,
   type CommandConnection,
   type CommandRegistration
-} from './command-registry'
+} from '../../core/ipc/command-registry'
 import {
   authcfgApply,
   authcfgEnd,
@@ -37,8 +37,8 @@ import {
   authcfgSetPassword,
   type AuthcfgApplyPatch,
   type AuthcfgHost
-} from './authcfg-commands'
-import { AUTHCFG_CHANNELS, AUTHCFG_FREE_CHANNELS } from '../services/step-up-tier'
+} from '../../core/ipc/authcfg-commands'
+import { AUTHCFG_CHANNELS, AUTHCFG_FREE_CHANNELS } from '../../core/services/step-up-tier'
 
 /**
  * The channels to clear before re-registering — both classifier sets, read from

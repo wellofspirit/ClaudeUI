@@ -21,17 +21,17 @@ import {
   channelSpec,
   deliveryDeltas,
   volatileStreamChannels
-} from '../../../shared/sync/channels'
-import { applyEvent, emptyAux } from '../../../shared/sync/reducer'
+} from '../../../core/shared/sync/channels'
+import { applyEvent, emptyAux } from '../../../core/shared/sync/reducer'
 import {
   sessionIdOfStream,
   streamEventScopeOf,
   streamFrameFrom,
   streamFrameToEmission
-} from '../../../shared/sync/stream'
-import { emptyCanonicalState, emptySession, type CanonicalState } from '../../../shared/sync/state'
-import { STREAM_WATCH_COMMAND } from '../stream-watch'
-import { GIT_WATCH_COMMAND } from '../git-watch'
+} from '../../../core/shared/sync/stream'
+import { emptyCanonicalState, emptySession, type CanonicalState } from '../../../core/shared/sync/state'
+import { STREAM_WATCH_COMMAND } from '../../../core/ipc/stream-watch'
+import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
 
 /** A canonical state holding one session — the minimum a stream frame needs. */
 function stateWithSession(routingId: string): CanonicalState {
@@ -42,7 +42,7 @@ function stateWithSession(routingId: string): CanonicalState {
 const REPO = process.cwd()
 
 /** The delivery adapter — the ONE file allowed to fan out. */
-const DELIVERY_ADAPTER = 'src/main/services/sync-host.ts'
+const DELIVERY_ADAPTER = 'src/core/services/sync-host.ts'
 
 /**
  * No shim files as of SyncCore phase 4c. 4a had one — `remote-bridge.ts` kept a
@@ -66,7 +66,7 @@ function walk(dir: string, out: string[] = [], exts: string[] = ['.ts']): string
   return out
 }
 
-const MAIN_SOURCES = walk('src/main')
+const MAIN_SOURCES = [...walk('src/main'), ...walk('src/core')]
 
 function read(rel: string): string {
   return fs.readFileSync(path.join(REPO, rel), 'utf-8')
@@ -91,7 +91,7 @@ describe('emission funnel (item 2)', () => {
   it('the scan sees the tree it thinks it sees (non-vacuity)', () => {
     expect(MAIN_SOURCES.length).toBeGreaterThan(50)
     expect(MAIN_SOURCES).toContain(DELIVERY_ADAPTER)
-    expect(MAIN_SOURCES).toContain('src/main/providers/BaseSession.ts')
+    expect(MAIN_SOURCES).toContain('src/core/providers/BaseSession.ts')
   })
 
   it('the extra-window registry is GONE from the tree (4c)', () => {
@@ -175,7 +175,7 @@ describe('emission funnel (item 2)', () => {
     const ALLOWED = new Set([
       // Only `voice:state` / `voice:transcript` (microphone capture belongs to the
       // machine with the microphone). `voice:error` goes through the funnel.
-      'src/main/services/voice-client.ts',
+      'src/core/services/voice-client.ts',
       // The separate log-viewer BrowserWindow: `log-viewer:*`, host diagnostics.
       'src/main/services/log-viewer.ts',
       // `plugin:<id>:<event>` (ADR-005) — matched by the `plugin:` PREFIX spec,
@@ -230,7 +230,7 @@ describe('emission funnel (item 2)', () => {
   })
 
   it('BaseSession.send delegates to the funnel rather than sending directly', () => {
-    const src = read('src/main/providers/BaseSession.ts')
+    const src = read('src/core/providers/BaseSession.ts')
     expect(src).toMatch(/protected send\([\s\S]{0,400}?emitEvent\(/)
     expect(src).not.toMatch(/this\.win\.webContents\.send\(/)
     // 4c: a session emission names no window at all — every channel it emits is
@@ -247,19 +247,19 @@ describe('snapshot path is synchronous (phase 4b, invariant 2)', () => {
   // had to under-claim around (remote.md defect 3) — and a behavioral test would
   // only catch it on the interleaving it happens to produce.
   it('SyncCore.getSnapshot and toSnapshot are not async and contain no await', () => {
-    const core = read('src/main/sync/sync-core.ts')
+    const core = read('src/core/sync/sync-core.ts')
     const snapshotFn = /getSnapshot\(\)[^{]*\{([\s\S]*?)\n {2}\}/.exec(core)
     expect(snapshotFn, 'getSnapshot() not found in sync-core.ts').not.toBeNull()
     expect(snapshotFn![1]).not.toMatch(/\bawait\b/)
     expect(core).not.toMatch(/async\s+getSnapshot/)
 
-    const state = read('src/shared/sync/state.ts')
+    const state = read('src/core/shared/sync/state.ts')
     expect(state).not.toMatch(/async\s+function\s+(to|from)Snapshot/)
     expect(state).not.toMatch(/\bawait\b/)
   })
 
   it('remote-server serves sync-full and /sent-file from canonical, never a renderer pull', () => {
-    const src = read('src/main/services/remote-server.ts')
+    const src = read('src/core/services/remote-server.ts')
     // The whole point of the cutover: no window is involved in a snapshot, so a
     // busy/hung/absent renderer cannot degrade a reconnect. (Matched on the CALL,
     // not the word — the doc comments explain what was removed.)
@@ -315,7 +315,7 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     const unclassified = [...emittedChannels()].filter((c) => !channelSpec(c)).sort()
     expect(
       unclassified,
-      `unclassified channels (add them to src/shared/sync/channels.ts): ${unclassified.join(', ')}`
+      `unclassified channels (add them to src/core/shared/sync/channels.ts): ${unclassified.join(', ')}`
     ).toEqual([])
   })
 
@@ -370,7 +370,7 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     // dropped from >30 to the size of that set, and the coverage that used to come
     // from counting call sites now comes from the classification itself: every
     // canonical channel has a reducer branch, pinned by the reducer-coverage test.
-    const declared = [...read('src/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
+    const declared = [...read('src/core/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
       (m) => m[1]
     )
     expect(declared.length).toBeGreaterThan(30)
@@ -475,7 +475,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   it('the interim `volatile-pending-phase-5` class is GONE, not merely empty', () => {
     // Deletion is the retirement (4a rule 1). An empty option left in the union
     // would let a future channel be parked there with no lane to ride.
-    expect(readCode('src/shared/sync/channels.ts')).not.toContain('volatile-pending-phase-5')
+    expect(readCode('src/core/shared/sync/channels.ts')).not.toContain('volatile-pending-phase-5')
     for (const spec of Object.values(CHANNEL_SPECS)) {
       expect(['replicated', 'volatile', 'host-local']).toContain(spec.cls)
     }
@@ -546,7 +546,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   it('volatile ⇒ no reducer branch, and applyEvent refuses one', () => {
     // Both halves matter. The SOURCE half: a `case 'session:stream':` growing
     // back would be a second accumulator racing `applyStreamFrame`.
-    const reducerSrc = readCode('src/shared/sync/reducer.ts')
+    const reducerSrc = readCode('src/core/shared/sync/reducer.ts')
     for (const channel of volatile) {
       expect(reducerSrc).not.toContain(`case '${channel}':`)
     }
@@ -578,7 +578,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     // those frames instead. For a TAIL it is the opposite: the pass-through
     // flavor exists so the existing per-channel listeners keep working verbatim,
     // so an entry that vanished would delete a live subscription.
-    const declared = [...read('src/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
+    const declared = [...read('src/core/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
       (m) => m[1]
     )
     expect(declared.length).toBeGreaterThan(30)
@@ -655,7 +655,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     // And the frames go out through the stream registry, never `addSyncSubscriber`.
     const host = readCode(DELIVERY_ADAPTER)
     expect(host).toMatch(/syncCore\.setStreamDelivery\(streamDelivery\)/)
-    const core = readCode('src/main/sync/sync-core.ts')
+    const core = readCode('src/core/sync/sync-core.ts')
     expect(core).toMatch(/spec\.cls === 'volatile'/)
     expect(core).toMatch(/spec\.volatileFlavor === 'pass-through'/)
   })
@@ -666,7 +666,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     // terminal frame cannot take that branch. A missing EVENT is a permanent hole
     // in a seq-ordered stream; a missing stream frame heals or is lossy by
     // contract.
-    const server = readCode('src/main/services/remote-server.ts')
+    const server = readCode('src/core/services/remote-server.ts')
     expect(server).toMatch(/addStreamSubscriber\(connectionId, \(frame\) => \{/)
     expect(server).toMatch(/if \(this\.streamCongested\(ws, newClient\)\) return/)
     expect(server).toMatch(/STREAM_BACKPRESSURE_BYTES/)
@@ -686,7 +686,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     expect(GIT_WATCH_COMMAND.kind).toBe('query')
     expect(GIT_WATCH_COMMAND.withConnection).toBe(true)
     // The owner ids are DELETED, not merely unused — deletion is the retirement.
-    const registry = readCode('src/main/services/git-watch-registry.ts')
+    const registry = readCode('src/core/services/git-watch-registry.ts')
     expect(registry).not.toMatch(/GIT_WATCH_OWNER/)
     expect(registry).not.toMatch(/releaseOwner|startWatching|stopWatching/)
     // And the wire event is untouched: still replicated, still ringed.
@@ -695,15 +695,14 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
 })
 
 describe('no-Electron fence (item 10)', () => {
-  it('is configured for BOTH fenced trees', () => {
+  it('fences src/core', () => {
     const config = read('eslint.config.mjs')
     expect(config).toContain('no-restricted-imports')
-    expect(config).toContain('src/main/sync/**')
-    expect(config).toContain('src/shared/sync/**')
+    expect(config).toContain('src/core/**/*.{ts,tsx}')
   })
 
   it('no source under the fence imports electron (belt to the lint braces)', () => {
-    const fenced = [...walk('src/main/sync'), ...walk('src/shared/sync')]
+    const fenced = walk('src/core')
     expect(fenced.length).toBeGreaterThan(4)
     const offenders = fenced.filter((rel) =>
       /from\s+['"](electron|electron\/|@electron)/.test(read(rel))

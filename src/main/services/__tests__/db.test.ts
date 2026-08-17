@@ -28,8 +28,8 @@ import {
   MIGRATIONS,
   type Migration,
   type Db
-} from '../db'
-import { logger } from '../logger'
+} from '../../../core/services/db'
+import { logger } from '../../../core/services/logger'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
 beforeEach(() => {

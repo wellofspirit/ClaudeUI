@@ -14,14 +14,14 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 // The service's DEFAULT store reads the operational DB. Every test here injects
 // an in-memory store instead, but the module-level `webauthnService` singleton
 // is constructed at import time, so `./db` must still resolve harmlessly.
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   listWebauthnCredentials: () => [],
   getWebauthnCredential: () => null,
   countWebauthnCredentials: () => 0,
@@ -38,8 +38,8 @@ import {
   normalizeNickname,
   resolveWebauthnOrigin,
   type WebauthnCredentialStore
-} from '../webauthn-service'
-import type { WebauthnCredentialRow } from '../db'
+} from '../../../core/services/webauthn-service'
+import type { WebauthnCredentialRow } from '../../../core/services/db'
 import { VirtualAuthenticator } from '../../../test/helpers/webauthn-authenticator'
 
 // ---------------------------------------------------------------------------

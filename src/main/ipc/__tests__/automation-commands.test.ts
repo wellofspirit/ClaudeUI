@@ -16,20 +16,20 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 const appendAuditLog = vi.hoisted(() => vi.fn())
-vi.mock('../../services/db', () => ({ appendAuditLog }))
+vi.mock('../../../core/services/db', () => ({ appendAuditLog }))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { AUTOMATION_COMMANDS, setAutomationManager } from '../automation-commands'
+import { AUTOMATION_COMMANDS, setAutomationManager } from '../../../core/ipc/automation-commands'
 import {
   CommandRegistry,
   makeRemoteConnection,
   AUTH_OFF_GRANTS,
   ENROLL_ONLY_GRANTS
-} from '../command-registry'
-import type { AutomationManager } from '../../services/automation-manager'
+} from '../../../core/ipc/command-registry'
+import type { AutomationManager } from '../../../core/services/automation-manager'
 
 const managerSpies = {
   list: vi.fn(() => [{ id: 'a1' }]),

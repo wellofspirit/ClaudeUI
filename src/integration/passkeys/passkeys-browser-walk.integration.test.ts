@@ -72,9 +72,9 @@ import * as nodeFs from 'node:fs'
 import type { Browser } from 'playwright'
 import type { CoreBoot } from '../../main/boot-core'
 import type { TestIpcBridge } from '../../test/bridges/test-ipc-bridge'
-import type { TailscaleManager, ServeOccupancy } from '../../main/services/tailscale-manager'
+import type { TailscaleManager, ServeOccupancy } from '../../core/services/tailscale-manager'
 import type { WebauthnCredential, RemoteConfig, RemoteStatus } from '../../shared/types'
-import type { AuditLogRow } from '../../main/services/db'
+import type { AuditLogRow } from '../../core/services/db'
 import {
   closeWalkPage,
   exportCredentials,
@@ -152,8 +152,8 @@ vi.mock('electron', async () => {
 // client makes on mount (`session:get-models` / `get-engine-models`) with empty
 // lists rather than `undefined` — otherwise every page load prints two
 // dispatcher errors that have nothing to do with what is being verified.
-vi.mock('../../main/sdk', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../main/sdk')>()
+vi.mock('../../core/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/sdk')>()
   return {
     ...actual,
     query: vi.fn(() => ({
@@ -172,7 +172,7 @@ vi.mock('../../main/sdk', async (importOriginal) => {
 // Leaf services that would spawn subprocesses, poll the network, or download a
 // binary. Same list (and same reasons) as `windowless-boot.e2e.test.ts`.
 // `tailscale-manager` is pointedly NOT here: the serve proxy is the point.
-vi.mock('../../main/services/usage-fetcher', () => ({
+vi.mock('../../core/services/usage-fetcher', () => ({
   usageFetcher: {
     setSessionGetter: vi.fn(),
     setIntervalSecs: vi.fn(),
@@ -188,7 +188,7 @@ vi.mock('../../main/services/service-session', () => ({
     stop: vi.fn()
   }
 }))
-vi.mock('../../main/services/block-usage', () => ({
+vi.mock('../../core/services/block-usage', () => ({
   blockUsageService: {
     setDebounceSecs: vi.fn(),
     startWatching: vi.fn(),
@@ -197,7 +197,7 @@ vi.mock('../../main/services/block-usage', () => ({
     setAccountFilter: vi.fn()
   }
 }))
-vi.mock('../../main/auth/vault/CredentialSync', () => ({
+vi.mock('../../core/auth/vault/CredentialSync', () => ({
   credentialSync: {
     configure: vi.fn(),
     start: vi.fn(async () => {}),
@@ -205,7 +205,7 @@ vi.mock('../../main/auth/vault/CredentialSync', () => ({
     getStatus: vi.fn(() => ({ connected: false }))
   }
 }))
-vi.mock('../../main/shared-providers', () => ({
+vi.mock('../../core/shared-providers', () => ({
   sharedProviderService: {
     syncAll: vi.fn(async () => {}),
     listDefinitions: vi.fn(() => []),
@@ -220,7 +220,7 @@ vi.mock('../../main/shared-providers', () => ({
     setRouteDefaultModel: vi.fn(async () => {})
   }
 }))
-vi.mock('../../main/opencode/OpencodeServerManager', () => ({
+vi.mock('../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
@@ -228,14 +228,14 @@ vi.mock('../../main/opencode/OpencodeServerManager', () => ({
     dispose: vi.fn()
   }
 }))
-vi.mock('../../main/opencode/model-discovery', () => ({
+vi.mock('../../core/opencode/model-discovery', () => ({
   discoverOpencodeModels: vi.fn(async () => []),
   invalidateOpencodeModelCache: vi.fn(),
   discoverOpencodeProviderCatalog: vi.fn(async () => []),
   getOpencodeProviderModels: vi.fn(async () => []),
   resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m)
 }))
-vi.mock('../../main/pi/model-discovery', () => ({
+vi.mock('../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   invalidatePiModelCache: vi.fn(),
@@ -243,11 +243,11 @@ vi.mock('../../main/pi/model-discovery', () => ({
   getPiModelCatalog: vi.fn(async () => []),
   effortLevelsFromModel: vi.fn(() => [])
 }))
-vi.mock('../../main/pi/pi-locate', () => ({
+vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
   locatePiBinary: vi.fn(() => null)
 }))
-vi.mock('../../main/services/cross-engine-dispatcher', () => ({
+vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
     dispatch: vi.fn(),
     resolveApproval: vi.fn(() => false),
@@ -257,16 +257,16 @@ vi.mock('../../main/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
-vi.mock('../../main/services/voice-capture', () => ({
+vi.mock('../../core/services/voice-capture', () => ({
   startRecording: vi.fn(() => false),
   stopRecording: vi.fn()
 }))
-vi.mock('../../main/services/voice-client', () => ({ VoiceClient: class {} }))
-vi.mock('../../main/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
-vi.mock('../../main/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../main/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
+vi.mock('../../core/services/voice-client', () => ({ VoiceClient: class {} }))
+vi.mock('../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
+vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
+vi.mock('../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 // Ships a CloudFlare download path; RemoteServer constructs one unconditionally.
-vi.mock('../../main/services/tunnel-manager', () => ({
+vi.mock('../../core/services/tunnel-manager', () => ({
   TunnelManager: class {
     setStatusHandler(): void {}
     getStatus(): { state: 'stopped'; url: null; error: null } {
@@ -481,7 +481,7 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       `built web client missing at ${webIndex} — run bun run build:web`
     ).toBe(true)
 
-    const { TailscaleManager: Manager } = await import('../../main/services/tailscale-manager')
+    const { TailscaleManager: Manager } = await import('../../core/services/tailscale-manager')
     tailscale = new Manager()
     const detection = await tailscale.detect()
     expect(detection.state, `tailscale not ready: ${JSON.stringify(detection)}`).toBe('ok')
@@ -509,7 +509,7 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     bridge = new Bridge()
     setIpcBridge(bridge)
 
-    const db = await import('../../main/services/db')
+    const db = await import('../../core/services/db')
     auditLogReader = db.listAuditLog
     // The persisted config the production start path reads. Random loopback
     // port (0), loopback bind, TLS mode on, pinned to the walk's HTTPS port.

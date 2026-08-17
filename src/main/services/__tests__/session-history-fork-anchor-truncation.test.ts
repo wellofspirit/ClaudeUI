@@ -28,7 +28,7 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: (): string => TMP_HOME }
 })
 
-import { loadSessionHistory } from '../session-history'
+import { loadSessionHistory } from '../../../core/services/session-history'
 
 const PROJECT_KEY = 'test-project-fork'
 const SESSION_ID = '99999999-8888-7777-6666-555555555555'

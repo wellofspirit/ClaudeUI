@@ -17,8 +17,8 @@ import {
   dbPasswordAuthProvider,
   safeHexEqual,
   MIN_PASSWORD_LENGTH
-} from '../remote-auth'
-import type { RemoteConfigRow } from '../db'
+} from '../../../core/services/remote-auth'
+import type { RemoteConfigRow } from '../../../core/services/db'
 
 // provisionPassword writes through to the DB and the auth provider reads from
 // it — stub both db.ts entry points so this stays a pure unit test of
@@ -28,7 +28,7 @@ const { dbSetRemotePassword, configRef } = vi.hoisted(() => ({
   dbSetRemotePassword: vi.fn(),
   configRef: { current: null as RemoteConfigRow | null }
 }))
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   setRemotePassword: dbSetRemotePassword,
   getRemoteConfig: () => configRef.current
 }))

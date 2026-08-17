@@ -51,11 +51,11 @@ vi.mock('os', async (importOriginal) => {
   }
 })
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
 }))
 
-vi.mock('../../opencode/OpencodeClient', () => ({
+vi.mock('../../../core/opencode/OpencodeClient', () => ({
   OpencodeClient: class {
     getConfigProviders() {
       return mockGetConfigProviders()
@@ -63,7 +63,7 @@ vi.mock('../../opencode/OpencodeClient', () => ({
   }
 }))
 
-vi.mock('../persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions-pricing-test'
 }))
 
@@ -122,7 +122,7 @@ const fakeNoCostProvider = {
 // Test setup
 // ---------------------------------------------------------------------------
 
-import { refreshPrices, loadPersistedPrices } from '../opencode-pricing'
+import { refreshPrices, loadPersistedPrices } from '../../../core/services/opencode-pricing'
 import { equivalentCostUsd, registerSupplementalPricing } from '../../../shared/pricing'
 
 /** The SUT's PRICES_FILE, resolved under the mocked (temp) homedir. */

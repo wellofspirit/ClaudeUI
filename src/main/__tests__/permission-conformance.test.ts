@@ -31,18 +31,18 @@ import { homedir } from 'node:os'
 // permission-engine.ts pulls in claude-settings (fs) + logger (electron-adjacent)
 // at module scope for `mergedClaudeRulesFor`; `decide` itself is pure. Stub both
 // so this file stays hermetic (mirrors pi/__tests__/permission-engine.test.ts).
-vi.mock('../services/claude-settings', () => ({ loadClaudePermissions: vi.fn() }))
-vi.mock('../services/logger', () => ({
+vi.mock('../../core/services/claude-settings', () => ({ loadClaudePermissions: vi.fn() }))
+vi.mock('../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { buildRuleset } from '../opencode/permission-ruleset'
+import { buildRuleset } from '../../core/opencode/permission-ruleset'
 import {
   compileClaudeRulesToOpencode,
   withoutAllowRules as withoutOpencodeAllowRules
-} from '../opencode/permission-compiler'
-import { decide, withoutAllowRules } from '../pi/permission-engine'
-import type { MergedClaudeRules } from '../pi/permission-engine'
+} from '../../core/opencode/permission-compiler'
+import { decide, withoutAllowRules } from '../../core/pi/permission-engine'
+import type { MergedClaudeRules } from '../../core/pi/permission-engine'
 import type { ClaudePermissions } from '../../shared/types'
 
 // ---------------------------------------------------------------------------

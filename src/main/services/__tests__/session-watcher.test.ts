@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
-import { clearSyncSubscribersForTests, syncCore } from '../sync-host'
+import { clearSyncSubscribersForTests, syncCore } from '../../../core/services/sync-host'
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -50,19 +50,19 @@ const { testHome, loadSessionHistoryMock } = vi.hoisted(() => {
 
 // claude-session is only used for `ClaudeSession.getExtraWindows()`. Stub it
 // so we don't drag in the SDK.
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   ClaudeSession: {
     getExtraWindows: () => new Set()
   }
 }))
 
-vi.mock('../session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     loadSessionHistoryMock(sessionId, projectKey)
 }))
 
 // Silence logger.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -72,7 +72,7 @@ vi.mock('../logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { watchSession, unwatchSession, unwatchAll } from '../session-watcher'
+import { watchSession, unwatchSession, unwatchAll } from '../../../core/services/session-watcher'
 
 // ---------------------------------------------------------------------------
 // Test doubles

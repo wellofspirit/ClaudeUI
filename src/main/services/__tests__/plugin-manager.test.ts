@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { emitEvent, clearSyncSubscribersForTests, syncCore } from '../sync-host'
+import { emitEvent, clearSyncSubscribersForTests, syncCore } from '../../../core/services/sync-host'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -52,7 +52,7 @@ vi.mock('os', async () => {
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
 // Don't pull the real SDK bundle — we only need the named export to exist.
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: vi.fn()
 }))
 
@@ -60,12 +60,12 @@ vi.mock('../../sdk', () => ({
 // enough since SyncCore phase 4c: the plugin bridge registers itself with the
 // FUNNEL (`addSyncSubscriber`), not as a static "extra window" on ClaudeSession,
 // so there are no statics left to fake.
-vi.mock('../claude-session', () => ({ ClaudeSession: {} }))
+vi.mock('../../../core/services/claude-session', () => ({ ClaudeSession: {} }))
 
 // Silence logger chatter and capture warn/error calls for assertions.
 // The factory runs at hoisted-time before any top-level bindings exist, so we
 // instantiate the spies inside the factory and re-export them for use below.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -81,8 +81,8 @@ vi.mock('../logger', () => ({
 import { PluginManager } from '../plugin-manager'
 import { TestIpcBridge } from '../../../test/bridges/test-ipc-bridge'
 import { setIpcBridge } from '../../../test/stubs/electron-shim'
-import { RemoteDispatcher } from '../remote-dispatcher'
-import { logger as loggerMod } from '../logger'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { logger as loggerMod } from '../../../core/services/logger'
 
 // Typed handles on the mocked logger spies (for assertions).
 const loggerSpies = loggerMod as unknown as {

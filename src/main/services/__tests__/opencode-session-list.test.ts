@@ -28,20 +28,20 @@ const {
   mockDeleteSessionFiles: vi.fn()
 }))
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
 }))
-vi.mock('../../opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
-vi.mock('../persisted-sessions-dir', () => ({ PERSISTED_SESSIONS_DIR: '/tmp/persisted' }))
-vi.mock('../db', () => ({ readOpencodeSessionRows: mockReadRows }))
-vi.mock('../delete-session-files', () => ({ deleteSessionFiles: mockDeleteSessionFiles }))
+vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({ PERSISTED_SESSIONS_DIR: '/tmp/persisted' }))
+vi.mock('../../../core/services/db', () => ({ readOpencodeSessionRows: mockReadRows }))
+vi.mock('../../../core/services/delete-session-files', () => ({ deleteSessionFiles: mockDeleteSessionFiles }))
 
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory,
   deleteOpencodeSession
-} from '../opencode-session-list'
-import { deleteSessionByEngine } from '../session-delete'
+} from '../../../core/services/opencode-session-list'
+import { deleteSessionByEngine } from '../../../core/services/session-delete'
 
 beforeEach(() => {
   mockAcquire.mockReset().mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })

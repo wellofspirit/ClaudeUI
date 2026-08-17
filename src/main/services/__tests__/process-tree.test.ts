@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
-import { killProcessTree } from '../process-tree'
+import { killProcessTree } from '../../../core/services/process-tree'
 
 /**
  * A fake child with a settable pid and a kill() spy that records call ORDER

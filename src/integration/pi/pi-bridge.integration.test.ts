@@ -33,9 +33,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { PiRpcClient } from '../../main/pi/PiRpcClient'
-import { PiBridgeHost, writeBridgeExtension } from '../../main/pi/PiBridgeHost'
-import type { GateDecision, PiToolCallPayload } from '../../main/pi/PiBridgeHost'
+import { PiRpcClient } from '../../core/pi/PiRpcClient'
+import { PiBridgeHost, writeBridgeExtension } from '../../core/pi/PiBridgeHost'
+import type { GateDecision, PiToolCallPayload } from '../../core/pi/PiBridgeHost'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'

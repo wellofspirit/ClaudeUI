@@ -30,23 +30,23 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, default: actual, homedir: () => home.dir }
 })
 
-vi.mock('../sync-host', () => ({ emitEvent: vi.fn(), syncCore: {} }))
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/sync-host', () => ({ emitEvent: vi.fn(), syncCore: {} }))
+vi.mock('../../../core/services/db', () => ({
   allSessionMeta: vi.fn(() => []),
   setSessionMeta: vi.fn(),
   deleteSessionMeta: vi.fn(),
   importSessionEnginesOnce: vi.fn()
 }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-let uiConfig: typeof import('../ui-config')
+let uiConfig: typeof import('../../../core/services/ui-config')
 
 beforeEach(async () => {
   home.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-config-guard-'))
   vi.resetModules()
-  uiConfig = await import('../ui-config')
+  uiConfig = await import('../../../core/services/ui-config')
 })
 
 afterEach(() => {

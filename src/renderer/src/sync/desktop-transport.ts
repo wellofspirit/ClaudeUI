@@ -27,8 +27,8 @@
  * a resync must not clobber local navigation (ADR-041).
  */
 
-import { SyncClient } from '../../../shared/sync/sync-client'
-import { setSyncClient } from '../../../shared/sync/client-registry'
+import { SyncClient } from '../../../core/shared/sync/sync-client'
+import { setSyncClient } from '../../../core/shared/sync/client-registry'
 import type { FullStateSnapshot, EventEntry } from '../../../shared/remote-protocol'
 
 /**

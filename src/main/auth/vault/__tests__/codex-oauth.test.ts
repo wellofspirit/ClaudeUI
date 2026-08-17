@@ -25,7 +25,7 @@ import {
   extractEmail,
   type PkceCodes,
   type TokenResponse
-} from '../codex-oauth'
+} from '../../../../core/auth/vault/codex-oauth'
 
 function makeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')

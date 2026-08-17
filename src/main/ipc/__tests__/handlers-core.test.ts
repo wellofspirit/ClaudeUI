@@ -12,19 +12,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { RemoteDispatcher } from '../../services/remote-dispatcher'
-import { CommandRegistry, makeRemoteConnection } from '../command-registry'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { CommandRegistry, makeRemoteConnection } from '../../../core/ipc/command-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
-vi.mock('../../services/skill-scanner', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({
   scanSkills: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/claude-settings', () => ({
+vi.mock('../../../core/services/claude-settings', () => ({
   saveCleanupPeriodDays: vi.fn()
 }))
 
-vi.mock('../../services/ui-config', () => ({
+vi.mock('../../../core/services/ui-config', () => ({
   saveSessionConfig: vi.fn(),
   // Pulled in transitively via claude-session → collab-tool →
   // cross-engine-dispatcher (ADR-033).
@@ -41,13 +41,13 @@ const { deleteSessionByEngine, deleteProjectFiles, refreshCanonicalDirectories }
     refreshCanonicalDirectories: vi.fn(async () => {})
   })
 )
-vi.mock('../../services/session-delete', () => ({ deleteSessionByEngine }))
-vi.mock('../../services/delete-session-files', () => ({ deleteProjectFiles }))
-vi.mock('../../services/sync-seed', () => ({ refreshCanonicalDirectories }))
+vi.mock('../../../core/services/session-delete', () => ({ deleteSessionByEngine }))
+vi.mock('../../../core/services/delete-session-files', () => ({ deleteProjectFiles }))
+vi.mock('../../../core/services/sync-seed', () => ({ refreshCanonicalDirectories }))
 
 // R1: a delete must UNWATCH before the file it watches disappears.
 const { unwatchSession } = vi.hoisted(() => ({ unwatchSession: vi.fn() }))
-vi.mock('../../services/session-watcher', () => ({ unwatchSession }))
+vi.mock('../../../core/services/session-watcher', () => ({ unwatchSession }))
 
 // Import AFTER mocks.
 import {
@@ -63,8 +63,8 @@ import {
   deleteSession,
   deleteProject,
   clearConversation
-} from '../handlers-core'
-import { syncCore, addSyncSubscriber } from '../../services/sync-host'
+} from '../../../core/ipc/handlers-core'
+import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {

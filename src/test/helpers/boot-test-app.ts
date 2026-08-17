@@ -17,8 +17,8 @@
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
-import { SyncClient } from '../../shared/sync/sync-client'
-import { resetSyncClientForTests, onSyncEvent } from '../../shared/sync/client-registry'
+import { SyncClient } from '../../core/shared/sync/sync-client'
+import { resetSyncClientForTests, onSyncEvent } from '../../core/shared/sync/client-registry'
 import {
   installSyncSeam,
   resetSyncSeam,
@@ -26,13 +26,13 @@ import {
   nextSeq,
   advanceSeqTo
 } from './replica-seed'
-import { channelSpec } from '../../shared/sync/channels'
+import { channelSpec } from '../../core/shared/sync/channels'
 import {
   startReplica,
   hydrateReplica,
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
-import type { SyncEventMap } from '../../shared/sync/events'
+import type { SyncEventMap } from '../../core/shared/sync/events'
 import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import type { ClaudeAPI } from '../../shared/types'
 

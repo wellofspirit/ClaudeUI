@@ -40,16 +40,16 @@ vi.mock('../auth-manager', () => ({
     signIn: vi.fn(async () => {})
   }
 }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 import { accountManager } from '../account-manager'
 import { setLiveSessionCanceller } from '../session-invalidation'
-import { getSecurestorageEnv } from '../../sdk/securestorage-env'
+import { getSecurestorageEnv } from '../../../core/sdk/securestorage-env'
 import { serviceSession } from '../service-session'
 import { authManager } from '../auth-manager'
-import { logger } from '../logger'
+import { logger } from '../../../core/services/logger'
 
 const ACCOUNTS_DIR = path.join(hoisted.TEST_HOME, '.claude', 'ui', 'accounts')
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { onSyncAnswered } from '../../../shared/sync/client-registry'
+import { onSyncAnswered } from '../../../core/shared/sync/client-registry'
 import { useSessionStore, useActiveSession } from '../stores/session-store'
 
 /**

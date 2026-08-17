@@ -12,7 +12,7 @@ import type { ToolKind } from '../../../../../../shared/tool-kinds'
 // kindOf switch for its mode-base gating decisions (see that file's doc
 // comment). This is the single-source guard: it fails if the two tables ever
 // disagree for a known pi tool name.
-import { piToolKind } from '../../../../../../main/pi/permission-engine'
+import { piToolKind } from '../../../../../../core/pi/permission-engine'
 
 describe('PiEngineToolMap.kindOf', () => {
   const cases: [string, ToolKind][] = [

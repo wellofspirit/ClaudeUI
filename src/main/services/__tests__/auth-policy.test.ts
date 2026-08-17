@@ -19,7 +19,7 @@ const { configRef, credentialCountRef, dbThrows } = vi.hoisted(() => ({
   dbThrows: { current: false }
 }))
 
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   getRemoteConfig: () => {
     if (dbThrows.current) throw new Error('db locked')
     return configRef.current
@@ -35,7 +35,7 @@ vi.mock('../db', () => ({
   DEFAULT_SESSION_MAX_AGE_HOURS: 4,
   appendAuditLog: vi.fn()
 }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -50,12 +50,12 @@ import {
   type AuthGrantMethod,
   type AuthPolicyContext,
   type AuthSurfaceSnapshot
-} from '../auth-policy'
+} from '../../../core/services/auth-policy'
 import {
   AUTH_OFF_GRANTS,
   ENROLL_ONLY_GRANTS,
   FULL_REMOTE_GRANTS
-} from '../../ipc/command-registry'
+} from '../../../core/ipc/command-registry'
 import type { RemoteAuthPolicy } from '../../../shared/types'
 
 function ctx(over: Partial<AuthPolicyContext> = {}): AuthPolicyContext {

@@ -30,11 +30,11 @@ import {
   syncSubscriberCount,
   clearSyncSubscribersForTests,
   type SyncSubscriber
-} from '../sync-host'
+} from '../../../core/services/sync-host'
 // The host window moved out of the delivery adapter in SyncCore phase 4d — the
 // adapter READS it (so a windowless boot has nothing to register) instead of
 // owning it.
-import { setHostWindow } from '../host-window'
+import { setHostWindow } from '../../../core/services/host-window'
 
 interface FakeWindow {
   isDestroyed: () => boolean
@@ -210,7 +210,7 @@ describe('sync-host delivery', () => {
   })
 
   it('BaseSession no longer exposes an extra-window registry (4c deletion)', async () => {
-    const { BaseSession } = await import('../../providers/BaseSession')
+    const { BaseSession } = await import('../../../core/providers/BaseSession')
     const statics = BaseSession as unknown as Record<string, unknown>
     expect(statics.addExtraWindow).toBeUndefined()
     expect(statics.removeExtraWindow).toBeUndefined()

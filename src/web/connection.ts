@@ -1,6 +1,6 @@
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
 import { E2ECrypto } from '../shared/e2e-crypto'
-import { SyncClient, type SyncListener } from '../shared/sync/sync-client'
+import { SyncClient, type SyncListener } from '../core/shared/sync/sync-client'
 import { base64ToText, textToBase64 } from '../shared/base64-text'
 import {
   PASSKEY_FAILED_ERROR,

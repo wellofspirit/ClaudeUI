@@ -24,7 +24,7 @@ import {
   desktopConnection,
   registerCommand,
   type CommandRegistration
-} from './command-registry'
+} from '../../core/ipc/command-registry'
 
 export function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'desktop' })

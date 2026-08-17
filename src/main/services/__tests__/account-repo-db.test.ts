@@ -15,7 +15,7 @@ import {
   deleteAccountRow,
   importAccountsOnce,
   closeDb
-} from '../db'
+} from '../../../core/services/db'
 import type { AccountInfo } from '../../../shared/types'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).

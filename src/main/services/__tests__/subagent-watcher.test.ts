@@ -32,7 +32,7 @@ const { testHome } = vi.hoisted(() => {
 })
 
 // Silence logger writes during tests.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -42,7 +42,7 @@ vi.mock('../logger', () => ({
 }))
 
 // Import AFTER mocks are registered.
-import { watchSubagent, unwatchSubagent, unwatchAllSubagents } from '../subagent-watcher'
+import { watchSubagent, unwatchSubagent, unwatchAllSubagents } from '../../../core/services/subagent-watcher'
 
 // ---------------------------------------------------------------------------
 // Helpers

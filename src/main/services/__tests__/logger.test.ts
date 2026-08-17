@@ -269,7 +269,7 @@ describe('formatError', () => {
 // compile against the old module), and nothing capped a day's file size.
 // ---------------------------------------------------------------------------
 
-type LoggerModule = typeof import('../logger')
+type LoggerModule = typeof import('../../../core/services/logger')
 
 function logDir(): string {
   return nodePath.join(TEMP_HOME, '.claude', 'ui', 'logs')
@@ -302,7 +302,7 @@ describe('logger — buffered file writes, subscribers, pruning', () => {
     savedLogDirEnv = process.env.CLAUDE_UI_LOG_DIR
     delete process.env.CLAUDE_UI_LOG_DIR
     vi.resetModules()
-    mod = await import('../logger')
+    mod = await import('../../../core/services/logger')
     mod.logger.globalLevel = 'debug'
   })
 
@@ -369,7 +369,7 @@ describe('logger — per-day size cap', () => {
     savedLogDirEnv = process.env.CLAUDE_UI_LOG_DIR
     delete process.env.CLAUDE_UI_LOG_DIR
     vi.resetModules()
-    mod = await import('../logger')
+    mod = await import('../../../core/services/logger')
     mod.logger.globalLevel = 'debug'
   })
 
@@ -422,7 +422,7 @@ describe('logger — CLAUDE_UI_LOG_DIR redirect (guard: fails pre-fix, when LOG_
     try {
       process.env.CLAUDE_UI_LOG_DIR = redirectDir
       vi.resetModules()
-      const mod: LoggerModule = await import('../logger')
+      const mod: LoggerModule = await import('../../../core/services/logger')
       mod.logger.globalLevel = 'debug'
       mod.logger.error('GuardTest', marker)
       mod.flushSync()

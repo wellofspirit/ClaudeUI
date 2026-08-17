@@ -94,7 +94,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
 })
 
-vi.mock('../../services/git-service', () => {
+vi.mock('../../../core/services/git-service', () => {
   const svc: any = {}
   for (const [k, v] of Object.entries(gitSvcSpies)) svc[k] = v
   return {
@@ -106,14 +106,14 @@ vi.mock('../../services/git-service', () => {
   }
 })
 
-vi.mock('../../services/worktree', () => ({
+vi.mock('../../../core/services/worktree', () => ({
   createWorktree: vi.fn(async () => ({ path: '/tmp/wt', branch: 'feat' })),
   getWorktreeStatus: vi.fn(async () => ({ dirty: false })),
   removeWorktree: vi.fn(async () => {}),
   listWorktrees: vi.fn(async () => [{ path: '/tmp/wt', branch: 'feat' }])
 }))
 
-vi.mock('../../services/session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => []),
   loadSessionHistory: vi.fn(async () => []),
   loadSubagentHistory: vi.fn(async () => []),
@@ -121,12 +121,12 @@ vi.mock('../../services/session-history', () => ({
   loadBackgroundOutput: vi.fn(() => '')
 }))
 
-vi.mock('../../services/session-watcher', () => ({
+vi.mock('../../../core/services/session-watcher', () => ({
   watchSession: vi.fn(),
   unwatchSession: vi.fn()
 }))
 
-vi.mock('../../services/ui-config', () => ({
+vi.mock('../../../core/services/ui-config', () => ({
   loadSettings: vi.fn(() => ({})),
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => ({})),
@@ -140,12 +140,12 @@ vi.mock('../../services/ui-config', () => ({
   saveVendorConfig: vi.fn()
 }))
 
-vi.mock('../../services/claude-settings', () => ({
+vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   saveClaudePermissions: vi.fn()
 }))
 
-vi.mock('../../services/claude-mcp', () => ({
+vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   saveMcpServers: vi.fn(),
   removeMcpServer: vi.fn(),
@@ -153,20 +153,20 @@ vi.mock('../../services/claude-mcp', () => ({
   writeDisabledMcpServers: vi.fn()
 }))
 
-vi.mock('../../services/skill-scanner', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({
   scanSkills: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/custom-command-scanner', () => ({
+vi.mock('../../../core/services/custom-command-scanner', () => ({
   scanCustomCommands: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/delete-session-files', () => ({
+vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
   deleteProjectFiles: vi.fn(async () => {})
 }))
 
-vi.mock('../../services/socks-bridge', () => ({
+vi.mock('../../../core/services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
   stopSocksBridge: vi.fn(async () => {}),
   // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
@@ -175,7 +175,7 @@ vi.mock('../../services/socks-bridge', () => ({
   })
 }))
 
-vi.mock('../../services/usage-fetcher', () => ({
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: {
     setWindow: vi.fn(),
     setSessionGetter: vi.fn(),
@@ -191,7 +191,7 @@ vi.mock('../../services/service-session', () => ({
   }
 }))
 
-vi.mock('../../services/block-usage', () => ({
+vi.mock('../../../core/services/block-usage', () => ({
   blockUsageService: {
     setWindow: vi.fn(),
     setDebounceSecs: vi.fn(),
@@ -201,7 +201,7 @@ vi.mock('../../services/block-usage', () => ({
   }
 }))
 
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
@@ -214,7 +214,7 @@ const crossEngineSpies = vi.hoisted(() => ({
   stopDispatch: vi.fn(() => false)
 }))
 
-vi.mock('../../services/cross-engine-dispatcher', () => ({
+vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: crossEngineSpies,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
@@ -232,9 +232,9 @@ const sharedProviderSpies = vi.hoisted(() => ({
   setRouteDefaultModel: vi.fn(async () => {})
 }))
 
-vi.mock('../../shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
+vi.mock('../../../core/shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
 
-vi.mock('../../services/session-manager', () => ({
+vi.mock('../../../core/services/session-manager', () => ({
   SessionManager: class {
     constructor() {
       /* no-op */
@@ -249,7 +249,7 @@ vi.mock('../../services/session-manager', () => ({
   }
 }))
 
-vi.mock('../../services/claude-session', () => {
+vi.mock('../../../core/services/claude-session', () => {
   const extraWindows = new Set<any>()
   return {
     ClaudeSession: class {
@@ -267,7 +267,7 @@ vi.mock('../../services/claude-session', () => {
   }
 })
 
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: vi.fn(() => {
     // Return an async iterable shaped like the SDK Query.
     async function* empty(): AsyncGenerator<unknown> {
@@ -282,7 +282,7 @@ vi.mock('../../sdk', () => ({
 // Electron shim — must come last among electron-related mocks.
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -293,11 +293,11 @@ vi.mock('../../services/logger', () => ({
 
 // Import AFTER mocks.
 import { registerSessionIpc } from '../session.ipc'
-import { gitServiceManager } from '../../services/git-service'
-import { gitWatchRegistry } from '../../services/git-watch-registry'
-import { desktopConnection } from '../command-registry'
-import { addSyncSubscriber } from '../../services/sync-host'
-import { setHostWindow } from '../../services/host-window'
+import { gitServiceManager } from '../../../core/services/git-service'
+import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { desktopConnection } from '../../../core/ipc/command-registry'
+import { addSyncSubscriber } from '../../../core/services/sync-host'
+import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // Fill in the stub's capabilities now that the top-level import is available

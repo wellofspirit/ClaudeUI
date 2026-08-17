@@ -18,8 +18,8 @@
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
-import { addSyncSubscriber, clearSyncSubscribersForTests } from '../../main/services/sync-host'
-import { channelSpec } from '../../shared/sync/channels'
+import { addSyncSubscriber, clearSyncSubscribersForTests } from '../../core/services/sync-host'
+import { channelSpec } from '../../core/shared/sync/channels'
 
 export interface IpcHarness {
   bridge: TestIpcBridge

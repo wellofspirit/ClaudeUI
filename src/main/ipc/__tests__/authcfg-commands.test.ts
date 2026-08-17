@@ -24,7 +24,7 @@ const { configRef, auditRows, configWrites, provisionSpy } = vi.hoisted(() => ({
   provisionSpy: vi.fn()
 }))
 
-vi.mock('../../services/db', () => ({
+vi.mock('../../../core/services/db', () => ({
   appendAuditLog: (entry: Record<string, unknown>) => {
     auditRows.push(entry)
   },
@@ -49,11 +49,11 @@ vi.mock('../../services/db', () => ({
   DEFAULT_SHELL_GRANT_IDLE_MINUTES: 10
 }))
 
-vi.mock('../../services/remote-auth', () => ({
+vi.mock('../../../core/services/remote-auth', () => ({
   provisionPassword: (pw: string) => provisionSpy(pw)
 }))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -65,8 +65,8 @@ import {
   authcfgRotateLanKey,
   authcfgSetPassword,
   type AuthcfgHost
-} from '../authcfg-commands'
-import { desktopConnection, makeRemoteConnection, type CommandConnection } from '../command-registry'
+} from '../../../core/ipc/authcfg-commands'
+import { desktopConnection, makeRemoteConnection, type CommandConnection } from '../../../core/ipc/command-registry'
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
   LAN_LINK_UNAVAILABLE_ERROR,

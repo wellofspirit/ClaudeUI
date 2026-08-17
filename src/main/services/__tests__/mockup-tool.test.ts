@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { wrapHtml, CREATE_MOCKUP_DESCRIPTION } from '../mockup-tool'
+import { wrapHtml, CREATE_MOCKUP_DESCRIPTION } from '../../../core/services/mockup-tool'
 
 describe('wrapHtml', () => {
   it('produces a valid HTML5 document with title', () => {

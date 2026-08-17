@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { onSyncEvent } from '../../../../shared/sync/client-registry'
+import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useMockupBridge } from '../../hooks/useMockupBridge'
 import {

@@ -18,9 +18,9 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import { startMcpHttpHost } from '../../main/opencode/mcp-http-host'
-import { createOpencodeHostedToolsServer } from '../../main/opencode/opencode-hosted-tools'
-import type { McpHttpHost } from '../../main/opencode/mcp-http-host'
+import { startMcpHttpHost } from '../../core/opencode/mcp-http-host'
+import { createOpencodeHostedToolsServer } from '../../core/opencode/opencode-hosted-tools'
+import type { McpHttpHost } from '../../core/opencode/mcp-http-host'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'

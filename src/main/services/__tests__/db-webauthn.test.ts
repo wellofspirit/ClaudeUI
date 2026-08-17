@@ -28,7 +28,7 @@ import {
   setRemotePassword,
   touchWebauthnCredential,
   type Db
-} from '../db'
+} from '../../../core/services/db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())

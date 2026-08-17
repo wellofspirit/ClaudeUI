@@ -1,12 +1,12 @@
 import { ipcMain } from 'electron'
-import { terminalService } from '../services/terminal-service'
+import { terminalService } from '../../core/services/terminal-service'
 import {
   commandRegistry,
   desktopConnection,
   registerCommand,
   type CommandConnection,
   type CommandRegistration
-} from './command-registry'
+} from '../../core/ipc/command-registry'
 
 const TERMINAL_IPC_CHANNELS = [
   'terminal:create',

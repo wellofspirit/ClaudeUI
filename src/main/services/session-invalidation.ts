@@ -38,7 +38,7 @@
  * `boot-core.ts` records for `setCallerSessionLookup`).
  */
 
-import { logger } from './logger'
+import { logger } from '../../core/services/logger'
 
 const LOG_SOURCE = 'session-invalidation'
 

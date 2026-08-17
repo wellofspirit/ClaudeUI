@@ -28,7 +28,7 @@ import {
   type WindowSampleRow,
   type DailyUsageRow,
   type Db
-} from '../db'
+} from '../../../core/services/db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())

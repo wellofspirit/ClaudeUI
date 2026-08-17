@@ -2,7 +2,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import { parseFrontmatter, extractFirstLine } from '../skill-scanner'
+import { parseFrontmatter, extractFirstLine } from '../../../core/services/skill-scanner'
 
 // parseFrontmatter / extractFirstLine used to be replicated verbatim in this
 // file, so the tests never actually exercised skill-scanner.ts. They are now

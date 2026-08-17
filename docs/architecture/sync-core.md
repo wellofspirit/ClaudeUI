@@ -36,16 +36,23 @@ claudeui-server — headless entrypoint (bun) booting core alone: systemd unit, 
                   files/env, `tailscale serve` in front for TLS + identity (ADR-039/042 stack).
 ```
 
-**Headless rescope (4a), as realized in 4d.** The physical `src/core` extraction and
-the `claudeui-server` entrypoint are a **named follow-on phase**, not part of phase 4.
-Phase 4's exit was a **windowless-Electron smoke test** — the app boots, syncs and
-serves with no `BrowserWindow` — which is what actually proves "a hung or absent
-renderer never degrades sync"; moving files proves nothing on its own and would have
-collided with 4b/4c's edits to the very modules involved. The Electron-free constraint
-is enforced by lint on `src/main/sync/**` and `src/shared/sync/**` (the future
-`src/core`), so the extraction stays a move rather than a rewrite. The
-vendor-OAuth-on-a-browserless-server design session moves with that follow-on phase,
-since it only becomes answerable once there is a server to provision.
+**Headless rescope (4a), as realized in 4d, physically extracted in S2.** Phase 4's
+exit was a **windowless-Electron smoke test** — the app boots, syncs and serves with no
+`BrowserWindow` — which is what actually proves "a hung or absent renderer never
+degrades sync"; moving files proves nothing on its own and would have collided with
+4b/4c's edits to the very modules involved, so the physical move was deferred to a named
+follow-on. **That move has now landed (S2):** the window-independent service graph
+(SyncCore, the shared reducer/wire types, the engine adapters, the PTY manager, the
+HTTP/WS server, the command registry and the services they need) physically lives under
+`src/core`, and the Electron-free constraint is now enforced by lint on `src/core/**`
+(no longer on the pre-move `src/main/sync/**` + `src/shared/sync/**` paths). Every
+host-shaped concern is injected through the neutral adapters in `src/core/host.ts`
+(window handle, app paths, native notifications, account-state reads, mockup serving),
+whose desktop implementations are wired from `src/main` (`index.ts`, `boot-core.ts`).
+What still anchors `boot-core.ts` to Electron is the `ipcMain` transport only — the seam
+the `claudeui-server` (bun) entrypoint breaks next. The
+vendor-OAuth-on-a-browserless-server design session moves with that entrypoint, since it
+only becomes answerable once there is a server to provision.
 
 **The boot order is what 4d actually changed.** `bootCore()` (`src/main/boot-core.ts`)
 runs from `app.whenReady()` BEFORE any window decision and owns everything
@@ -387,10 +394,12 @@ line is a named next step with the reason it is not phase-4 work.
 
 **The named follow-on phase** (was "headless", rescoped in 4a):
 
-- **Physical `src/core` extraction** — move `src/main/sync/**` + `src/shared/sync/**`
-  (and the engine adapters, PTY manager and HTTP/WS server) to `src/core`. A MOVE, not
-  a rewrite: the Electron-free lint fence already holds on both trees, and 4d made the
-  boot order expressible (`bootCore()` is what a second entrypoint would call).
+- **Physical `src/core` extraction — LANDED (S2).** `src/main/sync/**` +
+  `src/shared/sync/**` (and the engine adapters, PTY manager, HTTP/WS server, command
+  registry and the services they need) moved to `src/core`; the Electron-free lint fence
+  now targets `src/core/**`. It was a MOVE plus five narrow host-adapter seams in
+  `src/core/host.ts` (window handle, app paths, native notifications, and — added when the service-graph closure proved larger than first scoped — data-only account-state reads and mockup HTTP serving; a sixth candidate, the native folder dialog, was eliminated rather than abstracted, and the OAuth-browser flow stays desktop-only in `src/main`).
+  `boot-core.ts` stays in `src/main` and wires the desktop implementations.
 - **`claudeui-server` (bun) entrypoint** — systemd unit, config by files/env,
   `tailscale serve` in front. `bootCore()` still imports Electron (`ipcMain`, `app`);
   the seam to break is the desktop IPC transport adapter, not the services behind it.

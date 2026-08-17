@@ -18,9 +18,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { closeDb, getUsageEventByMessageId } from '../db'
-import { recordUsageEvent } from '../usage-recorder'
-import type { UsageTurnEvent } from '../usage-recorder'
+import { closeDb, getUsageEventByMessageId } from '../../../core/services/db'
+import { recordUsageEvent } from '../../../core/services/usage-recorder'
+import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())

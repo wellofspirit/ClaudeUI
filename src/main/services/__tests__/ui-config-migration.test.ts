@@ -59,7 +59,7 @@ describe('ui-config migration: config-plane split', () => {
     writeSettings({ theme: 'dark', sandbox, proxy })
 
     // Import the module with paths pointing to temp dir
-    vi.doMock('../../../main/services/ui-config', async () => {
+    vi.doMock('../../../core/services/ui-config', async () => {
       // We can't easily intercept path constants, so directly test the migration logic
       // by running it in isolation using the actual module implementation
       return {}

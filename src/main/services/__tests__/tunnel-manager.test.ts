@@ -69,7 +69,7 @@ vi.mock('node:fs', async () => {
   }
 })
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -79,7 +79,7 @@ vi.mock('../logger', () => ({
 }))
 
 // Import after mocks are registered.
-import { TunnelManager, assertHttpsUrl, verifyFileChecksum } from '../tunnel-manager'
+import { TunnelManager, assertHttpsUrl, verifyFileChecksum } from '../../../core/services/tunnel-manager'
 import { createHash } from 'node:crypto'
 import { writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'

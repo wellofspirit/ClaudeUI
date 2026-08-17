@@ -52,13 +52,13 @@
  * the `canonical: false` channels are NOT in it.
  */
 
-import { onSyncAnyEvent, onSyncStreamFrame } from '../../../shared/sync/client-registry'
-import { channelSpec } from '../../../shared/sync/channels'
+import { onSyncAnyEvent, onSyncStreamFrame } from '../../../core/shared/sync/client-registry'
+import { channelSpec } from '../../../core/shared/sync/channels'
 import {
   applyStreamFrame,
   dropStreamTurns,
   type StreamFrame
-} from '../../../shared/sync/stream'
+} from '../../../core/shared/sync/stream'
 import {
   applyEvent,
   applyWatchedContent,
@@ -67,14 +67,14 @@ import {
   rekeyTargetFor,
   type ReducerAux,
   type WatchedContent
-} from '../../../shared/sync/reducer'
+} from '../../../core/shared/sync/reducer'
 import {
   emptyCanonicalState,
   emptySession,
   fromSnapshot,
   type CanonicalSessionState,
   type CanonicalState
-} from '../../../shared/sync/state'
+} from '../../../core/shared/sync/state'
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 import { AUTONOMY_TO_PERMISSION } from '../../../shared/permission-modes'
 import type { PermissionMode, SessionStatus, WorktreeInfo } from '../../../shared/types'

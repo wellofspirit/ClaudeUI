@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createWebSocketApi } from '../api-adapter'
-import { SyncClient } from '../../shared/sync/sync-client'
+import { SyncClient } from '../../core/shared/sync/sync-client'
 import type { RemoteConnection } from '../connection'
 
 type FakeConnection = {

@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   subscribeWindowToSync
 } from '../../../test/helpers/sync-subscriber-window'
-import { clearSyncSubscribersForTests } from '../sync-host'
+import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 import type { StatusLineData } from '../../../shared/types'
 
 const { mockComputeTokenMetrics } = vi.hoisted(() => ({
@@ -27,8 +27,8 @@ const { mockComputeTokenMetrics } = vi.hoisted(() => ({
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
-vi.mock('../../sdk', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../sdk')>()
+vi.mock('../../../core/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/sdk')>()
   return {
     ...actual,
     query: vi.fn(),
@@ -37,34 +37,34 @@ vi.mock('../../sdk', async (importOriginal) => {
   }
 })
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { isBinaryAvailable: (): boolean => false }
 }))
-vi.mock('../cross-engine-dispatcher', () => ({
+vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
   crossEngineDispatchAvailable: (): boolean => false
 }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../ui-config', () => ({ saveSlashCommands: vi.fn(), loadEngineConfig: vi.fn(() => ({})) }))
-vi.mock('../claude-mcp', () => ({
+vi.mock('../../../core/services/ui-config', () => ({ saveSlashCommands: vi.fn(), loadEngineConfig: vi.fn(() => ({})) }))
+vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])
 }))
-vi.mock('../session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   computeTokenMetrics: mockComputeTokenMetrics,
   fallbackBlockText: vi.fn(() => '')
 }))
-vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
-vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
-vi.mock('../voice-client', () => ({ VoiceClient: class {} }))
-vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
-vi.mock('../usage-fetcher', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
+vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
+vi.mock('../../../core/services/voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
+vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
+vi.mock('../../../core/services/context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
 }))
-vi.mock('../usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
+vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({
   accountManager: { getState: vi.fn(() => ({ enabled: false, activeId: null })) }
 }))
@@ -73,7 +73,7 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 }))
 
 // Import AFTER mocks.
-import { ClaudeSession } from '../claude-session'
+import { ClaudeSession } from '../../../core/services/claude-session'
 import type { BrowserWindow } from 'electron'
 
 // Every `makeWin()` registers a funnel subscriber; drop them per test so a long

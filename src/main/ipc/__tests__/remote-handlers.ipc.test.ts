@@ -12,7 +12,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
-import { clearSyncSubscribersForTests } from '../../services/sync-host'
+import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
+import { setHostAuth, type HostAuth } from '../../../core/host'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -22,7 +23,7 @@ import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 // Mocks for every service remote-handlers.ts imports.
 // ---------------------------------------------------------------------------
 
-vi.mock('../../services/session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => [{ id: 'dir-1' }]),
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
   loadSubagentHistory: vi.fn(async () => []),
@@ -30,7 +31,7 @@ vi.mock('../../services/session-history', () => ({
   loadBackgroundOutput: vi.fn(() => '')
 }))
 
-vi.mock('../../services/delete-session-files', () => ({
+vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
   deleteProjectFiles: vi.fn(async () => {})
 }))
@@ -45,9 +46,9 @@ const uiConfigMocks = vi.hoisted(() => ({
   loadVendorConfig: vi.fn(() => ({}))
 }))
 
-vi.mock('../../services/ui-config', () => uiConfigMocks)
+vi.mock('../../../core/services/ui-config', () => uiConfigMocks)
 
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/model-discovery', () => ({
   resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free'),
   invalidateOpencodeModelCache: vi.fn(),
   discoverOpencodeModels: vi.fn(async () => []),
@@ -55,11 +56,11 @@ vi.mock('../../opencode/model-discovery', () => ({
   getOpencodeProviderModels: vi.fn(async () => [])
 }))
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { isBinaryAvailable: vi.fn(() => false) }
 }))
 
-vi.mock('../../pi/model-discovery', () => ({
+vi.mock('../../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   // Also consumed by the shared-providers graph pulled in transitively.
@@ -69,12 +70,12 @@ vi.mock('../../pi/model-discovery', () => ({
   effortLevelsFromModel: vi.fn(() => [])
 }))
 
-vi.mock('../../pi/pi-locate', () => ({
+vi.mock('../../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
   locatePiBinary: vi.fn(() => null)
 }))
 
-vi.mock('../../auth/vault/CredentialSync', () => ({
+vi.mock('../../../core/auth/vault/CredentialSync', () => ({
   credentialSync: { getStatus: vi.fn(() => ({ connected: false })) }
 }))
 
@@ -82,12 +83,12 @@ vi.mock('../../services/account-manager', () => ({
   accountManager: { getState: vi.fn(() => ({ enabled: false, accounts: [] })) }
 }))
 
-vi.mock('../../services/session-watcher', () => ({
+vi.mock('../../../core/services/session-watcher', () => ({
   watchSession: vi.fn(),
   unwatchSession: vi.fn()
 }))
 
-vi.mock('../../services/opencode-session-list', () => ({
+vi.mock('../../../core/services/opencode-session-list', () => ({
   listOpencodeSessionsGlobal: vi.fn(async () => []),
   loadOpencodeSessionHistory: vi.fn(async () => [])
 }))
@@ -127,24 +128,24 @@ const gitManagerSpies = vi.hoisted(() => ({
   getIfExists: vi.fn(() => gitSvcStub)
 }))
 
-vi.mock('../../services/git-service', () => ({
+vi.mock('../../../core/services/git-service', () => ({
   gitServiceManager: gitManagerSpies
 }))
 
-vi.mock('../../sdk/proxy', () => ({
+vi.mock('../../../core/sdk/proxy', () => ({
   setProxyEnv: vi.fn(),
   setProxyAllSubprocesses: vi.fn()
 }))
 
-vi.mock('../../sdk/endpoint-env', () => ({
+vi.mock('../../../core/sdk/endpoint-env', () => ({
   setEndpointEnv: vi.fn()
 }))
 
-vi.mock('../../sdk/model-env', () => ({
+vi.mock('../../../core/sdk/model-env', () => ({
   setModelEnv: vi.fn()
 }))
 
-vi.mock('../../services/socks-bridge', () => ({
+vi.mock('../../../core/services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
   stopSocksBridge: vi.fn(async () => {}),
   // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
@@ -158,7 +159,7 @@ const claudeSettingsSpies = vi.hoisted(() => ({
   isWorkspaceTrusted: vi.fn(() => true)
 }))
 
-vi.mock('../../services/claude-settings', () => ({
+vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
   saveCleanupPeriodDays: vi.fn(),
@@ -166,24 +167,24 @@ vi.mock('../../services/claude-settings', () => ({
   isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
 }))
 
-vi.mock('../../services/claude-mcp', () => ({
+vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])
 }))
 
-vi.mock('../../services/skill-scanner', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({
   scanSkills: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/custom-command-scanner', () => ({
+vi.mock('../../../core/services/custom-command-scanner', () => ({
   scanCustomCommands: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/usage-fetcher', () => ({
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })), setIntervalSecs: vi.fn() }
 }))
 
-vi.mock('../../services/block-usage', () => ({
+vi.mock('../../../core/services/block-usage', () => ({
   blockUsageService: {
     getData: vi.fn(() => null),
     recalculate: vi.fn(async () => ({ blocks: [] })),
@@ -191,17 +192,17 @@ vi.mock('../../services/block-usage', () => ({
   }
 }))
 
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
-vi.mock('../../services/claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   // 4c: no static extra-window registry to stub — clients are subscribers.
   ClaudeSession: class {},
   getSdkExecutableOpts: vi.fn(() => ({}))
 }))
 
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: vi.fn(() => {
     async function* empty(): AsyncGenerator<unknown> {
       /* */
@@ -221,12 +222,12 @@ const crossEngineSpies = vi.hoisted(() => ({
   stopDispatch: vi.fn(() => false)
 }))
 
-vi.mock('../../services/cross-engine-dispatcher', () => ({
+vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: crossEngineSpies,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -237,8 +238,8 @@ vi.mock('../../services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { RemoteDispatcher } from '../../services/remote-dispatcher'
-import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { registerRemoteHandlers, registerRemoteVersionInfo } from '../../../core/ipc/remote-handlers'
 import {
   CommandRegistry,
   commandRegistry,
@@ -246,23 +247,23 @@ import {
   AUTH_OFF_GRANTS,
   ENROLL_ONLY_GRANTS,
   PINNED_CAPABILITIES
-} from '../command-registry'
-import { setAutomationManager } from '../automation-commands'
+} from '../../../core/ipc/command-registry'
+import { setAutomationManager } from '../../../core/ipc/automation-commands'
 import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
   SHELL_ACT_VERBS,
   SHELL_READ_VERBS
-} from '../../services/step-up-tier'
-import { gitWatchRegistry } from '../../services/git-watch-registry'
+} from '../../../core/services/step-up-tier'
+import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
-import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
-import { setProxyEnv } from '../../sdk/proxy'
-import { setEndpointEnv } from '../../sdk/endpoint-env'
-import { setModelEnv } from '../../sdk/model-env'
-import { usageFetcher } from '../../services/usage-fetcher'
-import { blockUsageService } from '../../services/block-usage'
-import { logger } from '../../services/logger'
+import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
+import { setProxyEnv } from '../../../core/sdk/proxy'
+import { setEndpointEnv } from '../../../core/sdk/endpoint-env'
+import { setModelEnv } from '../../../core/sdk/model-env'
+import { usageFetcher } from '../../../core/services/usage-fetcher'
+import { blockUsageService } from '../../../core/services/block-usage'
+import { logger } from '../../../core/services/logger'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -373,6 +374,11 @@ describe('registerRemoteHandlers', () => {
   let win: any
 
   beforeEach(() => {
+    // `account:get` now reads the core HostAuth seam (S2) rather than importing
+    // account-manager directly — wire a stub with the state the test asserts on.
+    setHostAuth({
+      getAccountState: () => ({ enabled: false, accounts: [] })
+    } as unknown as HostAuth)
     dispatcher = new RemoteDispatcher()
     win = makeFakeWindow()
     Object.values(sessionManagerStub).forEach((fn) => {

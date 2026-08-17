@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import snapshot from '../../main/opencode/protocol/doc-snapshot.1.18.9.json'
+import snapshot from '../../core/opencode/protocol/doc-snapshot.1.18.9.json'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'

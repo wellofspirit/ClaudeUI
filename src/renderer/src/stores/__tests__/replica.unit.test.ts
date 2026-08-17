@@ -34,7 +34,7 @@ import {
   onReplicaApplied
 } from '../replica'
 import { seed, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
-import { toSnapshot } from '../../../../shared/sync/state'
+import { toSnapshot } from '../../../../core/shared/sync/state'
 import { makeAssistantMessage, makeSessionStatus } from '@test/factories/messages'
 
 const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()

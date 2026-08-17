@@ -45,8 +45,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { CrossEngineDispatcher } from '../../main/services/cross-engine-dispatcher'
-import type { DispatchContext } from '../../main/services/cross-engine-dispatcher'
+import { CrossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
+import type { DispatchContext } from '../../core/services/cross-engine-dispatcher'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'

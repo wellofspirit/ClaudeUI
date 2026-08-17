@@ -42,22 +42,22 @@ const optimizer = {
   }
 }
 import { bootCore, type CoreBoot } from './boot-core'
-import { setHostWindow, getHostWindow } from './services/host-window'
+import { setHostWindow, getHostWindow } from '../core/services/host-window'
 import { attachSyncPort } from './services/sync-port'
-import { terminalService } from './services/terminal-service'
-import { registerRemoteVersionInfo } from './ipc/remote-handlers'
+import { terminalService } from '../core/services/terminal-service'
+import { registerRemoteVersionInfo } from '../core/ipc/remote-handlers'
 import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
-import { credentialSync } from './auth/vault/CredentialSync'
-import { opencodeServerManager } from './opencode/OpencodeServerManager'
+import { credentialSync } from '../core/auth/vault/CredentialSync'
+import { opencodeServerManager } from '../core/opencode/OpencodeServerManager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
-import { logger } from './services/logger'
-import { getSdkVersion } from './services/claude-session'
+import { logger } from '../core/services/logger'
+import { getSdkVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
-import { loadPersistedPrices } from './services/opencode-pricing'
+import { loadPersistedPrices } from '../core/services/opencode-pricing'
 import { QuitCoordinator } from './quit-coordinator'
 import {
   isAllowedExternalUrl,
@@ -66,9 +66,17 @@ import {
   buildVscodeUrl,
   validateLocalFilePath,
   type AppOrigin
-} from './shell-security'
-import { readImagePreview } from './sent-file-security'
+} from '../core/shell-security'
+import { readImagePreview } from '../core/sent-file-security'
+import { setHostPaths } from '../core/host'
 import icon from '../../resources/icon.png?asset'
+
+// Desktop implementation of the core `HostPaths` seam (S2). Wired at module
+// load — as early as the desktop entrypoint runs, before any window decision or
+// engine spawn — so no core module (engine locators, the web-client dir) can
+// observe an unset provider on the spawn/serve path. A non-Electron entrypoint
+// wires its own (or none; core falls back to `process.cwd()`).
+setHostPaths({ getAppPath: () => app.getAppPath() })
 
 // Single-instance lock (M-BT1). A second launch must NOT run a full second
 // instance: both would write ~/.claude/ui/*.json (last-writer-wins corruption),

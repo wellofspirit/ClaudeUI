@@ -20,7 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   subscribeWindowToSync
 } from '../../../test/helpers/sync-subscriber-window'
-import { clearSyncSubscribersForTests } from '../sync-host'
+import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 
 const { mockQuery, binaryAvailable, crossEngineSpies } = vi.hoisted(() => ({
   mockQuery: vi.fn(),
@@ -37,8 +37,8 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 // Keep tool()/createSdkMcpServer real (collab-tool builds a real server);
 // replace query with a capture, and point the CLI locator at an existing file
 // so run()'s existsSync gate passes.
-vi.mock('../../sdk', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../sdk')>()
+vi.mock('../../../core/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/sdk')>()
   return {
     ...actual,
     query: mockQuery,
@@ -47,13 +47,13 @@ vi.mock('../../sdk', async (importOriginal) => {
   }
 })
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     isBinaryAvailable: (): boolean => binaryAvailable.value
   }
 }))
 
-vi.mock('../cross-engine-dispatcher', () => ({
+vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: crossEngineSpies,
   // Mirrors opencodeServerManager.isBinaryAvailable() above — same underlying
   // signal, now routed through the named capability helper (ADR-030/M4-A).
@@ -61,30 +61,30 @@ vi.mock('../cross-engine-dispatcher', () => ({
     engineId === 'claude' ? binaryAvailable.value : true
 }))
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 // loadEngineConfig is also read by collab-tool.ts (real here) to resolve the
 // dispatch_agent model hint (ADR-033 follow-up) — {} keeps that path on the
 // generic hint, hermetically, without touching the real dev machine's config.
-vi.mock('../ui-config', () => ({ saveSlashCommands: vi.fn(), loadEngineConfig: vi.fn(() => ({})) }))
-vi.mock('../claude-mcp', () => ({
+vi.mock('../../../core/services/ui-config', () => ({ saveSlashCommands: vi.fn(), loadEngineConfig: vi.fn(() => ({})) }))
+vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])
 }))
-vi.mock('../session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   computeTokenMetrics: vi.fn(() => ({})),
   fallbackBlockText: vi.fn(() => '')
 }))
-vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
-vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
-vi.mock('../voice-client', () => ({ VoiceClient: class {} }))
-vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
-vi.mock('../usage-fetcher', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
+vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
+vi.mock('../../../core/services/voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
+vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
+vi.mock('../../../core/services/context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
 }))
-vi.mock('../usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
+vi.mock('../../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 vi.mock('../account-manager', () => ({
   accountManager: { getState: vi.fn(() => ({ enabled: false, activeId: null })) }
 }))
@@ -93,9 +93,9 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 }))
 
 // Import AFTER mocks.
-import { ClaudeSession } from '../claude-session'
+import { ClaudeSession } from '../../../core/services/claude-session'
 import type { BrowserWindow } from 'electron'
-import type { SdkMcpServer } from '../../sdk'
+import type { SdkMcpServer } from '../../../core/sdk'
 
 // Every `makeWin()` registers a funnel subscriber; drop them per test so a long
 // file does not fan every event out to hundreds of dead stubs.

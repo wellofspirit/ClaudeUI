@@ -20,9 +20,9 @@ import {
   type AggEntry,
   type ApiWindow,
   type ProjectionSample
-} from '../usage-aggregation'
+} from '../../../core/services/usage-aggregation'
 import type { TokenCounts, UsageBlock, ModelTokenBreakdown } from '../../../shared/types'
-import { accountForTimestamp, type AccountLogRecord } from '../usage-windows'
+import { accountForTimestamp, type AccountLogRecord } from '../../../core/services/usage-windows'
 
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000

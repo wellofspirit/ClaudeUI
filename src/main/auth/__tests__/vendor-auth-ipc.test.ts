@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { VendorAuthMap, VendorAuthOption } from '../../../shared/types'
-import type { EngineAuthProvider } from '../EngineAuthProvider'
+import type { EngineAuthProvider } from '../../../core/auth/EngineAuthProvider'
 import { EngineAuthRegistry } from '../EngineAuthRegistry'
 
 // ---------------------------------------------------------------------------

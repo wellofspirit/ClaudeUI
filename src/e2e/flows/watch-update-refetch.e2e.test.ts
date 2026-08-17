@@ -52,11 +52,11 @@ vi.mock('electron', () => ({
   app: { getAppPath: () => process.cwd(), isPackaged: false }
 }))
 
-vi.mock('../../main/services/logger', () => ({
+vi.mock('../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-vi.mock('../../main/services/tunnel-manager', () => {
+vi.mock('../../core/services/tunnel-manager', () => {
   class StubTunnelManager {
     setStatusHandler(): void {}
     getStatus(): { state: 'stopped'; url: null; error: null } {
@@ -68,8 +68,8 @@ vi.mock('../../main/services/tunnel-manager', () => {
   return { TunnelManager: StubTunnelManager }
 })
 
-vi.mock('../../main/services/db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../main/services/db')>()
+vi.mock('../../core/services/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/services/db')>()
   // Auth-mode `off` — see the note in stream-lane-reconnect.e2e.test.ts.
   return {
     ...actual,
@@ -78,18 +78,18 @@ vi.mock('../../main/services/db', async (importOriginal) => {
   }
 })
 
-vi.mock('../../main/services/claude-session', () => ({
+vi.mock('../../core/services/claude-session', () => ({
   ClaudeSession: { addExtraWindow: vi.fn(), removeExtraWindow: vi.fn() }
 }))
 
-import { RemoteServer } from '../../main/services/remote-server'
-import { RemoteDispatcher } from '../../main/services/remote-dispatcher'
-import { registerCommand, commandRegistry } from '../../main/ipc/command-registry'
-import { syncCore } from '../../main/services/sync-host'
-import { watchSession, unwatchAll } from '../../main/services/session-watcher'
-import { loadSessionHistory } from '../../main/services/session-history'
-import { applyEvent, applyWatchedContent, auxFromCanonical } from '../../shared/sync/reducer'
-import { fromSnapshot, type CanonicalState } from '../../shared/sync/state'
+import { RemoteServer } from '../../core/services/remote-server'
+import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
+import { registerCommand, commandRegistry } from '../../core/ipc/command-registry'
+import { syncCore } from '../../core/services/sync-host'
+import { watchSession, unwatchAll } from '../../core/services/session-watcher'
+import { loadSessionHistory } from '../../core/services/session-history'
+import { applyEvent, applyWatchedContent, auxFromCanonical } from '../../core/shared/sync/reducer'
+import { fromSnapshot, type CanonicalState } from '../../core/shared/sync/state'
 import type { ChatMessage } from '../../shared/types'
 import type {
   WsServerMessage,

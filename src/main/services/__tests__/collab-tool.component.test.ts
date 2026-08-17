@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 // The real singleton's loadEngineConfig — mocked so the genuine
@@ -19,7 +19,7 @@ vi.mock('../logger', () => ({
 // server acquire, so the real opencodeServerManager is never touched). Also
 // used by createCollabServer itself to resolve the dispatch_agent model hint
 // (ADR-033 follow-up) — see the describe block below.
-vi.mock('../ui-config', () => ({
+vi.mock('../../../core/services/ui-config', () => ({
   loadEngineConfig: vi.fn(() => ({}))
 }))
 // The model-hint's cached-known-models source (ADR-033 follow-up). Mocked to
@@ -29,7 +29,7 @@ vi.mock('../ui-config', () => ({
 // exercised in this file (dispatch is either mocked outright or fails before
 // reaching model parsing), included only so the real cross-engine-dispatcher
 // singleton's import binding is never `undefined`.
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/model-discovery', () => ({
   peekOpencodeModels: vi.fn(() => null),
   parseModelString: vi.fn((model: string) => {
     const idx = model.indexOf('/')
@@ -39,12 +39,12 @@ vi.mock('../../opencode/model-discovery', () => ({
   })
 }))
 
-import { createCollabServer } from '../collab-tool'
-import type { CollabServerContext } from '../collab-tool'
-import { crossEngineDispatcher } from '../cross-engine-dispatcher'
-import { loadEngineConfig } from '../ui-config'
-import { peekOpencodeModels } from '../../opencode/model-discovery'
-import type { SdkToolExtra } from '../../sdk'
+import { createCollabServer } from '../../../core/services/collab-tool'
+import type { CollabServerContext } from '../../../core/services/collab-tool'
+import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
+import { loadEngineConfig } from '../../../core/services/ui-config'
+import { peekOpencodeModels } from '../../../core/opencode/model-discovery'
+import type { SdkToolExtra } from '../../../core/sdk'
 
 function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerContext & {
   emit: ReturnType<typeof vi.fn>

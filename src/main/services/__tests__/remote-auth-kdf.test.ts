@@ -18,15 +18,15 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import * as crypto from 'node:crypto'
-import { computeStoredCredential, dbPasswordAuthProvider } from '../remote-auth'
+import { computeStoredCredential, dbPasswordAuthProvider } from '../../../core/services/remote-auth'
 import { derivePasswordProof } from '../../../web/password-proof'
-import type { RemoteConfigRow } from '../db'
+import type { RemoteConfigRow } from '../../../core/services/db'
 
 // The provider reads the DB per call; drive it off a mutable fake row.
 const { configRef } = vi.hoisted(() => ({
   configRef: { current: null as RemoteConfigRow | null }
 }))
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   getRemoteConfig: () => configRef.current,
   setRemotePassword: vi.fn()
 }))

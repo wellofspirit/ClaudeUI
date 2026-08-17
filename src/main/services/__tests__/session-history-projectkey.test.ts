@@ -39,9 +39,9 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-async function freshResolveForkAnchor(): Promise<typeof import('../session-history')['resolveForkAnchor']> {
+async function freshResolveForkAnchor(): Promise<typeof import('../../../core/services/session-history')['resolveForkAnchor']> {
   vi.resetModules()
-  const mod = await import('../session-history')
+  const mod = await import('../../../core/services/session-history')
   return mod.resolveForkAnchor
 }
 

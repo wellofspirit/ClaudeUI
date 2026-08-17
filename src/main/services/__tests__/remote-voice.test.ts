@@ -32,7 +32,7 @@ const loggerMock = vi.hoisted(() => ({
   warn: vi.fn(),
   error: vi.fn()
 }))
-vi.mock('../logger', () => ({ logger: loggerMock }))
+vi.mock('../../../core/services/logger', () => ({ logger: loggerMock }))
 
 // --- sync-host mock ---------------------------------------------------------
 //
@@ -43,16 +43,16 @@ vi.mock('../logger', () => ({ logger: loggerMock }))
 const deliveries = vi.hoisted(
   () => [] as Array<{ connectionId: string; channel: string; args: unknown[] }>
 )
-vi.mock('../sync-host', () => ({
+vi.mock('../../../core/services/sync-host', () => ({
   sendToStreamConnection: (connectionId: string, frame: { channel: string; args: unknown[] }) => {
     deliveries.push({ connectionId, channel: frame.channel, args: frame.args })
     return true
   }
 }))
 
-import { remoteVoice, MAX_VOICE_FRAME_BYTES } from '../remote-voice'
-import type { SessionManager } from '../session-manager'
-import type { CommandConnection } from '../../ipc/command-registry'
+import { remoteVoice, MAX_VOICE_FRAME_BYTES } from '../../../core/services/remote-voice'
+import type { SessionManager } from '../../../core/services/session-manager'
+import type { CommandConnection } from '../../../core/ipc/command-registry'
 
 // --- A fake cli.js voice server --------------------------------------------
 

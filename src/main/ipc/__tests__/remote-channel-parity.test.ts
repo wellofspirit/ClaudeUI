@@ -29,8 +29,8 @@
 import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
-import { AUTH_OFF_GRANTS, type Capability } from '../command-registry'
-import { channelSpec } from '../../../shared/sync/channels'
+import { AUTH_OFF_GRANTS, type Capability } from '../../../core/ipc/command-registry'
+import { channelSpec } from '../../../core/shared/sync/channels'
 
 const REPO = process.cwd()
 const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf-8')
@@ -96,12 +96,12 @@ function invokedChannels(): Set<string> {
  * report those channels as missing.
  */
 const SHARED_DECLARATION_SOURCES = [
-  'src/main/ipc/remote-handlers.ts',
-  'src/main/ipc/stream-watch.ts',
-  'src/main/ipc/git-watch.ts',
+  'src/core/ipc/remote-handlers.ts',
+  'src/core/ipc/stream-watch.ts',
+  'src/core/ipc/git-watch.ts',
   // S1b — the config/worktree sweep and the automation port.
-  'src/main/ipc/config-commands.ts',
-  'src/main/ipc/automation-commands.ts'
+  'src/core/ipc/config-commands.ts',
+  'src/core/ipc/automation-commands.ts'
 ]
 
 /**
@@ -210,8 +210,8 @@ describe('remote channel parity (R5)', () => {
     //     either transport registrar, which is the only way the two surfaces
     //     could come to disagree.
     const shared = [
-      read('src/main/ipc/config-commands.ts'),
-      read('src/main/ipc/automation-commands.ts')
+      read('src/core/ipc/config-commands.ts'),
+      read('src/core/ipc/automation-commands.ts')
     ].join('\n')
     const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
     const found = new Map<string, { capability: Capability; kind: string }>()
@@ -225,7 +225,7 @@ describe('remote channel parity (R5)', () => {
 
     const registrars = [
       read('src/main/ipc/session.ipc.ts'),
-      read('src/main/ipc/remote-handlers.ts')
+      read('src/core/ipc/remote-handlers.ts')
     ].join('\n')
     const inline = Object.keys(S1B_SWEEP)
       .filter((c) => registrars.includes(`channel: '${c}'`))
@@ -240,7 +240,7 @@ describe('remote channel parity (R5)', () => {
     //     automation.ipc.ts for the automations), `handleRemote` on the other.
     const sessionIpc = read('src/main/ipc/session.ipc.ts')
     const automationIpc = read('src/main/ipc/automation.ipc.ts')
-    const remoteHandlers = read('src/main/ipc/remote-handlers.ts')
+    const remoteHandlers = read('src/core/ipc/remote-handlers.ts')
     expect(sessionIpc).toMatch(
       /for \(const cmd of configCommands\(manager\)\) \{\s*handleIpc\(cmd\)/
     )

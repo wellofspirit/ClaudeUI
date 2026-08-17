@@ -96,20 +96,24 @@ export default defineConfig(
     }
   },
 
-  // No-Electron fence for SyncCore (ADR-051 §Topology, phase 4a item 10).
+  // No-Electron fence for `src/core` (ADR-051 §Topology; physical extraction
+  // landed in the S2 series).
   //
-  // `src/main/sync/**` and `src/shared/sync/**` are the future `src/core`: they
-  // must stay runnable in a headless bun process with no Electron at all. The
-  // constraint is enforced, not documented — the Electron dependency is exactly
-  // the kind of thing that creeps in via one convenient import (a `BrowserWindow`
-  // type, `app.getPath`) and is then structural. Delivery and every other
-  // host-shaped concern is injected from `src/main/services/sync-host.ts`, which
-  // is deliberately OUTSIDE the fence.
+  // `src/core` is the window-independent service graph — SyncCore, the engine
+  // adapters, the PTY manager, the HTTP/WS server and the services they need. It
+  // must stay runnable in a headless bun process with no Electron at all, so a
+  // second entrypoint (`claudeui-server`) can boot it. The constraint is
+  // enforced, not documented — the Electron dependency is exactly the kind of
+  // thing that creeps in via one convenient import (a `BrowserWindow` type,
+  // `app.getPath`) and is then structural. Every host-shaped concern is injected
+  // through the neutral adapters in `src/core/host.ts` (window handle, app paths,
+  // native notifications, account-state reads, mockup serving), whose desktop
+  // implementations are wired from `src/main` (`index.ts`, `boot-core.ts`).
   //
   // Type-only imports are blocked too: a `BrowserWindow` in a signature makes
   // core's API Electron-shaped even when nothing is emitted at runtime.
   {
-    files: ['src/main/sync/**/*.{ts,tsx}', 'src/shared/sync/**/*.{ts,tsx}'],
+    files: ['src/core/**/*.{ts,tsx}'],
     ignores: ['**/__tests__/**'],
     rules: {
       'no-restricted-imports': [
@@ -119,7 +123,7 @@ export default defineConfig(
             {
               group: ['electron', 'electron/*', '@electron/*', '@electron-toolkit/*'],
               message:
-                'SyncCore must not import Electron (ADR-051 §Topology). Inject host behaviour from src/main/services/sync-host.ts instead.'
+                'src/core must not import Electron (ADR-051 §Topology). Inject host behaviour through src/core/host.ts instead.'
             }
           ]
         }

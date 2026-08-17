@@ -61,7 +61,7 @@ const {
   }
 })
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
     release: mockRelease,
@@ -69,24 +69,24 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   }
 }))
 
-vi.mock('../../opencode/OpencodeClient', () => ({
+vi.mock('../../../core/opencode/OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
 }))
 
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/model-discovery', () => ({
   invalidateOpencodeModelCache: mockInvalidateOpencodeModelCache
 }))
 
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/fake/persisted'
 }))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }
 }))
 
 // Import SUT AFTER mocking
-import { OpencodeAuthProvider } from '../OpencodeAuthProvider'
+import { OpencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -35,11 +35,11 @@ modRef._load = function patched(...a: unknown[]): unknown {
   return origLoad.call(this, ...a)
 }
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { PtyManager, MAX_POOL_INDEX } from '../pty-manager'
+import { PtyManager, MAX_POOL_INDEX } from '../../../core/services/pty-manager'
 
 const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 25))
 

@@ -42,7 +42,7 @@ modRef._load = function patched(...args: unknown[]): unknown {
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
 // Silence logger noise.
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -53,7 +53,7 @@ vi.mock('../../services/logger', () => ({
 
 // Import AFTER mocks so the real module picks up the mocked electron/pty.
 import { registerTerminalIpc } from '../terminal.ipc'
-import { terminalService } from '../../services/terminal-service'
+import { terminalService } from '../../../core/services/terminal-service'
 
 describe('terminal.ipc', () => {
   let harness: IpcHarness

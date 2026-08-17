@@ -41,12 +41,12 @@ afterEach(() => {
 const OPENCODE_MODEL: ModelRef = { engineId: 'opencode', vendorId: 'openai', modelId: 'gpt-5' }
 
 async function fresh(): Promise<{
-  db: typeof import('../db')
-  ui: typeof import('../ui-config')
+  db: typeof import('../../../core/services/db')
+  ui: typeof import('../../../core/services/ui-config')
 }> {
   vi.resetModules()
-  const db = await import('../db')
-  const ui = await import('../ui-config')
+  const db = await import('../../../core/services/db')
+  const ui = await import('../../../core/services/ui-config')
   return { db, ui }
 }
 

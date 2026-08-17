@@ -30,31 +30,31 @@ const {
   MockOpencodeClient: vi.fn()
 }))
 
-vi.mock('../block-usage', () => ({
+vi.mock('../../../core/services/block-usage', () => ({
   blockUsageService: {
     getClaudeEntriesForReconcile: mockGetClaudeEntries,
     recalculate: vi.fn(async () => ({}))
   }
 }))
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
 }))
 
-vi.mock('../../opencode/OpencodeClient', () => ({
+vi.mock('../../../core/opencode/OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
 }))
 
 // M-DB1: enumeration now goes through the global DB reader, not GET /session.
-vi.mock('../opencode-session-list', () => ({
+vi.mock('../../../core/services/opencode-session-list', () => ({
   listOpencodeSessionsGlobal: mockListSessionsGlobal
 }))
 
-vi.mock('../persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
-import { usageReconciler } from '../usage-reconciler'
+import { usageReconciler } from '../../../core/services/usage-reconciler'
 import {
   closeDb,
   getUsageEventByMessageId,
@@ -62,7 +62,7 @@ import {
   countUsageEvents,
   getUsageEventsSince,
   type UsageEventRow
-} from '../db'
+} from '../../../core/services/db'
 
 function liveRow(overrides: Partial<UsageEventRow> = {}): UsageEventRow {
   return {

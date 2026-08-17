@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 

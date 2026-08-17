@@ -36,7 +36,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { onSyncAnswered } from '../../../shared/sync/client-registry'
+import { onSyncAnswered } from '../../../core/shared/sync/client-registry'
 import { setStreamRewatch } from '../stores/replica'
 import { useAutomationStore } from '../stores/automation-store'
 import { useSessionStore } from '../stores/session-store'

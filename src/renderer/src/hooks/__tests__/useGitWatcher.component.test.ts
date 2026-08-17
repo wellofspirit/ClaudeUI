@@ -16,11 +16,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
-import { SyncClient } from '../../../../shared/sync/sync-client'
+import { SyncClient } from '../../../../core/shared/sync/sync-client'
 import {
   resetSyncClientForTests,
   setSyncClient
-} from '../../../../shared/sync/client-registry'
+} from '../../../../core/shared/sync/client-registry'
 import { useGitWatcher } from '../useGitWatcher'
 
 /**

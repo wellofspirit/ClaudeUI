@@ -24,7 +24,7 @@ const { configRef, credentialCountRef, storedPolicyRef, breakGlassRef, countImpl
     auditSpy: vi.fn()
   }))
 
-vi.mock('../../services/db', () => ({
+vi.mock('../../../core/services/db', () => ({
   appendAuditLog: auditSpy,
   getRemoteConfig: () => configRef.current,
   countWebauthnCredentials: () =>
@@ -35,7 +35,7 @@ vi.mock('../../services/db', () => ({
   DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES: 60,
   DEFAULT_SESSION_MAX_AGE_HOURS: 4
 }))
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -48,15 +48,15 @@ import {
   desktopConnection,
   makeRemoteConnection,
   type CommandConnection
-} from '../command-registry'
+} from '../../../core/ipc/command-registry'
 import {
   mintEnrollToken,
   webauthnRegisterOptions,
   webauthnRegisterVerify,
   webauthnRename,
   webauthnRevoke
-} from '../webauthn-commands'
-import { WebauthnService, type WebauthnCredentialStore } from '../../services/webauthn-service'
+} from '../../../core/ipc/webauthn-commands'
+import { WebauthnService, type WebauthnCredentialStore } from '../../../core/services/webauthn-service'
 import { VirtualAuthenticator } from '../../../test/helpers/webauthn-authenticator'
 
 const TAILNET = { rpId: 'box.tail1234.ts.net', origin: 'https://box.tail1234.ts.net' }

@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 const appendAuditLog = vi.hoisted(() => vi.fn())
-vi.mock('../../services/db', () => ({ appendAuditLog }))
+vi.mock('../../../core/services/db', () => ({ appendAuditLog }))
 
 const loggerSpies = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -19,7 +19,7 @@ const loggerSpies = vi.hoisted(() => ({
   warn: vi.fn(),
   error: vi.fn()
 }))
-vi.mock('../../services/logger', () => ({ logger: loggerSpies }))
+vi.mock('../../../core/services/logger', () => ({ logger: loggerSpies }))
 
 import {
   CommandRegistry,
@@ -29,7 +29,7 @@ import {
   desktopConnection,
   makeRemoteConnection,
   type CommandRegistration
-} from '../command-registry'
+} from '../../../core/ipc/command-registry'
 import { isEnrollNotPermittedError } from '../../../shared/remote-protocol'
 
 let registry: CommandRegistry

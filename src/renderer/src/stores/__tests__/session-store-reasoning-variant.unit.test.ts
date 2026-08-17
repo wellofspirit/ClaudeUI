@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
 import { getReplicaState } from '../replica'
-import { toSnapshot } from '../../../../shared/sync/state'
+import { toSnapshot } from '../../../../core/shared/sync/state'
 import { resetFactoryCounter } from '@test/factories/messages'
 import { hydrateReplica } from '@renderer/stores/replica'
 import { resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'

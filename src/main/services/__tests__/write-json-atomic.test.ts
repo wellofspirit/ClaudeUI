@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -37,7 +37,7 @@ import {
   writeJsonAtomicAsync,
   writeFileAtomicSync,
   readJsonFileForWrite
-} from '../write-json-atomic'
+} from '../../../core/services/write-json-atomic'
 
 let dir: string
 beforeEach(() => {

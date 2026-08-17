@@ -53,10 +53,10 @@ const managerMock = vi.hoisted(() => {
   }
 })
 
-vi.mock('../git-service', () => ({ gitServiceManager: managerMock }))
+vi.mock('../../../core/services/git-service', () => ({ gitServiceManager: managerMock }))
 
 // Import AFTER the mock.
-import { GitWatchRegistry } from '../git-watch-registry'
+import { GitWatchRegistry } from '../../../core/services/git-watch-registry'
 
 const status = (over: Partial<GitStatusData> = {}): GitStatusData =>
   ({

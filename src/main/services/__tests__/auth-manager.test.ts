@@ -15,7 +15,7 @@ vi.mock('../service-session', () => ({
     getControlHandle: vi.fn(async () => hoisted.handle.current)
   }
 }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 

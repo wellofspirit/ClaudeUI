@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 // piBinaryAvailable is a plain function export (unlike opencodeServerManager,
@@ -22,7 +22,7 @@ vi.mock('../logger', () => ({
 // defaultSpawnPiTarget entirely), so mocking locatePiBinary here has no effect
 // on them either way — see buildPiTargetChildEnv's own dedicated test for the
 // real defaultSpawnPiTarget's recursion-guard property.
-vi.mock('../../pi/pi-locate', () => ({
+vi.mock('../../../core/pi/pi-locate', () => ({
   locatePiBinary: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
@@ -32,9 +32,9 @@ import {
   XENG_REQUEST_PREFIX,
   crossEngineDispatchAvailable,
   buildPiTargetChildEnv
-} from '../cross-engine-dispatcher'
-import { opencodeServerManager } from '../../opencode/OpencodeServerManager'
-import { piBinaryAvailable } from '../../pi/pi-locate'
+} from '../../../core/services/cross-engine-dispatcher'
+import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
+import { piBinaryAvailable } from '../../../core/pi/pi-locate'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
@@ -45,11 +45,11 @@ import type {
   PiTargetPrimitives,
   SpawnClaudeQueryFn,
   SpawnPiTargetFn
-} from '../cross-engine-dispatcher'
-import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../sdk'
+} from '../../../core/services/cross-engine-dispatcher'
+import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { EngineId } from '../../../shared/types'
-import type { PiRpcClient } from '../../pi/PiRpcClient'
-import type { PiBridgeHost, PiBridgeHandler } from '../../pi/PiBridgeHost'
+import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
+import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 
 // ---------------------------------------------------------------------------
 // Fakes

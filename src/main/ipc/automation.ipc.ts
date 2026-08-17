@@ -1,9 +1,9 @@
-import { ipcMain } from 'electron'
+import { ipcMain, Notification } from 'electron'
 import { app } from 'electron'
 const is = { dev: !app.isPackaged }
-import { AutomationManager } from '../services/automation-manager'
-import { logger } from '../services/logger'
-import { AUTOMATION_COMMANDS, setAutomationManager } from './automation-commands'
+import { AutomationManager } from '../../core/services/automation-manager'
+import { logger } from '../../core/services/logger'
+import { AUTOMATION_COMMANDS, setAutomationManager } from '../../core/ipc/automation-commands'
 import { handleIpc } from './desktop-transport'
 
 /**
@@ -25,7 +25,12 @@ export function registerAutomationIpc(): AutomationManager {
     ipcMain.removeHandler(ch)
   }
 
-  const manager = new AutomationManager()
+  // Desktop native-notification sink: a run's completion surfaces as an OS
+  // notification. The manager is otherwise Electron-free (S2) — this is the one
+  // host-shaped capability, injected here where the desktop boot owns it.
+  const manager = new AutomationManager((notification) => {
+    new Notification({ ...notification, silent: false }).show()
+  })
   setAutomationManager(manager)
   manager.load()
 

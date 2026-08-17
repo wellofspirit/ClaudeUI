@@ -28,7 +28,7 @@
  */
 
 import { useEffect } from 'react'
-import { onSyncEvent, markSyncReady } from '../../../shared/sync/client-registry'
+import { onSyncEvent, markSyncReady } from '../../../core/shared/sync/client-registry'
 import { useSessionStore } from '../stores/session-store'
 import {
   onReplicaApplied,

@@ -27,31 +27,35 @@
  * dialog parent, a session's voice handle) and copes with `null`. That is what
  * makes the boot order — core, then maybe a window — expressible at all.
  *
- * Electron is still imported (`ipcMain`): this is the desktop shell's core boot,
- * not the future `claudeui-server` entrypoint. Physically extracting
- * `src/core` and adding a bun entrypoint is the named follow-on phase
- * (docs/architecture/sync-core.md §Follow-ons); the Electron-free fence that
- * keeps that a MOVE rather than a rewrite is already enforced on
- * `src/main/sync/**` + `src/shared/sync/**`.
+ * The `src/core` extraction has landed (S2): the window-independent service
+ * graph — SyncCore, the engine adapters, the PTY manager, the HTTP/WS server
+ * and the services they need — physically lives under `src/core`, which is
+ * Electron-free by lint fence. This file (the composition root) STAYS in
+ * `src/main`: it wires the desktop implementations of the `core/host.ts`
+ * adapters (account reads, mockup serving) and still imports Electron for the
+ * ONE thing left anchoring it — the `ipcMain` transport that registers the
+ * desktop renderer's channels. Breaking that last seam (a transport adapter, not
+ * the services behind it) is what the `claudeui-server` bun entrypoint does
+ * next (docs/architecture/sync-core.md §Follow-ons).
  */
 
 import { ipcMain } from 'electron'
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { registerAutomationIpc } from './ipc/automation.ipc'
-import { registerRemoteHandlers } from './ipc/remote-handlers'
-import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
-import { RemoteDispatcher } from './services/remote-dispatcher'
-import { TailscaleManager } from './services/tailscale-manager'
-import { terminalService } from './services/terminal-service'
-import { opencodeServerManager } from './opencode/OpencodeServerManager'
-import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
-import { credentialSync } from './auth/vault/CredentialSync'
-import { sharedProviderService } from './shared-providers'
+import { registerRemoteHandlers } from '../core/ipc/remote-handlers'
+import { RemoteServer, getNetworkInterfaces } from '../core/services/remote-server'
+import { RemoteDispatcher } from '../core/services/remote-dispatcher'
+import { TailscaleManager } from '../core/services/tailscale-manager'
+import { terminalService } from '../core/services/terminal-service'
+import { opencodeServerManager } from '../core/opencode/OpencodeServerManager'
+import { crossEngineDispatcher } from '../core/services/cross-engine-dispatcher'
+import { credentialSync } from '../core/auth/vault/CredentialSync'
+import { sharedProviderService } from '../core/shared-providers'
 import { accountManager } from './services/account-manager'
 import { setLiveSessionCanceller, cancelClaudeSessions } from './services/session-invalidation'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
-import { logger } from './services/logger'
+import { logger } from '../core/services/logger'
 import {
   MIN_AUDIT_RETENTION_DAYS,
   REMOTE_AUTH_POLICIES,
@@ -59,19 +63,21 @@ import {
   getRemoteConfig,
   setRemoteConfig as dbSetRemoteConfig,
   clearRemotePassword
-} from './services/db'
+} from '../core/services/db'
 import {
   auditAuthPolicyChange,
   authSurfaceChanged,
   describeAuthSurfaceChange
-} from './services/auth-policy'
-import { sanitizedRemoteConfig } from './services/remote-config-view'
+} from '../core/services/auth-policy'
+import { sanitizedRemoteConfig } from '../core/services/remote-config-view'
 import { registerWebauthnIpc } from './ipc/webauthn.ipc'
 import { registerAuthcfgIpc } from './ipc/authcfg.ipc'
-import { MAX_SESSION_MAX_AGE_HOURS } from './services/step-up-tier'
-import { desktopConnection } from './ipc/command-registry'
-import { provisionPassword } from './services/remote-auth'
-import type { SessionManager } from './services/session-manager'
+import { MAX_SESSION_MAX_AGE_HOURS } from '../core/services/step-up-tier'
+import { desktopConnection } from '../core/ipc/command-registry'
+import { provisionPassword } from '../core/services/remote-auth'
+import { setHostAuth, setHostMockup } from '../core/host'
+import { routeHttpMockup, serveMockup } from './services/mockup-protocol'
+import type { SessionManager } from '../core/services/session-manager'
 import type { RemoteAuthPolicy, StepUpTier, TailscaleDetection } from '../shared/types'
 
 /** What core hands back so the (optional) window layer can attach to it. */
@@ -103,6 +109,25 @@ export interface BootCoreOptions {
  * `app.whenReady()`, before deciding whether to make a window.
  */
 export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
+  // Desktop implementations of the core host-adapter seams (S2). Wired FIRST,
+  // before any session or the HTTP server is constructed, so the extracted
+  // (Electron-free) core reads account state and serves `/mockup` through these
+  // instead of importing the Electron-bound auth + protocol modules directly.
+  //
+  // HostAuth is DATA-ONLY: state reads and the probe-cache refresh. The
+  // OAuth-browser flow stays in account-manager/ClaudeAuthProvider (src/main).
+  setHostAuth({
+    getAccountState: () => accountManager.getState(),
+    buildClaudeAccountRef: (id) => claudeAuthProvider.buildAccountRef(id),
+    updateClaudeAuthSource: (source, account) =>
+      claudeAuthProvider.updateAuthSource(source, account)
+  })
+  // HostMockup composes mockup-protocol's PURE route+serve; the Electron
+  // `protocol.register*` half stays desktop-only (registered from index.ts).
+  setHostMockup((pathname, searchParams, selfSource) =>
+    serveMockup(routeHttpMockup(pathname, searchParams), selfSource)
+  )
+
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.
   const sessionManager = registerSessionIpc()

@@ -35,9 +35,9 @@
  */
 
 import { MessageChannelMain, type BrowserWindow, type MessagePortMain } from 'electron'
-import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
-import { desktopConnection } from '../ipc/command-registry'
-import { logger } from './logger'
+import { syncCore, addSyncSubscriber, addStreamSubscriber } from '../../core/services/sync-host'
+import { desktopConnection } from '../../core/ipc/command-registry'
+import { logger } from '../../core/services/logger'
 
 const LOG_SOURCE = 'sync-port'
 

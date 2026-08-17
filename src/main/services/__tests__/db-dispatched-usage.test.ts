@@ -18,7 +18,7 @@ import {
   dispatchedCostsByRouting,
   renameDispatchedUsage,
   type Db
-} from '../db'
+} from '../../../core/services/db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())

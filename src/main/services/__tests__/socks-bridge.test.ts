@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as net from 'node:net'
 import * as http from 'node:http'
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -25,7 +25,7 @@ vi.mock('../logger', () => ({
   }
 }))
 
-import { startSocksBridge, stopSocksBridge, getBridgePort, socks5Connect } from '../socks-bridge'
+import { startSocksBridge, stopSocksBridge, getBridgePort, socks5Connect } from '../../../core/services/socks-bridge'
 
 // ---------------------------------------------------------------------------
 // Minimal SOCKS5 server for tests

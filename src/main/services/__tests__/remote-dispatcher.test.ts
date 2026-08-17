@@ -13,17 +13,17 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { RemoteDispatcher } from '../remote-dispatcher'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
   CommandRegistry,
   AUTH_OFF_GRANTS,
   PINNED_CAPABILITIES,
   makeRemoteConnection
-} from '../../ipc/command-registry'
+} from '../../../core/ipc/command-registry'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
 // The dispatcher calls logger.error() on handler exceptions.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock('../logger', () => ({
 }))
 
 // Keep the audit sink out of a pure routing unit test (it would open SQLite).
-vi.mock('../db', () => ({ appendAuditLog: vi.fn() }))
+vi.mock('../../../core/services/db', () => ({ appendAuditLog: vi.fn() }))
 
 function req(channel: string, args: unknown[] = [], id = 'req-1'): WsInvokeRequest {
   return { type: 'invoke', id, channel, args }
@@ -278,7 +278,7 @@ describe('RemoteDispatcher', () => {
 // ---------------------------------------------------------------------------
 
 describe('remote-handlers registration surface (guard)', () => {
-  const HANDLERS_PATH = resolve(__dirname, '../../ipc/remote-handlers.ts')
+  const HANDLERS_PATH = resolve(__dirname, '../../../core/ipc/remote-handlers.ts')
 
   it('registers no remote:* channel for the remote transport', () => {
     const src = readFileSync(HANDLERS_PATH, 'utf-8')

@@ -38,14 +38,14 @@ import {
   tierOf,
   type DispatchClass,
   type PresenceState
-} from '../step-up-tier'
+} from '../../../core/services/step-up-tier'
 import {
   PINNED_CAPABILITIES,
   makeRemoteConnection,
   desktopConnection,
   type Capability,
   type CommandKind
-} from '../../ipc/command-registry'
+} from '../../../core/ipc/command-registry'
 import type { RemoteAuthPolicy, StepUpTier } from '../../../shared/types'
 
 const NOW = 1_000_000

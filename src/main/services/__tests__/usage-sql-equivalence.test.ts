@@ -26,7 +26,7 @@ import {
   type UsageEventRow,
   type DailyUsageRow,
   type WindowSampleRow
-} from '../db'
+} from '../../../core/services/db'
 import {
   groupEntriesIntoBlocks,
   computeProjectionWLS,
@@ -34,7 +34,7 @@ import {
   type AggEntry,
   type ApiWindow,
   type ProjectionSample
-} from '../usage-aggregation'
+} from '../../../core/services/usage-aggregation'
 import { v4 as uuid } from 'uuid'
 import { equivalentCostUsd } from '../../../shared/pricing'
 import type { UsageBlock } from '../../../shared/types'

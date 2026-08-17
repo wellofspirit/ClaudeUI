@@ -39,8 +39,8 @@ import {
   addSyncSubscriber,
   setStreamWatch,
   syncCore
-} from '../../main/services/sync-host'
-import { streamFrameToEmission, type LaneFrame } from '../../shared/sync/stream'
+} from '../../core/services/sync-host'
+import { streamFrameToEmission, type LaneFrame } from '../../core/shared/sync/stream'
 
 interface WindowLike {
   webContents: { send: (channel: string, ...args: unknown[]) => void }

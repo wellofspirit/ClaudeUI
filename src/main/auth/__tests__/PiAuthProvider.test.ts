@@ -25,10 +25,10 @@ vi.mock('os', async () => {
 const { mockInvalidatePiModelCache } = vi.hoisted(() => ({
   mockInvalidatePiModelCache: vi.fn()
 }))
-vi.mock('../../pi/model-discovery', () => ({
+vi.mock('../../../core/pi/model-discovery', () => ({
   invalidatePiModelCache: mockInvalidatePiModelCache
 }))
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -37,12 +37,12 @@ const { mockBeginLogin, mockCompleteLogin, mockCancelLogin } = vi.hoisted(() => 
   mockCompleteLogin: vi.fn(),
   mockCancelLogin: vi.fn()
 }))
-vi.mock('../vault/CredentialSync', () => ({
+vi.mock('../../../core/auth/vault/CredentialSync', () => ({
   credentialSync: { beginLogin: mockBeginLogin, completeLogin: mockCompleteLogin, cancelLogin: mockCancelLogin },
   PI_CODEX_VENDOR_ID: 'openai-codex'
 }))
 
-import { PiAuthProvider } from '../PiAuthProvider'
+import { PiAuthProvider } from '../../../core/auth/PiAuthProvider'
 
 let testHome: string
 

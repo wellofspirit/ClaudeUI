@@ -58,7 +58,7 @@ let lastAbortObserved = false
 let lastSdkParams: any = null
 let lastGeneratorReturned = false
 
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: (params: any) => {
     lastSdkParams = params
     const ac: AbortController | undefined = params?.options?.abortController
@@ -109,16 +109,16 @@ vi.mock('../../sdk', () => ({
 // claude-session — avoid its transitive import fan-out
 // ---------------------------------------------------------------------------
 
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   getSdkExecutableOpts: () => ({}),
   ClaudeSession: { getExtraWindows: () => new Set() }
 }))
 
-vi.mock('../session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   loadSessionHistory: vi.fn(async () => ({ messages: [] }))
 }))
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -128,7 +128,7 @@ vi.mock('../logger', () => ({
 
 import type { Automation, AutomationRun } from '../../../shared/types'
 
-type AutomationManagerT = InstanceType<typeof import('../automation-manager').AutomationManager>
+type AutomationManagerT = InstanceType<typeof import('../../../core/services/automation-manager').AutomationManager>
 
 async function freshManager(): Promise<{
   mgr: AutomationManagerT
@@ -139,7 +139,7 @@ async function freshManager(): Promise<{
   // Every test gets its own module graph so AUTOMATION_DIR is bound to the
   // current TEMP_HOME.
   vi.resetModules()
-  const { AutomationManager } = await import('../automation-manager')
+  const { AutomationManager } = await import('../../../core/services/automation-manager')
   const win = {
     isDestroyed: () => false,
     webContents: { send: vi.fn() }
@@ -859,7 +859,7 @@ describe('AutomationManager — edit/delete during a live run', () => {
 
 describe('AutomationManager — id validation (M-AU3)', () => {
   it('isValidAutomationId accepts uuids/slugs and rejects traversal', async () => {
-    const { isValidAutomationId } = await import('../automation-manager')
+    const { isValidAutomationId } = await import('../../../core/services/automation-manager')
     expect(isValidAutomationId('550e8400-e29b-41d4-a716-446655440000')).toBe(true)
     expect(isValidAutomationId('drift-1')).toBe(true)
     expect(isValidAutomationId('a_b-C9')).toBe(true)

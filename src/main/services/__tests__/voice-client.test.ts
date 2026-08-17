@@ -33,7 +33,7 @@ const startRecordingMock = vi.fn((onData: (buf: Buffer) => void) => {
 })
 const stopRecordingMock = vi.fn()
 
-vi.mock('../voice-capture', () => ({
+vi.mock('../../../core/services/voice-capture', () => ({
   startRecording: (onData: (buf: Buffer) => void) => startRecordingMock(onData),
   stopRecording: () => stopRecordingMock(),
   isVoiceCaptureAvailable: () => true,
@@ -43,7 +43,7 @@ vi.mock('../voice-capture', () => ({
 
 // --- logger mock ------------------------------------------------------------
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -113,7 +113,7 @@ vi.mock('readline', () => ({
 
 // --- Imports under test (after all mocks registered) ------------------------
 
-import { VoiceClient } from '../voice-client'
+import { VoiceClient } from '../../../core/services/voice-client'
 
 // --- Test helpers -----------------------------------------------------------
 

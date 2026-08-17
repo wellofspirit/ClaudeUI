@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Module from 'node:module'
 import { createPtyStub } from '../../../test/stubs/pty-stub'
-import type { PtyRemoteSink } from '../pty-manager'
+import type { PtyRemoteSink } from '../../../core/services/pty-manager'
 
 const ptyStub = createPtyStub()
 
@@ -35,11 +35,11 @@ modRef._load = function patched(...a: unknown[]): unknown {
   return origLoad.call(this, ...a)
 }
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { PtyManager } from '../pty-manager'
+import { PtyManager } from '../../../core/services/pty-manager'
 
 const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 25))
 

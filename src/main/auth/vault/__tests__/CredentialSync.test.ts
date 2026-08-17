@@ -34,9 +34,9 @@ import {
   type CodexFeedTarget,
   type CodexCredentialInput,
   type CodexEntrySnapshot
-} from '../CredentialSync'
+} from '../../../../core/auth/vault/CredentialSync'
 import type { FSWatcher } from 'node:fs'
-import type { VaultCredential } from '../codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
 
 // ---------------------------------------------------------------------------
 // Test doubles

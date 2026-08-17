@@ -24,8 +24,8 @@ import {
   TRANSIENT_SESSION_FIELDS,
   TRANSIENT_APP_FIELDS
 } from '../sealed-fields'
-import { emptySession, emptyCanonicalState, toSnapshot } from '../../../../shared/sync/state'
-import { channelSpec, CHANNEL_SPECS } from '../../../../shared/sync/channels'
+import { emptySession, emptyCanonicalState, toSnapshot } from '../../../../core/shared/sync/state'
+import { channelSpec, CHANNEL_SPECS } from '../../../../core/shared/sync/channels'
 
 const config = readFileSync(join(process.cwd(), 'eslint.config.mjs'), 'utf8')
 

@@ -26,8 +26,8 @@ import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
 import { serviceSession } from './service-session'
 import { invalidateLiveSessions } from './session-invalidation'
-import { logger } from './logger'
-import { emitEvent } from './sync-host'
+import { logger } from '../../core/services/logger'
+import { emitEvent } from '../../core/services/sync-host'
 
 interface AuthorizeUrls {
   manualUrl?: string

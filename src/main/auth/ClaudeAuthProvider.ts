@@ -21,7 +21,7 @@ import type {
   AuthState
 } from '../../shared/types'
 import type { OAuthAccount } from '../../shared/types'
-import type { EngineAuthProvider } from './EngineAuthProvider'
+import type { EngineAuthProvider } from '../../core/auth/EngineAuthProvider'
 import { authManager } from '../services/auth-manager'
 import { accountManager } from '../services/account-manager'
 

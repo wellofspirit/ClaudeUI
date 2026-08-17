@@ -35,7 +35,7 @@ const { mockState, managerSpies } = vi.hoisted(() => {
 // Mock the AutomationManager class to use our spies without touching disk.
 // isValidAutomationId is re-exported with its real slug semantics so the IPC
 // perimeter validation (M-AU3) is exercised end-to-end.
-vi.mock('../../services/automation-manager', () => ({
+vi.mock('../../../core/services/automation-manager', () => ({
   isValidAutomationId: (id: unknown): id is string =>
     typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id),
   AutomationManager: class {
@@ -71,7 +71,7 @@ vi.mock('electron', async () => {
   }
 })
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),

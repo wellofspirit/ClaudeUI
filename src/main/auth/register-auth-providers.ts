@@ -5,10 +5,10 @@
  */
 import { engineAuthRegistry } from './EngineAuthRegistry'
 import { claudeAuthProvider } from './ClaudeAuthProvider'
-import { opencodeAuthProvider } from './OpencodeAuthProvider'
-import { piAuthProvider } from './PiAuthProvider'
-import { credentialSync } from './vault/CredentialSync'
-import { SharedProviderRepository } from '../shared-providers/SharedProviderRepository'
+import { opencodeAuthProvider } from '../../core/auth/OpencodeAuthProvider'
+import { piAuthProvider } from '../../core/auth/PiAuthProvider'
+import { credentialSync } from '../../core/auth/vault/CredentialSync'
+import { SharedProviderRepository } from '../../core/shared-providers/SharedProviderRepository'
 
 engineAuthRegistry.register('claude', claudeAuthProvider)
 engineAuthRegistry.register('opencode', opencodeAuthProvider)

@@ -25,7 +25,7 @@ import WebSocket from 'ws'
 import { ephemeralPort } from '../../../test/helpers/ws-test-client'
 import { createPtyStub } from '../../../test/stubs/pty-stub'
 import type { WsServerMessage } from '../../../shared/remote-protocol'
-import type { RemoteConfigRow } from '../db'
+import type { RemoteConfigRow } from '../../../core/services/db'
 import type { StepUpTier } from '../../../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -65,8 +65,8 @@ const { remoteConfigRef, auditRows, configWrites, passwordWrites } = vi.hoisted(
   passwordWrites: [] as Array<{ salt: string; hash: string }>
 }))
 
-vi.mock('../db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db')>()
+vi.mock('../../../core/services/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/db')>()
   return {
     ...actual,
     getRemoteConfig: () => remoteConfigRef.current,
@@ -92,15 +92,15 @@ vi.mock('../db', async (importOriginal) => {
   }
 })
 
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   ClaudeSession: { addExtraWindow: vi.fn(), removeExtraWindow: vi.fn() }
 }))
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-vi.mock('../tunnel-manager', () => {
+vi.mock('../../../core/services/tunnel-manager', () => {
   class StubTunnelManager {
     setStatusHandler(): void {}
     getStatus(): { state: 'stopped'; url: null; error: null } {
@@ -112,23 +112,23 @@ vi.mock('../tunnel-manager', () => {
   return { TunnelManager: StubTunnelManager }
 })
 
-import { RemoteServer } from '../remote-server'
-import { RemoteDispatcher } from '../remote-dispatcher'
-import { terminalService } from '../terminal-service'
-import { registerRemoteHandlers } from '../../ipc/remote-handlers'
+import { RemoteServer } from '../../../core/services/remote-server'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { terminalService } from '../../../core/services/terminal-service'
+import { registerRemoteHandlers } from '../../../core/ipc/remote-handlers'
 import { registerTerminalIpc } from '../../ipc/terminal.ipc'
-import { commandRegistry, registerCommand } from '../../ipc/command-registry'
-import { emitEvent, streamSubscriberCount, syncCore } from '../sync-host'
+import { commandRegistry, registerCommand } from '../../../core/ipc/command-registry'
+import { emitEvent, streamSubscriberCount, syncCore } from '../../../core/services/sync-host'
 import {
   MAX_STREAM_WATCH,
   applyStreamFrame,
   type StreamApplyResult,
   type StreamEventFrame,
   type StreamFrame
-} from '../../../shared/sync/stream'
-import { auxFromCanonical } from '../../../shared/sync/reducer'
-import { fromSnapshot } from '../../../shared/sync/state'
-import { SyncClient } from '../../../shared/sync/sync-client'
+} from '../../../core/shared/sync/stream'
+import { auxFromCanonical } from '../../../core/shared/sync/reducer'
+import { fromSnapshot } from '../../../core/shared/sync/state'
+import { SyncClient } from '../../../core/shared/sync/sync-client'
 
 // ---------------------------------------------------------------------------
 // Fixtures

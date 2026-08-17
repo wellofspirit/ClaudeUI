@@ -35,14 +35,14 @@ vi.mock('fs', async () => {
 vi.mock('../providers/BaseSession', () => ({
   BaseSession: { getExtraWindows: () => [] }
 }))
-vi.mock('../session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   loadSessionHistory: vi.fn(async () => ({ messages: [], taskNotifications: [], statusLine: null }))
 }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { watchSession, unwatchSession } from '../session-watcher'
+import { watchSession, unwatchSession } from '../../../core/services/session-watcher'
 
 
 describe('session-watcher fs.watch error handling (M-CL5)', () => {

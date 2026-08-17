@@ -27,7 +27,7 @@ import {
   ENTRY_BATCH_INTERVAL_MS,
   ENTRY_BATCH_MAX
 } from '../log-viewer'
-import type { LogEntry } from '../logger'
+import type { LogEntry } from '../../../core/services/logger'
 
 function entry(message: string): LogEntry {
   return { timestamp: '00:00:00.000', level: 'debug', source: 'T', message }

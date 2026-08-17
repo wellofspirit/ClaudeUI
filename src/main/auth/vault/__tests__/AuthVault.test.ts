@@ -8,9 +8,9 @@ vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os')
   return { ...actual, homedir: () => home.value, default: { ...actual, homedir: () => home.value } }
 })
-import { AuthVault, vaultPath } from '../AuthVault'
-import { CredentialSync, type CodexFeedTarget } from '../CredentialSync'
-import type { VaultCredential } from '../codex-oauth'
+import { AuthVault, vaultPath } from '../../../../core/auth/vault/AuthVault'
+import { CredentialSync, type CodexFeedTarget } from '../../../../core/auth/vault/CredentialSync'
+import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
 let testHome: string
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'auth-vault-'))
@@ -154,7 +154,7 @@ describe('AuthVault validation', () => {
 })
 
 describe('AuthVault lifecycle compatibility', () => {
-  function flow(overrides: Partial<import('../codex-oauth').LoginFlow> = {}) {
+  function flow(overrides: Partial<import('../../../../core/auth/vault/codex-oauth').LoginFlow> = {}) {
     return {
       start: vi.fn(async () => ({ authorizeUrl: 'https://example.test/auth', state: 's' })),
       waitForCallback: vi.fn(async () => ({

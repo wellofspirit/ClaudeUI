@@ -10,7 +10,7 @@ import {
   computeTurnSpanDurationMs,
   createTurnSpanAccumulator,
   loadBackgroundOutput
-} from '../session-history'
+} from '../../../core/services/session-history'
 
 // ---------------------------------------------------------------------------
 // Replicate private parser functions from session-history.ts for testing

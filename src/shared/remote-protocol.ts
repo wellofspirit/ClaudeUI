@@ -744,8 +744,8 @@ export interface WsVoiceAudio {
 // audit log (security.md §Audit): a delta stream is fully summarized by the
 // accumulation in canonical state, and a tail (`stream-ev`, S2) is a lossy
 // preview whose durable record is the event lane.
-export type { StreamFrame, StreamEventFrame } from './sync/stream'
-import type { StreamFrame, StreamEventFrame } from './sync/stream'
+export type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
+import type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
 
 export type WsClientMessage =
   | WsAuthRequest

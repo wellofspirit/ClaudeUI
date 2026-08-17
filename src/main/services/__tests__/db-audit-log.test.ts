@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
-import * as dbModule from '../db'
+import * as dbModule from '../../../core/services/db'
 import {
   runMigrations,
   closeDb,
@@ -21,7 +21,7 @@ import {
   DEFAULT_AUDIT_RETENTION_DAYS,
   MIN_AUDIT_RETENTION_DAYS,
   type Db
-} from '../db'
+} from '../../../core/services/db'
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
@@ -130,7 +130,7 @@ describe('append-only surface', () => {
   it('never UPDATEs audit_log, and deletes only by the moving ts window', async () => {
     const fs = await import('node:fs')
     const path = await import('node:path')
-    const src = fs.readFileSync(path.join(process.cwd(), 'src/main/services/db.ts'), 'utf-8')
+    const src = fs.readFileSync(path.join(process.cwd(), 'src/core/services/db.ts'), 'utf-8')
     // No rewriting of history, ever.
     expect(src).not.toMatch(/UPDATE\s+audit_log/i)
     // Exactly one DELETE, and its predicate is `ts < ?` — a retention sweep that

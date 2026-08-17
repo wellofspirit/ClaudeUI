@@ -47,12 +47,12 @@ const HOUR = 60 * 60 * 1000
 const DAY_D_START = new Date(2025, 5, 15, 0, 0, 0, 0).getTime()
 
 async function fresh(): Promise<{
-  db: typeof import('../db')
-  service: InstanceType<typeof import('../block-usage')['BlockUsageService']>
+  db: typeof import('../../../core/services/db')
+  service: InstanceType<typeof import('../../../core/services/block-usage')['BlockUsageService']>
 }> {
   vi.resetModules()
-  const db = await import('../db')
-  const bu = await import('../block-usage')
+  const db = await import('../../../core/services/db')
+  const bu = await import('../../../core/services/block-usage')
   return { db, service: new bu.BlockUsageService() }
 }
 
@@ -60,7 +60,7 @@ function claudeEvent(
   id: string,
   ts: number,
   inputTokens: number
-): import('../db').UsageEventRow {
+): import('../../../core/services/db').UsageEventRow {
   return {
     id,
     ts,

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { perEngineBreakdown, type AggEntry } from '../usage-aggregation'
+import { perEngineBreakdown, type AggEntry } from '../../../core/services/usage-aggregation'
 
 function entry(engineId: string, model: string, input: number, output: number, cost: number): AggEntry {
   return {

@@ -26,8 +26,8 @@ import {
   findPiSessionFile,
   deletePiSession,
   resolvePiForkAnchor
-} from '../pi-session-list'
-import { PI_FORK_CLONE_LATEST_SENTINEL } from '../fork-anchor'
+} from '../../../core/services/pi-session-list'
+import { PI_FORK_CLONE_LATEST_SENTINEL } from '../../../core/services/fork-anchor'
 
 let testHome: string
 

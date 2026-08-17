@@ -26,7 +26,7 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: (): string => TMP_HOME }
 })
 
-import { loadSessionHistory, loadSubagentHistory } from '../session-history'
+import { loadSessionHistory, loadSubagentHistory } from '../../../core/services/session-history'
 
 const PROJECT_KEY = 'test-project-attachments'
 const SESSION_ID = '11111111-2222-3333-4444-555555555555'

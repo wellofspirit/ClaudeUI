@@ -70,8 +70,8 @@ const { remoteConfigRef, serveRecordWrites } = vi.hoisted(() => ({
   remoteConfigRef: { current: null as unknown },
   serveRecordWrites: [] as Array<{ httpsPort: number; localPort: number } | 'clear'>
 }))
-vi.mock('../db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db')>()
+vi.mock('../../../core/services/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/db')>()
   return {
     ...actual,
     getRemoteConfig: () => remoteConfigRef.current,
@@ -103,7 +103,7 @@ vi.mock('../db', async (importOriginal) => {
 
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
 // uses two static methods (addExtraWindow/removeExtraWindow). Stub the module.
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   ClaudeSession: {
     addExtraWindow: vi.fn(),
     removeExtraWindow: vi.fn()
@@ -111,7 +111,7 @@ vi.mock('../claude-session', () => ({
 }))
 
 // Silence the logger.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -134,7 +134,7 @@ const { tunnelUrlRef } = vi.hoisted(() => ({ tunnelUrlRef: { current: null as st
 const TUNNEL_HOST = 'unit-test-tunnel.trycloudflare.com'
 
 // TunnelManager ships with a CloudFlare download path; stub completely.
-vi.mock('../tunnel-manager', () => {
+vi.mock('../../../core/services/tunnel-manager', () => {
   class StubTunnelManager {
     private cb: ((status: unknown) => void) | null = null
     setStatusHandler(fn: (status: unknown) => void): void {
@@ -164,21 +164,34 @@ import {
   evaluateIdentity,
   getNetworkInterfaces,
   originRequiresE2E
-} from '../remote-server'
-import { RemoteDispatcher } from '../remote-dispatcher'
-import { registerCommand } from '../../ipc/command-registry'
-import { GIT_WATCH_COMMAND } from '../../ipc/git-watch'
-import { gitWatchRegistry } from '../git-watch-registry'
-import { emitEvent, syncCore } from '../sync-host'
+} from '../../../core/services/remote-server'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { registerCommand } from '../../../core/ipc/command-registry'
+import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
+import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { emitEvent, syncCore } from '../../../core/services/sync-host'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
 import type { GitStatusData } from '../../../shared/types'
-import { computeStoredCredential } from '../remote-auth'
-import { TailscaleServeError, serveTargetForPort } from '../tailscale-manager'
-import type { ServeOccupancy } from '../tailscale-manager'
-import type { RemoteConfigRow } from '../db'
-import type { PasswordAuthProvider } from '../remote-auth'
+import { computeStoredCredential } from '../../../core/services/remote-auth'
+import { TailscaleServeError, serveTargetForPort } from '../../../core/services/tailscale-manager'
+import type { ServeOccupancy } from '../../../core/services/tailscale-manager'
+import type { RemoteConfigRow } from '../../../core/services/db'
+import type { PasswordAuthProvider } from '../../../core/services/remote-auth'
 import type { TailscaleDetection } from '../../../shared/types'
+import { setHostPaths, setHostMockup } from '../../../core/host'
+import { routeHttpMockup, serveMockup } from '../mockup-protocol'
+
+// `getWebClientDir()` now reads the core `HostPaths` seam (getAppPath) rather
+// than Electron's `app` directly. Route it at the same mutable ref the suites
+// point at a temp web dir, preserving the prior electron-mock behaviour.
+setHostPaths({ getAppPath: () => appPathRef.current || process.cwd() })
+
+// `/mockup` serving now rides the core `HostMockup` seam; wire it to the same
+// PURE route+serve functions boot-core composes on the desktop.
+setHostMockup((pathname, searchParams, selfSource) =>
+  serveMockup(routeHttpMockup(pathname, searchParams), selfSource)
+)
 
 // Default for EVERY test in this file: no password provisioned. Suites that
 // need one call `provisionPassword()` below.

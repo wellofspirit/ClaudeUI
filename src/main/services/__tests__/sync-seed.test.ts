@@ -34,15 +34,15 @@ const {
   listPiSessionsGlobal: vi.fn()
 }))
 
-vi.mock('../ui-config', () => ({ loadSettings, loadSessionConfig, loadSlashCommands }))
-vi.mock('../claude-settings', () => ({ loadClaudePermissions }))
-vi.mock('../session-history', () => ({ listDirectories }))
+vi.mock('../../../core/services/ui-config', () => ({ loadSettings, loadSessionConfig, loadSlashCommands }))
+vi.mock('../../../core/services/claude-settings', () => ({ loadClaudePermissions }))
+vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
 // engines' list sources are mocked here too — unmocked they read the real
 // ~/.pi and the developer's own opencode server.
-vi.mock('../opencode-session-list', () => ({ listOpencodeSessionsGlobal }))
-vi.mock('../pi-session-list', () => ({ listPiSessionsGlobal }))
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/opencode-session-list', () => ({ listOpencodeSessionsGlobal }))
+vi.mock('../../../core/services/pi-session-list', () => ({ listPiSessionsGlobal }))
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -51,8 +51,8 @@ import {
   refreshCanonicalDirectories,
   listAllDirectories,
   resetDirectoryRefreshStateForTests
-} from '../sync-seed'
-import { syncCore } from '../sync-host'
+} from '../../../core/services/sync-seed'
+import { syncCore } from '../../../core/services/sync-host'
 
 const CLAUDE_SESSION = {
   sessionId: 'cl-1',

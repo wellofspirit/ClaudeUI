@@ -22,17 +22,17 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type { AccountsState, AccountInfo, OAuthAccount } from '../../shared/types'
-import { setSecurestorageEnv, getSecurestorageEnv } from '../sdk/securestorage-env'
+import { setSecurestorageEnv, getSecurestorageEnv } from '../../core/sdk/securestorage-env'
 import { serviceSession } from './service-session'
 import { authManager } from './auth-manager'
 import { invalidateLiveSessions } from './session-invalidation'
-import { logger } from './logger'
+import { logger } from '../../core/services/logger'
 import {
   getAllAccounts,
   upsertAccount,
   deleteAccountRow,
   importAccountsOnce
-} from './db'
+} from '../../core/services/db'
 
 const ACCOUNTS_DIR = join(homedir(), '.claude', 'ui', 'accounts')
 const ACCOUNTS_FILE = join(ACCOUNTS_DIR, 'accounts.json')

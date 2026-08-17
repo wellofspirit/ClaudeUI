@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { createServer } from 'node:http'
-import { CodexLoginFlow, type OAuthDeps, type TokenResponse } from '../codex-oauth'
+import { CodexLoginFlow, type OAuthDeps, type TokenResponse } from '../../../../core/auth/vault/codex-oauth'
 
 function makeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')

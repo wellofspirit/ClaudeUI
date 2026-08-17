@@ -90,8 +90,8 @@ vi.mock('electron', async () => {
 })
 
 // The engine. Same seam the ClaudeSession component tests use.
-vi.mock('../../main/sdk', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../main/sdk')>()
+vi.mock('../../core/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/sdk')>()
   return {
     ...actual,
     query: mockQuery,
@@ -115,7 +115,7 @@ const CONFIG_FIXTURE = {
   slashCommands: [{ name: 'seeded-command', description: 'from the cache' }]
 }
 
-vi.mock('../../main/services/ui-config', () => ({
+vi.mock('../../core/services/ui-config', () => ({
   loadSettings: vi.fn(() => CONFIG_FIXTURE.settings),
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => CONFIG_FIXTURE.sessionConfig),
@@ -131,7 +131,7 @@ vi.mock('../../main/services/ui-config', () => ({
   saveVendorConfig: vi.fn()
 }))
 
-vi.mock('../../main/services/session-history', () => ({
+vi.mock('../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => [
     { path: '/tmp/proj', name: 'proj', sessions: [] }
   ]),
@@ -145,7 +145,7 @@ vi.mock('../../main/services/session-history', () => ({
 }))
 
 // ── Leaf services that would spawn / poll / download ───────────────────────
-vi.mock('../../main/services/usage-fetcher', () => ({
+vi.mock('../../core/services/usage-fetcher', () => ({
   usageFetcher: {
     setSessionGetter: vi.fn(),
     setIntervalSecs: vi.fn(),
@@ -161,7 +161,7 @@ vi.mock('../../main/services/service-session', () => ({
     stop: vi.fn()
   }
 }))
-vi.mock('../../main/services/block-usage', () => ({
+vi.mock('../../core/services/block-usage', () => ({
   blockUsageService: {
     setDebounceSecs: vi.fn(),
     startWatching: vi.fn(),
@@ -170,7 +170,7 @@ vi.mock('../../main/services/block-usage', () => ({
     setAccountFilter: vi.fn()
   }
 }))
-vi.mock('../../main/auth/vault/CredentialSync', () => ({
+vi.mock('../../core/auth/vault/CredentialSync', () => ({
   credentialSync: {
     configure: vi.fn(),
     start: vi.fn(async () => {}),
@@ -178,7 +178,7 @@ vi.mock('../../main/auth/vault/CredentialSync', () => ({
     getStatus: vi.fn(() => ({ connected: false }))
   }
 }))
-vi.mock('../../main/shared-providers', () => ({
+vi.mock('../../core/shared-providers', () => ({
   sharedProviderService: {
     syncAll: vi.fn(async () => {}),
     listDefinitions: vi.fn(() => []),
@@ -193,7 +193,7 @@ vi.mock('../../main/shared-providers', () => ({
     setRouteDefaultModel: vi.fn(async () => {})
   }
 }))
-vi.mock('../../main/opencode/OpencodeServerManager', () => ({
+vi.mock('../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
@@ -201,14 +201,14 @@ vi.mock('../../main/opencode/OpencodeServerManager', () => ({
     dispose: vi.fn()
   }
 }))
-vi.mock('../../main/opencode/model-discovery', () => ({
+vi.mock('../../core/opencode/model-discovery', () => ({
   discoverOpencodeModels: vi.fn(async () => []),
   invalidateOpencodeModelCache: vi.fn(),
   discoverOpencodeProviderCatalog: vi.fn(async () => []),
   getOpencodeProviderModels: vi.fn(async () => []),
   resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m)
 }))
-vi.mock('../../main/pi/model-discovery', () => ({
+vi.mock('../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   invalidatePiModelCache: vi.fn(),
@@ -216,11 +216,11 @@ vi.mock('../../main/pi/model-discovery', () => ({
   getPiModelCatalog: vi.fn(async () => []),
   effortLevelsFromModel: vi.fn(() => [])
 }))
-vi.mock('../../main/pi/pi-locate', () => ({
+vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
   locatePiBinary: vi.fn(() => null)
 }))
-vi.mock('../../main/services/cross-engine-dispatcher', () => ({
+vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
     dispatch: vi.fn(),
     resolveApproval: vi.fn(() => false),
@@ -230,19 +230,19 @@ vi.mock('../../main/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
-vi.mock('../../main/services/voice-capture', () => ({
+vi.mock('../../core/services/voice-capture', () => ({
   startRecording: vi.fn(() => false),
   stopRecording: vi.fn()
 }))
-vi.mock('../../main/services/voice-client', () => ({ VoiceClient: class {} }))
-vi.mock('../../main/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
-vi.mock('../../main/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../main/services/context-window', () => ({
+vi.mock('../../core/services/voice-client', () => ({ VoiceClient: class {} }))
+vi.mock('../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
+vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
+vi.mock('../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)
 }))
-vi.mock('../../main/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
+vi.mock('../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 // Ships a CloudFlare download path; RemoteServer constructs one unconditionally.
-vi.mock('../../main/services/tunnel-manager', () => ({
+vi.mock('../../core/services/tunnel-manager', () => ({
   TunnelManager: class {
     setStatusHandler(): void {}
     getStatus(): { state: 'stopped'; url: null; error: null } {
@@ -252,7 +252,7 @@ vi.mock('../../main/services/tunnel-manager', () => ({
     stop(): void {}
   }
 }))
-vi.mock('../../main/services/logger', () => ({
+vi.mock('../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -268,9 +268,9 @@ import { TestIpcBridge } from '../../test/bridges/test-ipc-bridge'
 import { setIpcBridge } from '../../test/stubs/electron-shim'
 import { bootCore, type CoreBoot } from '../../main/boot-core'
 import { getSessionManager } from '../../main/ipc/session.ipc'
-import { getHostWindow } from '../../main/services/host-window'
-import { syncCore } from '../../main/services/sync-host'
-import { listAuditLog, setRemoteConfig } from '../../main/services/db'
+import { getHostWindow } from '../../core/services/host-window'
+import { syncCore } from '../../core/services/sync-host'
+import { listAuditLog, setRemoteConfig } from '../../core/services/db'
 
 // ---------------------------------------------------------------------------
 // The fake engine: one controllable cli.js run per `query()` call.

@@ -20,14 +20,14 @@ import {
   registerCommand,
   type CommandConnection,
   type CommandRegistration
-} from './command-registry'
+} from '../../core/ipc/command-registry'
 import {
   mintEnrollToken,
   webauthnCredentials,
   webauthnRename,
   webauthnRevoke,
   type RemoteAuthSurfaceHost
-} from './webauthn-commands'
+} from '../../core/ipc/webauthn-commands'
 
 const WEBAUTHN_IPC_CHANNELS = [
   'webauthn:credentials',

@@ -23,12 +23,12 @@
  * harness — two counters would manufacture gaps and trip resync detection.
  */
 
-import { SyncClient } from '../../shared/sync/sync-client'
+import { SyncClient } from '../../core/shared/sync/sync-client'
 import {
   getSyncClient,
   setSyncClient,
   resetSyncClientForTests
-} from '../../shared/sync/client-registry'
+} from '../../core/shared/sync/client-registry'
 import {
   startReplica,
   patchLocalSession,
@@ -37,10 +37,10 @@ import {
   getReplicaAux,
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
-import { isVolatileStream, volatileFlavorOf } from '../../shared/sync/channels'
-import { streamFrameFrom } from '../../shared/sync/stream'
+import { isVolatileStream, volatileFlavorOf } from '../../core/shared/sync/channels'
+import { streamFrameFrom } from '../../core/shared/sync/stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
-import type { CanonicalSessionState } from '../../shared/sync/state'
+import type { CanonicalSessionState } from '../../core/shared/sync/state'
 import type {
   ChatMessage,
   SessionStatus,

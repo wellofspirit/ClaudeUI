@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const loadSessionConfig = vi.fn()
 const saveSessionConfig = vi.fn()
 
-vi.mock('../ui-config', () => ({
+vi.mock('../../../core/services/ui-config', () => ({
   loadSessionConfig: () => loadSessionConfig(),
   saveSessionConfig: (config: unknown) => saveSessionConfig(config)
 }))
@@ -26,7 +26,7 @@ const {
   deriveWorktreeName,
   recordWorktreeEntry,
   WORKTREE_ENTER_TOOL_NAMES
-} = await import('../worktree-detect')
+} = await import('../../../core/services/worktree-detect')
 
 const INFO = {
   worktreePath: '/project/worktrees/feat',
