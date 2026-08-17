@@ -482,6 +482,10 @@ const api: ClaudeAPI = {
   authcfgApply: (patch) => ipcRenderer.invoke('authcfg:apply', patch),
   authcfgEnd: () => ipcRenderer.invoke('authcfg:end'),
   authcfgSetPassword: (password: string) => ipcRenderer.invoke('authcfg:set-password', password),
+  // The LAN channel link + rotation (ADR-056). Session-gated on the web, free
+  // here — the desktop connection IS the host anchor.
+  authcfgLanLink: () => ipcRenderer.invoke('authcfg:lan-link'),
+  authcfgRotateLanKey: () => ipcRenderer.invoke('authcfg:rotate-lan-key'),
 
   // Passkeys (ADR-052) — MANAGEMENT ONLY on this transport. `webauthn.ipc.ts`
   // registers exactly these four channels; the two register verbs below are

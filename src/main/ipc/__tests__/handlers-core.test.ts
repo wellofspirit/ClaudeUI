@@ -109,7 +109,7 @@ describe('handlers-core', () => {
     const direct = await mcpStatus(manager, 'rid-1')
     const viaDispatcher = await dispatcher.handle(
       { type: 'invoke', id: '1', channel: 'mcp:status', args: ['rid-1'] },
-      makeRemoteConnection('token', null)
+      makeRemoteConnection('password', null)
     )
 
     expect(viaDispatcher).toEqual(direct)

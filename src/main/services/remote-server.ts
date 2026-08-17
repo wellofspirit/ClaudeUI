@@ -9,14 +9,13 @@ import { app } from 'electron'
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
 import { RemoteDispatcher } from './remote-dispatcher'
 import {
-  LEGACY_REMOTE_GRANTS,
+  AUTH_OFF_GRANTS,
   makeRemoteConnection,
   type Capability,
   type CommandConnection,
   type IdentityMethod
 } from '../ipc/command-registry'
 import {
-  ceremonyRequiredForAuth,
   grantsFor,
   passwordAuthAllowed,
   passwordStepUpAllowed,
@@ -72,6 +71,7 @@ import {
   appendAuditLog,
   clearLastServeRecord,
   getRemoteConfig,
+  setLanE2eKey,
   setLastServeRecord
 } from './db'
 import {
@@ -82,6 +82,7 @@ import {
   PASSKEY_FAILED_ERROR,
   PASSKEY_REQUIRED_ERROR,
   PASSKEY_UNAVAILABLE_ERROR,
+  PASSWORD_REQUIRED_ERROR,
   TERMINAL_DISABLED_ERROR,
   type WsAuthWebauthnFinish,
   type WsClientMessage,
@@ -110,23 +111,23 @@ import type {
 const PING_INTERVAL_MS = 15_000
 const IDLE_TIMEOUT_MS = 30 * 60_000 // 30 minutes
 
-// DoS hardening (M-RM3). Token entropy already makes these limits about
-// resource exhaustion, not access control.
+// DoS hardening (M-RM3).
 /** Cap on total sockets (authenticated + pre-auth pending). */
 const MAX_CONNECTIONS = 64
-/** Max distinct failed-auth attempts from one IP within the window before new
- *  connections from that IP are refused for the rest of the window. */
-const MAX_FAILED_AUTH = 10
-const FAILED_AUTH_WINDOW_MS = 60_000
 /**
- * Separate, stricter budget for PASSWORD failures on the same key. The token
- * budget above is calibrated for a 256-bit random token, where throttling is
- * only about resource exhaustion; for a user-chosen password the throttle IS
- * the primary brute-force defence. The two budgets are tracked independently
- * and never reset each other — a key over EITHER is refused.
+ * THE failed-credential budget: 5 failures per key per 5 minutes, after which
+ * new connections from that key are refused up front (close 4006).
+ *
+ * ONE budget since ADR-056 (review F2). There used to be two — a loose 10/60 s
+ * for the 256-bit access token, where throttling was only about resource
+ * exhaustion, and this strict one for the user-chosen password, where the
+ * throttle IS the brute-force defence. The token is retired, and everything that
+ * can fail now is either user-chosen or a secret worth guessing (password proof,
+ * passkey assertion, enrollment link, channel-key activation), so the strict
+ * budget is the only correct one and there is nothing left to track separately.
  */
-const MAX_FAILED_PW_AUTH = 5
-const FAILED_PW_AUTH_WINDOW_MS = 300_000
+const MAX_FAILED_AUTH = 5
+const FAILED_AUTH_WINDOW_MS = 300_000
 /** Pre-auth frames (auth / e2e-activate) are tiny; ws's default 100 MiB
  *  maxPayload is a pre-auth memory-amplification vector. */
 const WS_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024 // 4 MiB
@@ -167,10 +168,11 @@ export interface RemoteServerTimeouts {
 const ENROLL_TOKEN_TTL_MS = 10 * 60_000
 
 /**
- * Constant-time comparison for the server's hex tokens (WS token + mockup
- * token). Both are `crypto.randomBytes(32).toString('hex')`, so they decode to
- * a fixed 32-byte buffer; a length mismatch (or non-hex garbage, which decodes
- * short) short-circuits before `timingSafeEqual`, which requires equal lengths.
+ * Constant-time comparison for the server's remaining hex tokens — the
+ * `/mockup` and `/sent-file` route tokens, and the one-time enrollment tokens.
+ * Each is `crypto.randomBytes(32).toString('hex')`, so they decode to a fixed
+ * 32-byte buffer; a length mismatch (or non-hex garbage, which decodes short)
+ * short-circuits before `timingSafeEqual`, which requires equal lengths.
  *
  * An empty/absent value on either side is always a mismatch — a stopped server
  * (token '') must not authenticate a client that also sends ''.
@@ -219,32 +221,133 @@ function headerValue(headers: http.IncomingHttpHeaders, name: string): string {
 }
 
 /**
- * Did this upgrade ask to authenticate with an ENROLLMENT LINK
- * (`?intent=enroll`)?
+ * Where a connection came from — the ONE classification (ADR-056 item B).
  *
- * The flag is NON-SECRET by construction — the token itself stays in the `auth`
- * frame and never touches the query string, so all a query log learns is that
- * somebody is on the enrollment screen, which that screen already says.
+ * It answers three questions that must never be allowed to disagree: which E2E
+ * key (if any) this socket's `e2e-activate` is measured against, whether a
+ * plaintext socket is acceptable here at all, and whether an ambient network
+ * fact should be read as a username hint. A second classifier is exactly how the
+ * first two would drift, and the drift would be a plaintext side door.
  *
- * It exists to break a collision that otherwise makes FIRST-DEVICE enrollment
- * impossible on any `tailscale serve` setup. Enrollment has to happen at the
- * tailnet origin, because that hostname IS the RP ID the credential binds to —
- * and at that origin serve attaches an owner identity that authenticates the
- * socket at CONNECTION time, before the client's `{auth, enrollToken}` frame is
- * read. With nothing enrolled yet the policy is effective-`legacy`, so no
- * ceremony is owed, so {@link RemoteServer.handleConnection}'s unsolicited
- * accept always wins the race: the phone lands in the app as an ordinary
- * tailnet session and the enrollment never happens.
+ * ## THE HOST HEADER IS NOT AN INPUT (review F1)
  *
- * Setting it is FAIL-CLOSED. All it does is decline ambient identity for this
- * one socket; a peer that then presents no token, or a bad one, is refused like
- * any other bad credential and has gained exactly nothing.
+ * Every value this function reads is either the SOCKET PEER, a header the
+ * ADR-039 trust predicate has already vouched for, or this server's own run
+ * state. `Host` is deliberately absent, and the reason is a real downgrade: it
+ * is attacker-controlled, and the first version of this function read the tunnel
+ * arm off it. A tunnelled client sending `Host: localhost:<port>` therefore
+ * classified `localhost`, `e2eRequired` went false, and it completed a
+ * PLAINTEXT handshake through the one transport that must never allow one — a
+ * regression against the old code, which demanded E2E unconditionally whenever a
+ * tunnel key existed. The same read broke during a tunnel restart, when
+ * `TunnelManager.url` is briefly null and every live tunnel client would have
+ * reclassified as local.
+ *
+ * The rule is therefore directional: **`Host` may only ever be used to UPGRADE
+ * what a connection must present, never to downgrade it.** It still selects the
+ * WebAuthn origin (via the allowlist `isAllowedHost` already validated), because
+ * getting that wrong costs a ceremony that cannot succeed rather than an
+ * encryption requirement that silently lapses.
+ *
+ * ## The tests, in order
+ *
+ * - `funnel` FIRST: a refusal, and nothing below it should be computed for a
+ *   request off the public internet.
+ * - A NON-LOOPBACK peer is `lan`, full stop — the only class that is neither a
+ *   trusted transport nor local, and therefore the one that carries its own
+ *   encryption.
+ * - Everything else has a loopback peer, because BOTH trusted proxies run on
+ *   this machine and connect to our own port. Among those:
+ *   - trusted `tailscale serve` identity headers ⇒ `tailnet-serve` (serve
+ *     terminates TLS, so no E2E is owed). Detected by the SAME predicate the
+ *     identity layer trusts — `isServeProxied` plus the `Tailscale-Headers-Info`
+ *     marker serve sets exactly when it set the identity trio — never a private
+ *     copy of it.
+ *   - else, if this run HAS a tunnel key ⇒ `tunnel`, and E2E is required.
+ *     Deliberately unconditional: while a tunnel is up we cannot tell a
+ *     cloudflared forward from a genuine local process, so we demand the channel
+ *     from both. That means localhost development must use the tunnel link for
+ *     as long as the tunnel runs — which is exactly what the pre-ADR-056 server
+ *     did, and it is the safe direction of the ambiguity.
+ *   - else ⇒ `localhost`: development, and the residual local-process case
+ *     ADR-039 accepts.
+ *
+ * TLS mode and the tunnel are mutually exclusive per run (`start()` enforces
+ * it), so the two loopback arms can never both apply.
  */
-function hasEnrollIntent(rawUrl: string | undefined): boolean {
-  if (!rawUrl) return false
-  const query = rawUrl.indexOf('?')
-  if (query < 0) return false
-  return new URLSearchParams(rawUrl.slice(query + 1)).get('intent') === 'enroll'
+export type ConnectionOrigin = 'funnel' | 'tunnel' | 'tailnet-serve' | 'localhost' | 'lan'
+
+export function classifyConnectionOrigin(args: {
+  headers: http.IncomingHttpHeaders
+  socketAddr: string | undefined
+  /** `tailscale serve` is CONFIRMED up for this run (not merely requested). */
+  tlsActive: boolean
+  /** This run holds a tunnel channel key — i.e. it was started with `tunnel`. */
+  tunnelActive: boolean
+}): ConnectionOrigin {
+  if (headerValue(args.headers, H_FUNNEL) !== '') return 'funnel'
+  // Peer address first, and no `Host` anywhere below: see the header note above.
+  if (!isLoopbackAddress(args.socketAddr)) return 'lan'
+  if (
+    isServeProxied(args.headers, args.socketAddr, args.tlsActive) &&
+    headerValue(args.headers, H_HEADERS_INFO) !== ''
+  ) {
+    return 'tailnet-serve'
+  }
+  if (args.tunnelActive) return 'tunnel'
+  return 'localhost'
+}
+
+/** Origins whose sockets must open an E2E channel before presenting an identity. */
+export function originRequiresE2E(origin: ConnectionOrigin): boolean {
+  return origin === 'tunnel' || origin === 'lan'
+}
+
+// `hasEnrollIntent` is GONE (ADR-056). `?intent=enroll` existed to break ONE
+// collision: at the tailnet origin `tailscale serve` attached an owner identity
+// that authenticated the socket at CONNECTION time, before the client's
+// `{auth, enrollToken}` frame could be read, so a first device could never
+// actually spend its enrollment link. Ambient tailnet admission is retired, so
+// there is no unsolicited accept left to decline and no race left to lose. The
+// web client still appends the (non-secret) query parameter — it costs nothing
+// and keeps the enrollment URL byte-identical — and the server now simply
+// ignores it. Keeping a server-side branch that can never change an outcome
+// would be a rule a future reader has to disprove.
+
+/**
+ * Split a `Host` header into hostname + optional port, or null when it is
+ * missing/malformed. Lowercased, and DNS is never resolved.
+ *
+ * Extracted so {@link RemoteServer.isAllowedHost} and
+ * {@link classifyConnectionOrigin} parse an attacker-supplied header exactly the
+ * same way — a classifier that disagreed with the allowlist about which host it
+ * was looking at is the kind of gap that only shows up as an exploit.
+ */
+function splitHostHeader(hostHeader: string | undefined): {
+  hostname: string
+  port?: string
+} | null {
+  const raw = (hostHeader ?? '').trim().toLowerCase()
+  if (!raw) return null
+
+  if (raw.startsWith('[')) {
+    // Bracketed IPv6 literal, e.g. `[::1]:8322`.
+    const end = raw.indexOf(']')
+    if (end < 0) return null
+    const hostname = raw.slice(1, end)
+    const rest = raw.slice(end + 1)
+    if (!rest) return { hostname }
+    if (!rest.startsWith(':')) return null
+    return { hostname, port: rest.slice(1) }
+  }
+  if (raw.indexOf(':') !== raw.lastIndexOf(':')) {
+    // More than one colon and no brackets — a bare IPv6 literal. Malformed per
+    // RFC 7230, but unambiguous: no port component.
+    return { hostname: raw }
+  }
+  const colon = raw.lastIndexOf(':')
+  if (colon < 0) return { hostname: raw }
+  return { hostname: raw.slice(0, colon), port: raw.slice(colon + 1) }
 }
 
 /**
@@ -346,13 +449,26 @@ interface TlsServeState {
 }
 
 /**
+ * The methods a HANDSHAKE can actually end in.
+ *
+ * `tailnet-identity` is excluded and that exclusion is the type-level statement
+ * of ADR-056: the value still exists in {@link RemoteAuthMethod} because
+ * `/remote/auth-info` advertises it as a username hint, and it must never again
+ * be something `accept()` can be called with.
+ */
+type AcceptedAuthMethod = Exclude<RemoteAuthMethod, 'tailnet-identity'>
+
+/**
  * A policy decision and the context it was derived from, produced by ONE read.
  *
  * Carried as a pair, never as two independently-read values, because the whole
- * class of bug this phase kept producing is a decision made against one read
- * and grants computed against another (`ceremonyRequiredForAuth` says "no
- * ceremony owed" while `grantsFor` says "owes one" ⇒ a connection that is
- * authenticated and holds nothing).
+ * class of bug the passkey phase kept producing is a decision made against one
+ * read and grants computed against another — the admission predicate saying "no
+ * ceremony owed" while `grantsFor` said "owes one", i.e. a connection that is
+ * authenticated and holds nothing. ADR-056 removed the second decision entirely
+ * (grants are keyed on the METHOD now), so that exact pairing is gone; the pair
+ * survives because the TIER and the `authDisabled` flag are still derived from
+ * this snapshot and must come from the same one.
  */
 interface AuthDecision {
   policy: RemoteAuthPolicy
@@ -365,12 +481,12 @@ interface AuthDecision {
  *
  * The one narrow method today is `enroll-token` ({@link ENROLL_ONLY_GRANTS}),
  * and ADR-052's invariant is that a leaked enrollment link can add a device and
- * reach nothing else. `EMPTY_GRANTS` (a connection that owes a ceremony) fails
- * this too. Tested against the grant SET rather than the method name so a future
- * narrow method is excluded without anyone having to remember it exists.
+ * reach nothing else. Tested against the grant SET rather than the method name
+ * so a future narrow method is excluded without anyone having to remember it
+ * exists.
  */
 function holdsBaseRemoteSurface(grants: ReadonlySet<Capability>): boolean {
-  for (const capability of LEGACY_REMOTE_GRANTS) {
+  for (const capability of AUTH_OFF_GRANTS) {
     if (!grants.has(capability)) return false
   }
   return true
@@ -434,13 +550,33 @@ function closeHttpServer(server: http.Server): Promise<void> {
   })
 }
 
+/**
+ * The E2E state of ONE socket, shared by the pre-auth handshake and the
+ * authenticated client that grows out of it.
+ *
+ * A single object rather than a pair of fields copied across at accept time,
+ * because ADR-056 put the activation BEFORE authentication: the `e2e-ack`, the
+ * `auth-response` and every frame after them ride the same cipher and the same
+ * ordering queue, and two queues over one socket would let a later frame's
+ * encryption finish first — which the peer's replay guard drops as a replay.
+ */
+interface SocketChannel {
+  e2e: E2ECrypto | null
+  /** Promise chain preserving message order across async encryption. */
+  sendQueue: Promise<void>
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
   /** Which credential this socket authenticated with — a credential change
    *  disconnects the `'password'` ones only (see disconnectPasswordClients). */
-  authMethod: RemoteAuthMethod
-  /** Tailnet login for `'tailnet-identity'` clients; null for token/password. */
+  authMethod: AcceptedAuthMethod
+  /**
+   * Username HINT for this client (`RemoteStatus.clientLogins`): the credential
+   * nickname for `webauthn`, the tailnet login where `tailscale serve` supplied
+   * one, else null.
+   */
   login: string | null
   /**
    * Per-connection identity + capability grants (SyncCore phase 1, ADR-052).
@@ -484,9 +620,8 @@ interface AuthenticatedClient {
    * it — a waiver must not survive as evidence of a human who never appeared.
    */
   armedByWaiver?: boolean
-  e2e: E2ECrypto | null
-  /** Promise chain to preserve message ordering with async encryption. */
-  sendQueue: Promise<void>
+  /** Shared with the pre-auth handshake — see {@link SocketChannel}. */
+  channel: SocketChannel
   /**
    * Unregister for this connection's VOLATILE STREAM sink (phase 5 S1). Held on
    * the client so it dies with the socket exactly like the ping timer does —
@@ -505,21 +640,21 @@ interface AuthenticatedClient {
 }
 
 /**
- * Per-key failed-auth record. Token and password failures share the key (the
- * peer IP) but keep INDEPENDENT counters + window starts, so burning the
- * password budget doesn't hand an attacker a fresh token budget or vice versa.
+ * Per-key failed-credential record: one counter and one window start.
+ *
+ * It carried a second, independent pair until ADR-056 (review F2), so that
+ * burning the password budget could not hand an attacker a fresh token budget.
+ * With the token retired there is one class of credential failure left, so a
+ * second counter would only be a way for two budgets to disagree.
  */
 interface FailedAuthRecord {
   count: number
   firstAt: number
-  pwCount: number
-  pwFirstAt: number
 }
 
 export class RemoteServer {
   private httpServer: http.Server | null = null
   private wss: WebSocketServer | null = null
-  private token = ''
   /**
    * Separate, low-privilege token for the `/mockup` HTTP route. It travels in
    * the mockup iframe URL and is therefore readable by the mockup's own
@@ -554,7 +689,24 @@ export class RemoteServer {
   private win: BrowserWindow | null = null
   private idleTimer?: ReturnType<typeof setInterval>
   private tunnel: TunnelManager
-  private e2eKey: string | null = null
+  /**
+   * EPHEMERAL channel key for the cloudflared tunnel — minted per `start()` and
+   * dropped by `stop()`, so it dies with the tunnel it belongs to. That is the
+   * whole difference from {@link lanE2eKey}: a tunnel hostname is ephemeral too,
+   * so a link that outlived the run would point at nothing anyway.
+   */
+  private tunnelE2eKey: string | null = null
+  /**
+   * PERSISTENT channel key for plain-LAN connections (ADR-056 item C), read from
+   * `remote_config.lan_e2e_key` and generated lazily on the first start that
+   * serves a non-loopback bind. Null while the server is stopped or bound
+   * loopback-only (TLS mode), which is also what makes the LAN link unavailable.
+   *
+   * Persistent because a LAN bookmark has to survive a restart to be a bookmark
+   * at all; rotatable (`authcfg:rotate-lan-key`) because a persistent secret with
+   * no way to replace it is one leak from being permanent.
+   */
+  private lanE2eKey: string | null = null
   /** Pre-auth sockets currently open (counted toward {@link MAX_CONNECTIONS}). */
   private pendingConnections = 0
   /** Per-IP failed-auth tracking for the sliding token/password windows. */
@@ -663,18 +815,17 @@ export class RemoteServer {
     requestedPort = 0,
     host?: string,
     opts?: { tunnel?: boolean; tls?: boolean; autostartRetry?: boolean }
-  ): Promise<{ port: number; token: string; lanUrl: string }> {
+  ): Promise<{ port: number; lanUrl: string }> {
     if (this.httpServer) {
       throw new Error('Remote server already running')
     }
 
-    this.token = crypto.randomBytes(32).toString('hex')
     this.mockupToken = crypto.randomBytes(32).toString('hex')
     this.fileToken = crypto.randomBytes(32).toString('hex')
 
-    // Generate E2E key when tunnel mode is requested
+    // The tunnel's channel key is minted per run and dies with it.
     if (opts?.tunnel) {
-      this.e2eKey = crypto.randomBytes(32).toString('hex')
+      this.tunnelE2eKey = crypto.randomBytes(32).toString('hex')
     }
 
     const tlsMode = opts?.tls === true && opts?.tunnel !== true
@@ -692,6 +843,13 @@ export class RemoteServer {
     const bindAddr = tlsMode ? '127.0.0.1' : host || '0.0.0.0'
     // For the URL, use the specific host if given, otherwise auto-detect the best LAN IP
     this.boundHost = tlsMode ? '127.0.0.1' : host || getDefaultIp()
+
+    // The PERSISTENT LAN channel key exists exactly while this run can be reached
+    // from off-box on a plain address (ADR-056 item C). Loopback-only runs — TLS
+    // mode, or an explicit 127.0.0.1 bind — mint nothing: a key generated for
+    // every install that will only ever use `tailscale serve` would be a stored
+    // secret with no channel behind it.
+    this.lanE2eKey = isLoopbackAddress(bindAddr) ? null : this.ensureLanE2eKey()
 
     // Create HTTP server
     this.httpServer = http.createServer((req, res) => this.handleHttp(req, res))
@@ -770,10 +928,10 @@ export class RemoteServer {
       }
       this.wss = null
       this.httpServer = null
-      this.token = ''
       this.mockupToken = ''
       this.fileToken = ''
-      this.e2eKey = null
+      this.tunnelE2eKey = null
+      this.lanE2eKey = null
       this.port = 0
       this.boundHost = ''
       this.tlsRequested = false
@@ -796,7 +954,10 @@ export class RemoteServer {
     // Start idle timeout checker
     this.idleTimer = setInterval(() => this.checkIdleClients(), 60_000)
 
-    const lanUrl = `http://${this.boundHost}:${this.port}/remote#t=${this.token}`
+    // ONE producer, shared with `getStatus().lanUrl` (review F6). The `??` is for
+    // TLS mode only, where `lanLink()` is null by design and the caller below
+    // replaces it with the ts.net URL anyway.
+    const lanUrl = this.lanLink() ?? `http://${this.boundHost}:${this.port}/remote`
     logger.info(
       'remote-server',
       `Remote server started on ${bindAddr}:${this.port} (URL host: ${this.boundHost})`
@@ -850,7 +1011,131 @@ export class RemoteServer {
     // In TLS mode the loopback `lanUrl` is not the URL anyone should use — hand
     // back the ts.net one when serve is already up. `getStatus().lanUrl` is null
     // in TLS mode for the same reason.
-    return { port: this.port, token: this.token, lanUrl: this.tlsServe?.url ?? lanUrl }
+    return { port: this.port, lanUrl: this.tlsServe?.url ?? lanUrl }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Channel keys (ADR-056 item C)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The stored LAN channel key, generating and persisting one on first use.
+   *
+   * Never throws. A DB that cannot be read or written still yields a usable key
+   * for THIS run — refusing to serve the LAN because a column could not be
+   * written would be the worse failure — but the operator is told loudly, because
+   * an unpersisted key silently invalidates the link they bookmarked yesterday
+   * and will invalidate this one at the next restart.
+   */
+  private ensureLanE2eKey(): string {
+    try {
+      const stored = getRemoteConfig()?.lanE2eKey
+      if (stored) return stored
+    } catch (err) {
+      logger.warn(
+        'remote-server',
+        `Could not read the LAN channel key: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    const key = crypto.randomBytes(32).toString('hex')
+    try {
+      setLanE2eKey(key)
+      logger.info('remote-server', 'Generated a persistent LAN channel key for this install')
+    } catch (err) {
+      logger.error(
+        'remote-server',
+        `Could not persist the LAN channel key (this run's LAN link will not survive a restart): ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+    }
+    return key
+  }
+
+  /**
+   * The browsable URL for this run's non-TLS listener — THE single producer,
+   * read by both `getStatus().lanUrl` and `start()`'s return (review F6, where
+   * they disagreed and a loopback-pinned run lost the working localhost link the
+   * modal used to show).
+   *
+   * `http://<host>:<port>/remote#k=<key>` when a LAN channel key exists; the
+   * same URL WITHOUT a fragment for a loopback-only bind, because that origin
+   * classifies `localhost` and owes no channel — a `#k=` there would be a secret
+   * the handshake would then refuse to accept.
+   *
+   * Null in TLS mode (the listener is loopback-only and the ts.net URL is the one
+   * to hand out) and while stopped. The fragment, when present, carries the
+   * CHANNEL key and nothing else — the identity inside it is still a password.
+   */
+  lanLink(): string | null {
+    if (!this.httpServer || !this.port || this.tlsRequested) return null
+    const base = `http://${this.boundHost}:${this.port}/remote`
+    return this.lanE2eKey ? `${base}#k=${this.lanE2eKey}` : base
+  }
+
+  /**
+   * Rotate the LAN channel key and return the new link.
+   *
+   * NOBODY IS DISCONNECTED, and that is a property of where the key is consumed
+   * rather than a courtesy: `E2ECrypto.init` derives a connection's AES key at
+   * `e2e-activate` and the stored value is never read again for that socket, so
+   * every established channel keeps running on what it already derived. Only a
+   * NEW handshake is measured against the new key.
+   */
+  rotateLanKey(): string | null {
+    if (!this.httpServer || !this.port || !this.lanE2eKey) return null
+    const key = crypto.randomBytes(32).toString('hex')
+    setLanE2eKey(key)
+    this.lanE2eKey = key
+    logger.info(
+      'remote-server',
+      'LAN channel key rotated; established channels keep running, new handshakes need the new link'
+    )
+    this.notifyStatus()
+    return this.lanLink()
+  }
+
+  /**
+   * The key an `e2e-activate` on this origin is measured against, or null where
+   * the transport is already confidential (`tailscale serve` TLS) or local.
+   *
+   * Read AT ACTIVATION, never snapshotted at socket-open (review F5): the
+   * pre-auth window is up to 10 s, and a socket that opened just before a
+   * rotation must not get to spend it activating against the retired key.
+   */
+  private expectedE2eKey(origin: ConnectionOrigin): string | null {
+    if (origin === 'tunnel') return this.tunnelE2eKey
+    if (origin === 'lan') return this.lanE2eKey
+    return null
+  }
+
+  /**
+   * Classify one upgrade request. THE single call site of
+   * {@link classifyConnectionOrigin} in production.
+   *
+   * ## Why this is `protected` rather than private
+   *
+   * It is the TEST SEAM for the LAN arm, and the narrowest one available. Every
+   * in-process test client connects over loopback, so `lan` — the only origin
+   * that carries its own encryption, and therefore the one whose end-to-end
+   * behaviour most needs covering — is otherwise unreachable from a test without
+   * a second machine. Overriding this one method in a subclass lets a test BE a
+   * LAN peer while leaving the classifier itself, the key selection, the E2E
+   * gate and the whole handshake exactly as production runs them.
+   *
+   * Deliberately not a constructor option or an injected predicate: a
+   * configuration knob is something production code could read (or a future
+   * caller could set), whereas a protected method can only be reached by writing
+   * a subclass, which no production path does. `remote-server.ts` has no
+   * subclasses outside `__tests__`.
+   */
+  protected classifyOrigin(req: http.IncomingMessage): ConnectionOrigin {
+    return classifyConnectionOrigin({
+      headers: req.headers,
+      socketAddr: req.socket.remoteAddress,
+      tlsActive: this.tlsServe !== null,
+      tunnelActive: this.tunnelE2eKey !== null
+    })
   }
 
   /**
@@ -866,7 +1151,10 @@ export class RemoteServer {
   async stop(): Promise<void> {
     // Stop tunnel first
     this.tunnel.stop()
-    this.e2eKey = null
+    // The tunnel key dies with the tunnel; the LAN key only leaves MEMORY here —
+    // it stays in `remote_config` so tomorrow's bookmark still opens the channel.
+    this.tunnelE2eKey = null
+    this.lanE2eKey = null
 
     // Best-effort teardown of OUR serve handler (never `serve reset` — that
     // would wipe the user's unrelated serve config). Fire-and-forget: a stop()
@@ -981,7 +1269,6 @@ export class RemoteServer {
 
     this.core.clearRing()
     this.port = 0
-    this.token = ''
     this.mockupToken = ''
     this.fileToken = ''
     // Outstanding "add this device" links die with the listener — the URL they
@@ -1209,31 +1496,24 @@ export class RemoteServer {
   /** Get current server status. */
   getStatus(): RemoteStatus {
     const tunnelStatus = this.tunnel.getStatus()
-    let tunnelUrl: string | null = null
-
-    if (tunnelStatus.url && this.token) {
-      // Token rides the URL fragment (never sent to the server/edge in the HTTP
-      // request line, so it can't leak into tunnel/CDN access logs — H2). The
-      // E2E key rides the same fragment. Both are read client-side from
-      // `location.hash`.
-      tunnelUrl = `${tunnelStatus.url}/remote#t=${this.token}`
-      if (this.e2eKey) {
-        tunnelUrl += `&k=${this.e2eKey}`
-      }
-    }
+    // The CHANNEL key rides the URL fragment — never the request line, so it
+    // cannot leak into a tunnel/CDN access log (H2) — and it is read client-side
+    // from `location.hash`. There is no `#t=` any more: the link opens the
+    // channel and the identity inside it is still a password (ADR-056).
+    const tunnelUrl =
+      tunnelStatus.url && this.tunnelE2eKey
+        ? `${tunnelStatus.url}/remote#k=${this.tunnelE2eKey}`
+        : null
 
     return {
       running: this.httpServer !== null,
       port: this.port || null,
-      token: this.token || null,
-      // TLS mode binds loopback only, so there IS no LAN URL — advertising the
-      // 127.0.0.1 one would send the user (and the QR code) to a dead end.
-      lanUrl:
-        this.port && !this.tlsRequested
-          ? `http://${this.boundHost}:${this.port}/remote#t=${this.token}`
-          : null,
+      // Null in TLS mode by construction: it binds loopback only, so there is no
+      // LAN channel key and `lanLink()` has nothing to hand out — advertising the
+      // 127.0.0.1 URL would send the user (and the QR code) to a dead end.
+      lanUrl: this.lanLink(),
       tunnelUrl,
-      tunnelState: this.e2eKey !== null ? tunnelStatus.state : null,
+      tunnelState: this.tunnelE2eKey !== null ? tunnelStatus.state : null,
       tunnelError: tunnelStatus.error,
       connectedClients: this.clients.size,
       clientIps: Array.from(this.clients.values()).map((c) => c.ip),
@@ -1263,32 +1543,30 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   /**
-   * Password credential params, or null when password auth is not available on
-   * this server. Read per call so provisioning/clearing applies immediately.
+   * Password credential params, or null when no credential is provisioned. Read
+   * per call so provisioning/clearing applies immediately.
    *
-   * Tunnel mode (`e2eKey !== null`) refuses password auth outright: an
-   * E2E-encrypted session needs the key from the URL fragment, which a password
-   * client by definition does not have — it would authenticate and then be
-   * closed with 4004 for failing to activate E2E.
-   *
-   * This is the AUTHENTICATION gate only, hence the transport condition. The
-   * step-up ceremony reads {@link passwordAuth} directly instead: its caller is
-   * already authenticated and E2E-active, so its proof is confidential on every
-   * transport (see {@link handleStepUp}).
+   * ADR-056 INVERTED this method's one special case. It used to return null in
+   * tunnel mode, because a password client could not have the fragment key and
+   * would authenticate only to be closed for failing to activate E2E. The
+   * handshake order is the other way round now: the channel is opened FIRST and
+   * the password travels inside it, so on the tunnel — and on the LAN — a
+   * password is not merely allowed, it is the ONLY identity there is.
    */
   private passwordParams(): { saltHex: string; kdf: RemoteKdfParams } | null {
-    if (this.e2eKey !== null) return null
     return this.passwordAuth.params()
   }
 
-  /** The single derivation of "what methods do we accept" — used by both
-   *  `getStatus()` and `GET /remote/auth-info`. Empty when not running. */
+  /** The single derivation of "what do we offer a new connection" — used by both
+   *  `getStatus()` and `GET /remote/auth-info`. Empty when not running, and
+   *  legitimately empty on a running host with no password and no passkey. */
   private authMethods(): RemoteAuthMethod[] {
     if (!this.httpServer) return []
-    const methods: RemoteAuthMethod[] = ['token']
+    const methods: RemoteAuthMethod[] = []
     if (this.passwordParams()) methods.push('password')
-    // Identity is available only once serve is actually up AND we know which
-    // login to accept — an unknown owner (tagged node) means fail closed.
+    // The username HINT, not a credential (ADR-056): available only once serve is
+    // actually up AND we know which login it would name — an unknown owner
+    // (tagged node) means we say nothing.
     if (this.identityContext().ownerLogin) methods.push('tailnet-identity')
     return methods
   }
@@ -1310,27 +1588,27 @@ export class RemoteServer {
   // ---------------------------------------------------------------------------
 
   /**
-   * Enrolled credential count, failing CLOSED (0) on a DB error.
-   *
-   * Zero is the safe answer at every call site: it withholds the passkey
-   * advertisement, and it makes {@link ceremonyRequiredForAuth} false — i.e. a
-   * wedged credential table degrades to "no passkeys available", never to
-   * "passkeys required but unusable", which would be an unrecoverable lockout.
-   */
-  /**
    * Resolve the auth policy from a SINGLE read of the context.
    *
    * The one place any authentication decision gets its inputs — the handshake
    * (`handleConnection`) and the post-registration upgrade
    * ({@link handleEnrollUpgrade}) both call this rather than each assembling
    * their own pair. `readAuthPolicyContext` never throws (it degrades to
-   * `legacy`), so neither does this.
+   * `password`), so neither does this.
    */
   private readAuthDecision(): AuthDecision {
     const ctx = readAuthPolicyContext()
     return { policy: resolveAuthPolicy(ctx), ctx }
   }
 
+  /**
+   * Enrolled credential count, failing CLOSED (0) on a DB error.
+   *
+   * Zero is the safe answer at every call site: it withholds the passkey
+   * advertisement and makes `handshakeCeremonyAvailable()` false — i.e. a wedged
+   * credential table degrades to "no passkeys available", never to "passkeys
+   * required but unusable", which would be an unrecoverable lockout.
+   */
   private credentialCount(): number {
     try {
       return this.webauthn.count()
@@ -1705,34 +1983,10 @@ export class RemoteServer {
    * widens the port rule to the serve HTTPS port.
    */
   private isAllowedHost(hostHeader: string | undefined): boolean {
-    const raw = (hostHeader ?? '').trim().toLowerCase()
-    if (!raw) return false
-
-    let hostname: string
-    let portPart: string | undefined
-    if (raw.startsWith('[')) {
-      // Bracketed IPv6 literal, e.g. `[::1]:8322`.
-      const end = raw.indexOf(']')
-      if (end < 0) return false
-      hostname = raw.slice(1, end)
-      const rest = raw.slice(end + 1)
-      if (rest) {
-        if (!rest.startsWith(':')) return false
-        portPart = rest.slice(1)
-      }
-    } else if (raw.indexOf(':') !== raw.lastIndexOf(':')) {
-      // More than one colon and no brackets — a bare IPv6 literal. Malformed per
-      // RFC 7230, but unambiguous: no port component.
-      hostname = raw
-    } else {
-      const colon = raw.lastIndexOf(':')
-      if (colon >= 0) {
-        hostname = raw.slice(0, colon)
-        portPart = raw.slice(colon + 1)
-      } else {
-        hostname = raw
-      }
-    }
+    // ONE parser, shared with `classifyConnectionOrigin` — see splitHostHeader.
+    const split = splitHostHeader(hostHeader)
+    if (!split) return false
+    const { hostname, port: portPart } = split
 
     // The tunnel hostname is checked BEFORE the port rule: cloudflared serves
     // the browser on 443, so the pass-through Host carries no port and would
@@ -2131,7 +2385,6 @@ export class RemoteServer {
     // per-source key comes from the (then trustworthy) X-Forwarded-For instead.
     const ip = this.throttleKey(req)
     let authenticated = false
-    let awaitingE2E = false
     /**
      * Minted when the SOCKET opens, not when it authenticates, and reused as the
      * `CommandConnection`'s id on success — so a failed ceremony, a burned
@@ -2171,10 +2424,70 @@ export class RemoteServer {
     // client asserts about its own secure-context status.
     const webauthnOrigin = resolveWebauthnOrigin(req.headers.host, this.tlsServe)
     const capableOrigin = webauthnOrigin !== null
-    // Read ONCE, from the upgrade request, like every other per-connection fact
-    // above it. See `hasEnrollIntent` for why this exists and why declining
-    // ambient identity can only ever cost the caller.
-    const enrollIntent = hasEnrollIntent(req.url)
+
+    // WHERE this socket came from, resolved once, from the same upgrade request
+    // (ADR-056 item B). It decides whether a plaintext socket is acceptable at
+    // all, which key an activation is measured against, and whether there is a
+    // username hint to attach — one classifier for all three, so they cannot
+    // disagree. Nothing here reads `Host`; see the classifier's own header note.
+    const origin = this.classifyOrigin(req)
+    const e2eRequired = originRequiresE2E(origin)
+    // The KEY itself is deliberately NOT snapshotted here (review F5). It is read
+    // inside the `e2e-activate` branch instead, so a socket that opened before a
+    // rotation cannot spend the pre-auth window activating against the retired
+    // one. The ORIGIN is stable for a connection's life; the key is not.
+
+    /** The one cipher + ordering queue for this socket (see {@link SocketChannel}). */
+    const channel: SocketChannel = { e2e: null, sendQueue: Promise.resolve() }
+
+    /**
+     * Send one frame on this socket, encrypting once the channel is live.
+     *
+     * Used by every PRE-AUTH frame, which under ADR-056 is exactly why it has to
+     * exist: on an E2E origin the `auth-response` — accept or refusal — is sent
+     * AFTER activation and must be ciphertext. `sendTo` runs the same code
+     * through the same `channel`, so the handshake and the session cannot end up
+     * with two encryption paths or two ordering queues over one socket.
+     */
+    const sendFrame = (msg: WsServerMessage): Promise<void> => this.sendOn(ws, channel, msg)
+
+    /**
+     * Send a final refusal and THEN close.
+     *
+     * The two halves have to be ordered explicitly since ADR-056: with the
+     * channel live, `sendFrame` hands the frame to an async encrypt, so a
+     * synchronous `ws.close()` beside it would tear the socket down before the
+     * ciphertext was ever written and the client would see a bare close code
+     * instead of the reason it is supposed to render.
+     */
+    const refuseAndClose = (msg: WsServerMessage, code: number, closeReason: string): void => {
+      void sendFrame(msg).then(() => ws.close(code, closeReason))
+    }
+
+    // Funnel traffic never reaches here (`verifyClient` refuses the upgrade), so
+    // this is a belt: a classification that says "public internet" must never be
+    // handed a channel key or an auth prompt.
+    if (origin === 'funnel') {
+      logger.warn('remote-server', `Refusing a Funnel-classified WS connection from ${ip}`)
+      ws.close(4007, 'Funnel is not supported')
+      clearPending()
+      return
+    }
+    // FAIL-CLOSED on a LAN/tunnel socket with no key to measure it against. It
+    // should be unreachable — a run that serves a non-loopback bind always has a
+    // LAN key, and a `tunnel` classification means the tunnel key exists by
+    // definition — but the alternative failure would be a plaintext side door on
+    // exactly the origin that must not have one. Checked from a LIVE read, like
+    // the activation itself (F5).
+    if (e2eRequired && !this.expectedE2eKey(origin)) {
+      logger.error(
+        'remote-server',
+        `Refusing a ${origin} connection from ${ip}: no channel key exists for this origin`
+      )
+      ws.close(4004, 'E2E activation required')
+      clearPending()
+      return
+    }
 
     /**
      * The policy this socket is currently being judged against.
@@ -2186,10 +2499,10 @@ export class RemoteServer {
      * under the old rules, and the auth-surface disconnect could not clean it up
      * because that only reaches connections that are already authenticated.
      *
-     * ASYMMETRY, deliberate: this initial read IS tailnet identity's
-     * authentication moment. That method authenticates from the upgrade headers
-     * with no client frame at all (`accept` runs below, before any `message`
-     * event), so for it there is no later moment to re-read at.
+     * ADR-056 removed the one asymmetry this comment used to record: tailnet
+     * identity authenticated from the upgrade headers with no client frame at
+     * all, so the socket-open read WAS its authentication moment. Every method
+     * now presents a credential in a frame, so every method re-reads.
      *
      * The pair is replaced wholesale, never field-by-field, so the ceremony
      * decision and the grant computation can never be reading different vintages
@@ -2230,11 +2543,11 @@ export class RemoteServer {
      * Shared success path for every method. Hoisted out of `handleFrame` because
      * tailnet identity authenticates on `connection`, before any client frame.
      */
-    const accept = (method: RemoteAuthMethod, login: string | null = null): void => {
+    const accept = (method: AcceptedAuthMethod, login: string | null = null): void => {
       authenticated = true
       clearTimeout(authTimeout)
       clearPending()
-      // Clears BOTH failure budgets for this key.
+      // Clears the failure budget for this key (one budget since ADR-056).
       this.failedAuth.delete(ip)
       // Resolved ONCE per connection, from the same snapshot the grants come
       // from (ADR-054). Auth-mode `off` forces tier `off`, so this single call
@@ -2245,18 +2558,11 @@ export class RemoteServer {
         ip,
         authMethod: method,
         login,
-        connection: makeRemoteConnection(
-          method,
-          login,
-          grantsFor({
-            method,
-            policy: auth.policy,
-            capableOrigin,
-            credentialCount: auth.ctx.credentialCount,
-            passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
-          }),
-          { connectionId, webauthnOrigin, stepUpTier }
-        ),
+        connection: makeRemoteConnection(method, login, grantsFor(method), {
+          connectionId,
+          webauthnOrigin,
+          stepUpTier
+        }),
         policy: auth.policy,
         policyCtx: auth.ctx,
         stepUpTier,
@@ -2264,8 +2570,9 @@ export class RemoteServer {
         pingTimer: setInterval(() => {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
         }, PING_INTERVAL_MS),
-        e2e: null,
-        sendQueue: Promise.resolve(),
+        // The SAME channel the handshake used — on an E2E origin it is already
+        // live, and the `auth-response` below is therefore ciphertext.
+        channel,
         unsubscribeStream: undefined
       }
       this.clients.set(ws, newClient)
@@ -2291,13 +2598,11 @@ export class RemoteServer {
       // ceremony: a login that IS a presence proof arms what its tier would
       // otherwise step-up-gate seconds later. A passkey assertion qualifies.
       //
-      // Nothing else does. Token possession is a bookmark, ambient tailnet
-      // identity is network admission, a tunnel fragment is a URL — none is
-      // evidence a human is present. The PASSWORD is deliberately excluded even
-      // though it is the owner's own secret: its proof is deterministic and
-      // client-cacheable, so it authenticates the browser rather than provably
-      // the human (ADR-052's recorded caveat). It stays the step-up FALLBACK,
-      // where the human has to type it again.
+      // Nothing else does. The PASSWORD is deliberately excluded even though it
+      // is the owner's own secret — and since ADR-056 it is the only other way
+      // in: its proof is deterministic and client-cacheable, so it authenticates
+      // the browser rather than provably the human (ADR-052's recorded caveat).
+      // It stays the step-up FALLBACK, where the human has to type it again.
       if (method === 'webauthn') {
         this.armPresence(newClient, 'passkey login')
       } else if (stepUpTier === 'off') {
@@ -2309,11 +2614,11 @@ export class RemoteServer {
         // where nothing was authenticated in the first place — the incoherence
         // ADR-054 decision 3 exists to remove.
         //
-        // "ORDINARY" is load-bearing and enforced inside `armPresence`: the six
-        // accept methods are `webauthn`, `password`, `token`, `tailnet-identity`,
-        // `none` and `enroll-token`, and the last of those holds `enroll` and
-        // NOTHING else. Waiving freshness for it would hand a leaked enrollment
-        // link a pty — see `holdsBaseRemoteSurface`.
+        // "ORDINARY" is load-bearing and enforced inside `armPresence`: the four
+        // accept methods are `webauthn`, `password`, `none` and `enroll-token`,
+        // and the last of those holds `enroll` and NOTHING else. Waiving
+        // freshness for it would hand a leaked enrollment link a pty — see
+        // `holdsBaseRemoteSurface`.
         //
         // Routed through the SAME arming path rather than a bespoke "set
         // armedEver" so there is still exactly one place that decides what
@@ -2322,34 +2627,32 @@ export class RemoteServer {
         this.armPresence(newClient, 'step-up tier off', { windows: false })
       }
       this.armMaxAgeCut(newClient)
-      // Send auth response plaintext
-      ws.send(
-        JSON.stringify({
-          type: 'auth-response',
-          ok: true,
-          method,
-          ...(login ? { identity: { login } } : {}),
-          // Every accept under `off` says so, whatever the method. Ambient
-          // tailnet identity is still evaluated (it is worth having in the
-          // audit trail), so under `off` the owner's own phone is admitted as
-          // `tailnet-identity` and `method:'none'` never reaches it — which is
-          // exactly the client security.md most needs to warn.
-          ...(auth.policy === 'off' ? { authDisabled: true } : {})
-        })
-      )
+      // Through `sendTo` (i.e. the shared channel), not a raw `ws.send`: on an
+      // E2E origin this frame is the SECOND encrypted frame of the handshake and
+      // must be ciphertext like the `e2e-ack` before it.
+      this.sendTo(ws, {
+        type: 'auth-response',
+        ok: true,
+        method,
+        ...(login ? { identity: { login } } : {}),
+        // Every accept under `off` says so, whatever the method — kept keyed on
+        // the POLICY rather than on `method === 'none'` because a future method
+        // admitted while authentication is disabled would otherwise reach the
+        // client unwarned.
+        ...(auth.policy === 'off' ? { authDisabled: true as const } : {})
+      })
       logger.info(
         'remote-server',
         `Client authenticated from ${ip} via ${method}${login ? ` (${login})` : ''} (${this.clients.size} total)`
       )
       this.notifyStatus()
-      // If server has an E2E key, expect e2e-activate as the next message
-      if (this.e2eKey) {
-        awaitingE2E = true
-      }
     }
     const reject = (error: string, closeReason: string): void => {
-      ws.send(JSON.stringify({ type: 'auth-response', ok: false, error, retryable: false }))
-      ws.close(4001, closeReason)
+      refuseAndClose(
+        { type: 'auth-response', ok: false, error, retryable: false },
+        4001,
+        closeReason
+      )
     }
 
     /**
@@ -2362,14 +2665,12 @@ export class RemoteServer {
      * half-authenticated `ok:true` for it would be worse than a clear refusal.
      */
     const requirePasskey = (): void => {
-      ws.send(
-        JSON.stringify({
-          type: 'auth-response',
-          ok: false,
-          error: PASSKEY_REQUIRED_ERROR,
-          retryable: false
-        })
-      )
+      void sendFrame({
+        type: 'auth-response',
+        ok: false,
+        error: PASSKEY_REQUIRED_ERROR,
+        retryable: false
+      })
       // Deliberately does NOT unlock the ceremony budget. This answer is free to
       // provoke — any tailnet peer can send `{type:'auth'}` — so it stays on the
       // short clock; only an issued challenge earns the long one.
@@ -2378,55 +2679,31 @@ export class RemoteServer {
     /** Is this connection allowed to run a HANDSHAKE assertion right now? */
     // ADR-054 removed `passkey-for-grants` (it was "legacy login + medium tier"
     // written as one knob), so `passkey-always` is the only mode that makes a
-    // handshake ceremony available. A `legacy` connection that wants the passkey
-    // benefits gets them from a step-up, not from a login ceremony it is not
-    // required to run.
+    // handshake ceremony available. Under the `password` policy there is by
+    // definition no credential to assert with.
     const handshakeCeremonyAvailable = (): boolean =>
       webauthnOrigin !== null && auth.policy === 'passkey-always' && auth.ctx.credentialCount > 0
 
-    // Tailnet identity (Phase 3). Everything it depends on is already in the
-    // upgrade request, so there is nothing for the client to send: on a match we
-    // authenticate immediately and push an UNSOLICITED auth-response. The bare
-    // `{type:'auth'}` the web client sends afterwards lands in the post-auth
-    // switch and is ignored.
+    // TAILNET IDENTITY IS A USERNAME HINT, NOT AN ADMISSION (ADR-056).
+    //
+    // The unsolicited `accept('tailnet-identity')` that used to run right here —
+    // before any client frame — is gone: the link is the channel, never the
+    // identity, and a network fact is not a person. What survives is the LABEL.
+    // A password login on a serve-proxied socket is attributed to the owner's
+    // tailnet login, so `RemoteStatus.clientLogins` and every audit row it
+    // writes still name who it was; the `/remote/auth-info` echo still lets the
+    // sign-in screen greet them.
     const identity = evaluateIdentity(req.headers, req.socket.remoteAddress, this.identityContext())
-    // A login that is not the owner's does NOT refuse the socket: identity is a
-    // convenience layer on top of the existing methods, not a gate, so a
-    // colleague who knows the password must still be able to sign in on this very
-    // socket. We just send nothing and let the normal auth frame flow run — with
-    // one improvement: if they turn out to have no credential at all, the
-    // "missing credential" rejection is replaced by an actionable message.
+    const identityHint = identity.kind === 'owner' ? identity.login : null
+    // A login that is not the owner's is still not a refusal — it never was.
+    // Identity is a convenience layer, so a colleague who knows the break-glass
+    // password signs in on this very socket; they only get an actionable message
+    // if they turn out to have no credential at all.
     const identityMismatch = identity.kind === 'mismatch' ? identity : null
-    // Under `passkey-always` on a capable origin, ambient tailnet identity does
-    // NOT skip the ceremony (owner decision: device theft is exactly the threat
-    // ambient identity does not cover) unless the operator set the exemption. We
-    // simply send no unsolicited auth-response and let the ceremony run.
-    const identityWouldAuthenticate =
-      identity.kind === 'owner' &&
-      !ceremonyRequiredForAuth({
-        policy: auth.policy,
-        capableOrigin,
-        credentialCount: auth.ctx.credentialCount,
-        method: 'tailnet-identity',
-        passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
-      })
-    // ...and it does not skip the ENROLLMENT LINK either. See `hasEnrollIntent`:
-    // without this, a first device can never enrol, because the origin
-    // enrollment requires is exactly the origin that hands out ambient identity.
-    // Deferring costs the socket nothing it cannot re-earn — the frame-driven
-    // path below is the ordinary one, and the pre-auth deadline already governs.
-    const identityAuthenticates = identityWouldAuthenticate && !enrollIntent
-    if (identityAuthenticates) {
-      accept('tailnet-identity', identity.kind === 'owner' ? identity.login : null)
-    } else if (identityWouldAuthenticate) {
-      logger.info(
-        'remote-server',
-        `enroll intent: deferring tailnet identity for ${ip} — authenticating from the auth frame instead`
-      )
-    } else if (identityMismatch) {
+    if (identityMismatch) {
       logger.warn(
         'remote-server',
-        `Tailnet identity ${identityMismatch.login.slice(0, 128)} is not the node owner — falling through to token/password auth`
+        `Tailnet identity ${identityMismatch.login.slice(0, 128)} is not the node owner — falling through to passkey/password auth`
       )
     }
 
@@ -2441,26 +2718,46 @@ export class RemoteServer {
     const handleFrame = async (raw: WebSocket.RawData): Promise<void> => {
       const rawStr = raw.toString()
 
-      // Determine if this message is encrypted (base64 blob, not JSON)
+      // Determine if this message is encrypted (base64 blob, not JSON).
+      //
+      // Read off the socket's CHANNEL rather than off the authenticated client,
+      // because since ADR-056 the channel outlives neither — it PRECEDES the
+      // client: on a tunnel/LAN origin every frame from `auth` onwards is
+      // ciphertext, and there is no client record yet when the first one lands.
       let msg: WsClientMessage
-      const client = this.clients.get(ws)
+      const encrypted = channel.e2e?.isReady === true
 
       try {
-        if (client?.e2e?.isReady) {
+        if (encrypted) {
           // Once E2E is active, EVERY frame must be encrypted. Never fall back
           // to JSON.parse on a plaintext `{...}` frame — that would let an
           // on-path party splice cleartext invoke/sync frames into an
           // "encrypted" session (H3). A plaintext frame here fails the GCM
           // auth below and the connection is closed.
-          msg = (await client.e2e.decrypt(rawStr)) as WsClientMessage
+          msg = (await channel.e2e!.decrypt(rawStr)) as WsClientMessage
         } else {
           msg = JSON.parse(rawStr)
         }
       } catch {
-        if (client?.e2e?.isReady) {
+        if (encrypted) {
+          // A WRONG CHANNEL KEY SPENDS THE BUDGET (review F2).
+          //
+          // This is the only place a bad key is observable, and it IS observable
+          // here: the server activated against its own key, so a client holding a
+          // different one produces ciphertext this decrypt cannot open. The
+          // charge bounds ONLINE probing and socket churn (an offline oracle
+          // against 256 bits is academic either way), and ADR-056 explicitly
+          // promises that activation failures spend the same per-IP budget the
+          // password does. Only PRE-AUTH: an established session's decrypt error
+          // is a broken or tampered stream, not a guess, and throttling the
+          // operator's own live socket for it would be the worse failure.
+          if (!authenticated) this.recordFailedAuth(ip)
           logger.error('remote-server', `E2E decryption failed from ${ip}, closing`)
           ws.close(4002, 'Decryption failed')
         } else {
+          // Malformed plaintext on a socket that OWED a channel is a handshake
+          // that never opened one — same budget, same reasoning.
+          if (!authenticated && e2eRequired) this.recordFailedAuth(ip)
           ws.close(4002, 'Invalid message format')
         }
         return
@@ -2475,6 +2772,50 @@ export class RemoteServer {
         // leave the socket immortal. Re-arming only while the socket is still
         // OPEN keeps closed/accepted sockets from getting a stray timer.
         try {
+          // ── THE CHANNEL COMES FIRST (ADR-056 item B) ──────────────────────
+          //
+          // On a tunnel or LAN origin the ORDER INVERTS: `e2e-activate` proves
+          // possession of the channel key, and only then may an identity be
+          // presented — inside the ciphertext. That is what makes the link a
+          // channel rather than a credential: holding it opens an encrypted pipe
+          // and buys nothing else.
+          //
+          // A socket that sends anything else first is REFUSED. That single rule
+          // is also the plaintext-on-LAN refusal: there is no path on those
+          // origins where an `auth` frame is read in the clear.
+          if (msg.type === 'e2e-activate') {
+            // Read LIVE, not from a socket-open snapshot (F5): the pre-auth
+            // window is up to 10 s, and a socket that opened just before a
+            // rotation must be measured against the key in force NOW.
+            const activationKey = this.expectedE2eKey(origin)
+            if (!activationKey || channel.e2e) {
+              // No key for this origin (tailnet/localhost — the transport is
+              // already confidential), or a second activation on one socket.
+              // A repeat activation is a malformed handshake from a peer that
+              // has already been answered once, so it spends the budget (F2).
+              if (channel.e2e) this.recordFailedAuth(ip)
+              ws.close(4004, 'E2E activation not available')
+              return
+            }
+            const e2e = new E2ECrypto()
+            await e2e.init(activationKey)
+            channel.e2e = e2e
+            // The ack is the FIRST encrypted frame, and it is also how the client
+            // learns its key was the right one: a stale link decrypts nothing,
+            // sends nothing, and is reaped by the pre-auth deadline.
+            void sendFrame({ type: 'e2e-ack' })
+            logger.info('remote-server', `E2E channel opened for ${origin} client ${ip}`)
+            return
+          }
+          if (e2eRequired && !channel.e2e) {
+            logger.warn(
+              'remote-server',
+              `Refusing a plaintext ${origin} connection from ${ip}: this origin must open an E2E channel first`
+            )
+            ws.close(4004, 'E2E activation required')
+            return
+          }
+
           // THE AUTHENTICATION MOMENT. Re-read the policy for the frames that
           // ask to be authenticated, so the decision is made against the rules
           // in force NOW rather than whenever this socket happened to open.
@@ -2496,15 +2837,16 @@ export class RemoteServer {
           // authority. Legal only where a ceremony could actually succeed.
           if (msg.type === 'auth-webauthn-start' || msg.type === 'auth-webauthn-finish') {
             if (!handshakeCeremonyAvailable() || !webauthnOrigin) {
-              ws.send(
-                JSON.stringify({
+              refuseAndClose(
+                {
                   type: 'auth-response',
                   ok: false,
                   error: PASSKEY_UNAVAILABLE_ERROR,
                   retryable: false
-                })
+                },
+                4001,
+                'Passkey auth not available'
               )
-              ws.close(4001, 'Passkey auth not available')
               return
             }
             if (msg.type === 'auth-webauthn-start') {
@@ -2514,7 +2856,8 @@ export class RemoteServer {
               const issued = await this.sendWebauthnChallenge(ws, ip, {
                 origin: webauthnOrigin,
                 connectionId,
-                kind: 'auth'
+                kind: 'auth',
+                channel
               })
               if (issued) beginCeremonyDeadline()
               return
@@ -2526,11 +2869,9 @@ export class RemoteServer {
               assertion: (msg as WsAuthWebauthnFinish).assertion
             })
             if (!result.ok) {
-              // A failed assertion is a failed CREDENTIAL, so it spends the
-              // stricter password budget rather than the token one — the token
-              // budget is calibrated for a 256-bit random value where throttling
-              // is only about resource exhaustion.
-              this.recordFailedAuth(ip, 'password')
+              // A failed assertion is a failed credential and spends the
+              // per-key budget like every other one (one budget since ADR-056).
+              this.recordFailedAuth(ip)
               this.auditAuth({
                 channel: 'auth:webauthn-assert',
                 connectionId,
@@ -2541,15 +2882,16 @@ export class RemoteServer {
                 detail: `handshake passkey assertion refused (${result.reason})`
               })
               logger.warn('remote-server', `Passkey assertion from ${ip} failed: ${result.reason}`)
-              ws.send(
-                JSON.stringify({
+              refuseAndClose(
+                {
                   type: 'auth-response',
                   ok: false,
                   error: PASSKEY_FAILED_ERROR,
                   retryable: true
-                })
+                },
+                4001,
+                'Passkey rejected'
               )
-              ws.close(4001, 'Passkey rejected')
               return
             }
             const label = credentialLabel(result.credential.nickname, result.credential.credId)
@@ -2561,12 +2903,10 @@ export class RemoteServer {
               capability: 'admin',
               outcome: 'ok',
               // Says what the ceremony CONFERRED, which is the reading that makes
-              // these rows useful: under a passkey mode a webauthn login carries
-              // admin+enroll, under `legacy`/`off` it keeps the as-built set.
-              detail:
-                auth.policy === 'legacy' || auth.policy === 'off'
-                  ? 'passkey login accepted; conferred the as-built remote set'
-                  : 'passkey login accepted; conferred admin+enroll; presence armed'
+              // these rows useful. Since ADR-056's grant collapse a passkey login
+              // carries admin+enroll under every policy it can reach — it cannot
+              // reach `off`, where the auth frame never gets this far.
+              detail: 'passkey login accepted; conferred admin+enroll; presence armed'
             })
             accept('webauthn', label)
             return
@@ -2588,18 +2928,20 @@ export class RemoteServer {
           }
 
           // Fixed order, no cross-method fallthrough: a presented password is
-          // never retried as a token (and vice versa), so a client cannot probe
-          // its way in with whichever credential the server happens to accept.
-          // The enrollment token slots between them under the same rule.
+          // never retried as an enrollment token or vice versa, so a client
+          // cannot probe its way in with whichever credential the server happens
+          // to accept.
           if (typeof msg.pwProof === 'string') {
             if (!this.passwordParams()) {
-              // Not provisioned, or tunnel mode (E2E needs the fragment key).
-              reject('Password auth not available', 'Password auth not available')
+              // No credential is provisioned on the HOST. Typed, and spending no
+              // failure budget, because nothing the caller did was wrong and
+              // nothing they can do from here will help.
+              reject(PASSWORD_REQUIRED_ERROR, 'No password is provisioned')
               return
             }
             // `passkey-only` (break-glass off) removes the password wherever a
             // passkey is actually possible — never on an origin that cannot do
-            // WebAuthn, which would silently reduce LAN/tunnel to token-only.
+            // WebAuthn, which would leave LAN/tunnel with no credential at all.
             if (
               !passwordAuthAllowed({
                 policy: auth.policy,
@@ -2614,9 +2956,11 @@ export class RemoteServer {
               // Distinct log line: this is the escape hatch, and the operator
               // should be able to see when it was used rather than a passkey.
               logger.info('remote-server', `Break-glass password auth accepted from ${ip}`)
-              accept('password')
+              // The tailnet login rides along as the username HINT where serve
+              // supplied one — all that is left of ambient identity (ADR-056).
+              accept('password', identityHint)
             } else {
-              this.recordFailedAuth(ip, 'password')
+              this.recordFailedAuth(ip)
               reject('Invalid password', 'Invalid password')
             }
             return
@@ -2624,7 +2968,7 @@ export class RemoteServer {
 
           if (typeof msg.enrollToken === 'string') {
             if (!this.consumeEnrollToken(msg.enrollToken)) {
-              this.recordFailedAuth(ip, 'password')
+              this.recordFailedAuth(ip)
               this.auditAuth({
                 channel: 'auth:enroll-token',
                 connectionId,
@@ -2650,53 +2994,32 @@ export class RemoteServer {
             return
           }
 
-          if (typeof msg.token === 'string') {
-            if (!this.verifyToken(msg.token)) {
-              this.recordFailedAuth(ip, 'token')
-              reject('Invalid token', 'Invalid token')
-              return
-            }
-            // A VALID token under `passkey-always` still buys nothing on a capable
-            // origin — it only earns the right to run the ceremony on this socket.
-            // Verified first on purpose: an invalid token must not learn that a
-            // passkey would have worked.
-            if (
-              ceremonyRequiredForAuth({
-                policy: auth.policy,
-                capableOrigin,
-                credentialCount: auth.ctx.credentialCount,
-                method: 'token',
-                passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
-              })
-            ) {
-              requirePasskey()
-              return
-            }
-            accept('token')
-            return
-          }
+          // THE TOKEN ARM IS GONE (ADR-056). A stale cached bundle still sends
+          // `{type:'auth', token}`; the field is simply not read, so such a frame
+          // is a frame with no credential and falls through to the refusals
+          // below — a typed answer rather than a crash, which is the whole of the
+          // no-compatibility-lane ruling.
 
           // `{type:'auth'}` with no credential must never reach a comparator.
           // Under `passkey-always` on a capable origin this is the NORMAL opening
           // move for a passkey-first client (open the page, biometric, in) — it
-          // has no token to present, so answer with the ceremony prompt rather
+          // has nothing to present, so answer with the ceremony prompt rather
           // than a credential rejection.
-          if (
-            handshakeCeremonyAvailable() &&
-            ceremonyRequiredForAuth({
-              policy: auth.policy,
-              capableOrigin,
-              credentialCount: auth.ctx.credentialCount,
-              method: 'token',
-              passkeyTailnetExempt: auth.ctx.passkeyTailnetExempt
-            })
-          ) {
+          if (handshakeCeremonyAvailable()) {
             requirePasskey()
             return
           }
-          // A tailnet user whose login is not the owner's lands here (identity did
-          // not authenticate them and they presented nothing else) — give them the
-          // actionable reason instead of a bare "Missing credential".
+          // On an E2E origin the channel is open and there is no ceremony to
+          // offer, so the ONLY thing this socket could still present is a
+          // password — and it presented none. Typed, because the cure is on the
+          // host ("provision a password to use this link"), not on the phone.
+          if (e2eRequired) {
+            reject(PASSWORD_REQUIRED_ERROR, 'Password required')
+            return
+          }
+          // A tailnet user whose login is not the owner's lands here (they
+          // presented nothing else) — give them the actionable reason instead of
+          // a bare "Missing credential".
           if (identityMismatch) {
             reject(
               `Signed in to Tailscale as ${identityMismatch.login.slice(0, 128)}, but this ClaudeUI only accepts ${identityMismatch.ownerLogin.slice(0, 128)}`,
@@ -2712,32 +3035,14 @@ export class RemoteServer {
         return
       }
 
-      // E2E is configured for this server: the first post-auth frame MUST be
-      // `e2e-activate`. Anything else (a client that never activates E2E) is
-      // refused rather than silently allowed to run cleartext (H3).
-      if (awaitingE2E) {
-        if (msg.type === 'e2e-activate') {
-          const c = this.clients.get(ws)
-          if (c && this.e2eKey) {
-            const e2e = new E2ECrypto()
-            await e2e.init(this.e2eKey)
-            c.e2e = e2e
-            // Ack is the FIRST encrypted server frame — `auth-response` was the
-            // last plaintext one. The client only sends `e2e-activate` after
-            // its own init() has completed, so it is guaranteed ready to
-            // decrypt this (a plaintext ack here would be silently dropped by
-            // the client's strict post-activation decoder — see R2 client).
-            this.sendTo(ws, { type: 'e2e-ack' })
-            logger.info('remote-server', `E2E encryption activated for client ${ip}`)
-          }
-          awaitingE2E = false
-          return
-        }
-        ws.close(4004, 'E2E activation required')
-        return
-      }
+      // The post-auth `awaitingE2E` state is GONE (ADR-056): activation happens
+      // BEFORE authentication now, so by the time a socket is authenticated its
+      // channel is either live or was never required. A late `e2e-activate` on an
+      // authenticated socket falls through to the switch below and is ignored as
+      // an unknown post-auth frame.
 
       // Update activity timestamp
+      const client = this.clients.get(ws)
       if (client) client.lastActivity = Date.now()
 
       switch (msg.type) {
@@ -2890,22 +3195,36 @@ export class RemoteServer {
   private async sendWebauthnChallenge(
     ws: WebSocket,
     ip: string,
-    args: { origin: WebauthnOrigin; connectionId: string; kind: 'auth' | 'step-up' }
+    args: {
+      origin: WebauthnOrigin
+      connectionId: string
+      kind: 'auth' | 'step-up'
+      /**
+       * The socket's channel (review F7). REQUIRED, not derived from
+       * `this.clients`: the `auth`-kind refusals below fire PRE-AUTH, where there
+       * is no client record to look one up from, and a raw `ws.send` there would
+       * put plaintext on a live encrypted channel. That is reachable — a
+       * loopback peer on a tunnel-active run classifies `tunnel` (E2E) while
+       * `Host: localhost` still yields a WebAuthn-capable origin — and it is
+       * wrong regardless of reachability.
+       */
+      channel: SocketChannel
+    }
   ): Promise<boolean> {
+    const send = (msg: WsServerMessage): Promise<void> => this.sendOn(ws, args.channel, msg)
     if (this.isAuthThrottled(ip)) {
       logger.warn('remote-server', `Refusing a passkey challenge for ${ip}: too many attempts`)
       if (args.kind === 'auth') {
-        ws.send(
-          JSON.stringify({
-            type: 'auth-response',
-            ok: false,
-            error: 'Too many failed attempts',
-            retryable: false
-          })
-        )
-        ws.close(4006, 'Too many failed attempts')
+        // Flushed before the close, like every other refusal on a channel that
+        // may be encrypting asynchronously.
+        void send({
+          type: 'auth-response',
+          ok: false,
+          error: 'Too many failed attempts',
+          retryable: false
+        }).then(() => ws.close(4006, 'Too many failed attempts'))
       } else {
-        this.sendTo(ws, {
+        void send({
           type: 'step-up-response',
           ok: false,
           code: 'throttled',
@@ -2922,17 +3241,14 @@ export class RemoteServer {
     })
     if (!options) {
       if (args.kind === 'auth') {
-        ws.send(
-          JSON.stringify({
-            type: 'auth-response',
-            ok: false,
-            error: PASSKEY_UNAVAILABLE_ERROR,
-            retryable: false
-          })
-        )
-        ws.close(4001, 'Passkey auth not available')
+        void send({
+          type: 'auth-response',
+          ok: false,
+          error: PASSKEY_UNAVAILABLE_ERROR,
+          retryable: false
+        }).then(() => ws.close(4001, 'Passkey auth not available'))
       } else {
-        this.sendTo(ws, {
+        void send({
           type: 'step-up-response',
           ok: false,
           code: 'passkey-unavailable',
@@ -2942,8 +3258,7 @@ export class RemoteServer {
       }
       return false
     }
-    this.sendTo(
-      ws,
+    void send(
       args.kind === 'auth'
         ? { type: 'auth-webauthn-challenge', options }
         : { type: 'step-up-challenge', options }
@@ -2969,7 +3284,8 @@ export class RemoteServer {
     await this.sendWebauthnChallenge(ws, ip, {
       origin,
       connectionId: client.connection.connectionId,
-      kind: 'step-up'
+      kind: 'step-up',
+      channel: client.channel
     })
   }
 
@@ -2999,7 +3315,8 @@ export class RemoteServer {
       await this.sendWebauthnChallenge(ws, ip, {
         origin,
         connectionId: client.connection.connectionId,
-        kind: 'auth'
+        kind: 'auth',
+        channel: client.channel
       })
       return
     }
@@ -3012,7 +3329,7 @@ export class RemoteServer {
       assertion: msg.assertion
     })
     if (!result.ok) {
-      this.recordFailedAuth(ip, 'password')
+      this.recordFailedAuth(ip)
       this.auditAuth({
         channel: 'auth:webauthn-assert',
         connectionId: client.connection.connectionId,
@@ -3043,36 +3360,26 @@ export class RemoteServer {
     client.connection.identity = { method: 'webauthn', label, connectedAt: Date.now() }
 
     // RE-SNAPSHOT the policy. This is a re-authentication moment, and the
-    // connect-time snapshot is provably stale here in the case that matters
-    // most: the first device connects on an enrollment link while AUTO still
-    // resolves to `legacy` (zero credentials), then registers — which flips AUTO
-    // to `passkey-always` — and only then asserts. Computing grants from the
-    // connect-time `legacy` would hand the operator's first passkey the LEGACY
-    // set and no way to manage credentials until it reconnected.
+    // connect-time snapshot is stale in the case that matters most: the first
+    // device connects on an enrollment link while AUTO still resolves to
+    // `password` (zero credentials), then registers — which flips AUTO to
+    // `passkey-always` — and only then asserts.
     //
-    // Only the POLICY is re-read; `capableOrigin` stays true because it is a
-    // fact about this connection's Host, which cannot change under it. Same
-    // single-read helper the handshake uses — a third copy of "read context,
-    // resolve policy" is exactly how the two halves drift apart.
+    // The GRANTS no longer depend on it (ADR-056: a `webauthn` connection holds
+    // the full set under every policy), but the TIER still does, and so does the
+    // `authDisabled` flag the response carries. Same single-read helper the
+    // handshake uses — a third copy of "read context, resolve policy" is exactly
+    // how the two halves drift apart.
     const fresh = this.readAuthDecision()
     client.policy = fresh.policy
     client.policyCtx = fresh.ctx
     // The tier rides the same re-snapshot: enrolling the first credential can
-    // flip AUTO from `legacy` to `passkey-always`, and auth-mode `off` forces
+    // flip AUTO from `password` to `passkey-always`, and auth-mode `off` forces
     // tier `off`, so a stale tier here would be judged against a policy that
     // just changed underneath it.
     client.stepUpTier = resolveStepUpTier(fresh.policy, fresh.ctx.stepUpTier)
     client.connection.stepUpTier = client.stepUpTier
-    client.connection.grants = grantsFor({
-      method: 'webauthn',
-      policy: fresh.policy,
-      capableOrigin: true,
-      // Inert for `webauthn` (a completed ceremony is not the token/tailnet
-      // branch), but required by the signature so no call site can omit the
-      // fields that DO matter — which is exactly how they were omitted before.
-      credentialCount: fresh.ctx.credentialCount,
-      passkeyTailnetExempt: fresh.ctx.passkeyTailnetExempt
-    })
+    client.connection.grants = grantsFor('webauthn')
     // ARM-ON-AUTH (ADR-054 decision 2): the enroll→webauthn upgrade IS a passkey
     // ceremony, so it arms exactly like the handshake one. This is the case that
     // matters most for the double-ceremony complaint — the operator has just
@@ -3352,7 +3659,7 @@ export class RemoteServer {
       if (!result.ok) {
         // SAME budget as a bad password — an assertion brute force must not get
         // a fresh allowance just because it is a different frame field.
-        this.recordFailedAuth(ip, 'password')
+        this.recordFailedAuth(ip)
         this.auditAuth({
           channel: 'auth:webauthn-assert',
           connectionId: client.connection.connectionId,
@@ -3456,7 +3763,7 @@ export class RemoteServer {
     if (typeof msg.pwProof !== 'string' || !this.passwordAuth.verify(msg.pwProof)) {
       // Shape failures and wrong proofs are the same event to the budget: both
       // are "this socket presented something that is not the password".
-      this.recordFailedAuth(ip, 'password')
+      this.recordFailedAuth(ip)
       respond({
         ok: false,
         code: typeof msg.pwProof === 'string' ? 'invalid-proof' : 'malformed',
@@ -3936,9 +4243,7 @@ export class RemoteServer {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private verifyToken(clientToken: string): boolean {
-    return safeTokenEqual(this.token, clientToken)
-  }
+  // `verifyToken` is GONE (ADR-056): there is no WS access token to verify.
 
   /**
    * WS upgrade gate (M-RM3). Browsers always send `Origin` on a WS upgrade, so
@@ -3963,95 +4268,104 @@ export class RemoteServer {
   }
 
   /**
-   * True if `ip` has exceeded EITHER failed-auth budget within its own window
-   * (10 token failures / 60s, or 5 password failures / 5min). The record is
-   * dropped only once both windows have lapsed, so an expired token window never
-   * clears a live password lockout.
+   * True if `ip` is over the failed-credential budget (5 failures / 5 min).
+   *
+   * ONE budget since ADR-056 (review F2). There were two, because the token was
+   * a 256-bit random value for which throttling was only about resource
+   * exhaustion, while a user-chosen password needs the throttle to BE the
+   * brute-force defence. The token is gone, and everything that can now fail —
+   * a password proof, a passkey assertion, an enrollment link, a channel-key
+   * activation — is either user-chosen or a secret worth guessing, so the strict
+   * budget is the only correct one. The record is dropped once its window lapses.
    */
   private isAuthThrottled(ip: string): boolean {
     const rec = this.failedAuth.get(ip)
     if (!rec) return false
     const now = Date.now()
-    const tokenLive = rec.count > 0 && now - rec.firstAt <= FAILED_AUTH_WINDOW_MS
-    const pwLive = rec.pwCount > 0 && now - rec.pwFirstAt <= FAILED_PW_AUTH_WINDOW_MS
-    if (!tokenLive && !pwLive) {
+    if (rec.count === 0 || now - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
       this.failedAuth.delete(ip)
       return false
     }
-    if (tokenLive && rec.count >= MAX_FAILED_AUTH) return true
-    if (pwLive && rec.pwCount >= MAX_FAILED_PW_AUTH) return true
-    return false
+    return rec.count >= MAX_FAILED_AUTH
   }
 
-  /** Record one failed attempt against the budget for `method` only. */
-  private recordFailedAuth(ip: string, method: RemoteAuthMethod): void {
+  /**
+   * Record one failed credential attempt against this key's budget.
+   *
+   * Every caller spends the SAME budget deliberately: a brute force must not get
+   * a fresh allowance for arriving in a different frame field, whether that is a
+   * password proof, a step-up assertion, an enrollment token, or an E2E
+   * activation whose ciphertext does not open.
+   */
+  private recordFailedAuth(ip: string): void {
     const now = Date.now()
-    let rec = this.failedAuth.get(ip)
-    if (!rec) {
-      rec = { count: 0, firstAt: now, pwCount: 0, pwFirstAt: now }
-      this.failedAuth.set(ip, rec)
-    }
-    if (method === 'password') {
-      if (rec.pwCount === 0 || now - rec.pwFirstAt > FAILED_PW_AUTH_WINDOW_MS) {
-        rec.pwCount = 1
-        rec.pwFirstAt = now
-      } else {
-        rec.pwCount++
-      }
+    const rec = this.failedAuth.get(ip)
+    if (!rec || now - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
+      this.failedAuth.set(ip, { count: 1, firstAt: now })
       return
     }
-    if (rec.count === 0 || now - rec.firstAt > FAILED_AUTH_WINDOW_MS) {
-      rec.count = 1
-      rec.firstAt = now
-    } else {
-      rec.count++
-    }
+    rec.count++
   }
 
-  /** Send a message to a specific client (encrypts if E2E is active). */
-  private sendTo(ws: WebSocket, msg: WsServerMessage): void {
-    if (ws.readyState !== WebSocket.OPEN) return
-
-    const client = this.clients.get(ws)
-    if (client?.e2e?.isReady) {
-      // Queue encrypted send to preserve message ordering
-      client.sendQueue = client.sendQueue.then(async () => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(await client.e2e!.encrypt(msg))
-          } catch (err) {
-            logger.error(
-              'remote-server',
-              `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`
-            )
-          }
-        }
-      })
-    } else {
+  /**
+   * Send one frame on an explicit {@link SocketChannel}, encrypting when the
+   * channel is live. THE one send path — the pre-auth handshake and the
+   * authenticated session both route through it, which is what keeps a single
+   * cipher and a single ordering queue over one socket.
+   *
+   * The returned promise resolves once the frame has been handed to `ws.send`,
+   * so a caller that must CLOSE afterwards can order the two. Under ADR-056 that
+   * matters for every refusal on an E2E origin: the frame is encrypted
+   * asynchronously, and a synchronous close beside it would drop the reason.
+   */
+  private sendOn(ws: WebSocket, channel: SocketChannel, msg: WsServerMessage): Promise<void> {
+    if (ws.readyState !== WebSocket.OPEN) return Promise.resolve()
+    const e2e = channel.e2e
+    if (!e2e?.isReady) {
       ws.send(JSON.stringify(msg))
+      return Promise.resolve()
     }
+    const queued = channel.sendQueue.then(async () => {
+      if (ws.readyState !== WebSocket.OPEN) return
+      try {
+        ws.send(await e2e.encrypt(msg))
+      } catch (err) {
+        logger.error(
+          'remote-server',
+          `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    })
+    channel.sendQueue = queued
+    return queued
+  }
+
+  /**
+   * Send a message to a specific client (encrypts if E2E is active).
+   *
+   * A socket with no client record is PRE-AUTH and not one this method's callers
+   * own — the handshake has its own `sendFrame` bound to the socket's channel —
+   * so the plaintext fallback here is only ever reached for a frame racing a
+   * socket that just went away.
+   */
+  private sendTo(ws: WebSocket, msg: WsServerMessage): void {
+    const client = this.clients.get(ws)
+    if (client) {
+      void this.sendOn(ws, client.channel, msg)
+      return
+    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
   }
 
   /** Broadcast a message to all authenticated clients. */
   private broadcast(msg: WsServerMessage): void {
+    // Serialized ONCE for every plaintext client — the event fan-out is a hot
+    // path, and an encrypted client pays for its own ciphertext anyway.
     const plainPayload = JSON.stringify(msg)
     for (const [ws, client] of this.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue
-
-      if (client.e2e?.isReady) {
-        // Queue encrypted send per-client
-        client.sendQueue = client.sendQueue.then(async () => {
-          if (ws.readyState === WebSocket.OPEN) {
-            try {
-              ws.send(await client.e2e!.encrypt(msg))
-            } catch (err) {
-              logger.error(
-                'remote-server',
-                `E2E broadcast encrypt failed: ${err instanceof Error ? err.message : String(err)}`
-              )
-            }
-          }
-        })
+      if (client.channel.e2e?.isReady) {
+        void this.sendOn(ws, client.channel, msg)
       } else {
         ws.send(plainPayload)
       }

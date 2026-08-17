@@ -70,7 +70,12 @@ vi.mock('../../main/services/tunnel-manager', () => {
 
 vi.mock('../../main/services/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../main/services/db')>()
-  return { ...actual, getRemoteConfig: () => null, dispatchedCostsByRouting: () => ({}) }
+  // Auth-mode `off` — see the note in stream-lane-reconnect.e2e.test.ts.
+  return {
+    ...actual,
+    getRemoteConfig: () => ({ authPolicy: 'off' }),
+    dispatchedCostsByRouting: () => ({})
+  }
 })
 
 vi.mock('../../main/services/claude-session', () => ({
@@ -103,7 +108,6 @@ const transcriptPath = path.join(projectDir, `${SESSION_ID}.jsonl`)
 
 let server: RemoteServer
 let port: number
-let token: string
 
 /** One assistant line, in the shape `session-history` parses. */
 function assistantLine(id: string, text: string): string {
@@ -137,8 +141,8 @@ beforeAll(async () => {
 
   server = new RemoteServer(new RemoteDispatcher())
   port = await ephemeralPort()
-  const started = await server.start(port, '127.0.0.1')
-  token = started.token
+  await server.start(port, '127.0.0.1')
+
   syncCore.resetCanonicalForTests()
   syncCore.clearRing()
 })
@@ -152,7 +156,7 @@ afterAll(async () => {
 
 /** Connect, and record every server frame in arrival order. */
 async function connect(): Promise<{ client: RemoteClient; frames: WsServerMessage[] }> {
-  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
   await client.ready
   const frames: WsServerMessage[] = []
   client.onMessage((msg) => frames.push(msg))

@@ -62,7 +62,10 @@ vi.mock('../../main/services/tunnel-manager', () => {
 // "no credential provisioned" so no test ever opens the developer's real file.
 vi.mock('../../main/services/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../main/services/db')>()
-  return { ...actual, getRemoteConfig: () => null }
+  // Auth-mode `off`: these flows are about the stream/sync lanes, not about
+  // admission, and since ADR-056 a server with no credential provisioned admits
+  // nobody — so "an authenticated socket" has to be asked for explicitly.
+  return { ...actual, getRemoteConfig: () => ({ authPolicy: 'off' }) }
 })
 
 // ClaudeSession drags in the SDK and a dozen services; the server only ever
@@ -92,7 +95,6 @@ const CWD = '/tmp/stream-lane'
 
 let server: RemoteServer
 let port: number
-let token: string
 
 beforeAll(async () => {
   commandRegistry.reset()
@@ -101,8 +103,8 @@ beforeAll(async () => {
   registerCommand({ ...STREAM_WATCH_COMMAND, transport: 'remote' })
   server = new RemoteServer(new RemoteDispatcher())
   port = await ephemeralPort()
-  const started = await server.start(port, '127.0.0.1')
-  token = started.token
+  await server.start(port, '127.0.0.1')
+
   syncCore.resetCanonicalForTests()
   syncCore.clearRing()
   emitEvent('session:created', [ROUTING_ID, { cwd: CWD }])
@@ -115,7 +117,7 @@ afterAll(async () => {
 
 /** Connect, and record every server frame in arrival order. */
 async function connect(): Promise<{ client: RemoteClient; frames: WsServerMessage[] }> {
-  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
   await client.ready
   const frames: WsServerMessage[] = []
   client.onMessage((msg) => frames.push(msg))

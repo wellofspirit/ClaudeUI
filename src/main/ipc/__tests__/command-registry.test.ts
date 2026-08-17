@@ -23,7 +23,7 @@ vi.mock('../../services/logger', () => ({ logger: loggerSpies }))
 
 import {
   CommandRegistry,
-  LEGACY_REMOTE_GRANTS,
+  AUTH_OFF_GRANTS,
   ALL_GRANTS,
   PINNED_CAPABILITIES,
   desktopConnection,
@@ -40,7 +40,7 @@ beforeEach(() => {
   loggerSpies.error.mockClear()
 })
 
-const remoteConn = makeRemoteConnection('tailnet-identity', 'owner@example.com')
+const remoteConn = makeRemoteConnection('password', 'owner@example.com')
 
 /** Register with sane defaults; `reg` overrides any field. */
 function reg(overrides: Partial<CommandRegistration> = {}): CommandRegistration {
@@ -201,8 +201,8 @@ describe('capability gating', () => {
     expect(isEnrollNotPermittedError(await refusal('webauthn:mint-enroll-token'))).toBe(false)
   })
 
-  it('the legacy remote grant set excludes shell/admin/host', () => {
-    expect([...LEGACY_REMOTE_GRANTS].sort()).toEqual([
+  it('the auth-off remote grant set excludes shell/admin/host', () => {
+    expect([...AUTH_OFF_GRANTS].sort()).toEqual([
       'chat',
       'config',
       'fs-read',
@@ -210,7 +210,7 @@ describe('capability gating', () => {
       'session-config'
     ])
     for (const capability of Object.values(PINNED_CAPABILITIES)) {
-      expect(LEGACY_REMOTE_GRANTS.has(capability)).toBe(false)
+      expect(AUTH_OFF_GRANTS.has(capability)).toBe(false)
     }
   })
 })
@@ -223,7 +223,9 @@ describe('audit', () => {
     expect(appendAuditLog).toHaveBeenCalledTimes(1)
     expect(appendAuditLog.mock.calls[0][0]).toMatchObject({
       connectionId: remoteConn.connectionId,
-      method: 'tailnet-identity',
+      // ADR-056: `password` is the method, and the tailnet login survives as the
+      // LABEL — the username hint is what is left of ambient identity.
+      method: 'password',
       label: 'owner@example.com',
       capability: 'chat',
       kind: 'command',
@@ -234,10 +236,10 @@ describe('audit', () => {
     expect(typeof appendAuditLog.mock.calls[0][0].ts).toBe('number')
   })
 
-  it('labels a token connection by its method when there is no login', async () => {
-    const tokenConn = makeRemoteConnection('token', null)
-    expect(tokenConn.identity.label).toBe('token')
-    expect(tokenConn.connectionId).not.toBe(remoteConn.connectionId)
+  it('labels a connection by its method when there is no login hint', async () => {
+    const anon = makeRemoteConnection('password', null)
+    expect(anon.identity.label).toBe('password')
+    expect(anon.connectionId).not.toBe(remoteConn.connectionId)
   })
 
   it('does not audit queries', async () => {

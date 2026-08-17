@@ -50,7 +50,8 @@ function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     shellGrantIdleMinutes: 10,
     authPolicy: null,
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
+    // ADR-056 (v13): no LAN channel key on a loopback-bound test server.
+    lanE2eKey: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,

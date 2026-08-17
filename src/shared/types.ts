@@ -1561,7 +1561,7 @@ export interface RemoteConfig {
   shellGrantIdleMinutes: number
   /**
    * Stored auth policy, or `null` for AUTO (≥1 credential ⇒ `passkey-always`,
-   * else `legacy`). Same table + same desktop-only write path as
+   * else `password`). Same table + same desktop-only write path as
    * {@link RemoteConfig.allowTerminal}, and for the same reason: a remotely
    * writable policy would let a client downgrade its own authentication.
    */
@@ -1572,8 +1572,6 @@ export interface RemoteConfig {
   credentialCount: number
   /** Break-glass password enabled (default true); the `passkey-only` toggle clears it. */
   passwordBreakGlass: boolean
-  /** Let a tailnet-identified connection skip the ceremony under `passkey-always`. */
-  passkeyTailnetExempt: boolean
   /**
    * Stored step-up tier (ADR-054). The SECOND axis: `authPolicy` governs the
    * login ceremony, this governs post-login freshness. Never null — an
@@ -1695,7 +1693,7 @@ interface RemoteAPI {
     port?: number
     host?: string
     tunnel?: boolean
-  }): Promise<{ port: number; token: string; lanUrl: string }>
+  }): Promise<{ port: number; lanUrl: string }>
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
@@ -1732,7 +1730,6 @@ interface RemoteAPI {
     /** `null` restores AUTO. Host-anchor only by construction (ADR-054 dec. 6). */
     authPolicy?: RemoteAuthPolicy | null
     passwordBreakGlass?: boolean
-    passkeyTailnetExempt?: boolean
     /** ADR-054's second axis. */
     stepUpTier?: StepUpTier
     /** Strong-tier idle window for non-shell mutations, 1–1440 minutes. */
@@ -1774,9 +1771,8 @@ interface RemoteAPI {
     shellGrantIdleMinutes?: number
     /** ≥30 — the audit floor is a refusal here, not a silent clamp. */
     auditRetentionDays?: number
-    /** The two admission toggles — auth-surface members, so they sweep too. */
+    /** The admission toggle — an auth-surface member, so it sweeps too. */
     passwordBreakGlass?: boolean
-    passkeyTailnetExempt?: boolean
   }): Promise<{ ok: true; config: RemoteConfig }>
   /**
    * Close the editor: Save, Cancel, and pane unmount all call it, so the bounded
@@ -1784,6 +1780,28 @@ interface RemoteAPI {
    * calling it with no session open is a no-op success.
    */
   authcfgEnd(): Promise<{ ok: true }>
+  /**
+   * The LAN channel link — `http://<ip>:<port>/#k=<key>` (ADR-056 item C).
+   *
+   * SETTINGS-SESSION GATED, unlike its namespace sibling `authcfg:get`: it
+   * returns a channel SECRET, so the "the pane's default state is the read"
+   * exemption explicitly does not apply. The desktop connection is exempt like
+   * everywhere else — it is the host anchor.
+   *
+   * Throws `lan-link-unavailable` when the running server serves no non-loopback
+   * bind (stopped, or `tailscale serve` mode, which binds loopback only).
+   */
+  authcfgLanLink(): Promise<{ url: string }>
+  /**
+   * Rotate the persistent LAN channel key and return the NEW link.
+   *
+   * Never strands anybody: established E2E channels survive (the key is consumed
+   * at handshake only, and each connection derives its own session keys at
+   * activation), so nobody is disconnected — only NEW handshakes need the new
+   * key. Audited as a settings change, with no 4009 sweep, because the admission
+   * rules for existing identities did not move.
+   */
+  authcfgRotateLanKey(): Promise<{ url: string }>
   /**
    * Rotate the break-glass password. Session-gated like the rest of the area.
    *
@@ -1954,25 +1972,27 @@ export type TunnelState =
   | 'restarting'
 
 /**
- * Auth methods the remote server accepts on a connection. `'token'` is the
- * per-start random bearer token from the URL fragment; `'password'` is the
- * scrypt proof derived from the user's persisted credential;
- * `'tailnet-identity'` is the spoof-stripped `Tailscale-User-Login` header a
- * `tailscale serve` proxy attaches, accepted for the node owner's login only.
+ * Auth methods the remote server ADVERTISES or ACCEPTS (ADR-056 collapsed the
+ * two lists into one union with one asymmetric member — see below).
  *
- * ADR-052 adds three. `'webauthn'` is a completed passkey assertion (the only
- * method that proves a HUMAN rather than a cached client secret);
- * `'enroll-token'` is the one-time desktop-minted enrollment token, which
- * authenticates a socket that may do nothing but register a credential; and
- * `'none'` is the `off` policy mode, where authentication is disabled outright.
+ * - `'password'` — the scrypt proof derived from the user's persisted
+ *   credential. Since ADR-056 it is the ONLY credential a non-WebAuthn origin
+ *   (LAN, tunnel) can present, and it always travels inside E2E there.
+ * - `'webauthn'` — a completed passkey assertion: the only method that proves a
+ *   HUMAN rather than a cached client secret.
+ * - `'enroll-token'` — the one-time minted enrollment link, which authenticates
+ *   a socket that may do nothing but register a credential.
+ * - `'none'` — the `off` policy mode, where authentication is disabled outright.
+ * - `'tailnet-identity'` — ADVERTISEMENT ONLY since ADR-056. It appears in
+ *   `RemoteAuthInfo.methods` / `RemoteStatus.authMethods` to say "this server
+ *   recognises your tailnet login and will use it as the username hint", and it
+ *   is never an `auth-response.method`: ambient network identity stopped being
+ *   an admission credential when the link stopped being an identity.
  *
- * NOTE: `RemoteAuthInfo.methods` / `RemoteStatus.authMethods` still advertise
- * only the three original values — the passkey advertisement is the separate,
- * per-request `RemoteAuthInfo.webauthn` block, and `enroll-token` / `none` are
- * not things a client picks.
+ * `'token'` is GONE (ADR-056): the per-start bearer token in the URL fragment
+ * was a link that carried authority, which is exactly what that ADR retires.
  */
 export type RemoteAuthMethod =
-  | 'token'
   | 'password'
   | 'tailnet-identity'
   | 'webauthn'
@@ -1980,23 +2000,29 @@ export type RemoteAuthMethod =
   | 'none'
 
 /**
- * Remote authentication POLICY (ADR-052 decision 3 / security.md §"Policy
- * modes"). Persisted in `remote_config.auth_policy`, where **NULL means auto**:
- * ≥1 enrolled credential resolves to `passkey-always`, otherwise `legacy`. An
- * explicitly stored value always wins over that inference.
+ * Remote authentication POLICY (ADR-052 decision 3, ADR-056 §grant collapse /
+ * security.md §"Policy modes"). Persisted in `remote_config.auth_policy`, where
+ * **NULL means auto**: ≥1 enrolled credential resolves to `passkey-always`,
+ * otherwise `password`. An explicitly stored value always wins.
  *
  * - `passkey-always` — every connection arriving on a WebAuthn-capable origin
  *   must complete the assertion ceremony (break-glass password aside).
- * - `legacy` — the as-built ADR-039 stack, byte for byte.
+ * - `password` — no ceremony is owed; admission is a break-glass password (or
+ *   an enrollment link). It is what AUTO resolves to with nothing enrolled, and
+ *   it is **effective-only**: the operator cannot pin it, because pinning it
+ *   would mean "keep accepting a password after I enrol a passkey", which is
+ *   what `passwordBreakGlass` already says.
  * - `off` — MASTER SWITCH: all authentication disabled. HOST-ANCHOR only to set
  *   (ADR-054 decision 6), audited on every change, and warned about at startup.
  *
- * ADR-054 REMOVED `passkey-for-grants`: it was "legacy login + medium step-up
- * tier" written as one knob, and the two axes are now independent (see
- * {@link StepUpTier}). Migration v12 rewrites stored `passkey-for-grants` rows
- * to `legacy`, which with the default `medium` tier is the same behavior.
+ * ADR-054 removed `passkey-for-grants`; ADR-056 removed `legacy`, whose meaning
+ * ("the as-built ADR-039 stack") died with the token and the ambient tailnet
+ * admission it named. Migration v13 rewrites stored `legacy` rows to NULL,
+ * i.e. back to AUTO — which resolves to `passkey-always` or `password`
+ * depending on whether a credential exists, and is what `legacy` was standing
+ * in for on either side of that line.
  */
-export type RemoteAuthPolicy = 'passkey-always' | 'legacy' | 'off'
+export type RemoteAuthPolicy = 'passkey-always' | 'password' | 'off'
 
 /**
  * Post-login presence-freshness tier (ADR-054 decision 1). Persisted in
@@ -2072,8 +2098,18 @@ export interface RemoteTlsStatus {
 export interface RemoteStatus {
   running: boolean
   port: number | null
-  token: string | null
+  /**
+   * `http://<lan-ip>:<port>/remote#k=<channel key>` while the server serves a
+   * non-loopback bind, else null.
+   *
+   * The fragment carries the PERSISTENT LAN channel key (ADR-056 item C), never
+   * an access token: it opens the encrypted channel, and the identity inside it
+   * is still a password. It is a secret, which is why `remote:status` has no
+   * remote registration and this field never crosses the WS — the web-reachable
+   * equivalent is `authcfg:lan-link`, behind a settings-editing session.
+   */
   lanUrl: string | null
+  /** Same shape over the tunnel, with the EPHEMERAL tunnel key that dies with it. */
   tunnelUrl: string | null
   tunnelState: TunnelState | null
   tunnelError: string | null
@@ -2081,7 +2117,8 @@ export interface RemoteStatus {
   clientIps: string[]
   /**
    * Tailnet logins of the connected clients, parallel to `clientIps`. A `null`
-   * entry means that client authenticated with the token or the password.
+   * entry means the server has no username hint for that client (a password
+   * login off the tailnet, an enrollment link).
    */
   clientLogins: (string | null)[]
   /** `tailscale serve` state, or null when the running server is not in TLS mode. */
@@ -2091,11 +2128,11 @@ export interface RemoteStatus {
    *  since the last stop(). Surfaces autostart failures, which are otherwise
    *  invisible (no modal open to report them to). */
   lastError: string | null
-  /** Methods this running server will accept: always `'token'`, plus
-   *  `'password'` when a credential is provisioned AND the server is not in
-   *  tunnel (E2E) mode, plus `'tailnet-identity'` when `tailscale serve` is up
-   *  and the node owner's login is known. Empty when not running. Derived
-   *  exactly the same way as `/remote/auth-info`'s `methods`. */
+  /** Methods this running server advertises: `'password'` when a credential is
+   *  provisioned, plus `'tailnet-identity'` when `tailscale serve` is up and the
+   *  node owner's login is known — a username HINT, not an admission credential
+   *  (ADR-056). Empty when not running. Derived exactly the same way as
+   *  `/remote/auth-info`'s `methods`. */
   authMethods: RemoteAuthMethod[]
 }
 

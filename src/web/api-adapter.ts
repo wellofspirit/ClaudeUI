@@ -711,6 +711,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >
       return Promise.race([answered, rotatedAndDisconnected])
     },
+    // ADR-056 item C. Both are session-gated like `authcfg:apply` — `lan-link` is
+    // a `query` and would otherwise be free, but it hands out the channel key.
+    authcfgLanLink: () =>
+      connection.invoke('authcfg:lan-link') as ReturnType<ClaudeAPI['authcfgLanLink']>,
+    authcfgRotateLanKey: () =>
+      connection.invoke('authcfg:rotate-lan-key') as ReturnType<
+        ClaudeAPI['authcfgRotateLanKey']
+      >,
 
     detectTailscale: async () => {
       throw new Error('Not available in remote mode')

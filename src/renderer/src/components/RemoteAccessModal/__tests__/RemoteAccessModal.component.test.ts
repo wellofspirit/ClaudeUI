@@ -214,7 +214,7 @@ describe('RemoteAccessModal FC', () => {
         running: true,
         port: 5123,
         lanUrl: null,
-        tunnelUrl: 'https://tunnel.example/remote#t=abc',
+        tunnelUrl: 'https://tunnel.example/remote#k=abc',
         tls: {
           mode: 1,
           httpsPort: 443,

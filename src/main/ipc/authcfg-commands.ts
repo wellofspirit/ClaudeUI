@@ -49,6 +49,7 @@
 
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
+  LAN_LINK_UNAVAILABLE_ERROR,
   NEEDS_SETTINGS_SESSION_ERROR
 } from '../../shared/remote-protocol'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../shared/types'
@@ -82,6 +83,24 @@ import type { CommandConnection } from './command-registry'
 export interface AuthcfgHost extends AuthSurfaceDisconnector {
   /** Drop sockets that authenticated with the password that just rotated. */
   disconnectPasswordClients(): void
+  /**
+   * `http://<ip>:<port>/remote#k=<key>` for the LAN channel, or null when the
+   * running server serves no non-loopback bind (ADR-056 item C). The server owns
+   * this because the ip:port half comes from LIVE listener state, not from
+   * config: a listener started on port 0 has a port nothing else knows.
+   */
+  lanLink(): string | null
+  /**
+   * Generate a NEW LAN channel key and return the link that carries it.
+   *
+   * Never strands anybody, and that is a contract rather than an accident: the
+   * key is consumed at handshake only (each connection derives its own AES
+   * session keys from it at `e2e-activate` and never re-reads the stored value),
+   * so established channels keep working and NOBODY is disconnected. Only new
+   * handshakes need the new key. Returns null on the same "no LAN bind" ground
+   * as {@link AuthcfgHost.lanLink}.
+   */
+  rotateLanKey(): string | null
   /**
    * Re-derive ONE live connection against the auth surface as it now stands.
    *
@@ -185,14 +204,16 @@ export interface AuthcfgApplyPatch {
   shellGrantIdleMinutes?: number
   auditRetentionDays?: number
   /**
-   * The two ADMISSION toggles. They were always members of the auth surface —
-   * the same class of setting as the tier, sweeping and auditing through the
-   * same machinery — but they used to live outside the editor as always-live
-   * switches. The owner's ruling folded them in: the pane is the configuration
-   * of ALL of these, so they are staged, saved and swept with the rest.
+   * The ADMISSION toggle. It was always a member of the auth surface — the same
+   * class of setting as the tier, sweeping and auditing through the same
+   * machinery — but it used to live outside the editor as an always-live switch.
+   * The owner's ruling folded it in: the pane is the configuration of ALL of
+   * these, so it is staged, saved and swept with the rest.
+   *
+   * `passkeyTailnetExempt` was its twin until ADR-056 retired what it exempted
+   * FROM — ambient tailnet admission — and with it the setting.
    */
   passwordBreakGlass?: boolean
-  passkeyTailnetExempt?: boolean
 }
 
 /** Bounds mirrored from `boot-core.ts`'s host-anchor writer — one rule, two doors. */
@@ -294,12 +315,11 @@ export async function authcfgApply(
     )
   }
 
-  for (const flag of ['passwordBreakGlass', 'passkeyTailnetExempt'] as const) {
-    if (!(flag in patch)) continue
-    if (typeof patch[flag] !== 'boolean') {
-      throw new Error(`${flag} must be true or false`)
+  if ('passwordBreakGlass' in patch) {
+    if (typeof patch.passwordBreakGlass !== 'boolean') {
+      throw new Error('passwordBreakGlass must be true or false')
     }
-    write[flag] = patch[flag]
+    write.passwordBreakGlass = patch.passwordBreakGlass
   }
 
   if ('sessionMaxAgeHours' in patch) {
@@ -405,6 +425,58 @@ export async function authcfgSetPassword(
   auditSettingsChange(connection, 'break-glass password rotated via authcfg:set-password')
   host?.disconnectPasswordClients()
   return { ok: true }
+}
+
+/**
+ * `authcfg:lan-link` — the LAN channel link, `http://<ip>:<port>/remote#k=<key>`
+ * (ADR-056 item C).
+ *
+ * SESSION-GATED, unlike its namespace sibling `authcfg:get`. The free-read rule
+ * there is "the pane's default state IS the read, so demanding an unlock to
+ * DISPLAY the current settings would put the ceremony in front of its own
+ * explanation" — and it does not reach this verb, which hands out a live channel
+ * secret rather than displaying a setting. Declared a `query` because it moves
+ * nothing; membership of `AUTHCFG_CHANNELS` is what gates it, and that is
+ * deliberate: what gates a verb here is what it DISCLOSES, not its kind.
+ *
+ * The desktop connection is exempt through the ordinary presence table (it is
+ * the host anchor), so the desktop pane renders the link with no ceremony.
+ */
+export async function authcfgLanLink(
+  connection: CommandConnection,
+  host: AuthcfgHost | null = null
+): Promise<{ url: string }> {
+  assertSettingsSession(connection)
+  const url = host?.lanLink() ?? null
+  if (!url) throw new Error(LAN_LINK_UNAVAILABLE_ERROR)
+  return { url }
+}
+
+/**
+ * `authcfg:rotate-lan-key` — mint a new LAN channel key and hand back the new
+ * link (ADR-056 item C).
+ *
+ * NEVER STRANDS, by construction rather than by care: the key is consumed at
+ * handshake only, so every established E2E channel keeps running on the session
+ * keys it derived at activation and nobody is disconnected. Only a NEW handshake
+ * needs the new key. The response carries the link so the actor's own UI can
+ * render it immediately — a rotation whose new link the operator had to go and
+ * find would be a rotation they would put off.
+ *
+ * Audited as `auth:settings-change` with NO 4009 sweep: the admission rules for
+ * existing identities did not move, only the key a future socket must open the
+ * channel with. Sweeping would disconnect every live client to tell them
+ * something that does not apply to them.
+ */
+export async function authcfgRotateLanKey(
+  connection: CommandConnection,
+  host: AuthcfgHost | null = null
+): Promise<{ url: string }> {
+  assertSettingsSession(connection)
+  const url = host?.rotateLanKey() ?? null
+  if (!url) throw new Error(LAN_LINK_UNAVAILABLE_ERROR)
+  auditSettingsChange(connection, 'LAN channel key rotated via authcfg:rotate-lan-key')
+  return { url }
 }
 
 // `authcfg:set-retention` is GONE — folded into `authcfg:apply` above, like

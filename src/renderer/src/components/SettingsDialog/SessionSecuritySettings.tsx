@@ -34,9 +34,12 @@ type PolicyChoice = RemoteAuthPolicy | 'auto'
 const POLICY_OPTIONS: { value: PolicyChoice; label: string }[] = [
   { value: 'auto', label: 'Automatic (recommended)' },
   { value: 'passkey-always', label: 'Passkey for every sign-in' },
-  // `passkey-for-grants` is gone (ADR-054): it was "legacy sign-in + medium
-  // step-up tier" written as one knob, and the two axes are independent now.
-  { value: 'legacy', label: 'Password / link only' },
+  // `passkey-for-grants` went with ADR-054 ("legacy sign-in + medium step-up
+  // tier" written as one knob); `legacy` went with ADR-056, which retired the
+  // token and the ambient tailnet admission it named. What it stood for is
+  // AUTO's zero-credential answer (`password`), which is not something an
+  // operator pins — pinning it would mean "keep accepting a password after I
+  // enrol a passkey", which is the break-glass toggle below.
   { value: 'off', label: 'No authentication' }
 ]
 
@@ -51,9 +54,16 @@ const POLICY_OPTIONS: { value: PolicyChoice; label: string }[] = [
  */
 const WEB_POLICY_OPTIONS = POLICY_OPTIONS.filter((option) => option.value !== 'off')
 
-const POLICY_LABELS: Record<PolicyChoice, string> = Object.fromEntries(
-  POLICY_OPTIONS.map((o) => [o.value, o.label])
-) as Record<PolicyChoice, string>
+const POLICY_LABELS: Record<PolicyChoice, string> = {
+  ...(Object.fromEntries(POLICY_OPTIONS.map((o) => [o.value, o.label])) as Record<
+    PolicyChoice,
+    string
+  >),
+  // Effective-only (ADR-056): AUTO resolves to it with nothing enrolled, and it
+  // is never an option in the picker — but the summary row has to be able to
+  // name what AUTO currently means.
+  password: 'Password / link only'
+}
 
 const TIER_OPTIONS: { value: StepUpTier; label: string }[] = [
   { value: 'strong', label: 'Strict — re-check before acting' },
@@ -273,7 +283,6 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     'authMode' in draft ? (draft.authMode ?? 'auto') : (config.authPolicy ?? 'auto')
   const tierValue = effective('stepUpTier', config.stepUpTier) as StepUpTier
   const breakGlass = effective('passwordBreakGlass', config.passwordBreakGlass) as boolean
-  const tailnetExempt = effective('passkeyTailnetExempt', config.passkeyTailnetExempt) as boolean
 
   const numericValue = (field: NumericField): string =>
     numericText[field] ?? String(config[field as keyof RemoteConfig] as number)
@@ -435,7 +444,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
         value: config.authPolicy === null ? 'Automatic' : POLICY_LABELS[config.authPolicy],
         muted:
           config.authPolicy === null
-            ? `· ${config.effectiveAuthPolicy === 'legacy' ? 'password / link' : 'passkey'}, ${config.credentialCount} enrolled`
+            ? `· ${config.effectiveAuthPolicy === 'password' ? 'password / link' : 'passkey'}, ${config.credentialCount} enrolled`
             : undefined
       },
       {
@@ -472,11 +481,6 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
         field: 'passwordBreakGlass',
         label: 'Password as a backup',
         value: config.passwordBreakGlass ? 'Allowed' : 'Not allowed'
-      },
-      {
-        field: 'passkeyTailnetExempt',
-        label: 'Skip passkey for Tailscale',
-        value: config.passkeyTailnetExempt ? 'On' : 'Off'
       },
       {
         field: 'auditRetentionDays',
@@ -734,14 +738,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
           'Password as a backup',
           breakGlass,
           () => setDraft((prev) => ({ ...prev, passwordBreakGlass: !breakGlass })),
-          'Off means passkey-only — but only from addresses that can use passkeys. Plain-LAN and tunnel connections keep the password either way.'
-        )}
-        {toggleField(
-          'SessionSecuritySettings.passkeyTailnetExempt',
-          'Skip passkey for Tailscale sign-ins',
-          tailnetExempt,
-          () => setDraft((prev) => ({ ...prev, passkeyTailnetExempt: !tailnetExempt })),
-          'Trades away the one thing a passkey covers that Tailscale does not: someone holding your unlocked device. Such a connection gets the ordinary permissions.'
+          'Off means passkey-only — but only from addresses that can use passkeys. Plain-LAN and tunnel connections need the password either way; it is the only identity they have.'
         )}
       </div>
 

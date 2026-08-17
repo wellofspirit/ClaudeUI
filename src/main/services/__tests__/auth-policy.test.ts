@@ -1,15 +1,14 @@
 /**
  * @vitest-environment node
  *
- * Auth policy resolution + the grant matrix (ADR-052 decision 3 /
- * security.md §"Policy modes", §"Capability grants").
+ * Auth policy resolution + the grant matrix (ADR-052 decision 3, ADR-056 §grant
+ * collapse / security.md §"Policy modes", §"Capability grants").
  *
- * The whole mode × origin × method table is asserted here as a TABLE, because
- * that is the artifact the design is specified as — a socket-level test can only
- * ever sample a few cells of it, and the cell that matters most (a valid token
- * on a capable origin under `passkey-always` holding NOTHING) is the one an
- * implementation is most likely to get subtly right in one path and wrong in
- * another.
+ * The table is asserted as a TABLE because that is the artifact the design is
+ * specified as. ADR-056 collapsed it from a mode × origin × method matrix to
+ * THREE outcomes keyed on the method alone — the collapse is itself the
+ * property under test, so the cases below deliberately vary the policy and the
+ * origin and assert that neither moves the answer.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -41,10 +40,8 @@ vi.mock('../logger', () => ({
 }))
 
 import {
-  EMPTY_GRANTS,
   FAIL_CLOSED_POLICY_CONTEXT,
   authSurfaceChanged,
-  ceremonyRequiredForAuth,
   grantsFor,
   passwordAuthAllowed,
   passwordStepUpAllowed,
@@ -54,7 +51,11 @@ import {
   type AuthPolicyContext,
   type AuthSurfaceSnapshot
 } from '../auth-policy'
-import { ENROLL_ONLY_GRANTS, LEGACY_REMOTE_GRANTS, PASSKEY_REMOTE_GRANTS } from '../../ipc/command-registry'
+import {
+  AUTH_OFF_GRANTS,
+  ENROLL_ONLY_GRANTS,
+  FULL_REMOTE_GRANTS
+} from '../../ipc/command-registry'
 import type { RemoteAuthPolicy } from '../../../shared/types'
 
 function ctx(over: Partial<AuthPolicyContext> = {}): AuthPolicyContext {
@@ -62,7 +63,6 @@ function ctx(over: Partial<AuthPolicyContext> = {}): AuthPolicyContext {
     stored: null,
     credentialCount: 0,
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
@@ -81,8 +81,8 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('resolveAuthPolicy — NULL means AUTO', () => {
-  it('AUTO with no credential is the as-built stack', () => {
-    expect(resolveAuthPolicy(ctx({ stored: null, credentialCount: 0 }))).toBe('legacy')
+  it('AUTO with no credential is password-gated admission', () => {
+    expect(resolveAuthPolicy(ctx({ stored: null, credentialCount: 0 }))).toBe('password')
   })
 
   it('AUTO flips to passkey-always the moment one credential exists', () => {
@@ -90,7 +90,6 @@ describe('resolveAuthPolicy — NULL means AUTO', () => {
   })
 
   it('an explicit value always beats AUTO, in both directions', () => {
-    expect(resolveAuthPolicy(ctx({ stored: 'legacy', credentialCount: 5 }))).toBe('legacy')
     expect(resolveAuthPolicy(ctx({ stored: 'passkey-always', credentialCount: 0 }))).toBe(
       'passkey-always'
     )
@@ -103,7 +102,6 @@ describe('readAuthPolicyContext', () => {
     configRef.current = {
       authPolicy: 'passkey-always',
       passwordBreakGlass: false,
-      passkeyTailnetExempt: true,
       stepUpTier: 'strong',
       stepUpMutationIdleMinutes: 15,
       sessionMaxAgeHours: 2
@@ -113,7 +111,6 @@ describe('readAuthPolicyContext', () => {
       stored: 'passkey-always',
       credentialCount: 2,
       passwordBreakGlass: false,
-      passkeyTailnetExempt: true,
       stepUpTier: 'strong',
       stepUpMutationIdleMinutes: 15,
       sessionMaxAgeHours: 2,
@@ -123,12 +120,11 @@ describe('readAuthPolicyContext', () => {
     })
   })
 
-  it('defaults an absent row to AUTO / break-glass on / no exemption / medium tier', () => {
+  it('defaults an absent row to AUTO / break-glass on / medium tier', () => {
     expect(readAuthPolicyContext()).toEqual({
       stored: null,
       credentialCount: 0,
       passwordBreakGlass: true,
-      passkeyTailnetExempt: false,
       // ADR-054's axis defaults to the shipped posture, for the same reason the
       // policy defaults to AUTO: no migration or missing row may choose a
       // stricter or looser stance than the operator did.
@@ -139,14 +135,14 @@ describe('readAuthPolicyContext', () => {
     })
   })
 
-  it('falls back to LEGACY (never off, never passkey-always) when the DB throws', () => {
+  it('falls back to PASSWORD-gated (never off, never passkey-always) when the DB throws', () => {
     // A wedged DB must degrade to a real authentication path. `off` would
     // disable auth on a hiccup; `passkey-always` with an unreadable credential
     // table would lock the operator out of their own machine.
     dbThrows.current = true
     try {
       expect(readAuthPolicyContext()).toEqual(FAIL_CLOSED_POLICY_CONTEXT)
-      expect(resolveAuthPolicy(readAuthPolicyContext())).toBe('legacy')
+      expect(resolveAuthPolicy(readAuthPolicyContext())).toBe('password')
     } finally {
       dbThrows.current = false
     }
@@ -157,182 +153,72 @@ describe('readAuthPolicyContext', () => {
 // The grant matrix
 // ---------------------------------------------------------------------------
 
-describe('grantsFor — mode × origin × method', () => {
-  const L = LEGACY_REMOTE_GRANTS
-  const P = PASSKEY_REMOTE_GRANTS
+describe('grantsFor — THREE outcomes (ADR-056 grant collapse)', () => {
+  const FULL = FULL_REMOTE_GRANTS
   const E = ENROLL_ONLY_GRANTS
-  const N = EMPTY_GRANTS
+  const OFF = AUTH_OFF_GRANTS
+
+  const METHODS: AuthGrantMethod[] = ['password', 'webauthn', 'enroll-token', 'none']
 
   interface Row {
-    policy: RemoteAuthPolicy
     method: AuthGrantMethod
-    capableOrigin: boolean
-    /** Defaults to 1 — the interesting case is "a passkey exists to demand". */
-    credentialCount?: number
-    passkeyTailnetExempt?: boolean
     expected: ReadonlySet<string>
     why: string
   }
 
   const rows: Row[] = [
-    // legacy — byte-for-byte as-built, on every origin and for every method.
-    { policy: 'legacy', method: 'token', capableOrigin: true, expected: L, why: 'as-built' },
-    { policy: 'legacy', method: 'token', capableOrigin: false, expected: L, why: 'as-built' },
-    { policy: 'legacy', method: 'password', capableOrigin: true, expected: L, why: 'as-built' },
-    { policy: 'legacy', method: 'password', capableOrigin: false, expected: L, why: 'as-built' },
-    { policy: 'legacy', method: 'tailnet-identity', capableOrigin: true, expected: L, why: 'as-built' },
-    { policy: 'legacy', method: 'tailnet-identity', capableOrigin: false, expected: L, why: 'as-built' },
-
-    // passkey-always — a capable origin gives token/tailnet NOTHING pre-ceremony.
-    { policy: 'passkey-always', method: 'token', capableOrigin: true, expected: N, why: 'owes a ceremony' },
-    { policy: 'passkey-always', method: 'tailnet-identity', capableOrigin: true, expected: N, why: 'owes a ceremony' },
-    // …but a non-capable origin (LAN IP, tunnel) keeps the as-built surface.
-    { policy: 'passkey-always', method: 'token', capableOrigin: false, expected: L, why: 'no WebAuthn here' },
-    { policy: 'passkey-always', method: 'tailnet-identity', capableOrigin: false, expected: L, why: 'no WebAuthn here' },
-
-    // THE REGRESSION ROWS. Both of these describe a connection the server
-    // ACCEPTS (no ceremony is owed), so both must hold the real legacy surface —
-    // an accepted-but-empty connection is authenticated and then refused on
-    // every invoke, which is the bug this pairing was introduced to kill.
     {
-      policy: 'passkey-always',
-      method: 'tailnet-identity',
-      capableOrigin: true,
-      passkeyTailnetExempt: true,
-      expected: L,
-      why: 'exempt tailnet identity skips the ceremony — and must still be able to DO things'
+      method: 'webauthn',
+      expected: FULL,
+      why: 'a completed ceremony is the operator'
     },
     {
-      policy: 'passkey-always',
-      method: 'token',
-      capableOrigin: true,
-      credentialCount: 0,
-      expected: L,
-      why: 'nothing enrolled, so no ceremony can be demanded — pinning the mode must not brick access'
+      method: 'password',
+      expected: FULL,
+      why: 'the break-glass password is the owner’s own secret — FULL under every policy now'
     },
-    {
-      policy: 'passkey-always',
-      method: 'tailnet-identity',
-      capableOrigin: true,
-      credentialCount: 0,
-      expected: L,
-      why: 'same escape hatch for tailnet identity'
-    },
-    // The exemption is scoped to tailnet identity — a TOKEN never benefits.
-    {
-      policy: 'passkey-always',
-      method: 'token',
-      capableOrigin: true,
-      passkeyTailnetExempt: true,
-      expected: N,
-      why: 'the exemption is about ambient identity, not about bearer tokens'
-    },
-
-    // A completed ceremony, or the break-glass password, is the operator.
-    { policy: 'passkey-always', method: 'webauthn', capableOrigin: true, expected: P, why: 'proven human' },
-    { policy: 'passkey-always', method: 'password', capableOrigin: true, expected: P, why: 'break-glass is the owner' },
-    { policy: 'passkey-always', method: 'password', capableOrigin: false, expected: P, why: 'break-glass is the owner' },
-
-    // enroll-token is `enroll` and nothing else, in every mode.
-    { policy: 'passkey-always', method: 'enroll-token', capableOrigin: true, expected: E, why: 'enroll only' },
-    { policy: 'legacy', method: 'enroll-token', capableOrigin: true, expected: E, why: 'enroll only' },
-
-    // off — the as-built remote surface, deliberately WITHOUT admin/enroll.
-    { policy: 'off', method: 'none', capableOrigin: true, expected: L, why: 'the no-auth surface' },
-    { policy: 'off', method: 'none', capableOrigin: false, expected: L, why: 'the no-auth surface' },
-    { policy: 'off', method: 'password', capableOrigin: true, expected: L, why: 'the no-auth surface' }
+    { method: 'enroll-token', expected: E, why: 'enroll and nothing else' },
+    { method: 'none', expected: OFF, why: 'the no-auth surface, deliberately without admin/enroll' }
   ]
 
-  const call = (row: Row): ReadonlySet<string> =>
-    grantsFor({
-      method: row.method,
-      policy: row.policy,
-      capableOrigin: row.capableOrigin,
-      credentialCount: row.credentialCount ?? 1,
-      passkeyTailnetExempt: row.passkeyTailnetExempt ?? false
-    })
-
-  it.each(rows)(
-    '$policy / $method / capable=$capableOrigin / creds=$credentialCount / exempt=$passkeyTailnetExempt — $why',
-    (row) => {
-      expect([...call(row)].sort()).toEqual([...row.expected].sort())
-    }
-  )
-
-  it('grantsFor and ceremonyRequiredForAuth can never disagree about token/tailnet', () => {
-    // The invariant that replaced the drifted pair: EMPTY_GRANTS iff a ceremony
-    // is owed. Exhaustive over the whole input space, so a future edit to either
-    // function that reintroduces a private copy of the rule fails here.
-    for (const policy of ['legacy', 'passkey-always', 'off'] as const) {
-      for (const method of ['token', 'tailnet-identity'] as const) {
-        for (const capableOrigin of [true, false]) {
-          for (const credentialCount of [0, 1, 5]) {
-            for (const passkeyTailnetExempt of [true, false]) {
-              const owed = ceremonyRequiredForAuth({
-                policy,
-                capableOrigin,
-                credentialCount,
-                method,
-                passkeyTailnetExempt
-              })
-              const grants = grantsFor({
-                method,
-                policy,
-                capableOrigin,
-                credentialCount,
-                passkeyTailnetExempt
-              })
-              const label = `${policy}/${method}/capable=${capableOrigin}/creds=${credentialCount}/exempt=${passkeyTailnetExempt}`
-              expect(grants === EMPTY_GRANTS, label).toBe(owed)
-              if (!owed) expect([...grants].sort(), label).toEqual([...LEGACY_REMOTE_GRANTS].sort())
-            }
-          }
-        }
-      }
-    }
+  it.each(rows)('$method — $why', (row) => {
+    expect([...grantsFor(row.method)].sort()).toEqual([...row.expected].sort())
   })
 
-  it('never grants shell or host at authentication time, in any cell', () => {
-    for (const row of rows) {
-      const grants = call(row)
-      expect(grants.has('shell'), `${row.policy}/${row.method}`).toBe(false)
-      expect(grants.has('host'), `${row.policy}/${row.method}`).toBe(false)
-    }
+  it('the PASSWORD carries admin+enroll (the mint-path argument, ADR-056)', () => {
+    // Withholding `enroll` from a password login was theatre once it held
+    // `admin`: `webauthn:mint-enroll-token` is an `admin` verb, so such a client
+    // could always mint its own enrollment link. RED before ADR-056, where the
+    // password kept the base set under `legacy`.
+    const grants = grantsFor('password')
+    expect(grants.has('admin')).toBe(true)
+    expect(grants.has('enroll')).toBe(true)
   })
 
-  it('never grants admin/enroll to a token or tailnet connection, in any mode', () => {
-    for (const policy of ['legacy', 'passkey-always', 'off'] as const) {
-      for (const method of ['token', 'tailnet-identity'] as const) {
-        for (const capableOrigin of [true, false]) {
-          for (const passkeyTailnetExempt of [true, false]) {
-            const grants = grantsFor({
-              policy,
-              method,
-              capableOrigin,
-              credentialCount: 1,
-              passkeyTailnetExempt
-            })
-            const label = `${policy}/${method}/${capableOrigin}/exempt=${passkeyTailnetExempt}`
-            expect(grants.has('admin'), label).toBe(false)
-            expect(grants.has('enroll'), label).toBe(false)
-          }
-        }
-      }
+  it('is a function of the METHOD alone — the policy is no longer an input', () => {
+    // The collapse itself. `grantsFor` takes one argument now, so there is no way
+    // to spell a policy-dependent answer; this pins the SIGNATURE, which is what
+    // stops the old second-copy-of-the-admission-rule from growing back.
+    expect(grantsFor.length).toBe(1)
+  })
+
+  it('never grants shell or host at authentication time, for any method', () => {
+    for (const method of METHODS) {
+      const grants = grantsFor(method)
+      expect(grants.has('shell'), method).toBe(false)
+      expect(grants.has('host'), method).toBe(false)
     }
   })
 
   it('never grants admin/enroll under `off` (enrolling while auth is disabled is nonsense)', () => {
-    for (const method of ['none', 'password', 'webauthn'] as const) {
-      const grants = grantsFor({
-        policy: 'off',
-        method,
-        capableOrigin: true,
-        credentialCount: 1,
-        passkeyTailnetExempt: false
-      })
-      expect(grants.has('admin'), method).toBe(false)
-      expect(grants.has('enroll'), method).toBe(false)
-    }
+    // `none` is the ONLY method policy `off` can produce — the handshake accepts
+    // any auth frame as `none` before it looks at a credential — so this is the
+    // whole of the auth-off surface, and the settings session stays unreachable
+    // because `admin` is absent.
+    const grants = grantsFor('none')
+    expect(grants.has('admin')).toBe(false)
+    expect(grants.has('enroll')).toBe(false)
+    expect([...grants].sort()).toEqual([...AUTH_OFF_GRANTS].sort())
   })
 })
 
@@ -343,9 +229,8 @@ describe('grantsFor — mode × origin × method', () => {
 describe('authSurfaceChanged', () => {
   const base: AuthSurfaceSnapshot = {
     authPolicy: null,
-    effectiveAuthPolicy: 'legacy',
+    effectiveAuthPolicy: 'password',
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
@@ -371,8 +256,9 @@ describe('authSurfaceChanged', () => {
   })
 
   it('catches an AUTO resolution flip with the stored column unchanged', () => {
-    // Enrolling the first credential moves `null` from legacy to passkey-always
-    // without anyone writing the column — live sockets must still be re-admitted.
+    // Enrolling the first credential moves `null` from `password` to
+    // `passkey-always` without anyone writing the column — live sockets must
+    // still be re-admitted.
     expect(
       authSurfaceChanged(base, { ...base, effectiveAuthPolicy: 'passkey-always' })
     ).toBe(true)
@@ -380,10 +266,6 @@ describe('authSurfaceChanged', () => {
 
   it('catches a BREAK-GLASS flip (the gap the first round left unaudited)', () => {
     expect(authSurfaceChanged(base, { ...base, passwordBreakGlass: false })).toBe(true)
-  })
-
-  it('catches a TAILNET-EXEMPT flip (likewise)', () => {
-    expect(authSurfaceChanged(base, { ...base, passkeyTailnetExempt: true })).toBe(true)
   })
 
   it('catches a STEP-UP TIER change (ADR-054: the tier is an admission rule)', () => {
@@ -399,7 +281,6 @@ describe('authSurfaceChanged', () => {
       authPolicy: 'passkey-always',
       effectiveAuthPolicy: 'passkey-always',
       passwordBreakGlass: false,
-      passkeyTailnetExempt: false,
       stepUpTier: 'strong',
       stepUpMutationIdleMinutes: 15,
       sessionMaxAgeHours: 1,
@@ -416,7 +297,6 @@ describe('authSurfaceChanged', () => {
     expect(fields.sort()).toEqual([
       'authPolicy',
       'effectiveAuthPolicy',
-      'passkeyTailnetExempt',
       'passwordBreakGlass',
       'sessionMaxAgeHours',
       'shellGrantIdleMinutes',
@@ -440,62 +320,18 @@ describe('authSurfaceChanged', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// Ceremony requirement
-// ---------------------------------------------------------------------------
-
-describe('ceremonyRequiredForAuth', () => {
-  const base = {
-    policy: 'passkey-always' as RemoteAuthPolicy,
-    capableOrigin: true,
-    credentialCount: 1,
-    method: 'token' as const,
-    passkeyTailnetExempt: false
-  }
-
-  it('demands the ceremony for a token on a capable origin under passkey-always', () => {
-    expect(ceremonyRequiredForAuth(base)).toBe(true)
-  })
-
-  it('demands it for tailnet identity too — ambient identity is not device possession', () => {
-    expect(ceremonyRequiredForAuth({ ...base, method: 'tailnet-identity' })).toBe(true)
-  })
-
-  it('honours the tailnet exemption, and ONLY for tailnet identity', () => {
-    expect(
-      ceremonyRequiredForAuth({
-        ...base,
-        method: 'tailnet-identity',
-        passkeyTailnetExempt: true
-      })
-    ).toBe(false)
-    expect(ceremonyRequiredForAuth({ ...base, method: 'token', passkeyTailnetExempt: true })).toBe(
-      true
-    )
-  })
-
-  it('never demands it on a non-capable origin', () => {
-    expect(ceremonyRequiredForAuth({ ...base, capableOrigin: false })).toBe(false)
-  })
-
-  it('never demands it with ZERO credentials — that would be an unrecoverable lockout', () => {
-    expect(ceremonyRequiredForAuth({ ...base, credentialCount: 0 })).toBe(false)
-  })
-
-  it('never demands it under the other three modes', () => {
-    for (const policy of ['legacy', 'off'] as const) {
-      expect(ceremonyRequiredForAuth({ ...base, policy }), policy).toBe(false)
-    }
-  })
-})
+// `ceremonyRequiredForAuth` is GONE (ADR-056) and so are its tests: it answered
+// "does this AMBIENT credential owe a ceremony", and both ambient credentials —
+// the bearer token and tailnet identity — are retired. Nothing replaced it,
+// because a connection now either presents an identity or is refused.
 
 // ---------------------------------------------------------------------------
 // Password availability
 // ---------------------------------------------------------------------------
 
 describe('passwordAuthAllowed', () => {
-  it('is unconditional under legacy and off', () => {
-    for (const policy of ['legacy', 'off'] as const) {
+  it('is unconditional under the password policy and off', () => {
+    for (const policy of ['password', 'off'] as const) {
       expect(passwordAuthAllowed({ policy, capableOrigin: true, passwordBreakGlass: false })).toBe(
         true
       )
@@ -519,7 +355,7 @@ describe('passwordAuthAllowed', () => {
     ).toBe(true)
   })
 
-  it('IGNORES the toggle on a non-capable origin — LAN/tunnel must not become token-only', () => {
+  it('IGNORES the toggle on a non-capable origin — LAN/tunnel would have NO credential left', () => {
     expect(
       passwordAuthAllowed({
         policy: 'passkey-always',
@@ -558,9 +394,9 @@ describe('passwordStepUpAllowed', () => {
     )
   })
 
-  it('is unconditional under legacy (zero regression for the as-built step-up)', () => {
+  it('is unconditional under the password policy (nothing to prefer over it)', () => {
     expect(
-      passwordStepUpAllowed({ ...base, policy: 'legacy', passwordBreakGlass: false })
+      passwordStepUpAllowed({ ...base, policy: 'password', passwordBreakGlass: false })
     ).toBe(true)
   })
 })

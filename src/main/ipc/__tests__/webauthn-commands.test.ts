@@ -41,8 +41,8 @@ vi.mock('../../services/logger', () => ({
 
 import {
   CommandRegistry,
-  LEGACY_REMOTE_GRANTS,
-  PASSKEY_REMOTE_GRANTS,
+  AUTH_OFF_GRANTS,
+  FULL_REMOTE_GRANTS,
   ENROLL_ONLY_GRANTS,
   PINNED_CAPABILITIES,
   desktopConnection,
@@ -73,14 +73,12 @@ beforeEach(() => {
 function setPolicy(over: {
   authPolicy?: string | null
   passwordBreakGlass?: boolean
-  passkeyTailnetExempt?: boolean
   passwordHash?: string | null
   credentialCount?: number
 }): void {
   configRef.current = {
     authPolicy: over.authPolicy ?? null,
     passwordBreakGlass: over.passwordBreakGlass ?? true,
-    passkeyTailnetExempt: over.passkeyTailnetExempt ?? false,
     passwordHash: over.passwordHash ?? null
   }
   credentialCountRef.current = over.credentialCount ?? 0
@@ -118,7 +116,7 @@ function memoryStore(): WebauthnCredentialStore {
 
 function conn(over: Partial<CommandConnection> = {}): CommandConnection {
   return {
-    ...makeRemoteConnection('webauthn', 'Phone', PASSKEY_REMOTE_GRANTS, {
+    ...makeRemoteConnection('webauthn', 'Phone', FULL_REMOTE_GRANTS, {
       webauthnOrigin: TAILNET
     }),
     ...over
@@ -145,7 +143,7 @@ describe('passkey channel declarations', () => {
 
   it('every pinned passkey capability stays OUTSIDE the base remote grant set', () => {
     for (const capability of Object.values(EXPECTED)) {
-      expect(LEGACY_REMOTE_GRANTS.has(capability)).toBe(false)
+      expect(AUTH_OFF_GRANTS.has(capability)).toBe(false)
     }
   })
 
@@ -176,13 +174,13 @@ describe('passkey channel declarations', () => {
   })
 
   it('the passkey grant set is the legacy set PLUS admin+enroll — never shell or host', () => {
-    for (const capability of LEGACY_REMOTE_GRANTS) {
-      expect(PASSKEY_REMOTE_GRANTS.has(capability)).toBe(true)
+    for (const capability of AUTH_OFF_GRANTS) {
+      expect(FULL_REMOTE_GRANTS.has(capability)).toBe(true)
     }
-    expect(PASSKEY_REMOTE_GRANTS.has('admin')).toBe(true)
-    expect(PASSKEY_REMOTE_GRANTS.has('enroll')).toBe(true)
-    expect(PASSKEY_REMOTE_GRANTS.has('shell')).toBe(false)
-    expect(PASSKEY_REMOTE_GRANTS.has('host')).toBe(false)
+    expect(FULL_REMOTE_GRANTS.has('admin')).toBe(true)
+    expect(FULL_REMOTE_GRANTS.has('enroll')).toBe(true)
+    expect(FULL_REMOTE_GRANTS.has('shell')).toBe(false)
+    expect(FULL_REMOTE_GRANTS.has('host')).toBe(false)
   })
 
   it('an enroll-only connection cannot reach an admin channel through the registry', async () => {

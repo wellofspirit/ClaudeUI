@@ -52,7 +52,10 @@ vi.mock('../../main/services/tunnel-manager', () => {
 
 vi.mock('../../main/services/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../main/services/db')>()
-  return { ...actual, getRemoteConfig: () => null }
+  // Auth-mode `off`: these flows are about the stream/sync lanes, not about
+  // admission, and since ADR-056 a server with no credential provisioned admits
+  // nobody — so "an authenticated socket" has to be asked for explicitly.
+  return { ...actual, getRemoteConfig: () => ({ authPolicy: 'off' }) }
 })
 
 vi.mock('../../main/services/claude-session', () => ({
@@ -78,15 +81,14 @@ const TOOL_USE_ID = 'tu-tail-1'
 
 let server: RemoteServer
 let port: number
-let token: string
 
 beforeAll(async () => {
   commandRegistry.reset()
   registerCommand({ ...STREAM_WATCH_COMMAND, transport: 'remote' })
   server = new RemoteServer(new RemoteDispatcher())
   port = await ephemeralPort()
-  const started = await server.start(port, '127.0.0.1')
-  token = started.token
+  await server.start(port, '127.0.0.1')
+
   syncCore.resetCanonicalForTests()
   syncCore.clearRing()
   emitEvent('session:created', [ROUTING_ID, { cwd: CWD }])
@@ -98,7 +100,7 @@ afterAll(async () => {
 })
 
 async function connect(): Promise<{ client: RemoteClient; frames: WsServerMessage[] }> {
-  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
   await client.ready
   const frames: WsServerMessage[] = []
   client.onMessage((msg) => frames.push(msg))

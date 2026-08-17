@@ -52,7 +52,10 @@ vi.mock('../../main/services/tunnel-manager', () => {
 
 vi.mock('../../main/services/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../main/services/db')>()
-  return { ...actual, getRemoteConfig: () => null }
+  // Auth-mode `off`: these flows are about the stream/sync lanes, not about
+  // admission, and since ADR-056 a server with no credential provisioned admits
+  // nobody — so "an authenticated socket" has to be asked for explicitly.
+  return { ...actual, getRemoteConfig: () => ({ authPolicy: 'off' }) }
 })
 
 vi.mock('../../main/services/claude-session', () => ({
@@ -74,7 +77,6 @@ const CWD = '/tmp/voice'
 
 let server: RemoteServer
 let port: number
-let token: string
 
 // --- The fake engine: a cli.js voice server that echoes canned transcripts ---
 
@@ -167,8 +169,8 @@ beforeAll(async () => {
 
   server = new RemoteServer(new RemoteDispatcher())
   port = await ephemeralPort()
-  const started = await server.start(port, '127.0.0.1')
-  token = started.token
+  await server.start(port, '127.0.0.1')
+
   syncCore.resetCanonicalForTests()
   syncCore.clearRing()
   emitEvent('session:created', [ROUTING_ID, { cwd: CWD }])
@@ -191,7 +193,7 @@ beforeEach(() => {
 })
 
 async function connect(): Promise<{ client: RemoteClient; frames: WsServerMessage[] }> {
-  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+  const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
   await client.ready
   const frames: WsServerMessage[] = []
   client.onMessage((msg) => frames.push(msg))
@@ -324,11 +326,8 @@ describe('E2E: remote voice input (phase 5 S3)', () => {
     // is the test rather than a side effect on every case after it.
     const server2 = new RemoteServer(new RemoteDispatcher())
     const port2 = await ephemeralPort()
-    const started2 = await server2.start(port2, '127.0.0.1')
-    const client = await connectRemoteClient({
-      url: `ws://127.0.0.1:${port2}/`,
-      token: started2.token
-    })
+    await server2.start(port2, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port2}/` })
     await client.ready
     // A server that is STOPPED under a live socket resets it, and `ws` reports
     // that as an 'error' on the client. The helper's own handler only rejects an

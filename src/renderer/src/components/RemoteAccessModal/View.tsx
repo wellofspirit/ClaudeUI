@@ -292,14 +292,16 @@ export function RemoteAccessModalView({
                 </div>
               )}
 
-              {/* TLS mode: why there is no token in the URL, and who can use it. */}
+              {/* TLS mode: why this link carries no secret at all (ADR-056 —
+                  Tailscale supplies the encrypted channel and the username hint,
+                  and the identity is still a passkey or the backup password). */}
               {tlsUrl && (
                 <div
                   data-testid="RemoteAccessModal.tlsIdentity"
                   className="w-full text-[11px] text-success px-1"
                 >
-                  Authenticated by Tailscale identity — only this machine&apos;s Tailscale owner can
-                  sign in. No token in the link.
+                  Encrypted by Tailscale, and it knows who you are — you still sign in with a
+                  passkey or the backup password. Nothing secret in the link.
                 </div>
               )}
 

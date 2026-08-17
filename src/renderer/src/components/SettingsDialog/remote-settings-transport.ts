@@ -46,7 +46,6 @@ export interface SettingsDraft {
   shellGrantIdleMinutes?: number
   auditRetentionDays?: number
   passwordBreakGlass?: boolean
-  passkeyTailnetExempt?: boolean
 }
 
 /**
@@ -76,10 +75,7 @@ export async function saveSettingsDraft(draft: SettingsDraft): Promise<RemoteCon
         ? { shellGrantIdleMinutes: draft.shellGrantIdleMinutes }
         : {}),
       ...('auditRetentionDays' in draft ? { auditRetentionDays: draft.auditRetentionDays } : {}),
-      ...('passwordBreakGlass' in draft ? { passwordBreakGlass: draft.passwordBreakGlass } : {}),
-      ...('passkeyTailnetExempt' in draft
-        ? { passkeyTailnetExempt: draft.passkeyTailnetExempt }
-        : {})
+      ...('passwordBreakGlass' in draft ? { passwordBreakGlass: draft.passwordBreakGlass } : {})
     })
   }
   const { config } = await window.api.authcfgApply(draft)

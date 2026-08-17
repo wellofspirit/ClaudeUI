@@ -353,6 +353,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     authcfgApply: (patch) => ipcRenderer.invoke('authcfg:apply', patch),
     authcfgEnd: () => ipcRenderer.invoke('authcfg:end'),
     authcfgSetPassword: (password) => ipcRenderer.invoke('authcfg:set-password', password),
+    authcfgLanLink: () => ipcRenderer.invoke('authcfg:lan-link'),
+    authcfgRotateLanKey: () => ipcRenderer.invoke('authcfg:rotate-lan-key'),
 
     // Passkeys — mirrors the preload split: the four management verbs are real
     // desktop channels, the two ceremony verbs are not registered there at all.

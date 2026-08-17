@@ -417,11 +417,14 @@ line is a named next step with the reason it is not phase-4 work.
   turns the fork discarded. Cosmetic and self-correcting — the first `result` of the
   forked session replaces them with cli.js's authoritative numbers — but wrong until
   then. The fix is the same anchor, threaded one level further down.
-- **The delete channels keep the `config` capability while now cancelling engines.**
-  `session:delete-session` / `session:delete-project` were file operations when that
-  capability was assigned; they stop live engine processes now. `config` is grantable
-  to a remote client, so a capability review is owed — either they move to a stronger
-  capability or the grant table records that `config` includes "may stop my sessions".
+- ~~**The delete channels keep the `config` capability while now cancelling engines.**~~
+  **RESOLVED by ADR-056:** both moved to `chat`, in both registrars. The review this
+  asked for concluded that the honest label was neither "config" nor something
+  stronger — deleting a session removes CONVERSATIONS, which is the material `chat`
+  already governs reading and writing, and calling it configuration had put a
+  destructive verb in the bundle a client holds for saving UI preferences. The
+  registry throws on a per-transport disagreement, so the two declarations stay one
+  reviewed fact.
 - **The registry rows a delete removes from canonical are not persisted main-side.**
   The `session:removed` reducer branch drops the deleted id from `customTitles` /
   `pinnedSessionIds` / `recentSessionIds` / `hiddenSessions` / `worktreeInfoMap` /

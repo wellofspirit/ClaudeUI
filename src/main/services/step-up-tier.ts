@@ -97,7 +97,14 @@ export const SHELL_ACT_VERBS: ReadonlySet<string> = new Set([
  */
 export const AUTHCFG_CHANNELS: ReadonlySet<string> = new Set([
   'authcfg:apply',
-  'authcfg:set-password'
+  'authcfg:set-password',
+  // ADR-056 item C. `authcfg:lan-link` is a `query`, which would classify `read`
+  // and be FREE like `authcfg:get` — and that is exactly why it is named here
+  // instead: it returns a channel SECRET, so the "the pane's default state is the
+  // read" exemption does not reach it. A `query` that hands out a key is gated by
+  // what it discloses, not by its kind.
+  'authcfg:lan-link',
+  'authcfg:rotate-lan-key'
 ])
 
 /**

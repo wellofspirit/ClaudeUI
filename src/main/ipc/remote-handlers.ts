@@ -85,6 +85,8 @@ import {
   authcfgApply,
   authcfgEnd,
   authcfgGet,
+  authcfgLanLink,
+  authcfgRotateLanKey,
   authcfgSetPassword,
   type AuthcfgApplyPatch,
   type AuthcfgHost
@@ -792,9 +794,12 @@ export function registerRemoteHandlers(
     }
   })
 
+  // `chat` since ADR-056 — deleting a session removes conversations, not
+  // configuration. See the desktop twin in session.ipc.ts for the reasoning; the
+  // two must agree or the registry throws.
   handleRemote({
     channel: 'session:delete-session',
-    capability: 'config',
+    capability: 'chat',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, engineId?: EngineId) => {
       await deleteSession(manager, sessionId, projectKey, engineId)
@@ -813,7 +818,7 @@ export function registerRemoteHandlers(
 
   handleRemote({
     channel: 'session:delete-project',
-    capability: 'config',
+    capability: 'chat',
     kind: 'command',
     handler: async (projectKey: string) => {
       await deleteProject(manager, projectKey)
@@ -1263,7 +1268,7 @@ export function registerRemoteHandlers(
   // Terminal (SyncCore phase 2 — ADR-052 decision 6, security.md §Terminal posture)
   //
   // The first channels on this surface whose capability is NOT in
-  // LEGACY_REMOTE_GRANTS. Registering them does not expose them: `shell` is
+  // AUTH_OFF_GRANTS. Registering them does not expose them: `shell` is
   // granted only by the step-up ceremony (a transport frame — see
   // remote-server.ts), only while the desktop-side "Allow remote terminal"
   // toggle is ON, and only until the grant decays. Three gates in series, all
@@ -1523,6 +1528,29 @@ export function registerRemoteHandlers(
     withConnection: true,
     handler: async (connection: CommandConnection, password: string) =>
       authcfgSetPassword(connection, password, enrollTokens ?? null)
+  })
+
+  // The LAN channel link + its rotation (ADR-056 item C). Registered on this
+  // transport too, per the everything-remote ruling — a headless box has no
+  // desktop pane to read the link from. `lan-link` is a `query` and is STILL
+  // session-gated (`AUTHCFG_CHANNELS`): the free-read rule that exempts
+  // `authcfg:get` is about displaying settings, and this hands out a key.
+  handleRemote({
+    channel: 'authcfg:lan-link',
+    capability: 'admin',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection) =>
+      authcfgLanLink(connection, enrollTokens ?? null)
+  })
+
+  handleRemote({
+    channel: 'authcfg:rotate-lan-key',
+    capability: 'admin',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection) =>
+      authcfgRotateLanKey(connection, enrollTokens ?? null)
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)

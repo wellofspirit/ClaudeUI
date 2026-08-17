@@ -1,7 +1,7 @@
 # ADR-054 — Step-up policy tiers: separating login auth from presence freshness
 
 **Status:** **Implemented** (owner-ratified 2026-08-15; §6 amended and implemented 2026-08-16). Server core landed in `8a4b28d`; client UX, the `authcfg:*` read verb, the read/act client state and the docs amendment landed in the follow-on series; the settings-editing SESSION that replaced the mutation window for that area (§6 amendment) landed after it. As-built detail lives in [security.md](../architecture/security.md) — this ADR keeps the decisions and the reasoning, including the ordering clarifications ratified during implementation (§3/§6 below).
-**Relates to:** ADR-051 (command registry — the `kind` field becomes security-load-bearing here), ADR-053.
+**Relates to:** ADR-051 (command registry — the `kind` field becomes security-load-bearing here), ADR-053, and **ADR-056** (the admission model), which leaves this ADR's host anchor and settings-editing session UNCHANGED and touches it in exactly three places: the auth-mode vocabulary loses `legacy` (Decision text and the §6 amendment's mode list), `authcfg:*` gains two LAN-channel verbs on the gated side of the classifier, and Decision 2's list of "weaker logins that arm nothing" shrinks to the break-glass password now that the token and ambient tailnet identity are retired.
 **Supersedes in part:** ADR-052 — its Decision 3 (`passkey-for-grants` as a mode), Decision 5 (grant-decay scope and what feeds it), and the "never reachable remotely" wording of its Decision 3 `off` clause (generalized, not weakened — see Decision 6). Everything else in ADR-052 stands.
 
 ## Context

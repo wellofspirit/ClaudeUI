@@ -27,8 +27,8 @@
  * dialog parent, a session's voice handle) and copes with `null`. That is what
  * makes the boot order — core, then maybe a window — expressible at all.
  *
- * Electron is still imported (`ipcMain`, `app`): this is the desktop shell's
- * core boot, not the future `claudeui-server` entrypoint. Physically extracting
+ * Electron is still imported (`ipcMain`): this is the desktop shell's core boot,
+ * not the future `claudeui-server` entrypoint. Physically extracting
  * `src/core` and adding a bun entrypoint is the named follow-on phase
  * (docs/architecture/sync-core.md §Follow-ons); the Electron-free fence that
  * keeps that a MOVE rather than a rewrite is already enforced on
@@ -278,7 +278,6 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
         shellGrantIdleMinutes?: number
         authPolicy?: RemoteAuthPolicy | null
         passwordBreakGlass?: boolean
-        passkeyTailnetExempt?: boolean
         stepUpTier?: StepUpTier
         stepUpMutationIdleMinutes?: number
         sessionMaxAgeHours?: number
@@ -382,8 +381,8 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
       dbSetRemoteConfig(partial)
       const after = sanitizedRemoteConfig()
       // ANY auth-surface change — the policy mode, the step-up tier, the
-      // break-glass toggle, or the tailnet exemption — is audited AND drops
-      // every live remote socket.
+      // break-glass toggle, or one of the three timing dials — is audited AND
+      // drops every live remote socket.
       //
       // Both halves matter and are deliberately one branch. The audit is what
       // makes the change traceable after the fact rather than only visible while

@@ -34,7 +34,10 @@ vi.mock('../../services/db', () => ({
     if (configRef.current) Object.assign(configRef.current, partial)
   },
   countWebauthnCredentials: () => 0,
-  REMOTE_AUTH_POLICIES: ['passkey-always', 'legacy', 'off'],
+  // The STORABLE vocabulary, matching production since ADR-056: `legacy` is
+  // retired and `password` is effective-only (AUTO's zero-credential answer),
+  // so neither is accepted on the write path.
+  REMOTE_AUTH_POLICIES: ['passkey-always', 'off'],
   STEP_UP_TIERS: ['strong', 'medium', 'off'],
   MIN_AUDIT_RETENTION_DAYS: 30,
   DEFAULT_STEP_UP_TIER: 'medium',
@@ -58,11 +61,17 @@ import {
   authcfgApply,
   authcfgEnd,
   authcfgGet,
+  authcfgLanLink,
+  authcfgRotateLanKey,
   authcfgSetPassword,
   type AuthcfgHost
 } from '../authcfg-commands'
 import { desktopConnection, makeRemoteConnection, type CommandConnection } from '../command-registry'
-import { AUTH_MODE_OFF_HOST_ANCHOR_ERROR } from '../../../shared/remote-protocol'
+import {
+  AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
+  LAN_LINK_UNAVAILABLE_ERROR,
+  NEEDS_SETTINGS_SESSION_ERROR
+} from '../../../shared/remote-protocol'
 
 /** A remote connection with the settings editor UNLOCKED (the amendment). */
 function unlockedConn(): CommandConnection {
@@ -89,19 +98,26 @@ function lockedConn(): CommandConnection {
   return makeRemoteConnection('password', null, new Set(['admin']))
 }
 
-function makeHost(): AuthcfgHost & {
+function makeHost(
+  over: { lanLink?: () => string | null; rotateLanKey?: () => string | null } = {}
+): AuthcfgHost & {
   disconnects: Array<{ exceptConnectionId?: string } | undefined>
   passwordDisconnects: number
   resnapshotted: string[]
+  rotations: number
 } {
   const disconnects: Array<{ exceptConnectionId?: string } | undefined> = []
   const resnapshotted: string[] = []
   let passwordDisconnects = 0
+  let rotations = 0
   return {
     disconnects,
     resnapshotted,
     get passwordDisconnects() {
       return passwordDisconnects
+    },
+    get rotations() {
+      return rotations
     },
     disconnectAuthSurfaceClients: (opts) => {
       disconnects.push(opts)
@@ -111,7 +127,14 @@ function makeHost(): AuthcfgHost & {
     },
     resnapshotConnection: (id) => {
       resnapshotted.push(id)
-    }
+    },
+    lanLink: over.lanLink ?? (() => 'http://10.0.0.5:8321/remote#k=' + 'ab'.repeat(32)),
+    rotateLanKey:
+      over.rotateLanKey ??
+      (() => {
+        rotations++
+        return 'http://10.0.0.5:8321/remote#k=' + 'cd'.repeat(32)
+      })
   }
 }
 
@@ -122,7 +145,6 @@ beforeEach(() => {
   configRef.current = {
     authPolicy: null,
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
@@ -137,13 +159,25 @@ describe('the settings-session backstop', () => {
     ['authcfg:set-password', (c) => authcfgSetPassword(c, 'a-long-enough-password')]
   ]
 
-  it.each(verbs)('%s refuses a LOCKED editor with needs-settings-session', async (_n, call) => {
+  /**
+   * Every session-gated verb, including the two ADR-056 LAN-channel ones. They
+   * are listed for the REFUSAL cases only, because they answer with a link
+   * rather than `{ok:true}` — their accept paths are asserted in their own
+   * describe below.
+   */
+  const gated: Array<[string, (c: CommandConnection) => Promise<unknown>]> = [
+    ...verbs,
+    ['authcfg:lan-link', (c) => authcfgLanLink(c, makeHost())],
+    ['authcfg:rotate-lan-key', (c) => authcfgRotateLanKey(c, makeHost())]
+  ]
+
+  it.each(gated)('%s refuses a LOCKED editor with needs-settings-session', async (_n, call) => {
     await expect(call(lockedConn())).rejects.toThrow('needs-settings-session')
     expect(configWrites).toEqual([])
     expect(provisionSpy).not.toHaveBeenCalled()
   })
 
-  it.each(verbs)('%s refuses a fresh MUTATION WINDOW with no session', async (_n, call) => {
+  it.each(gated)('%s refuses a fresh MUTATION WINDOW with no session', async (_n, call) => {
     // THE guard for the 2026-08-16 amendment, at the body layer. This exact
     // connection — armed, mutation window fresh — was what the as-shipped gate
     // accepted, which made administering an ambient capability. It must now be
@@ -153,7 +187,7 @@ describe('the settings-session backstop', () => {
     expect(provisionSpy).not.toHaveBeenCalled()
   })
 
-  it.each(verbs)('%s refuses an EXPIRED session', async (_n, call) => {
+  it.each(gated)('%s refuses an EXPIRED session', async (_n, call) => {
     const conn = unlockedConn()
     conn.settingsSessionExpiresAt = Date.now() - 1
     await expect(call(conn)).rejects.toThrow('needs-settings-session')
@@ -166,6 +200,65 @@ describe('the settings-session backstop', () => {
 
   it.each(verbs)('%s lets the DESKTOP through — it is the host anchor', async (_n, call) => {
     await expect(call(desktopConnection())).resolves.toMatchObject({ ok: true })
+  })
+})
+
+describe('the LAN channel link (ADR-056 item C)', () => {
+  it('answers the link inside an unlocked editor', async () => {
+    await expect(authcfgLanLink(unlockedConn(), makeHost())).resolves.toEqual({
+      url: `http://10.0.0.5:8321/remote#k=${'ab'.repeat(32)}`
+    })
+  })
+
+  it('lets the DESKTOP read it with no ceremony — it is the host anchor', async () => {
+    await expect(authcfgLanLink(desktopConnection(), makeHost())).resolves.toMatchObject({
+      url: expect.stringContaining('#k=')
+    })
+  })
+
+  it('is typed-unavailable when this run serves no non-loopback bind', async () => {
+    // `tailscale serve` mode binds loopback ONLY, so there is no LAN channel and
+    // no key was ever generated. The settings pane has to explain the absence
+    // rather than render a failure, hence the typed error.
+    await expect(
+      authcfgLanLink(unlockedConn(), makeHost({ lanLink: () => null }))
+    ).rejects.toThrow(LAN_LINK_UNAVAILABLE_ERROR)
+  })
+
+  it('rotation returns the NEW link, audits, and sweeps NOBODY', async () => {
+    // The never-strand contract: the key is consumed at handshake only, so
+    // established channels keep running and no 4009 goes out. A sweep here would
+    // disconnect every live client to tell them something that does not apply to
+    // them.
+    const host = makeHost()
+    await expect(authcfgRotateLanKey(unlockedConn(), host)).resolves.toEqual({
+      url: `http://10.0.0.5:8321/remote#k=${'cd'.repeat(32)}`
+    })
+    expect(host.rotations).toBe(1)
+    expect(host.disconnects).toEqual([])
+    expect(host.passwordDisconnects).toBe(0)
+    const rows = auditRows.filter((r) => r.channel === 'auth:settings-change')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].detail).toContain('LAN channel key rotated')
+    // NOT an admission-rule change, so no policy-change row either.
+    expect(auditRows.filter((r) => r.channel === 'auth:policy-change')).toEqual([])
+  })
+
+  it('rotation writes NOTHING and audits nothing when there is no LAN channel', async () => {
+    const host = makeHost({ rotateLanKey: () => null })
+    await expect(authcfgRotateLanKey(unlockedConn(), host)).rejects.toThrow(
+      LAN_LINK_UNAVAILABLE_ERROR
+    )
+    expect(auditRows).toEqual([])
+  })
+
+  it('a locked editor gets the SETTINGS-SESSION refusal, never the link', async () => {
+    // Stated separately from the table above because this is the one that would
+    // leak a live channel key: `authcfg:lan-link` is a `query`, and a query
+    // classifies `read` — i.e. free — unless something says otherwise.
+    await expect(authcfgLanLink(lockedConn(), makeHost())).rejects.toThrow(
+      NEEDS_SETTINGS_SESSION_ERROR
+    )
   })
 })
 
@@ -224,11 +317,15 @@ describe('authcfgApply — the batch', () => {
     const host = makeHost()
     const conn = unlockedConn()
     await expect(
-      authcfgApply(conn, { authMode: 'legacy', stepUpTier: 'strong', auditRetentionDays: 90 }, host)
+      authcfgApply(
+        conn,
+        { authMode: 'passkey-always', stepUpTier: 'strong', auditRetentionDays: 90 },
+        host
+      )
     ).resolves.toMatchObject({ ok: true })
     expect(configWrites).toHaveLength(1)
     expect(configWrites[0]).toMatchObject({
-      authPolicy: 'legacy',
+      authPolicy: 'passkey-always',
       stepUpTier: 'strong',
       auditRetentionDays: 90
     })

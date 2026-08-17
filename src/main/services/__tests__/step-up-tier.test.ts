@@ -117,7 +117,7 @@ describe('resolveStepUpTier', () => {
   })
 
   it('passes the stored tier through under every OTHER mode', () => {
-    for (const policy of ['legacy', 'passkey-always'] as const satisfies RemoteAuthPolicy[]) {
+    for (const policy of ['password', 'passkey-always'] as const satisfies RemoteAuthPolicy[]) {
       for (const stored of ['strong', 'medium', 'off'] as const) {
         expect(resolveStepUpTier(policy, stored), `${policy}/${stored}`).toBe(stored)
       }
@@ -212,8 +212,29 @@ describe('classifyDispatch', () => {
     // `authcfg:get` reads, and `authcfg:end` only gives authority back — gating
     // a revocation would mean an operator whose mutation window had lapsed could
     // open an editor under `strong` and then be refused permission to close it.
-    expect([...AUTHCFG_CHANNELS].sort()).toEqual(['authcfg:apply', 'authcfg:set-password'])
+    expect([...AUTHCFG_CHANNELS].sort()).toEqual([
+      'authcfg:apply',
+      // ADR-056 item C. `lan-link` is a `query` and would classify `read` — i.e.
+      // FREE like `authcfg:get` — so its membership here is the whole gate: what
+      // gates a verb in this namespace is what it DISCLOSES, not its kind, and
+      // this one discloses a live channel key.
+      'authcfg:lan-link',
+      'authcfg:rotate-lan-key',
+      'authcfg:set-password'
+    ])
     expect([...AUTHCFG_FREE_CHANNELS].sort()).toEqual(['authcfg:end', 'authcfg:get'])
+  })
+
+  it('classifies the session-gated LAN link as `authcfg`, not as the free read its kind implies', () => {
+    // RED before ADR-056 added it to AUTHCFG_CHANNELS: a `query` falls through to
+    // `read`, which is free on every tier, so the channel key would have been
+    // handed to any `admin` connection with no editor open at all.
+    expect(
+      classifyDispatch({ channel: 'authcfg:lan-link', capability: 'admin', kind: 'query' })
+    ).toBe('authcfg')
+    expect(
+      classifyDispatch({ channel: 'authcfg:rotate-lan-key', capability: 'admin', kind: 'command' })
+    ).toBe('authcfg')
   })
 })
 
@@ -429,7 +450,7 @@ describe('evaluateStepUp — the tier × class × state matrix', () => {
 
 describe('presenceOf / tierOf', () => {
   it('reads a fresh remote connection as unarmed, medium, nothing held', () => {
-    const conn = makeRemoteConnection('token', null)
+    const conn = makeRemoteConnection('password', null)
     expect(presenceOf(conn)).toEqual({
       exempt: false,
       armedEver: false,

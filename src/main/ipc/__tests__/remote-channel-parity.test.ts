@@ -29,7 +29,7 @@
 import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
-import { LEGACY_REMOTE_GRANTS, type Capability } from '../command-registry'
+import { AUTH_OFF_GRANTS, type Capability } from '../command-registry'
 import { channelSpec } from '../../../shared/sync/channels'
 
 const REPO = process.cwd()
@@ -47,9 +47,11 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    one-time enrollment link. A token/tailnet connection never holds either.
  *  - `admin` (ADR-054 §6, `authcfg:*`) — the routine remote-access settings.
  *    Same reachability as the passkey management verbs, PLUS a live
- *    settings-editing session for the mutations (`apply`, `set-password`). The
- *    `off` master switch is deliberately not among them: it stays in
- *    `remote:set-config`, which has no remote registration at all.
+ *    settings-editing session for the mutations (`apply`, `set-password`) and
+ *    for the two ADR-056 LAN-channel verbs — `lan-link` is a `query` and is
+ *    session-gated anyway, because it hands out a channel key. The `off` master
+ *    switch is deliberately not among them: it stays in `remote:set-config`,
+ *    which has no remote registration at all.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -60,6 +62,8 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:apply',
   'authcfg:end',
   'authcfg:get',
+  'authcfg:lan-link',
+  'authcfg:rotate-lan-key',
   'authcfg:set-password',
   'terminal:attach',
   'terminal:create',
@@ -130,7 +134,7 @@ describe('remote channel parity (R5)', () => {
     const invoked = invokedChannels()
     const declared = remoteDeclarations()
     const ungranted = [...invoked]
-      .filter((c) => declared.has(c) && !LEGACY_REMOTE_GRANTS.has(declared.get(c)!))
+      .filter((c) => declared.has(c) && !AUTH_OFF_GRANTS.has(declared.get(c)!))
       .sort()
     // The terminal and passkey channels are the deliberate exceptions (SyncCore
     // phase 2 / ADR-052): they declare `shell`, `enroll` or `admin`, none of
@@ -160,7 +164,7 @@ describe('remote channel parity (R5)', () => {
     expect(declared.get('webauthn:mint-enroll-token')).toBe('admin')
     for (const [channel, capability] of declared) {
       if (!channel.startsWith('webauthn:')) continue
-      expect(LEGACY_REMOTE_GRANTS.has(capability), channel).toBe(false)
+      expect(AUTH_OFF_GRANTS.has(capability), channel).toBe(false)
     }
   })
 

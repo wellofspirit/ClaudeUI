@@ -85,17 +85,30 @@ vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
+/**
+ * The stub tunnel's public URL, mutable per test.
+ *
+ * It has to be a real value for the tunnel cases since ADR-056: the server
+ * classifies a socket's ORIGIN and reads the tunnel arm off the `Host` the
+ * tunnel forwards verbatim, so "this client is on the tunnel" is now a fact
+ * about the request rather than about the server having a key.
+ */
+const { tunnelUrlRef } = vi.hoisted(() => ({ tunnelUrlRef: { current: null as string | null } }))
+
 vi.mock('../tunnel-manager', () => {
   class StubTunnelManager {
     setStatusHandler(): void {}
-    getStatus(): { state: 'stopped'; url: null; error: null } {
-      return { state: 'stopped', url: null, error: null }
+    getStatus(): { state: 'stopped'; url: string | null; error: null } {
+      return { state: 'stopped', url: tunnelUrlRef.current, error: null }
     }
     async start(): Promise<void> {}
     stop(): void {}
   }
   return { TunnelManager: StubTunnelManager }
 })
+
+/** Hostname of {@link tunnelUrlRef} — the `Host` a tunnelled client must send. */
+const TUNNEL_HOST = 'unit-test-tunnel.trycloudflare.com'
 
 import { RemoteServer } from '../remote-server'
 import { RemoteDispatcher } from '../remote-dispatcher'
@@ -152,7 +165,7 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     shellGrantIdleMinutes: 10,
     authPolicy: null,
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
+    lanE2eKey: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
@@ -197,7 +210,9 @@ const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 30))
 describe('remote terminal — gates, step-up, decay, audit', () => {
   let server: RemoteServer
   let port: number
-  let token: string
+  // ADR-056: there is no WS access token any more — every socket authenticates
+  // with the break-glass password proof (`PROOF`), inside E2E where the origin
+  // requires one.
   let clients: RemoteClient[]
   let clockOffset: number
   let realNow: () => number
@@ -208,6 +223,9 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     ptyStub.reset()
     auditRows.length = 0
     clients = []
+    // No tunnel unless a test brings one up — the default fixture is a plain
+    // loopback listener, which classifies `localhost` and expects no E2E.
+    tunnelUrlRef.current = null
     clockOffset = 0
     realNow = Date.now
     vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffset)
@@ -230,8 +248,8 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     terminalService.setRemoteSink(server.terminalSink())
 
     port = await ephemeralPort()
-    const started = await server.start(port, '127.0.0.1')
-    token = started.token
+    await server.start(port, '127.0.0.1')
+
   })
 
   afterEach(async () => {
@@ -243,23 +261,38 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     vi.restoreAllMocks()
   })
 
+  /**
+   * A LOCALHOST client (no channel key — the transport is already local), or a
+   * TUNNEL one when `e2eKey` is given: it opens the channel first and sends the
+   * password inside it, and it must LOOK like a tunnel client, i.e. carry the
+   * tunnel's own `Host` (ADR-056's origin classification).
+   */
   async function connect(e2eKey?: string): Promise<RemoteClient> {
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token, e2eKey })
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: PROOF,
+      e2eKey,
+      ...(e2eKey ? { headers: { Host: TUNNEL_HOST } } : {})
+    })
     await client.ready
     clients.push(client)
     return client
   }
 
   /**
-   * Restart the fixture server in TUNNEL mode and hand back its E2E key, so a
-   * client can complete the mandatory `e2e-activate` (a tunnel socket whose
-   * first post-auth frame is anything else is closed 4004). The key is private
-   * to the server — read the same way remote-server.test.ts does.
+   * Restart the fixture server in TUNNEL mode and hand back its channel key.
+   *
+   * A tunnel socket must open the E2E channel BEFORE presenting a credential
+   * (ADR-056), and the server decides that from the socket's origin — so the
+   * stub tunnel is given a real URL here and `connect()` sends the matching
+   * `Host`. The key is private to the server, read the same way
+   * remote-server.test.ts does.
    */
   async function restartInTunnelMode(): Promise<string> {
     await Promise.all(clients.map((c) => c.close()))
     clients.length = 0
     await server.stop()
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
     server = new RemoteServer(
       new RemoteDispatcher(),
       passwordProvider() as never,
@@ -267,8 +300,8 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     )
     terminalService.setRemoteSink(server.terminalSink())
     port = await ephemeralPort()
-    token = (await server.start(port, '127.0.0.1', { tunnel: true })).token
-    return (server as unknown as { e2eKey: string }).e2eKey
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    return (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
   }
 
   /** Advance the (Date.now-only) clock by `minutes`. */
@@ -647,13 +680,18 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
   // -------------------------------------------------------------------------
 
   it('refuses step-up with an actionable message when no password is configured', async () => {
-    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    // Auth-mode `off` is the only way to BE authenticated on a server with no
+    // password and no passkey since ADR-056 — the handshake otherwise answers
+    // `password-required` and there is no socket to step up on. The step-up
+    // itself is still reachable (a client may always ask), and it must answer
+    // `no-password` rather than pretend.
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true, authPolicy: 'off' })
     await server.stop()
     const dispatcher = new RemoteDispatcher()
     server = new RemoteServer(dispatcher, passwordProvider(false) as never, tailscaleStub as never)
     terminalService.setRemoteSink(server.terminalSink())
     port = await ephemeralPort()
-    token = (await server.start(port, '127.0.0.1')).token
+    await server.start(port, '127.0.0.1')
 
     const client = await connect()
     const response = await stepUp(client)
@@ -674,7 +712,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     // …and it is the SAME budget the auth handshake uses: a brand-new socket
     // from this key is now refused before it can even present a credential.
     await expect(
-      connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token, handshakeTimeoutMs: 2000 })
+      connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, pwProof: PROOF, handshakeTimeoutMs: 2000 })
         .then((c) => {
           clients.push(c)
           return c.ready
@@ -691,11 +729,13 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     const e2eKey = await restartInTunnelMode()
     const client = await connect(e2eKey)
 
-    // Password AUTHENTICATION stays refused on this transport (the E2E key
-    // rides the URL fragment, which a password login does not have). A step-up
-    // is not authentication: this socket is already token-authed AND E2E-active,
-    // so the proof travels encrypted end to end and the tunnel edge sees only
-    // ciphertext. Pre-fix the gate reused passwordParams() and answered
+    // ADR-056 INVERTED the premise this case was written under: password
+    // authentication is no longer refused on the tunnel, it is REQUIRED there —
+    // the channel key opens the pipe and the password is the identity inside it,
+    // which is exactly how this client just connected. What the case still pins
+    // is the step-up half: the proof travels encrypted end to end and the tunnel
+    // edge sees only ciphertext, so the ceremony works on this transport. Before
+    // the original fix the gate reused passwordParams() and answered
     // 'no-password' here, leaving the terminal permanently locked over tunnels.
     await expect(client.invoke('terminal:create', '/tmp/x')).rejects.toThrow('needs-step-up')
     expect(await stepUp(client)).toMatchObject({ ok: true })
@@ -720,7 +760,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     await expect(
       connectRemoteClient({
         url: `ws://127.0.0.1:${port}/`,
-        token,
+        pwProof: PROOF,
         e2eKey,
         handshakeTimeoutMs: 2000
       }).then((c) => {
@@ -829,7 +869,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
 
     for (const row of auditRows.filter((r) => String(r.channel).startsWith('terminal:'))) {
       expect(row.capability).toBe('shell')
-      expect(row.method).toBe('token')
+      expect(row.method).toBe('password')
       expect(typeof row.connectionId).toBe('string')
       // The row shape carries no payload field at all, and no value in it may
       // contain what crossed the pty — in either direction.
@@ -951,9 +991,10 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
       stepUp: { saltHex: SALT_HEX, kdf: KDF }
     })
 
-    // On the tunnel `/remote/auth-info` advertises token-only (password AUTH is
-    // refused there by design), so this channel is the ONLY salt delivery the
-    // web client has for the ceremony.
+    // Kept for the tunnel too: `/remote/auth-info` does advertise the password
+    // there since ADR-056 (it is that transport's only identity), but a client
+    // that reached the terminal panel without re-fetching discovery still has
+    // this channel as its salt delivery for the ceremony.
     const e2eKey = await restartInTunnelMode()
     const tunnelClient = await connect(e2eKey)
     await expect(tunnelClient.invoke('terminal:availability')).resolves.toMatchObject({

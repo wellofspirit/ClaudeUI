@@ -144,8 +144,9 @@ describe('migration framework — user_version guard', () => {
       // v8: remote_config pinned HTTPS port + serve cleanup record,
       // v9: audit_log, v10: remote-terminal posture columns,
       // v11: webauthn_credential + auth-policy columns (ADR-052 passkeys),
-      // v12: step-up tier columns + audit detail/retention (ADR-054)
-      expect(userVersion(db)).toBe(12)
+      // v12: step-up tier columns + audit detail/retention (ADR-054),
+      // v13: LAN channel key + the `legacy` policy retirement (ADR-056)
+      expect(userVersion(db)).toBe(13)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -224,7 +225,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(12)
+      expect(userVersion(db)).toBe(13)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -301,7 +302,12 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('v12 rewrites a stored `passkey-for-grants` policy to legacy + the medium tier', () => {
+  it('v12 then v13 walk `passkey-for-grants` all the way to AUTO', () => {
+    // Two hops, one row: v12 rewrote it to `legacy` (the mode was "legacy login
+    // + medium tier" written as one knob), and v13 rewrites `legacy` to NULL
+    // because ADR-056 retired what `legacy` named. The end state is AUTO, which
+    // resolves to `passkey-always` or `password` on the credential count — i.e.
+    // to whichever of the two things `legacy` was standing in for.
     const db = openRawDb()
     try {
       runMigrations(
@@ -316,11 +322,9 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(12)
+      expect(userVersion(db)).toBe(13)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
-        // The mode was "legacy login + medium step-up tier" written as one knob,
-        // so the pair below is the SAME behavior on the two axes that exist now.
-        auth_policy: 'legacy',
+        auth_policy: null,
         step_up_tier: 'medium',
         // Everything else the operator chose survives untouched.
         port: 4568,
@@ -331,8 +335,11 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('v12 leaves every OTHER stored policy alone — including `off`', () => {
-    for (const policy of ['passkey-always', 'legacy', 'off']) {
+  it('leaves every SURVIVING stored policy alone — including `off`', () => {
+    // `legacy` is deliberately absent: v13 rewrites it (see the case above).
+    // What must never move is `off` — no migration may ever set OR clear the
+    // master switch — and `passkey-always`, which is an explicit operator choice.
+    for (const policy of ['passkey-always', 'off']) {
       const db = openRawDb()
       try {
         runMigrations(
@@ -343,7 +350,6 @@ describe('migration framework — user_version guard', () => {
           `INSERT INTO remote_config (id, auth_policy, updated_at) VALUES (1, ?, 1)`
         ).run(policy)
         runMigrations(db)
-        // No migration may ever set OR clear the master switch.
         expect(
           (db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
             auth_policy: string

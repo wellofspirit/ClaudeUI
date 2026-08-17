@@ -18,7 +18,7 @@
  *    order, including `registerSessionIpc()`, the canonical seeds, the command
  *    registry, `registerRemoteHandlers()` and the remote autostart path;
  *  - the remote HTTP+WS server on a real ephemeral port, and a real `ws` client
- *    speaking the real protocol (token auth handshake, `sync`, `invoke`, `event`);
+ *    speaking the real protocol (auth handshake, `sync`, `invoke`, `event`);
  *  - a real `SessionManager` + real `ClaudeSession`, spawned BY THE WS CLIENT, with
  *    `win: null`;
  *  - the real funnel: `BaseSession.send` → ring + canonical → subscriber → WS frame,
@@ -375,16 +375,17 @@ beforeAll(async () => {
   // behind — so the server below is brought up by PRODUCTION code, not by the
   // test calling `start()` itself.
   port = await ephemeralPort()
-  setRemoteConfig({ port, bindHost: '127.0.0.1', autostart: true })
+  // Auth-mode `off`: this flow is about the WINDOWLESS boot, and since ADR-056 a
+  // server with no credential provisioned admits nobody — so an authenticated
+  // socket has to be asked for rather than assumed.
+  setRemoteConfig({ port, bindHost: '127.0.0.1', autostart: true, authPolicy: 'off' })
 
   core = bootCore({ remoteAccessDisabled: false })
 
   // Autostart is fire-and-forget (a listen failure must never block boot).
   await waitFor(() => core.remoteServer.getStatus().running === true, 10000)
-  const token = core.remoteServer.getStatus().token
-  expect(token, 'the autostarted server must mint a WS token').toBeTruthy()
 
-  client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: token! })
+  client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
   await client.ready
   client.onMessage((msg) => frames.push(msg))
 }, 30000)
@@ -656,8 +657,7 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     // A no-op write must do neither again — otherwise every Settings save would
     // kick every phone off.
     const closedAgain = vi.fn()
-    const token = core.remoteServer.getStatus().token!
-    client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token })
+    client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await client.ready
     client.onMessage((msg) => frames.push(msg))
     client.ws.once('close', closedAgain)

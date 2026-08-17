@@ -5,7 +5,8 @@ import { base64ToText, textToBase64 } from '../shared/base64-text'
 import {
   PASSKEY_FAILED_ERROR,
   PASSKEY_REQUIRED_ERROR,
-  PASSKEY_UNAVAILABLE_ERROR
+  PASSKEY_UNAVAILABLE_ERROR,
+  PASSWORD_REQUIRED_ERROR
 } from '../shared/remote-protocol'
 import type {
   PublicKeyCredentialCreationOptionsJSON,
@@ -62,17 +63,17 @@ export type ConnectionState =
 
 /**
  * Exactly one field is honoured by the server, which branches on `pwProof`
- * first, then `enrollToken`, then `token` — this client sends them in the same
- * order for the same reason. `token` comes from the URL fragment (QR scan);
- * `pwProof` is `hex(scrypt(...))` derived from the user's password (see
- * password-proof.ts); `enrollToken` comes from the `#enroll=` fragment of a
- * desktop-minted "add this device" link.
+ * first and then `enrollToken` — this client sends them in the same order for
+ * the same reason. `pwProof` is `hex(scrypt(...))` derived from the user's
+ * password (see password-proof.ts); `enrollToken` comes from the `#enroll=`
+ * fragment of a minted "add this device" link.
  *
- * All three are SECRETS: they ride the fragment (never the request line) and
- * must never reach a log line, an error message, or a state label.
+ * The bearer `token` is GONE (ADR-056): a link is a CHANNEL now (`#k=`), never
+ * an identity. Both surviving fields are SECRETS — they ride the fragment or the
+ * user's typing, never the request line, and must never reach a log line, an
+ * error message, or a state label.
  */
 export interface RemoteCredential {
-  token?: string
   pwProof?: string
   enrollToken?: string
 }
@@ -107,6 +108,18 @@ const CLOSE_SESSION_EXPIRED = 4010
  * server was still happily waiting.
  */
 const PASSKEY_CEREMONY_TIMEOUT_MS = 120_000
+
+/**
+ * How long to wait for `e2e-ack` after asking to open the channel (ADR-056).
+ *
+ * A STALE LINK is the case this exists for. The ack is the first encrypted frame,
+ * so a client holding an old `#k=` cannot decrypt it, drops it, and would
+ * otherwise sit here until the server's pre-auth deadline closed the socket —
+ * then reconnect and do it again, forever, with nothing on screen explaining
+ * why. Timing out into `auth-rejected` stops the backoff and says the one true
+ * thing: this link is out of date.
+ */
+const E2E_ACTIVATION_TIMEOUT_MS = 10_000
 
 /**
  * Human copy for a ceremony the BROWSER refused, before anything was sent.
@@ -237,6 +250,8 @@ export class RemoteConnection {
   private reconnectAttempt = 0
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
+  /** Live only between `e2e-activate` and the ack — see E2E_ACTIVATION_TIMEOUT_MS. */
+  private e2eActivationTimer?: ReturnType<typeof setTimeout>
   private destroyed = false
   /**
    * Set when the server definitively rejected the current credential (or the key
@@ -329,19 +344,24 @@ export class RemoteConnection {
     // Convert http(s) URL to ws(s), strip path and fragment
     this.url = url.replace(/^http/, 'ws').replace(/\/remote.*$/, '')
     this.credential = credential
-    // A password client never has an E2E key: tunnel mode refuses password auth
-    // precisely because the key rides the fragment the client doesn't have.
-    this.e2eKeyHex = credential.pwProof !== undefined ? undefined : e2eKeyHex
+    // The channel key is kept REGARDLESS of the credential since ADR-056. It used
+    // to be dropped for a password client, because the tunnel refused password
+    // auth outright; now the order is inverted and the password is exactly what a
+    // channel-key client presents INSIDE the channel it just opened.
+    this.e2eKeyHex = e2eKeyHex
   }
 
   /**
    * Replace the credential before a (re)connect — used by the password flow to
    * retry after a rejection without discarding the instance `window.api` is
    * bound to. Does not touch a live socket; call `connect()` after it.
+   *
+   * Deliberately leaves the channel key alone: on a LAN or tunnel link the key is
+   * a property of the ADDRESS, and a re-prompt for the password must not throw
+   * away the only way to reach the socket.
    */
   setCredential(credential: RemoteCredential): void {
     this.credential = credential
-    if (credential.pwProof !== undefined) this.e2eKeyHex = undefined
   }
 
   /**
@@ -892,18 +912,22 @@ export class RemoteConnection {
    * The URL this socket opens on — the base origin, plus `?intent=enroll` while
    * the credential we are about to present is an ENROLLMENT LINK.
    *
-   * The token itself stays in the `auth` frame; only the non-secret intent
-   * rides the query string. Without the flag a first device can never enrol:
+   * The enrollment token itself stays in the `auth` frame; only the non-secret
+   * intent rides the query string.
+   *
+   * The flag is INERT since ADR-056 and is kept deliberately. It existed because
    * enrollment happens at the tailnet origin (that hostname is the RP ID), and
-   * there `tailscale serve` supplies an owner identity that authenticates the
-   * socket at CONNECTION time — before our `{auth, enrollToken}` frame is read
-   * — so the phone lands in the app with its token unspent and no biometric
-   * ever asked for. See `remote-server.ts`'s `hasEnrollIntent`.
+   * there `tailscale serve` used to supply an owner identity that authenticated
+   * the socket at CONNECTION time — before our `{auth, enrollToken}` frame was
+   * read — so a first device landed in the app with its link unspent and no
+   * biometric ever asked for. Ambient admission is retired, so there is no such
+   * accept left to decline; the parameter costs nothing and keeps the enrollment
+   * URL byte-identical, and the server ignores it.
    *
    * Derived per connect from the CREDENTIAL, never baked into `this.url`: the
    * enrollment screen's "Sign in normally instead" escape calls
-   * `setCredential({})`, and the very next socket has to go back to ordinary
-   * ambient auth.
+   * `setCredential({})`, and the very next socket must go back to the ordinary
+   * sign-in path.
    */
   private socketUrl(): string {
     return this.credential.enrollToken !== undefined ? `${this.url}/?intent=enroll` : this.url
@@ -944,6 +968,12 @@ export class RemoteConnection {
     this.authMethodValue = undefined
     this.authDisabledValue = false
     this.registeredOnThisSocket = false
+    // The cipher is PER SOCKET — its replay counters reset per connection on both
+    // ends — so a reconnect must never inherit the previous socket's instance.
+    // Explicit rather than implied by `initE2E` replacing it: between here and
+    // `onopen` a stale instance would make `send()` encrypt with dead counters.
+    this.e2e = null
+    this.clearE2eActivationTimeout()
 
     try {
       this.ws = new WebSocket(this.socketUrl())
@@ -957,23 +987,19 @@ export class RemoteConnection {
 
     this.ws.onopen = (): void => {
       this.reconnectAttempt = 0
-      this.setState('authenticating')
-      // Send exactly one credential field — the server refuses to fall through
-      // from one method to another, so sending both would be meaningless.
-      //
-      // With an EMPTY credential (tailnet-identity mode) this sends a bare
-      // `{type:'auth'}`: the server has already authenticated the socket from the
-      // upgrade headers and pushed an unsolicited `auth-response`, and its
-      // post-auth handler ignores this frame. If identity did NOT apply, the same
-      // frame is answered with a definitive "Missing credential" failure, which
-      // the token branch of `handleMessage` surfaces as `failed`.
-      if (this.credential.pwProof !== undefined) {
-        this.sendRaw({ type: 'auth', pwProof: this.credential.pwProof })
-      } else if (this.credential.enrollToken !== undefined) {
-        this.sendRaw({ type: 'auth', enrollToken: this.credential.enrollToken })
-      } else {
-        this.sendRaw({ type: 'auth', token: this.credential.token })
+      // THE CHANNEL COMES FIRST (ADR-056). With a `#k=` key in hand this socket
+      // is on a tunnel or LAN origin, where the server reads NOTHING in the clear:
+      // activate, wait for the encrypted ack, and send the credential inside it.
+      // Without a key the origin is the tailnet HTTPS name or localhost, the
+      // transport is already confidential, and the auth frame goes first exactly
+      // as before.
+      if (this.e2eKeyHex) {
+        this.setState('e2e-activating')
+        void this.initE2E()
+        return
       }
+      this.setState('authenticating')
+      this.sendAuthFrame()
     }
 
     this.ws.onmessage = (ev): void => {
@@ -1096,14 +1122,22 @@ export class RemoteConnection {
             // it, only the enrollment screen, and asking for a snapshot it
             // cannot use would just be noise on the wire.
             this.setState('enrolling')
-          } else if (this.e2eKeyHex) {
-            // Activate E2E encryption before syncing
-            this.setState('e2e-activating')
-            this.initE2E()
           } else {
+            // No E2E branch here any more (ADR-056): the channel was opened
+            // BEFORE this frame, so an accepted socket is always ready to sync.
             this.setState('syncing')
             this.sendSync()
           }
+        } else if (msg.error === PASSWORD_REQUIRED_ERROR) {
+          // The channel opened and there is no identity to present: the host has
+          // no break-glass password provisioned. Recoverable only ON THE HOST, so
+          // stop the backoff and say so — retrying this link changes nothing.
+          this.authRejected = true
+          this.setState(
+            'auth-rejected',
+            'This link needs a password. Set a remote-access password on the host, then try again.'
+          )
+          this.ws?.close()
         } else if (msg.error === PASSKEY_REQUIRED_ERROR) {
           // NOT a rejection, and the socket deliberately stays OPEN — this is
           // the socket the ceremony has to run on, and tearing it down would
@@ -1172,9 +1206,12 @@ export class RemoteConnection {
         break
 
       case 'e2e-ack':
-        // E2E is now active — proceed to sync (all subsequent messages are encrypted)
-        this.setState('syncing')
-        this.sendSync()
+        // The channel is open and PROVEN — decrypting this frame at all is the
+        // proof. Now present an identity inside it (ADR-056: the link is the
+        // channel, the password is the identity).
+        this.clearE2eActivationTimeout()
+        this.setState('authenticating')
+        this.sendAuthFrame()
         break
 
       case 'sync-full':
@@ -1321,14 +1358,68 @@ export class RemoteConnection {
     }
   }
 
-  /** Initialize E2E encryption and send activation request. */
+  /**
+   * Send exactly ONE credential field — the server refuses to fall through from
+   * one method to another, so sending both would be meaningless. Encrypted when
+   * the channel is already live, which on a tunnel/LAN origin it always is.
+   *
+   * An EMPTY credential sends a bare `{type:'auth'}`. That is still the right
+   * opening move under `passkey-always`: the answer is `passkey-required` and the
+   * login screen's one tap runs the ceremony on this very socket.
+   */
+  private sendAuthFrame(): void {
+    if (this.credential.pwProof !== undefined) {
+      this.send({ type: 'auth', pwProof: this.credential.pwProof })
+    } else if (this.credential.enrollToken !== undefined) {
+      this.send({ type: 'auth', enrollToken: this.credential.enrollToken })
+    } else {
+      this.send({ type: 'auth' })
+    }
+  }
+
+  /**
+   * Initialize E2E encryption and ask the server to open the channel.
+   *
+   * The activation request itself is plaintext (the key is never sent — both
+   * ends already hold it); everything from the server's ack onwards is
+   * ciphertext. A key the server does not recognise produces an ack this client
+   * cannot decrypt, which is what the timeout below is for.
+   */
   private async initE2E(): Promise<void> {
     if (!this.e2eKeyHex) return
 
     this.e2e = new E2ECrypto()
-    await this.e2e.init(this.e2eKeyHex)
-    // Send activation request plaintext (key is NOT included)
+    try {
+      await this.e2e.init(this.e2eKeyHex)
+    } catch {
+      // A malformed `#k=` (wrong length, non-hex) — the link is unusable and no
+      // amount of reconnecting changes that.
+      this.e2e = null
+      this.authRejected = true
+      this.setState('auth-rejected', 'This link is not valid — get a new one from the host.')
+      this.ws?.close()
+      return
+    }
+    this.armE2eActivationTimeout()
     this.sendRaw({ type: 'e2e-activate' })
+  }
+
+  /** Give up on an ack that will never decrypt — see E2E_ACTIVATION_TIMEOUT_MS. */
+  private armE2eActivationTimeout(): void {
+    this.clearE2eActivationTimeout()
+    this.e2eActivationTimer = setTimeout(() => {
+      this.e2eActivationTimer = undefined
+      this.authRejected = true
+      this.setState('auth-rejected', 'This link is out of date — get a new one from the host.')
+      this.ws?.close()
+    }, E2E_ACTIVATION_TIMEOUT_MS)
+  }
+
+  private clearE2eActivationTimeout(): void {
+    if (this.e2eActivationTimer) {
+      clearTimeout(this.e2eActivationTimer)
+      this.e2eActivationTimer = undefined
+    }
   }
 
   private setState(state: ConnectionState, error?: string): void {
@@ -1352,6 +1443,7 @@ export class RemoteConnection {
 
   private clearTimers(): void {
     this.clearPing()
+    this.clearE2eActivationTimeout()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = undefined

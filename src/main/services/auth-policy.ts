@@ -21,9 +21,9 @@
 
 import type { Capability, CommandConnection } from '../ipc/command-registry'
 import {
+  AUTH_OFF_GRANTS,
   ENROLL_ONLY_GRANTS,
-  LEGACY_REMOTE_GRANTS,
-  PASSKEY_REMOTE_GRANTS
+  FULL_REMOTE_GRANTS
 } from '../ipc/command-registry'
 import {
   appendAuditLog,
@@ -49,8 +49,6 @@ export interface AuthPolicyContext {
   credentialCount: number
   /** Break-glass password accepted under the passkey modes (default true). */
   passwordBreakGlass: boolean
-  /** Tailnet identity may skip the ceremony under `passkey-always` (default false). */
-  passkeyTailnetExempt: boolean
   /**
    * The STORED step-up tier (ADR-054's second axis, default `medium`). Read in
    * the same snapshot as the policy because the effective tier depends on it —
@@ -77,14 +75,13 @@ export interface AuthPolicyContext {
 
 /** The context a server should assume when the DB cannot be read. */
 export const FAIL_CLOSED_POLICY_CONTEXT: AuthPolicyContext = {
-  // AUTO with zero credentials ⇒ `legacy`: the as-built stack, which is a real
-  // authentication path. Failing to `off` would disable auth on a DB hiccup, and
+  // AUTO with zero credentials ⇒ `password`: a real authentication path, and the
+  // only honest default. Failing to `off` would disable auth on a DB hiccup, and
   // failing to `passkey-always` with an unreadable credential table would lock
-  // the operator out of their own machine. `legacy` is the only honest default.
+  // the operator out of their own machine.
   stored: null,
   credentialCount: 0,
   passwordBreakGlass: true,
-  passkeyTailnetExempt: false,
   // `medium` for the same reason `legacy` is the policy fallback: it is the
   // DEFAULT posture, neither a silent tightening that could lock the operator
   // out of their own terminal nor a silent loosening on a DB hiccup.
@@ -97,7 +94,8 @@ export const FAIL_CLOSED_POLICY_CONTEXT: AuthPolicyContext = {
 /**
  * Read the policy context from `remote_config` + the credential table. Never
  * throws — a DB hiccup must not take down the listener, and the fallback above
- * is deliberately the as-built stack rather than anything more or less strict.
+ * is deliberately password-gated admission rather than anything more or less
+ * strict.
  */
 export function readAuthPolicyContext(): AuthPolicyContext {
   try {
@@ -106,7 +104,6 @@ export function readAuthPolicyContext(): AuthPolicyContext {
       stored: config?.authPolicy ?? null,
       credentialCount: countWebauthnCredentials(),
       passwordBreakGlass: config?.passwordBreakGlass ?? true,
-      passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false,
       stepUpTier: config?.stepUpTier ?? DEFAULT_STEP_UP_TIER,
       stepUpMutationIdleMinutes:
         config?.stepUpMutationIdleMinutes ?? DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES,
@@ -116,7 +113,7 @@ export function readAuthPolicyContext(): AuthPolicyContext {
   } catch (err) {
     logger.warn(
       'auth-policy',
-      `Could not read the remote auth policy (falling back to legacy): ${
+      `Could not read the remote auth policy (falling back to password-gated): ${
         err instanceof Error ? err.message : String(err)
       }`
     )
@@ -126,116 +123,86 @@ export function readAuthPolicyContext(): AuthPolicyContext {
 
 /**
  * AUTO resolution: an explicitly stored value always wins; `null` means "≥1
- * enrolled credential ⇒ `passkey-always`, else `legacy`".
+ * enrolled credential ⇒ `passkey-always`, else `password`".
  *
  * This is how "default once a credential is enrolled" (security.md §Policy
  * modes) stays true without any code ever WRITING a policy behind the
  * operator's back — enrolling the first passkey turns the mode on, revoking the
  * last one turns it back off, and neither is a config mutation that could
  * surprise someone reading the settings row.
+ *
+ * ADR-056 renamed the zero-credential arm from `legacy` to `password` and made
+ * the rename load-bearing rather than cosmetic: `legacy` meant "the as-built
+ * ADR-039 stack", whose token and ambient-tailnet admission are gone, so the
+ * only credential that arm still admits is a break-glass password (or an
+ * enrollment link, which admits nothing but itself).
  */
 export function resolveAuthPolicy(ctx: AuthPolicyContext): RemoteAuthPolicy {
   if (ctx.stored !== null) return ctx.stored
-  return ctx.credentialCount > 0 ? 'passkey-always' : 'legacy'
+  return ctx.credentialCount > 0 ? 'passkey-always' : 'password'
 }
 
 /** How a connection proved itself, for grant purposes. */
-export type AuthGrantMethod =
-  | 'token'
-  | 'password'
-  | 'tailnet-identity'
-  | 'webauthn'
-  | 'enroll-token'
-  | 'none'
+export type AuthGrantMethod = 'password' | 'webauthn' | 'enroll-token' | 'none'
 
 /**
- * The grant bundle for one authenticated connection.
+ * The grant bundle for one authenticated connection — THREE outcomes, and the
+ * collapse to three is ADR-056's point.
  *
- * - `webauthn` and `password`: the full remote set PLUS `admin` and `enroll`.
- *   A passkey proves a human, and the break-glass password is the owner's own
- *   secret — both are the operator, and inline self-enroll (password → enroll →
- *   passkey) is owner-ratified, which REQUIRES the password path to carry
- *   `enroll`. `admin` over remote still only exposes channels explicitly
- *   registered for the remote transport: `remote:set-config` and friends are
- *   raw desktop `ipcMain.handle` wiring and are not in the registry's remote
- *   half at all, so this cannot reach the policy column it would be able to
- *   rewrite.
- * - `enroll-token`: `enroll` ONLY. It does not widen after a successful
- *   registration either — the client re-runs the assertion ceremony on the same
- *   socket and comes back as `webauthn`, so the credential it just made is what
- *   actually buys it access.
- * - `token` / `tailnet-identity`: the as-built set — UNLESS this connection owed
- *   a ceremony it has not performed, in which case it holds nothing.
+ * - `webauthn` / `password` ⇒ {@link FULL_REMOTE_GRANTS}, under every policy.
+ *   A passkey proves a human and the break-glass password is the owner's own
+ *   secret; both are the operator. The password's old `legacy`-mode carve-out
+ *   (base set only, no `enroll`) is retired because it was already theatre: the
+ *   same connection held `admin`, and `webauthn:mint-enroll-token` is an `admin`
+ *   verb, so it could always mint itself the enrollment link the carve-out
+ *   pretended to withhold. What actually protects the first device is the POLICY
+ *   DEFAULT — with nothing enrolled AND no password provisioned, no connection
+ *   is admitted at all.
+ * - `enroll-token` ⇒ {@link ENROLL_ONLY_GRANTS}: `enroll` and nothing else. It
+ *   does not widen after a successful registration either — the client re-runs
+ *   the assertion ceremony on the same socket and comes back as `webauthn`, so
+ *   the credential it just made is what actually buys it access.
+ * - `none` (only reachable under policy `off`) ⇒ {@link AUTH_OFF_GRANTS}: the
+ *   base remote surface and deliberately NOT `admin`/`enroll`. Enrolling a
+ *   credential while authentication is disabled would let any reachable client
+ *   mint itself a permanent one, and without `admin` the settings session stays
+ *   unreachable too.
  *
- *   That condition is not restated here; it is {@link ceremonyRequiredForAuth},
- *   called directly. The two used to be separate predicates over the same
- *   inputs, and they drifted immediately: `ceremonyRequiredForAuth` honoured
- *   `passkeyTailnetExempt` and the zero-credential escape hatch, while this
- *   function only tested `passkey-always && capableOrigin`. The result was a
- *   connection the server ACCEPTED (no ceremony owed) and then handed
- *   `EMPTY_GRANTS` — authenticated, and refused on every single invoke. Sharing
- *   the one predicate makes that class of bug unrepresentable: if a ceremony is
- *   not owed, the connection is real; if it is owed, the server never accepts
- *   it and `EMPTY_GRANTS` is only ever a defensive answer.
- *
- *   Note the exemption yields LEGACY, never PASSKEY: skipping the ceremony is a
- *   convenience over ambient network identity, and ambient identity is not
- *   evidence of device possession — so it must not buy `admin`/`enroll`.
- * - `none` (`off` mode): the as-built remote set — what the no-auth surface
- *   would have been. NOT `admin`/`enroll`: enrolling a credential while
- *   authentication is disabled would let any reachable client mint itself a
- *   permanent one.
+ * The POLICY is deliberately no longer an input. It used to be, because two of
+ * the old arms (`token`, `tailnet-identity`) held either the base set or nothing
+ * depending on whether a ceremony was owed — a second copy of the admission rule
+ * that drifted from `ceremonyRequiredForAuth` within a week and produced
+ * connections the server accepted and then refused on every invoke. Both arms
+ * are gone, and with them the only reason this function ever had to re-decide
+ * admission. Admission is now decided exactly once, at the handshake.
  */
-export function grantsFor(args: {
-  method: AuthGrantMethod
-  policy: RemoteAuthPolicy
-  /** Can this connection's origin do WebAuthn at all? */
-  capableOrigin: boolean
-  /** Enrolled credentials — REQUIRED, so no call site can silently omit it. */
-  credentialCount: number
-  /** Whether tailnet identity may skip the ceremony — likewise required. */
-  passkeyTailnetExempt: boolean
-}): ReadonlySet<Capability> {
-  switch (args.method) {
+export function grantsFor(method: AuthGrantMethod): ReadonlySet<Capability> {
+  switch (method) {
     case 'webauthn':
     case 'password':
-      // Under `legacy` the password is just the as-built password login and must
-      // keep the as-built surface — widening it would be a silent privilege
-      // increase for users who never opted into passkeys.
-      return args.policy === 'legacy' || args.policy === 'off'
-        ? LEGACY_REMOTE_GRANTS
-        : PASSKEY_REMOTE_GRANTS
+      return FULL_REMOTE_GRANTS
     case 'enroll-token':
       return ENROLL_ONLY_GRANTS
     case 'none':
-      return LEGACY_REMOTE_GRANTS
-    case 'token':
-    case 'tailnet-identity':
-      return ceremonyRequiredForAuth({
-        policy: args.policy,
-        capableOrigin: args.capableOrigin,
-        credentialCount: args.credentialCount,
-        method: args.method,
-        passkeyTailnetExempt: args.passkeyTailnetExempt
-      })
-        ? EMPTY_GRANTS
-        : LEGACY_REMOTE_GRANTS
+      return AUTH_OFF_GRANTS
   }
 }
 
-/** No capabilities at all — a connection that has not finished proving itself. */
-export const EMPTY_GRANTS: ReadonlySet<Capability> = new Set<Capability>()
+// `EMPTY_GRANTS` is GONE (ADR-056). It existed for the one state the grant
+// collapse removed: a connection the server had ACCEPTED which nonetheless held
+// nothing, because it owed a ceremony. There is no such state now — a handshake
+// either produces an identity or refuses the socket — and keeping the constant
+// would leave a way to spell an unreachable one.
 
 /**
  * The settings that decide how a connection authenticates and what it then
- * holds. Exactly the fields {@link grantsFor}, {@link ceremonyRequiredForAuth}
- * and {@link passwordAuthAllowed} read.
+ * holds. Exactly the fields {@link grantsFor} and {@link passwordAuthAllowed}
+ * read.
  */
 export interface AuthSurfaceSnapshot {
   authPolicy: RemoteAuthPolicy | null
   effectiveAuthPolicy: RemoteAuthPolicy
   passwordBreakGlass: boolean
-  passkeyTailnetExempt: boolean
   /**
    * ADR-054: the step-up tier JOINS the auth surface. It is an admission rule
    * like the others — a connection's tier is snapshotted at authentication, so
@@ -304,7 +271,6 @@ export function authSurfaceChanged(
     before.authPolicy !== after.authPolicy ||
     before.effectiveAuthPolicy !== after.effectiveAuthPolicy ||
     before.passwordBreakGlass !== after.passwordBreakGlass ||
-    before.passkeyTailnetExempt !== after.passkeyTailnetExempt ||
     before.stepUpTier !== after.stepUpTier ||
     before.stepUpMutationIdleMinutes !== after.stepUpMutationIdleMinutes ||
     before.sessionMaxAgeHours !== after.sessionMaxAgeHours ||
@@ -339,9 +305,6 @@ export function describeAuthSurfaceChange(
   if (before.passwordBreakGlass !== after.passwordBreakGlass) {
     parts.push(`break-glass password ${before.passwordBreakGlass ? 'on' : 'off'}→${after.passwordBreakGlass ? 'on' : 'off'}`)
   }
-  if (before.passkeyTailnetExempt !== after.passkeyTailnetExempt) {
-    parts.push(`tailnet exemption ${before.passkeyTailnetExempt ? 'on' : 'off'}→${after.passkeyTailnetExempt ? 'on' : 'off'}`)
-  }
   if (before.stepUpMutationIdleMinutes !== after.stepUpMutationIdleMinutes) {
     parts.push(
       `idle re-check ${before.stepUpMutationIdleMinutes}→${after.stepUpMutationIdleMinutes} min`
@@ -364,7 +327,7 @@ export function describeAuthSurfaceChange(
  * The config write path takes its snapshots from `sanitizedRemoteConfig()`
  * (which is a superset of this shape); the CREDENTIAL write path has no such
  * object, and it needs the same fields — because enrolling the first passkey or
- * revoking the last one moves AUTO between `legacy` and `passkey-always`
+ * revoking the last one moves AUTO between `password` and `passkey-always`
  * without touching the config at all.
  */
 export function readAuthSurface(): AuthSurfaceSnapshot {
@@ -373,7 +336,6 @@ export function readAuthSurface(): AuthSurfaceSnapshot {
     authPolicy: ctx.stored,
     effectiveAuthPolicy: resolveAuthPolicy(ctx),
     passwordBreakGlass: ctx.passwordBreakGlass,
-    passkeyTailnetExempt: ctx.passkeyTailnetExempt,
     // The RAW tier, matching `authPolicy` above: the config path's snapshots
     // come from `sanitizedRemoteConfig()`, which carries the same raw value, so
     // the two producers of this shape must agree on which one it is. The
@@ -492,47 +454,32 @@ export async function withAuthSurfaceReaction<T>(args: {
   return result
 }
 
-/**
- * Does a connection on this origin have to complete the assertion ceremony
- * before it holds anything?
- *
- * Only `passkey-always`, only on a capable origin, only when there is actually a
- * credential to assert with (otherwise the mode would be an unrecoverable
- * lockout the moment the last passkey is revoked while the mode is pinned), and
- * not when the operator has explicitly exempted tailnet identity.
- */
-export function ceremonyRequiredForAuth(args: {
-  policy: RemoteAuthPolicy
-  capableOrigin: boolean
-  credentialCount: number
-  method: 'token' | 'tailnet-identity'
-  passkeyTailnetExempt: boolean
-}): boolean {
-  if (args.policy !== 'passkey-always') return false
-  if (!args.capableOrigin) return false
-  if (args.credentialCount === 0) return false
-  if (args.method === 'tailnet-identity' && args.passkeyTailnetExempt) return false
-  return true
-}
+// `ceremonyRequiredForAuth` is GONE (ADR-056). It answered "does this ambient
+// credential owe a ceremony before it holds anything" for the `token` and
+// `tailnet-identity` methods — and both methods are retired, so the question no
+// longer has a subject. Nothing replaced it: a connection either presents an
+// identity (passkey / password) or it is refused, and `handshakeCeremonyAvailable`
+// in remote-server.ts answers the only surviving question, which is whether a
+// ceremony can run on this origin at all.
 
 /**
  * Is the break-glass PASSWORD accepted as an initial-auth credential on this
  * connection?
  *
- * Under the passkey modes the `passkey-only` toggle (`passwordBreakGlass:false`)
+ * Under `passkey-always` the `passkey-only` toggle (`passwordBreakGlass:false`)
  * turns it off — but ONLY where a passkey is actually possible. On a plain-LAN
  * or tunnel origin the browser has no WebAuthn to offer, so honoring the toggle
- * there would silently reduce those transports to token-only, which is not what
- * "passkey only" means to someone who set it (and is how people lock themselves
- * out). Under `legacy` / `off` the toggle is not consulted at all: those modes
- * are defined as the as-built behavior.
+ * there would leave those transports with NO admission credential at all, which
+ * is not what "passkey only" means to someone who set it (and is how people lock
+ * themselves out). Under the `password` policy there is nothing to prefer over
+ * it, and under `off` nothing is checked at all.
  */
 export function passwordAuthAllowed(args: {
   policy: RemoteAuthPolicy
   capableOrigin: boolean
   passwordBreakGlass: boolean
 }): boolean {
-  if (args.policy === 'legacy' || args.policy === 'off') return true
+  if (args.policy === 'password' || args.policy === 'off') return true
   if (!args.capableOrigin) return true
   return args.passwordBreakGlass
 }
@@ -551,7 +498,7 @@ export function passwordStepUpAllowed(args: {
   credentialCount: number
   passwordBreakGlass: boolean
 }): boolean {
-  if (args.policy === 'legacy' || args.policy === 'off') return true
+  if (args.policy === 'password' || args.policy === 'off') return true
   if (!args.capableOrigin) return true
   // Nothing enrolled ⇒ there is no passkey to demand instead.
   if (args.credentialCount === 0) return true

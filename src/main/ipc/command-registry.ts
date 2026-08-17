@@ -78,16 +78,20 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
 /**
  * How a connection proved who it is. `desktop` is the in-process renderer.
  *
- * ADR-052 adds three: `webauthn` (a completed passkey assertion — the only
- * method that proves a human rather than a cached secret), `enroll-token` (a
- * one-time link that may do nothing but register a credential), and `none`
- * (the `off` policy mode, where authentication is disabled outright and the
- * audit trail must say so rather than implying a credential was checked).
+ * `webauthn` is a completed passkey assertion (the only method that proves a
+ * human rather than a cached secret), `enroll-token` a one-time link that may do
+ * nothing but register a credential, and `none` the `off` policy mode, where
+ * authentication is disabled outright and the audit trail must say so rather
+ * than implying a credential was checked.
+ *
+ * `token` and `tailnet-identity` are GONE (ADR-056). The bearer token was a link
+ * carrying authority; ambient tailnet identity was a network fact standing in
+ * for a person. Neither can authenticate a connection any more, so neither can
+ * appear on an audit row's `method` — what survives of the tailnet login is the
+ * `label`, which a password connection on the serve origin still carries.
  */
 export type IdentityMethod =
-  | 'token'
   | 'password'
-  | 'tailnet-identity'
   | 'webauthn'
   | 'enroll-token'
   | 'none'
@@ -192,16 +196,24 @@ export interface CommandConnection {
 export const ALL_GRANTS: ReadonlySet<Capability> = new Set<Capability>(CAPABILITIES)
 
 /**
- * Grant set for remote connections under the `legacy` auth policy — i.e. the
- * ONLY set phase 1 issues. It is chosen to reproduce the as-built remote
- * surface EXACTLY: every channel `remote-handlers.ts` registers today declares
- * one of these five, and every channel the old denylist blocked declares
- * `shell`, `admin` or `host` (see {@link PINNED_CAPABILITIES}).
+ * The BASE remote surface — the set a connection admitted under the `off`
+ * master switch holds, and the floor every ordinary remote connection stands on.
  *
- * `shell` arrives in phase 2 behind opt-in + step-up (ADR-052 decision 6);
- * `admin`/`host` are desktop/console surfaces.
+ * It reproduces the as-built remote surface EXACTLY: every channel
+ * `remote-handlers.ts` registers declares one of these five, and every channel
+ * the old denylist blocked declares `shell`, `admin` or `host` (see
+ * {@link PINNED_CAPABILITIES}).
+ *
+ * Deliberately NOT `admin`/`enroll` under `off`: enrolling a credential while
+ * authentication is disabled would let any reachable client mint itself a
+ * permanent one, and the settings session stays unreachable for the same reason.
+ * `shell` costs the desktop opt-in plus a step-up; `admin`/`host` are
+ * desktop/console surfaces.
+ *
+ * Named `AUTH_OFF_GRANTS` since ADR-056 — it was `LEGACY_REMOTE_GRANTS`, after a
+ * policy mode that no longer exists. The MEMBERS are unchanged.
  */
-export const LEGACY_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>([
+export const AUTH_OFF_GRANTS: ReadonlySet<Capability> = new Set<Capability>([
   'chat',
   'session-config',
   'config',
@@ -210,25 +222,34 @@ export const LEGACY_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>
 ])
 
 /**
- * Grant set for a connection that proved a HUMAN: a completed passkey assertion
- * (ADR-052 decision 1) or the break-glass password under a passkey policy.
+ * Grant set for a connection that presented a real IDENTITY: a completed passkey
+ * assertion (ADR-052 decision 1) or the break-glass password.
  *
- * The legacy set plus `admin` and `enroll`. `admin` is safe to grant over
- * remote because reachability is still `registered for the remote transport AND
+ * The base set plus `admin` and `enroll`. `admin` is safe to grant over remote
+ * because reachability is still `registered for the remote transport AND
  * capability ∈ grants`: the `admin` channels that must never be remote —
  * `remote:set-config` (which owns the policy column and the terminal toggle),
- * `remote:set-password`, `remote:force-reserve`, `account:*`, `auth:*` — are
- * raw desktop `ipcMain.handle` wiring and have no remote registration at all.
- * What `admin` actually reaches over remote is the credential-management verbs
- * this phase adds, which is the point: managing your passkeys from your phone.
+ * `remote:set-password`, `remote:force-reserve` — are raw desktop
+ * `ipcMain.handle` wiring and have no remote registration at all. What `admin`
+ * actually reaches over remote is the credential-management and settings verbs,
+ * which is the point: administering your own server from your phone.
+ *
+ * ADR-056 made the PASSWORD carry this set under every non-`off` policy, where
+ * it previously kept the base set under `legacy`. Withholding `enroll` from a
+ * password login was already theatre once it held `admin`:
+ * `webauthn:mint-enroll-token` is an `admin` verb, so an admin-holding password
+ * client could always mint its own enrollment link. The "first device requires
+ * the anchor" property survives via the POLICY DEFAULT rather than via grant
+ * surgery — with zero credentials AND no password provisioned, nothing can
+ * connect at all except an enrollment link.
  *
  * NOT `shell`: raw terminal still costs the desktop opt-in plus a step-up, and a
  * passkey at connect time is not the same evidence as a passkey ten minutes into
  * a session (ADR-052 decision 5 — decay applies in `passkey-always` too).
  * NOT `host`: there is no host shell to reach from a phone.
  */
-export const PASSKEY_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>([
-  ...LEGACY_REMOTE_GRANTS,
+export const FULL_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>([
+  ...AUTH_OFF_GRANTS,
   'admin',
   'enroll'
 ])
@@ -273,7 +294,7 @@ export function desktopConnection(): CommandConnection {
 export function makeRemoteConnection(
   method: Exclude<IdentityMethod, 'desktop'>,
   login: string | null,
-  grants: ReadonlySet<Capability> = LEGACY_REMOTE_GRANTS,
+  grants: ReadonlySet<Capability> = AUTH_OFF_GRANTS,
   opts?: {
     connectionId?: string
     webauthnOrigin?: { rpId: string; origin: string } | null
@@ -364,22 +385,36 @@ interface Declaration {
  * `register()` refuses any registration that contradicts the pin.
  *
  * Every entry resolves to `host`, `shell`, `admin` or `enroll` — none of which
- * are in {@link LEGACY_REMOTE_GRANTS} — so registering any of them for the
- * remote transport cannot make it reachable to a token/tailnet connection.
- * Channels not yet ported to the registry (`window:*`, `app:*` and `remote:*`
- * in main/index.ts, `terminal:*` in terminal.ipc.ts) are pinned here in
- * advance, so they arrive correctly classified whenever those files are ported.
+ * are in {@link AUTH_OFF_GRANTS} — so registering any of them for the remote
+ * transport cannot make it reachable to an auth-off connection. Channels not yet
+ * ported to the registry (`window:*`, `app:*` and `remote:*` in main/index.ts,
+ * `terminal:*` in terminal.ipc.ts) are pinned here in advance, so they arrive
+ * correctly classified whenever those files are ported.
  *
  * **What ADR-052 changed about this table's guarantee, stated honestly.**
  * Before passkeys, `admin` was ungrantable over remote FULL STOP, so a pin to
  * `admin` was equivalent to "unreachable remotely". A passkey-authenticated
- * connection now holds `admin` ({@link PASSKEY_REMOTE_GRANTS}), so the pin's
+ * connection now holds `admin` ({@link FULL_REMOTE_GRANTS}), so the pin's
  * remaining guarantee is the narrower — and still load-bearing — one: a pinned
  * channel can never be RECLASSIFIED into a capability the base grant set holds.
  * The channels that must stay desktop-only are kept so by the OTHER half of the
  * reachability rule (they have no remote registration at all: `remote:*`,
  * `auth:*`, `account:*` and `window:*` are raw `ipcMain.handle` wiring in
  * boot-core.ts / index.ts). `remote-handlers.ipc.test.ts` pins that absence.
+ *
+ * **What ADR-056 changed.** `admin` shrank to EXACTLY the session-security area
+ * — the `authcfg:*` and `webauthn:*` families, plus their host-anchor twin
+ * `remote:*`. The engine-vendor channels that used to sit here (`auth:*`,
+ * `account:*`, `usage:refresh-prices`, and the unpinned `shared-provider:*` /
+ * `vendor-auth:*`) declare `config` now and are therefore GONE from this table
+ * rather than re-pinned: `config` is in the base grant set, and a pin whose
+ * capability is grantable would break this table's one guarantee. What keeps
+ * them desktop-only is their registration, which is where it always actually
+ * was. `log-viewer:*` and `automation:*` keep their forward pins — they are not
+ * registered anywhere yet, and whether the S1b port exposes them (and under
+ * which capability) is that series' decision, so freezing them at the
+ * fail-closed value is the conservative placeholder, not a claim that they are
+ * session security.
  */
 export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // Host shell surfaces (window controls, native pickers, editor launch, quit).
@@ -393,7 +428,7 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // Raw shell — reachable over remote as of phase 2, but ONLY behind the
   // desktop opt-in toggle + a stepped-up, decaying `shell` grant (ADR-052
   // decision 6). The pin still does its job: `shell` is not in
-  // LEGACY_REMOTE_GRANTS, so authenticating never suffices on its own.
+  // AUTH_OFF_GRANTS, so authenticating never suffices on its own.
   'terminal:create': 'shell',
   'terminal:write': 'shell',
   'terminal:resize': 'shell',
@@ -401,17 +436,12 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'terminal:kill-by-cwd': 'shell',
   'terminal:attach': 'shell',
   'terminal:detach': 'shell',
-  // Native OAuth: local browser + loopback listener (ADR-014).
-  'auth:sign-in': 'admin',
-  'auth:submit-code': 'admin',
-  'auth:cancel': 'admin',
-  // Account mutations open local browsers / touch local credential files (ADR-015).
-  'account:set-enabled': 'admin',
-  'account:add': 'admin',
-  'account:switch': 'admin',
-  'account:delete': 'admin',
-  // Spawns a local opencode server.
-  'usage:refresh-prices': 'admin',
+  // `auth:*` (native OAuth), `account:*` and `usage:refresh-prices` were pinned
+  // to `admin` here until ADR-056 shrank `admin` to the session-security area.
+  // They declare `config` now, which is grantable, so a pin would be a
+  // contradiction rather than a guarantee — see the doc comment. They are still
+  // desktop-only, by the registration half of the reachability rule.
+  //
   // Host diagnostics surface: a SEPARATE BrowserWindow with its own preload,
   // reading the process log ring. Pinned to `admin` ahead of the port (SyncCore
   // phase 4a item 3 closed the EVENT side of this residual — `log-viewer:*`
@@ -432,7 +462,7 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   //
   // The read channels (`automation:list`, `-list-runs`, `-load-run-history`) are
   // deliberately NOT pinned: they would declare `config`, which IS in
-  // LEGACY_REMOTE_GRANTS, and a pin whose capability is grantable would break
+  // AUTH_OFF_GRANTS, and a pin whose capability is grantable would break
   // this table's one guarantee (see the doc comment). Whether reads are exposed
   // is a policy decision for the port, not something to freeze in advance.
   'automation:save': 'admin',
@@ -453,15 +483,27 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'remote:force-reserve': 'admin',
   // Passkeys (ADR-052). Registered for real — unlike most of this table — and
   // pinned because a misclassification here is precisely the silent widening the
-  // pin exists to stop: `webauthn:revoke` reclassified as `config` would let a
-  // plain token connection delete the operator's passkeys, and
+  // pin exists to stop: `webauthn:revoke` reclassified as `config` would let any
+  // authenticated connection delete the operator's passkeys, and
   // `webauthn:register-verify` as `config` would let one enroll its own.
   'webauthn:register-options': 'enroll',
   'webauthn:register-verify': 'enroll',
   'webauthn:credentials': 'admin',
   'webauthn:rename': 'admin',
   'webauthn:revoke': 'admin',
-  'webauthn:mint-enroll-token': 'admin'
+  'webauthn:mint-enroll-token': 'admin',
+  // The settings-editing surface (ADR-054 §6), pinned by ADR-056 alongside its
+  // `webauthn:*` sibling now that `admin` means exactly these two families. The
+  // hole this closes is the same one: `authcfg:apply` reclassified as `config`
+  // would let any authenticated connection rewrite the auth surface, and
+  // `authcfg:lan-link` as `config` would hand out the LAN channel key. Both are
+  // registered for BOTH transports, so a misclassification would be reachable.
+  'authcfg:get': 'admin',
+  'authcfg:apply': 'admin',
+  'authcfg:end': 'admin',
+  'authcfg:set-password': 'admin',
+  'authcfg:lan-link': 'admin',
+  'authcfg:rotate-lan-key': 'admin'
 }
 
 // ---------------------------------------------------------------------------

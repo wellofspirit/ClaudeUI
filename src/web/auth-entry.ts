@@ -6,12 +6,20 @@ export interface PasswordParams {
   kdf: RemoteKdfParams
 }
 
-/** Which entry screen (or automatic connect) `/remote/auth-info` calls for. */
+/**
+ * Which entry screen `/remote/auth-info` calls for.
+ *
+ * The `'tailnet'` route is GONE (ADR-056). It meant "the server already
+ * recognises this browser as the node owner, so connect with an empty
+ * credential" — ambient admission, which is exactly what that ADR retires. A
+ * tailnet browser now takes the same two routes as any other: the passkey screen
+ * where a credential is enrolled, the password form otherwise. What is left of
+ * `info.identity.login` is a username hint the server records; it decides
+ * nothing here.
+ */
 export type AuthEntryRoute =
   /** The server speaks a protocol this bundle does not know. */
   | 'unsupported'
-  /** `tailscale serve` already recognises this browser as the node owner. */
-  | 'tailnet'
   /** Lead with the one-tap passkey screen. */
   | 'passkey'
   /** Collect a password (or reuse a cached proof). */
@@ -55,22 +63,16 @@ export function decideAuthEntry(info: RemoteAuthInfo): AuthEntryDecision {
       ? { saltHex: info.password.saltHex, kdf: info.password.kdf }
       : null
 
-  // Tailnet identity (Phase 3). A non-null `login` means the server already
-  // recognises THIS browser as the node owner from the `tailscale serve`
-  // identity headers, so there is no credential to collect — connect with an
-  // empty credential and let the server's unsolicited auth-response drive the
-  // rest. A null `login` (advertised but not us — a tagged device, a colleague,
-  // or a request that did not come through serve) falls through to the password
-  // flow, which is exactly what such a caller needs.
-  if (info.methods?.includes('tailnet-identity') && info.identity?.login) {
-    return { route: 'tailnet', passwordParams, passkeyAdvertised }
-  }
+  // `info.identity.login` is deliberately NOT branched on (ADR-056): ambient
+  // tailnet identity is a username hint, and a hint is not a way in. The two
+  // routes below are the only ones there are, on every origin.
+  //
   // Passkey-first (ADR-052). An advertisement means ≥1 credential is enrolled
   // AND this Host can do WebAuthn, so a one-tap sign-in is the right lead. The
   // POLICY is deliberately not advertised, so this cannot know whether the
   // server will actually accept a ceremony — if it refuses
-  // (`passkey-unavailable` under `legacy`), the rejection path drops back to
-  // the password form, which is why the params are captured either way.
+  // (`passkey-unavailable`), the rejection path drops back to the password form,
+  // which is why the params are captured either way.
   if (passkeyAdvertised) {
     return { route: 'passkey', passwordParams, passkeyAdvertised }
   }

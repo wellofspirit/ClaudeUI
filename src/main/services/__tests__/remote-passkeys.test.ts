@@ -178,7 +178,7 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     shellGrantIdleMinutes: 10,
     authPolicy: null,
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
+    lanE2eKey: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
@@ -472,7 +472,9 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
       disconnectAuthSurfaceClients: (opts?: { exceptConnectionId?: string }) =>
         server.disconnectAuthSurfaceClients(opts),
       disconnectPasswordClients: () => server.disconnectPasswordClients(),
-      resnapshotConnection: (id: string) => server.resnapshotConnection(id)
+      resnapshotConnection: (id: string) => server.resnapshotConnection(id),
+      lanLink: () => server.lanLink(),
+      rotateLanKey: () => server.rotateLanKey()
     }
     registerRemoteHandlers(
       dispatcherRef,
@@ -492,17 +494,29 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   // legacy — zero regression
   // -------------------------------------------------------------------------
 
-  it('legacy: a token authenticates as-built even with a passkey enrolled', async () => {
-    await boot('legacy')
-    await enroll()
+  // The `legacy` MODE is retired (ADR-056), and with it the state these two
+  // cases described: "a credential is enrolled and yet no ceremony is owed" is
+  // no longer expressible, because the only thing that suppressed the ceremony
+  // was a pinned mode whose meaning (the as-built token stack) is gone.
+  //
+  // What survives is the property underneath — a ceremony is only available
+  // where one could actually succeed — restated against AUTO's zero-credential
+  // answer.
+
+  it('password policy: the break-glass password authenticates and carries the FULL set', async () => {
+    // ADR-056's grant collapse at the socket: under AUTO with nothing enrolled
+    // the password is the whole admission, and it holds `admin`+`enroll` rather
+    // than the old base-only `legacy` bundle. RED before the collapse.
+    await boot(null)
     const client = await connect()
-    client.send({ type: 'auth', token: server.getStatus().token })
-    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
+    // `admin` reaches the settings READ (free, no session needed).
+    await expect(invoke(client, 'authcfg:get')).resolves.toMatchObject({ authPolicy: null })
   })
 
-  it('legacy: the ceremony is refused outright — no ceremony anywhere', async () => {
-    await boot('legacy')
-    await enroll()
+  it('password policy: the ceremony is refused outright — there is nothing to assert with', async () => {
+    await boot(null)
     const client = await connect()
     client.send({ type: 'auth-webauthn-start' })
     expect(await client.waitFor('auth-response')).toMatchObject({
@@ -516,18 +530,21 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   // AUTO resolution
   // -------------------------------------------------------------------------
 
-  it('AUTO with no credential is legacy: a token just works', async () => {
+  it('AUTO with no credential is password-gated: the break-glass password just works', async () => {
     await boot(null)
     const client = await connect()
-    client.send({ type: 'auth', token: server.getStatus().token })
-    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
   })
 
   it('AUTO flips to passkey-always as soon as a credential exists', async () => {
-    await boot(null)
+    // Break-glass OFF, so the flip is observable: with it on (the default) the
+    // password is still accepted under `passkey-always`, which is the point of
+    // break-glass and not a failure of the flip.
+    await boot(null, { passwordBreakGlass: false })
     await enroll()
     const client = await connect()
-    client.send({ type: 'auth', token: server.getStatus().token })
+    client.send({ type: 'auth', pwProof: PROOF })
     expect(await client.waitFor('auth-response')).toMatchObject({
       ok: false,
       error: 'passkey-required',
@@ -539,12 +556,16 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   // passkey-always handshake
   // -------------------------------------------------------------------------
 
-  it('refuses a VALID token with passkey-required and keeps the socket open for the ceremony', async () => {
-    await boot('passkey-always')
+  it('refuses a NON-PASSKEY credential with passkey-required and keeps the socket open for the ceremony', async () => {
+    // Was "a VALID token"; the token is retired (ADR-056), so the credential
+    // that is refused here is the break-glass password with the passkey-only
+    // toggle set. The property is unchanged and is the reason the socket is not
+    // closed: it is the socket the ceremony has to run on.
+    await boot('passkey-always', { passwordBreakGlass: false })
     const device = await enroll('Work phone')
     const client = await connect()
 
-    client.send({ type: 'auth', token: server.getStatus().token })
+    client.send({ type: 'auth', pwProof: PROOF })
     expect(await client.waitFor('auth-response')).toMatchObject({
       ok: false,
       error: 'passkey-required'
@@ -568,15 +589,20 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
   })
 
-  it('rejects an INVALID token before it can learn that a passkey would work', async () => {
+  it('IGNORES a token field entirely — a stale bundle is answered, never admitted', async () => {
+    // The no-compat-lane ruling as a behaviour (ADR-056): the field is not read,
+    // so `{type:'auth', token}` is a frame with NO credential and gets the
+    // ordinary ceremony prompt for this origin. RED before ADR-056, where this
+    // reached the token comparator and answered 'Invalid token'.
     await boot('passkey-always')
     await enroll()
     const client = await connect()
     client.send({ type: 'auth', token: 'ff'.repeat(32) })
     const response = await client.waitFor('auth-response')
-    expect(response).toMatchObject({ ok: false, error: 'Invalid token' })
-    expect(response.error).not.toBe('passkey-required')
-    expect(await client.waitForClose()).toBe(4001)
+    expect(response).toMatchObject({ ok: false, error: 'passkey-required' })
+    // …and the socket stays open, because that IS the ceremony prompt.
+    expect(client.ws.readyState).toBe(WebSocket.OPEN)
+    expect(server.getStatus().connectedClients).toBe(0)
   })
 
   it('grants the passkey set — admin + enroll on top of the as-built surface', async () => {
@@ -669,40 +695,34 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
   })
 
-  it('an EXEMPT tailnet owner authenticates WITH the legacy grant set, not an empty one', async () => {
-    // The regression this guards: `ceremonyRequiredForAuth` honoured the
-    // exemption (so the connection was ACCEPTED) while `grantsFor` did not (so
-    // it was accepted holding EMPTY_GRANTS) — authenticated, and then refused on
-    // literally every invoke. The end-to-end shape is the point: an auth-response
-    // alone would have passed against the broken code.
-    await boot('passkey-always', { passkeyTailnetExempt: true })
+  // The TAILNET EXEMPTION is gone (ADR-056) along with the ambient admission it
+  // exempted from, and so is the drift it used to guard: `grantsFor` no longer
+  // re-decides admission at all, so "accepted holding EMPTY_GRANTS" is not a
+  // state that can be spelled. What replaces the case is its opposite —
+  // ambient identity does not admit ANYBODY, exemption or not.
+  it('an identified tailnet owner is NOT admitted ambiently, and needs a real credential', async () => {
+    await boot('passkey-always')
     forceServeUp(OWNER_LOGIN)
     await enroll()
     const client = await connectWith(tailnetHeaders(OWNER_LOGIN))
 
+    // Silence, not an accept: the headers are a hint.
+    client.send({ type: 'auth' })
     expect(await client.waitFor('auth-response')).toMatchObject({
-      ok: true,
-      method: 'tailnet-identity',
-      identity: { login: OWNER_LOGIN }
+      ok: false,
+      error: 'passkey-required'
     })
-    // A legacy-capability dispatch must actually SUCCEED.
-    await expect(invoke(client, 'terminal:availability')).resolves.toMatchObject({
-      allowed: false,
-      granted: false
-    })
-    // The exemption is a convenience over ambient identity, NOT a ceremony — so
-    // it must not confer the passkey set.
-    await expect(invoke(client, 'webauthn:credentials')).rejects.toThrow(/Permission denied/)
-    await expect(invoke(client, 'webauthn:register-options')).rejects.toThrow(/Permission denied/)
+    expect(server.getStatus().connectedClients).toBe(0)
   })
 
-  it('a pinned passkey-always with ZERO credentials still lets a token in with real grants', async () => {
-    // Same bug class as the exemption: the connection IS accepted (there is no
-    // passkey to demand), so it must not be accepted empty-handed.
+  it('a pinned passkey-always with ZERO credentials still lets the password in with real grants', async () => {
+    // The escape hatch: pinning the mode with nothing enrolled must not brick
+    // access, because there is no passkey to demand. The connection IS accepted,
+    // so it must not be accepted empty-handed.
     await boot('passkey-always')
     const client = await connect()
-    client.send({ type: 'auth', token: server.getStatus().token })
-    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
     await expect(invoke(client, 'terminal:availability')).resolves.toMatchObject({
       allowed: false
     })
@@ -712,20 +732,23 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   // The authentication moment is the FRAME, not the socket
   // -------------------------------------------------------------------------
 
-  it('judges a token against the policy in force when it ARRIVES, not at socket-open', async () => {
-    // The pre-auth window is up to 10 s wide. A socket that opened under
-    // `legacy` and presents its token after the operator has tightened the
-    // policy must be judged by the new rules — otherwise the flip has a hole in
-    // it exactly as wide as the handshake, and the socket that slips through
-    // holds LEGACY grants that nothing will revoke (the auth-surface disconnect
-    // only reaches sockets that are already authenticated).
-    await boot('legacy')
-    await enroll() // a passkey exists, so the flip below can actually bite
+  it('judges a credential against the policy in force when it ARRIVES, not at socket-open', async () => {
+    // The pre-auth window is up to 10 s wide. A socket that opened while no
+    // ceremony was owed and presents its password after the rules tightened must
+    // be judged by the NEW rules — otherwise the flip has a hole in it exactly as
+    // wide as the handshake, and the socket that slips through holds grants
+    // nothing will revoke (the auth-surface disconnect only reaches sockets that
+    // are already authenticated).
+    //
+    // The tightening is now an ENROLMENT rather than a mode pin: with `legacy`
+    // retired, AUTO's own flip (zero credentials ⇒ `password`, one ⇒
+    // `passkey-always`) is the sharpest version of this — nobody writes a
+    // setting at all, and break-glass is off so the password stops being enough.
+    await boot(null, { passwordBreakGlass: false })
+    const client = await connect() // …snapshot taken here says `password`…
+    await enroll() // …and this flips AUTO to `passkey-always`.
 
-    const client = await connect() // …snapshot taken here says `legacy`…
-    remoteConfigRef.current = makeConfigRow({ authPolicy: 'passkey-always' })
-
-    client.send({ type: 'auth', token: server.getStatus().token })
+    client.send({ type: 'auth', pwProof: PROOF })
     expect(await client.waitFor('auth-response')).toMatchObject({
       ok: false,
       error: 'passkey-required'
@@ -733,25 +756,26 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   })
 
   it('…and judges it unchanged when nothing flipped (the inverse no-op)', async () => {
-    await boot('legacy')
-    await enroll()
+    await boot(null, { passwordBreakGlass: false })
     const client = await connect()
-    client.send({ type: 'auth', token: server.getStatus().token })
-    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
   })
 
   it('a LOOSENING flip mid-handshake is honoured too', async () => {
     // Same property in the other direction: a socket that opened while a
-    // ceremony was required must not be forced through one the operator has
-    // just switched off.
-    await boot('passkey-always')
+    // ceremony was required must not be forced through one that is no longer
+    // owed — here because the last credential was revoked under it, which is
+    // exactly what AUTO answers to.
+    await boot('passkey-always', { passwordBreakGlass: false })
     await enroll()
     const client = await connect()
-    remoteConfigRef.current = makeConfigRow({ authPolicy: 'legacy' })
+    remoteConfigRef.current = makeConfigRow({ authPolicy: null, passwordBreakGlass: false })
+    credentialRows.clear()
 
-    client.send({ type: 'auth', token: server.getStatus().token })
-    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
-    // …and it holds the real legacy surface, not an empty set.
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
+    // …and it holds a real surface, not an empty set.
     await expect(invoke(client, 'terminal:availability')).resolves.toMatchObject({
       allowed: false
     })
@@ -769,7 +793,7 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
 
     client.send({ type: 'auth-webauthn-start' })
     const challenge = await client.waitFor('auth-webauthn-challenge')
-    remoteConfigRef.current = makeConfigRow({ authPolicy: 'legacy' })
+    remoteConfigRef.current = makeConfigRow({ authPolicy: null })
     client.send({
       type: 'auth-webauthn-finish',
       assertion: device.authenticate({
@@ -814,8 +838,11 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   // Non-capable origin (the as-built half of the matrix)
   // -------------------------------------------------------------------------
 
-  it('a LAN-IP Host keeps the as-built methods even under passkey-always', async () => {
-    await boot('passkey-always')
+  it('a loopback Host keeps the PASSWORD even under passkey-always + passkey-only', async () => {
+    // `passwordAuthAllowed` deliberately ignores the passkey-only toggle where a
+    // passkey is impossible: honouring it there would leave that origin with NO
+    // admission credential at all, which is how people lock themselves out.
+    await boot('passkey-always', { passwordBreakGlass: false })
     await enroll()
     // Connect with the loopback Host: not a WebAuthn-capable origin.
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
@@ -825,12 +852,12 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
       ws.once('open', () => resolve())
       ws.once('error', reject)
     })
-    ws.send(JSON.stringify({ type: 'auth', token: server.getStatus().token }))
+    ws.send(JSON.stringify({ type: 'auth', pwProof: PROOF }))
     const deadline = Date.now() + 3000
     for (;;) {
       const found = frames.find((f) => f.type === 'auth-response')
       if (found) {
-        expect(found).toMatchObject({ ok: true, method: 'token' })
+        expect(found).toMatchObject({ ok: true, method: 'password' })
         break
       }
       if (Date.now() > deadline) throw new Error('no auth-response')
@@ -858,22 +885,26 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   // alone cannot carry that — under `off` an owner's phone on the tailnet is
   // accepted at CONNECTION time as `tailnet-identity`, so the single most
   // common client would see no warning at all while all auth is disabled.
-  it('off: EVERY accept carries authDisabled, whatever the method (GUARD)', async () => {
+  it('off: EVERY accept carries authDisabled, keyed on the POLICY not the method (GUARD)', async () => {
     await boot('off')
     forceServeUp(OWNER_LOGIN)
 
-    // The case that was silently unwarned: ambient tailnet identity.
+    // A tailnet-identified socket. Under `off` it lands as `none` like anything
+    // else — the mode short-circuits before any credential is looked at — and it
+    // is exactly the client that most needs the warning.
     const tailnet = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    tailnet.send({ type: 'auth' })
     expect(await tailnet.waitFor('auth-response')).toMatchObject({
       ok: true,
-      method: 'tailnet-identity',
+      method: 'none',
       authDisabled: true
     })
 
-    // ...and the bare frame that `off` also accepts.
-    const bare = await connect()
-    bare.send({ type: 'auth' })
-    expect(await bare.waitFor('auth-response')).toMatchObject({
+    // ...and a socket presenting a real credential is not spared it either: the
+    // flag says what the SERVER is doing, not what this client offered.
+    const withProof = await connect()
+    withProof.send({ type: 'auth', pwProof: PROOF })
+    expect(await withProof.waitFor('auth-response')).toMatchObject({
       ok: true,
       method: 'none',
       authDisabled: true
@@ -881,11 +912,18 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   })
 
   it('the flag is absent once authentication is back on', async () => {
-    await boot('legacy')
+    await boot(null)
     forceServeUp(OWNER_LOGIN)
     const client = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    // The tailnet headers no longer ADMIT anyone (ADR-056) — they only supply
+    // the login hint that rides the accept below.
+    client.send({ type: 'auth', pwProof: PROOF })
     const response = await client.waitFor('auth-response')
-    expect(response).toMatchObject({ ok: true, method: 'tailnet-identity' })
+    expect(response).toMatchObject({
+      ok: true,
+      method: 'password',
+      identity: { login: OWNER_LOGIN }
+    })
     // Absent, not `false`: a client keying on presence must never see a stale
     // warning, and an older client that ignores the field is unaffected.
     expect(response).not.toHaveProperty('authDisabled')
@@ -1040,9 +1078,9 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
   })
 
-  it('enroll intent with a BAD token is refused, not silently tailnet-accepted', async () => {
-    // Opting out of ambient identity is fail-closed: the flag can only ever cost
-    // the caller the authentication it just declined.
+  it('enroll intent with a BAD token is refused', async () => {
+    // Fail-closed, as it always was — and with ambient admission retired
+    // (ADR-056) there is no longer an accept for it to fall back INTO either.
     await boot(null)
     forceServeUp(OWNER_LOGIN)
 
@@ -1052,18 +1090,23 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     expect(await client.waitForClose()).toBe(4001)
   })
 
-  it('NO intent flag: the unsolicited tailnet accept still fires (zero-regression pin)', async () => {
+  it('NO intent flag: an enrollment link works identically without it (ADR-056)', async () => {
+    // The flag existed to decline the unsolicited tailnet accept that would
+    // otherwise win the race and leave a first device's link unspent. There is
+    // no such accept any more, so the flag is inert — and this pins that its
+    // absence costs an enrollment link nothing.
     await boot(null)
     forceServeUp(OWNER_LOGIN)
+    const { token } = server.mintEnrollToken()
     const client = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    client.send({ type: 'auth', enrollToken: token })
     expect(await client.waitFor('auth-response')).toMatchObject({
       ok: true,
-      method: 'tailnet-identity',
-      identity: { login: OWNER_LOGIN }
+      method: 'enroll-token'
     })
   })
 
-  it('under passkey-always (unexempt) the flag is a no-op — the ceremony was already owed', async () => {
+  it('under passkey-always the flag is a no-op — the ceremony was already owed', async () => {
     await boot('passkey-always')
     await enroll()
     forceServeUp(OWNER_LOGIN)
@@ -1121,12 +1164,12 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
 
   it('first-device enrollment: AUTO flips, bystanders drop, the ACTOR survives and upgrades', async () => {
     // The whole interplay in one socket-level flow.
-    await boot(null) // AUTO with nothing enrolled ⇒ effective `legacy`
+    await boot(null) // AUTO with nothing enrolled ⇒ effective `password`
 
     // A bystander admitted under the OLD rules.
     const bystander = await connect()
-    bystander.send({ type: 'auth', token: server.getStatus().token })
-    expect(await bystander.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
+    bystander.send({ type: 'auth', pwProof: PROOF })
+    expect(await bystander.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
 
     // The first device arrives on a one-time enrollment link.
     const { token } = server.mintEnrollToken()
@@ -1160,10 +1203,11 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   })
 
   it('the enroll upgrade holds ADMIN on the same socket (fresh snapshot, not connect-time)', async () => {
-    // Gap 2 in isolation: the connection authenticated under effective-`legacy`
-    // (zero credentials), and `grantsFor('webauthn', 'legacy')` is the LEGACY
-    // set. Only re-snapshotting at the upgrade — a re-authentication moment —
-    // yields the passkey set.
+    // Gap 2 in isolation: the connection authenticated under effective-`password`
+    // (zero credentials) with the `enroll`-ONLY bundle. Only re-snapshotting at
+    // the upgrade — a re-authentication moment — yields the full set. ADR-056's
+    // grant collapse removed the policy from `grantsFor`, but not the need to
+    // re-derive the grants from the new METHOD once the socket has one.
     await boot(null)
     const { token } = server.mintEnrollToken()
     const actor = await connect()
@@ -1394,18 +1438,23 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     })
   })
 
-  // ADR-054 retired `passkey-for-grants` as a mode; the behavior it named is
-  // `legacy` login + the default `medium` tier, which is exactly what this now
-  // exercises (and what migration v12 rewrites stored rows to).
-  it('legacy + medium tier: the base connection is as-built, the step-up is the ceremony', async () => {
-    await boot('legacy', { allowTerminal: true })
+  // ADR-054 retired `passkey-for-grants` as a mode; what it named is an ordinary
+  // login plus the default `medium` tier, which is what this exercises. ADR-056
+  // then removed the "and the base connection holds only the as-built set" half
+  // — a password login carries the FULL bundle now — so the surviving property
+  // is the step-up itself: the terminal costs a ceremony that connecting did not.
+  it('password login + medium tier: the terminal still costs the ceremony', async () => {
+    await boot(null, { allowTerminal: true })
     const device = await enroll()
     const client = await connect()
 
-    // Base auth: as-built token, as-built grants.
-    client.send({ type: 'auth', token: server.getStatus().token })
-    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'token' })
-    await expect(invoke(client, 'webauthn:credentials')).rejects.toThrow(/Permission denied/)
+    // Base auth. The passkey exists, so AUTO says `passkey-always` and
+    // break-glass (on by default) is what lets the password through.
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
+    // It holds `admin` since the collapse — but NOT `shell`, which is the point.
+    await expect(invoke(client, 'webauthn:credentials')).resolves.toHaveLength(1)
+    await expect(invoke(client, 'terminal:create', '/tmp/x')).rejects.toThrow('needs-step-up')
 
     // Step-up with the passkey arms `shell`.
     client.frames.length = 0
@@ -1429,40 +1478,46 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   it('drops EVERY remote client when the auth surface changes, whatever their method', async () => {
     // The connection's policy/grants/origin-capability are snapshotted at
     // authentication time, so a tightened policy reaches an existing socket only
-    // by ending it. Every method is dropped — a `passkey-always` flip is aimed at
-    // token and tailnet connections above all, so dropping only `password` ones
-    // (the credential-change precedent) would miss its whole audience.
-    await boot('legacy')
+    // by ending it. EVERY method is dropped, not just the one whose credential
+    // moved — the credential-change precedent (4008 to password clients) is
+    // deliberately narrower, and using it here would miss the flip's audience.
+    //
+    // Since ADR-056 the methods that can be on a socket at once are `password`
+    // (with and without a tailnet login hint) and `webauthn`; the token and
+    // ambient-tailnet ones are retired.
+    await boot('passkey-always')
+    const device = await enroll()
     forceServeUp(OWNER_LOGIN)
-
-    const tokenClient = await connect()
-    tokenClient.send({ type: 'auth', token: server.getStatus().token })
-    expect(await tokenClient.waitFor('auth-response')).toMatchObject({ ok: true })
 
     const passwordClient = await connect()
     passwordClient.send({ type: 'auth', pwProof: PROOF })
     expect(await passwordClient.waitFor('auth-response')).toMatchObject({ ok: true })
 
-    const tailnetClient = await connectWith(tailnetHeaders(OWNER_LOGIN))
-    expect(await tailnetClient.waitFor('auth-response')).toMatchObject({
+    const hintedClient = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    hintedClient.send({ type: 'auth', pwProof: PROOF })
+    expect(await hintedClient.waitFor('auth-response')).toMatchObject({
       ok: true,
-      method: 'tailnet-identity'
+      method: 'password',
+      identity: { login: OWNER_LOGIN }
     })
+
+    const passkeyClient = await connect()
+    expect(await ceremony(passkeyClient, device)).toMatchObject({ ok: true, method: 'webauthn' })
     expect(server.getStatus().connectedClients).toBe(3)
 
     server.disconnectAuthSurfaceClients()
 
     for (const [name, c] of [
-      ['token', tokenClient],
       ['password', passwordClient],
-      ['tailnet', tailnetClient]
+      ['tailnet-hinted password', hintedClient],
+      ['passkey', passkeyClient]
     ] as const) {
       expect(await closeCodeWithin(c, 2000), name).toBe(4009)
     }
   })
 
   it('is a no-op with nobody connected', async () => {
-    await boot('legacy')
+    await boot(null)
     expect(() => server.disconnectAuthSurfaceClients()).not.toThrow()
   })
 

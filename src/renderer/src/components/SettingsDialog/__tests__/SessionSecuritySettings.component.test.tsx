@@ -29,7 +29,7 @@ const baseConfig: RemoteConfig = {
   effectiveAuthPolicy: 'passkey-always',
   credentialCount: 1,
   passwordBreakGlass: true,
-  passkeyTailnetExempt: false,
+
   stepUpTier: 'medium',
   effectiveStepUpTier: 'medium',
   stepUpMutationIdleMinutes: 60,
@@ -94,7 +94,7 @@ describe('SessionSecuritySettings', () => {
   afterEach(cleanup)
 
   describe('1. view (the default)', () => {
-    it('summarises the six facts and mounts NO inputs at all', () => {
+    it('summarises the auth surface and mounts NO inputs at all', () => {
       renderPane()
       const root = screen.getByTestId('SessionSecuritySettings')
       expect(root).toHaveAttribute('data-state', 'view')
@@ -114,7 +114,7 @@ describe('SessionSecuritySettings', () => {
         'sessionMaxAgeHours',
         'password',
         'passwordBreakGlass',
-        'passkeyTailnetExempt',
+
         'auditRetentionDays'
       ])
 
@@ -128,7 +128,7 @@ describe('SessionSecuritySettings', () => {
     })
 
     it('resolves AUTO to what it means right now', () => {
-      renderPane({ authPolicy: null, effectiveAuthPolicy: 'legacy', credentialCount: 0 })
+      renderPane({ authPolicy: null, effectiveAuthPolicy: 'password', credentialCount: 0 })
       const row = screen
         .getAllByTestId('SessionSecuritySettings.summaryRow')
         .find((r) => r.getAttribute('data-field') === 'authMode')!
@@ -208,7 +208,7 @@ describe('SessionSecuritySettings', () => {
         'off'
       ])
       expect(selectMenuOptionValues(screen.getByTestId('SessionSecuritySettings.authMode'))).toEqual(
-        ['auto', 'passkey-always', 'legacy', 'off']
+        ['auto', 'passkey-always', 'off']
       )
     })
 
@@ -220,7 +220,7 @@ describe('SessionSecuritySettings', () => {
       await openEditor(true)
       expect(
         selectMenuOptionValues(screen.getByTestId('SessionSecuritySettings.authMode'))
-      ).toEqual(['auto', 'passkey-always', 'legacy'])
+      ).toEqual(['auto', 'passkey-always'])
     })
 
     it('writes NOTHING until Save, then sends ONE batch', async () => {
@@ -292,9 +292,10 @@ describe('SessionSecuritySettings', () => {
     it('sends NULL for AUTO, never the string "auto"', async () => {
       // The picker's own value for a NULL column is `'auto'`, so this mapping is
       // exactly where a stray string would get through — and a stored `"auto"`
-      // reads back as an unknown policy, failing closed to `legacy` and turning
-      // passkey enforcement off without anyone choosing that.
-      renderPane({ authPolicy: 'legacy' })
+      // reads back as an unknown policy, failing closed to AUTO — which with a
+      // credential enrolled is `passkey-always` and without one is `password`,
+      // so a stray string silently re-decides enforcement.
+      renderPane({ authPolicy: 'passkey-always' })
       await openEditor(false)
       chooseSelectMenuOption(screen.getByTestId('SessionSecuritySettings.authMode'), 'auto')
       await act(async () => {
@@ -359,10 +360,12 @@ describe('SessionSecuritySettings', () => {
       expect(api.authcfgSetPassword).toHaveBeenCalledWith('a-long-enough-password')
     })
 
-    it('stages the two ADMISSION TOGGLES and the terminal dial into the same batch', async () => {
+    it('stages the ADMISSION TOGGLE and the terminal dial into the same batch', async () => {
       // The owner's ruling: the pane is the configuration of ALL of these. The
-      // toggles were auth-surface members all along — they just used to live
-      // outside as always-live switches, which made two classes of one thing.
+      // toggle was an auth-surface member all along — it just used to live
+      // outside as an always-live switch, which made two classes of one thing.
+      // Its twin (`passkeyTailnetExempt`) went with ADR-056, which retired the
+      // ambient tailnet admission it exempted from.
       api.platform = 'web'
       renderPane()
       await openEditor(true)
@@ -371,7 +374,6 @@ describe('SessionSecuritySettings', () => {
         target: { value: '2' }
       })
       fireEvent.click(screen.getByTestId('SessionSecuritySettings.passwordBreakGlass'))
-      fireEvent.click(screen.getByTestId('SessionSecuritySettings.passkeyTailnetExempt'))
       expect(api.authcfgApply).not.toHaveBeenCalled()
 
       await act(async () => {
@@ -379,9 +381,13 @@ describe('SessionSecuritySettings', () => {
       })
       expect(api.authcfgApply).toHaveBeenCalledWith({
         shellGrantIdleMinutes: 2,
-        passwordBreakGlass: false,
-        passkeyTailnetExempt: true
+        passwordBreakGlass: false
       })
+    })
+
+    it('offers no tailnet-exemption control at all (ADR-056)', () => {
+      renderPane()
+      expect(screen.queryByTestId('SessionSecuritySettings.passkeyTailnetExempt')).toBeNull()
     })
 
     it('refuses an out-of-range TERMINAL dial locally', async () => {

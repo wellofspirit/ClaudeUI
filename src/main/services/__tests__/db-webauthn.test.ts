@@ -84,10 +84,94 @@ describe('DB migration — v11 webauthn_credential + auth policy columns', () =>
         // NULL = AUTO. A migration must never pick a policy for the operator,
         // and least of all `off`.
         auth_policy: null,
-        // Break-glass ON by default (owner decision); tailnet exemption OFF.
+        // Break-glass ON by default (owner decision).
         password_break_glass: 1,
-        passkey_tailnet_exempt: 0
+        // v13 (ADR-056): the exemption column survives as DEAD storage rather
+        // than being dropped — an older build still names it in its INSERT, and
+        // the downgrade guard is a "proceed read-forward" path, not a refusal.
+        passkey_tailnet_exempt: 0,
+        // …and the LAN channel key is NOT minted by a migration: it appears on
+        // the first start that actually serves a non-loopback bind.
+        lan_e2e_key: null
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v13 rewrites a stored `legacy` policy back to AUTO (ADR-056)', () => {
+    // `legacy` named "the as-built ADR-039 stack", whose token and ambient
+    // tailnet admission are both retired — so what it selected for is exactly
+    // what AUTO already resolves between. Anything else on the column is
+    // untouched, `off` above all: no migration may ever set OR clear it.
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 12)
+      )
+      db.prepare(
+        `INSERT INTO remote_config (id, port, auth_policy, updated_at) VALUES (1, 8321, 'legacy', 1)`
+      ).run()
+
+      runMigrations(db)
+
+      expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
+        port: 8321,
+        auth_policy: null
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v13 leaves `off` and `passkey-always` alone', () => {
+    for (const policy of ['off', 'passkey-always']) {
+      const db = openRawDb()
+      try {
+        runMigrations(
+          db,
+          MIGRATIONS.filter((m) => m.version <= 12)
+        )
+        db.prepare(
+          `INSERT INTO remote_config (id, port, auth_policy, updated_at) VALUES (1, 1, ?, 1)`
+        ).run(policy)
+        runMigrations(db)
+        expect(
+          (db.prepare('SELECT * FROM remote_config WHERE id = 1').get() as { auth_policy: string })
+            .auth_policy,
+          policy
+        ).toBe(policy)
+      } finally {
+        db.close()
+      }
+    }
+  })
+
+  it('keeps the tailnet-exemption column as DEAD storage rather than dropping it', () => {
+    // "Tolerant of the dead column" means exactly this: v13 does not DROP it, so
+    // an older binary that still names it in its INSERT keeps working after a
+    // downgrade (the guard in `runMigrations` is a proceed-read-forward path, not
+    // a refusal). Nothing in this build reads or writes it.
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      const columns = (
+        db.prepare('PRAGMA table_info(remote_config)').all() as { name: string }[]
+      ).map((c) => c.name)
+      expect(columns).toContain('passkey_tailnet_exempt')
+      expect(columns).toContain('lan_e2e_key')
+      // A hand-set 1 is inert: it cannot resurrect an exemption nothing
+      // implements, because no mapper reads the column any more.
+      db.prepare(
+        `INSERT INTO remote_config (id, port, passkey_tailnet_exempt, updated_at)
+         VALUES (1, 1, 1, 1)`
+      ).run()
+      const row = db.prepare('SELECT * FROM remote_config WHERE id = 1').get() as Record<
+        string,
+        unknown
+      >
+      expect(row.passkey_tailnet_exempt).toBe(1)
     } finally {
       db.close()
     }
@@ -114,7 +198,9 @@ describe('remote_config auth-policy columns', () => {
     const row = getRemoteConfig()!
     expect(row.authPolicy).toBeNull()
     expect(row.passwordBreakGlass).toBe(true)
-    expect(row.passkeyTailnetExempt).toBe(false)
+    // ADR-056: the LAN channel key is minted lazily by the first non-loopback
+    // start, never by a config write.
+    expect(row.lanE2eKey).toBeNull()
   })
 
   it('round-trips every legal policy value', () => {

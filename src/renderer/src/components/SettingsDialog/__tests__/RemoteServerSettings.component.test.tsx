@@ -17,10 +17,9 @@ const baseConfig: RemoteConfig = {
   shellGrantIdleMinutes: 10,
   // ADR-052 policy fields: AUTO with nothing enrolled, i.e. the legacy stack.
   authPolicy: null,
-  effectiveAuthPolicy: 'legacy',
+  effectiveAuthPolicy: 'password',
   credentialCount: 0,
   passwordBreakGlass: true,
-  passkeyTailnetExempt: false,
   // ADR-054 second axis, at its defaults (series 2 owns the tier UI).
   stepUpTier: 'medium',
   effectiveStepUpTier: 'medium',

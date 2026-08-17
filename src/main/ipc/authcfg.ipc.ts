@@ -32,6 +32,8 @@ import {
   authcfgApply,
   authcfgEnd,
   authcfgGet,
+  authcfgLanLink,
+  authcfgRotateLanKey,
   authcfgSetPassword,
   type AuthcfgApplyPatch,
   type AuthcfgHost
@@ -110,5 +112,23 @@ export function registerAuthcfgIpc(host: AuthcfgHost | null): void {
     withConnection: true,
     handler: async (connection: CommandConnection, password: string) =>
       authcfgSetPassword(connection, password, host)
+  })
+
+  // ADR-056 item C. A `query` that is nonetheless SESSION-GATED — it returns a
+  // channel key, and `AUTHCFG_CHANNELS` (not the kind) is what decides that.
+  handleIpc({
+    channel: 'authcfg:lan-link',
+    capability: 'admin',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => authcfgLanLink(connection, host)
+  })
+
+  handleIpc({
+    channel: 'authcfg:rotate-lan-key',
+    capability: 'admin',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection) => authcfgRotateLanKey(connection, host)
   })
 }

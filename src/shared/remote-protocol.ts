@@ -58,17 +58,21 @@ export interface WsEvent {
  * Client → Server: auth handshake.
  *
  * Exactly ONE credential is honoured. The server branches on `pwProof` first,
- * then `token`, and never falls through from a failed method to another — so a
- * client cannot try a weak credential and then a strong one on the same socket.
+ * then `enrollToken`, and never falls through from a failed method to another —
+ * so a client cannot try a weak credential and then a strong one on the socket.
  *
- * `token` is optional as of Phase 2 (it was required before). The legacy
- * `{ type:'auth', token }` frame is byte-identical, so an older `/remote`
- * bundle cached in a phone browser still authenticates.
+ * **ORDER (ADR-056).** On an E2E origin — the cloudflared tunnel and plain LAN —
+ * this frame arrives INSIDE the ciphertext: `e2e-activate` comes first and
+ * proves possession of the channel key, and only then does the client present an
+ * identity. On the tailnet HTTPS name and on localhost there is no E2E and this
+ * is still the first frame on the socket.
+ *
+ * The `token` field is GONE (ADR-056): the per-start bearer token was a link
+ * that carried authority. There is deliberately no compatibility lane — a stale
+ * cached bundle that still sends one gets a typed refusal, not a crash.
  */
 export interface WsAuthRequest {
   type: 'auth'
-  /** Random per-start bearer token from the URL fragment. */
-  token?: string
   /**
    * Password proof: `hex(H)` where
    * `H = scrypt(NFC(password), salt, dkLen, {N,r,p})` using the salt/params
@@ -107,7 +111,10 @@ export interface WsAuthResponse {
    *   prefix when it has none, so a client can say WHICH passkey signed in.
    * - `none` (`off` policy) — the literal `unauthenticated`, which is the honest
    *   answer: no credential was checked.
-   * - `token` / `password` / `enroll-token` — absent.
+   * - `password` — the tailnet login when `tailscale serve` supplied one for this
+   *   socket (the username HINT ADR-056 reduced ambient identity to), else
+   *   absent.
+   * - `enroll-token` — absent.
    */
   identity?: { login: string }
   /**
@@ -163,22 +170,26 @@ export interface RemoteKdfParams {
 export interface RemoteAuthInfo {
   /** Bumped when the handshake grammar changes; a client refuses an unknown major. */
   version: 1
-  /** Methods this server will accept on a new connection. Never empty while running. */
+  /**
+   * What this server offers a new connection. Since ADR-056 it can legitimately
+   * be EMPTY while running — a host with no password provisioned and no passkey
+   * enrolled accepts nothing but an enrollment link, and saying so is more
+   * honest than advertising a method that would be refused.
+   */
   methods: RemoteAuthMethod[]
   /** Present iff `methods` includes `'password'`. */
   password?: { saltHex: string; kdf: RemoteKdfParams }
   /**
-   * Present iff `methods` includes `'tailnet-identity'`. Purely informational:
-   * the server decides from the request headers, never from anything the client
-   * sends.
+   * Present iff `methods` includes `'tailnet-identity'`. Purely informational —
+   * and since ADR-056 that is ALL it is: a username HINT the sign-in screen can
+   * greet the operator with, never an admission credential. The server decides
+   * from the request headers, never from anything the client sends.
    *
-   * `login` is non-null ONLY when THIS request would be authenticated as the
-   * node owner — i.e. it echoes back the caller's own trusted header value, so
-   * it discloses nothing the caller did not already prove. It is null when the
-   * request did not arrive through `tailscale serve`, AND when it did but
-   * carried a login other than the owner's: a non-owner must fall through to
-   * the password form rather than be told to connect credential-less (they
-   * would just be refused). See `evaluateIdentity` in `remote-server.ts`.
+   * `login` is non-null ONLY when THIS request arrives with the node owner's own
+   * trusted header value, so it echoes back nothing the caller did not already
+   * prove. It is null when the request did not arrive through `tailscale serve`,
+   * AND when it did but carried a login other than the owner's. See
+   * `evaluateIdentity` in `remote-server.ts`.
    */
   identity?: { login: string | null }
   /**
@@ -310,6 +321,28 @@ export interface WsAuthWebauthnFinish {
 export const PASSKEY_REQUIRED_ERROR = 'passkey-required'
 export const PASSKEY_FAILED_ERROR = 'passkey-failed'
 export const PASSKEY_UNAVAILABLE_ERROR = 'passkey-unavailable'
+
+/**
+ * `auth-response.error` for an E2E origin (tunnel / LAN) whose socket proved the
+ * CHANNEL and then had no identity to present — ADR-056's central rule stated as
+ * a refusal: the link is the channel, never the identity.
+ *
+ * Distinct from `Invalid password`, and the distinction is the whole point of
+ * typing it: this one is not a wrong credential, it is a host with no break-glass
+ * password provisioned (or a client that presented nothing), so the cure is on
+ * the HOST — "provision a password on the host to use this link" — and no amount
+ * of retrying from the phone will help. It therefore spends no failure budget.
+ */
+export const PASSWORD_REQUIRED_ERROR = 'password-required'
+
+/**
+ * Error `authcfg:lan-link` / `authcfg:rotate-lan-key` throw when the running
+ * server serves no non-loopback bind — it is stopped, or it is in `tailscale
+ * serve` mode, which binds loopback ONLY (so there is no LAN channel and no key
+ * was ever generated). Typed so the settings pane can explain the absence rather
+ * than render a failure.
+ */
+export const LAN_LINK_UNAVAILABLE_ERROR = 'lan-link-unavailable'
 
 /**
  * Error a `webauthn:mint-enroll-token` dispatch throws when `tailscale serve` is

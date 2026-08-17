@@ -20,28 +20,26 @@ import { readCachedProof, writeCachedProof, clearCachedProof } from './password-
 import { decideAuthEntry, type PasswordParams } from './auth-entry'
 import type { FullStateSnapshot, RemoteAuthInfo, RemoteAuthMethod } from '../shared/remote-protocol'
 
-// The access token, the optional E2E key AND a one-time enrollment token all
-// ride the URL fragment. Browsers never send the fragment to the server, so
-// none of them ever appears in the HTTP request line — keeping them out of
-// tunnel/CDN access logs (H2). They reach the client only by scanning the QR
-// code / opening the copied link.
+// The CHANNEL key and a one-time enrollment token ride the URL fragment.
+// Browsers never send the fragment to the server, so neither ever appears in the
+// HTTP request line — keeping them out of tunnel/CDN access logs (H2). They
+// reach the client only by scanning the QR code / opening the copied link.
+//
+// `#t=` is GONE (ADR-056). A link is a channel now: `#k=` opens the encrypted
+// pipe on a tunnel or LAN address and buys nothing else, and the identity inside
+// it is a password or a passkey.
 const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''))
-const fragmentToken = fragment.get('t') || ''
 const e2eKeyHex = fragment.get('k') || undefined
-/** `#enroll=<token>` — a desktop-minted "add this device" link (ADR-052). */
+/** `#enroll=<token>` — a minted "add this device" link (ADR-052). */
 const enrollToken = fragment.get('enroll') || ''
 
 // ONE connection instance for the page lifetime. `window.api` is bound to it
 // before React mounts, so the password re-prompt path must revive this instance
 // (setCredential + connect) rather than construct a replacement the adapter
 // would never see.
-//
-// Credential precedence mirrors the server's own branch order: an enrollment
-// link is a deliberate, single-purpose visit and wins over a stale `t=` in the
-// same fragment.
 const connection = new RemoteConnection(
   window.location.href,
-  enrollToken ? { enrollToken } : fragmentToken ? { token: fragmentToken } : {},
+  enrollToken ? { enrollToken } : {},
   e2eKeyHex
 )
 // ADR-054's generic step-up gate. Installed on the CONNECTION (not on the
@@ -149,7 +147,7 @@ function loadApp(): Promise<React.ComponentType> {
 // Root app component that manages the auth flow + connection lifecycle
 function RemoteApp(): React.JSX.Element {
   const [phase, setPhase] = useState<AuthPhase>(
-    enrollToken ? { kind: 'enroll' } : fragmentToken ? { kind: 'connecting' } : { kind: 'probing' }
+    enrollToken ? { kind: 'enroll' } : { kind: 'probing' }
   )
   const [connState, setConnState] = useState<ConnectionState>('connecting')
   const [error, setError] = useState<string>()
@@ -373,7 +371,7 @@ function RemoteApp(): React.JSX.Element {
       return (await res.json()) as RemoteAuthInfo
     }
 
-    if (enrollToken || fragmentToken) {
+    if (enrollToken) {
       connection.connect()
       // Alongside, never instead: discovery must not delay a connect that has
       // a credential in hand, and a failed probe must not break one either.
@@ -407,13 +405,6 @@ function RemoteApp(): React.JSX.Element {
               kind: 'unavailable',
               detail: 'This server speaks a newer remote protocol — update the desktop app.'
             })
-            return
-          case 'tailnet':
-            // Nothing to collect: connect with an empty credential and let the
-            // server's unsolicited auth-response drive the rest.
-            connection.setCredential({})
-            setPhase({ kind: 'connecting' })
-            connection.connect()
             return
           case 'passkey':
             setPhase({ kind: 'passkey' })

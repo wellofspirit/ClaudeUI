@@ -1166,9 +1166,16 @@ export function registerSessionIpc(): SessionManager {
     }
   })
 
+  // `chat`, not `config`, since ADR-056 (the review sync-core.md §Follow-ons
+  // asked for, resolved). Deleting a session or a project removes CONVERSATIONS
+  // — the same material `chat` already governs reading and writing — and calling
+  // that "configuration" put the destructive verb in the bundle a client holds
+  // for saving UI preferences. Both remote and desktop registrars move together;
+  // the registry throws on a per-transport disagreement, which is the mechanism
+  // that keeps this a single reviewed fact.
   handleIpc({
     channel: 'session:delete-session',
-    capability: 'config',
+    capability: 'chat',
     kind: 'command',
     handler: safeHandler(async (sessionId: string, projectKey: string, engineId?: EngineId) => {
       await deleteSession(manager, sessionId, projectKey, engineId)
@@ -1177,7 +1184,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'session:delete-project',
-    capability: 'config',
+    capability: 'chat',
     kind: 'command',
     handler: safeHandler(async (projectKey: string) => {
       await deleteProject(manager, projectKey)
@@ -1459,9 +1466,17 @@ export function registerSessionIpc(): SessionManager {
     kind: 'query',
     handler: safeHandler(async (id: string) => sharedProviderService.listProviderModels(id))
   })
+  // `config`, not `admin`, since ADR-056: `admin` is EXACTLY the session-security
+  // area now (`authcfg:*` + `webauthn:*`). Provider routing is engine
+  // configuration — the same class of setting as `config:save-settings`, which
+  // has always been `config` — and labelling it `admin` conflated "changes how
+  // the app talks to a model vendor" with "changes who may connect to this
+  // machine". Reachability is unchanged in this series: these are DESKTOP
+  // registrations only, and a channel is reachable over remote iff it is
+  // registered for that transport (S1b ports the remote half deliberately).
   handleIpc({
     channel: 'shared-provider:save',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (definition: SharedProviderDefinition) =>
       sharedProviderService.saveDefinition(definition)
@@ -1469,13 +1484,13 @@ export function registerSessionIpc(): SessionManager {
   })
   handleIpc({
     channel: 'shared-provider:remove',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (id: string) => sharedProviderService.removeDefinition(id))
   })
   handleIpc({
     channel: 'shared-provider:set-route',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(
       async (id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
@@ -1484,25 +1499,25 @@ export function registerSessionIpc(): SessionManager {
   })
   handleIpc({
     channel: 'shared-provider:set-key',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (id: string, key: string) => sharedProviderService.setApiKey(id, key))
   })
   handleIpc({
     channel: 'shared-provider:sync',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (id: string) => sharedProviderService.syncProvider(id))
   })
   handleIpc({
     channel: 'shared-provider:disconnect',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (id: string) => sharedProviderService.disconnectProvider(id))
   })
   handleIpc({
     channel: 'shared-provider:set-default',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(
       async (id: string, harness: ConfigurableHarnessId, modelId?: string) =>
@@ -2226,29 +2241,35 @@ export function registerSessionIpc(): SessionManager {
   // Desktop-only — spawns a local opencode server; blocked from remote dispatch.
   handleIpc({
     channel: 'usage:refresh-prices',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async () => refreshPrices())
   })
 
   // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.
   // Channels and payloads are unchanged; the registry defaults to 'claude'.
+  //
+  // `config` since ADR-056. These are ENGINE-vendor credentials — which model
+  // account the host bills — not the session-security surface `admin` now names
+  // exactly. They stay desktop-only by their registration (they open a local
+  // browser and write local credential files), which is the guarantee that
+  // actually holds; the capability label was never what kept them here.
   const claudeAuth = engineAuthRegistry.require('claude')
   handleIpc({
     channel: 'auth:sign-in',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async () => claudeAuth.signIn?.()
   })
   handleIpc({
     channel: 'auth:submit-code',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async (code: string) => claudeAuth.submitCode?.(code)
   })
   handleIpc({
     channel: 'auth:cancel',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async () => claudeAuth.cancelSignIn?.()
   })
@@ -2263,26 +2284,26 @@ export function registerSessionIpc(): SessionManager {
   })
   handleIpc({
     channel: 'account:set-enabled',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async (enabled: boolean) =>
       accountManager.setEnabled(enabled)
   })
   handleIpc({
     channel: 'account:add',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async () => claudeAuth.addAccount?.()
   })
   handleIpc({
     channel: 'account:switch',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async (id: string) => claudeAuth.switchAccount?.(id)
   })
   handleIpc({
     channel: 'account:delete',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: async (id: string) => claudeAuth.deleteAccount?.(id)
   })
@@ -2292,11 +2313,15 @@ export function registerSessionIpc(): SessionManager {
   // Each handler dispatches to engineAuthRegistry.require(engineId) and guards
   // the optional per-vendor method — throws a clear error if the provider lacks it.
   // Claude auth is unchanged: auth:* / account:* above stay byte-identical.
+  //
+  // All eight declare `config` since ADR-056, for the same reason the Claude auth
+  // channels do: a vendor credential is engine configuration, not the
+  // session-security surface. Desktop-only by registration, unchanged.
   // -------------------------------------------------------------------------
 
   handleIpc({
     channel: 'vendor-auth:probe',
-    capability: 'admin',
+    capability: 'config',
     kind: 'query',
     handler: safeHandler(async (engineId: EngineId): Promise<VendorAuthMap> => {
       const provider = engineAuthRegistry.require(engineId)
@@ -2306,7 +2331,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:list-options',
-    capability: 'admin',
+    capability: 'config',
     kind: 'query',
     handler: safeHandler(
       async (engineId: EngineId): Promise<Record<string, VendorAuthOption[]>> => {
@@ -2321,7 +2346,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:list-keys',
-    capability: 'admin',
+    capability: 'config',
     kind: 'query',
     handler: safeHandler(
       async (engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
@@ -2336,7 +2361,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:set-key',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (engineId: EngineId, vendorId: string, key: string): Promise<void> => {
       const provider = engineAuthRegistry.require(engineId)
@@ -2349,7 +2374,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:oauth-authorize',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(
       async (
@@ -2369,7 +2394,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:oauth-callback',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(
       async (
@@ -2389,7 +2414,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:remove',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (engineId: EngineId, vendorId: string): Promise<void> => {
       const provider = engineAuthRegistry.require(engineId)
@@ -2402,7 +2427,7 @@ export function registerSessionIpc(): SessionManager {
 
   handleIpc({
     channel: 'vendor-auth:oauth-cancel',
-    capability: 'admin',
+    capability: 'config',
     kind: 'command',
     handler: safeHandler(async (engineId: EngineId): Promise<void> => {
       const provider = engineAuthRegistry.require(engineId)

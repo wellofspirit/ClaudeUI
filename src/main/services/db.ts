@@ -465,6 +465,37 @@ export const MIGRATIONS: Migration[] = [
         UPDATE remote_config SET auth_policy = 'legacy' WHERE auth_policy = 'passkey-for-grants';
       `)
     }
+  },
+  {
+    // v13 — the ADR-056 admission model: `legacy` retires, and the LAN channel
+    // gets a PERSISTENT key.
+    //
+    // The DATA migration rewrites stored `legacy` to NULL, i.e. back to AUTO.
+    // That is a real restoration rather than a downgrade: `legacy` named "the
+    // as-built ADR-039 stack", whose token and ambient-tailnet admission are
+    // both gone, so what it selected for was exactly the two states AUTO already
+    // resolves between — `passkey-always` with a credential enrolled, `password`
+    // without one. Rows on any other policy are untouched, least of all `off`,
+    // which no migration may ever set OR clear.
+    //
+    // `lan_e2e_key` is NULLABLE and stays NULL until the first start that serves
+    // a non-loopback bind — generating it here would mint a channel secret for
+    // every install that will only ever use `tailscale serve`. It is a SECRET
+    // and is deliberately absent from `sanitizedRemoteConfig` / `authcfg:get`;
+    // the only readers are the handshake and the two session-gated link verbs.
+    //
+    // `passkey_tailnet_exempt` is NOT dropped. Its MEANING is retired (ambient
+    // tailnet grants are gone), so nothing reads or writes it any more, but a
+    // dead column costs nothing while `ALTER TABLE ... DROP COLUMN` would brick
+    // an older build that still names it in its INSERT — and the downgrade guard
+    // above is explicitly a "proceed read-forward" path, not a refusal.
+    version: 13,
+    up(db) {
+      db.exec(`
+        ALTER TABLE remote_config ADD COLUMN lan_e2e_key TEXT;
+        UPDATE remote_config SET auth_policy = NULL WHERE auth_policy = 'legacy';
+      `)
+    }
   }
 ]
 
@@ -1502,20 +1533,23 @@ export const DEFAULT_STEP_UP_MUTATION_IDLE_MINUTES = 60
 export const DEFAULT_SESSION_MAX_AGE_HOURS = 4
 
 /**
- * The closed policy vocabulary, as a runtime value — the IPC validator and the
- * row mapper both need to test membership, and duplicating the literals is how
- * a fourth mode would end up accepted in one place and rejected in the other.
+ * The closed vocabulary of STORABLE policy values, as a runtime value — the IPC
+ * validator and the row mapper both need to test membership, and duplicating the
+ * literals is how a mode would end up accepted in one place and rejected in the
+ * other.
  *
- * `passkey-for-grants` was removed by ADR-054 (migration v12 rewrites stored
- * rows to `legacy`); it is therefore no longer accepted on the write path
- * either, which is what stops a client from re-creating a value the code no
- * longer branches on.
+ * `password` is deliberately ABSENT even though it is a legal
+ * {@link RemoteAuthPolicy}: it is what AUTO resolves to with nothing enrolled,
+ * never something an operator pins. Pinning it would mean "keep accepting a
+ * password after I enrol a passkey", which is what `passwordBreakGlass` already
+ * says, on a knob that already exists.
+ *
+ * `passkey-for-grants` was removed by ADR-054 and `legacy` by ADR-056 (migrations
+ * v12 and v13 rewrite the stored rows); neither is accepted on the write path any
+ * more, which is what stops a client re-creating a value the code no longer
+ * branches on.
  */
-export const REMOTE_AUTH_POLICIES: readonly RemoteAuthPolicy[] = [
-  'passkey-always',
-  'legacy',
-  'off'
-]
+export const REMOTE_AUTH_POLICIES: readonly RemoteAuthPolicy[] = ['passkey-always', 'off']
 
 /** The closed step-up tier vocabulary, same single-source reasoning. */
 export const STEP_UP_TIERS: readonly StepUpTier[] = ['strong', 'medium', 'off']
@@ -1557,7 +1591,19 @@ interface RemoteConfigDbRow {
   shell_grant_idle_minutes: number
   auth_policy: string | null
   password_break_glass: number
-  passkey_tailnet_exempt: number
+  /**
+   * DEAD since migration v13 (ADR-056 retired the ambient tailnet grant the
+   * exemption named). Still SELECTed by `SELECT *` and still written by its
+   * column default, never read or set by any code path. Declared optional so the
+   * mapper stays honest about the fact that nothing depends on it.
+   */
+  passkey_tailnet_exempt?: number
+  /**
+   * Persistent LAN channel key, 32 bytes hex, or NULL until the first start that
+   * serves a non-loopback bind (ADR-056 item C). A SECRET — it never reaches
+   * `sanitizedRemoteConfig` / `authcfg:get`.
+   */
+  lan_e2e_key: string | null
   step_up_tier: string | null
   step_up_mutation_idle_minutes: number
   session_max_age_hours: number
@@ -1592,8 +1638,12 @@ export interface RemoteConfigRow {
   authPolicy: RemoteAuthPolicy | null
   /** Break-glass password accepted under the passkey modes. Default ON. */
   passwordBreakGlass: boolean
-  /** Tailnet identity may skip the ceremony under `passkey-always`. Default OFF. */
-  passkeyTailnetExempt: boolean
+  /**
+   * Persistent LAN E2E channel key (32-byte hex), or null before the first
+   * non-loopback start. A SECRET: read by the handshake and by the two
+   * session-gated link verbs, and never by the config sanitizer.
+   */
+  lanE2eKey: string | null
   /**
    * Stored step-up tier (ADR-054 decision 1). Never null — an unrecognised
    * column value reads as `medium`. This is the RAW setting; auth-mode `off`
@@ -1639,7 +1689,8 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
     // hand-edited row) reads as AUTO, so a typo can never silently mean `off`.
     authPolicy: parseAuthPolicy(row.auth_policy),
     passwordBreakGlass: (row.password_break_glass ?? 1) === 1,
-    passkeyTailnetExempt: (row.passkey_tailnet_exempt ?? 0) === 1,
+    // v13 (ADR-056). Null until the first non-loopback start generates one.
+    lanE2eKey: row.lan_e2e_key ?? null,
     // v12 (ADR-054). Same in-code COALESCE reasoning once more, plus the
     // retention CLAMP — see `RemoteConfigRow.auditRetentionDays`.
     stepUpTier: parseStepUpTier(row.step_up_tier),
@@ -1689,7 +1740,6 @@ export function setRemoteConfig(partial: {
    *  from `undefined` (leave alone) — same convention as `bindHost`. */
   authPolicy?: RemoteAuthPolicy | null
   passwordBreakGlass?: boolean
-  passkeyTailnetExempt?: boolean
   stepUpTier?: StepUpTier
   stepUpMutationIdleMinutes?: number
   sessionMaxAgeHours?: number
@@ -1721,12 +1771,6 @@ export function setRemoteConfig(partial: {
         ? 1
         : 0
       : (existing?.password_break_glass ?? 1)
-  const passkeyTailnetExempt =
-    partial.passkeyTailnetExempt !== undefined
-      ? partial.passkeyTailnetExempt
-        ? 1
-        : 0
-      : (existing?.passkey_tailnet_exempt ?? 0)
   const stepUpTier =
     partial.stepUpTier ?? parseStepUpTier(existing?.step_up_tier ?? DEFAULT_STEP_UP_TIER)
   const stepUpMutationIdleMinutes =
@@ -1745,11 +1789,11 @@ export function setRemoteConfig(partial: {
     `INSERT INTO remote_config (
        id, port, bind_host, autostart, tls_mode, tls_https_port,
        allow_terminal, shell_grant_idle_minutes,
-       auth_policy, password_break_glass, passkey_tailnet_exempt,
+       auth_policy, password_break_glass,
        step_up_tier, step_up_mutation_idle_minutes, session_max_age_hours,
        audit_retention_days, updated_at
      )
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        port                          = excluded.port,
        bind_host                     = excluded.bind_host,
@@ -1760,7 +1804,6 @@ export function setRemoteConfig(partial: {
        shell_grant_idle_minutes      = excluded.shell_grant_idle_minutes,
        auth_policy                   = excluded.auth_policy,
        password_break_glass          = excluded.password_break_glass,
-       passkey_tailnet_exempt        = excluded.passkey_tailnet_exempt,
        step_up_tier                  = excluded.step_up_tier,
        step_up_mutation_idle_minutes = excluded.step_up_mutation_idle_minutes,
        session_max_age_hours         = excluded.session_max_age_hours,
@@ -1776,13 +1819,36 @@ export function setRemoteConfig(partial: {
     shellGrantIdleMinutes,
     authPolicy,
     passwordBreakGlass,
-    passkeyTailnetExempt,
     stepUpTier,
     stepUpMutationIdleMinutes,
     sessionMaxAgeHours,
     auditRetentionDays,
     Date.now()
   )
+}
+
+/**
+ * Persist the LAN E2E channel key (ADR-056 item C).
+ *
+ * Deliberately NARROW — it names ONLY `lan_e2e_key` in both the INSERT and the
+ * SET clause, exactly like {@link setLastServeRecord} and for the same reason: a
+ * lazy key generation happens during `start()` and a rotation happens from the
+ * settings editor, either of which can race a Settings write, and neither may
+ * clobber the config or password columns.
+ *
+ * `setRemoteConfig` deliberately does NOT carry this field: a channel key is not
+ * a config field, on the same reasoning that keeps `authcfg:set-password` out of
+ * `authcfg:apply`'s batch.
+ */
+export function setLanE2eKey(keyHex: string): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO remote_config (id, lan_e2e_key, updated_at)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       lan_e2e_key = excluded.lan_e2e_key,
+       updated_at  = excluded.updated_at`
+  ).run(keyHex, Date.now())
 }
 
 /**

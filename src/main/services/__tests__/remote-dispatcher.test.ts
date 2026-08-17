@@ -16,7 +16,7 @@ import { resolve } from 'node:path'
 import { RemoteDispatcher } from '../remote-dispatcher'
 import {
   CommandRegistry,
-  LEGACY_REMOTE_GRANTS,
+  AUTH_OFF_GRANTS,
   PINNED_CAPABILITIES,
   makeRemoteConnection
 } from '../../ipc/command-registry'
@@ -40,7 +40,7 @@ function req(channel: string, args: unknown[] = [], id = 'req-1'): WsInvokeReque
 }
 
 /** A remote connection with the legacy-policy grants — what phase 1 issues. */
-const remoteConn = makeRemoteConnection('token', null)
+const remoteConn = makeRemoteConnection('password', null)
 
 describe('RemoteDispatcher', () => {
   let registry: CommandRegistry
@@ -112,14 +112,14 @@ describe('RemoteDispatcher', () => {
       'terminal:resize',
       'terminal:kill',
       'terminal:kill-by-cwd',
-      'auth:sign-in',
-      'auth:submit-code',
-      'auth:cancel',
-      'account:set-enabled',
-      'account:add',
-      'account:switch',
-      'account:delete',
-      'usage:refresh-prices',
+      // ADR-056 REMOVED `auth:*`, `account:*` and `usage:refresh-prices` from
+      // this list. They declare `config` now — `admin` shrank to exactly the
+      // session-security area — so a PIN would be a contradiction rather than a
+      // guarantee (the pin table's one invariant is that every entry names a
+      // capability the base grant set does not hold). What keeps them off the
+      // remote surface is the other half of the reachability rule: they have no
+      // remote registration at all, which `remote-handlers.ipc.test.ts` pins
+      // channel by channel. See ENGINE_VENDOR_DESKTOP_ONLY below.
       'remote:get-config',
       'remote:set-config',
       'remote:set-password',
@@ -131,7 +131,7 @@ describe('RemoteDispatcher', () => {
     it.each(HISTORICALLY_BLOCKED)('pins "%s" to a capability remote is never granted', (channel) => {
       const pinned = PINNED_CAPABILITIES[channel]
       expect(pinned).toBeDefined()
-      expect(LEGACY_REMOTE_GRANTS.has(pinned)).toBe(false)
+      expect(AUTH_OFF_GRANTS.has(pinned)).toBe(false)
     })
 
     it.each(HISTORICALLY_BLOCKED)(
@@ -152,6 +152,33 @@ describe('RemoteDispatcher', () => {
           /Permission denied/
         )
         expect(handler).not.toHaveBeenCalled()
+      }
+    )
+
+    /**
+     * The engine-vendor channels ADR-056 moved from `admin` to `config`.
+     *
+     * They are DESKTOP-ONLY by registration, not by capability, and that was
+     * always the load-bearing half — `admin` had already stopped meaning
+     * "unreachable remotely" when a passkey connection started holding it
+     * (ADR-052). Pinned here as the negative: not in the pin table, and not
+     * pretending to be.
+     */
+    const ENGINE_VENDOR_DESKTOP_ONLY = [
+      'auth:sign-in',
+      'auth:submit-code',
+      'auth:cancel',
+      'account:set-enabled',
+      'account:add',
+      'account:switch',
+      'account:delete',
+      'usage:refresh-prices'
+    ] as const
+
+    it.each(ENGINE_VENDOR_DESKTOP_ONLY)(
+      '"%s" is no longer PINNED — a grantable capability may never be pinned',
+      (channel) => {
+        expect(PINNED_CAPABILITIES[channel]).toBeUndefined()
       }
     )
 

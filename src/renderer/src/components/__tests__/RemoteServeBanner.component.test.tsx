@@ -29,7 +29,6 @@ function status(over: Partial<RemoteStatus> = {}): RemoteStatus {
   return {
     running: true,
     port: 51000,
-    token: 'tok',
     lanUrl: null,
     tunnelUrl: null,
     tunnelState: null,
@@ -39,7 +38,7 @@ function status(over: Partial<RemoteStatus> = {}): RemoteStatus {
     clientLogins: [],
     tls: tls(),
     lastError: null,
-    authMethods: ['token'],
+    authMethods: ['password'],
     ...over
   }
 }

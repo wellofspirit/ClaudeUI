@@ -520,8 +520,7 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       tlsMode: 1,
       tlsHttpsPort: HTTPS_PORT,
       authPolicy: null,
-      passwordBreakGlass: true,
-      passkeyTailnetExempt: false
+      passwordBreakGlass: true
     })
     expect(
       db.countWebauthnCredentials(),

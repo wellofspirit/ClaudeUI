@@ -243,7 +243,7 @@ import {
   CommandRegistry,
   commandRegistry,
   makeRemoteConnection,
-  LEGACY_REMOTE_GRANTS,
+  AUTH_OFF_GRANTS,
   PINNED_CAPABILITIES
 } from '../command-registry'
 import {
@@ -277,7 +277,7 @@ function makeRequest(channel: string, ...args: unknown[]): WsInvokeRequest {
  * all-capability stand-in) is what makes these tests double as the parity
  * check: a channel that stopped being reachable would fail here.
  */
-const remoteConn = makeRemoteConnection('token', null)
+const remoteConn = makeRemoteConnection('password', null)
 
 /**
  * A stub window that is also a CLIENT (SyncCore phase 4c).
@@ -1278,7 +1278,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
  * ADR-052 decision 6 / security.md §"Terminal posture").
  *
  * Why this is not the failure mode the pin above exists to catch: every channel
- * here declares `shell`, which is NOT in {@link LEGACY_REMOTE_GRANTS}, so
+ * here declares `shell`, which is NOT in {@link AUTH_OFF_GRANTS}, so
  * registering them changes nothing about what an authenticated connection can
  * do. Reaching them requires all three gates, all enforced server-side —
  * (1) the desktop-only `allow_terminal` toggle (persisted in `remote_config`,
@@ -1341,7 +1341,7 @@ const POST_PORT_CHANNELS = ['session:clear-conversation'] as const
  * pre-port baseline.
  *
  * Every one declares `enroll` or `admin`, neither of which is in
- * {@link LEGACY_REMOTE_GRANTS} — so registering them changed what a
+ * {@link AUTH_OFF_GRANTS} — so registering them changed what a
  * passkey-authenticated connection can reach, and changed NOTHING for a
  * token/tailnet one.
  */
@@ -1358,14 +1358,22 @@ const PASSKEY_CHANNELS = [
  * ADR-054 decision 6 — the remote-access SETTINGS WRITES. The THIRD deliberate
  * widening, listed separately for the same reason the other two are.
  *
- * Every one declares `admin` (outside {@link LEGACY_REMOTE_GRANTS}, so
+ * Every one declares `admin` (outside {@link AUTH_OFF_GRANTS}, so
  * authenticating never suffices) AND is gated on a presence proof inside the
  * mutation window on every tier — the transport classifies this namespace as
  * `authcfg`. What makes the widening safe to review is what is ABSENT: the `off`
  * master switch. Auth-DISABLING operations stay host-anchor only and stay in
  * `remote:set-config`, which has no remote registration at all (pinned below).
  */
-const AUTHCFG_WRITE_CHANNELS = ['authcfg:apply', 'authcfg:set-password'] as const
+const AUTHCFG_WRITE_CHANNELS = [
+  'authcfg:apply',
+  // ADR-056 item C. `authcfg:lan-link` sits in the WRITE half despite being a
+  // `query`, and that is the decision under test: what gates a verb in this
+  // namespace is what it DISCLOSES — here a live channel key — not its kind.
+  'authcfg:lan-link',
+  'authcfg:rotate-lan-key',
+  'authcfg:set-password'
+] as const
 
 /**
  * The FREE half. Same `admin` gate, but no settings session demanded:
@@ -1387,7 +1395,7 @@ const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNEL
  * same reason every other widening is: it must read as its own decision.
  *
  * Unlike the three above, these declare `chat` — INSIDE
- * {@link LEGACY_REMOTE_GRANTS} — so they widen what an ordinary token/tailnet
+ * {@link AUTH_OFF_GRANTS} — so they widen what an ordinary token/tailnet
  * connection can do, and that is deliberate: a capture produces a draft message,
  * which is exactly what `session:send` already lets the same connection do. What
  * makes it a narrow widening rather than a broad one is what these verbs
@@ -1441,7 +1449,7 @@ describe('remote surface parity (phase 1 port)', () => {
     const unreachable = commandRegistry
       .channels('remote')
       .map((c) => [c, commandRegistry.declaration(c)!.capability] as const)
-      .filter(([, cap]) => !LEGACY_REMOTE_GRANTS.has(cap))
+      .filter(([, cap]) => !AUTH_OFF_GRANTS.has(cap))
     // The complete list of channels a token/tailnet connection cannot reach:
     // the shell-gated terminal set (step-up) and the passkey set (a proven
     // human, or a one-time enrollment link). Anything else appearing here is a
@@ -1460,7 +1468,7 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('the passkey channels are unreachable from a plain token connection', async () => {
-    const conn = makeRemoteConnection('token', null)
+    const conn = makeRemoteConnection('password', null)
     for (const channel of PASSKEY_CHANNELS) {
       await expect(
         commandRegistry.dispatch(channel, 'remote', ['x'], conn),
@@ -1473,7 +1481,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // The capability half of the gate. The FRESHNESS half (a presence proof
     // inside the mutation window, on every tier) is enforced at the transport
     // and asserted over a real socket in remote-step-up-tiers.test.ts.
-    const conn = makeRemoteConnection('token', null)
+    const conn = makeRemoteConnection('password', null)
     for (const channel of AUTHCFG_CHANNELS) {
       await expect(
         commandRegistry.dispatch(channel, 'remote', ['x'], conn),
@@ -1579,7 +1587,7 @@ describe('remote surface parity (phase 1 port)', () => {
   it('the phase-2 terminal channels are unreachable WITHOUT a step-up grant', async () => {
     // The registration is not the gate — the grant set is. A connection holding
     // the standard remote grants is refused by the registry itself.
-    const conn = makeRemoteConnection('token', null)
+    const conn = makeRemoteConnection('password', null)
     for (const channel of SHELL_GATED_CHANNELS) {
       await expect(
         commandRegistry.dispatch(channel, 'remote', ['x'], conn),
@@ -1593,14 +1601,21 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // Two sanctioned widenings, both deliberate and both behind a ceremony:
-    // the terminal set (ADR-052 decision 6) and the passkey set (decision 1).
+    // THREE sanctioned widenings, each deliberate and each behind a ceremony:
+    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), and
+    // the `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with
+    // the two LAN-channel verbs — which is also when the namespace joined the
+    // pin table, `admin` having shrunk to exactly these two families).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
     // connection holds `admin`.
     const exposed = new Set(commandRegistry.channels('remote'))
-    const sanctioned = new Set<string>([...SHELL_GATED_CHANNELS, ...PASSKEY_CHANNELS])
+    const sanctioned = new Set<string>([
+      ...SHELL_GATED_CHANNELS,
+      ...PASSKEY_CHANNELS,
+      ...AUTHCFG_CHANNELS
+    ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue
       expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)

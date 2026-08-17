@@ -26,6 +26,11 @@
  * reconciliation bookkeeping (ADR-042) rather than user-facing configuration.
  * That rule mattered when only the desktop could read this; it is load-bearing
  * now that a browser can.
+ *
+ * `lan_e2e_key` (ADR-056 item C) joins that list and is the sharpest case: it is
+ * a live channel secret, and `authcfg:get` is the ONE verb in its namespace with
+ * no session gate. The LAN link has its own verb — `authcfg:lan-link`, inside a
+ * settings-editing session — precisely so this free read never carries it.
  */
 
 import {
@@ -63,7 +68,8 @@ export function sanitizedRemoteConfig(): RemoteConfig {
     effectiveAuthPolicy: resolveAuthPolicy(policyCtx),
     credentialCount: policyCtx.credentialCount,
     passwordBreakGlass: config?.passwordBreakGlass ?? true,
-    passkeyTailnetExempt: config?.passkeyTailnetExempt ?? false,
+    // NOT exposed: lan_e2e_key. See the header — it is a channel secret and this
+    // read is ungated.
     // ADR-054's second axis, raw + resolved for the same reason the policy is:
     // auth-mode `off` FORCES tier `off`, and re-deriving that in the renderer is
     // how a displayed tier drifts from the enforced one.

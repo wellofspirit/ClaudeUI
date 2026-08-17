@@ -17,8 +17,10 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
   const [tunnelMode, setTunnelMode] = useState(false)
 
   // TLS mode first: it is the only URL that works when the server is bound to
-  // loopback, it needs no fragment (Tailscale identity authenticates the
-  // browser), and it is stable enough to bookmark.
+  // loopback, it needs no fragment at all (ADR-056: TLS is the channel and the
+  // identity is a passkey or a password), and it is stable enough to bookmark.
+  // The tunnel and LAN URLs below carry `#k=` — the CHANNEL key, never an access
+  // token — which is why the QR still has to encode the whole string.
   const shareUrl = status?.tls?.url ?? status?.tunnelUrl ?? status?.lanUrl ?? null
 
   useEffect(() => {

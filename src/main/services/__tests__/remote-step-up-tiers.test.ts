@@ -177,7 +177,7 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     shellGrantIdleMinutes: 10,
     authPolicy: null,
     passwordBreakGlass: true,
-    passkeyTailnetExempt: false,
+    lanE2eKey: null,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
@@ -192,8 +192,10 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
 }
 
 // ---------------------------------------------------------------------------
-// A raw client — the handshake credential varies per case, so the shared
-// `connectRemoteClient` helper (which always presents a token) is too narrow.
+// A raw client — the handshake credential and its TIMING vary per case (a bare
+// frame, a password, an enrollment link, a mid-handshake policy flip), so the
+// shared `connectRemoteClient` helper, which drives one fixed handshake to
+// completion, is too narrow.
 // ---------------------------------------------------------------------------
 
 interface RawClient {
@@ -386,7 +388,6 @@ describe('ADR-054 step-up tiers over the socket', () => {
   let server: RemoteServer
   let dispatcher: RemoteDispatcher
   let port: number
-  let token: string
   let clients: RawClient[]
   let clockOffset: number
   let realNow: () => number
@@ -416,7 +417,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     )
     terminalService.setRemoteSink(server.terminalSink())
     port = await ephemeralPort()
-    token = (await server.start(port, '127.0.0.1')).token
+    await server.start(port, '127.0.0.1')
   }
 
   async function connect(): Promise<RawClient> {
@@ -439,20 +440,16 @@ describe('ADR-054 step-up tiers over the socket', () => {
     }
   }
 
-  /** Authenticate with the URL token — a bookmark, so it arms NOTHING. */
-  async function connectWithToken(): Promise<RawClient> {
-    const c = await connect()
-    c.send({ type: 'auth', token })
-    expect(await c.waitFor('auth-response')).toMatchObject({ ok: true })
-    return c
-  }
-
   /**
-   * Authenticate with the break-glass PASSWORD. Under a passkey policy this
-   * carries `admin` (so the settings verbs are capability-reachable) while
-   * arming nothing — the exact combination the `authcfg` freshness gate exists
-   * for, and the reason the password is the step-up fallback rather than an
-   * arming login.
+   * Authenticate with the break-glass PASSWORD — the only non-ceremony way in
+   * since ADR-056 retired the URL token.
+   *
+   * It ARMS NOTHING, which is what most of the cases below are about: its proof
+   * is client-cacheable, so it authenticates the browser rather than provably
+   * the human, and it is therefore the step-up FALLBACK rather than an arming
+   * login. Since the grant collapse it also carries `admin`, which makes the
+   * settings verbs capability-reachable on the very connection that has proved
+   * no presence — the exact combination the `authcfg` session gate exists for.
    */
   async function connectWithPassword(): Promise<RawClient> {
     const c = await connect()
@@ -460,6 +457,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     expect(await c.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
     return c
   }
+
 
   /** Run a password step-up and return the response frame. */
   async function stepUp(client: RawClient): Promise<Record<string, unknown>> {
@@ -521,7 +519,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       disconnectAuthSurfaceClients: (opts?: { exceptConnectionId?: string }) =>
         server.disconnectAuthSurfaceClients(opts),
       disconnectPasswordClients: () => server.disconnectPasswordClients(),
-      resnapshotConnection: (id: string) => server.resnapshotConnection(id)
+      resnapshotConnection: (id: string) => server.resnapshotConnection(id),
+      lanLink: () => server.lanLink(),
+      rotateLanKey: () => server.rotateLanKey()
     }
     registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never, hostStub)
     registerTerminalIpc()
@@ -562,7 +562,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
   describe('arm-on-auth', () => {
     it('a TOKEN login arms nothing — the terminal still owes a step-up', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await expect(invoke(c, 'terminal:availability')).resolves.toMatchObject({
         allowed: true,
         granted: false,
@@ -583,7 +583,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('a successful STEP-UP arms reads, acts and mutations together', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       await expect(invoke(c, 'terminal:pool', '/tmp/x')).resolves.toEqual([])
       const id = await invoke(c, 'terminal:create', '/tmp/x', 0)
@@ -595,7 +595,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // is theatre. The desktop toggle still applies — it is capability arming,
       // not a freshness claim — which is why `allowTerminal` is on here.
       await boot({ stepUpTier: 'off' })
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await expect(invoke(c, 'terminal:pool', '/tmp/x')).resolves.toEqual([])
       await expect(invoke(c, 'terminal:create', '/tmp/x', 0)).resolves.toEqual(expect.any(String))
     })
@@ -668,7 +668,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
   describe('the shell read/act split', () => {
     it('after decay: reads answer, acts refuse', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       const id = (await invoke(c, 'terminal:create', '/tmp/x', 0)) as string
 
@@ -688,7 +688,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('a NEVER-armed connection is refused the reads too', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await expect(invoke(c, 'terminal:pool', '/tmp/x')).rejects.toThrow('needs-step-up')
       await expect(invoke(c, 'terminal:attach', 'anything')).rejects.toThrow('needs-step-up')
       await expect(invoke(c, 'terminal:resize', 'anything', 80, 24)).rejects.toThrow(
@@ -698,7 +698,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('reads never SLIDE the act window (the landed d1c6e4e rule, generalised)', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       await invoke(c, 'terminal:create', '/tmp/x', 0)
 
@@ -712,7 +712,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('an ACT slides the window (acting is presence)', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       advance(6)
       await invoke(c, 'terminal:create', '/tmp/x', 0)
@@ -725,7 +725,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // The whole point of the split: a `logcat` session left running must not
       // die because nobody typed for ten minutes.
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       const id = (await invoke(c, 'terminal:create', '/tmp/x', 0)) as string
       await invoke(c, 'terminal:attach', id)
@@ -743,7 +743,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('a `term-input` FRAME is act-class; `term-resize` is read-class', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       const id = (await invoke(c, 'terminal:create', '/tmp/x', 0)) as string
       await invoke(c, 'terminal:attach', id)
@@ -771,7 +771,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
   describe('tier `medium` — zero regression outside the terminal', () => {
     it('never gates a non-shell command, however stale the connection', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       advance(600) // ten hours
       await expect(invoke(c, 'probe:mutate')).resolves.toBe('mutated')
       await expect(invoke(c, 'probe:read')).resolves.toBe('read')
@@ -779,7 +779,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('a REAL chat/git channel never answers needs-step-up', async () => {
       await boot()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       advance(600)
       // The handler itself fails (no git repo in the stub graph) — what matters
       // is that the failure is the HANDLER's and not the step-up gate's.
@@ -796,7 +796,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
   describe('tier `strong`', () => {
     it('refuses a non-shell command once the mutation window elapses, and takes it back after a step-up', async () => {
       await boot({ stepUpTier: 'strong' })
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       // Unarmed connection: the FIRST mutation already owes a proof.
       await expect(invoke(c, 'probe:mutate')).rejects.toThrow('needs-step-up')
 
@@ -812,7 +812,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('leaves reads and the sync stream free', async () => {
       await boot({ stepUpTier: 'strong' })
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       advance(600)
       await expect(invoke(c, 'probe:read')).resolves.toBe('read')
       await expect(invoke(c, 'terminal:availability')).resolves.toMatchObject({ allowed: true })
@@ -822,7 +822,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // The landed d1c6e4e rule, extended to the second window: reads are not
       // presence, so an open tab polling a query cannot keep itself mutable.
       await boot({ stepUpTier: 'strong' })
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       advance(40)
       await expect(invoke(c, 'probe:read')).resolves.toBe('read')
@@ -832,7 +832,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('a MUTATION slides it', async () => {
       await boot({ stepUpTier: 'strong' })
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       advance(40)
       await expect(invoke(c, 'probe:mutate')).resolves.toBe('mutated')
@@ -844,7 +844,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // Shell channels are governed EXCLUSIVELY by the read/act split; the
       // strong tier's mutation window must not stack on top of them.
       await boot({ stepUpTier: 'strong', stepUpMutationIdleMinutes: 1 })
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       advance(2) // mutation window dead, 10-minute act window alive
       await expect(invoke(c, 'probe:mutate')).rejects.toThrow('needs-step-up')
@@ -859,7 +859,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
   describe('session max-age', () => {
     it('cuts a strong-tier socket with 4010 and audits it', async () => {
       await boot({ stepUpTier: 'strong' }, 120)
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await c.waitForClose(3000)).toBe(4010)
       const row = auditRow('auth:session-expired')
       expect(row).toBeDefined()
@@ -869,7 +869,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('does NOT cut a medium-tier socket', async () => {
       await boot({ stepUpTier: 'medium' }, 120)
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await new Promise((r) => setTimeout(r, 300))
       expect(c.ws.readyState).toBe(WebSocket.OPEN)
       expect(auditChannels()).not.toContain('auth:session-expired')
@@ -877,7 +877,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
     it('does NOT cut an off-tier socket', async () => {
       await boot({ stepUpTier: 'off' }, 120)
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await new Promise((r) => setTimeout(r, 300))
       expect(c.ws.readyState).toBe(WebSocket.OPEN)
     })
@@ -923,7 +923,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('replays the coalesced accumulation on subscribe, and only for watched sessions', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       c.frames.length = 0
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       // Every stream of the session, at offset 0, empty ones included — a stream
@@ -952,7 +952,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('is a REPLACE set, not an accumulation', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       c.frames.length = 0
       // Switching sessions is one call. The previous id must STOP being watched,
@@ -979,7 +979,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('refuses an over-long set rather than clipping it', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       const tooMany = Array.from({ length: MAX_STREAM_WATCH + 1 }, (_, i) => `s-${i}`)
       await expect(invoke(c, 'stream:watch', { sessionIds: tooMany })).rejects.toThrow(
         /at most 32 sessions/
@@ -999,7 +999,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('rejects a malformed payload', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await expect(invoke(c, 'stream:watch', { sessionIds: RID })).rejects.toThrow(
         /must be an array/
       )
@@ -1011,8 +1011,8 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('is PER CONNECTION — one client watching leaks nothing to another', async () => {
       await boot()
       seedSessions()
-      const a = await connectWithToken()
-      const b = await connectWithToken()
+      const a = await connectWithPassword()
+      const b = await connectWithPassword()
       await invoke(a, 'stream:watch', { sessionIds: [RID] })
       a.frames.length = 0
       b.frames.length = 0
@@ -1025,7 +1025,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('dies with the socket', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       expect(streamSubscriberCount()).toBe(1)
       await c.close()
@@ -1040,7 +1040,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('the 4010 max-age cut takes the watch with it', async () => {
       await boot({ stepUpTier: 'strong' }, 500)
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       expect(await c.waitForClose(3000)).toBe(4010)
       await vi.waitFor(() => expect(streamSubscriberCount()).toBe(0), { timeout: 3000 })
@@ -1053,7 +1053,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // forever.
       await boot({ stepUpTier: 'strong', stepUpMutationIdleMinutes: 10 })
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       expect(await stepUp(c)).toMatchObject({ ok: true })
       await expect(invoke(c, 'probe:mutate')).resolves.toBe('mutated')
 
@@ -1070,7 +1070,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('is unaudited (a subscription toggle is not a command)', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       auditRows.length = 0
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       expect(auditChannels()).not.toContain('stream:watch')
@@ -1086,7 +1086,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('delivers the session tails on the session set, verbatim', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       c.frames.length = 0
 
@@ -1108,7 +1108,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('scopes automation:stream-event by its own set, independently replaced', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
       // A session watch that says NOTHING about automations must not clear them,
       // or the two scopes could never be stated by one call each.
       await invoke(c, 'stream:watch', { sessionIds: [RID], automationRuns: ['auto-1'] })
@@ -1131,8 +1131,8 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('the automation set is PER CONNECTION and bounded like the session set', async () => {
       await boot()
       seedSessions()
-      const a = await connectWithToken()
-      const b = await connectWithToken()
+      const a = await connectWithPassword()
+      const b = await connectWithPassword()
       await invoke(a, 'stream:watch', { sessionIds: [], automationRuns: ['auto-1'] })
       a.frames.length = 0
       b.frames.length = 0
@@ -1153,7 +1153,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
     it('drops STREAM frames under backpressure — never events — and heals after relief', async () => {
       await boot()
       seedSessions()
-      const c = await connectWithToken()
+      const c = await connectWithPassword()
 
       // A REAL client replica behind this socket, fed the way a transport feeds
       // one. The heal is a claim about what a CLIENT ends up holding, so proving
@@ -1349,16 +1349,29 @@ describe('ADR-054 step-up tiers over the socket', () => {
     })
 
     it('accepts the non-off modes, including AUTO', async () => {
+      // Two survive since ADR-056 retired `legacy`: `passkey-always` and NULL.
+      // `password` is deliberately not among them — it is what AUTO resolves to
+      // with nothing enrolled, never a value an operator pins.
       const c = await adminLocked()
       expect(await unlock(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:apply', { authMode: 'legacy' })).resolves.toMatchObject({
-        ok: true
-      })
-      expect(remoteConfigRef.current!.authPolicy).toBe('legacy')
+      await expect(
+        invoke(c, 'authcfg:apply', { authMode: 'passkey-always' })
+      ).resolves.toMatchObject({ ok: true })
+      expect(remoteConfigRef.current!.authPolicy).toBe('passkey-always')
       await expect(invoke(c, 'authcfg:apply', { authMode: null })).resolves.toMatchObject({
         ok: true
       })
       expect(remoteConfigRef.current!.authPolicy).toBeNull()
+    })
+
+    it('refuses the effective-only `password` mode — it is resolved, never stored', async () => {
+      const c = await adminLocked()
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      configWrites.length = 0
+      await expect(
+        invoke(c, 'authcfg:apply', { authMode: 'password' })
+      ).rejects.toThrow(/Unknown remote auth policy/)
+      expect(configWrites).toEqual([])
     })
 
     it('one batch = ONE audit row carrying the diff, and ONE 4009 sweep', async () => {
@@ -1370,7 +1383,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       await expect(
         invoke(actor, 'authcfg:apply', {
           stepUpTier: 'strong',
-          authMode: 'legacy',
+          authMode: 'passkey-always',
           auditRetentionDays: 90
         })
       ).resolves.toMatchObject({ ok: true })
@@ -1434,24 +1447,24 @@ describe('ADR-054 step-up tiers over the socket', () => {
       expect(rows[0].detail).toMatch(/terminal re-check 10→1 min/)
     })
 
-    it('the two ADMISSION TOGGLES ride apply, and sweep like everything else', async () => {
-      // They were always auth-surface members; the owner's ruling moved their UI
-      // into the editor, so the verb has to carry them.
-      const actor = await adminLocked({ passwordBreakGlass: true, passkeyTailnetExempt: false })
+    it('the ADMISSION TOGGLE rides apply, and sweeps like everything else', async () => {
+      // It was always an auth-surface member; the owner's ruling moved its UI
+      // into the editor, so the verb has to carry it. Its twin —
+      // `passkeyTailnetExempt` — went with ADR-056, which retired the ambient
+      // tailnet admission it exempted FROM.
+      const actor = await adminLocked({ passwordBreakGlass: true })
       expect(await unlock(actor)).toMatchObject({ ok: true })
       const bystander = await connectWithPassword()
 
       auditRows.length = 0
       await expect(
-        invoke(actor, 'authcfg:apply', { passwordBreakGlass: false, passkeyTailnetExempt: true })
+        invoke(actor, 'authcfg:apply', { passwordBreakGlass: false })
       ).resolves.toMatchObject({ ok: true })
 
       expect(await bystander.waitForClose(2000)).toBe(4009)
       const row = auditRow('auth:policy-change')
       expect(row!.detail).toMatch(/break-glass password on→off/)
-      expect(row!.detail).toMatch(/tailnet exemption off→on/)
       expect(remoteConfigRef.current!.passwordBreakGlass).toBe(false)
-      expect(remoteConfigRef.current!.passkeyTailnetExempt).toBe(true)
     })
 
     it('a MIXED save names the dials in the same diff as the tier', async () => {
@@ -1616,28 +1629,22 @@ describe('ADR-054 step-up tiers over the socket', () => {
       expect(await c.waitFor('auth-response')).toMatchObject({ ok: true, authDisabled: true })
 
       // Wall 1: the settings session.
-      await expect(invoke(c, 'authcfg:apply', { authMode: 'legacy' })).rejects.toThrow(
+      await expect(invoke(c, 'authcfg:apply', { authMode: 'passkey-always' })).rejects.toThrow(
         'needs-settings-session'
       )
 
       // Wall 2: capability, now that the editor is open.
       expect(await unlock(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:apply', { authMode: 'legacy' })).rejects.toThrow(
+      await expect(invoke(c, 'authcfg:apply', { authMode: 'passkey-always' })).rejects.toThrow(
         /Permission denied/
       )
       expect(configWrites).toEqual([])
       expect(remoteConfigRef.current!.authPolicy).toBe('off')
     })
 
-    it('is unreachable from a token connection even with the editor open (capability, not the session)', async () => {
-      // Under `legacy` the token connection holds the as-built set, which has no
-      // `admin` — and unlocking does not widen capabilities, only the mode.
-      await boot({ authPolicy: 'legacy' })
-      const c = await connectWithToken()
-      expect(await unlock(c)).toMatchObject({ ok: true })
-      await expect(invoke(c, 'authcfg:apply', { stepUpTier: 'off' })).rejects.toThrow(
-        /Permission denied/
-      )
-    })
+    // The old "unreachable from a TOKEN connection" case is GONE with the token
+    // (ADR-056). Its property — unlocking widens the MODE, never the capability
+    // set — is carried by the auth-off case above, whose connection is the only
+    // remaining admitted method that does not hold `admin`.
   })
 })
