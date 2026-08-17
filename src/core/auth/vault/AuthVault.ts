@@ -112,6 +112,27 @@ export class AuthVault {
       this.activeFlow = undefined
     }
   }
+  /**
+   * Complete the active login from a PASTED callback URL / bare code (ADR-057's
+   * remote paste-back path). Mirrors completeLogin() — persist + clear the
+   * active flow — but drives the flow's paste completion instead of the loopback
+   * wait. Throws when the active flow does not support pasted completion (a fake
+   * without the method, or a flow kind that has no loopback to bypass).
+   */
+  async completeLoginFromPastedInput(input: string): Promise<VaultCredential> {
+    const flow = this.activeFlow
+    if (!flow) throw new Error('AuthVault: no login in progress — call beginLogin() first')
+    if (!flow.completeFromPastedInput) {
+      throw new Error('AuthVault: the active login flow does not support pasted completion')
+    }
+    try {
+      const credential = await flow.completeFromPastedInput(input)
+      await this.save(credential)
+      return credential
+    } finally {
+      this.activeFlow = undefined
+    }
+  }
   cancelLogin(): void {
     this.activeFlow?.cancel()
     this.activeFlow = undefined

@@ -258,11 +258,21 @@ export class PiAuthProvider implements EngineAuthProvider {
     }
   }
 
-  async oauthCallback(vendorId: string, _method: number, _code?: string): Promise<boolean> {
+  async oauthCallback(vendorId: string, _method: number, code?: string): Promise<boolean> {
     if (vendorId !== PI_CODEX_VENDOR_ID) {
       throw new Error(`PiAuthProvider.oauthCallback: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`)
     }
-    await credentialSync.completeLogin()
+    // ADR-057: a non-empty `code` is the pasted callback URL / bare code from a
+    // remote browser (the host loopback never fired because the redirect landed
+    // on the REMOTE client's own loopback). Complete via the paste path; the
+    // host still holds the PKCE verifier and performs the exchange. Absent, the
+    // desktop loopback wait is awaited exactly as before.
+    const pasted = code?.trim()
+    if (pasted) {
+      await credentialSync.completeLogin(pasted)
+    } else {
+      await credentialSync.completeLogin()
+    }
     return true
   }
 

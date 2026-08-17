@@ -72,6 +72,7 @@ import {
   type CommandRegistration
 } from './command-registry'
 import { configCommands } from './config-commands'
+import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
 import {
   mintEnrollToken,
@@ -309,7 +310,17 @@ export function registerRemoteHandlers(
    * must not depend on runtime configuration, or the parity pins would report a
    * different surface in tests than in production.
    */
-  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost
+  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost,
+  /**
+   * The desktop-auth dependencies for the vendor-OAuth / account / native-OAuth
+   * command family (ADR-057, S4). Optional for the SAME reason `enrollTokens` is
+   * — the channel SET must not depend on runtime configuration, or the parity
+   * pins would report a different surface in tests than in production. Absent
+   * (every existing two/three-arg call site, and the tests), the channels still
+   * register but each handler throws `auth surface unavailable` on dispatch.
+   * `boot-core` passes the real `engineAuthRegistry` / `account-manager`.
+   */
+  authDeps?: AuthCommandDeps
 ): void {
   remoteHandlersRegistered = true
 
@@ -1579,6 +1590,25 @@ export function registerRemoteHandlers(
     handleRemote(cmd)
   }
   for (const cmd of AUTOMATION_COMMANDS) {
+    handleRemote(cmd)
+  }
+
+  // The vendor-OAuth / account-mutation / native-OAuth family (S4, ADR-057).
+  // Same shared declarations `session.ipc.ts` spreads — the remote UI can drive
+  // vendor credentials, provider routing and (paste-back) OAuth. Token material
+  // never crosses the wire; `auth:sign-in` / `account:add` skip the host browser
+  // for a remote caller and surface `manualUrl` instead. Absent deps → the
+  // channels register but each handler throws (see the param doc above), so the
+  // remote surface is the SAME shape in tests as in production.
+  const resolvedAuthDeps: AuthCommandDeps = authDeps ?? {
+    requireEngineAuth: () => {
+      throw new Error('auth surface unavailable: no auth dependencies wired for this transport')
+    },
+    setAccountEnabled: () => {
+      throw new Error('auth surface unavailable: no auth dependencies wired for this transport')
+    }
+  }
+  for (const cmd of authCommands(resolvedAuthDeps)) {
     handleRemote(cmd)
   }
 

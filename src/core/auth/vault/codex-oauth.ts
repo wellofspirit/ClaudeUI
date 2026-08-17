@@ -104,6 +104,73 @@ export interface LoginFlow {
    * of blocking re-login. Fakes may omit it (treated as "not settled").
    */
   isSettled?(): boolean
+  /**
+   * Optional: complete the flow from a PASTED callback URL / bare code instead
+   * of the loopback redirect (the remote paste-back path — ADR-057). The host
+   * still performs the exchange with the held PKCE verifier; consent + the code
+   * return happen in any browser on any device. Fakes may omit it.
+   */
+  completeFromPastedInput?(input: string): Promise<VaultCredential>
+}
+
+/**
+ * The shape a pasted OAuth callback was recognized as.
+ *  - `structured: true`  — a full redirect URL or a `code=…&state=…` query form,
+ *    which CARRIES a `state` param, so the caller applies the loopback's exact
+ *    CSRF check (a missing OR mismatched state is rejected).
+ *  - `structured: false` — a BARE authorization code (or empty), which genuinely
+ *    cannot carry `state`; the caller proceeds on PKCE alone (OAuth 2.0 Security
+ *    BCP §2.1 — the host-held, flow-bound verifier is the CSRF defense there).
+ */
+export interface ParsedPastedCallback {
+  code?: string
+  state?: string
+  structured: boolean
+}
+
+/**
+ * Extract `code` + `state` from a PASTED OAuth callback, and report which SHAPE
+ * it was (ADR-057). Be liberal in what we accept: the user pastes whatever they
+ * grabbed from the browser's address bar — the whole
+ * `http://localhost:1455/auth/callback?code=…&state=…` redirect URL, a bare
+ * `?code=…&state=…` query fragment, or just the code.
+ *
+ * The `structured` flag is what lets the caller keep the two shapes on DIFFERENT
+ * CSRF rules without weakening either: a URL/query form is state-bearing and is
+ * held to the loopback's exact check; only a bare code is allowed to proceed
+ * without state. Returns `code: undefined` only for empty input.
+ */
+export function parsePastedCallback(input: string): ParsedPastedCallback {
+  const trimmed = input.trim()
+  if (!trimmed) return { structured: false }
+  // A full absolute redirect URL.
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed)
+      return {
+        code: url.searchParams.get('code') ?? undefined,
+        state: url.searchParams.get('state') ?? undefined,
+        structured: true
+      }
+    } catch {
+      /* fall through — treat as a bare code */
+    }
+  }
+  // A bare `?code=…&state=…` (or `code=…&state=…`) query fragment.
+  const queryIndex = trimmed.indexOf('?')
+  const candidate = queryIndex >= 0 ? trimmed.slice(queryIndex + 1) : trimmed
+  if (/(^|&)code=/.test(candidate)) {
+    const params = new URLSearchParams(candidate)
+    if (params.has('code')) {
+      return {
+        code: params.get('code') ?? undefined,
+        state: params.get('state') ?? undefined,
+        structured: true
+      }
+    }
+  }
+  // Otherwise the whole thing is the authorization code, verbatim.
+  return { code: trimmed, structured: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +473,14 @@ export class CodexLoginFlow implements LoginFlow {
     this.pendingPromise = new Promise<VaultCredential>((resolve, reject) => {
       this.pending = { resolve, reject }
     })
+    // The paste-back path (completeFromPastedInput) completes the flow WITHOUT
+    // anyone awaiting waitForCallback() — the loopback that would have consumed
+    // this promise never fires for a remote sign-in. terminate() still settles
+    // it (single-settle: a stray loopback hit after a paste is then a no-op), so
+    // attach an internal no-op catch to keep an error-path settlement from
+    // surfacing as an unhandled rejection. A real loopback consumer
+    // (waitForCallback) still receives its own resolution/rejection.
+    void this.pendingPromise.catch(() => {})
 
     // Bind the loopback server BEFORE arming the timeout. Arming the timeout
     // first leaks it when listen() fails (e.g. EADDRINUSE on the fixed port
@@ -433,6 +508,55 @@ export class CodexLoginFlow implements LoginFlow {
       throw new Error('CodexLoginFlow: call start() before waitForCallback()')
     }
     return this.pendingPromise
+  }
+
+  /**
+   * Complete the flow from a PASTED callback URL / bare code (ADR-057's remote
+   * paste-back path) instead of the loopback redirect. Used when the redirect
+   * lands on a REMOTE client's own loopback (a dead page whose address bar still
+   * holds the `?code=&state=` URL) that the host can never receive.
+   *
+   * The host performs the exchange either way — it holds the PKCE verifier and
+   * the `redirect_uri` — so this is the exact same `exchangeCodeForTokens` the
+   * loopback path runs, only with the code arriving by paste.
+   *
+   * CSRF, by input SHAPE (matching the loopback where it can): a URL/query paste
+   * CARRIES `state`, so it gets `handleCallback`'s EXACT check — a missing OR
+   * mismatched state is rejected. Only a BARE pasted code — which genuinely
+   * cannot carry `state` — proceeds on PKCE alone (the host-held, flow-bound
+   * verifier is the defense there, per OAuth 2.0 Security BCP §2.1). Terminating
+   * here also closes the (host-bound, unused-for-remote) loopback server and
+   * settles the pending `waitForCallback()` promise, so the two completion paths
+   * can never both resolve.
+   */
+  async completeFromPastedInput(input: string): Promise<VaultCredential> {
+    if (!this.pkce || !this.state) {
+      throw new Error('CodexLoginFlow: call start() before completeFromPastedInput()')
+    }
+    const { code, state, structured } = parsePastedCallback(input)
+    if (!code) {
+      const err = new Error('Missing authorization code')
+      await this.terminate({ ok: false, err })
+      throw err
+    }
+    // A state-bearing shape (URL/query) is held to the loopback's rule verbatim
+    // (`!this.state || state !== this.state`); a bare code has no state to check.
+    if (structured && (!this.state || state !== this.state)) {
+      const err = new Error('Invalid state - potential CSRF attack')
+      await this.terminate({ ok: false, err })
+      throw err
+    }
+    const pkce = this.pkce
+    try {
+      const tokens = await exchangeCodeForTokens(code, this.redirectUri, pkce, this.deps)
+      const cred = buildVaultCredential(tokens, this.now)
+      await this.terminate({ ok: true, cred })
+      return cred
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err))
+      await this.terminate({ ok: false, err: e })
+      throw e
+    }
   }
 
   /**

@@ -59,17 +59,11 @@ import type {
   EngineModelGroup,
   PermissionSuggestion,
   EngineId,
-  VendorAuthMap,
-  VendorAuthOption,
   OpencodeProviderCatalogEntry,
   ProviderRemoveKind,
   PermissionScope,
   ClaudePermissions
 } from '../../shared/types'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderDefinition
-} from '../../shared/shared-provider'
 import {
   discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
@@ -93,6 +87,7 @@ import { prepareAndCreateSession } from '../../core/ipc/create-session'
 import { safeHandler } from '../../core/ipc/safe-handler'
 import { handleIpc } from './desktop-transport'
 import { configCommands } from '../../core/ipc/config-commands'
+import { authCommands } from '../../core/ipc/auth-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -1180,64 +1175,11 @@ export function registerSessionIpc(): SessionManager {
     kind: 'query',
     handler: safeHandler(async (id: string) => sharedProviderService.listProviderModels(id))
   })
-  // `config`, not `admin`, since ADR-056: `admin` is EXACTLY the session-security
-  // area now (`authcfg:*` + `webauthn:*`). Provider routing is engine
-  // configuration — the same class of setting as `config:save-settings`, which
-  // has always been `config` — and labelling it `admin` conflated "changes how
-  // the app talks to a model vendor" with "changes who may connect to this
-  // machine". Reachability is unchanged in this series: these are DESKTOP
-  // registrations only, and a channel is reachable over remote iff it is
-  // registered for that transport (S1b ports the remote half deliberately).
-  handleIpc({
-    channel: 'shared-provider:save',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (definition: SharedProviderDefinition) =>
-      sharedProviderService.saveDefinition(definition)
-    )
-  })
-  handleIpc({
-    channel: 'shared-provider:remove',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (id: string) => sharedProviderService.removeDefinition(id))
-  })
-  handleIpc({
-    channel: 'shared-provider:set-route',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(
-      async (id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
-        sharedProviderService.setRouteEnabled(id, harness, enabled)
-    )
-  })
-  handleIpc({
-    channel: 'shared-provider:set-key',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (id: string, key: string) => sharedProviderService.setApiKey(id, key))
-  })
-  handleIpc({
-    channel: 'shared-provider:sync',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (id: string) => sharedProviderService.syncProvider(id))
-  })
-  handleIpc({
-    channel: 'shared-provider:disconnect',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (id: string) => sharedProviderService.disconnectProvider(id))
-  })
-  handleIpc({
-    channel: 'shared-provider:set-default',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(
-      async (id: string, harness: ConfigurableHarnessId, modelId?: string) =>
-        sharedProviderService.setRouteDefaultModel(id, harness, modelId)
-    )
-  })
+  // The shared-provider MUTATIONS (save/remove/set-route/set-key/sync/
+  // disconnect/set-default) moved to `ipc/auth-commands.ts` in the S4 vendor-
+  // OAuth series — ONE declaration both transports spread, so the remote UI can
+  // edit provider routing too (ADR-057). The read half above (list/statuses/
+  // models) stays inline: it was already on both transports.
 
   // Claude permission settings (allow/deny/ask rules)
   handleIpc({
@@ -1728,195 +1670,28 @@ export function registerSessionIpc(): SessionManager {
     }
   })
 
-  // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.
-  // Channels and payloads are unchanged; the registry defaults to 'claude'.
+  // Native Anthropic OAuth (ADR-014), multi-account MUTATIONS (ADR-015), the
+  // engine-routed per-vendor auth channels (Phase 5c) and the shared-provider
+  // MUTATIONS all moved to `ipc/auth-commands.ts` in the S4 vendor-OAuth series
+  // (ADR-057): ONE declaration both transports spread, so the remote UI can
+  // drive them too. `config` since ADR-056 (engine/vendor credentials, not the
+  // session-security surface). The desktop-auth subsystem stays in `src/main`,
+  // so the factory takes `requireEngineAuth` / `setAccountEnabled` injected here.
   //
-  // `config` since ADR-056. These are ENGINE-vendor credentials — which model
-  // account the host bills — not the session-security surface `admin` now names
-  // exactly. They stay desktop-only by their registration (they open a local
-  // browser and write local credential files), which is the guarantee that
-  // actually holds; the capability label was never what kept them here.
-  const claudeAuth = engineAuthRegistry.require('claude')
-  handleIpc({
-    channel: 'auth:sign-in',
-    capability: 'config',
-    kind: 'command',
-    handler: async () => claudeAuth.signIn?.()
-  })
-  handleIpc({
-    channel: 'auth:submit-code',
-    capability: 'config',
-    kind: 'command',
-    handler: async (code: string) => claudeAuth.submitCode?.(code)
-  })
-  handleIpc({
-    channel: 'auth:cancel',
-    capability: 'config',
-    kind: 'command',
-    handler: async () => claudeAuth.cancelSignIn?.()
-  })
-
-  // Multiple-account support (ADR-015) — routed through EngineAuthProvider for
-  // add/switch/delete; setEnabled stays direct on AccountManager (not on the interface).
+  // `account:get` (a query) is NOT in that family — it stays inline below, as it
+  // was already registered on both transports.
   handleIpc({
     channel: 'account:get',
     capability: 'config',
     kind: 'query',
     handler: async () => accountManager.getState()
   })
-  handleIpc({
-    channel: 'account:set-enabled',
-    capability: 'config',
-    kind: 'command',
-    handler: async (enabled: boolean) =>
-      accountManager.setEnabled(enabled)
-  })
-  handleIpc({
-    channel: 'account:add',
-    capability: 'config',
-    kind: 'command',
-    handler: async () => claudeAuth.addAccount?.()
-  })
-  handleIpc({
-    channel: 'account:switch',
-    capability: 'config',
-    kind: 'command',
-    handler: async (id: string) => claudeAuth.switchAccount?.(id)
-  })
-  handleIpc({
-    channel: 'account:delete',
-    capability: 'config',
-    kind: 'command',
-    handler: async (id: string) => claudeAuth.deleteAccount?.(id)
-  })
-
-  // -------------------------------------------------------------------------
-  // Engine-routed per-vendor auth channels (opencode multi-vendor auth, Phase 5c)
-  // Each handler dispatches to engineAuthRegistry.require(engineId) and guards
-  // the optional per-vendor method — throws a clear error if the provider lacks it.
-  // Claude auth is unchanged: auth:* / account:* above stay byte-identical.
-  //
-  // All eight declare `config` since ADR-056, for the same reason the Claude auth
-  // channels do: a vendor credential is engine configuration, not the
-  // session-security surface. Desktop-only by registration, unchanged.
-  // -------------------------------------------------------------------------
-
-  handleIpc({
-    channel: 'vendor-auth:probe',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(async (engineId: EngineId): Promise<VendorAuthMap> => {
-      const provider = engineAuthRegistry.require(engineId)
-      return provider.probe()
-    })
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:list-options',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(
-      async (engineId: EngineId): Promise<Record<string, VendorAuthOption[]>> => {
-        const provider = engineAuthRegistry.require(engineId)
-        if (!provider.listVendorAuthOptions) {
-          throw new Error(`Engine "${engineId}" does not support listVendorAuthOptions`)
-        }
-        return provider.listVendorAuthOptions()
-      }
-    )
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:list-keys',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(
-      async (engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
-        const provider = engineAuthRegistry.require(engineId)
-        if (!provider.listVendorCredentialIds) {
-          throw new Error(`Engine "${engineId}" does not support listVendorCredentialIds`)
-        }
-        return provider.listVendorCredentialIds()
-      }
-    )
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:set-key',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (engineId: EngineId, vendorId: string, key: string): Promise<void> => {
-      const provider = engineAuthRegistry.require(engineId)
-      if (!provider.setVendorApiKey) {
-        throw new Error(`Engine "${engineId}" does not support setVendorApiKey`)
-      }
-      return provider.setVendorApiKey(vendorId, key)
-    })
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:oauth-authorize',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(
-      async (
-        engineId: EngineId,
-        vendorId: string,
-        method: number,
-        inputs?: Record<string, string>
-      ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> => {
-        const provider = engineAuthRegistry.require(engineId)
-        if (!provider.oauthAuthorize) {
-          throw new Error(`Engine "${engineId}" does not support oauthAuthorize`)
-        }
-        return provider.oauthAuthorize(vendorId, method, inputs)
-      }
-    )
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:oauth-callback',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(
-      async (
-        engineId: EngineId,
-        vendorId: string,
-        method: number,
-        code?: string
-      ): Promise<boolean> => {
-        const provider = engineAuthRegistry.require(engineId)
-        if (!provider.oauthCallback) {
-          throw new Error(`Engine "${engineId}" does not support oauthCallback`)
-        }
-        return provider.oauthCallback(vendorId, method, code)
-      }
-    )
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:remove',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (engineId: EngineId, vendorId: string): Promise<void> => {
-      const provider = engineAuthRegistry.require(engineId)
-      if (!provider.removeVendorAuth) {
-        throw new Error(`Engine "${engineId}" does not support removeVendorAuth`)
-      }
-      return provider.removeVendorAuth(vendorId)
-    })
-  })
-
-  handleIpc({
-    channel: 'vendor-auth:oauth-cancel',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (engineId: EngineId): Promise<void> => {
-      const provider = engineAuthRegistry.require(engineId)
-      // No-op if the engine doesn't drive OAuth flows.
-      await provider.cancelVendorOauth?.()
-    })
-  })
+  for (const cmd of authCommands({
+    requireEngineAuth: (engineId) => engineAuthRegistry.require(engineId),
+    setAccountEnabled: (enabled) => accountManager.setEnabled(enabled)
+  })) {
+    handleIpc(cmd)
+  }
 
   // Mockup preview — read HTML from mockup directory. `cwd`/`directory` are
   // caller-supplied (and reachable remotely), so confine the read to a direct

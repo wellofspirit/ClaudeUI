@@ -426,6 +426,21 @@ describe('PiAuthProvider OAuth delegation (openai-codex only)', () => {
     expect(mockCompleteLogin).not.toHaveBeenCalled()
   })
 
+  it('oauthCallback with a pasted URL/code drives completeLogin(pasted) (ADR-057 remote paste-back)', async () => {
+    mockCompleteLogin.mockResolvedValue({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    const provider = new PiAuthProvider()
+    const pasted = 'http://localhost:1455/auth/callback?code=abc&state=st'
+    await expect(provider.oauthCallback('openai-codex', 0, pasted)).resolves.toBe(true)
+    expect(mockCompleteLogin).toHaveBeenCalledWith(pasted)
+  })
+
+  it('oauthCallback with a blank code falls back to the loopback completeLogin() (desktop)', async () => {
+    mockCompleteLogin.mockResolvedValue({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    const provider = new PiAuthProvider()
+    await expect(provider.oauthCallback('openai-codex', 0, '   ')).resolves.toBe(true)
+    expect(mockCompleteLogin).toHaveBeenCalledWith()
+  })
+
   it('cancelVendorOauth() delegates to credentialSync.cancelLogin()', async () => {
     const provider = new PiAuthProvider()
     await provider.cancelVendorOauth()

@@ -97,6 +97,52 @@ describe('AuthManager.signIn — never rejects, always broadcasts on failure (C-
 })
 
 /**
+ * ADR-057 — a REMOTE-initiated sign-in must not open a browser on the host, and
+ * must surface `manualUrl` so the remote UI can display it. The desktop path is
+ * unchanged: it opens the host browser and carries no `manualUrl`. The token
+ * exchange stays host-side either way (unchanged).
+ */
+describe('AuthManager.signIn — remote path skips openExternal + surfaces manualUrl (ADR-057)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    hoisted.handle.current = {
+      claudeAuthenticate: vi.fn(async () => ({
+        manualUrl: 'https://claude.ai/oauth?state=s',
+        automaticUrl: 'https://claude.ai/oauth/auto'
+      })),
+      claudeOAuthWaitForCompletion: vi.fn(() => new Promise(() => {})),
+      claudeOAuthCallback: vi.fn()
+    }
+  })
+
+  it('remote: does NOT call shell.openExternal and returns manualUrl on the state', async () => {
+    const { win } = makeWindow()
+    authManager.setWindow(win as never)
+    const shim = await import('../../../test/stubs/electron-shim')
+    const spy = vi.spyOn(shim.shell, 'openExternal').mockResolvedValue(undefined)
+
+    const state = await authManager.signIn({ remote: true })
+
+    expect(spy).not.toHaveBeenCalled()
+    expect(state.status).toBe('authorizing')
+    expect(state.manualUrl).toBe('https://claude.ai/oauth?state=s')
+  })
+
+  it('desktop (no opts): opens the host browser and carries no manualUrl (byte-identical)', async () => {
+    const { win } = makeWindow()
+    authManager.setWindow(win as never)
+    const shim = await import('../../../test/stubs/electron-shim')
+    const spy = vi.spyOn(shim.shell, 'openExternal').mockResolvedValue(undefined)
+
+    const state = await authManager.signIn()
+
+    expect(spy).toHaveBeenCalledWith('https://claude.ai/oauth/auto')
+    expect(state.status).toBe('authorizing')
+    expect(state.manualUrl).toBeUndefined()
+  })
+})
+
+/**
  * F5 — security-adjacent. A successful login replaces the credential every
  * running engine process cached, so those processes have to stop MAIN-side.
  *

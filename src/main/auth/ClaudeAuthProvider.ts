@@ -91,8 +91,8 @@ class ClaudeAuthProvider implements EngineAuthProvider {
     }
   }
 
-  async signIn(): Promise<AuthFlowState> {
-    return authManager.signIn()
+  async signIn(opts?: { remote?: boolean }): Promise<AuthFlowState> {
+    return authManager.signIn(opts)
   }
 
   async submitCode(code: string): Promise<AuthFlowState> {
@@ -103,8 +103,8 @@ class ClaudeAuthProvider implements EngineAuthProvider {
     return authManager.cancelSignIn()
   }
 
-  async addAccount(): Promise<AccountsState> {
-    return accountManager.addAccount()
+  async addAccount(opts?: { remote?: boolean }): Promise<AccountsState> {
+    return accountManager.addAccount(opts)
   }
 
   async switchAccount(id: string): Promise<AccountsState> {

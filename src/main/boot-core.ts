@@ -55,6 +55,7 @@ import { sharedProviderService } from '../core/shared-providers'
 import { accountManager } from './services/account-manager'
 import { setLiveSessionCanceller, cancelClaudeSessions } from './services/session-invalidation'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
+import { engineAuthRegistry } from './auth/EngineAuthRegistry'
 import { logger } from '../core/services/logger'
 import {
   MIN_AUDIT_RETENTION_DAYS,
@@ -207,7 +208,16 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // Multi-attach delivery path (SyncCore phase 2): the pty manager hands frames
   // for attached remote connections to THIS server's sink.
   terminalService.setRemoteSink(remoteServer.terminalSink())
-  registerRemoteHandlers(remoteDispatcher, sessionManager, remoteServer)
+  // The 4th arg wires the vendor-OAuth / account / native-OAuth family (S4,
+  // ADR-057) onto the remote transport — the desktop-auth subsystem stays in
+  // `src/main`, so its registry + account manager are injected here rather than
+  // imported by the (Electron-free) core registrar. `engineAuthRegistry` is
+  // populated by the `register-auth-providers` side-effect import that
+  // `registerSessionIpc` (above) pulled in.
+  registerRemoteHandlers(remoteDispatcher, sessionManager, remoteServer, {
+    requireEngineAuth: (engineId) => engineAuthRegistry.require(engineId),
+    setAccountEnabled: (enabled) => accountManager.setEnabled(enabled)
+  })
   // Passkey management on the desktop transport (ADR-052). Separate call because
   // the ceremony verbs are remote-only — see webauthn.ipc.ts.
   registerWebauthnIpc(remoteServer)

@@ -103,8 +103,16 @@ class AuthManager {
    * Begin the login flow. Opens the browser and starts awaiting the loopback
    * redirect in the background. Resolves with the "authorizing" snapshot; the
    * success/error transition is broadcast via `auth:state`.
+   *
+   * `opts.remote` (ADR-057) is the ONLY behavioural fork: a remote-initiated
+   * sign-in must NOT open a browser on the HOST — the remote user opens the URL
+   * on their own device — so `shell.openExternal` is skipped and the returned
+   * snapshot carries `manualUrl` for the remote UI to display. cli.js still
+   * performs the token EXCHANGE host-side either way (that is correct and
+   * unchanged). The desktop path (`opts` absent) is byte-identical to before.
    */
-  async signIn(): Promise<AuthFlowState> {
+  async signIn(opts?: { remote?: boolean }): Promise<AuthFlowState> {
+    const remote = opts?.remote === true
     // Never let a spawn-path throw escape as a rejected promise: callers
     // fire-and-forget this (AccountManager.addAccount → `void signIn()`), so a
     // rejection would be an unhandled rejection AND the renderer would get no
@@ -132,7 +140,10 @@ class AuthManager {
     }
 
     this.pendingState = parseState(urls.manualUrl)
-    if (urls.automaticUrl) {
+    // Remote sign-in: do NOT open a browser on the host — the remote user opens
+    // `manualUrl` on their own device (ADR-057). Desktop: open the host browser
+    // exactly as before.
+    if (!remote && urls.automaticUrl) {
       try {
         await shell.openExternal(urls.automaticUrl)
       } catch (err) {
@@ -141,12 +152,20 @@ class AuthManager {
     }
 
     // Await the loopback redirect in the background — do not block the caller.
+    // On the remote path the host loopback still arms (harmless); completion
+    // will normally arrive via `auth:submit-code` instead.
     handle
       .claudeOAuthWaitForCompletion()
       .then((res) => this.finalize(myFlow, res as OAuthResult))
       .catch((err) => this.fail(myFlow, err))
 
-    const authorizing: AuthFlowState = { status: 'authorizing', account: null, error: null }
+    const authorizing: AuthFlowState = {
+      status: 'authorizing',
+      account: null,
+      error: null,
+      // Surfaced ONLY for a remote sign-in, so the desktop snapshot is unchanged.
+      ...(remote ? { manualUrl: urls.manualUrl } : {})
+    }
     this.broadcast(authorizing)
     return authorizing
   }

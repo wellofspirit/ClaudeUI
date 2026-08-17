@@ -2305,6 +2305,14 @@ export interface AuthFlowState {
   status: AuthFlowStatus
   account: OAuthAccount | null
   error: string | null
+  /**
+   * The claude.ai URL to open in ANY browser for a REMOTE-initiated sign-in
+   * (ADR-057): the host does not open a browser on itself, so the remote UI
+   * shows this URL, the user consents anywhere, claude.ai displays a code, and
+   * `auth:submit-code` completes the exchange host-side. Absent on the desktop
+   * path, which opens the host browser directly (byte-identical to before).
+   */
+  manualUrl?: string
 }
 
 /**

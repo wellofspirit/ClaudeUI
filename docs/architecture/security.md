@@ -140,6 +140,24 @@ Two structural facts make this reviewable rather than a leap of faith. **One dec
 
 `log-viewer:*` was ruled the opposite way, and stays pinned at `admin` with no registration anywhere: it is desktop WINDOW CHROME (open/minimize/maximize/close/theme of a `BrowserWindow`), host-physical in the same sense `window:*` is. A headless box has no log window to drive — it has the log file.
 
+### The vendor-credential surface (S4, ADR-057)
+
+The last family S1b deferred — native Claude OAuth, multi-account mutations, the per-vendor auth verbs, and the shared-provider writes — is registered on the remote transport too, from ONE shared declaration in `ipc/auth-commands.ts` that both `session.ipc.ts` and `remote-handlers.ts` spread (the same pattern as `config-commands.ts`). All `config`, so any authenticated connection reaches them.
+
+| Family | Capability | Channels |
+| ------ | ---------- | -------- |
+| Native Claude OAuth (`auth:sign-in`, `auth:submit-code`, `auth:cancel`) | `config` | 3 |
+| Multi-account mutations (`account:set-enabled`, `account:add`, `account:switch`, `account:delete`) | `config` | 4 (`account:get` was already on both transports) |
+| Per-vendor auth (`vendor-auth:*` — probe / list-options / list-keys / set-key / oauth-authorize / oauth-callback / oauth-cancel / remove) | `config` | 8 |
+| Shared-provider writes (`shared-provider:{save,remove,set-route,set-key,sync,disconnect,set-default}`) | `config` | 7 (the reads were already on both) |
+
+These verbs are **flows, not just data**, and two properties keep them safe over remote:
+
+- **Token material never crosses the wire.** `probe` / `list-keys` / `pi:auth-status` return `authState` / credential-kind / labels / booleans only; the mutations return void. No handler returns `access` / `refresh` / a key. The token EXCHANGE runs host-side (it holds the PKCE verifier and writes the credential stores); only the authorization CODE returns from the browser.
+- **Consent happens in any browser on any device; the host-physical browser open does NOT fire for a remote caller.** `auth:sign-in` / `account:add` derive remote-vs-desktop from `connection.identity.method` (the "origin-derived flag") — a desktop connection opens the host browser exactly as before, a remote connection skips `shell.openExternal` and surfaces `manualUrl` for the remote UI to display; the code returns via `auth:submit-code`. For the Codex vault (`vendor-auth:oauth-callback`) the remote user pastes the whole callback URL and the host completes with the held verifier (see ADR-057). opencode's `auto` method — whose loopback lives inside the host's opencode server, unreachable from a remote browser — is refused from a remote caller with instructions to use the `code` method or the desktop; pi's Codex `auto` is not refused, because it completes via paste-back.
+
+Reachability is unchanged in substance from the ADR-056 rename: these were already `config`, and were desktop-only by REGISTRATION; S4 adds the registration, deliberately.
+
 Grant bundles (`grantsFor`) — **THREE outcomes since ADR-056, keyed on the METHOD alone**:
 
 | Method | Bundle |

@@ -23,6 +23,8 @@ import {
   parseJwtClaims,
   extractAccountId,
   extractEmail,
+  parsePastedCallback,
+  CodexLoginFlow,
   type PkceCodes,
   type TokenResponse
 } from '../../../../core/auth/vault/codex-oauth'
@@ -290,6 +292,155 @@ describe('extractAccountId', () => {
   it('returns undefined when neither token carries an account id', () => {
     expect(extractAccountId({ id_token: makeJwt({}), access_token: makeJwt({}) })).toBeUndefined()
     expect(extractAccountId({})).toBeUndefined()
+  })
+})
+
+describe('parsePastedCallback (ADR-057)', () => {
+  it('marks a full loopback redirect URL as structured (state-bearing)', () => {
+    expect(
+      parsePastedCallback('http://localhost:1455/auth/callback?code=abc123&state=st-9')
+    ).toEqual({ code: 'abc123', state: 'st-9', structured: true })
+  })
+
+  it('marks a bare query fragment as structured', () => {
+    expect(parsePastedCallback('?code=abc123&state=st-9')).toEqual({
+      code: 'abc123',
+      state: 'st-9',
+      structured: true
+    })
+    expect(parsePastedCallback('code=abc123&state=st-9')).toEqual({
+      code: 'abc123',
+      state: 'st-9',
+      structured: true
+    })
+  })
+
+  it('a URL/query form with NO state is still structured (so the caller can require state)', () => {
+    expect(parsePastedCallback('http://localhost:1455/auth/callback?code=abc123')).toEqual({
+      code: 'abc123',
+      state: undefined,
+      structured: true
+    })
+  })
+
+  it('treats a bare code verbatim and marks it NON-structured (cannot carry state)', () => {
+    expect(parsePastedCallback('bare-auth-code')).toEqual({
+      code: 'bare-auth-code',
+      structured: false
+    })
+    expect(parsePastedCallback('  bare-auth-code  ')).toEqual({
+      code: 'bare-auth-code',
+      structured: false
+    })
+  })
+
+  it('returns a non-structured empty result for empty input', () => {
+    expect(parsePastedCallback('   ')).toEqual({ structured: false })
+  })
+
+  it('URL-decodes the code/state values', () => {
+    const parsed = parsePastedCallback('http://localhost:1455/auth/callback?code=a%2Fb&state=s%3D1')
+    expect(parsed.code).toBe('a/b')
+    expect(parsed.state).toBe('s=1')
+  })
+})
+
+describe('CodexLoginFlow.completeFromPastedInput (ADR-057 remote paste-back)', () => {
+  /** A flow bound to an ephemeral loopback port with a mocked token endpoint. */
+  async function armFlow(fetchFn: ReturnType<typeof vi.fn>) {
+    const flow = new CodexLoginFlow({
+      port: 0,
+      deps: { fetch: fetchFn as unknown as typeof fetch, issuer: ISSUER },
+      now: () => 1_000_000
+    })
+    const { authorizeUrl, state } = await flow.start()
+    const challenge = new URL(authorizeUrl).searchParams.get('code_challenge')!
+    return { flow, state, challenge }
+  }
+
+  it('completes from a full pasted URL: validates state, exchanges with the HELD verifier, returns the credential', async () => {
+    const fetchFn = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'acc',
+        refresh_token: 'ref',
+        expires_in: 3600
+      })
+    }))
+    const { flow, state, challenge } = await armFlow(fetchFn)
+
+    const cred = await flow.completeFromPastedInput(
+      `http://localhost:1455/auth/callback?code=paste-code&state=${state}`
+    )
+
+    // The exchange fired exactly once, against the token endpoint.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe(`${ISSUER}/oauth/token`)
+    const body = new URLSearchParams(init.body as string)
+    expect(body.get('grant_type')).toBe('authorization_code')
+    expect(body.get('code')).toBe('paste-code')
+    // The verifier is the flow's HELD one — its S256 challenge matches the
+    // authorize URL's code_challenge (proving the host exchanged with the
+    // verifier it generated, not one supplied by the paste).
+    const verifier = body.get('code_verifier')!
+    expect(createHash('sha256').update(verifier).digest('base64url')).toBe(challenge)
+
+    expect(cred).toMatchObject({ type: 'oauth', access: 'acc', refresh: 'ref' })
+    // waitForCallback resolves to the same credential (single-settle).
+    await expect(flow.waitForCallback()).resolves.toMatchObject({ access: 'acc' })
+  })
+
+  it('accepts a BARE code (no state) and exchanges it', async () => {
+    const fetchFn = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'a2', refresh_token: 'r2', expires_in: 100 })
+    }))
+    const { flow } = await armFlow(fetchFn)
+
+    const cred = await flow.completeFromPastedInput('just-the-code')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const [, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit]
+    const body = new URLSearchParams(init.body as string)
+    expect(body.get('code')).toBe('just-the-code')
+    expect(cred.access).toBe('a2')
+  })
+
+  it('refuses a state MISMATCH before any exchange (CSRF guard)', async () => {
+    const fetchFn = vi.fn()
+    const { flow } = await armFlow(fetchFn)
+
+    await expect(
+      flow.completeFromPastedInput(
+        'http://localhost:1455/auth/callback?code=x&state=WRONG-STATE'
+      )
+    ).rejects.toThrow(/Invalid state/)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('refuses a URL/query paste that carries a code but NO state (loopback parity — GUARD, fails pre-fix)', async () => {
+    // The exact bypass the divergence allowed: the loopback rejects a missing
+    // state, but the paste path used to SKIP the check when state was absent. A
+    // state-bearing SHAPE (a full callback URL) must be held to the loopback's
+    // rule — only a bare code may proceed on PKCE alone.
+    const fetchFn = vi.fn()
+    const { flow } = await armFlow(fetchFn)
+
+    await expect(
+      flow.completeFromPastedInput('http://localhost:1455/auth/callback?code=only-code')
+    ).rejects.toThrow(/Invalid state/)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('rejects a pasted URL with no code', async () => {
+    const fetchFn = vi.fn()
+    const { flow, state } = await armFlow(fetchFn)
+    await expect(
+      flow.completeFromPastedInput(`http://localhost:1455/auth/callback?state=${state}`)
+    ).rejects.toThrow(/Missing authorization code/)
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 })
 

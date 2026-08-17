@@ -358,6 +358,51 @@ describe('CredentialSync route policy', () => {
     }
   })
 
+  it('completeLogin(pastedInput) drives the vault paste path and feeds both engines (ADR-057)', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = 5_000_000
+      vi.setSystemTime(now)
+      const cred: VaultCredential = {
+        type: 'oauth',
+        access: 'pasted-acc',
+        refresh: 'pasted-ref',
+        expires: now + 3_600_000
+      }
+      const { vault } = makeFakeVault(null)
+      const completePaste = vi.fn(async () => cred)
+      vault.completeLoginFromPastedInput = completePaste
+      const pi = fakeFeedTarget()
+      const opencode = fakeFeedTarget()
+      const sync = new CredentialSync({ vault })
+      sync.configure({ pi: pi.target, opencode: opencode.target })
+
+      const result = await sync.completeLogin(
+        'http://localhost:1455/auth/callback?code=c&state=s'
+      )
+
+      expect(completePaste).toHaveBeenCalledWith(
+        'http://localhost:1455/auth/callback?code=c&state=s'
+      )
+      expect(vault.completeLogin).not.toHaveBeenCalled()
+      expect(result).toBe(cred)
+      expect(pi.feed).toHaveBeenCalled()
+      expect(opencode.feed).toHaveBeenCalled()
+      sync.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('completeLogin(pastedInput) throws when the vault has no paste support', async () => {
+    // makeFakeVault does not implement the optional completeLoginFromPastedInput.
+    const { vault } = makeFakeVault(null)
+    const sync = new CredentialSync({ vault })
+    await expect(sync.completeLogin('x')).rejects.toThrow(
+      /does not support pasted login completion/
+    )
+  })
+
   it('fails closed when a configured route policy throws', async () => {
     const pi = fakeFeedTarget()
     const opencode = fakeFeedTarget()

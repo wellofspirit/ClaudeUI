@@ -21,12 +21,18 @@ export interface EngineAuthProvider {
   probe(): Promise<VendorAuthMap>
 
   // --- Driven login (capabilities.auth.canDriveLogin) ---
-  signIn?(vendorId?: VendorId): Promise<AuthFlowState>
+  /**
+   * `opts.remote` (ADR-057): a remote-initiated sign-in must not open a browser
+   * on the host — the host surfaces `manualUrl` on the returned state instead.
+   * Desktop callers pass nothing and get the byte-identical host-browser flow.
+   */
+  signIn?(opts?: { remote?: boolean }): Promise<AuthFlowState>
   submitCode?(code: string): Promise<AuthFlowState>
   cancelSignIn?(): Promise<void>
 
   // --- Multi-account (capabilities.auth.multiAccount) ---
-  addAccount?(): Promise<AccountsState>
+  /** `opts.remote` threads through to the new account's sign-in (ADR-057), same as {@link signIn}. */
+  addAccount?(opts?: { remote?: boolean }): Promise<AccountsState>
   switchAccount?(id: string): Promise<AccountsState>
   deleteAccount?(id: string): Promise<AccountsState>
 

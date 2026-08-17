@@ -158,13 +158,15 @@ describe('RemoteDispatcher', () => {
     /**
      * The engine-vendor channels ADR-056 moved from `admin` to `config`.
      *
-     * They are DESKTOP-ONLY by registration, not by capability, and that was
-     * always the load-bearing half — `admin` had already stopped meaning
-     * "unreachable remotely" when a passkey connection started holding it
-     * (ADR-052). Pinned here as the negative: not in the pin table, and not
-     * pretending to be.
+     * S4 (ADR-057) then REGISTERED them on the remote transport too (the S1b
+     * sweep had deferred this last family), so they are no longer desktop-only —
+     * but the invariant this block pins is unchanged and independent of
+     * registration: a `config` channel is grantable, and a grantable capability
+     * may NEVER be pinned (the pin table's one guarantee is that every entry
+     * names a capability the base grant set lacks). So none of these appear in
+     * `PINNED_CAPABILITIES`, before or after they became remote-reachable.
      */
-    const ENGINE_VENDOR_DESKTOP_ONLY = [
+    const ENGINE_VENDOR_NEVER_PINNED = [
       'auth:sign-in',
       'auth:submit-code',
       'auth:cancel',
@@ -175,8 +177,8 @@ describe('RemoteDispatcher', () => {
       'usage:refresh-prices'
     ] as const
 
-    it.each(ENGINE_VENDOR_DESKTOP_ONLY)(
-      '"%s" is no longer PINNED — a grantable capability may never be pinned',
+    it.each(ENGINE_VENDOR_NEVER_PINNED)(
+      '"%s" is not PINNED — a grantable capability may never be pinned',
       (channel) => {
         expect(PINNED_CAPABILITIES[channel]).toBeUndefined()
       }

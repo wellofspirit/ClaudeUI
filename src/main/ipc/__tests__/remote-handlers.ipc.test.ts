@@ -469,6 +469,8 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:models'
     ])
       expect(channels).toContain(channel)
+    // The shared-provider MUTATIONS are now remote-registered too (S4 / ADR-057):
+    // the everything-remote ruling reaches provider routing as well.
     for (const channel of [
       'shared-provider:save',
       'shared-provider:remove',
@@ -478,7 +480,7 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:disconnect',
       'shared-provider:set-default'
     ])
-      expect(channels).not.toContain(channel)
+      expect(channels).toContain(channel)
     // ADR-052 passkeys: registered for remote, but behind `enroll`/`admin`,
     // neither of which a token/tailnet connection ever holds.
     for (const channel of [
@@ -926,10 +928,13 @@ describe('registerRemoteHandlers', () => {
       expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(false)
     })
 
-    it('does NOT register account mutations (they are admin-capability)', () => {
+    it('registers the account mutations (S4 / ADR-057 — config, not admin)', () => {
+      // Previously desktop-only; now remote-registered under the everything-
+      // remote ruling. They declare `config` (in AUTH_OFF_GRANTS) and `account:add`
+      // is remote-aware (skips the host browser, surfaces manualUrl).
       const channels = dispatcher.channels()
       for (const ch of ['account:add', 'account:switch', 'account:delete', 'account:set-enabled']) {
-        expect(channels).not.toContain(ch)
+        expect(channels).toContain(ch)
       }
     })
   })
@@ -1480,6 +1485,49 @@ const S1B_SWEEP_CHANNELS = [
   'worktree:status'
 ] as const
 
+/**
+ * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
+ *
+ * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
+ * throughout — all INSIDE {@link AUTH_OFF_GRANTS} — so an ordinary authenticated
+ * connection reaches every one. That is the everything-remote ruling reaching
+ * the LAST family S1b deferred: a vendor credential is engine configuration, not
+ * the session-security surface (ADR-056), and consent + code-return now work
+ * from any browser (ADR-057). What bounds it: token material never crosses the
+ * wire (`probe`/`list-keys` return booleans/kind/labels), and the two flow verbs
+ * that would open a host browser (`auth:sign-in`, `account:add`) derive
+ * remote-vs-desktop from the connection and skip `openExternal` for a remote
+ * caller — the exchange stays host-side either way.
+ *
+ * They are also not SECOND registrations: `session.ipc.ts` (desktop) and
+ * `remote-handlers.ts` (remote) spread the same declarations from
+ * `ipc/auth-commands.ts`, so a capability cannot drift between the two surfaces.
+ */
+const S4_VENDOR_CREDENTIAL_CHANNELS = [
+  'account:add',
+  'account:delete',
+  'account:set-enabled',
+  'account:switch',
+  'auth:cancel',
+  'auth:sign-in',
+  'auth:submit-code',
+  'shared-provider:disconnect',
+  'shared-provider:remove',
+  'shared-provider:save',
+  'shared-provider:set-default',
+  'shared-provider:set-key',
+  'shared-provider:set-route',
+  'shared-provider:sync',
+  'vendor-auth:list-keys',
+  'vendor-auth:list-options',
+  'vendor-auth:oauth-authorize',
+  'vendor-auth:oauth-callback',
+  'vendor-auth:oauth-cancel',
+  'vendor-auth:probe',
+  'vendor-auth:remove',
+  'vendor-auth:set-key'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1521,7 +1569,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...PASSKEY_CHANNELS,
         ...AUTHCFG_CHANNELS,
         ...VOICE_CHANNELS,
-        ...S1B_SWEEP_CHANNELS
+        ...S1B_SWEEP_CHANNELS,
+        ...S4_VENDOR_CREDENTIAL_CHANNELS
       ].sort()
     )
   })
@@ -1824,5 +1873,114 @@ describe('remote surface parity (phase 1 port)', () => {
       if (sanctioned.has(channel)) continue
       expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S4 — the vendor-OAuth / account / native-OAuth family, dispatched (ADR-057).
+//
+// The parity block above pins that these channels are REGISTERED and reachable
+// under the base grant set. This block drives them through the shared registry
+// with an injected fake auth provider, so it covers what registration alone
+// cannot: fail-closed gating, token-never-on-wire, and the opencode-`auto`
+// remote refusal.
+// ---------------------------------------------------------------------------
+
+describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
+  let dispatcher: RemoteDispatcher
+
+  // A fake provider standing in for whatever engineId is asked for — the branch
+  // that matters (opencode-auto refusal) keys on the engineId ARG, not on which
+  // provider object comes back.
+  const fakeProvider = {
+    probe: vi.fn(async () => ({
+      openai: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' }
+    })),
+    listVendorCredentialIds: vi.fn(async () => ({ openai: 'api' as const })),
+    oauthAuthorize: vi.fn(async () => ({
+      url: 'https://auth.example.com/oauth?x=1',
+      method: 'auto' as const,
+      instructions: 'Sign in.'
+    })),
+    cancelVendorOauth: vi.fn(async () => {}),
+    oauthCallback: vi.fn(async () => true)
+  }
+
+  beforeEach(() => {
+    fakeProvider.probe.mockClear()
+    fakeProvider.cancelVendorOauth.mockClear()
+    makeFakeWindow()
+    dispatcher = new RemoteDispatcher()
+    registerRemoteHandlers(dispatcher, sessionManagerStub, undefined, {
+      requireEngineAuth: () => fakeProvider as never,
+      setAccountEnabled: async (enabled: boolean) => ({
+        enabled,
+        activeId: null,
+        accounts: []
+      })
+    })
+  })
+
+  afterEach(() => {
+    gitWatchRegistry.releaseConnection(remoteConn.connectionId)
+    clearSyncSubscribersForTests()
+  })
+
+  it('an ordinary authenticated (config) connection reaches vendor-auth:probe', async () => {
+    const conn = makeRemoteConnection('password', null)
+    const res = (await dispatcher.handle(makeRequest('vendor-auth:probe', 'opencode'), conn)) as {
+      ok: boolean
+      data?: unknown
+    }
+    expect(res.ok).toBe(true)
+    expect(fakeProvider.probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('an enroll-only connection is refused (fail-closed — config not held)', async () => {
+    const conn = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+    await expect(
+      dispatcher.handle(makeRequest('vendor-auth:probe', 'opencode'), conn)
+    ).rejects.toThrow(/Permission denied: "vendor-auth:probe" requires the "config" capability/)
+    expect(fakeProvider.probe).not.toHaveBeenCalled()
+  })
+
+  it('token material never crosses the wire (probe/list-keys carry no access/refresh/key)', async () => {
+    const conn = makeRemoteConnection('password', null)
+    const probe = (await dispatcher.handle(makeRequest('vendor-auth:probe', 'opencode'), conn)) as {
+      ok: boolean
+      data: Record<string, Record<string, unknown>>
+    }
+    const keys = (await dispatcher.handle(
+      makeRequest('vendor-auth:list-keys', 'opencode'),
+      conn
+    )) as { ok: boolean; data: Record<string, unknown> }
+    const SECRET_FIELDS = ['access', 'refresh', 'token', 'key', 'apiKey', 'secret']
+    for (const entry of Object.values(probe.data)) {
+      for (const field of SECRET_FIELDS) expect(entry).not.toHaveProperty(field)
+    }
+    // list-keys is a map of vendorId → 'api' | 'oauth' — kinds, never material.
+    expect(Object.values(keys.data)).toEqual(['api'])
+  })
+
+  it("refuses opencode's `auto` method from a REMOTE caller and tears the flow down", async () => {
+    const conn = makeRemoteConnection('password', null)
+    const res = (await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-authorize', 'opencode', 'anthropic', 0),
+      conn
+    )) as { ok: boolean; error?: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/only completes on the host machine/)
+    expect(fakeProvider.cancelVendorOauth).toHaveBeenCalledTimes(1)
+  })
+
+  it("does NOT refuse pi's Codex `auto` remotely — it completes via paste-back", async () => {
+    const conn = makeRemoteConnection('password', null)
+    const res = (await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-authorize', 'pi', 'openai-codex', 0),
+      conn
+    )) as { ok: boolean; data?: { url: string } }
+    expect(res.ok).toBe(true)
+    expect(res.data?.url).toContain('auth.example.com')
+    expect(fakeProvider.cancelVendorOauth).not.toHaveBeenCalled()
   })
 })

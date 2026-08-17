@@ -99,8 +99,10 @@ class AccountManager {
     }
   }
 
-  /** Create a new account, make it active, and kick off its login flow. */
-  async addAccount(): Promise<AccountsState> {
+  /** Create a new account, make it active, and kick off its login flow.
+   *  `opts.remote` (ADR-057) forwards to signIn so a remote add surfaces the
+   *  manual URL instead of opening a browser on the host. */
+  async addAccount(opts?: { remote?: boolean }): Promise<AccountsState> {
     if (!this.state.enabled) this.state.enabled = true
     const acc = this.createAccount(`Account ${this.state.accounts.length + 1}`)
     this.state.accounts.push(acc)
@@ -112,7 +114,7 @@ class AccountManager {
     // fire-and-forget with a catch so a spawn-path throw can never surface as an
     // unhandled rejection (signIn() itself is also hardened to broadcast errors
     // rather than reject).
-    void authManager.signIn().catch((err) => {
+    void authManager.signIn(opts).catch((err) => {
       logger.error('AccountManager', `Failed to start login for new account: ${err}`)
     })
     return this.state

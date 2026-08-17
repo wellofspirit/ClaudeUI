@@ -90,6 +90,8 @@ export interface VaultLike {
   hasUnreadableLegacyVault?(): boolean
   beginLogin(): Promise<{ authorizeUrl: string }>
   completeLogin(): Promise<VaultCredential>
+  /** ADR-057 remote paste-back completion. Optional so fakes stay minimal. */
+  completeLoginFromPastedInput?(input: string): Promise<VaultCredential>
   cancelLogin(): void
 }
 
@@ -356,10 +358,22 @@ export class CredentialSync {
     return this.vault.beginLogin()
   }
 
-  /** On success: feed both engine stores, arm the refresh scheduler, and start the fs-watch resync. */
-  async completeLogin(): Promise<VaultCredential> {
+  /**
+   * On success: feed both engine stores, arm the refresh scheduler, and start
+   * the fs-watch resync.
+   *
+   * `pastedInput` (ADR-057) drives the remote paste-back completion instead of
+   * the desktop loopback wait — the host still performs the exchange. Absent,
+   * the loopback path is awaited exactly as before. Everything AFTER the vault
+   * completion (feed / schedule / watch / needsReauth reset) is identical, so
+   * the two paths share this one body.
+   */
+  async completeLogin(pastedInput?: string): Promise<VaultCredential> {
     const generation = this.lifecycleGeneration
-    const cred = await this.vault.completeLogin()
+    const cred =
+      pastedInput !== undefined
+        ? await this.completeVaultLoginFromPaste(pastedInput)
+        : await this.vault.completeLogin()
     if (!this.isCurrent(generation)) {
       await this.removeChatgptCredential()
       throw new Error('ChatGPT login was cancelled')
@@ -374,6 +388,14 @@ export class CredentialSync {
 
   cancelLogin(): void {
     this.vault.cancelLogin()
+  }
+
+  /** Drive the vault's remote paste-back completion, or fail clearly when the vault has no such support. */
+  private async completeVaultLoginFromPaste(input: string): Promise<VaultCredential> {
+    if (!this.vault.completeLoginFromPastedInput) {
+      throw new Error('CredentialSync: vault does not support pasted login completion')
+    }
+    return this.vault.completeLoginFromPastedInput(input)
   }
 
   /** Remove only ChatGPT credentials, preserving all other central-vault records. */

@@ -101,7 +101,9 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/git-watch.ts',
   // S1b — the config/worktree sweep and the automation port.
   'src/core/ipc/config-commands.ts',
-  'src/core/ipc/automation-commands.ts'
+  'src/core/ipc/automation-commands.ts',
+  // S4 (ADR-057) — the vendor-OAuth / account / native-OAuth family.
+  'src/core/ipc/auth-commands.ts'
 ]
 
 /**
