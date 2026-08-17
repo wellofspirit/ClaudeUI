@@ -121,6 +121,25 @@ Capabilities: `chat`, `session-config`, `config`, `git`, `fs-read`, `shell`, `ad
 
 **`admin` is EXACTLY the session-security area** since ADR-056: the `authcfg:*` and `webauthn:*` families, plus their host-anchor twin `remote:*`. The engine-vendor channels that used to carry it — `auth:*`, `account:*`, `shared-provider:*` writes, `vendor-auth:*`, `usage:refresh-prices` — declare `config` now. That is a rename, not a widening: they are desktop-only by their REGISTRATION (a channel is reachable over a transport iff it was registered for it), which is where the guarantee always actually lived. It also removes them from `PINNED_CAPABILITIES`, because `config` is in the base grant set and the pin table's one invariant is that every entry names a capability the base set does not hold.
 
+### The registration sweep (S1b, 2026-08-17)
+
+The owner ruling behind the headless arc is that **everything is changeable from the remote UI; host-PHYSICAL verbs are the only exception**. Until S1b a large part of the config surface was desktop-only *by omission* — registered in `session.ipc.ts` with no remote twin — so the sweep registered it deliberately instead. 37 channels, all of them declaring a capability the base grant set already holds (`config`, `git`, or `chat`), i.e. this is a real widening of what an ordinary authenticated connection reaches, and it is the ruling rather than an accident:
+
+| Family | Capability | Channels |
+| ------ | ---------- | -------- |
+| `worktree:*` | `git` | create / status / remove / list |
+| engine, vendor and opencode config (`config:save-slash-commands`, `config:{load,save}-engine-config`, `config:{load,save}-vendor-config`, `config:{load,save}-opencode-settings`, `config:read-opencode-native-raw`, `config:patch-opencode-native`) | `config` | 9 |
+| `opencode-agents:*` CRUD | `config` (`generate` is `chat` — it spends model tokens) | 6 |
+| `mcp:*` writes (`toggle`, `reconnect`, `set-servers`, `save-servers`, `remove-server`, `toggle-disabled`) | `config` | 6 |
+| `proxy:test-connection`, `usage:refresh-prices` | `config` | 2 |
+| `automation:*` | `config` | 10 |
+
+Two structural facts make this reviewable rather than a leap of faith. **One declaration, two transports:** each channel is declared once, in `ipc/config-commands.ts` / `ipc/automation-commands.ts`, and both registrars spread the same object — the surfaces cannot drift about a capability, and a future desktop-only registration has to be written as one (pinned by `remote-channel-parity.test.ts`). **Nothing host-physical rides along:** `session:pick-folder`, `app:open-in-vscode` and `window:*` declare `host`, which no remote connection holds, and they have no remote registration either.
+
+`automation:*` is the other half of the sweep — a PORT, not just a registration. Those ten channels were the last family on raw `ipcMain.handle`: no declared capability, no capability check, no audit row, no remote twin. They declare **`config`**, because an automation is host-side configuration (a stored prompt plus a cron expression under `~/.claude/ui/automation/`) and `admin` means exactly the session-security area. The "it runs prompts against the host on a timer" objection does not separate it from `session:send`, which runs a prompt against the host *right now* under `chat` — see §Posture: any authenticated remote client is already operator-level in effect. What the port buys is the enforcement the family never had: audited mutations, unaudited reads, and the mutation window on the `strong` tier. The seven mutating channels left `PINNED_CAPABILITIES` in the process, for the same reason `auth:*`/`account:*` did — a pin naming a grantable capability would break that table's one invariant.
+
+`log-viewer:*` was ruled the opposite way, and stays pinned at `admin` with no registration anywhere: it is desktop WINDOW CHROME (open/minimize/maximize/close/theme of a `BrowserWindow`), host-physical in the same sense `window:*` is. A headless box has no log window to drive — it has the log file.
+
 Grant bundles (`grantsFor`) — **THREE outcomes since ADR-056, keyed on the METHOD alone**:
 
 | Method | Bundle |

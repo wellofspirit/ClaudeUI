@@ -443,10 +443,17 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // desktop-only, by the registration half of the reachability rule.
   //
   // Host diagnostics surface: a SEPARATE BrowserWindow with its own preload,
-  // reading the process log ring. Pinned to `admin` ahead of the port (SyncCore
-  // phase 4a item 3 closed the EVENT side of this residual — `log-viewer:*`
-  // events are classified `host-local` in shared/sync/channels.ts — but the
-  // invoke side is still raw `ipcMain.handle` in services/log-viewer.ts).
+  // reading the process log ring. Pinned to `admin`, and — unlike the
+  // `automation:*` block that used to sit below — NOT as a placeholder for a
+  // future port. S1b ruled it: `log-viewer:*` is desktop WINDOW CHROME (open,
+  // minimize, maximize, close, theme of a BrowserWindow), so it is host-physical
+  // in the same sense `window:*` is and NEVER registers on the remote transport.
+  // A headless box has no log window to drive; it has the log FILE. The invoke
+  // side stays raw `ipcMain.handle` in services/log-viewer.ts, and the pin stays
+  // as the belt: `admin` is not in AUTH_OFF_GRANTS, so a stray registration
+  // could not expose it to an auth-off connection either. (SyncCore phase 4a
+  // item 3 closed the EVENT side — `log-viewer:*` events are classified
+  // `host-local` in shared/sync/channels.ts.)
   'log-viewer:open': 'admin',
   'log-viewer:ready': 'admin',
   'log-viewer:get-theme': 'admin',
@@ -454,24 +461,18 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'log-viewer:minimize': 'admin',
   'log-viewer:maximize': 'admin',
   'log-viewer:close': 'admin',
-  // Scheduled automations run arbitrary prompts against the host on a timer, so
-  // every MUTATING channel is `admin`. Same situation as `log-viewer:*`: the event
-  // side is classified now (`automation:*` in shared/sync/channels.ts), the invoke
-  // side still lives on raw `ipcMain.handle` in ipc/automation.ipc.ts. Pinning
-  // here means the port cannot silently widen the remote surface when it happens.
+  // `automation:*` was pinned here at `admin` — the seven mutations only — as a
+  // deliberately fail-closed PLACEHOLDER while the port was unwritten. S1b wrote
+  // it and ruled `config`: an automation is host-side configuration (a stored
+  // prompt plus a cron expression under ~/.claude/ui/automation/), and `admin`
+  // means exactly the session-security area since ADR-056. The entries are GONE
+  // rather than re-pinned at `config`, for the same reason `auth:*` and
+  // `account:*` are: `config` is in the base grant set, and a pin whose
+  // capability is grantable would break this table's one guarantee. What governs
+  // them now is the registry — declared capability plus per-transport
+  // registration — and the audit rows the port bought them. See
+  // ipc/automation-commands.ts for the capability ruling in full.
   //
-  // The read channels (`automation:list`, `-list-runs`, `-load-run-history`) are
-  // deliberately NOT pinned: they would declare `config`, which IS in
-  // AUTH_OFF_GRANTS, and a pin whose capability is grantable would break
-  // this table's one guarantee (see the doc comment). Whether reads are exposed
-  // is a policy decision for the port, not something to freeze in advance.
-  'automation:save': 'admin',
-  'automation:delete': 'admin',
-  'automation:run-now': 'admin',
-  'automation:toggle': 'admin',
-  'automation:cancel': 'admin',
-  'automation:dismiss-run': 'admin',
-  'automation:send-message': 'admin',
   // The remote server's own config + credential. A remote client must never
   // read/rotate the credential it authenticated with, nor flip the transport
   // it is connected through (ADR-039/042).

@@ -568,3 +568,74 @@ describe('OPENCODE_CONFIG_DIR env var', () => {
     }
   })
 })
+
+// ─── Path guard (S1b review F1) ───────────────────────────────────────────────
+//
+// The agent name is caller-supplied and, since the S1b sweep put
+// `opencode-agents:*` on the remote transport, remotely so. Unvalidated it is an
+// arbitrary `.md` read / write / unlink — `~/.claude/CLAUDE.md` is within reach,
+// which plants standing model instructions on every future session.
+//
+// `ipc/config-commands.ts` refuses these at the registration perimeter (driven
+// over the real remote transport in `ipc/__tests__/remote-handlers.ipc.test.ts`);
+// this block bypasses that entirely and calls the service, because the backstop
+// has to hold for callers that never went through the perimeter.
+
+describe('agent name path guard (F1 backstop)', () => {
+  const ESCAPES = [
+    '../../../.claude/CLAUDE',
+    '../evil',
+    '..',
+    '.',
+    'a/b',
+    'a\\b',
+    'C:evil',
+    '.hidden',
+    ''
+  ]
+
+  it('refuses a traversal name on read/delete/set-disabled', () => {
+    for (const bad of ESCAPES) {
+      expect(() => readAgent(bad, 'global'), bad).toThrow(/Invalid agent name/)
+      expect(() => deleteAgent(bad, 'global'), bad).toThrow(/Invalid agent name/)
+      expect(() => setAgentDisabled(bad, 'global', undefined, true), bad).toThrow(
+        /Invalid agent name/
+      )
+    }
+  })
+
+  it('refuses a traversal name on save, and writes nothing outside the agents dir', () => {
+    const outside = path.join(configDir, '..', 'CLAUDE.md')
+    for (const bad of ESCAPES) {
+      expect(() => saveAgent({ name: bad, scope: 'global', mode: 'all' }), bad).toThrow(
+        /Invalid agent name/
+      )
+    }
+    expect(fs.existsSync(outside)).toBe(false)
+  })
+
+  it('does not list an on-disk file whose basename is not a plain agent name', () => {
+    // Such a file cannot be read, saved or deleted, so offering it as a row would
+    // hand the UI a name it will be refused for.
+    const agentsDir = path.join(configDir, 'agents')
+    writeAgentFile(agentsDir, '.hidden-agent', `---\nmode: all\n---\nx`)
+    writeAgentFile(agentsDir, 'ok-agent', `---\nmode: all\n---\nx`)
+
+    const names = listAgents().map((a) => a.name)
+    expect(names).toContain('ok-agent')
+    expect(names).not.toContain('.hidden-agent')
+  })
+
+  it('still accepts the real name vocabulary (UI slugs, plus `_`/`.` in hand-written files)', () => {
+    // The settings UI restricts new names to /^[a-z0-9-]+$/; the guard is a
+    // little wider so a hand-written agents/*.md stays readable.
+    for (const good of ['build', 'my-custom-agent', 'code_review', 'v1.2-agent', 'Agent9']) {
+      saveAgent({ name: good, scope: 'global', mode: 'all' })
+      expect(fs.existsSync(path.join(configDir, 'agents', `${good}.md`))).toBe(true)
+      expect(readAgent(good, 'global')).not.toBeNull()
+      expect(listAgents().map((a) => a.name)).toContain(good)
+      deleteAgent(good, 'global')
+      expect(fs.existsSync(path.join(configDir, 'agents', `${good}.md`))).toBe(false)
+    }
+  })
+})

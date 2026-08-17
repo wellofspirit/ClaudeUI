@@ -11,6 +11,7 @@ import { loadSessionHistory } from './session-history'
 import { extractToolResultContent } from './tool-result-content'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
+import { isValidAutomationId } from './automation-id'
 import {
   resolveThinkingMode,
   resolveEffort,
@@ -65,21 +66,10 @@ const AUTOMATION_DIR = path.join(os.homedir(), '.claude', 'ui', 'automation')
 /** @deprecated Legacy single-file storage — migrated to per-file on first load */
 const LEGACY_AUTOMATIONS_FILE = path.join(AUTOMATION_DIR, 'automations.json')
 
-/**
- * Strict slug for an automation id (audit M-AU3). Renderer-supplied ids flow
- * into path.join — including the destructive `fs.rmSync(runsDir(id), …)` in
- * delete() — so an id like `../..` would escape the automation dir and delete
- * arbitrary directories above it. A hostile/compromised renderer or the remote
- * surface is the trigger. Real ids are uuid v4 (hex + hyphens); this allows
- * that plus conservative slug punctuation and rejects any `.`, `/` or `\`
- * needed for traversal.
- */
-const AUTOMATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
-
-/** True iff `id` is a safe automation/run id (no path-traversal characters). */
-export function isValidAutomationId(id: unknown): id is string {
-  return typeof id === 'string' && AUTOMATION_ID_RE.test(id)
-}
+// The slug rule itself lives in `automation-id.ts` — the IPC perimeter needs it
+// without this module's Electron/SDK graph (see that file). Re-exported here so
+// every existing importer keeps its import path.
+export { isValidAutomationId } from './automation-id'
 
 /** Throw unless `id` is a safe id. The single choke point before any path.join. */
 function assertValidAutomationId(id: unknown): asserts id is string {

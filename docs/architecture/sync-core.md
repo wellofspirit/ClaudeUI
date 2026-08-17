@@ -184,7 +184,7 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 | # | Content | Size | Exit criteria | Status |
 | - | ------- | ---- | ------------- | ------ |
 | 0 | Unified `sync-client` (two transports); ack-based `lastSeq`; pre-mount buffering | S | No event dropped while acked, provable by test | **landed** (`bf6aa1b`, 2026-08-14) |
-| 1 | Command registry: schemas, capabilities, per-connection identity, audit log | M | Every mutating channel registered with a declared capability; fail-closed test | **landed** (`48b4f72`, 2026-08-14) — plugin channels ride `config` pending plugin-declared capabilities; `automation:*`/`log-viewer:*` not yet ported |
+| 1 | Command registry: schemas, capabilities, per-connection identity, audit log | M | Every mutating channel registered with a declared capability; fail-closed test | **landed** (`48b4f72`, 2026-08-14) — plugin channels ride `config` pending plugin-declared capabilities; `automation:*`/`log-viewer:*` not yet ported (S1b, 2026-08-17: `automation:*` ported at `config`; `log-viewer:*` ruled desktop-forever) |
 | 2 | **Terminal** (PTY manager, multi-attach, step-up, audit) | M | Shell usable from web behind opt-in + step-up | **landed** (`0e60c7e`, 2026-08-14) — step-up = password proof (passkeys follow), available over the cloudflared tunnel too: the ceremony gates on credential existence, not transport (the proof rides the mandatory E2E channel; its salt/KDF come from `terminal:availability`, since auth-info advertises no password there); mobile terminal layout is a follow-up. **Indexed per-cwd pool added afterwards** (see §Terminal): 2's fan-out and ring were real but every open still spawned, so the two surfaces never actually shared a pty |
 | 3 | Queue-of-record: itemized queue, CC-parity take-back, boundary-held forwarding for opencode/pi | M | Ghost-message repros from the 2026-08-13 review pass | **landed** (`1349ec9`, 2026-08-14) — claude turn-end race closed by treating cli.js's `result` as a queue-flush boundary (everything still queued is marked consumed in one broadcast; accepted micro-race: a recall in flight at that exact instant) |
 | 4 | Canonical state in core + shared reducer + in-process snapshots; desktop renderer becomes client #1; no `BrowserWindow`-required sync paths | **L** | Snapshot invariant test (seq N ⊇ events ≤ N); app runs with no window (windowless-Electron smoke) | **landed** — all four stages; invariant test green, windowless smoke green (`windowless-boot.e2e.test.ts`) |
@@ -533,9 +533,18 @@ refetch), so a 10-minute background reconnect catches up without a `sync-full`.
   the 4c deviation note above. **`causedBy` itself is still unbuilt** — the designed
   escape hatch if the honest round-trip ever feels slow from a phone, and an owner call
   after living with it.
-- **`automation:*` and `log-viewer:*` are not ported** to the registry: they register
-  through bare `ipcMain.handle` (`ipc/automation.ipc.ts`, `services/log-viewer.ts`), so
-  they get no capability check and no audit row, and they are unreachable remotely.
+- ~~**`automation:*` and `log-viewer:*` are not ported** to the registry~~ — **RESOLVED
+  (S1b, 2026-08-17), the two halves differently.** `automation:*` is ported: all ten
+  channels declare `config` (host-side configuration — see security.md §The registration
+  sweep for the capability ruling), are registered on BOTH transports from one shared
+  declaration (`ipc/automation-commands.ts`), and now get the capability check, the audit
+  row on every mutation, and the `strong`-tier mutation window. `automation.ipc.ts` keeps
+  only what the desktop boot owns — constructing the manager, starting the schedules, and
+  the `ipcMain` wiring, which goes through `handleIpc` like every other channel.
+  `log-viewer:*` is ruled DESKTOP-FOREVER instead: it drives a `BrowserWindow` (open,
+  minimize, maximize, close, theme), so it is host-physical like `window:*` and never
+  registers. It stays on bare `ipcMain.handle` in `services/log-viewer.ts` and stays
+  pinned at `admin` as the belt.
 - **`app:version-info` never reaches the remote dispatcher.**
   `registerRemoteVersionInfo()` no-ops unless `registerRemoteHandlers()` has already
   run, and the bootstrap computes the build versions BEFORE core boots — so the web

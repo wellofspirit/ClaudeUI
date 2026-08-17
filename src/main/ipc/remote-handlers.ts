@@ -71,6 +71,8 @@ import {
   type CommandConnection,
   type CommandRegistration
 } from './command-registry'
+import { configCommands } from './config-commands'
+import { AUTOMATION_COMMANDS } from './automation-commands'
 import {
   mintEnrollToken,
   webauthnCredentials,
@@ -1552,6 +1554,33 @@ export function registerRemoteHandlers(
     handler: async (connection: CommandConnection) =>
       authcfgRotateLanKey(connection, enrollTokens ?? null)
   })
+
+  // -------------------------------------------------------------------------
+  // The config / worktree family + the automations (S1b — the everything-remote
+  // ruling, 2026-08-17)
+  // -------------------------------------------------------------------------
+  //
+  // Both families are spread from the SAME declarations the desktop registrar
+  // uses (`ipc/config-commands.ts`, `ipc/automation-commands.ts`) — the
+  // stream-watch / git-watch pattern, applied to everything this series ported.
+  // `AUTOMATION_COMMANDS` is one frozen constant shared by both transports;
+  // `configCommands(manager)` is a factory called once per registrar, so the
+  // config family's handlers are distinct closures over the same code and the
+  // same manager. Either way capability/kind cannot drift: the registry's
+  // conflict-throw compares the declaration, never handler identity.
+  // Every entry declares `config`, `git` or `chat`: all three are in
+  // AUTH_OFF_GRANTS, so these are reachable by any authenticated connection, and
+  // the mutations still meet the mutation window on the `strong` tier.
+  //
+  // Nothing host-PHYSICAL rides along: no dialog, no window, no console. Those
+  // (`session:pick-folder`, `app:open-in-vscode`, `window:*`) declare `host` and
+  // have no registration here at all.
+  for (const cmd of configCommands(manager)) {
+    handleRemote(cmd)
+  }
+  for (const cmd of AUTOMATION_COMMANDS) {
+    handleRemote(cmd)
+  }
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
 }

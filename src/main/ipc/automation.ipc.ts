@@ -1,34 +1,23 @@
 import { ipcMain } from 'electron'
 import { app } from 'electron'
 const is = { dev: !app.isPackaged }
-import { AutomationManager, isValidAutomationId } from '../services/automation-manager'
+import { AutomationManager } from '../services/automation-manager'
 import { logger } from '../services/logger'
-import type { Automation } from '../../shared/types'
+import { AUTOMATION_COMMANDS, setAutomationManager } from './automation-commands'
+import { handleIpc } from './desktop-transport'
 
 /**
- * Reject a renderer-supplied automation id at the IPC perimeter before it can
- * reach any path.join in the manager (audit M-AU3). Throwing rejects the invoke
- * so a hostile/compromised renderer (or the remote surface) gets a clean error
- * instead of a traversal.
+ * The DESKTOP half of the automation surface.
+ *
+ * It used to be ten raw `ipcMain.handle` calls with their handler bodies inline
+ * — no declared capability, no capability check, no audit row, and no remote
+ * twin. The bodies live in `automation-commands.ts` now and both transports
+ * spread the same declarations; this file owns what only the desktop boot can
+ * own: constructing the manager, starting the schedules, and wiring `ipcMain`
+ * (through `handleIpc`, so the dispatch goes through the registry choke point
+ * like every other channel).
  */
-function requireValidId(id: unknown): asserts id is string {
-  if (!isValidAutomationId(id)) {
-    throw new Error(`Invalid automation id: ${JSON.stringify(id)}`)
-  }
-}
-
-const AUTOMATION_IPC_CHANNELS = [
-  'automation:list',
-  'automation:save',
-  'automation:delete',
-  'automation:run-now',
-  'automation:toggle',
-  'automation:list-runs',
-  'automation:load-run-history',
-  'automation:cancel',
-  'automation:dismiss-run',
-  'automation:send-message'
-]
+const AUTOMATION_IPC_CHANNELS = AUTOMATION_COMMANDS.map((cmd) => cmd.channel)
 
 export function registerAutomationIpc(): AutomationManager {
   // Remove old handlers (for re-registration)
@@ -37,6 +26,7 @@ export function registerAutomationIpc(): AutomationManager {
   }
 
   const manager = new AutomationManager()
+  setAutomationManager(manager)
   manager.load()
 
   // Skip automatic scheduling in dev mode — avoids spawning SDK subprocesses
@@ -47,55 +37,9 @@ export function registerAutomationIpc(): AutomationManager {
     logger.info('AutomationIpc', 'Dev mode — skipping automatic automation scheduling')
   }
 
-  ipcMain.handle('automation:list', () => manager.list())
-
-  ipcMain.handle('automation:save', (_e, automation: Automation) => {
-    requireValidId(automation?.id)
-    manager.upsert(automation)
-  })
-
-  ipcMain.handle('automation:delete', (_e, id: string) => {
-    requireValidId(id)
-    manager.delete(id)
-  })
-
-  ipcMain.handle('automation:run-now', (_e, id: string) => {
-    requireValidId(id)
-    // Fire-and-forget — don't await, runs stream results via events
-    manager.runNow(id).catch(() => {})
-  })
-
-  ipcMain.handle('automation:toggle', (_e, id: string, enabled: boolean) => {
-    requireValidId(id)
-    manager.toggle(id, enabled)
-  })
-
-  ipcMain.handle('automation:list-runs', (_e, automationId: string) => {
-    requireValidId(automationId)
-    return manager.listRuns(automationId)
-  })
-
-  ipcMain.handle('automation:load-run-history', (_e, automationId: string, runId: string) => {
-    requireValidId(automationId)
-    requireValidId(runId)
-    return manager.loadRunMessages(automationId, runId)
-  })
-
-  ipcMain.handle('automation:cancel', (_e, id: string) => {
-    requireValidId(id)
-    manager.cancelRun(id)
-  })
-
-  ipcMain.handle('automation:dismiss-run', (_e, automationId: string, runId: string) => {
-    requireValidId(automationId)
-    requireValidId(runId)
-    manager.dismissRun(automationId, runId)
-  })
-
-  ipcMain.handle('automation:send-message', (_e, id: string, prompt: string) => {
-    requireValidId(id)
-    manager.sendMessage(id, prompt)
-  })
+  for (const cmd of AUTOMATION_COMMANDS) {
+    handleIpc(cmd)
+  }
 
   return manager
 }

@@ -17,6 +17,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import matter from 'gray-matter'
 import { opencodeConfigDir } from './opencode-config'
+import { assertSafeIdSegment, isPathInside, isSafeIdSegment } from '../services/path-containment'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -122,12 +123,38 @@ interface AgentFile {
 }
 
 /**
+ * Resolve `<dir>/<name>.md`, refusing anything that is not a plain agent name.
+ *
+ * The SERVICE-LAYER backstop (S1b review F1). The agent name is caller-supplied
+ * and — since the S1b sweep put `opencode-agents:*` on the remote transport —
+ * remotely so: an unvalidated name is an arbitrary `.md` read, write or unlink,
+ * and `~/.claude/CLAUDE.md` is within reach of it, which plants standing model
+ * instructions on every future session. The registration perimeter
+ * (`ipc/config-commands.ts`) validates first; this is the belt behind it, in the
+ * one place every path in this module is actually built.
+ *
+ * The settings UI already restricts new names to `^[a-z0-9-]+$`;
+ * `assertSafeIdSegment` is deliberately a little wider (`_` and `.` are legal in
+ * a hand-written `agents/*.md`, which `listAgents` will happily enumerate and
+ * then hand straight back to `readAgent`), while still admitting no separator,
+ * no drive letter and no leading dot.
+ */
+function agentFilePath(dir: string, name: unknown): string {
+  assertSafeIdSegment(name, 'agent name')
+  const filePath = path.join(dir, `${name}.md`)
+  if (!isPathInside(dir, filePath)) {
+    throw new Error(`Invalid agent name: ${JSON.stringify(name)}`)
+  }
+  return filePath
+}
+
+/**
  * Search for `<name>.md` in the given list of directories (in order).
  * Returns the first match found, or null.
  */
 function readAgentFile(name: string, dirPaths: string[]): AgentFile | null {
   for (const dir of dirPaths) {
-    const filePath = path.join(dir, `${name}.md`)
+    const filePath = agentFilePath(dir, name)
     try {
       const text = fs.readFileSync(filePath, 'utf8')
       return { text, filePath }
@@ -294,6 +321,11 @@ export function listAgents(cwd?: string): OpencodeAgentSummary[] {
       for (const entry of entries) {
         if (!entry.endsWith('.md')) continue
         const name = entry.slice(0, -3)
+        // Skip a file whose basename is not a plain agent name. `read`/`save`/
+        // `delete`/`set-disabled` all refuse such a name (see `agentFilePath`), so
+        // listing it would offer the UI a row that cannot be opened — and the
+        // listing is where the UI gets the names it sends back.
+        if (!isSafeIdSegment(name)) continue
         if (found.has(name)) continue // already seen (higher-precedence scope/dir wins)
         let text: string
         try {
@@ -427,7 +459,7 @@ export function saveAgent(input: OpencodeAgentInput, cwd?: string): void {
   ])
   const targetPath = existing
     ? existing.filePath
-    : path.join(baseDir, 'agents', `${input.name}.md`)
+    : agentFilePath(path.join(baseDir, 'agents'), input.name)
 
   fs.mkdirSync(path.dirname(targetPath), { recursive: true })
   fs.writeFileSync(targetPath, fileText, 'utf8')
@@ -447,7 +479,7 @@ export function deleteAgent(name: string, scope: OpencodeAgentScope, cwd?: strin
   }
 
   for (const subdir of ['agent', 'agents']) {
-    const filePath = path.join(baseDir, subdir, `${name}.md`)
+    const filePath = agentFilePath(path.join(baseDir, subdir), name)
     try {
       fs.unlinkSync(filePath)
     } catch {
@@ -497,9 +529,10 @@ export function setAgentDisabled(
     fs.writeFileSync(file.filePath, newText, 'utf8')
   } else if (disabled) {
     // No file exists — create a minimal one in agents/ only when disabling
+    const filePath = agentFilePath(agentsDir, name)
     fs.mkdirSync(agentsDir, { recursive: true })
     const newText = matter.stringify('', { disable: true })
-    fs.writeFileSync(path.join(agentsDir, `${name}.md`), newText, 'utf8')
+    fs.writeFileSync(filePath, newText, 'utf8')
   }
   // If not disabling and no file exists, nothing to do
 }

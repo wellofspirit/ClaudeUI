@@ -87,20 +87,72 @@ function invokedChannels(): Set<string> {
   return set
 }
 
+/**
+ * remote-handlers.ts, plus every module whose transport-agnostic declarations it
+ * SPREADS. A channel registered for both transports from one shared constant
+ * (`handleRemote(STREAM_WATCH_COMMAND)`, `for (…of configCommands(manager))`) is
+ * still a remote registration; the constants exist precisely so the two surfaces
+ * cannot declare it differently, and a scan that only read the inline form would
+ * report those channels as missing.
+ */
+const SHARED_DECLARATION_SOURCES = [
+  'src/main/ipc/remote-handlers.ts',
+  'src/main/ipc/stream-watch.ts',
+  'src/main/ipc/git-watch.ts',
+  // S1b — the config/worktree sweep and the automation port.
+  'src/main/ipc/config-commands.ts',
+  'src/main/ipc/automation-commands.ts'
+]
+
+/**
+ * The S1b sweep: channel → the ONE declaration both transports must serve it
+ * with. Written out rather than derived, because "what capability is this
+ * reachable under" is the decision the review gate exists to freeze.
+ */
+const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'worktree:create': { capability: 'git', kind: 'command' },
+  'worktree:status': { capability: 'git', kind: 'query' },
+  'worktree:remove': { capability: 'git', kind: 'command' },
+  'worktree:list': { capability: 'git', kind: 'query' },
+  'config:save-slash-commands': { capability: 'config', kind: 'command' },
+  'config:load-engine-config': { capability: 'config', kind: 'query' },
+  'config:save-engine-config': { capability: 'config', kind: 'command' },
+  'config:load-vendor-config': { capability: 'config', kind: 'query' },
+  'config:save-vendor-config': { capability: 'config', kind: 'command' },
+  'config:load-opencode-settings': { capability: 'config', kind: 'query' },
+  'config:save-opencode-settings': { capability: 'config', kind: 'command' },
+  'config:read-opencode-native-raw': { capability: 'config', kind: 'query' },
+  'config:patch-opencode-native': { capability: 'config', kind: 'command' },
+  'opencode-agents:list': { capability: 'config', kind: 'query' },
+  'opencode-agents:read': { capability: 'config', kind: 'query' },
+  'opencode-agents:save': { capability: 'config', kind: 'command' },
+  'opencode-agents:delete': { capability: 'config', kind: 'command' },
+  'opencode-agents:set-disabled': { capability: 'config', kind: 'command' },
+  // Spends model tokens, so `chat` rather than `config`.
+  'opencode-agents:generate': { capability: 'chat', kind: 'command' },
+  'mcp:toggle': { capability: 'config', kind: 'command' },
+  'mcp:reconnect': { capability: 'config', kind: 'command' },
+  'mcp:set-servers': { capability: 'config', kind: 'command' },
+  'mcp:save-servers': { capability: 'config', kind: 'command' },
+  'mcp:remove-server': { capability: 'config', kind: 'command' },
+  'mcp:toggle-disabled': { capability: 'config', kind: 'command' },
+  'proxy:test-connection': { capability: 'config', kind: 'command' },
+  'usage:refresh-prices': { capability: 'config', kind: 'command' },
+  'automation:list': { capability: 'config', kind: 'query' },
+  'automation:list-runs': { capability: 'config', kind: 'query' },
+  'automation:load-run-history': { capability: 'config', kind: 'query' },
+  'automation:save': { capability: 'config', kind: 'command' },
+  'automation:delete': { capability: 'config', kind: 'command' },
+  'automation:toggle': { capability: 'config', kind: 'command' },
+  'automation:run-now': { capability: 'config', kind: 'command' },
+  'automation:cancel': { capability: 'config', kind: 'command' },
+  'automation:send-message': { capability: 'config', kind: 'command' },
+  'automation:dismiss-run': { capability: 'config', kind: 'command' }
+}
+
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */
 function remoteDeclarations(): Map<string, Capability> {
-  // remote-handlers.ts, plus the modules whose transport-agnostic declaration it
-  // SPREADS. A channel registered for both transports from one shared constant
-  // (`handleRemote(STREAM_WATCH_COMMAND)`) is still a remote registration; the
-  // constant exists precisely so the two surfaces cannot declare it differently,
-  // and a scan that only read the inline form would report it as missing.
-  const src = [
-    'src/main/ipc/remote-handlers.ts',
-    'src/main/ipc/stream-watch.ts',
-    'src/main/ipc/git-watch.ts'
-  ]
-    .map(read)
-    .join('\n')
+  const src = SHARED_DECLARATION_SOURCES.map(read).join('\n')
   const map = new Map<string, Capability>()
   const re = /channel:\s*['"]([^'"]+)['"],\s*capability:\s*['"]([^'"]+)['"]/g
   for (let m = re.exec(src); m; m = re.exec(src)) map.set(m[1], m[2] as Capability)
@@ -147,6 +199,71 @@ describe('remote channel parity (R5)', () => {
       ungranted,
       `invoked but not grantable: ${ungranted.map((c) => `${c}(${declared.get(c)})`).join(', ')}`
     ).toEqual(UNGRANTED_AT_CONNECT_REMOTE_CHANNELS)
+  })
+
+  it('the S1b sweep is declared ONCE and both transports spread that declaration', () => {
+    // The guard the everything-remote ruling needs: a future desktop-only
+    // registration must be a DECISION, not drift. Two halves.
+    //
+    // (1) Each swept channel is declared exactly once, in a shared module, with
+    //     the capability/kind this table freezes — and NOT re-declared inline in
+    //     either transport registrar, which is the only way the two surfaces
+    //     could come to disagree.
+    const shared = [
+      read('src/main/ipc/config-commands.ts'),
+      read('src/main/ipc/automation-commands.ts')
+    ].join('\n')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      expect(found.has(m[1]), `${m[1]} is declared twice in the shared modules`).toBe(false)
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries([...found].sort())).toEqual(
+      Object.fromEntries(Object.entries(S1B_SWEEP).sort())
+    )
+
+    const registrars = [
+      read('src/main/ipc/session.ipc.ts'),
+      read('src/main/ipc/remote-handlers.ts')
+    ].join('\n')
+    const inline = Object.keys(S1B_SWEEP)
+      .filter((c) => registrars.includes(`channel: '${c}'`))
+      .sort()
+    expect(
+      inline,
+      `these S1b channels are re-declared inline in a transport registrar: ${inline.join(', ')}`
+    ).toEqual([])
+
+    // (2) Both transports actually spread the shared declarations. `handleIpc` on
+    //     the desktop side (session.ipc.ts for the config family,
+    //     automation.ipc.ts for the automations), `handleRemote` on the other.
+    const sessionIpc = read('src/main/ipc/session.ipc.ts')
+    const automationIpc = read('src/main/ipc/automation.ipc.ts')
+    const remoteHandlers = read('src/main/ipc/remote-handlers.ts')
+    expect(sessionIpc).toMatch(
+      /for \(const cmd of configCommands\(manager\)\) \{\s*handleIpc\(cmd\)/
+    )
+    expect(automationIpc).toMatch(/for \(const cmd of AUTOMATION_COMMANDS\) \{\s*handleIpc\(cmd\)/)
+    expect(remoteHandlers).toMatch(
+      /for \(const cmd of configCommands\(manager\)\) \{\s*handleRemote\(cmd\)/
+    )
+    expect(remoteHandlers).toMatch(
+      /for \(const cmd of AUTOMATION_COMMANDS\) \{\s*handleRemote\(cmd\)/
+    )
+  })
+
+  it('every S1b channel is remotely reachable with the base grant set', () => {
+    // The ruling itself: everything except host-PHYSICAL verbs is changeable
+    // from the remote UI. `git`, `config` and `chat` are all in AUTH_OFF_GRANTS,
+    // so an ordinary authenticated connection reaches every one of them.
+    const declared = remoteDeclarations()
+    const missing = Object.keys(S1B_SWEEP).filter((c) => !declared.has(c)).sort()
+    expect(missing, `S1b channels with no remote registration: ${missing.join(', ')}`).toEqual([])
+    const ungranted = Object.keys(S1B_SWEEP)
+      .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))
+      .sort()
+    expect(ungranted).toEqual([])
   })
 
   it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {

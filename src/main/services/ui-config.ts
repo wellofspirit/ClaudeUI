@@ -10,6 +10,7 @@ import {
   deleteSessionMeta,
   importSessionEnginesOnce
 } from './db'
+import { assertSafeIdSegment, isPathInside } from './path-containment'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
@@ -268,8 +269,30 @@ export function saveSlashCommands(commands: SlashCommandCache[]): void {
   writeJson(SLASH_COMMANDS_FILE, commands)
 }
 
+/**
+ * Resolve `<dir>/<id>.json`, refusing anything that is not a plain id.
+ *
+ * The SERVICE-LAYER backstop (S1b review F1). `engineId` / `vendorId` are
+ * caller-supplied and, since the S1b sweep, remotely so: `config:save-engine-config`
+ * with `engineId: '../../settings'` would land on `~/.claude/settings.json` —
+ * Claude Code's hooks and permissions file, whose contents run with no approval
+ * gate. The registration perimeter (`ipc/config-commands.ts`) validates first;
+ * this is the belt behind it, because the file that BUILDS the path is the only
+ * place that cannot be bypassed by a new caller.
+ *
+ * Two checks rather than one, for the same reason the terminal has two: the slug
+ * says the id is an id, and `isPathInside` says the joined result really did stay
+ * under its root — which stays true even if the pattern is ever loosened.
+ */
+function configFileFor(dir: string, id: unknown, label: string): string {
+  assertSafeIdSegment(id, label)
+  const filePath = path.join(dir, `${id}.json`)
+  if (!isPathInside(dir, filePath)) throw new Error(`Invalid ${label}: ${JSON.stringify(id)}`)
+  return filePath
+}
+
 export function loadEngineConfig(engineId: string): import('../../shared/types').EngineConfig {
-  const filePath = path.join(ENGINES_DIR, `${engineId}.json`)
+  const filePath = configFileFor(ENGINES_DIR, engineId, 'engineId')
   return readJson<import('../../shared/types').EngineConfig>(filePath) ?? {}
 }
 
@@ -277,12 +300,13 @@ export function saveEngineConfig(
   engineId: string,
   config: import('../../shared/types').EngineConfig
 ): void {
+  const filePath = configFileFor(ENGINES_DIR, engineId, 'engineId')
   if (!fs.existsSync(ENGINES_DIR)) fs.mkdirSync(ENGINES_DIR, { recursive: true, mode: 0o700 })
-  writeJson(path.join(ENGINES_DIR, `${engineId}.json`), config)
+  writeJson(filePath, config)
 }
 
 export function loadVendorConfig(vendorId: string): import('../../shared/types').VendorConfig {
-  const filePath = path.join(VENDORS_DIR, `${vendorId}.json`)
+  const filePath = configFileFor(VENDORS_DIR, vendorId, 'vendorId')
   return readJson<import('../../shared/types').VendorConfig>(filePath) ?? {}
 }
 
@@ -290,8 +314,9 @@ export function saveVendorConfig(
   vendorId: string,
   config: import('../../shared/types').VendorConfig
 ): void {
+  const filePath = configFileFor(VENDORS_DIR, vendorId, 'vendorId')
   if (!fs.existsSync(VENDORS_DIR)) fs.mkdirSync(VENDORS_DIR, { recursive: true, mode: 0o700 })
-  writeJson(path.join(VENDORS_DIR, `${vendorId}.json`), config)
+  writeJson(filePath, config)
 }
 
 /**

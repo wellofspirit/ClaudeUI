@@ -24,40 +24,22 @@ import {
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
-import { socks5Connect } from '../services/socks-bridge'
 import {
   loadSettings,
   loadSessionConfig,
   loadSlashCommands,
-  saveSlashCommands,
-  startConfigWatcher,
-  loadEngineConfig,
-  saveEngineConfig,
-  loadVendorConfig,
-  saveVendorConfig
+  startConfigWatcher
 } from '../services/ui-config'
 import {
   loadClaudePermissions,
   loadCleanupPeriodDays,
   isWorkspaceTrusted
 } from '../services/claude-settings'
-import {
-  loadMcpServers,
-  saveMcpServers,
-  removeMcpServer,
-  readDisabledMcpServers,
-  writeDisabledMcpServers
-} from '../services/claude-mcp'
+import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
-import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
+import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { gitWatchRegistry } from '../services/git-watch-registry'
-import {
-  createWorktree,
-  getWorktreeStatus,
-  removeWorktree,
-  listWorktrees
-} from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
@@ -74,12 +56,8 @@ import type {
   ApprovalDecision,
   ModelInfo,
   EngineModelGroup,
-  ProxySettings,
   PermissionSuggestion,
-  IpcResult,
   EngineId,
-  EngineConfig,
-  VendorConfig,
   VendorAuthMap,
   VendorAuthOption,
   OpencodeProviderCatalogEntry,
@@ -93,7 +71,6 @@ import type {
 } from '../../shared/shared-provider'
 import {
   discoverOpencodeModels,
-  invalidateOpencodeModelCache,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
@@ -102,32 +79,8 @@ import {
   setOpencodeProviderDisabled
 } from '../opencode/provider-management'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
-import {
-  discoverPiModels,
-  getPiModelCatalogGroups,
-  invalidatePiModelCache
-} from '../pi/model-discovery'
+import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
 import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
-import {
-  readOpencodeNativeConfig,
-  writeOpencodeNativeConfig,
-  migrateOpencodeConfigToNative
-} from '../opencode/opencode-config'
-import {
-  readOpencodeNativeRaw,
-  patchOpencodeNativeRaw
-} from '../opencode/opencode-native-raw'
-import type { OpencodeConfigSettings, RawConfigPatch } from '../../shared/types'
-import {
-  listAgents,
-  readAgent,
-  saveAgent,
-  deleteAgent,
-  setAgentDisabled,
-} from '../opencode/opencode-agents'
-import type { OpencodeAgentInput } from '../opencode/opencode-agents'
-import { generateAgent } from '../opencode/agent-generate'
-import { refreshPrices } from '../services/opencode-pricing'
 import { logger } from '../services/logger'
 import {
   listOpencodeSessionsGlobal,
@@ -136,12 +89,9 @@ import {
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
-import {
-  commandRegistry,
-  desktopConnection,
-  registerCommand,
-  type CommandRegistration
-} from './command-registry'
+import { safeHandler } from './safe-handler'
+import { handleIpc } from './desktop-transport'
+import { configCommands } from './config-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -172,46 +122,12 @@ import {
   clearConversation
 } from './handlers-core'
 
-/**
- * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
- * Use this for handlers that can throw (git, MCP, worktree, file operations) but NOT for
- * fire-and-forget handlers (session:send) or those that already have proper error handling.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return async (...args: any[]): Promise<IpcResult<T>> => {
-    try {
-      const data = await handler(...args)
-      return { ok: true, data }
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err)
-      logger.error('IPC', error)
-      return { ok: false, error }
-    }
-  }
-}
-
-/**
- * Register one desktop-transport command and wire its `ipcMain.handle`.
- *
- * The ONE way this file exposes a channel (SyncCore phase 1 — ADR-051/052).
- * The declaration (capability/kind/sessionIdArg) goes into the shared command
- * registry, which the remote transport also registers into, and the actual
- * dispatch — capability check + audit — happens in the registry. Both
- * transports therefore pass through the same choke point.
- *
- * Handlers no longer receive the Electron `IpcMainInvokeEvent`: nothing in this
- * file ever used it (every body named it `_e`/`_event`), and a handler body
- * that a headless core can also call must not know about Electron at all. The
- * event stays here, in the transport adapter, and never reaches the registry.
- */
-function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
-  registerCommand({ ...reg, transport: 'desktop' })
-  ipcMain.handle(reg.channel, (_event, ...args: unknown[]) =>
-    commandRegistry.dispatch(reg.channel, 'desktop', args, desktopConnection())
-  )
-}
+// `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
+// adapter) both moved out of this file with the S1b registration sweep: the
+// channels that sweep shares with the WebSocket transport are declared once, in
+// an Electron-free module, so the envelope had to become Electron-free too — and
+// `automation.ipc.ts` needed the same adapter rather than a second copy of it.
+// See `safe-handler.ts` / `desktop-transport.ts`.
 
 // The model list is derived from cli.js's initialize response, which reflects
 // ~/.claude.json's additionalModelOptionsCache. That cache is warmed by cli.js's
@@ -511,161 +427,6 @@ const SESSION_IPC_CHANNELS = [
   'vendor-auth:oauth-cancel',
   'vendor-auth:remove'
 ]
-
-// ---------------------------------------------------------------------------
-// Proxy helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Test proxy connectivity by making a real HTTPS request through the proxy
- * to api.anthropic.com. A 401 (Unauthorized) proves the proxy works — we're
- * testing the tunnel, not the API key.
- */
-async function testProxyConnection(
-  proxy: ProxySettings
-): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
-  const http = await import('node:http')
-  const tls = await import('node:tls')
-
-  const start = Date.now()
-  const TARGET_HOST = 'api.anthropic.com'
-  const TARGET_PORT = 443
-  const TIMEOUT_MS = 10_000
-
-  /** Upgrade a raw socket to TLS, send a GET, and check the HTTP status. */
-  function verifyThroughTls(
-    rawSocket: import('node:net').Socket
-  ): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        tlsSocket.destroy()
-        resolve({ ok: false, latencyMs: Date.now() - start, error: 'TLS handshake timed out' })
-      }, TIMEOUT_MS)
-
-      const tlsSocket = tls.connect({ socket: rawSocket, servername: TARGET_HOST }, () => {
-        // TLS established — send a minimal HTTP request
-        tlsSocket.write(
-          `GET /v1/models HTTP/1.1\r\nHost: ${TARGET_HOST}\r\nConnection: close\r\n\r\n`
-        )
-      })
-
-      tlsSocket.once('data', (chunk: Buffer) => {
-        clearTimeout(timer)
-        tlsSocket.destroy()
-        const head = chunk.toString('utf8', 0, Math.min(chunk.length, 128))
-        const statusMatch = head.match(/^HTTP\/\d\.\d (\d{3})/)
-        if (statusMatch) {
-          // Any HTTP response (even 401) means the proxy routed traffic successfully
-          resolve({ ok: true, latencyMs: Date.now() - start })
-        } else {
-          resolve({
-            ok: false,
-            latencyMs: Date.now() - start,
-            error: 'Unexpected response from server'
-          })
-        }
-      })
-
-      tlsSocket.on('error', (err) => {
-        clearTimeout(timer)
-        resolve({ ok: false, latencyMs: Date.now() - start, error: `TLS error: ${err.message}` })
-      })
-    })
-  }
-
-  if (proxy.type === 'socks5') {
-    // SOCKS5 handshake (RFC 1928) → connect to target → TLS verify.
-    // LOW-RW5: the handshake is socks-bridge.ts's socks5Connect. The hand-rolled
-    // copy that used to live here assumed one SOCKS5 message per TCP chunk, so a
-    // split greeting/CONNECT reply failed the proxy test spuriously.
-    return new Promise((resolve) => {
-      let settled = false
-      // The outer 10s budget stays authoritative (socks5Connect's own 15s
-      // internal timeout would otherwise outlive it).
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        resolve({ ok: false, latencyMs: Date.now() - start, error: 'Connection timed out (10s)' })
-      }, TIMEOUT_MS)
-
-      socks5Connect(
-        {
-          socksHost: proxy.hostname,
-          socksPort: proxy.port,
-          username: proxy.username,
-          password: proxy.password
-        },
-        TARGET_HOST,
-        TARGET_PORT
-      )
-        .then(async ({ socket, leftover }) => {
-          if (settled) {
-            // Outer timeout already answered — drop the late tunnel.
-            socket.destroy()
-            return
-          }
-          settled = true
-          clearTimeout(timer)
-          // For TLS the client speaks first, so the proxy should not have sent
-          // anything past the CONNECT reply — but never drop bytes if it did.
-          if (leftover.length > 0) socket.unshift(leftover)
-          resolve(await verifyThroughTls(socket))
-        })
-        .catch((err: Error) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
-        })
-    })
-  }
-
-  // HTTP proxy: CONNECT tunnel → TLS verify
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      req.destroy()
-      resolve({ ok: false, latencyMs: Date.now() - start, error: 'Connection timed out (10s)' })
-    }, TIMEOUT_MS)
-
-    const authHeader = proxy.username
-      ? {
-          'Proxy-Authorization':
-            'Basic ' + Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64')
-        }
-      : {}
-
-    const req = http.request({
-      host: proxy.hostname,
-      port: proxy.port || 8080,
-      method: 'CONNECT',
-      path: `${TARGET_HOST}:${TARGET_PORT}`,
-      headers: authHeader
-    })
-
-    req.on('connect', async (res, socket) => {
-      clearTimeout(timer)
-      if (res.statusCode !== 200) {
-        socket.destroy()
-        resolve({
-          ok: false,
-          latencyMs: Date.now() - start,
-          error: `Proxy returned HTTP ${res.statusCode}`
-        })
-        return
-      }
-      // Tunnel open — verify with TLS
-      const result = await verifyThroughTls(socket)
-      resolve(result)
-    })
-
-    req.on('error', (err) => {
-      clearTimeout(timer)
-      resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
-    })
-
-    req.end()
-  })
-}
 
 /** Shared SessionManager — created once, used by both IPC and remote handlers. */
 let sharedManager: SessionManager | null = null
@@ -982,16 +743,6 @@ export function registerSessionIpc(): SessionManager {
       const session = manager.get(routingId)
       if (!session || !session.capabilities.voice) return
       await session.voiceStopRecording?.()
-    })
-  })
-
-  // Proxy test connection
-  handleIpc({
-    channel: 'proxy:test-connection',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (proxy: ProxySettings) => {
-      return await testProxyConnection(proxy)
     })
   })
 
@@ -1364,13 +1115,6 @@ export function registerSessionIpc(): SessionManager {
     handler: () => loadSlashCommands()
   })
   handleIpc({
-    channel: 'config:save-slash-commands',
-    capability: 'config',
-    kind: 'command',
-    handler: (commands: SlashCommandCache[]) =>
-      saveSlashCommands(commands)
-  })
-  handleIpc({
     channel: 'config:scan-custom-commands',
     capability: 'config',
     kind: 'query',
@@ -1381,27 +1125,6 @@ export function registerSessionIpc(): SessionManager {
     capability: 'config',
     kind: 'query',
     handler: (cwd: string) => loadSkillDetails(manager, cwd)
-  })
-  handleIpc({
-    channel: 'config:load-engine-config',
-    capability: 'config',
-    kind: 'query',
-    handler: (engineId: string) =>
-      loadEngineConfig(engineId)
-  })
-  handleIpc({
-    channel: 'config:save-engine-config',
-    capability: 'config',
-    kind: 'command',
-    handler: (engineId: string, cfg: EngineConfig) => {
-      saveEngineConfig(engineId, cfg)
-      // Provider enable/disable + custom-provider edits change which models the
-      // discovery server returns. Drop the cache so the next getEngineModels()
-      // re-discovers (otherwise a disabled/re-enabled provider only reflects after
-      // an app restart).
-      if (engineId === 'opencode') invalidateOpencodeModelCache()
-      if (engineId === 'pi') invalidatePiModelCache()
-    }
   })
   // Cheap, deterministic engine availability check. Backs the renderer's
   // "is opencode/pi installed?" gate WITHOUT spawning a server/process — a
@@ -1433,20 +1156,6 @@ export function registerSessionIpc(): SessionManager {
     capability: 'config',
     kind: 'query',
     handler: () => credentialSync.getStatus()
-  })
-  handleIpc({
-    channel: 'config:load-vendor-config',
-    capability: 'config',
-    kind: 'query',
-    handler: (vendorId: string) =>
-      loadVendorConfig(vendorId)
-  })
-  handleIpc({
-    channel: 'config:save-vendor-config',
-    capability: 'config',
-    kind: 'command',
-    handler: (vendorId: string, cfg: VendorConfig) =>
-      saveVendorConfig(vendorId, cfg)
   })
   handleIpc({
     channel: 'shared-provider:list',
@@ -1525,124 +1234,6 @@ export function registerSessionIpc(): SessionManager {
     )
   })
 
-  // opencode engine-native settings — read/write opencode's OWN config file.
-  // The load handler triggers the one-time migration from the private store when
-  // the opencode binary is available. modelAllowlist stays ClaudeUI-private.
-  handleIpc({
-    channel: 'config:load-opencode-settings',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(async () => {
-      if (opencodeServerManager.isBinaryAvailable()) {
-        migrateOpencodeConfigToNative()
-      }
-      const native = readOpencodeNativeConfig()
-      const privCfg = loadEngineConfig('opencode')
-      const modelAllowlist = privCfg.opencodeConfig?.modelAllowlist
-      const result: OpencodeConfigSettings = {
-        ...native,
-        ...(modelAllowlist !== undefined ? { modelAllowlist } : {})
-      }
-      return result
-    })
-  })
-  handleIpc({
-    channel: 'config:save-opencode-settings',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (settings: OpencodeConfigSettings) => {
-      // Write the six native fields to opencode's own config file.
-      const { modelAllowlist, ...nativeFields } = settings
-      writeOpencodeNativeConfig(nativeFields)
-      // Route modelAllowlist to the private EngineConfig, preserving autoMode/sandbox/proxy.
-      // The private opencodeConfig only holds modelAllowlist now (six native fields moved to disk).
-      const engCfg = loadEngineConfig('opencode')
-      const nextOpencodeConfig: OpencodeConfigSettings | undefined =
-        modelAllowlist !== undefined && Object.keys(modelAllowlist).length > 0
-          ? { modelAllowlist }
-          : engCfg.opencodeConfig?.modelAllowlist &&
-              Object.keys(engCfg.opencodeConfig.modelAllowlist).length > 0
-            ? { modelAllowlist: engCfg.opencodeConfig.modelAllowlist }
-            : undefined
-      saveEngineConfig('opencode', {
-        ...engCfg,
-        opencodeConfig: nextOpencodeConfig
-      })
-      // Provider changes affect the discoverable model set.
-      invalidateOpencodeModelCache()
-    })
-  })
-
-  // Raw (non-lossy) opencode config access for the schema-driven settings editor.
-  // Reads opencode's own config file verbatim; patches literal opencode field
-  // names as jsonc leaf edits (comment-safe). Unlike save-opencode-settings this
-  // never projects — it writes exactly the paths the UI names.
-  handleIpc({
-    channel: 'config:read-opencode-native-raw',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(async () => readOpencodeNativeRaw())
-  })
-  handleIpc({
-    channel: 'config:patch-opencode-native',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (patches: RawConfigPatch[]) => {
-      patchOpencodeNativeRaw(patches)
-      // Capability edits (attachment/modalities/…) change model discovery.
-      invalidateOpencodeModelCache()
-    })
-  })
-
-  // opencode agent CRUD — list/read/save/delete/disable custom + built-in agents
-  handleIpc({
-    channel: 'opencode-agents:list',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(async (cwd?: string) => listAgents(cwd))
-  })
-  handleIpc({
-    channel: 'opencode-agents:read',
-    capability: 'config',
-    kind: 'query',
-    handler: safeHandler(async (name: string, scope: string, cwd?: string) =>
-      readAgent(name, scope as 'global' | 'project', cwd)
-    )
-  })
-  handleIpc({
-    channel: 'opencode-agents:save',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (input: OpencodeAgentInput, cwd?: string) =>
-      saveAgent(input, cwd)
-    )
-  })
-  handleIpc({
-    channel: 'opencode-agents:delete',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async (name: string, scope: string, cwd?: string) =>
-      deleteAgent(name, scope as 'global' | 'project', cwd)
-    )
-  })
-  handleIpc({
-    channel: 'opencode-agents:set-disabled',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(
-      async (name: string, scope: string, cwd: string | undefined, disabled: boolean) =>
-        setAgentDisabled(name, scope as 'global' | 'project', cwd, disabled)
-    )
-  })
-  handleIpc({
-    channel: 'opencode-agents:generate',
-    capability: 'chat',
-    kind: 'command',
-    handler: safeHandler(async (description: string, cwd?: string) =>
-      generateAgent(description, cwd)
-    )
-  })
-
   // Claude permission settings (allow/deny/ask rules)
   handleIpc({
     channel: 'claude:load-permissions',
@@ -1702,48 +1293,6 @@ export function registerSessionIpc(): SessionManager {
     handler: async (routingId: string) => mcpStatus(manager, routingId)
   })
 
-  handleIpc({
-    channel: 'mcp:toggle',
-    capability: 'config',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string, serverName: string, enabled: boolean) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      if (!session.capabilities.hostedMcp || !session.mcpToggleServer)
-        throw new Error('Provider does not support hosted MCP')
-      await session.mcpToggleServer(serverName, enabled)
-    })
-  })
-
-  handleIpc({
-    channel: 'mcp:reconnect',
-    capability: 'config',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string, serverName: string) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      if (!session.capabilities.hostedMcp || !session.mcpReconnectServer)
-        throw new Error('Provider does not support hosted MCP')
-      await session.mcpReconnectServer(serverName)
-    })
-  })
-
-  handleIpc({
-    channel: 'mcp:set-servers',
-    capability: 'config',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: safeHandler(async (routingId: string, servers: Record<string, unknown>) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
-      if (!session.capabilities.hostedMcp || !session.mcpSetServers)
-        throw new Error('Provider does not support hosted MCP')
-      return await session.mcpSetServers(servers)
-    })
-  })
-
   // MCP config file read/write (direct file access, no session needed)
   handleIpc({
     channel: 'mcp:load-servers',
@@ -1752,21 +1301,6 @@ export function registerSessionIpc(): SessionManager {
     handler: (scope: string, cwd?: string) =>
       loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
   })
-  handleIpc({
-    channel: 'mcp:save-servers',
-    capability: 'config',
-    kind: 'command',
-    handler: (scope: string, servers: Record<string, unknown>, cwd?: string) =>
-      saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd)
-  })
-  handleIpc({
-    channel: 'mcp:remove-server',
-    capability: 'config',
-    kind: 'command',
-    handler: (scope: string, serverName: string, cwd?: string) =>
-      removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd)
-  })
-
   // MCP disabled state (direct ~/.claude.json access, no session needed)
   handleIpc({
     channel: 'mcp:read-disabled',
@@ -1774,22 +1308,6 @@ export function registerSessionIpc(): SessionManager {
     kind: 'query',
     handler: (cwd: string) => {
       return readDisabledMcpServers(cwd)
-    }
-  })
-
-  handleIpc({
-    channel: 'mcp:toggle-disabled',
-    capability: 'config',
-    kind: 'command',
-    handler: async (cwd: string, serverName: string, enabled: boolean) => {
-      const disabled = readDisabledMcpServers(cwd)
-      let updated: string[]
-      if (enabled) {
-        updated = disabled.filter((n) => n !== serverName)
-      } else {
-        updated = disabled.includes(serverName) ? disabled : [...disabled, serverName]
-      }
-      writeDisabledMcpServers(cwd, updated)
     }
   })
 
@@ -2057,45 +1575,13 @@ export function registerSessionIpc(): SessionManager {
   // what its watch set is keyed by.
   handleIpc(GIT_WATCH_COMMAND)
 
-  // -------------------------------------------------------------------------
-  // Worktree IPC handlers
-  // -------------------------------------------------------------------------
-
-  handleIpc({
-    channel: 'worktree:create',
-    capability: 'git',
-    kind: 'command',
-    handler: safeHandler(async (cwd: string, name: string) => {
-      return await createWorktree(cwd, name)
-    })
-  })
-
-  handleIpc({
-    channel: 'worktree:status',
-    capability: 'git',
-    kind: 'query',
-    handler: safeHandler(async (worktreePath: string, originalHead: string) => {
-      return await getWorktreeStatus(worktreePath, originalHead)
-    })
-  })
-
-  handleIpc({
-    channel: 'worktree:remove',
-    capability: 'git',
-    kind: 'command',
-    handler: safeHandler(async (worktreePath: string, branch: string, gitRoot: string) => {
-      await removeWorktree(worktreePath, branch, gitRoot)
-    })
-  })
-
-  handleIpc({
-    channel: 'worktree:list',
-    capability: 'git',
-    kind: 'query',
-    handler: safeHandler(async (cwd: string) => {
-      return await listWorktrees(cwd)
-    })
-  })
+  // The config / worktree family (S1b). ONE declaration per channel, spread here
+  // for the desktop and in `remote-handlers.ts` for the WebSocket — see
+  // `ipc/config-commands.ts` for what is in it and why each entry is reachable
+  // from a phone.
+  for (const cmd of configCommands(manager)) {
+    handleIpc(cmd)
+  }
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher()
@@ -2235,15 +1721,6 @@ export function registerSessionIpc(): SessionManager {
     handler: async () => {
       return dispatchedUsageSummary()
     }
-  })
-
-  // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
-  // Desktop-only — spawns a local opencode server; blocked from remote dispatch.
-  handleIpc({
-    channel: 'usage:refresh-prices',
-    capability: 'config',
-    kind: 'command',
-    handler: safeHandler(async () => refreshPrices())
   })
 
   // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.

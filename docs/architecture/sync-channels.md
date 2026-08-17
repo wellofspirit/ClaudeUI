@@ -566,10 +566,17 @@ change with its own eviction policy, deliberately not taken with this fix.
 
 ## Phase-1 residuals closed here
 
-`automation:*` and `log-viewer:*` events are classified above. Their **invoke**
-channels still live on raw `ipcMain.handle` (ipc/automation.ipc.ts,
-services/log-viewer.ts) rather than the command registry; every mutating one is now
-pinned in `PINNED_CAPABILITIES` (`admin`), so the eventual port cannot silently
-widen the remote surface. The automation READ channels are deliberately unpinned —
-they would declare `config`, which is grantable, and a grantable pin would break
-that table's one guarantee.
+`automation:*` and `log-viewer:*` events are classified above. Their **invoke** halves
+were the last raw `ipcMain.handle` families; S1b (2026-08-17) settled both, in opposite
+directions:
+
+- **`automation:*` is ported.** All ten invoke channels declare `config` on the command
+  registry and are registered on BOTH transports from one shared declaration
+  (`ipc/automation-commands.ts`) — capability-checked, mutations audited. The seven
+  mutating channels therefore LEFT `PINNED_CAPABILITIES`: `config` is grantable, and a
+  grantable pin would break that table's one guarantee (which is also why the reads were
+  never pinned). See security.md §The registration sweep.
+- **`log-viewer:*` stays desktop-forever.** It drives a `BrowserWindow`, so it is host
+  chrome like `window:*`; it keeps its raw `ipcMain.handle` wiring in
+  `services/log-viewer.ts` and its `admin` pin as the belt behind having no remote
+  registration at all.

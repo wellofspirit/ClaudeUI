@@ -244,8 +244,10 @@ import {
   commandRegistry,
   makeRemoteConnection,
   AUTH_OFF_GRANTS,
+  ENROLL_ONLY_GRANTS,
   PINNED_CAPABILITIES
 } from '../command-registry'
+import { setAutomationManager } from '../automation-commands'
 import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
@@ -1406,6 +1408,72 @@ const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNEL
  */
 const VOICE_CHANNELS = ['voice:start', 'voice:stop'] as const
 
+/**
+ * S1b — the registration sweep for the everything-remote ruling (2026-08-17):
+ * everything is changeable from the remote UI except host-PHYSICAL verbs.
+ *
+ * The FOURTH deliberate widening, and the widest one, so it gets the same
+ * treatment as the other three: its own list, read as its own decision.
+ *
+ * Unlike the terminal / passkey / authcfg sets, every channel here declares
+ * `config`, `git` or `chat` — all INSIDE {@link AUTH_OFF_GRANTS} — so this
+ * genuinely widens what an ordinary authenticated connection reaches. That is
+ * the ruling, not an accident, and what bounds it is the same rule as always:
+ * host-physical verbs (`session:pick-folder`, `app:open-in-vscode`, `window:*`)
+ * declare `host` and are not registered on this transport at all.
+ *
+ * They are also not SECOND registrations: `session.ipc.ts` (desktop) and
+ * `remote-handlers.ts` (remote) spread the same declarations from
+ * `ipc/config-commands.ts` / `ipc/automation-commands.ts`, so a capability can
+ * no more drift between the two surfaces here than it can for `stream:watch`.
+ *
+ * `automation:*` is the port half: it was raw `ipcMain.handle` with no
+ * capability, no audit and no remote twin. It declares `config` — host-side
+ * configuration — and the seven mutating channels are therefore GONE from
+ * `PINNED_CAPABILITIES`, which may only hold capabilities the base grant set
+ * lacks. `log-viewer:*` stays pinned and unregistered: window chrome, forever
+ * desktop.
+ */
+const S1B_SWEEP_CHANNELS = [
+  'automation:cancel',
+  'automation:delete',
+  'automation:dismiss-run',
+  'automation:list',
+  'automation:list-runs',
+  'automation:load-run-history',
+  'automation:run-now',
+  'automation:save',
+  'automation:send-message',
+  'automation:toggle',
+  'config:load-engine-config',
+  'config:load-opencode-settings',
+  'config:load-vendor-config',
+  'config:patch-opencode-native',
+  'config:read-opencode-native-raw',
+  'config:save-engine-config',
+  'config:save-opencode-settings',
+  'config:save-slash-commands',
+  'config:save-vendor-config',
+  'mcp:reconnect',
+  'mcp:remove-server',
+  'mcp:save-servers',
+  'mcp:set-servers',
+  'mcp:toggle',
+  'mcp:toggle-disabled',
+  'opencode-agents:delete',
+  'opencode-agents:generate',
+  'opencode-agents:list',
+  'opencode-agents:read',
+  'opencode-agents:save',
+  'opencode-agents:set-disabled',
+  'proxy:test-connection',
+  'usage:refresh-prices',
+  'worktree:create',
+  'worktree:list',
+  'worktree:remove',
+  'worktree:status'
+] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1417,12 +1485,18 @@ const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
 }
 
 describe('remote surface parity (phase 1 port)', () => {
+  // The dispatcher the two S1b reachability cases below actually call through —
+  // the same object `registerRemoteHandlers` was handed, resolving against the
+  // shared registry exactly as production does.
+  let dispatcher: RemoteDispatcher
+
   beforeEach(() => {
     // Subscribes a fake desktop client to the funnel, mirroring production's
     // "somebody else is listening too" (the parity assertions below read the
     // registry, not this sink).
     makeFakeWindow()
-    registerRemoteHandlers(new RemoteDispatcher(), sessionManagerStub)
+    dispatcher = new RemoteDispatcher()
+    registerRemoteHandlers(dispatcher, sessionManagerStub)
     // Registered later in the real bootstrap, once build versions are known.
     registerRemoteVersionInfo({ appVersion: '1', sdkVersion: '2', cliVersion: '3' })
   })
@@ -1440,9 +1514,133 @@ describe('remote surface parity (phase 1 port)', () => {
         ...POST_PORT_CHANNELS,
         ...PASSKEY_CHANNELS,
         ...AUTHCFG_CHANNELS,
-        ...VOICE_CHANNELS
+        ...VOICE_CHANNELS,
+        ...S1B_SWEEP_CHANNELS
       ].sort()
     )
+  })
+
+  it('the S1b sweep is reachable with the base grant set, and audited where it mutates', async () => {
+    // The point of the sweep: a phone holding nothing but an ordinary
+    // authenticated connection reaches these. Asserted through the CAPABILITY
+    // (what dispatch actually checks) rather than by calling every handler —
+    // most of them would touch the real filesystem.
+    const caps = S1B_SWEEP_CHANNELS.map(
+      (c) => [c, commandRegistry.declaration(c)?.capability] as const
+    )
+    const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
+    expect(
+      ungranted,
+      `S1b channels a base connection cannot reach: ${ungranted.map(([c]) => c).join(', ')}`
+    ).toEqual([])
+    // `opencode-agents:generate` spends model tokens, so it is `chat`, not
+    // `config` — the one deliberate difference inside the sweep.
+    expect(commandRegistry.declaration('opencode-agents:generate')?.capability).toBe('chat')
+    expect(commandRegistry.declaration('worktree:create')?.capability).toBe('git')
+    // Automations are host-side CONFIGURATION (see ipc/automation-commands.ts),
+    // and their reads are reads.
+    expect(commandRegistry.declaration('automation:save')).toMatchObject({
+      capability: 'config',
+      kind: 'command'
+    })
+    expect(commandRegistry.declaration('automation:list')).toMatchObject({
+      capability: 'config',
+      kind: 'query'
+    })
+  })
+
+  it('automation:save dispatches over the remote transport, and fails closed without `config`', async () => {
+    // RED BEFORE S1b: `automation:*` had no remote registration at all, so this
+    // same dispatch answered `Channel not available: automation:save` — the
+    // unregistered-channel shape, which `automation-commands.test.ts` pins
+    // explicitly against a registry that has not registered them.
+    const saved: unknown[] = []
+    setAutomationManager({
+      upsert: (a: unknown) => saved.push(a)
+    } as unknown as Parameters<typeof setAutomationManager>[0])
+
+    const granted = makeRemoteConnection('password', null)
+    await dispatcher.handle(makeRequest('automation:save', { id: 'nightly' }), granted)
+    expect(saved).toEqual([{ id: 'nightly' }])
+
+    // An enrollment link holds `enroll` and nothing else — the narrowest real
+    // connection the server mints.
+    const ungranted = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+    await expect(
+      dispatcher.handle(makeRequest('automation:save', { id: 'nightly' }), ungranted)
+    ).rejects.toThrow(/Permission denied: "automation:save" requires the "config" capability/)
+    expect(saved).toHaveLength(1)
+  })
+
+  it('refuses a traversal id on every newly-remote path-building family (F1)', async () => {
+    // RED BEFORE the F1 fix: `config:save-engine-config` with this engineId wrote
+    // `~/.claude/settings.json` — Claude Code's hooks + permissions file, whose
+    // contents execute with no approval gate — from any authenticated remote
+    // connection. `opencode-agents:save` was the same shape against arbitrary
+    // `.md` (e.g. `~/.claude/CLAUDE.md`, standing model instructions).
+    //
+    // This asserts the PERIMETER (`ipc/config-commands.ts`), which is the layer a
+    // transport can see: `ui-config` is mocked in this file, so nothing here could
+    // reach the service backstop. That second layer is unit-tested directly in
+    // `services/__tests__/ui-config-path-guard.test.ts` and
+    // `opencode/__tests__/opencode-agents.test.ts`.
+    const conn = makeRemoteConnection('password', null)
+    const escapes = ['../../settings', '..', 'a/b', 'a\\b', 'C:evil', '.hidden', '']
+
+    for (const bad of escapes) {
+      // The two config families throw (no `safeHandler` envelope on them).
+      await expect(
+        dispatcher.handle(makeRequest('config:save-engine-config', bad, {}), conn),
+        `engineId ${JSON.stringify(bad)}`
+      ).rejects.toThrow(/Invalid engineId/)
+      await expect(
+        dispatcher.handle(makeRequest('config:load-engine-config', bad), conn)
+      ).rejects.toThrow(/Invalid engineId/)
+      await expect(
+        dispatcher.handle(makeRequest('config:save-vendor-config', bad, {}), conn)
+      ).rejects.toThrow(/Invalid vendorId/)
+      await expect(
+        dispatcher.handle(makeRequest('config:load-vendor-config', bad), conn)
+      ).rejects.toThrow(/Invalid vendorId/)
+
+      // The agent family is `safeHandler`-wrapped, so the refusal arrives as the
+      // envelope the desktop and the web client both already read.
+      for (const [channel, args] of [
+        ['opencode-agents:read', [bad, 'global']],
+        ['opencode-agents:save', [{ name: bad, scope: 'global', mode: 'all' }]],
+        ['opencode-agents:delete', [bad, 'global']],
+        ['opencode-agents:set-disabled', [bad, 'global', undefined, true]]
+      ] as Array<[string, unknown[]]>) {
+        const result = (await dispatcher.handle(makeRequest(channel, ...args), conn)) as {
+          ok: boolean
+          error?: string
+        }
+        expect(result.ok, `${channel} ${JSON.stringify(bad)}`).toBe(false)
+        expect(result.error).toMatch(/Invalid agent name/)
+      }
+    }
+
+    // …and the real vocabularies still pass: engine ids, provider ids, and the
+    // agent names the settings UI produces.
+    for (const good of ['claude', 'opencode', 'pi']) {
+      await expect(
+        dispatcher.handle(makeRequest('config:load-engine-config', good), conn)
+      ).resolves.toBeDefined()
+    }
+    for (const good of ['anthropic', 'openai-codex', 'github-copilot', 'zen']) {
+      await expect(
+        dispatcher.handle(makeRequest('config:load-vendor-config', good), conn)
+      ).resolves.toBeDefined()
+    }
+  })
+
+  it('a traversal automation id is refused at the perimeter, over the remote transport too', async () => {
+    const spy = vi.fn()
+    setAutomationManager({ delete: spy } as unknown as Parameters<typeof setAutomationManager>[0])
+    await expect(
+      dispatcher.handle(makeRequest('automation:delete', '../..'), makeRemoteConnection('password', null))
+    ).rejects.toThrow(/Invalid automation id/)
+    expect(spy).not.toHaveBeenCalled()
   })
 
   it('every exposed channel outside the shell/passkey sets is reachable under the legacy grant set', () => {
