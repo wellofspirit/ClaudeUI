@@ -77,8 +77,12 @@ const AUTH_INFO_URL = new URL('/remote/auth-info', window.location.origin).toStr
  * Both halves matter and `@simplewebauthn/browser`'s `browserSupportsWebAuthn()`
  * only covers one: it tests for the API, not for the SECURE CONTEXT, and the
  * plain-LAN IP case (`http://192.168.x.x`) is exactly an ordinary browser with
- * the API present and `navigator.credentials` unusable. Used to decide whether
- * OFFERING enrollment makes sense — never to decide anything the server decides.
+ * the API present and `navigator.credentials` unusable.
+ *
+ * A NECESSARY condition for offering enrollment, never a sufficient one, and no
+ * longer the origin test: whether a credential could be BOUND here is the
+ * server's classification (`auth-response.webauthnCapableOrigin`), because an
+ * HTTPS tunnel page passes everything below and can still bind nothing.
  */
 function browserCanAttemptWebauthn(): boolean {
   return window.isSecureContext === true && typeof window.PublicKeyCredential === 'function'
@@ -167,6 +171,12 @@ function RemoteApp(): React.JSX.Element {
    */
   const [authDisabled, setAuthDisabled] = useState(false)
   /**
+   * The SERVER says a passkey could be bound on this connection's origin
+   * (`auth-response.webauthnCapableOrigin`). The origin gate for the enrollment
+   * offer — see the gate below for why the browser's own answer is not enough.
+   */
+  const [webauthnCapableOrigin, setWebauthnCapableOrigin] = useState(false)
+  /**
    * The last disconnect was a strong-tier session cut (close 4010), and the user
    * has not been back to `connected` since. Not an error state — the reconnect
    * is already running — just the one sentence that explains the sign-in screen
@@ -191,6 +201,7 @@ function RemoteApp(): React.JSX.Element {
     setError(err)
     setAuthMethod(connection.getAuthMethod())
     setAuthDisabled(connection.isAuthDisabled())
+    setWebauthnCapableOrigin(connection.isWebauthnCapableOrigin())
     // Every connect path — fragment token, tailnet identity, password proof —
     // goes through connection.connect(), which emits 'connecting' before it
     // opens the socket, and nothing else emits it. So this starts the App
@@ -505,19 +516,36 @@ function RemoteApp(): React.JSX.Element {
     return <ConnectionOverlay state="connecting" />
   }
 
-  // The offer only makes sense for a PASSWORD connection in a browser that
-  // could actually run a ceremony: a passkey connection already has one, and a
-  // token / tailnet one holds no `enroll` to use.
+  // The offer only makes sense for a PASSWORD connection: a passkey connection
+  // already has one, and an enrollment-link one is on its way to having one.
+  //
+  // THE ORIGIN GATE IS THE SERVER'S, not the browser's. Enrollment binds a
+  // credential to the RP ID derived from the serving `Host`, and only two Hosts
+  // can carry one: the tailnet DNS name and `localhost` in development
+  // (`resolveWebauthnOrigin`). `browserCanAttemptWebauthn()` cannot see that —
+  // the Cloudflare tunnel is HTTPS, so it answers TRUE there while every
+  // credential minted on that origin dies with the ephemeral hostname it was
+  // bound to. So the offer follows `webauthnCapableOrigin`, which the accept
+  // carries from the server's own classification: tailnet ⇒ offered, tunnel and
+  // LAN ⇒ never, localhost dev ⇒ offered.
+  //
+  // `browserCanAttemptWebauthn()` STAYS, as a second condition rather than the
+  // origin one: a capable origin reached in a browser with no WebAuthn (or no
+  // secure context — the plain-http tailnet DNS address classifies as a capable
+  // Host while the page is insecure) still cannot run a ceremony.
   //
   // Deliberately NOT gated on the passkey advertisement. That flag needs ≥1
   // credential to be present, which would hide the offer in precisely the case
   // where the operator most needs to be told something — their first web login,
-  // nothing enrolled yet, wondering where passkeys live. Offering there and
-  // letting the server refuse is how they learn the first one comes from the
-  // desktop (see EnrollPrompt's `needsDesktop` branch).
+  // nothing enrolled yet, wondering where passkeys live. On a CAPABLE origin
+  // that first offer is honest work: it either enrolls (a password connection
+  // holds `enroll` under every non-`off` policy since ADR-056) or the server
+  // refuses and the refusal itself teaches where the first passkey comes from
+  // (see EnrollPrompt's `needsDesktop` branch).
   const offerEnroll =
     enrollOffered &&
     authMethod === 'password' &&
+    webauthnCapableOrigin &&
     browserCanAttemptWebauthn() &&
     connState === 'connected'
 

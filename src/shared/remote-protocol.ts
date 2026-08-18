@@ -143,6 +143,31 @@ export interface WsAuthResponse {
    * every live client reconnects and gets a fresh `auth-response`.
    */
   authDisabled?: true
+  /**
+   * Success only: THIS connection's `Host` is an origin a passkey could actually
+   * be bound to — i.e. `resolveWebauthnOrigin` returned an RP ID for it (the
+   * tailnet DNS name, or `localhost` in development).
+   *
+   * The server's own classification, echoed because the client cannot compute
+   * it. A browser can only observe that it is in a secure context, which is a
+   * strictly weaker fact: the Cloudflare tunnel is HTTPS, so a tunnel page
+   * passes every browser-side test and yet no credential minted there could ever
+   * verify — the RP ID would be an ephemeral `*.trycloudflare.com` name the next
+   * link does not share. Offering enrollment on that origin is offering a
+   * ceremony that is guaranteed to be useless, so the OFFER has to be gated on
+   * the server's answer and not on the browser's.
+   *
+   * Not an authorization signal and never to be read as one: the server decides
+   * what a ceremony may do at `webauthn:*` time from
+   * `RemoteConnection.webauthnOrigin`, which is where this value comes from. All
+   * this field buys is a UI that does not propose the impossible.
+   *
+   * ABSENT rather than `false` when the origin cannot bind, exactly like
+   * {@link WsAuthResponse.authDisabled}: presence is the whole test, and a
+   * server that predates the field reads as "not capable" — which withholds an
+   * offer rather than inventing one, the safe direction.
+   */
+  webauthnCapableOrigin?: true
 }
 
 /**

@@ -1488,11 +1488,19 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     ws.send(await keyed.encrypt({ type: 'auth' }))
     const authResp = await nextRaw(ws)
     expect(authResp.startsWith('{')).toBe(false)
-    expect(await keyed.decrypt(authResp)).toMatchObject({
+    const accept = await keyed.decrypt(authResp)
+    expect(accept).toMatchObject({
       type: 'auth-response',
       ok: true,
       authDisabled: true
     })
+    // THE TUNNEL IS NEVER A WEBAUTHN ORIGIN, and the accept has to say so. The
+    // page is HTTPS, so every browser-side capability test the client could run
+    // answers "yes" — while the RP ID would be this run's ephemeral
+    // `*.trycloudflare.com` name, which the next tunnel does not share. The web
+    // client gates its enrollment offer on this field precisely because it
+    // cannot work that out for itself.
+    expect(accept).not.toHaveProperty('webauthnCapableOrigin')
     expect(server.getStatus().connectedClients).toBe(1)
     ws.close()
   })

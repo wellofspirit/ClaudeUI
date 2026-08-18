@@ -270,6 +270,16 @@ export class RemoteConnection {
   /** `auth-response.authDisabled` — the effective policy is `off`. */
   private authDisabledValue = false
   /**
+   * `auth-response.webauthnCapableOrigin` — the SERVER's answer to "could a
+   * passkey be bound on this connection's origin?".
+   *
+   * Per-socket like {@link RemoteConnection.authMethodValue}, and false until an
+   * accept says otherwise: an absent field (older server, or an origin that
+   * cannot bind) must read as "no", so the app withholds an offer rather than
+   * inventing one.
+   */
+  private webauthnCapableOriginValue = false
+  /**
    * `/remote/auth-info` advertised `webauthn` for this origin — i.e. at least
    * one credential is enrolled AND this Host can do WebAuthn. Set by the page
    * bootstrap; it is the only thing a client can know about passkey feasibility
@@ -395,6 +405,20 @@ export class RemoteConnection {
    */
   isAuthDisabled(): boolean {
     return this.authDisabledValue || this.authMethodValue === 'none'
+  }
+
+  /**
+   * Could a passkey be BOUND on this connection's origin (the server's own
+   * classification — see `WsAuthResponse.webauthnCapableOrigin`)?
+   *
+   * The enrollment OFFER's origin gate. Deliberately not
+   * {@link RemoteConnection.canRunPasskeyStepUp}, which asks a different question
+   * (is there a credential to assert with) and is satisfied by the auth-info
+   * advertisement; this one is about whether a NEW credential could exist here at
+   * all, which only the server's `Host` classification can answer.
+   */
+  isWebauthnCapableOrigin(): boolean {
+    return this.webauthnCapableOriginValue
   }
 
   /**
@@ -790,6 +814,7 @@ export class RemoteConnection {
     this.settleAssertion(new Error('Connection destroyed'))
     this.authMethodValue = undefined
     this.authDisabledValue = false
+    this.webauthnCapableOriginValue = false
   }
 
   /** Get the current last sequence number (for debugging). */
@@ -967,6 +992,7 @@ export class RemoteConnection {
     // `enrollThisDevice` skip the registration it actually owes.
     this.authMethodValue = undefined
     this.authDisabledValue = false
+    this.webauthnCapableOriginValue = false
     this.registeredOnThisSocket = false
     // The cipher is PER SOCKET — its replay counters reset per connection on both
     // ends — so a reconnect must never inherit the previous socket's instance.
@@ -1024,6 +1050,7 @@ export class RemoteConnection {
       // an `off`-mode banner (or offer a passkey step-up) for a dead socket.
       this.authMethodValue = undefined
       this.authDisabledValue = false
+      this.webauthnCapableOriginValue = false
       // Per-socket, like the method above: a new socket carries a new token and
       // starts the enrollment over from registration.
       this.registeredOnThisSocket = false
@@ -1111,6 +1138,7 @@ export class RemoteConnection {
         if (msg.ok) {
           this.authMethodValue = msg.method
           this.authDisabledValue = msg.authDisabled === true
+          this.webauthnCapableOriginValue = msg.webauthnCapableOrigin === true
           this.settleAssertion(null)
           if (msg.method === 'enroll-token') {
             // The server consumed the token to answer this frame — it is

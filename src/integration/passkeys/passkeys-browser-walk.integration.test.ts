@@ -814,14 +814,18 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       `step 4a: break-glass password accepted at the tailnet origin under passkey-always (breakGlass=true) → ${shot7}`
     )
 
-    // The inline self-enroll offer only renders for `authMethod === 'password'`,
-    // so its presence is the CLIENT's own report that this connection is a
-    // password one and not, say, an ambient tailnet accept.
+    // The inline self-enroll offer renders only for `authMethod === 'password'`
+    // AND an accept that declared `webauthnCapableOrigin`, so its presence here
+    // is the CLIENT's own report of two things at once: this connection is a
+    // password one (not, say, an ambient tailnet accept), and the SERVER agreed
+    // that a credential could be bound at this origin. That second half is what
+    // the unit matrix can only assert frame-by-frame — this is the one place the
+    // real serve origin, the real Host, and the real client agree on it.
     expect(
       await hasTestId(breakGlassPage.page, 'EnrollPrompt'),
       'a password connection under a passkey mode must be offered inline self-enroll'
     ).toBe(true)
-    note('step 4a: inline self-enroll offered — the connection is `password`, not ambient identity')
+    note('step 4a: inline self-enroll offered — `password` method on a server-declared capable origin')
 
     // 4b. `localhost` is the OTHER WebAuthn-capable origin
     // (`resolveWebauthnOrigin`), and a direct loopback request carries no serve

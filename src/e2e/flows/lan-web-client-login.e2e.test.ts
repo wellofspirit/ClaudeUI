@@ -210,6 +210,12 @@ describe('E2E: the shipped web client on a lan-classified socket', () => {
 
     await reach('connected', 15_000)
     expect(conn.getAuthMethod()).toBe('password')
+    // …and the LAN row of the enrollment-offer matrix, read off the REAL client:
+    // a plain LAN address is not a Host any credential can bind to, so the
+    // accept withholds `webauthnCapableOrigin` and the web client's offer stays
+    // hidden here. Asserted through the transport rather than the frame because
+    // that is the value `main.tsx` actually gates on.
+    expect(conn.isWebauthnCapableOrigin()).toBe(false)
     // Not just a state label: `connected` is only set from `sync-full`, whose
     // snapshot the client decrypted off the channel it opened.
     expect(snapshots).toHaveLength(1)

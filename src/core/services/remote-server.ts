@@ -2660,7 +2660,15 @@ export class RemoteServer {
         // the POLICY rather than on `method === 'none'` because a future method
         // admitted while authentication is disabled would otherwise reach the
         // client unwarned.
-        ...(auth.policy === 'off' ? { authDisabled: true as const } : {})
+        ...(auth.policy === 'off' ? { authDisabled: true as const } : {}),
+        // Can a passkey be BOUND on this connection's origin? The client cannot
+        // work this out — a tunnel page is HTTPS and passes every browser-side
+        // test while its RP ID is an ephemeral hostname — so the answer travels
+        // with the accept. Read off the SAME `capableOrigin` the password and
+        // ceremony gates above were decided from, never re-derived: an
+        // enrollment offer that disagreed with `passwordAuthAllowed` about which
+        // origin this is would be a UI promising what the server refuses.
+        ...(capableOrigin ? { webauthnCapableOrigin: true as const } : {})
       })
       logger.info(
         'remote-server',
@@ -3429,7 +3437,15 @@ export class RemoteServer {
       // Same rule as the handshake accept — this frame is a re-authentication
       // result and a client must be able to read it the same way. `fresh` is
       // the policy re-read a few lines up, not the connect-time snapshot.
-      ...(fresh.policy === 'off' ? { authDisabled: true as const } : {})
+      ...(fresh.policy === 'off' ? { authDisabled: true as const } : {}),
+      // Likewise: the client clears its per-socket origin verdict on EVERY ok
+      // accept, so omitting the field here would have this frame retract a fact
+      // that is not merely still true but was just PROVEN — `origin` is non-null
+      // by the guard at the top of this method (an enrollment socket exists only
+      // where a credential can bind), and a ceremony against it has this instant
+      // verified. Derived from the connection's own `webauthnOrigin`, the same
+      // value the handshake's `capableOrigin` came from.
+      ...(origin !== null ? { webauthnCapableOrigin: true as const } : {})
     })
     this.notifyStatus()
   }

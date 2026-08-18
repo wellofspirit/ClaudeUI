@@ -936,6 +936,69 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   })
 
   // -------------------------------------------------------------------------
+  // `webauthnCapableOrigin` — the accept's origin verdict
+  //
+  // The enrollment OFFER in the web client is gated on this field, so what these
+  // cases pin is a single equality: the flag on the accept is exactly
+  // `resolveWebauthnOrigin(Host, tlsServe) !== null` for THIS socket — the same
+  // value `passwordAuthAllowed` and `handshakeCeremonyAvailable` were decided
+  // from. A UI that offered enrollment where the server would refuse to bind one
+  // (or withheld it where it would) is the failure this covers; the `Host` →
+  // RP ID mapping itself belongs to `webauthn-service.test.ts`.
+  // -------------------------------------------------------------------------
+
+  it('the accept declares a CAPABLE origin at the tailnet DNS name', async () => {
+    await boot(null)
+    await enroll()
+    forceServeUp(OWNER_LOGIN)
+    // `rawConnect` sends the tailnet DNS name as `Host` by default.
+    const client = await connectWith(tailnetHeaders(OWNER_LOGIN))
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'password',
+      webauthnCapableOrigin: true
+    })
+  })
+
+  it('...and at `localhost`, the development origin browsers treat as secure', async () => {
+    await boot(null)
+    const client = await connectWith({
+      host: `localhost:${port}`,
+      origin: `http://localhost:${port}`
+    })
+    client.send({ type: 'auth', pwProof: PROOF })
+    expect(await client.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'password',
+      webauthnCapableOrigin: true
+    })
+  })
+
+  it('the flag is ABSENT on a Host no credential can bind to (GUARD)', async () => {
+    // A bare IP literal stands in for every non-capable Host — the LAN address
+    // and the tunnel's `*.trycloudflare.com` name resolve through the very same
+    // `return null` arm. Absent rather than `false`, like `authDisabled`: an
+    // older client that never learned the field must read "not capable", which
+    // withholds an offer instead of inventing one.
+    await boot(null)
+    const client = await connectWith({
+      host: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port}`
+    })
+    client.send({ type: 'auth', pwProof: PROOF })
+    const response = await client.waitFor('auth-response')
+    expect(response).toMatchObject({ ok: true, method: 'password' })
+    expect(response).not.toHaveProperty('webauthnCapableOrigin')
+  })
+
+  // The "tailnet name, serve down" row is deliberately absent: it is unreachable
+  // over a socket. `isAllowedHost` only admits the ts.net name through the same
+  // `this.tlsServe !== null` predicate `resolveWebauthnOrigin` consults, so a
+  // client sending that Host with serve down is refused at the upgrade (401)
+  // long before an accept could describe its origin.
+
+  // -------------------------------------------------------------------------
   // Enrollment tokens
   // -------------------------------------------------------------------------
 
@@ -1216,7 +1279,15 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
 
     const device = await registerOver(actor, 'Solo device')
     actor.frames.length = 0
-    expect(await ceremony(actor, device)).toMatchObject({ ok: true, method: 'webauthn' })
+    expect(await ceremony(actor, device)).toMatchObject({
+      ok: true,
+      method: 'webauthn',
+      // The upgrade frame carries the origin verdict too (GUARD). The client
+      // re-reads it on EVERY ok accept, so a frame that omitted it would RETRACT
+      // a capability this very ceremony just proved — an enrollment socket only
+      // exists where a credential can bind, and one was just asserted.
+      webauthnCapableOrigin: true
+    })
 
     // `admin` and `enroll` — the full passkey set, on the very same socket.
     await expect(invoke(actor, 'webauthn:credentials')).resolves.toHaveLength(1)
