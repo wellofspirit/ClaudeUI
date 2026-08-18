@@ -52,6 +52,9 @@
     "test:git:changed": "vitest run --project git --changed",
     "test:ci": "vitest run --project unit --project component --project e2e --project git",
     "test:patch": "node patch/test-all.mjs",
+    "verify:sqlite": "bun scripts/verify-bun-sqlite.ts",
+    "build:server": "node scripts/build-server.mjs bundle",
+    "build:server:compile": "node scripts/build-server.mjs compile",
     "test:watch": "vitest --project unit"
   },
   "_comment_dependencies": "Only packages imported by src/main or src/preload belong here. electron-vite's externalizeDepsPlugin externalizes exactly the `dependencies` keys, so a main-process import that lives in devDependencies gets inline-bundled instead. Renderer/web-only packages are bundled by vite and must stay in devDependencies so electron-builder prunes them from the shipped node_modules.",
@@ -72,6 +75,7 @@
     "jsonc-parser": "^3.3.1",
     "node-fetch": "^3.3.2",
     "node-pty": "^1.1.0",
+    "reflect-metadata": "^0.2.2",
     "simple-git": "^3.36.0",
     "undici": "^6.28.0",
     "uuid": "^14.0.1",
