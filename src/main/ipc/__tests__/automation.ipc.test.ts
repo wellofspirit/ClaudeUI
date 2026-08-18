@@ -81,7 +81,7 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { registerAutomationIpc } from '../automation.ipc'
+import { registerAutomationIpc } from '../../../core/ipc/automation.ipc'
 
 describe('automation.ipc', () => {
   let harness: IpcHarness

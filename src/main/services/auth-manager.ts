@@ -24,7 +24,7 @@
 import { shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
-import { serviceSession } from './service-session'
+import { serviceSession } from '../../core/services/service-session'
 import { invalidateLiveSessions } from './session-invalidation'
 import { logger } from '../../core/services/logger'
 import { emitEvent } from '../../core/services/sync-host'

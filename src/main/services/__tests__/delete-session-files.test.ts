@@ -151,7 +151,7 @@ describe('IPC handler argument slots (session:delete-session, session:delete-pro
   // test.
   it('session.ipc.ts registrations put the real first argument in slot 0', async () => {
     const src = await fs.promises.readFile(
-      path.resolve(__dirname, '../../ipc/session.ipc.ts'),
+      path.resolve(__dirname, '../../../core/ipc/session.ipc.ts'),
       'utf8'
     )
     const sessionRegistration =

@@ -116,7 +116,7 @@ import { RemoteServer } from '../../../core/services/remote-server'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { terminalService } from '../../../core/services/terminal-service'
 import { registerRemoteHandlers } from '../../../core/ipc/remote-handlers'
-import { registerTerminalIpc } from '../../ipc/terminal.ipc'
+import { registerTerminalIpc } from '../../../core/ipc/terminal.ipc'
 import { commandRegistry, registerCommand } from '../../../core/ipc/command-registry'
 import { emitEvent, streamSubscriberCount, syncCore } from '../../../core/services/sync-host'
 import {

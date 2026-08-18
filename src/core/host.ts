@@ -79,6 +79,63 @@ export function getAppPath(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Packaged-build flag (Electron's `app.isPackaged`)
+// ---------------------------------------------------------------------------
+
+let hostPackaged: (() => boolean) | null = null
+
+/**
+ * Publish "is this a packaged/production build" (or clear it). The desktop wires
+ * `() => app.isPackaged`; the headless server wires `() => true`.
+ */
+export function setHostIsPackaged(probe: (() => boolean) | null): void {
+  hostPackaged = probe
+}
+
+/**
+ * Whether this is a packaged build. **Defaults to `false`** — i.e. "dev".
+ *
+ * The one consumer is the block-usage / reconciler startup in `session.ipc.ts`,
+ * which SKIPS its background writes in dev so a dev instance cannot fight the
+ * production instance over the same snapshot files. `false` is therefore the
+ * conservative default: an unwired context (vitest, a harness script) writes
+ * nothing, which is what it got before this seam existed. `claudeui-server`
+ * wires `true` deliberately — a deployed server is not a dev build and its usage
+ * history is the only one there is.
+ */
+export function hostIsPackaged(): boolean {
+  return hostPackaged?.() ?? false
+}
+
+// ---------------------------------------------------------------------------
+// Native directory picker
+// ---------------------------------------------------------------------------
+
+/**
+ * Open the host's native folder picker; resolve to the chosen absolute path, or
+ * `null` when the user cancelled.
+ *
+ * Backed by Electron's `dialog.showOpenDialog` on the desktop. There is no
+ * headless implementation and there should never be one: the channel behind it
+ * (`session:pick-folder`) declares the `host` capability, so it is unreachable
+ * from any remote client by construction, and a server with no operator at its
+ * console has no one to show a dialog to.
+ */
+export type HostPicker = () => Promise<string | null>
+
+let hostPicker: HostPicker | null = null
+
+/** Publish the native folder picker (or clear it). Wired in `boot-core`. */
+export function setHostPicker(picker: HostPicker | null): void {
+  hostPicker = picker
+}
+
+/** Pick a directory, or `null` when cancelled OR when no host picker is wired. */
+export function pickHostDirectory(): Promise<string | null> {
+  return hostPicker ? hostPicker() : Promise.resolve(null)
+}
+
+// ---------------------------------------------------------------------------
 // Native notifications
 // ---------------------------------------------------------------------------
 
@@ -105,7 +162,7 @@ export type HostNotifier = (notification: HostNotification) => void
  * host-physical flow the headless server gets its own vendor-OAuth for in a
  * later series.
  *
- * HARD CONSTRAINT: this is DATA ONLY. It exposes exactly the three read/probe
+ * HARD CONSTRAINT: this is DATA ONLY. It exposes exactly the read/probe/report
  * operations below and MUST NOT grow a flow-initiating method (no sign-in, no
  * `openExternal`, no code submission). Those stay in `src/main`; a core module
  * that needs one is scope creep into the deferred headless-OAuth design.
@@ -113,10 +170,21 @@ export type HostNotifier = (notification: HostNotification) => void
 export interface HostAuth {
   /** `AccountManager.getState()` — multi-account enable flag + active id. */
   getAccountState(): AccountsState
-  /** `ClaudeAuthProvider.buildAccountRef(id)` — the probe-cached account ref. */
+  /** `ClaudeAuthProvider.buildClaudeAccountRef(id)` — the probe-cached account ref. */
   buildClaudeAccountRef(activeAccountId?: string | null): AccountRef
   /** `ClaudeAuthProvider.updateAuthSource(...)` — refresh the probe cache from cli.js init. */
   updateClaudeAuthSource(source: string, account?: OAuthAccount | null): void
+  /**
+   * `AuthManager.reportLoginStatus(account)` — publish the login status carried
+   * by cli.js's `initialize` response, so the desktop's sign-in banner is
+   * accurate before any chat session is opened (ADR-014).
+   *
+   * STATUS-ONLY, and within the DATA-ONLY constraint above: it REPORTS an
+   * observation the engine already handed us. It initiates nothing, and the
+   * broadcast it drives is a host-local window channel — which is exactly why a
+   * headless server leaves it unimplemented rather than emulating it.
+   */
+  reportLoginStatus(account: unknown): void
 }
 
 let hostAuth: HostAuth | null = null
@@ -139,6 +207,11 @@ export function buildClaudeAccountRef(activeAccountId?: string | null): AccountR
 /** Forward a cli.js auth-source signal to the desktop provider (no-op when unwired). */
 export function updateClaudeAuthSource(source: string, account?: OAuthAccount | null): void {
   hostAuth?.updateClaudeAuthSource(source, account)
+}
+
+/** Report cli.js's `initialize` login status to the host (no-op when unwired). */
+export function reportHostLoginStatus(account: unknown): void {
+  hostAuth?.reportLoginStatus(account)
 }
 
 // ---------------------------------------------------------------------------

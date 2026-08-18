@@ -226,7 +226,7 @@ describe('remote channel parity (R5)', () => {
     )
 
     const registrars = [
-      read('src/main/ipc/session.ipc.ts'),
+      read('src/core/ipc/session.ipc.ts'),
       read('src/core/ipc/remote-handlers.ts')
     ].join('\n')
     const inline = Object.keys(S1B_SWEEP)
@@ -240,8 +240,8 @@ describe('remote channel parity (R5)', () => {
     // (2) Both transports actually spread the shared declarations. `handleIpc` on
     //     the desktop side (session.ipc.ts for the config family,
     //     automation.ipc.ts for the automations), `handleRemote` on the other.
-    const sessionIpc = read('src/main/ipc/session.ipc.ts')
-    const automationIpc = read('src/main/ipc/automation.ipc.ts')
+    const sessionIpc = read('src/core/ipc/session.ipc.ts')
+    const automationIpc = read('src/core/ipc/automation.ipc.ts')
     const remoteHandlers = read('src/core/ipc/remote-handlers.ts')
     expect(sessionIpc).toMatch(
       /for \(const cmd of configCommands\(manager\)\) \{\s*handleIpc\(cmd\)/
@@ -300,7 +300,7 @@ describe('remote channel parity (R5)', () => {
     const re = /ipcRenderer\.invoke\(\s*['"](webauthn:[^'"]+)['"]/g
     for (let m = re.exec(preload); m; m = re.exec(preload)) invoked.add(m[1])
 
-    const ipcSrc = read('src/main/ipc/webauthn.ipc.ts')
+    const ipcSrc = read('src/core/ipc/webauthn.ipc.ts')
     const registered = new Set<string>()
     const regRe = /['"](webauthn:[^'"]+)['"]/g
     for (let m = regRe.exec(ipcSrc); m; m = regRe.exec(ipcSrc)) registered.add(m[1])

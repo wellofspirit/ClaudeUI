@@ -154,7 +154,7 @@ vi.mock('../../core/services/usage-fetcher', () => ({
     updateFromRateLimitEvent: vi.fn()
   }
 }))
-vi.mock('../../main/services/service-session', () => ({
+vi.mock('../../core/services/service-session', () => ({
   serviceSession: {
     getUsage: vi.fn(async () => null),
     getControlHandle: vi.fn(async () => null),

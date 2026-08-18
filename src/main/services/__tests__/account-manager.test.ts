@@ -29,7 +29,7 @@ vi.mock('node:os', async () => {
   }
 })
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
-vi.mock('../service-session', () => ({ serviceSession: { stop: vi.fn() } }))
+vi.mock('../../../core/services/service-session', () => ({ serviceSession: { stop: vi.fn() } }))
 vi.mock('../auth-manager', () => ({
   authManager: {
     onLoginSuccess: vi.fn((cb: (a: unknown) => void) => {
@@ -47,7 +47,7 @@ vi.mock('../../../core/services/logger', () => ({
 import { accountManager } from '../account-manager'
 import { setLiveSessionCanceller } from '../session-invalidation'
 import { getSecurestorageEnv } from '../../../core/sdk/securestorage-env'
-import { serviceSession } from '../service-session'
+import { serviceSession } from '../../../core/services/service-session'
 import { authManager } from '../auth-manager'
 import { logger } from '../../../core/services/logger'
 

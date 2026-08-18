@@ -52,7 +52,7 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import AFTER mocks so the real module picks up the mocked electron/pty.
-import { registerTerminalIpc } from '../terminal.ipc'
+import { registerTerminalIpc } from '../../../core/ipc/terminal.ipc'
 import { terminalService } from '../../../core/services/terminal-service'
 
 describe('terminal.ipc', () => {

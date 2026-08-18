@@ -51,6 +51,15 @@ async function fresh(): Promise<{
   service: InstanceType<typeof import('../../../core/services/block-usage')['BlockUsageService']>
 }> {
   vi.resetModules()
+  // `vi.resetModules()` hands back a fresh `sqlite-driver` module too, and the
+  // seam deliberately has no default engine (S3 stage 1) — so the driver the
+  // setup file installed is not on THIS instance of it. Install it again, right
+  // where the fresh `db` is imported: the two are one act.
+  const driverSeam = await import('../../../core/services/sqlite-driver')
+  const { betterSqlite3Driver } = await import(
+    '../../../core/services/sqlite/better-sqlite3-driver'
+  )
+  driverSeam.setSqliteDriver(betterSqlite3Driver())
   const db = await import('../../../core/services/db')
   const bu = await import('../../../core/services/block-usage')
   return { db, service: new bu.BlockUsageService() }

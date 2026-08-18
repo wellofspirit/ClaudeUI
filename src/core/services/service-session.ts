@@ -11,10 +11,10 @@
  * or process crash. Consumes zero API tokens.
  */
 
-import { query as sdkQuery } from '../../core/sdk'
-import { getSdkExecutableOpts } from '../../core/services/claude-session'
-import { PERSISTED_SESSIONS_DIR } from '../../core/services/persisted-sessions-dir'
-import { logger } from '../../core/services/logger'
+import { query as sdkQuery } from '../sdk'
+import { getSdkExecutableOpts } from './claude-session'
+import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
+import { logger } from './logger'
 
 /**
  * Creates an AsyncIterable<string> that never yields.

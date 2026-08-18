@@ -18,6 +18,8 @@
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
+import { installDesktopTransport } from '../../main/ipc/desktop-transport'
+import { setDesktopTransportBinder } from '../../core/ipc/desktop-transport-binding'
 import { addSyncSubscriber, clearSyncSubscribersForTests } from '../../core/services/sync-host'
 import { channelSpec } from '../../core/shared/sync/channels'
 
@@ -51,6 +53,16 @@ export function bootIpcHarness(): IpcHarness {
   const bridge = new TestIpcBridge()
   setIpcBridge(bridge)
   const win = bridge.createBrowserWindow()
+
+  // Install the DESKTOP transport binder (S3 stage 1b). The registrars moved to
+  // `src/core` and no longer touch `ipcMain` themselves — they call the
+  // Electron-free `handleIpc`, which binds through whatever the host installed.
+  // Production installs this exact adapter from `bootCore()`; here it resolves
+  // `ipcMain` to the electron-shim these suites already `vi.mock` in, so the
+  // channels land on `bridge` as they always did. Using the REAL adapter rather
+  // than a harness-local copy is deliberate: a second implementation of the
+  // binder is exactly the drift the seam exists to prevent.
+  installDesktopTransport()
 
   const call = async <T>(channel: string, ...args: unknown[]): Promise<T> => {
     return (await bridge.ipcRenderer.invoke(channel, ...args)) as T
@@ -101,6 +113,10 @@ export function bootIpcHarness(): IpcHarness {
       // Subscribers are a module singleton on the funnel; leaking one would fan
       // the next test's ring out into this test's closures.
       clearSyncSubscribersForTests()
+      // Same reasoning for the binder: it is module state pointing at THIS
+      // bridge, so leaving it installed would let a later suite's registration
+      // bind onto a bridge that has already been reset.
+      setDesktopTransportBinder(null)
       bridge.reset()
     }
   }

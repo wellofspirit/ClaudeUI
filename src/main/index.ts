@@ -46,7 +46,7 @@ import { setHostWindow, getHostWindow } from '../core/services/host-window'
 import { attachSyncPort } from './services/sync-port'
 import { terminalService } from '../core/services/terminal-service'
 import { registerRemoteVersionInfo } from '../core/ipc/remote-handlers'
-import { serviceSession } from './services/service-session'
+import { serviceSession } from '../core/services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
@@ -69,7 +69,21 @@ import {
 } from '../core/shell-security'
 import { readImagePreview } from '../core/sent-file-security'
 import { setHostPaths } from '../core/host'
+import { setSqliteDriver } from '../core/services/sqlite-driver'
+import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
 import icon from '../../resources/icon.png?asset'
+
+// The DESKTOP's storage engine (S3 stage 1). `db.ts` talks to a driver seam now
+// — it names no SQLite implementation — so this is where the app declares that
+// it uses the native better-sqlite3, exactly as it always has. Behaviour is
+// unchanged; what changed is that the choice is now stated rather than implied
+// by an import, which is what lets `claudeui-server` state a different one.
+//
+// Wired at module load, before `setHostPaths` and long before `bootCore()`, for
+// the same reason that one is: the DB is opened lazily on first use, and no code
+// path may reach it while the seam is empty. `better-sqlite3` stays in
+// `electron.vite.config.ts`'s `external` list, so the main bundle is untouched.
+setSqliteDriver(betterSqlite3Driver())
 
 // Desktop implementation of the core `HostPaths` seam (S2). Wired at module
 // load — as early as the desktop entrypoint runs, before any window decision or

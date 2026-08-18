@@ -154,7 +154,7 @@ vi.mock('../../core/services/usage-fetcher', () => ({
     updateFromRateLimitEvent: vi.fn()
   }
 }))
-vi.mock('../../main/services/service-session', () => ({
+vi.mock('../../core/services/service-session', () => ({
   serviceSession: {
     getUsage: vi.fn(async () => null),
     getControlHandle: vi.fn(async () => null),
@@ -267,7 +267,7 @@ vi.mock('../../core/services/logger', () => ({
 import { TestIpcBridge } from '../../test/bridges/test-ipc-bridge'
 import { setIpcBridge } from '../../test/stubs/electron-shim'
 import { bootCore, type CoreBoot } from '../../main/boot-core'
-import { getSessionManager } from '../../main/ipc/session.ipc'
+import { getSessionManager } from '../../core/ipc/session.ipc'
 import { getHostWindow } from '../../core/services/host-window'
 import { syncCore } from '../../core/services/sync-host'
 import { listAuditLog, setRemoteConfig } from '../../core/services/db'

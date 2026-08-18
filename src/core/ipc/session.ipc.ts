@@ -1,58 +1,58 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { app, ipcMain, dialog } from 'electron'
-import type { BrowserWindow } from 'electron'
-import { query as sdkQuery } from '../../core/sdk'
-import { PERSISTED_SESSIONS_DIR } from '../../core/services/persisted-sessions-dir'
-import { SessionManager } from '../../core/services/session-manager'
-import { getSdkExecutableOpts } from '../../core/services/claude-session'
-import { emitEvent } from '../../core/services/sync-host'
-import { STREAM_WATCH_COMMAND } from '../../core/ipc/stream-watch'
-import { GIT_WATCH_COMMAND } from '../../core/ipc/git-watch'
-import { getHostWindow } from '../../core/services/host-window'
+import { query as sdkQuery } from '../sdk'
+import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
+import { SessionManager } from '../services/session-manager'
+import { getSdkExecutableOpts } from '../services/claude-session'
+import { emitEvent } from '../services/sync-host'
+import { STREAM_WATCH_COMMAND } from './stream-watch'
+import { GIT_WATCH_COMMAND } from './git-watch'
+import { getHostWindow } from '../services/host-window'
 import {
   seedCanonicalAppState,
   refreshCanonicalDirectories,
   listAllDirectories
-} from '../../core/services/sync-seed'
+} from '../services/sync-seed'
 import {
   loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput,
   resolveForkAnchor
-} from '../../core/services/session-history'
-import { watchSession, unwatchSession } from '../../core/services/session-watcher'
-import { isPathInside, assertSafePathSegment } from '../../core/services/path-containment'
+} from '../services/session-history'
+import { watchSession, unwatchSession } from '../services/session-watcher'
+import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import {
   loadSettings,
   loadSessionConfig,
   loadSlashCommands,
   startConfigWatcher
-} from '../../core/services/ui-config'
+} from '../services/ui-config'
 import {
   loadClaudePermissions,
   loadCleanupPeriodDays,
   isWorkspaceTrusted
-} from '../../core/services/claude-settings'
-import { loadMcpServers, readDisabledMcpServers } from '../../core/services/claude-mcp'
-import { scanCustomCommands } from '../../core/services/custom-command-scanner'
-import type { UISettings, UISessionConfig } from '../../core/services/ui-config'
-import { gitServiceManager } from '../../core/services/git-service'
-import { gitWatchRegistry } from '../../core/services/git-watch-registry'
-import { usageFetcher } from '../../core/services/usage-fetcher'
+} from '../services/claude-settings'
+import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
+import { scanCustomCommands } from '../services/custom-command-scanner'
+import type { UISettings, UISessionConfig } from '../services/ui-config'
+import { gitServiceManager } from '../services/git-service'
+import { gitWatchRegistry } from '../services/git-watch-registry'
+import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
-import { blockUsageService } from '../../core/services/block-usage'
-import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../../core/services/cross-engine-dispatcher'
-import { dispatchedUsageSummary } from '../../core/services/db'
-import '../auth/register-auth-providers'
-import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
-import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
-import { credentialSync } from '../../core/auth/vault/CredentialSync'
-import { sharedProviderService } from '../../core/shared-providers'
-import { authManager } from '../services/auth-manager'
-import { accountManager } from '../services/account-manager'
+import { blockUsageService } from '../services/block-usage'
+import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
+import { dispatchedUsageSummary } from '../services/db'
+import { credentialSync } from '../auth/vault/CredentialSync'
+import { sharedProviderService } from '../shared-providers'
+import {
+  accountState,
+  hostIsPackaged,
+  pickHostDirectory,
+  reportHostLoginStatus,
+  updateClaudeAuthSource
+} from '../host'
 import type {
   ApprovalDecision,
   ModelInfo,
@@ -68,26 +68,26 @@ import {
   discoverOpencodeModels,
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
-} from '../../core/opencode/model-discovery'
+} from '../opencode/model-discovery'
 import {
   removeOpencodeProvider,
   setOpencodeProviderDisabled
-} from '../../core/opencode/provider-management'
-import { opencodeServerManager } from '../../core/opencode/OpencodeServerManager'
-import { discoverPiModels, getPiModelCatalogGroups } from '../../core/pi/model-discovery'
-import { piBinaryAvailable, locatePiBinary } from '../../core/pi/pi-locate'
-import { logger } from '../../core/services/logger'
+} from '../opencode/provider-management'
+import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { discoverPiModels, getPiModelCatalogGroups } from '../pi/model-discovery'
+import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
+import { logger } from '../services/logger'
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
-} from '../../core/services/opencode-session-list'
-import { listPiSessionsGlobal, loadPiSessionHistory } from '../../core/services/pi-session-list'
-import type { ISession } from '../../core/providers/ISession'
-import { prepareAndCreateSession } from '../../core/ipc/create-session'
-import { safeHandler } from '../../core/ipc/safe-handler'
-import { handleIpc } from './desktop-transport'
-import { configCommands } from '../../core/ipc/config-commands'
-import { authCommands } from '../../core/ipc/auth-commands'
+} from '../services/opencode-session-list'
+import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
+import type { ISession } from '../providers/ISession'
+import { prepareAndCreateSession } from './create-session'
+import { safeHandler } from './safe-handler'
+import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
+import { configCommands } from './config-commands'
+import { authCommands, type AuthCommandDeps } from './auth-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -116,7 +116,7 @@ import {
   deleteSession,
   deleteProject,
   clearConversation
-} from '../../core/ipc/handlers-core'
+} from './handlers-core'
 
 // `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
 // adapter) both moved out of this file with the S1b registration sweep: the
@@ -266,14 +266,16 @@ async function fetchModels(): Promise<ModelInfo[]> {
     // session is opened. Resolves immediately (init already completed). ADR-014.
     try {
       const init = await handle.initializationResult()
-      // reportLoginStatus broadcasts session:auth-source to the window (legacy path).
-      authManager.reportLoginStatus(init?.account)
+      // reportLoginStatus broadcasts session:auth-source to the window (legacy
+      // path). Through the `HostAuth` seam since S3 stage 1b — status-only, and
+      // a no-op with no host wired.
+      reportHostLoginStatus(init?.account)
       // Also update the ClaudeAuthProvider probe cache so probe() and session.account
       // are accurate from the first model-fetch, before any chat session opens.
       const acc = init?.account as Record<string, unknown> | undefined
       if (acc) {
         const loggedIn = !!(acc.email)
-        claudeAuthProvider.updateAuthSource(loggedIn ? 'authenticated' : 'none', {
+        updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', {
           email: (acc.email as string | null) ?? null,
           organization: (acc.organization as string | null) ?? null,
           subscriptionType: (acc.subscriptionType as string | null) ?? null,
@@ -442,12 +444,10 @@ export function getSessionManager(): SessionManager | null {
  * native folder picker and the spawn handle a session holds) read it from
  * `services/host-window.ts` at USE time and cope with `null`.
  */
-export function registerSessionIpc(): SessionManager {
+export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  for (const channel of SESSION_IPC_CHANNELS) {
-    ipcMain.removeHandler(channel)
-  }
+  unbindDesktopChannels(SESSION_IPC_CHANNELS)
 
   const manager = new SessionManager()
   sharedManager = manager
@@ -461,19 +461,14 @@ export function registerSessionIpc(): SessionManager {
     capability: 'host',
     kind: 'command',
     handler: async () => {
-      // `host` capability, so only the desktop client can reach this — but a
-      // windowless boot has no window to parent the dialog to, and Electron's
-      // overload set makes that a different call rather than a nullable arg.
-      // session.ipc is the desktop transport registrar (never moves to core), so
-      // it owns the native picker directly. The host window is a real
-      // `BrowserWindow` at runtime — createWindow publishes it — even though the
-      // neutral `HostWindowHandle` seam narrows what `getHostWindow()` advertises.
-      const win = getHostWindow() as BrowserWindow | null
-      const result = win
-        ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
-        : await dialog.showOpenDialog({ properties: ['openDirectory'] })
-      if (result.canceled || result.filePaths.length === 0) return null
-      return result.filePaths[0]
+      // `host` capability, so only the desktop client can reach this. The native
+      // dialog itself is a HOST act — Electron's overload set even makes the
+      // window-parented and unparented calls two different calls — so it lives
+      // behind the `HostPicker` seam (S3 stage 1b) and the desktop wires
+      // `dialog.showOpenDialog` into it from `boot-core`. A headless server has
+      // no operator at a console to show a picker to, so it wires nothing and
+      // this resolves to `null` — the same answer a cancelled dialog gives.
+      return await pickHostDirectory()
     }
   })
 
@@ -1596,7 +1591,7 @@ export function registerSessionIpc(): SessionManager {
   // Full scan on startup, then event-driven recalculation on file changes.
   // Disabled in dev builds to avoid snapshot write conflicts with the prod
   // instance. Set CLAUDE_UI_DEV_USAGE=1 to enable for testing.
-  const skipUsageInDev = !app.isPackaged && !process.env.CLAUDE_UI_DEV_USAGE
+  const skipUsageInDev = !hostIsPackaged() && !process.env.CLAUDE_UI_DEV_USAGE
   if (!skipUsageInDev) {
     // Phase 7 Pass 2 (Full SQL): run the backfill reconciler FIRST so usage_event
     // holds out-of-tool Claude + opencode usage before the first dashboard
@@ -1684,12 +1679,9 @@ export function registerSessionIpc(): SessionManager {
     channel: 'account:get',
     capability: 'config',
     kind: 'query',
-    handler: async () => accountManager.getState()
+    handler: async () => accountState()
   })
-  for (const cmd of authCommands({
-    requireEngineAuth: (engineId) => engineAuthRegistry.require(engineId),
-    setAccountEnabled: (enabled) => accountManager.setEnabled(enabled)
-  })) {
+  for (const cmd of authCommands(authDeps)) {
     handleIpc(cmd)
   }
 

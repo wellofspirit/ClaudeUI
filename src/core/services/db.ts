@@ -2,17 +2,28 @@
  * Operational SQLite database — Phase 3a.
  *
  * Single per-OS-user DB at ~/.claude/ui/operational.db.
- * This is the ONLY file in the codebase that imports better-sqlite3.
  * All callers must go through the typed repository API below — never the raw db.
  *
- * Isolation: vitest aliases better-sqlite3 to a node:sqlite-backed shim so
- * tests never load the Electron-ABI native .node binary.
+ * ## Storage engine
+ *
+ * This file no longer names a SQLite implementation. It talks to the DRIVER
+ * SEAM (`sqlite-driver.ts`), which the ENTRYPOINT installs: better-sqlite3 on
+ * the Electron desktop (unchanged, native, byte-identical), `bun:sqlite` or
+ * `node:sqlite` for `claudeui-server`. That indirection is what lets the
+ * headless server exist at all — S3 stage 0 established that better-sqlite3
+ * cannot run under bun (an uncatchable N-API panic), so a statically-imported
+ * native addon here would have made every module that reads this DB — i.e. most
+ * of `src/core` — unloadable under the server's runtime. See `sqlite-driver.ts`
+ * for the evidence and the driver contract.
+ *
+ * Isolation: vitest installs a driver backed by an in-memory `node:sqlite`, so
+ * tests never load a native .node binary and never touch the real DB file.
  */
 
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import BetterSqlite3 from 'better-sqlite3'
+import { getSqliteDriver, setDbOpenProbe, type SqliteDatabase } from './sqlite-driver'
 import type {
   EngineId,
   ModelRef,
@@ -74,9 +85,14 @@ export interface DailyUsageRow {
   source: 'rollup' | 'seed'
 }
 
-// Infer the Database instance type from the constructor return so we don't
-// need the `BetterSqlite3.Database` namespace (not available with `export =`).
-export type Db = ReturnType<typeof BetterSqlite3>
+/**
+ * The database handle every repository function and every `Migration.up` sees.
+ *
+ * It used to be inferred from better-sqlite3's constructor; it is the seam's
+ * neutral interface now, so a migration body cannot reach for an engine-specific
+ * method that only one of the three drivers implements.
+ */
+export type Db = SqliteDatabase
 
 // ---------------------------------------------------------------------------
 // Types
@@ -559,6 +575,11 @@ let _db: Db | null = null
 /** Periodic audit-retention sweep (ADR-054 decision 5); cleared by {@link closeDb}. */
 let _auditPruneTimer: ReturnType<typeof setInterval> | null = null
 
+// Let the driver seam see whether a handle is live, so `setSqliteDriver` can
+// refuse an engine swap under an open DB. A function reference rather than an
+// import back into this module, so the two files stay acyclic.
+setDbOpenProbe(() => _db !== null)
+
 /**
  * Open (or return the cached) operational DB.
  * Creates ~/.claude/ui/ if it doesn't exist.
@@ -571,7 +592,7 @@ function getDb(): Db {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 })
   }
 
-  const db = new BetterSqlite3(DB_PATH)
+  const db = getSqliteDriver().open(DB_PATH)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
 
@@ -641,8 +662,9 @@ export function closeDb(): void {
 // (only the serve-cwd's git-root), so to enumerate ALL opencode sessions for the
 // sidebar we read that DB directly — one cheap query, every cwd. opencode runs it
 // in WAL mode, so a read-only connection never blocks opencode's writes and sees a
-// consistent snapshot. We open read-only, never write. This lives in db.ts to keep
-// better-sqlite3 to a single importer (ADR-020 / the native-ABI invariant).
+// consistent snapshot. We open read-only, never write. This lives in db.ts so that
+// SQLite access has one importer of the driver seam (ADR-020) — the foreign read
+// then runs on whichever engine the entrypoint installed, like everything else.
 
 /** A top-level opencode session row (the subset the sidebar needs). */
 export interface OpencodeSessionRow {
@@ -661,7 +683,7 @@ export interface OpencodeSessionRow {
 export function readOpencodeSessionRows(opencodeDbPath: string): OpencodeSessionRow[] {
   let foreign: Db | null = null
   try {
-    foreign = new BetterSqlite3(opencodeDbPath, { readonly: true, fileMustExist: true })
+    foreign = getSqliteDriver().open(opencodeDbPath, { readonly: true, fileMustExist: true })
     foreign.pragma('busy_timeout = 3000')
     const rows = foreign
       .prepare(

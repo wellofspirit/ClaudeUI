@@ -292,7 +292,7 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { registerSessionIpc } from '../session.ipc'
+import { registerSessionIpc } from '../../../core/ipc/session.ipc'
 import { gitServiceManager } from '../../../core/services/git-service'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { desktopConnection } from '../../../core/ipc/command-registry'
@@ -319,7 +319,18 @@ describe('session.ipc', () => {
     // SyncCore 4d: the registration is window-free, and the two handlers that
     // want the host's window read it from host-window.ts at use time.
     setHostWindow(harness.win)
-    registerSessionIpc()
+    registerSessionIpc({
+      // S3 stage 1b: the desktop-auth pair is injected now (the registrar left
+      // `src/main` and must not import the Electron-bound singletons). Neither
+      // channel family under test touches these, so a throwing stub is the
+      // honest double — it fails loudly if that ever stops being true.
+      requireEngineAuth: () => {
+        throw new Error('requireEngineAuth is not stubbed in this suite')
+      },
+      setAccountEnabled: () => {
+        throw new Error('setAccountEnabled is not stubbed in this suite')
+      }
+    })
   })
 
   afterEach(() => {

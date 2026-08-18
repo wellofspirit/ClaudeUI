@@ -189,7 +189,7 @@ vi.mock('../../../core/sdk/proxy', () => ({ setProxyEnv: vi.fn(async () => {}), 
 vi.mock('../../../core/sdk/endpoint-env', () => ({ setEndpointEnv: vi.fn() }))
 vi.mock('../../../core/sdk/model-env', () => ({ setModelEnv: vi.fn() }))
 
-import { registerSessionIpc } from '../session.ipc'
+import { registerSessionIpc } from '../../../core/ipc/session.ipc'
 import { setHostWindow } from '../../../core/services/host-window'
 
 describe('session:create spawn rewiring (Phase 3b)', () => {
@@ -199,7 +199,18 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     vi.clearAllMocks()
     harness = bootIpcHarness()
     setHostWindow(harness.win)
-    registerSessionIpc()
+    registerSessionIpc({
+      // S3 stage 1b: the desktop-auth pair is injected now (the registrar left
+      // `src/main` and must not import the Electron-bound singletons). Neither
+      // channel family under test touches these, so a throwing stub is the
+      // honest double — it fails loudly if that ever stops being true.
+      requireEngineAuth: () => {
+        throw new Error('requireEngineAuth is not stubbed in this suite')
+      },
+      setAccountEnabled: () => {
+        throw new Error('setAccountEnabled is not stubbed in this suite')
+      }
+    })
   })
 
   afterEach(() => {

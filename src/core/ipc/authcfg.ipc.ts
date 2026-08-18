@@ -20,14 +20,8 @@
  * the `off` master switch.
  */
 
-import { ipcMain } from 'electron'
-import {
-  commandRegistry,
-  desktopConnection,
-  registerCommand,
-  type CommandConnection,
-  type CommandRegistration
-} from '../../core/ipc/command-registry'
+import { type CommandConnection } from './command-registry'
+import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import {
   authcfgApply,
   authcfgEnd,
@@ -37,8 +31,8 @@ import {
   authcfgSetPassword,
   type AuthcfgApplyPatch,
   type AuthcfgHost
-} from '../../core/ipc/authcfg-commands'
-import { AUTHCFG_CHANNELS, AUTHCFG_FREE_CHANNELS } from '../../core/services/step-up-tier'
+} from './authcfg-commands'
+import { AUTHCFG_CHANNELS, AUTHCFG_FREE_CHANNELS } from '../services/step-up-tier'
 
 /**
  * The channels to clear before re-registering — both classifier sets, read from
@@ -60,13 +54,6 @@ import { AUTHCFG_CHANNELS, AUTHCFG_FREE_CHANNELS } from '../../core/services/ste
  */
 const AUTHCFG_IPC_CHANNELS = [...AUTHCFG_FREE_CHANNELS, ...AUTHCFG_CHANNELS]
 
-function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
-  registerCommand({ ...reg, transport: 'desktop' })
-  ipcMain.handle(reg.channel, (_event, ...args: unknown[]) =>
-    commandRegistry.dispatch(reg.channel, 'desktop', args, desktopConnection())
-  )
-}
-
 /**
  * Register the desktop half. `host` is the running `RemoteServer`; `null` (a
  * harness instance with remote access disabled) keeps the CHANNELS registered
@@ -75,9 +62,7 @@ function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
  * tests than in production.
  */
 export function registerAuthcfgIpc(host: AuthcfgHost | null): void {
-  for (const channel of AUTHCFG_IPC_CHANNELS) {
-    ipcMain.removeHandler(channel)
-  }
+  unbindDesktopChannels(AUTHCFG_IPC_CHANNELS)
 
   // The READ. `query`, so it is free on every tier — see AUTHCFG_IPC_CHANNELS.
   handleIpc({

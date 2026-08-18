@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 const hoisted = vi.hoisted(() => ({ handle: { current: undefined as unknown } }))
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
-vi.mock('../service-session', () => ({
+vi.mock('../../../core/services/service-session', () => ({
   serviceSession: {
     getControlHandle: vi.fn(async () => hoisted.handle.current)
   }
@@ -20,7 +20,7 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 import { authManager } from '../auth-manager'
-import { serviceSession } from '../service-session'
+import { serviceSession } from '../../../core/services/service-session'
 import { setLiveSessionCanceller } from '../session-invalidation'
 
 function makeWindow(): {

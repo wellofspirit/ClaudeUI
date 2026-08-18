@@ -1,6 +1,6 @@
 # SyncCore — sync architecture
 
-Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); **phase 5 S1 + S2 + S4 (the volatile stream lane, the lossy tails, backpressure, the git-watch retirement and the watch-update notify) are landed** (2026-08-17), the named follow-on phase is not started — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
+Part of [architecture/](README.md). **Status:** design accepted 2026-08-13 (ADR-051, ADR-053; security companion [security.md](security.md) / ADR-052). **Phases 0-4 are landed** (2026-08-14); **phase 5 S1 + S2 + S4 (the volatile stream lane, the lossy tails, backpressure, the git-watch retirement and the watch-update notify) are landed** (2026-08-17); **the named follow-on phase is landed too** (S2 extraction + S3 claudeui-server, 2026-08-18) — phase status at the bottom, ledger in [§Follow-ons](#follow-ons). [sync-channels.md](sync-channels.md) is the per-channel classification; [remote.md](remote.md) is now the transport + auth as-built record (the sync architecture is this file).
 
 **Phase 4 complete (4a → 4d).** Canonical state in the main process is the state of
 record: one emission funnel appends every domain event to the ring and applies it
@@ -32,8 +32,11 @@ src/core        — SyncCore + engine adapters + PTY manager + HTTP/WS server + 
 desktop shell   — Electron app: boots core in-process, hosts the renderer, provides
                   host-local surfaces (window controls, native pickers, voice, OAuth browser).
                   The renderer connects to core as client #1 over a MessagePort transport.
-claudeui-server — headless entrypoint (bun) booting core alone: systemd unit, config by
-                  files/env, `tailscale serve` in front for TLS + identity (ADR-039/042 stack).
+claudeui-server — headless entrypoint (src/server, AS BUILT in S3): boots core alone
+                  under bun or node; DB-resident settings + CLI flags (--port/--bind/--tls,
+                  --disable-auth as the host-anchor arg, show-link); first-boot console
+                  enrollment chain; distributed as a bun-compiled exe AND a pure-asset
+                  bundle, both native-dep-free via the SQLite driver seam.
 ```
 
 **Headless rescope (4a), as realized in 4d, physically extracted in S2.** Phase 4's
@@ -49,8 +52,9 @@ HTTP/WS server, the command registry and the services they need) physically live
 host-shaped concern is injected through the neutral adapters in `src/core/host.ts`
 (window handle, app paths, native notifications, account-state reads, mockup serving),
 whose desktop implementations are wired from `src/main` (`index.ts`, `boot-core.ts`).
-What still anchors `boot-core.ts` to Electron is the `ipcMain` transport only — the seam
-the `claudeui-server` (bun) entrypoint breaks next. The
+That seam is now broken (S3): the registrar bodies live in `src/core/ipc/**` and bind
+to `ipcMain` only through the pluggable `DesktopTransportBinder` `src/main` installs;
+`src/server` installs none and boots the same graph headless. The
 vendor-OAuth-on-a-browserless-server design session moves with that entrypoint, since it
 only becomes answerable once there is a server to provision.
 
@@ -400,9 +404,17 @@ line is a named next step with the reason it is not phase-4 work.
   now targets `src/core/**`. It was a MOVE plus five narrow host-adapter seams in
   `src/core/host.ts` (window handle, app paths, native notifications, and — added when the service-graph closure proved larger than first scoped — data-only account-state reads and mockup HTTP serving; a sixth candidate, the native folder dialog, was eliminated rather than abstracted, and the OAuth-browser flow stays desktop-only in `src/main`).
   `boot-core.ts` stays in `src/main` and wires the desktop implementations.
-- **`claudeui-server` (bun) entrypoint** — systemd unit, config by files/env,
-  `tailscale serve` in front. `bootCore()` still imports Electron (`ipcMain`, `app`);
-  the seam to break is the desktop IPC transport adapter, not the services behind it.
+- **`claudeui-server` entrypoint — LANDED (S3).** `src/server` (cli.ts / first-boot.ts /
+  main.ts) boots the core graph with no Electron: the registrars moved to `src/core/ipc`
+  wholesale (order preserved), `DesktopTransportBinder` is the pluggable ipcMain half,
+  `core/boot/core-services.ts` owns the ordered graph and `core/boot/host-anchor.ts`
+  exposes the ten `remote:*` bodies as callable functions (never remote-registered —
+  the host-anchor invariant is pinned). Storage rides a SQLite driver seam: desktop
+  keeps better-sqlite3; bun/node runtimes use their builtins (bun panics on
+  better-sqlite3 — measured, not assumed). Known limitations are documented in the
+  generated dist README: node-pty ships beside the artifact for terminals, web assets
+  ship beside the compiled exe, and the pure-asset bundle targets bun (jsonc-parser's
+  UMD entry blocks a node-target build).
 - **Vendor OAuth on a browserless server** — direction is vault sync from a desktop
   enrollment (ADR-036) and/or device-code flows. Only answerable once there is a server
   to provision, which is why it moves with this phase.

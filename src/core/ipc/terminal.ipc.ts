@@ -1,12 +1,6 @@
-import { ipcMain } from 'electron'
-import { terminalService } from '../../core/services/terminal-service'
-import {
-  commandRegistry,
-  desktopConnection,
-  registerCommand,
-  type CommandConnection,
-  type CommandRegistration
-} from '../../core/ipc/command-registry'
+import { terminalService } from '../services/terminal-service'
+import { type CommandConnection } from './command-registry'
+import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 
 const TERMINAL_IPC_CHANNELS = [
   'terminal:create',
@@ -21,19 +15,6 @@ const TERMINAL_IPC_CHANNELS = [
 ]
 
 /**
- * Desktop-transport registration, mirroring session.ipc.ts's `handleIpc`: the
- * handler lives in the shared command registry (SyncCore phase 1) and the
- * `ipcMain.handle` wrapper only routes through `dispatch`, so capability
- * enforcement and audit are the same code the remote transport runs.
- */
-function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
-  registerCommand({ ...reg, transport: 'desktop' })
-  ipcMain.handle(reg.channel, (_event, ...args: unknown[]) =>
-    commandRegistry.dispatch(reg.channel, 'desktop', args, desktopConnection())
-  )
-}
-
-/**
  * Register the terminal channels. Window-free since SyncCore phase 4d: the pty
  * manager is process-lifetime, so the registration is too, and the two
  * window-LIFETIME concerns it used to own — where `terminal:data`/`terminal:exit`
@@ -42,9 +23,7 @@ function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
  * serves `terminal:*` to remote clients (phase 2 multi-attach) with no local sink.
  */
 export function registerTerminalIpc(): void {
-  for (const channel of TERMINAL_IPC_CHANNELS) {
-    ipcMain.removeHandler(channel)
-  }
+  unbindDesktopChannels(TERMINAL_IPC_CHANNELS)
 
   // `index` is the pool slot (`cwd#0`, `cwd#1`, …). Omitted ⇒ next free slot,
   // which is what a caller that predates the pool always got: a fresh pty.

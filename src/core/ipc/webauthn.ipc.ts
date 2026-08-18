@@ -13,21 +13,15 @@
  * — `webauthn:mint-enroll-token` — which IS here.
  */
 
-import { ipcMain } from 'electron'
-import {
-  commandRegistry,
-  desktopConnection,
-  registerCommand,
-  type CommandConnection,
-  type CommandRegistration
-} from '../../core/ipc/command-registry'
+import { type CommandConnection } from './command-registry'
+import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import {
   mintEnrollToken,
   webauthnCredentials,
   webauthnRename,
   webauthnRevoke,
   type RemoteAuthSurfaceHost
-} from '../../core/ipc/webauthn-commands'
+} from './webauthn-commands'
 
 const WEBAUTHN_IPC_CHANNELS = [
   'webauthn:credentials',
@@ -36,13 +30,6 @@ const WEBAUTHN_IPC_CHANNELS = [
   'webauthn:mint-enroll-token'
 ]
 
-function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
-  registerCommand({ ...reg, transport: 'desktop' })
-  ipcMain.handle(reg.channel, (_event, ...args: unknown[]) =>
-    commandRegistry.dispatch(reg.channel, 'desktop', args, desktopConnection())
-  )
-}
-
 /**
  * Register the desktop half. `host` is the running {@link RemoteServer};
  * `null` (no server, e.g. a harness instance with remote access disabled) keeps
@@ -50,9 +37,7 @@ function handleIpc(reg: Omit<CommandRegistration, 'transport'>): void {
  * set does not depend on runtime configuration.
  */
 export function registerWebauthnIpc(host: RemoteAuthSurfaceHost | null): void {
-  for (const channel of WEBAUTHN_IPC_CHANNELS) {
-    ipcMain.removeHandler(channel)
-  }
+  unbindDesktopChannels(WEBAUTHN_IPC_CHANNELS)
 
   handleIpc({
     channel: 'webauthn:credentials',

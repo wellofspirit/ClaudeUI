@@ -181,7 +181,7 @@ vi.mock('../../core/services/usage-fetcher', () => ({
     updateFromRateLimitEvent: vi.fn()
   }
 }))
-vi.mock('../../main/services/service-session', () => ({
+vi.mock('../../core/services/service-session', () => ({
   serviceSession: {
     getUsage: vi.fn(async () => null),
     getControlHandle: vi.fn(async () => null),
@@ -577,7 +577,7 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
 
     try {
       await core?.remoteServer.stop()
-      const { getSessionManager } = await import('../../main/ipc/session.ipc')
+      const { getSessionManager } = await import('../../core/ipc/session.ipc')
       getSessionManager()?.cancelAll()
       core?.automationManager.stopAll()
     } catch {
