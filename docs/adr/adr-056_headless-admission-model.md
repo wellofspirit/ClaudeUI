@@ -1,6 +1,6 @@
 # ADR-056 — The headless admission model: the link is the channel, never the identity
 
-**Status:** **Implemented** (owner-ratified 2026-08-17 design session; landed as headless-arc series S1a). Normative as-built record: [security.md](../architecture/security.md); handshake/transport detail in [remote.md](../architecture/remote.md).
+**Status:** **Implemented** (owner-ratified 2026-08-17 design session; landed as headless-arc series S1a). **Amended 2026-08-18** — the LAN channel falls back to pure-JS AES-GCM where a browser withholds Web Crypto; see [Amendment](#amendment--2026-08-18-the-lan-channel-needs-a-cipher-a-browser-will-actually-run) at the end. Normative as-built record: [security.md](../architecture/security.md); handshake/transport detail in [remote.md](../architecture/remote.md).
 **Relates to:** ADR-042 (pinned HTTPS port — unchanged), ADR-051 (the command registry this rides on), ADR-055 (the no-compatibility-lane precedent).
 **Supersedes in part:** ADR-039 — its **token mode** is retired outright, and its "confidentiality is delegated to the transport" caveat is narrowed by LAN E2E. Its transport hardening (Host allowlist, throttling, funnel reject, the identity-header trust predicate) carries forward unchanged, as does the tailnet-identity *evaluation* — demoted to a username hint.
 **Supersedes in part:** ADR-052 — its **`passkeyTailnetExempt`** setting and the ambient tailnet admission it exempted from, its `legacy` policy mode, and the grant carve-out that withheld `enroll` from a password login. Its passkey layer, `enroll` capability, enrollment flow and audit contract stand.
@@ -114,3 +114,91 @@ Two verbs, on BOTH transports (a headless box has no desktop pane to read a link
 - **An ephemeral LAN key, like the tunnel's.** A bookmark that dies at every restart is not a bookmark; rotation gives back the property the ephemerality was protecting.
 - **Sweep live clients (4009) on a LAN-key rotation.** Rejected as actively wrong: it would disconnect everybody to announce a change that does not apply to them, and it would make an operator rotating from their phone disconnect their own phone.
 - **A compatibility lane for `#t=` bundles.** Declined per ADR-055: bundles ship with the server, and a lane would keep the retired admission path alive in code for a client that cannot exist.
+
+## Amendment — 2026-08-18: the LAN channel needs a cipher a browser will actually run
+
+Found by owner live-test from a real phone, one day after the arc landed:
+**tunnel + password worked, LAN + password did not.** Typing the password
+returned *"This link is not valid — get a new one from the host."* — and, worse
+than the failure, that copy is an instruction, so the next thing the owner did
+was rotate a key that was never the problem.
+
+### The finding
+
+`SubtleCrypto` is exposed **only in a secure context**. `https://…` and
+`http://localhost` are secure; `http://192.168.x.x:<port>` — the LAN link this
+ADR mints — is not. So on that origin `window.isSecureContext` is `false` and
+`crypto.subtle` is `undefined`, while `crypto.getRandomValues` remains (it is
+not gated). `E2ECrypto` was built entirely on `subtle`, and §1 makes the E2E
+channel **mandatory** on `lan` — so the channel could not be opened **by any
+browser at all**. The LAN row was dead on arrival, and the desktop card was
+advertising it as bookmarkable.
+
+Two things hid it. The tunnel is HTTPS, so the origin the owner tested first was
+a secure context and worked. And every automated layer ran in **Node**, which has
+`crypto.subtle` unconditionally — including `lan-channel-admission.e2e.test.ts`,
+which drives the real server over a real `lan`-classified socket and passes,
+because its CLIENT is `ws-test-client.ts` rather than the bundle a phone runs.
+A green suite and a broken phone were both telling the truth.
+
+### The ruling (owner, 2026-08-18): a pure-JS fallback, Web Crypto still primary
+
+`E2ECrypto` picks its implementation once, in `init()`:
+
+- `crypto.subtle` present ⇒ **unchanged** — HKDF-SHA256 + AES-256-GCM via Web
+  Crypto, with the key held as a non-extractable `CryptoKey`. Every desktop, every
+  server, every HTTPS origin keeps exactly the code it had.
+- `crypto.subtle` absent ⇒ the same two primitives in pure JS: `hkdf(sha256, …)`
+  from `@noble/hashes` and `gcm()` from **`@noble/ciphers`** (new dependency,
+  2.3.0). The derived 32 bytes are held raw, because noble takes raw bytes.
+
+**No protocol change.** HKDF is RFC 5869 on both sides over the same salt/info,
+and AES-GCM appends its 16-byte tag in both, so the wire format
+`base64(nonce[12] ‖ AES-GCM(seq[4] ‖ json))` is byte-identical and the two
+implementations interoperate in either direction. That is not incidental: **every
+LAN session is a mixed pair**, because the server always has Web Crypto. It is
+pinned as such — `e2e-crypto.test.ts` encrypts with one and decrypts with the
+other, and `lan-web-client-login.e2e.test.ts` runs the whole sign-in with the
+client's `subtle` removed against a Node server that still has it.
+
+### Why this and not the alternatives
+
+- **Same vendor, and it completes a story already begun.** `@noble/hashes` is
+  already a direct dependency, and the password proof on this very origin is
+  already pure-JS scrypt — because WebCrypto has no scrypt. The channel needing
+  the same treatment for the same reason is consistent, not a new kind of risk.
+- **TLS on the LAN listener** (self-signed, purely to earn secure-context) would
+  have fixed it without a dependency, and was rejected for this round: a
+  certificate lifecycle, a Host/WS-origin story and a per-phone trust prompt is a
+  far larger change than a cipher swap, and it is the same "certificate story
+  ClaudeUI does not have" the Consequences section already declines.
+- **Dropping E2E on LAN** was never on the table: it is §1's rule.
+
+### Cost, accepted
+
+The fallback is AES in JavaScript, so LAN frames on a phone cost more CPU than
+they would through Web Crypto. Measured (review round, 2026-08-18): ~17 µs per
+256 B frame and ~69 µs per 4 KB frame — the band the chatty lanes (PTY batches,
+stream deltas) actually live in — versus ~1 ms per 64 KB and ~14 ms for a 1 MB
+`sync-full`. At small sizes the sync noble call actually beats the async
+`subtle` round trip, and the asymmetry runs the right way regardless: the
+SERVER always has Web Crypto, so only the phone pays, and only on this origin.
+Accepted rather than mitigated; if it ever bites, the cure is the TLS story
+above, not a second cipher.
+
+The security posture is otherwise **unchanged** — same algorithm, same key
+derivation, same replay counter, same accepted risk about the plain-HTTP surface
+of that origin (Consequences, first bullet). The one genuine regression against
+the Web Crypto path is that the fallback holds the derived key as raw bytes
+instead of a non-extractable `CryptoKey`; on a context with no `subtle` there is
+no non-extractable anything to hold, and the alternative is no channel.
+
+### Interim fixes, superseded by this amendment
+
+Between the live-test and the ruling, the client was made to *diagnose* the dead
+end honestly rather than blame the link (a bootstrap refusal before the password
+form, a typed `WebCryptoUnavailableError`, and a caveat on the desktop LAN row).
+All of that is **reverted**: the link works, so a warning about it would be the
+new lie. What survives is `webCryptoAvailable()` — now the branch predicate —
+and the typed error, demoted to an invariant guard for `subtle` disappearing
+mid-session, which no reachable path produces.

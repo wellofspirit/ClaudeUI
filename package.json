@@ -60,6 +60,7 @@
     "@electron-toolkit/utils": "^4.0.0",
     "@mermaid-js/parser": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@noble/ciphers": "^2.3.0",
     "@noble/hashes": "^2.3.0",
     "@simplewebauthn/server": "^13.3.2",
     "ajv": "^8.20.0",

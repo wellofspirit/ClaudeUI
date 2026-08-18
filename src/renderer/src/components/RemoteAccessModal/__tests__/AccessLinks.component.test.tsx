@@ -177,6 +177,22 @@ describe('AccessLinks', () => {
       expect(part('AccessLinks.rotate', 'lan')).toBeTruthy()
     })
 
+    /**
+     * The row's copy is a PROMISE — "bookmark it" — and for one round of this
+     * arc it was a false one: the link was unopenable by any browser, because
+     * `#k=` needs Web Crypto and a plain `http://<lan-ip>` origin is not a secure
+     * context. The pure-JS AES-GCM fallback (ADR-056 amendment 2026-08-18) made
+     * it true again, so the promise stays — and this pins that the row is not
+     * quietly carrying a caveat about an obstacle that no longer exists.
+     */
+    it('promises a bookmarkable link, with no browser-support caveat', async () => {
+      renderCard(makeStatus({ lanUrl: LAN_LINK }))
+      await settle()
+
+      expect(row('lan')).toHaveTextContent(/Bookmark it/)
+      expect(row('lan')).not.toHaveTextContent(/http:\/\/ address|cannot open it|refuse/i)
+    })
+
     it('draws the QR from the row it was asked for, and toggles it off', async () => {
       renderCard(makeStatus({ lanUrl: LAN_LINK }))
       await settle()

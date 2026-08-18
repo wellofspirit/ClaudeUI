@@ -1393,7 +1393,10 @@ export class RemoteConnection {
       await this.e2e.init(this.e2eKeyHex)
     } catch {
       // A malformed `#k=` (wrong length, non-hex) — the link is unusable and no
-      // amount of reconnecting changes that.
+      // amount of reconnecting changes that. EXHAUSTIVE since the pure-JS
+      // fallback landed: `init()` no longer has a "this context cannot do
+      // crypto" failure to raise, so a throw here is always about the key, and
+      // "get a new one from the host" is always the right cure.
       this.e2e = null
       this.authRejected = true
       this.setState('auth-rejected', 'This link is not valid — get a new one from the host.')

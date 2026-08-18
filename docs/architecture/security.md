@@ -23,6 +23,8 @@ ADR-056 gave the plain-LAN origin its own E2E channel, and the boundary of that 
 
 **Covered:** the WebSocket lane. Every frame from `e2e-activate` onwards is AES-256-GCM, so the password proof, the session snapshot, chat content, terminal traffic and the scoped route tokens are no longer readable by a passive observer on the wire.
 
+**How that cipher runs here is not the same as elsewhere.** A browser exposes `crypto.subtle` only in a secure context, and this origin is plain HTTP — so on the LAN link (and only there) the channel's HKDF-SHA256 + AES-256-GCM run in **pure JavaScript** (`@noble/hashes` + `@noble/ciphers`) rather than through Web Crypto, which every other origin still uses. Same algorithm, same key derivation, same wire bytes — the two interoperate, and they must, because the server end of a LAN session is always on Web Crypto. The one difference that matters to this section: the pure-JS path necessarily holds the derived key as raw bytes instead of a non-extractable `CryptoKey`. See ADR-056's 2026-08-18 amendment; without the fallback the LAN channel was unopenable from any browser at all.
+
 **NOT covered — still plain HTTP on the LAN origin:** the `/remote` bundle itself, `/assets/*`, `/remote/auth-info` (which carries the salt and KDF params), `/mockup/*` and `/sent-file`. So:
 
 - A **passive** LAN observer learns that a ClaudeUI exists, its salt/KDF params, and the contents of any delivered file or mockup fetched over that origin — but not the WS lane.
