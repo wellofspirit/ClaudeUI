@@ -553,32 +553,31 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     fetchDispatchedUsage: () =>
       connection.invoke('usage:fetch-dispatched') as ReturnType<ClaudeAPI['fetchDispatchedUsage']>,
 
-    // Native OAuth (ADR-014) — desktop-only (opens a local browser + loopback).
-    // sign-in/submit/cancel are blocklisted on the remote dispatcher; only the
-    // read-only status query is forwarded.
-    signIn: async () => {
-      throw new Error('Login is only available on the desktop app.')
-    },
-    submitOAuthCode: async () => {
-      throw new Error('Login is only available on the desktop app.')
-    },
-    cancelSignIn: async () => {},
+    // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
+    // its own browser for these calls: it returns `manualUrl` on the state and
+    // the client drives the two-step paste-back flow itself (S4-UI). The token
+    // EXCHANGE still happens host-side; no token material crosses the wire.
+    signIn: () => connection.invoke('auth:sign-in') as ReturnType<ClaudeAPI['signIn']>,
+    submitOAuthCode: (code) =>
+      connection.invoke('auth:submit-code', code) as ReturnType<ClaudeAPI['submitOAuthCode']>,
+    cancelSignIn: () => connection.invoke('auth:cancel') as Promise<void>,
+    // Still host-local by classification (sync-channels.md) — a remote client
+    // learns its own flow's outcome from the invoke returns above, not from here.
     onAuthState: on('auth:state') as ClaudeAPI['onAuthState'],
 
-    // Multi-account (ADR-015) — read-only over remote; mutations are desktop-only.
+    // Multi-account (ADR-015) — the mutations are `config`-capability commands
+    // registered on both transports since S4 (core/ipc/auth-commands.ts).
     getAccounts: () => connection.invoke('account:get') as ReturnType<ClaudeAPI['getAccounts']>,
-    setMultiAccountEnabled: async () => {
-      throw new Error('Account management is only available on the desktop app.')
-    },
-    addAccount: async () => {
-      throw new Error('Account management is only available on the desktop app.')
-    },
-    switchAccount: async () => {
-      throw new Error('Account management is only available on the desktop app.')
-    },
-    deleteAccount: async () => {
-      throw new Error('Account management is only available on the desktop app.')
-    },
+    setMultiAccountEnabled: (enabled) =>
+      connection.invoke('account:set-enabled', enabled) as ReturnType<
+        ClaudeAPI['setMultiAccountEnabled']
+      >,
+    // Carries `pendingSignIn` back for a remote caller — see AccountsState.
+    addAccount: () => connection.invoke('account:add') as ReturnType<ClaudeAPI['addAccount']>,
+    switchAccount: (id) =>
+      connection.invoke('account:switch', id) as ReturnType<ClaudeAPI['switchAccount']>,
+    deleteAccount: (id) =>
+      connection.invoke('account:delete', id) as ReturnType<ClaudeAPI['deleteAccount']>,
     onAccountsChanged: on('account:changed') as ClaudeAPI['onAccountsChanged'],
     onAccountRespawnSessions: on(
       'account:respawn-sessions'
@@ -840,19 +839,24 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       throw new Error('Not available in remote mode')
     },
 
-    // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
-    vendorAuthProbe: async () => ({}),
-    vendorAuthListOptions: async () => ({}),
-    vendorAuthListKeys: async () => ({}),
-    vendorAuthSetKey: async () => {},
-    vendorAuthOauthAuthorize: async () => {
-      throw new Error('Vendor auth is only available on the desktop app.')
-    },
-    vendorAuthOauthCallback: async () => {
-      throw new Error('Vendor auth is only available on the desktop app.')
-    },
-    vendorAuthRemove: async () => {},
-    vendorAuthOauthCancel: async () => {},
+    // Engine-routed per-vendor auth — registered on both transports since S4
+    // (core/ipc/auth-commands.ts), so this mirrors preload 1:1 through `unwrap`
+    // (every one of these handlers is safeHandler-wrapped). They used to be
+    // stubbed as desktop-only; the stubs for the MUTATIONS were the worse half —
+    // `vendorAuthSetKey` resolved silently, so a remote user could "save" an API
+    // key that went nowhere. `oauth-authorize` refuses opencode's `auto` method
+    // for a remote caller; `oauth-callback` accepts the pasted URL/code (ADR-057).
+    vendorAuthProbe: (engineId) => unwrap('vendor-auth:probe', engineId),
+    vendorAuthListOptions: (engineId) => unwrap('vendor-auth:list-options', engineId),
+    vendorAuthListKeys: (engineId) => unwrap('vendor-auth:list-keys', engineId),
+    vendorAuthSetKey: (engineId, vendorId, key) =>
+      unwrap('vendor-auth:set-key', engineId, vendorId, key),
+    vendorAuthOauthAuthorize: (engineId, vendorId, method, inputs) =>
+      unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+    vendorAuthOauthCallback: (engineId, vendorId, method, code) =>
+      unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
+    vendorAuthRemove: (engineId, vendorId) => unwrap('vendor-auth:remove', engineId, vendorId),
+    vendorAuthOauthCancel: (engineId) => unwrap('vendor-auth:oauth-cancel', engineId),
 
     // Plugin system — desktop-only, stubbed out on web
     listPlugins: async () => [],

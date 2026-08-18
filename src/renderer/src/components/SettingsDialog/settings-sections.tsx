@@ -8,6 +8,11 @@ import {
 } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
+import {
+  OAuthOutcomeNotice,
+  OAuthPasteBackFlow,
+  classifyOAuthError
+} from '../auth/OAuthPasteBackFlow'
 import type {
   ClaudePermissions,
   ProxySettings,
@@ -267,10 +272,23 @@ function ModelEffortRow({
 
 // ── Accounts (multi-account support, ADR-015) ────────────────────────
 
+/**
+ * Adding an account starts a Claude login. On DESKTOP the host opens its own
+ * browser and nothing more is needed here. On WEB (ADR-057 / S4-UI) the host
+ * opens nothing: `account:add` returns the flow's `pendingSignIn` snapshot, we
+ * fold it into the store's `authState` — the SAME field AuthBanner drives, so
+ * there is still exactly one Claude-flow state — and the shared paste-back flow
+ * finishes it through `submitOAuthCode`.
+ */
 function AccountsSetting(): React.JSX.Element {
   const accounts = useSessionStore((s) => s.accountsState)
   const setAccounts = useSessionStore((s) => s.setAccountsState)
+  const authState = useSessionStore((s) => s.authState)
+  const setAuthState = useSessionStore((s) => s.setAuthState)
+  const submitOAuthCode = useSessionStore((s) => s.submitOAuthCode)
+  const cancelSignIn = useSessionStore((s) => s.cancelSignIn)
   const [busy, setBusy] = useState(false)
+  const [submittingCode, setSubmittingCode] = useState(false)
 
   useEffect(() => {
     void window.api.getAccounts().then(setAccounts)
@@ -278,11 +296,16 @@ function AccountsSetting(): React.JSX.Element {
 
   const enabled = accounts?.enabled ?? false
   const isMac = window.api.platform === 'darwin'
+  const isWeb = window.api.platform === 'web'
+  const pasteBack = isWeb && authState?.status === 'authorizing'
 
   const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
     setBusy(true)
     try {
-      setAccounts(await fn())
+      const next = await fn()
+      setAccounts(next)
+      // Only `account:add` on a remote connection ever carries this.
+      if (next.pendingSignIn) setAuthState(next.pendingSignIn)
     } finally {
       setBusy(false)
     }
@@ -364,6 +387,32 @@ function AccountsSetting(): React.JSX.Element {
           >
             + Add account
           </button>
+
+          {pasteBack && (
+            <div
+              data-testid="AccountsSetting.signInFlow"
+              className="mt-1.5 rounded-md border border-border/40 bg-bg-secondary/40 p-2.5 space-y-2"
+            >
+              <OAuthPasteBackFlow
+                variant="code"
+                url={authState?.manualUrl}
+                busy={submittingCode}
+                onSubmit={(pasted) => {
+                  setSubmittingCode(true)
+                  void submitOAuthCode(pasted)
+                    .then(() => void window.api.getAccounts().then(setAccounts))
+                    .finally(() => setSubmittingCode(false))
+                }}
+                onCancel={() => void cancelSignIn()}
+              />
+            </div>
+          )}
+          {isWeb && authState?.status === 'error' && authState.error && (
+            <OAuthOutcomeNotice
+              kind={classifyOAuthError(authState.error)}
+              message={authState.error}
+            />
+          )}
         </div>
       )}
     </div>
@@ -1313,13 +1362,19 @@ function VendorOpencodeSection(): React.JSX.Element {
   // Provider whose credential panel is expanded inline on its row.
   const [credentialId, setCredentialId] = useState<string | null>(null)
   const mountedRef = useRef(true)
-  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
-    useShallow((s) => ({
-      vendorOAuth: s.vendorOAuth,
-      authorizeVendorOAuth: s.authorizeVendorOAuth,
-      cancelVendorOAuth: s.cancelVendorOAuth
-    }))
-  )
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth, submitVendorOAuthCode } =
+    useSessionStore(
+      useShallow((s) => ({
+        vendorOAuth: s.vendorOAuth,
+        authorizeVendorOAuth: s.authorizeVendorOAuth,
+        cancelVendorOAuth: s.cancelVendorOAuth,
+        submitVendorOAuthCode: s.submitVendorOAuthCode
+      }))
+    )
+  // Web drives ADR-057's paste-back flow off `vendorOAuth`; desktop keeps the
+  // local `oauthFlow` machinery below, untouched.
+  const isWeb = window.api.platform === 'web'
+  const [pasteBusy, setPasteBusy] = useState(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -1487,7 +1542,13 @@ function VendorOpencodeSection(): React.JSX.Element {
       const result = await authorizeVendorOAuth('opencode', vendorId)
       if (result.ok) {
         finishAdd(vendorId)
-      } else if (result.needsPaste) {
+        return
+      }
+      // Web: the store has already parked the flow — `paste` (the two-step
+      // form below) or `error` (opencode's remote-`auto` refusal, rendered as
+      // the desktop-only outcome). Nothing local to set.
+      if (isWeb) return
+      if (result.needsPaste) {
         setOauthFlow({
           stage: 'instructions',
           url: result.needsPaste.url,
@@ -1499,6 +1560,18 @@ function VendorOpencodeSection(): React.JSX.Element {
     } catch (err) {
       setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
     }
+  }
+
+  /** Step 2 of the remote flow — see `submitVendorOAuthCode` in the store. */
+  const handlePasteBackSubmit = (vendorId: string, pasted: string): void => {
+    setPasteBusy(true)
+    void submitVendorOAuthCode(pasted)
+      .then((result) => {
+        if (result.ok) finishAdd(vendorId)
+      })
+      .finally(() => {
+        if (mountedRef.current) setPasteBusy(false)
+      })
   }
 
   const handleOAuthSubmit = async (): Promise<void> => {
@@ -1843,10 +1916,33 @@ function VendorOpencodeSection(): React.JSX.Element {
                             </button>
                           </div>
                         )}
-                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'error' && (
-                          <div className="text-[10px] text-red-400">
-                            Authentication failed. Try again.
-                          </div>
+                        {vendorOAuth?.vendorId === p.id &&
+                          vendorOAuth.stage === 'error' &&
+                          (vendorOAuth.error ? (
+                            // ADR-057 outcome: the remote-`auto` refusal reads as
+                            // "use the desktop", a CSRF mismatch as "start again".
+                            <OAuthOutcomeNotice
+                              kind={classifyOAuthError(vendorOAuth.error)}
+                              message={vendorOAuth.error}
+                              id={p.id}
+                            />
+                          ) : (
+                            <div className="text-[10px] text-red-400">
+                              Authentication failed. Try again.
+                            </div>
+                          ))}
+
+                        {/* Remote two-step flow. Never reached on desktop — the
+                            store only parks `paste` for a web caller. */}
+                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'paste' && (
+                          <OAuthPasteBackFlow
+                            variant="url"
+                            id={p.id}
+                            url={vendorOAuth.url}
+                            busy={pasteBusy}
+                            onSubmit={(pasted) => handlePasteBackSubmit(p.id, pasted)}
+                            onCancel={cancelVendorOAuth}
+                          />
                         )}
 
                         {oauthFlow.stage === 'instructions' && oauthFlow.vendorId === p.id && (

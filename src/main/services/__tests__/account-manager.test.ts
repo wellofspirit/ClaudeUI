@@ -111,6 +111,49 @@ describe('AccountManager', () => {
     expect(authManager.signIn).toHaveBeenCalled()
   })
 
+  /**
+   * ADR-057 / S4-UI, item C. `manualUrl` is what a remote client needs to render
+   * step 1, and it existed only on the `auth:state` event — which is `host-local`
+   * and therefore never reached the caller. It rides the RESPONSE instead of
+   * widening that event's delivery, because an in-flight OAuth flow belongs to
+   * the ONE client that started it: `manualUrl` carries the flow's CSRF `state`,
+   * so fanning it out would let any other admitted client finish someone else's
+   * sign-in with their own account.
+   */
+  describe('addAccount — remote sign-in hand-back (ADR-057)', () => {
+    it('remote: awaits the sign-in and returns its snapshot on the response', async () => {
+      const authorizing = {
+        status: 'authorizing',
+        account: null,
+        error: null,
+        manualUrl: 'https://claude.ai/oauth?state=s'
+      }
+      ;(authManager.signIn as ReturnType<typeof vi.fn>).mockResolvedValueOnce(authorizing)
+      await accountManager.setEnabled(true)
+      const state = await accountManager.addAccount({ remote: true })
+      expect(authManager.signIn).toHaveBeenCalledWith({ remote: true })
+      expect(state.pendingSignIn).toEqual(authorizing)
+    })
+
+    it('desktop: no pendingSignIn — the host opened its own browser', async () => {
+      await accountManager.setEnabled(true)
+      const state = await accountManager.addAccount()
+      expect(state.pendingSignIn).toBeUndefined()
+    })
+
+    it('remote: a rejected sign-in degrades to no pendingSignIn, never a rejection', async () => {
+      ;(authManager.signIn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('service session down')
+      )
+      await accountManager.setEnabled(true)
+      const state = await accountManager.addAccount({ remote: true })
+      expect(state.pendingSignIn).toBeUndefined()
+      // The account itself was still created — only its login failed to start.
+      expect(state.accounts.length).toBeGreaterThan(0)
+      expect(logger.error).toHaveBeenCalled()
+    })
+  })
+
   it('a failing login start on addAccount is caught (no unhandled rejection) and logged', async () => {
     ;(authManager.signIn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('service session down')

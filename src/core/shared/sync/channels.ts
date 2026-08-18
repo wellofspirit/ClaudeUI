@@ -446,7 +446,10 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'host-local',
     ring: false,
     canonical: false,
-    why: 'Native OAuth flow transitions (ADR-014): a local browser + loopback listener, meaningless to a remote client.'
+    // ADR-057 made a remote sign-in real, so the old rationale ("meaningless to
+    // a remote client") no longer holds — but the classification does, for a
+    // stronger reason. Kept host-local deliberately: see the why.
+    why: 'Native OAuth flow transitions (ADR-014). Stays host-local NOT because a remote client cannot use them (ADR-057 gave it a real sign-in) but because a flow belongs to the ONE client that started it: the state carries `manualUrl`, whose `state` param is that flow’s CSRF token, and fanning it out would let any other admitted client complete someone else’s sign-in with their own account. Every remote caller gets its own flow state on the invoke RETURN instead — `auth:sign-in` / `auth:submit-code` directly, `account:add` via `AccountsState.pendingSignIn` (S4-UI).'
   },
   'account:changed': {
     cls: 'host-local',

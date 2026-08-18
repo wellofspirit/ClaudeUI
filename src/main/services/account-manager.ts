@@ -108,12 +108,31 @@ class AccountManager {
     this.state.accounts.push(acc)
     this.state.activeId = acc.id
     this.persistAndApply()
+
     // serviceSession now points at the new (empty) dir — start the login there.
-    // signIn() resolves at the "authorizing" stage and broadcasts terminal
-    // success/error via auth:state, so we deliberately don't await it. Guard the
-    // fire-and-forget with a catch so a spawn-path throw can never surface as an
-    // unhandled rejection (signIn() itself is also hardened to broadcast errors
-    // rather than reject).
+    //
+    // REMOTE (S4-UI): the caller is the only client that may see this flow's
+    // `manualUrl` (it carries the flow's CSRF `state`), and the `auth:state`
+    // event that used to carry it is host-local, so echo the "authorizing"
+    // snapshot back on the RESPONSE. signIn() resolves as soon as the authorize
+    // URL exists — it does NOT block on the login completing — so awaiting it
+    // costs one cli.js control round-trip, not a user's attention span. It is
+    // also hardened to never reject; the catch is belt-and-braces and degrades
+    // to "no pendingSignIn", which the UI renders as "no sign-in link".
+    if (opts?.remote) {
+      try {
+        return { ...this.state, pendingSignIn: await authManager.signIn(opts) }
+      } catch (err) {
+        logger.error('AccountManager', `Failed to start login for new account: ${err}`)
+        return this.state
+      }
+    }
+
+    // DESKTOP: unchanged. signIn() resolves at the "authorizing" stage and
+    // broadcasts terminal success/error via auth:state, so we deliberately don't
+    // await it. Guard the fire-and-forget with a catch so a spawn-path throw can
+    // never surface as an unhandled rejection (signIn() itself is also hardened
+    // to broadcast errors rather than reject).
     void authManager.signIn(opts).catch((err) => {
       logger.error('AccountManager', `Failed to start login for new account: ${err}`)
     })

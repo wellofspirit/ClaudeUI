@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SharedProviders } from '../SharedProviders'
 import {
   chooseSelectMenuOption,
@@ -265,5 +265,104 @@ describe('SharedProviders', () => {
       await waitFor(() => expect(screen.getByTestId('SharedProviderCard')).toBeInTheDocument())
       expect(diagnosisNode()).toBeNull()
     })
+  })
+})
+
+/**
+ * Connecting ChatGPT from a REMOTE client (ADR-057 / S4-UI).
+ *
+ * This card used to be flatly desktop-only on web ("Connect from the desktop
+ * app", disabled) because pi's Codex login needed the host's loopback. It does
+ * not any more: the host holds the PKCE verifier and completes the exchange from
+ * a PASTED callback, so the button works and the card expands into the shared
+ * two-step flow. Everything else `readOnly` guards — API keys, definition edits,
+ * route toggles, disconnect — is deliberately still desktop-only.
+ */
+describe('SharedProviders — remote ChatGPT connect', () => {
+  const flow = {
+    engineId: 'pi',
+    vendorId: 'openai-codex',
+    stage: 'paste' as const,
+    instructions: 'Complete sign-in to ChatGPT in the browser window that just opened.',
+    url: 'https://auth.openai.com/oauth/authorize?state=s',
+    method: 0
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.listSharedProviders.mockResolvedValue([chatgpt])
+    api.getSharedProviderStatuses.mockResolvedValue([status()])
+    api.listSharedProviderModels.mockResolvedValue(models)
+    ;(window as unknown as { api: typeof api }).api = api
+    ;(window as unknown as { open: unknown }).open = vi.fn()
+    useSessionStore.setState({
+      vendorOAuth: null,
+      authorizeVendorOAuth: vi.fn(async () => ({ ok: false, needsPaste: { ...flow } })),
+      submitVendorOAuthCode: vi.fn(async () => ({ ok: true })),
+      cancelVendorOAuth: vi.fn(),
+      reloadModels: vi.fn()
+    })
+  })
+  afterEach(cleanup)
+
+  it('offers a real Connect on web and expands the paste-back flow', async () => {
+    ;(window.api as unknown as { platform: string }).platform = 'web'
+    render(<SharedProviders />)
+    await screen.findByTestId('SharedProviderCard')
+    const connect = screen.getByTestId('SharedProviderCard.connect')
+    expect(connect).not.toBeDisabled()
+    expect(connect).toHaveTextContent('Connect ChatGPT')
+
+    fireEvent.click(connect)
+    await waitFor(() =>
+      expect(useSessionStore.getState().authorizeVendorOAuth).toHaveBeenCalledWith(
+        'pi',
+        'openai-codex'
+      )
+    )
+    // The store parks the flow; the card renders it off that single source.
+    act(() => useSessionStore.setState({ vendorOAuth: flow }))
+    const form = await screen.findByTestId('OAuthPasteBackFlow')
+    expect(form).toHaveAttribute('data-variant', 'url')
+    fireEvent.change(screen.getByTestId('OAuthPasteBackFlow.input'), {
+      target: { value: 'http://localhost:1455/auth/callback?code=c&state=s' }
+    })
+    fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
+    await waitFor(() =>
+      expect(useSessionStore.getState().submitVendorOAuthCode).toHaveBeenCalledWith(
+        'http://localhost:1455/auth/callback?code=c&state=s'
+      )
+    )
+  })
+
+  it('renders the desktop-only outcome when the backend refuses the method', async () => {
+    ;(window.api as unknown as { platform: string }).platform = 'web'
+    render(<SharedProviders />)
+    await screen.findByTestId('SharedProviderCard')
+    act(() =>
+      useSessionStore.setState({
+        vendorOAuth: {
+          engineId: 'pi',
+          vendorId: 'openai-codex',
+          stage: 'error',
+          instructions: '',
+          error:
+            "opencode's automatic browser sign-in only completes on the host machine. " +
+            "Choose the 'paste a code' method, or sign in from the desktop app."
+        }
+      })
+    )
+    expect(await screen.findByTestId('OAuthOutcomeNotice')).toHaveAttribute(
+      'data-kind',
+      'desktop-only'
+    )
+  })
+
+  it('never mounts the flow on desktop (platform pin)', async () => {
+    ;(window.api as unknown as { platform: string }).platform = 'darwin'
+    render(<SharedProviders />)
+    await screen.findByTestId('SharedProviderCard')
+    act(() => useSessionStore.setState({ vendorOAuth: flow }))
+    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
   })
 })

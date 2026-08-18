@@ -212,3 +212,83 @@ describe('web api-adapter — remote-access settings (ADR-054 decision 6)', () =
     })
   })
 })
+
+/**
+ * The vendor-OAuth / account / native-OAuth family (ADR-057, S4 + S4-UI).
+ *
+ * S4 registered all of these on the remote transport, but this adapter still
+ * carried the pre-S4 stubs — so the remote UI could not reach a single one of
+ * them, and the two WORST stubs failed silently rather than loudly:
+ * `vendorAuthSetKey` and `vendorAuthRemove` resolved with `undefined`, so a
+ * remote user could "save" an API key that went nowhere. These guards pin the
+ * channel names and the safeHandler unwrapping.
+ */
+describe('web api-adapter — auth / account / vendor-auth reach the remote handlers', () => {
+  it('drives the native Claude flow over the wire (the host opens no browser)', async () => {
+    connection.invoke.mockResolvedValueOnce({ status: 'authorizing', manualUrl: 'https://x' })
+    await expect(api.signIn()).resolves.toMatchObject({ manualUrl: 'https://x' })
+    expect(connection.invoke).toHaveBeenCalledWith('auth:sign-in')
+
+    await api.submitOAuthCode('pasted-code')
+    expect(connection.invoke).toHaveBeenCalledWith('auth:submit-code', 'pasted-code')
+
+    await api.cancelSignIn()
+    expect(connection.invoke).toHaveBeenCalledWith('auth:cancel')
+  })
+
+  it('account mutations are real invokes, and addAccount carries pendingSignIn back', async () => {
+    connection.invoke.mockResolvedValueOnce({
+      enabled: true,
+      activeId: 'a1',
+      accounts: [],
+      pendingSignIn: { status: 'authorizing', account: null, error: null, manualUrl: 'https://m' }
+    })
+    await expect(api.addAccount()).resolves.toMatchObject({
+      pendingSignIn: { manualUrl: 'https://m' }
+    })
+    expect(connection.invoke).toHaveBeenCalledWith('account:add')
+
+    await api.setMultiAccountEnabled(true)
+    expect(connection.invoke).toHaveBeenCalledWith('account:set-enabled', true)
+    await api.switchAccount('a2')
+    expect(connection.invoke).toHaveBeenCalledWith('account:switch', 'a2')
+    await api.deleteAccount('a2')
+    expect(connection.invoke).toHaveBeenCalledWith('account:delete', 'a2')
+  })
+
+  it('vendor-auth verbs invoke their channels and unwrap the safeHandler envelope', async () => {
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: { openai: [{ type: 'oauth' }] } })
+    await expect(api.vendorAuthListOptions('pi')).resolves.toEqual({
+      openai: [{ type: 'oauth' }]
+    })
+    expect(connection.invoke).toHaveBeenCalledWith('vendor-auth:list-options', 'pi')
+
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: { url: 'u', method: 'auto' } })
+    await api.vendorAuthOauthAuthorize('pi', 'openai-codex', 0)
+    expect(connection.invoke).toHaveBeenCalledWith(
+      'vendor-auth:oauth-authorize',
+      'pi',
+      'openai-codex',
+      0,
+      undefined
+    )
+
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: true })
+    await expect(
+      api.vendorAuthOauthCallback('pi', 'openai-codex', 0, 'http://localhost:1455/cb?code=c')
+    ).resolves.toBe(true)
+    expect(connection.invoke).toHaveBeenCalledWith(
+      'vendor-auth:oauth-callback',
+      'pi',
+      'openai-codex',
+      0,
+      'http://localhost:1455/cb?code=c'
+    )
+  })
+
+  it('a refused vendor-auth mutation now THROWS instead of resolving silently', async () => {
+    connection.invoke.mockResolvedValueOnce({ ok: false, error: 'not permitted' })
+    await expect(api.vendorAuthSetKey('pi', 'openai', 'sk-x')).rejects.toThrow('not permitted')
+    expect(connection.invoke).toHaveBeenCalledWith('vendor-auth:set-key', 'pi', 'openai', 'sk-x')
+  })
+})

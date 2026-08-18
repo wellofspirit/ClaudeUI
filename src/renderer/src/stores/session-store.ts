@@ -802,6 +802,16 @@ let vendorOAuthFlowToken = 0
 const GIT_STATUS_CACHE_MAX = 100
 const gitStatusCache = new Map<string, GitStatusData>()
 
+/**
+ * A rejected `window.api.*` invoke as displayable text. Deliberately verbatim:
+ * the OAuth surfaces (ADR-057) classify the backend's own wording, so replacing
+ * it with a friendly generic would break the outcome mapping.
+ */
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return typeof err === 'string' ? err : 'Unknown error'
+}
+
 /** Helper to update a specific session's state */
 function updateSession(
   sessions: Record<string, PerSessionState>,
@@ -867,6 +877,38 @@ function coldSessionIds(
   return cold
 }
 
+/**
+ * The ONE vendor-OAuth flow state, shared by every surface that can start one
+ * (the chat re-auth card, Settings › Providers, Shared providers).
+ *
+ * Three stages, two of them as old as the feature:
+ *  - `waiting` — the DESKTOP `auto` drive: the host opened a browser and is
+ *    blocked on its own loopback listener;
+ *  - `error`   — the flow failed; `error` carries the backend's verbatim text
+ *    for the ADR-057 outcome mapping (older callers only rendered a generic
+ *    "Authentication failed", so the field is optional);
+ *  - `paste`   — S4-UI: a REMOTE (web) client drives ADR-057's two-step
+ *    paste-back instead. There is no host browser and no loopback to wait on,
+ *    so `url` (what the client opens itself) and `method` (which vendor auth
+ *    option the paste completes) are carried here. Never set on desktop.
+ */
+export interface VendorOAuthState {
+  engineId: string
+  vendorId: string
+  stage: 'waiting' | 'error' | 'paste'
+  instructions: string
+  /** Authorize URL — `paste` stage only (the client opens it, not the host). */
+  url?: string
+  /** Index into the vendor's auth options, needed by `vendor-auth:oauth-callback`. */
+  method?: number
+  /**
+   * Verbatim backend message — `error` stage only, and only for flows that
+   * reached it through S4-UI's paths (the legacy desktop `auto` failure sets no
+   * message and its surfaces still render their own generic text).
+   */
+  error?: string
+}
+
 export interface SessionState {
   // Multi-session
   activeSessionId: string | null
@@ -928,12 +970,7 @@ export interface SessionState {
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
-  vendorOAuth: {
-    engineId: string
-    vendorId: string
-    stage: 'waiting' | 'error'
-    instructions: string
-  } | null
+  vendorOAuth: VendorOAuthState | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -1125,21 +1162,26 @@ export interface SessionState {
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
-  setVendorOAuth(
-    state: {
-      engineId: string
-      vendorId: string
-      stage: 'waiting' | 'error'
-      instructions: string
-    } | null
-  ): void
+  setVendorOAuth(state: VendorOAuthState | null): void
   cancelVendorOAuth(): void
   setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
   clearVendorAuthRequired(routingId: string): void
   authorizeVendorOAuth(
     engineId: EngineId,
     vendorId: string
-  ): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
+  ): Promise<{
+    ok: boolean
+    needsPaste?: { url: string; method: number; instructions: string }
+    /** Verbatim backend failure text (e.g. opencode's remote-`auto` refusal). */
+    error?: string
+  }>
+  /**
+   * Finish the `paste` stage: post the user's pasted string to
+   * `vendor-auth:oauth-callback` VERBATIM (the backend parses URL-vs-code) and
+   * fold the result back into `vendorOAuth`. Remote-only by construction — the
+   * stage it consumes is never set on desktop.
+   */
+  submitVendorOAuthCode(pasted: string): Promise<{ ok: boolean; error?: string }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -2210,12 +2252,22 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
   signIn: async () => {
     set({ authState: { status: 'authorizing', account: null, error: null } })
-    const result = await window.api.signIn()
-    set({ authState: result })
+    // A rejected invoke used to leave the UI stuck on "authorizing" forever.
+    // Harmless on desktop (AuthManager.signIn never rejects), but a remote
+    // caller can be refused by the capability gate, and S4-UI's paste flow reads
+    // `manualUrl` off this very state — so surface the failure instead.
+    try {
+      set({ authState: await window.api.signIn() })
+    } catch (err) {
+      set({ authState: { status: 'error', account: null, error: errorText(err) } })
+    }
   },
   submitOAuthCode: async (code) => {
-    const result = await window.api.submitOAuthCode(code)
-    set({ authState: result })
+    try {
+      set({ authState: await window.api.submitOAuthCode(code) })
+    } catch (err) {
+      set({ authState: { status: 'error', account: null, error: errorText(err) } })
+    }
   },
   cancelSignIn: async () => {
     await window.api.cancelSignIn()
@@ -2251,6 +2303,25 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!firstOAuthOption) return { ok: false }
       const methodIdx = vendorOptions.indexOf(firstOAuthOption)
       const result = await window.api.vendorAuthOauthAuthorize(engineId, vendorId, methodIdx)
+      // ADR-057 / S4-UI: a REMOTE client can neither reach the host's loopback
+      // nor be sent to a page by the host, so BOTH methods become the two-step
+      // paste-back — and the open is the flow component's own user-gesture
+      // `window.open`, not this post-await one (which every mobile browser
+      // blocks). Desktop is untouched: same open, same `auto` loopback drive.
+      if (window.api.platform === 'web') {
+        useSessionStore.getState().setVendorOAuth({
+          engineId,
+          vendorId,
+          stage: 'paste',
+          instructions: result.instructions,
+          url: result.url,
+          method: methodIdx
+        })
+        return {
+          ok: false,
+          needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions }
+        }
+      }
       window.open(result.url, '_blank')
       if (result.method === 'auto') {
         // Capture the flow token AFTER authorize so a Cancel during authorize is
@@ -2301,8 +2372,53 @@ export const useSessionStore = create<SessionState>((set) => ({
           needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions }
         }
       }
-    } catch {
-      return { ok: false }
+    } catch (err) {
+      // The message matters now: `vendor-auth:oauth-authorize` refuses
+      // opencode's `auto` method for a remote caller, and that refusal IS the
+      // mockup's desktop-only outcome. Previously swallowed entirely.
+      const message = errorText(err)
+      if (window.api.platform === 'web') {
+        useSessionStore
+          .getState()
+          .setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: '', error: message })
+      }
+      return { ok: false, error: message }
+    }
+  },
+  submitVendorOAuthCode: async (pasted) => {
+    const flow = useSessionStore.getState().vendorOAuth
+    if (!flow || flow.stage !== 'paste' || flow.method === undefined) {
+      return { ok: false, error: 'No sign-in is in progress. Start again from step 1.' }
+    }
+    const { engineId, vendorId, method, instructions } = flow
+    // A failed paste is TERMINAL for the flow, not a retryable field error:
+    // CodexLoginFlow.completeFromPastedInput() calls terminate() on every
+    // failure path (missing code, state mismatch, exchange error), so the
+    // host-held PKCE verifier is already gone. Dropping to `error` — which the
+    // surfaces render as an outcome plus their own start-over affordance — is
+    // therefore the honest state, and it is what the mockup's "Start again from
+    // step 1" means. Leaving the paste field up would invite the user to retype
+    // a code into a flow that can no longer accept one.
+    const fail = (message: string): { ok: false; error: string } => {
+      useSessionStore
+        .getState()
+        .setVendorOAuth({ engineId, vendorId, stage: 'error', instructions, error: message })
+      return { ok: false, error: message }
+    }
+    try {
+      // VERBATIM (trimmed by the caller): the backend decides URL-vs-code and
+      // applies the shape-dependent CSRF rule (ADR-057).
+      const ok = await window.api.vendorAuthOauthCallback(
+        engineId as EngineId,
+        vendorId,
+        method,
+        pasted
+      )
+      if (!ok) return fail('The vendor rejected that sign-in. Start again from step 1.')
+      useSessionStore.getState().setVendorOAuth(null)
+      return { ok: true }
+    } catch (err) {
+      return fail(errorText(err))
     }
   },
   retrySend: async (routingId, prompt) => {

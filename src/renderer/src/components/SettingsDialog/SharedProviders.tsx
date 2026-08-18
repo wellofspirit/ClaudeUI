@@ -9,6 +9,12 @@ import type {
   SharedProviderStatus
 } from '../../../../shared/shared-provider'
 import { SelectMenu } from '../shared/SelectMenu'
+import {
+  OAuthOutcomeNotice,
+  OAuthPasteBackFlow,
+  classifyOAuthError
+} from '../auth/OAuthPasteBackFlow'
+import type { VendorOAuthState } from '../../stores/session-store'
 
 /**
  * Explain an enabled-but-empty route, and say where to fix it. Each string names
@@ -58,13 +64,18 @@ export function SharedProviders(): React.JSX.Element {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
-    useShallow((s) => ({
-      vendorOAuth: s.vendorOAuth,
-      authorizeVendorOAuth: s.authorizeVendorOAuth,
-      cancelVendorOAuth: s.cancelVendorOAuth
-    }))
-  )
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth, submitVendorOAuthCode } =
+    useSessionStore(
+      useShallow((s) => ({
+        vendorOAuth: s.vendorOAuth,
+        authorizeVendorOAuth: s.authorizeVendorOAuth,
+        cancelVendorOAuth: s.cancelVendorOAuth,
+        submitVendorOAuthCode: s.submitVendorOAuthCode
+      }))
+    )
+  const [pasteBusy, setPasteBusy] = useState(false)
+  /** A remote connect that just succeeded — the mockup's success outcome. */
+  const [oauthConnected, setOauthConnected] = useState(false)
   const reload = async (): Promise<void> => {
     setError(null)
     try {
@@ -146,6 +157,26 @@ export function SharedProviders(): React.JSX.Element {
             vendorOAuth.vendorId === 'openai-codex' &&
             vendorOAuth.stage === 'waiting'
           }
+          // ADR-057 / S4-UI: on web the same Connect action parks the flow here
+          // instead of driving the host browser, and the card expands into the
+          // shared paste-back form. Null on desktop — the store never sets it.
+          oauthFlow={
+            vendorOAuth?.engineId === 'pi' && vendorOAuth.vendorId === 'openai-codex'
+              ? vendorOAuth
+              : null
+          }
+          oauthPasteBusy={pasteBusy}
+          oauthConnected={oauthConnected}
+          onPasteBack={(pasted) => {
+            setPasteBusy(true)
+            void submitVendorOAuthCode(pasted)
+              .then((result) => {
+                if (!result.ok) return undefined
+                setOauthConnected(true)
+                return reload()
+              })
+              .finally(() => setPasteBusy(false))
+          }}
           onRoute={(h, enabled) =>
             run(definition.id, () => window.api.setSharedProviderRoute(definition.id, h, enabled))
           }
@@ -161,8 +192,13 @@ export function SharedProviders(): React.JSX.Element {
           onConnect={() =>
             void authorizeVendorOAuth('pi', 'openai-codex')
               .then((result) => {
-                if (!result.ok) throw new Error('Failed to start the ChatGPT connect flow')
-                return reload()
+                if (result.ok) return reload()
+                // On web a non-ok result is the EXPECTED handoff to step 1/2 (or
+                // a refusal), both already parked on `vendorOAuth` and rendered
+                // by the card — surfacing it as a card-level error too would
+                // double-report it.
+                if (window.api.platform === 'web') return undefined
+                throw new Error(result.error ?? 'Failed to start the ChatGPT connect flow')
               })
               .catch((e) => setError(e instanceof Error ? e.message : String(e)))
           }
@@ -236,6 +272,10 @@ function ProviderCard({
   busy,
   readOnly,
   oauthBusy,
+  oauthFlow,
+  oauthPasteBusy,
+  oauthConnected,
+  onPasteBack,
   onRoute,
   onDefault,
   onSync,
@@ -251,6 +291,12 @@ function ProviderCard({
   busy: boolean
   readOnly: boolean
   oauthBusy: boolean
+  /** This provider's remote sign-in flow, or null (always null on desktop). */
+  oauthFlow: VendorOAuthState | null
+  oauthPasteBusy: boolean
+  /** A remote connect completed in THIS session — drives the success outcome. */
+  oauthConnected: boolean
+  onPasteBack: (pasted: string) => void
   onRoute: (h: ConfigurableHarnessId, enabled: boolean) => void
   onDefault: (h: ConfigurableHarnessId, id: string) => void
   onSync: () => void
@@ -260,6 +306,10 @@ function ProviderCard({
   onEdit: () => void
   onDelete: () => void
 }): React.JSX.Element {
+  // Connecting ChatGPT is the one action a remote client CAN complete — pi's
+  // Codex `auto` method finishes through ADR-057's paste-back, unlike the API-key
+  // and definition edits `readOnly` still guards.
+  const isWeb = window.api.platform === 'web'
   return (
     <div
       data-testid="SharedProviderCard"
@@ -310,34 +360,62 @@ function ProviderCard({
         </div>
       </div>
       {definition.id === 'chatgpt' && (
-        <div className="flex gap-2 items-center">
-          {status?.connected ? (
-            <button
-              data-testid="SharedProviderCard.disconnect"
-              disabled={busy || readOnly}
-              onClick={onDisconnect}
-              className="rounded bg-white/5 px-2 py-1 text-text-muted hover:text-red-400"
-            >
-              Disconnect ChatGPT
-            </button>
-          ) : (
-            <>
+        <div className="space-y-2">
+          <div className="flex gap-2 items-center">
+            {status?.connected ? (
               <button
-                data-testid="SharedProviderCard.connect"
-                disabled={busy || oauthBusy || readOnly}
-                onClick={onConnect}
-                className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40"
+                data-testid="SharedProviderCard.disconnect"
+                disabled={busy || readOnly}
+                onClick={onDisconnect}
+                className="rounded bg-white/5 px-2 py-1 text-text-muted hover:text-red-400"
               >
-                {window.api.platform === 'web'
-                  ? 'Connect from the desktop app'
-                  : oauthBusy
-                    ? 'Connecting...'
-                    : 'Connect ChatGPT'}
+                Disconnect ChatGPT
               </button>
-              {oauthBusy && <button onClick={onCancel}>Cancel</button>}
-            </>
+            ) : (
+              <>
+                <button
+                  data-testid="SharedProviderCard.connect"
+                  disabled={busy || oauthBusy || oauthFlow?.stage === 'paste'}
+                  onClick={onConnect}
+                  className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40"
+                >
+                  {oauthBusy ? 'Connecting...' : 'Connect ChatGPT'}
+                </button>
+                {oauthBusy && <button onClick={onCancel}>Cancel</button>}
+              </>
+            )}
+            {status?.connected && <span className="text-success">Central connection</span>}
+          </div>
+          {isWeb && oauthFlow?.stage === 'paste' && (
+            <div className="rounded border border-border/40 bg-bg-secondary/40 p-2.5">
+              <OAuthPasteBackFlow
+                variant="url"
+                id={definition.id}
+                url={oauthFlow.url}
+                busy={oauthPasteBusy}
+                onSubmit={onPasteBack}
+                onCancel={onCancel}
+              />
+            </div>
           )}
-          {status?.connected && <span className="text-success">Central connection</span>}
+          {isWeb && oauthFlow?.stage === 'error' && oauthFlow.error && (
+            <OAuthOutcomeNotice
+              kind={classifyOAuthError(oauthFlow.error)}
+              message={oauthFlow.error}
+              id={definition.id}
+            />
+          )}
+          {/* The mockup's success row. Its "shared with opencode" clause is
+              dropped on purpose — which harnesses actually receive the
+              credential is reported truthfully by the route rows below, and a
+              disabled opencode route would have made that clause a lie. */}
+          {isWeb && oauthConnected && !oauthFlow && (
+            <OAuthOutcomeNotice
+              kind="success"
+              message="Connected. Tokens stay on the host."
+              id={definition.id}
+            />
+          )}
         </div>
       )}
       {harnesses.map((h) => {

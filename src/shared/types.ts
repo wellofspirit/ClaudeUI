@@ -2293,6 +2293,26 @@ export interface AccountsState {
   enabled: boolean
   activeId: string | null
   accounts: AccountInfo[]
+  /**
+   * The login `account:add` just started, echoed back on the RESPONSE only
+   * (ADR-057 / S4-UI).
+   *
+   * `addAccount` creates the account and kicks off a sign-in whose `manualUrl`
+   * a remote client needs in order to render the paste-back flow. That URL used
+   * to exist only on the `auth:state` event, which is `host-local` — so a remote
+   * add-account started a flow the caller could never see.
+   *
+   * Delivering it here rather than widening `auth:state`'s delivery is
+   * deliberate: an in-flight OAuth flow belongs to the ONE client that started
+   * it, and `manualUrl` carries that flow's `state` (its CSRF token). Fanning it
+   * out would let any other admitted client finish someone else's sign-in with
+   * their own account. `auth:sign-in` already returns its state to its caller
+   * for the same reason; this makes `account:add` consistent with it.
+   *
+   * Present ONLY on the value returned by a REMOTE `account:add`. Never
+   * persisted, never on `account:changed`, never on `account:get`.
+   */
+  pendingSignIn?: AuthFlowState
 }
 
 export type AuthFlowStatus = 'idle' | 'authorizing' | 'success' | 'error'
