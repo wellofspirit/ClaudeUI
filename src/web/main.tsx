@@ -16,6 +16,10 @@ import { MissingCredential } from './components/MissingCredential'
 import { SessionExpiredNotice } from './components/SessionExpiredNotice'
 import { StepUpOverlay } from './components/StepUpOverlay'
 import { createStepUpGate } from './step-up-gate'
+import {
+  enrollOfferable,
+  installEnrollBridge
+} from '@renderer/components/SettingsDialog/enroll-flow'
 import { readCachedProof, writeCachedProof, clearCachedProof } from './password-proof'
 import { decideAuthEntry, type PasswordParams } from './auth-entry'
 import type { FullStateSnapshot, RemoteAuthInfo, RemoteAuthMethod } from '../shared/remote-protocol'
@@ -87,6 +91,37 @@ const AUTH_INFO_URL = new URL('/remote/auth-info', window.location.origin).toStr
 function browserCanAttemptWebauthn(): boolean {
   return window.isSecureContext === true && typeof window.PublicKeyCredential === 'function'
 }
+
+/**
+ * Consumers of the enrolment bridge below, woken on every connection-state
+ * change — which is when all three of its facts can move (they are set by
+ * `auth-response` and cleared by a close).
+ */
+const enrollBridgeListeners = new Set<() => void>()
+
+/**
+ * Hand the SHARED settings tree the three facts and the one verb that make
+ * self-enrolment possible, so `Settings › Remote` can offer it durably (the
+ * strip above the app is one-shot and latches off — see `EnrollCard`).
+ *
+ * Installed here, before React mounts, for the same reason `__STEP_UP_REQUEST__`
+ * and the mockup/file tokens are: the settings components are shared with the
+ * desktop renderer, which has no transport to import and no RP ID to enrol
+ * against, so the capability travels through `window` rather than through a
+ * module the desktop build would have to resolve.
+ */
+installEnrollBridge({
+  authMethod: () => connection.getAuthMethod(),
+  capableOrigin: () => connection.isWebauthnCapableOrigin(),
+  browserCapable: browserCanAttemptWebauthn,
+  enroll: (nickname) => connection.enrollThisDevice(nickname ?? null),
+  subscribe: (cb) => {
+    enrollBridgeListeners.add(cb)
+    return () => {
+      enrollBridgeListeners.delete(cb)
+    }
+  }
+})
 
 /**
  * Drop `#enroll=` from the address bar, keeping any other fragment keys.
@@ -202,6 +237,11 @@ function RemoteApp(): React.JSX.Element {
     setAuthMethod(connection.getAuthMethod())
     setAuthDisabled(connection.isAuthDisabled())
     setWebauthnCapableOrigin(connection.isWebauthnCapableOrigin())
+    // The durable Settings card reads the same three facts straight off the
+    // connection, so it has to be told they may have moved. Copied before
+    // iterating: a consumer unsubscribing from its own callback (an unmounting
+    // card) would otherwise mutate the set mid-loop.
+    for (const cb of [...enrollBridgeListeners]) cb()
     // Every connect path — fragment token, tailnet identity, password proof —
     // goes through connection.connect(), which emits 'connecting' before it
     // opens the socket, and nothing else emits it. So this starts the App
@@ -542,11 +582,18 @@ function RemoteApp(): React.JSX.Element {
   // holds `enroll` under every non-`off` policy since ADR-056) or the server
   // refuses and the refusal itself teaches where the first passkey comes from
   // (see EnrollPrompt's `needsDesktop` branch).
+  //
+  // Those three conditions are `enrollOfferable`, shared with the durable
+  // Settings card so the two surfaces cannot diverge on WHEN enrolment is worth
+  // offering. What stays here is what belongs to the STRIP alone: the per-device
+  // dismissal latch, and the requirement that the app behind it is actually up.
   const offerEnroll =
     enrollOffered &&
-    authMethod === 'password' &&
-    webauthnCapableOrigin &&
-    browserCanAttemptWebauthn() &&
+    enrollOfferable({
+      authMethod,
+      capableOrigin: webauthnCapableOrigin,
+      browserCapable: browserCanAttemptWebauthn()
+    }) &&
     connState === 'connected'
 
   return (

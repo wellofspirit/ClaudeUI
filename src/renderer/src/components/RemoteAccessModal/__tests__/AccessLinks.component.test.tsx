@@ -333,12 +333,83 @@ describe('AccessLinks', () => {
       renderCard(makeStatus({ lanUrl: null }))
       await settle()
 
-      await waitFor(() =>
-        expect(row('lan')).toHaveTextContent(/Unlock in Session security to reveal/)
-      )
+      await waitFor(() => expect(row('lan')).toHaveTextContent(/Unlock in Session security above/))
       expect(part('AccessLinks.url', 'lan')).toBeFalsy()
       expect(part('AccessLinks.copy', 'lan')).toBeFalsy()
       expect(part('AccessLinks.rotate', 'lan')).toBeFalsy()
+    })
+
+    /**
+     * A locked row must not be a DEAD END, which is what it was before the M4
+     * review: the `loading` effect keys on the status, every field of which is a
+     * constant on the web mount, so nothing would ever ask again and the row's
+     * own instruction ("unlock in Session security") pointed at a row that could
+     * never notice. Reveal is the operator's second ask — deliberately a press,
+     * because curing this ambiently is precisely what ADR-054 §6 forbids.
+     */
+    it('recovers through Reveal once the operator has unlocked the editor', async () => {
+      api.authcfgLanLink.mockRejectedValue(new Error(NEEDS_SETTINGS_SESSION_ERROR))
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+      await waitFor(() => expect(part('AccessLinks.reveal', 'lan')).toBeTruthy())
+
+      // …the operator unlocks in Session security, so the verb now answers.
+      api.authcfgLanLink.mockResolvedValue({ url: LAN_LINK })
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.reveal', 'lan')!)
+      })
+
+      expect(api.authcfgLanLink).toHaveBeenCalledTimes(2)
+      await waitFor(() => expect(part('AccessLinks.url', 'lan')).toBeTruthy())
+      expect(part('AccessLinks.rotate', 'lan')).toBeTruthy()
+      expect(part('AccessLinks.reveal', 'lan')).toBeFalsy()
+    })
+
+    /** Refused again is locked again — never a retry loop, never a ceremony. */
+    it('re-locks when Reveal is pressed and the editor is still locked', async () => {
+      api.authcfgLanLink.mockRejectedValue(new Error(NEEDS_SETTINGS_SESSION_ERROR))
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+      await waitFor(() => expect(part('AccessLinks.reveal', 'lan')).toBeTruthy())
+
+      await act(async () => {
+        fireEvent.click(part('AccessLinks.reveal', 'lan')!)
+      })
+
+      expect(api.authcfgLanLink).toHaveBeenCalledTimes(2)
+      await waitFor(() => expect(part('AccessLinks.reveal', 'lan')).toBeTruthy())
+      expect(part('AccessLinks.url', 'lan')).toBeFalsy()
+    })
+
+    /**
+     * The dead-end banner is HOST-ONLY. On the web `tls` is unconditionally null
+     * (no verb reports the host's serve state), so its third conjunct is free —
+     * and a device signed in on an enrollment link (no passkey yet, no password)
+     * would be told "no device can sign in yet" while it is signed in, and have
+     * its LAN link withheld on the strength of it.
+     */
+    it('never claims a dead end from an all-null status (GUARD)', async () => {
+      api.getRemoteConfig.mockResolvedValue({
+        ...baseConfig,
+        credentialCount: 0,
+        passwordSet: false
+      })
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+
+      expect(screen.queryByTestId('AccessLinks.deadEnd')).toBeNull()
+      await waitFor(() => expect(part('AccessLinks.url', 'lan')).toBeTruthy())
+    })
+
+    /** The warning names only what is on screen — the tunnel row is withheld. */
+    it('warns about the LAN link alone, never a tunnel it does not render', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, passwordSet: false })
+      renderCard(makeStatus({ lanUrl: null }))
+      await settle()
+
+      const warning = await screen.findByTestId('AccessLinks.passwordWarning')
+      expect(warning).toHaveTextContent(/LAN sign-in requires a password/)
+      expect(warning).not.toHaveTextContent(/Tunnel/)
     })
 
     it('re-locks rather than retrying when the session lapses under a rotate', async () => {
@@ -353,7 +424,9 @@ describe('AccessLinks', () => {
       })
 
       expect(api.authcfgRotateLanKey).toHaveBeenCalledTimes(1)
-      expect(row('lan')).toHaveTextContent(/Unlock in Session security to reveal/)
+      expect(row('lan')).toHaveTextContent(/Unlock in Session security above/)
+      // …and the way back is the same one press, not a page reload.
+      expect(part('AccessLinks.reveal', 'lan')).toBeTruthy()
     })
 
     it('says the run serves no LAN address on the typed unavailable refusal', async () => {
@@ -364,9 +437,20 @@ describe('AccessLinks', () => {
       await waitFor(() => expect(row('lan')).toHaveTextContent(/serves no LAN address/))
     })
 
-    it('offers no tunnel Start: starting a listener is host-anchor work', async () => {
-      renderCard(makeStatus())
+    /**
+     * The row is WITHHELD, not merely stripped of its Start button.
+     *
+     * Its two facts — is cloudflared up, and what URL did it mint this run —
+     * live only on the host (`remote:status` is host-local by classification and
+     * never crosses the WS), so a web client would render this row from absence:
+     * no link, and an `off` badge that is a guess rather than a reading. Since
+     * series M4 gave the web a real mount for this card (Settings › Remote),
+     * that guess would be on a phone screen, so the row goes.
+     */
+    it('withholds the tunnel row entirely: its state is a host fact', async () => {
+      renderCard(makeStatus({ tunnelUrl: 'https://x.trycloudflare.com/remote#k=aa' }))
       await settle()
+      expect(row('tunnel')).toBeFalsy()
       expect(part('AccessLinks.tunnelToggle', 'tunnel')).toBeFalsy()
     })
   })

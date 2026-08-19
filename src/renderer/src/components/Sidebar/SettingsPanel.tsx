@@ -5,9 +5,12 @@ import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
 import { SECTION_SCOPE_MAP, type SettingsScope } from '../SettingsDialog/settings-sections'
 import { UsageRing } from './UsagePanel'
 
-// Lazy: the modal tree + qrcode must not ride the eager App chunk — the trigger below
-// is desktop-only, so on the web client these bytes are unreachable. The specifier
-// must stay '../RemoteAccessModal' for tests that mock that exact module id.
+// Lazy: the modal tree + qrcode must not ride the eager App chunk — the trigger
+// below is desktop-only, so on the web client THIS modal is unreachable. Its
+// `AccessLinks` card is not, as of series M4: Settings › Remote mounts that card
+// on its own (`SettingsDialog/WebAccessLinks`, lazy for the same reason), so the
+// shared bytes are now split into a chunk both entries pull. The specifier must
+// stay '../RemoteAccessModal' for tests that mock that exact module id.
 const RemoteAccessModal = lazy(() =>
   import('../RemoteAccessModal').then((m) => ({ default: m.RemoteAccessModal }))
 )

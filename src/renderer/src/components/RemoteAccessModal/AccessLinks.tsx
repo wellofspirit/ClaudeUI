@@ -26,6 +26,19 @@ import { isWebClient } from '../SettingsDialog/remote-settings-transport'
  * the owner of state only this card can interpret. The modal keeps the
  * responsibilities it always had — start, stop, status, the TLS banner — and
  * hands this card the status it already subscribes to.
+ *
+ * ## Two mounts
+ *
+ * `RemoteAccessModal` on the host anchor, and `SettingsDialog/WebAccessLinks` on
+ * the web client (series M4). The `web` branches below — the LAN row's
+ * `authcfg:lan-link` read, its locked state, the missing tunnel controls — were
+ * written before that second mount existed and are what it exists to reach: a
+ * phone can now reveal, QR and rotate the LAN link without walking back to the
+ * desktop. What the web mount does NOT get is the rows built from facts only the
+ * host holds — the tunnel row (see its note below) and the tailnet row, whose
+ * URL comes from a `tailscale serve` state that never crosses the WS. Both fall
+ * out of the status `WebAccessLinks` hands in; see its doc for why it declines to
+ * infer either from the page's own origin.
  */
 
 /** Row identity, also the `data-id` discriminator (ADR-027). */
@@ -372,8 +385,18 @@ export function AccessLinks({
    * rendered — a URL that dead-ends at a credential-less sign-in screen teaches
    * the operator that remote access is broken, when what is missing is one
    * setting.
+   *
+   * HOST ONLY, because the third conjunct is not knowable on the web. A browser
+   * client is handed `tls: null` unconditionally (there is no verb that tells it
+   * whether `tailscale serve` is up — see `WebAccessLinks`), so `tailnetUrl` is
+   * always null there and the test degenerates into "no passkey and no password".
+   * A device signed in on an enrollment link is exactly that, and on the host —
+   * which can see the serve state that link was minted against — the same install
+   * would NOT be a dead end. Claiming "no device can sign in yet" to a device that
+   * is signed in, and withholding the LAN link on the strength of it, is a false
+   * statement made from missing information rather than from facts.
    */
-  const deadEnd = credentialCount === 0 && passwordSet === false && tailnetUrl === null
+  const deadEnd = !web && credentialCount === 0 && passwordSet === false && tailnetUrl === null
   /**
    * LAN and tunnel identity is the password, and there is not one — warned about
    * only when one of those origins is actually in play. A TLS-only install whose
@@ -591,13 +614,33 @@ export function AccessLinks({
               'This run is bound to loopback and the tunnel claims that address, so a LAN link would be refused. Use the tunnel link below.'
             )
           ) : lan.kind === 'locked' ? (
-            note('Unlock in Session security to reveal this link.')
+            note('Unlock in Session security above, then press Reveal.')
           ) : lan.kind === 'error' ? (
             note(lan.message)
           ) : (
             note('This run serves no LAN address.')
           ),
-          lan.kind === 'ready' && lanShown ? (
+          lan.kind === 'locked' ? (
+            // THE WAY BACK from a locked row, and the reason it is a button
+            // rather than a re-read on some ambient signal.
+            //
+            // This row's `loading` effect keys on the STATUS, and on the web
+            // every field of that status is a constant — so once the mount has
+            // asked and been refused, nothing will ever ask again, and the copy's
+            // own instruction ("unlock in Session security") would point at a row
+            // that could never notice. Curing it automatically is what ADR-054 §6
+            // forbids (an ambient ceremony raised by a card the operator merely
+            // opened); asking again ON A PRESS is the operator's own act, which is
+            // the whole distinction. Refused again ⇒ locked again, no ceremony.
+            <button
+              data-testid="AccessLinks.reveal"
+              data-id="lan"
+              onClick={() => void loadLanLink()}
+              className={actionClass}
+            >
+              Reveal
+            </button>
+          ) : lan.kind === 'ready' && lanShown ? (
             <>
               <button
                 data-testid="AccessLinks.copy"
@@ -662,104 +705,119 @@ export function AccessLinks({
         )
 
   const tunnelStateLabel = tunnelActive ? (status.tunnelState ?? 'on') : 'off'
-  const tunnelRow = row(
-    'tunnel',
-    '☁',
-    'bg-bg-tertiary text-text-secondary',
-    'Tunnel',
-    <>
-      <Badge tone="bg-bg-tertiary text-text-secondary">LINK + PASSWORD</Badge>
-      <Badge tone="bg-bg-tertiary text-text-muted">{tunnelStateLabel}</Badge>
-    </>,
-    <>
-      {tunnelUrl && !deadEnd && urlLine('tunnel', maskFragment(tunnelUrl))}
-      {note('Link changes every start (the hostname is ephemeral).')}
-    </>,
-    <>
-      {tunnelUrl && !deadEnd && (
+  /**
+   * WITHHELD ON THE WEB — not built, and not rendered.
+   *
+   * Both of this row’s facts live only on the host: whether cloudflared is up,
+   * and the ephemeral URL it minted this run. Neither crosses the WS
+   * (`remote:status` is host-local by classification), so a web client would
+   * render the row from ABSENCE — no link, and an `off` badge that is a guess
+   * rather than a reading. A row that confidently mislabels a running tunnel is
+   * worse than no row, and the one action it offers is host-anchor work the web
+   * already declines. The LAN row is the web’s equivalent and it ASKS
+   * (`authcfg:lan-link`) instead of inferring; the tunnel has no such verb.
+   */
+  const tunnelRow = web
+    ? null
+    : row(
+        'tunnel',
+        '☁',
+        'bg-bg-tertiary text-text-secondary',
+        'Tunnel',
         <>
-          <button
-            data-testid="AccessLinks.copy"
-            data-id="tunnel"
-            onClick={() => void copy('tunnel', tunnelUrl)}
-            className={actionClass}
-          >
-            {copiedRow === 'tunnel' ? 'Copied' : 'Copy'}
-          </button>
-          <button
-            data-testid="AccessLinks.qr"
-            data-id="tunnel"
-            onClick={() => toggleQr('tunnel', tunnelUrl)}
-            className={actionClass}
-          >
-            QR
-          </button>
-        </>
-      )}
-      {!web && (
-        <button
-          data-testid="AccessLinks.tunnelToggle"
-          data-id="tunnel"
-          disabled={busy}
-          onClick={() =>
-            setConfirm((prev) => {
-              const next = tunnelActive ? 'tunnel-off' : 'tunnel-on'
-              return prev === next ? null : next
-            })
-          }
-          className={actionClass}
-        >
-          {tunnelActive ? 'Stop' : 'Start'}
-        </button>
-      )}
-    </>,
-    confirm === 'tunnel-on' || confirm === 'tunnel-off' ? (
-      <div
-        data-testid="AccessLinks.tunnelConfirm"
-        className="mt-2 ml-9 rounded-lg border border-warning/25 bg-warning/5 p-2.5"
-      >
-        <div className="text-[11px] text-warning font-medium">
-          {confirm === 'tunnel-on' ? 'Start the tunnel?' : 'Stop the tunnel?'}
-        </div>
-        <div className="text-[10px] text-text-secondary mt-1 leading-snug">
-          The tunnel’s key is minted per run, so the remote server restarts. Devices connected right
-          now are disconnected and reconnect with the links shown after the restart.
-        </div>
-        {/* The tunnel and `tailscale serve` are mutually exclusive per RUN
-            (`RemoteServer.start` — tunnel wins), so on a TLS install starting
-            the tunnel takes the tailnet origin down with it. That costs passkey
-            sign-in AND the only origin an enrollment link can bind to, which is
-            far too large a consequence to leave implied by a restart notice. */}
-        {tlsConfigured && confirm === 'tunnel-on' && (
+          <Badge tone="bg-bg-tertiary text-text-secondary">LINK + PASSWORD</Badge>
+          <Badge tone="bg-bg-tertiary text-text-muted">{tunnelStateLabel}</Badge>
+        </>,
+        <>
+          {tunnelUrl && !deadEnd && urlLine('tunnel', maskFragment(tunnelUrl))}
+          {note('Link changes every start (the hostname is ephemeral).')}
+        </>,
+        <>
+          {tunnelUrl && !deadEnd && (
+            <>
+              <button
+                data-testid="AccessLinks.copy"
+                data-id="tunnel"
+                onClick={() => void copy('tunnel', tunnelUrl)}
+                className={actionClass}
+              >
+                {copiedRow === 'tunnel' ? 'Copied' : 'Copy'}
+              </button>
+              <button
+                data-testid="AccessLinks.qr"
+                data-id="tunnel"
+                onClick={() => toggleQr('tunnel', tunnelUrl)}
+                className={actionClass}
+              >
+                QR
+              </button>
+            </>
+          )}
+          {!web && (
+            <button
+              data-testid="AccessLinks.tunnelToggle"
+              data-id="tunnel"
+              disabled={busy}
+              onClick={() =>
+                setConfirm((prev) => {
+                  const next = tunnelActive ? 'tunnel-off' : 'tunnel-on'
+                  return prev === next ? null : next
+                })
+              }
+              className={actionClass}
+            >
+              {tunnelActive ? 'Stop' : 'Start'}
+            </button>
+          )}
+        </>,
+        confirm === 'tunnel-on' || confirm === 'tunnel-off' ? (
           <div
-            data-testid="AccessLinks.tunnelConfirmTlsCost"
-            className="text-[10px] text-warning mt-1.5 leading-snug"
+            data-testid="AccessLinks.tunnelConfirm"
+            className="mt-2 ml-9 rounded-lg border border-warning/25 bg-warning/5 p-2.5"
           >
-            Starting the tunnel also stops Tailscale HTTPS: passkey sign-in and adding a new device
-            are unavailable until you stop the tunnel again. The tunnel link needs your password.
+            <div className="text-[11px] text-warning font-medium">
+              {confirm === 'tunnel-on' ? 'Start the tunnel?' : 'Stop the tunnel?'}
+            </div>
+            <div className="text-[10px] text-text-secondary mt-1 leading-snug">
+              The tunnel’s key is minted per run, so the remote server restarts. Devices connected
+              right now are disconnected and reconnect with the links shown after the restart.
+            </div>
+            {/* The tunnel and `tailscale serve` are mutually exclusive per RUN
+                (`RemoteServer.start` — tunnel wins), so on a TLS install starting
+                the tunnel takes the tailnet origin down with it. That costs passkey
+                sign-in AND the only origin an enrollment link can bind to, which is
+                far too large a consequence to leave implied by a restart notice. */}
+            {tlsConfigured && confirm === 'tunnel-on' && (
+              <div
+                data-testid="AccessLinks.tunnelConfirmTlsCost"
+                className="text-[10px] text-warning mt-1.5 leading-snug"
+              >
+                Starting the tunnel also stops Tailscale HTTPS: passkey sign-in and adding a new
+                device are unavailable until you stop the tunnel again. The tunnel link needs your
+                password.
+              </div>
+            )}
+            <div className="mt-2 flex gap-2">
+              <button
+                data-testid="AccessLinks.tunnelConfirmSubmit"
+                disabled={busy}
+                onClick={() => void handleTunnel(confirm === 'tunnel-on')}
+                className="text-[11px] px-2 py-1 rounded-md bg-warning/20 hover:bg-warning/30 text-warning disabled:opacity-40"
+              >
+                {confirm === 'tunnel-on' ? 'Start tunnel' : 'Stop tunnel'}
+              </button>
+              <button
+                data-testid="AccessLinks.tunnelConfirmCancel"
+                disabled={busy}
+                onClick={() => setConfirm(null)}
+                className="text-[11px] px-2 py-1 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-muted disabled:opacity-40"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
-        )}
-        <div className="mt-2 flex gap-2">
-          <button
-            data-testid="AccessLinks.tunnelConfirmSubmit"
-            disabled={busy}
-            onClick={() => void handleTunnel(confirm === 'tunnel-on')}
-            className="text-[11px] px-2 py-1 rounded-md bg-warning/20 hover:bg-warning/30 text-warning disabled:opacity-40"
-          >
-            {confirm === 'tunnel-on' ? 'Start tunnel' : 'Stop tunnel'}
-          </button>
-          <button
-            data-testid="AccessLinks.tunnelConfirmCancel"
-            disabled={busy}
-            onClick={() => setConfirm(null)}
-            className="text-[11px] px-2 py-1 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-muted disabled:opacity-40"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    ) : null
-  )
+        ) : null
+      )
 
   return (
     <div data-testid="AccessLinks" className="w-full">
@@ -769,6 +827,7 @@ export function AccessLinks({
       <div className="rounded-xl border border-border bg-bg-primary divide-y divide-border">
         {tailnetRow}
         {lanRow}
+        {/* null on the web — see the declaration. */}
         {tunnelRow}
       </div>
 
@@ -793,7 +852,10 @@ export function AccessLinks({
           data-testid="AccessLinks.passwordWarning"
           className="mt-2 rounded-md border border-warning/25 bg-warning/5 px-2.5 py-1.5 text-[10px] text-warning leading-snug"
         >
-          Tunnel and LAN sign-in require a password.{' '}
+          {/* Name only what is on screen. The tunnel row is withheld on the web
+              (see its note above), so naming the tunnel there would send the
+              operator looking for a row that is not there. */}
+          {web ? 'LAN sign-in requires a password.' : 'Tunnel and LAN sign-in require a password.'}{' '}
           <button
             data-testid="AccessLinks.setPassword"
             onClick={onSetPassword}
@@ -801,7 +863,7 @@ export function AccessLinks({
           >
             Set one
           </button>{' '}
-          to use these links.
+          {web ? 'to use this link.' : 'to use these links.'}
         </div>
       )}
 

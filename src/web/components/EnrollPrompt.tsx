@@ -1,5 +1,4 @@
-import { useCallback, useState } from 'react'
-import { isEnrollNotPermittedError } from '../../shared/remote-protocol'
+import { useEnrollFlow } from '@renderer/components/SettingsDialog/enroll-flow'
 
 const DISMISSED_KEY = 'claudeui.remote.enrollPromptDismissed'
 
@@ -43,27 +42,14 @@ interface EnrollPromptProps {
  * connection does not hold `enroll` (a stolen password must not be able to mint
  * a permanent credential), so the server says no and the honest answer is
  * guidance, not an error: the first passkey comes from the desktop.
+ *
+ * The flow itself — attempt, classify, refuse — is `useEnrollFlow`, shared
+ * verbatim with the durable Settings card (`SettingsDialog/EnrollCard`). This
+ * component owns only the STRIP: its placement, its copy, and the per-device
+ * dismissal latch above, which is the one thing the card must never touch.
  */
 export function EnrollPrompt({ onEnroll, onDismiss }: EnrollPromptProps): React.JSX.Element | null {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string>()
-  const [needsDesktop, setNeedsDesktop] = useState(false)
-  const [done, setDone] = useState(false)
-
-  const submit = useCallback(async (): Promise<void> => {
-    if (busy) return
-    setBusy(true)
-    setError(undefined)
-    try {
-      await onEnroll()
-      setDone(true)
-    } catch (err) {
-      if (isEnrollNotPermittedError(err)) setNeedsDesktop(true)
-      else setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }, [busy, onEnroll])
+  const { busy, error, needsDesktop, done, submit } = useEnrollFlow(onEnroll)
 
   if (done) return null
 
@@ -87,7 +73,7 @@ export function EnrollPrompt({ onEnroll, onDismiss }: EnrollPromptProps): React.
           data-testid="EnrollPrompt.enroll"
           type="button"
           disabled={busy}
-          onClick={() => void submit()}
+          onClick={submit}
           className="shrink-0 rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
         >
           {busy ? 'Waiting…' : 'Enroll this device'}

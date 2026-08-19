@@ -1,8 +1,19 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
 import { RemotePasskeySettings } from './RemotePasskeySettings'
 import { SelectMenu } from '../shared/SelectMenu'
 import { isWebClient } from './remote-settings-transport'
+import { EnrollCard } from './EnrollCard'
+import { useEnrollOffer } from './enroll-flow'
+
+/**
+ * Lazy for the same reason `SettingsPanel` loads `RemoteAccessModal` lazily: the
+ * card drags `qrcode` in, and neither belongs in the eagerly-loaded settings
+ * chunk. Only the WEB branch below renders it, so on the desktop this chunk is
+ * never fetched at all — and on the web it is fetched when the remote section is
+ * rendered, not at boot.
+ */
+const WebAccessLinks = lazy(() => import('./WebAccessLinks'))
 
 const inputClass =
   'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
@@ -29,6 +40,12 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [tlsDetection, setTlsDetection] = useState<string | null>(null)
   /** True once detection passed and we're waiting for the confirm click. */
   const [confirmTls, setConfirmTls] = useState(false)
+  /**
+   * The web client's enrolment bridge while a passkey is worth offering on THIS
+   * connection, else null. Null on the desktop by construction — see
+   * `enroll-flow.ts`.
+   */
+  const enrollBridge = useEnrollOffer()
 
   const reload = useCallback(async (): Promise<void> => {
     const [nextConfig, ifaces] = await Promise.all([
@@ -184,6 +201,13 @@ export function RemoteServerSettings(): React.JSX.Element {
       data-transport={web ? 'web' : 'host'}
       className="px-3 py-1.5 text-[13px] text-text-secondary space-y-3"
     >
+      {/* FIRST, above even the host-only note: on a phone this is the one thing
+          in this section the operator came here to DO, and it is time-sensitive
+          in a way nothing below it is — the offer is alive only while this
+          connection is a password one on an origin that can bind a credential.
+          Its own conditions decide whether it renders at all. */}
+      {enrollBridge && <EnrollCard bridge={enrollBridge} />}
+
       {web && (
         <div
           data-testid="RemoteServerSettings.hostOnlyNote"
@@ -401,6 +425,18 @@ export function RemoteServerSettings(): React.JSX.Element {
           (a phone enrolling lands here), which the pure-config blocks above
           never do. */}
       <RemotePasskeySettings config={config} onConfigChange={setConfig} onReload={reload} />
+
+      {/* Access links, web only (ADR-056 item C). BELOW the credential blocks
+          deliberately: those answer "who may sign in", this answers "through
+          which channel", and the second question only becomes interesting once
+          the first is settled. The desktop reaches the same card through
+          `RemoteAccessModal`, which also owns the transport controls this
+          section withholds from a remote client. */}
+      {web && (
+        <Suspense fallback={null}>
+          <WebAccessLinks />
+        </Suspense>
+      )}
     </div>
   )
 }
