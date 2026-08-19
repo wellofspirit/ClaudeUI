@@ -19,6 +19,8 @@ import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 import { RemoteServeBanner } from './RemoteServeBanner'
+import { SettingsDialog } from './SettingsDialog'
+import { SECTION_SCOPE_MAP, type SettingsScope } from './SettingsDialog/settings-sections'
 import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
 export const SidebarContext = createContext<{
@@ -174,6 +176,18 @@ export function SessionView(): React.JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     isMobile ? true : localStorage.getItem('sidebarCollapsed') === 'true'
   )
+  /**
+   * Mobile-only settings host. On a phone the sidebar drawer is UNMOUNTED when
+   * it closes, and Settings is opened from inside it — so `SettingsPanel` (which
+   * hosts the dialog on desktop) cannot both close the drawer and keep the
+   * dialog alive. Hosting it here, outside the drawer, is what lets opening
+   * Settings dismiss the drawer. Desktop is untouched: `SettingsPanel` still
+   * owns the dialog there, and this branch never renders.
+   */
+  const [mobileSettings, setMobileSettings] = useState<{
+    scope?: SettingsScope
+    section?: string
+  } | null>(null)
 
   // Git repo detection and polling
   useGitWatcher()
@@ -195,6 +209,32 @@ export function SessionView(): React.JSX.Element {
   useEffect(() => {
     applyTheme(useSessionStore.getState().settings.theme)
   }, [])
+
+  // `open-settings` is the app-wide deep-link channel (the composer's sandbox
+  // pill, RemoteAccessModal, SettingsPanel's own button). On mobile it lands
+  // here and closes the drawer with it; on desktop SettingsPanel keeps it.
+  //
+  // Crossing back over the breakpoint (rotating an iPad, resizing an Electron
+  // window) must DROP this host's state, not park it: a stale `mobileSettings`
+  // would make Settings reappear unbidden the next time the viewport narrows,
+  // long after the user dismissed it. The two hosts hand ownership over, so
+  // exactly one of them can be showing a dialog at any width.
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileSettings(null)
+      return
+    }
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
+      setMobileSettings({
+        scope: detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
+        section: detail?.section
+      })
+      setSidebarCollapsed(true)
+    }
+    window.addEventListener('open-settings', handler)
+    return () => window.removeEventListener('open-settings', handler)
+  }, [isMobile])
 
   // Global Shift+Tab to cycle permission mode
   useEffect(() => {
@@ -347,6 +387,13 @@ export function SessionView(): React.JSX.Element {
         </div>
       </div>
       <QuitWorktreeModal />
+      {isMobile && mobileSettings && (
+        <SettingsDialog
+          onClose={() => setMobileSettings(null)}
+          initialScope={mobileSettings.scope}
+          initialSection={mobileSettings.section}
+        />
+      )}
       {/* App-level (not per-session) notice: `tailscale serve` failed while TLS
           mode is on, so the remote bookmark is dead. Fixed overlay, desktop-only
           — renders null on web and while serve is healthy. */}

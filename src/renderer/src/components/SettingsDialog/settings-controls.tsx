@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 // ── Shared setting control components ────────────────────────────────
 
@@ -205,32 +205,103 @@ export function ChatRetentionSetting(): React.JSX.Element {
   )
 }
 
+/**
+ * The ⓘ affordance next to a setting's label.
+ *
+ * Hover is the desktop behaviour and is untouched. Touch has no hover, so the
+ * icon is also tappable: a tap pins the popover open, a second tap or a tap
+ * anywhere outside dismisses it. Dependency-free — one `pointerdown` listener on
+ * the document, attached only while a popover is actually pinned.
+ *
+ * The two states must not be allowed to mix, and on a phone they try to.
+ * Android Chrome and iOS Safari SYNTHESIZE a mouse sequence after a tap
+ * (`pointerdown → pointerup → mouseenter → click`), and no `mouseleave` ever
+ * follows because the finger is gone. Trusting that `mouseenter` would leave
+ * `hovered` stuck true forever: the first tap pins AND hovers, the second tap
+ * un-pins but the popover stays up on the phantom hover, and the ⓘ appears
+ * broken. So hover is accepted only when the last pointer over this element was
+ * a real mouse, and a touch/pen press clears it outright.
+ */
 export function InfoTooltip({ text }: { text: string }): React.JSX.Element {
   const [hovered, setHovered] = useState(false)
+  const [pinned, setPinned] = useState(false)
+  const rootRef = useRef<HTMLSpanElement>(null)
+  /**
+   * Pointer type of the last `pointerenter`/`pointerdown` here. Seeded to
+   * 'mouse' so a browser that reports no pointer events at all still hovers.
+   */
+  const lastPointerType = useRef<string>('mouse')
+
+  useEffect(() => {
+    if (!pinned) return
+    const handler = (e: Event): void => {
+      const node = e.target
+      if (node instanceof Node && rootRef.current?.contains(node)) return
+      setPinned(false)
+    }
+    // `pointerdown` (not click) so a tap that starts a scroll also dismisses,
+    // and capture so a handler that stops propagation can't strand it open.
+    document.addEventListener('pointerdown', handler, true)
+    return () => document.removeEventListener('pointerdown', handler, true)
+  }, [pinned])
 
   return (
     <span
       data-testid="InfoTooltip"
+      ref={rootRef}
       className="relative inline-flex items-center"
-      onMouseEnter={() => setHovered(true)}
+      // Fires before the mouse events in both the real-mouse and the
+      // synthesized-from-touch sequences, so it is what tells them apart.
+      onPointerEnter={(e) => {
+        lastPointerType.current = e.pointerType
+      }}
+      onPointerDown={(e) => {
+        lastPointerType.current = e.pointerType
+        if (e.pointerType !== 'mouse') setHovered(false)
+      }}
+      onMouseEnter={() => {
+        if (lastPointerType.current === 'mouse') setHovered(true)
+      }}
       onMouseLeave={() => setHovered(false)}
     >
-      <svg
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        className="text-text-muted/40 hover:text-text-muted transition-colors cursor-default shrink-0"
+      {/* A span, not a <button>: the icon usually sits INSIDE another button
+          (SettingsToggle's row), and nesting real buttons is invalid HTML. */}
+      <span
+        role="button"
+        tabIndex={-1}
+        data-testid="InfoTooltip.toggle"
+        aria-expanded={pinned}
+        aria-label="More information"
+        // Without stopPropagation the tap would toggle the setting it explains.
+        onClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setPinned((v) => !v)
+        }}
+        className="inline-flex items-center justify-center cursor-default"
       >
-        <circle cx="12" cy="12" r="10" />
-        <path d="M12 16v-4" />
-        <path d="M12 8h.01" />
-      </svg>
-      {hovered && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 pointer-events-none z-50">
-          <div className="bg-bg-tertiary border border-border rounded-md px-2.5 py-1.5 shadow-lg text-[10px] text-text-secondary leading-relaxed w-56">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-text-muted/40 hover:text-text-muted transition-colors cursor-default shrink-0"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4" />
+          <path d="M12 8h.01" />
+        </svg>
+      </span>
+      {(hovered || pinned) && (
+        <div
+          data-testid="InfoTooltip.popover"
+          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 pointer-events-none z-50"
+        >
+          {/* max-w is a no-op on desktop (the viewport is far wider than 14rem)
+              and keeps the popover inside a 360px phone. */}
+          <div className="bg-bg-tertiary border border-border rounded-md px-2.5 py-1.5 shadow-lg text-[10px] text-text-secondary leading-relaxed w-56 max-w-[calc(100vw-1.5rem)]">
             {text}
           </div>
           <div className="flex justify-center -mt-px">

@@ -4954,6 +4954,23 @@ export const SCOPES: ScopeDef[] = [
   }
 ]
 
+/**
+ * The section a scope opens on: its first CAPABILITY-VISIBLE section, so a
+ * gated-out one is never selected. Shared by the desktop container and the
+ * mobile view (which uses it to tell a deep link apart from a plain tab
+ * switch), so the two can't drift.
+ */
+export function firstSectionOfScope(scope: SettingsScope): string {
+  const scopeDef = SCOPES.find((s) => s.id === scope)
+  if (!scopeDef) return ''
+  const caps = scopeCapabilities(scope)
+  for (const sg of scopeDef.subgroups) {
+    const sec = sg.sections.find((s) => isSectionVisible(s.id, caps))
+    if (sec) return sec.id
+  }
+  return ''
+}
+
 /** Map from section id → scope id, for search + selection logic */
 export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(
   SCOPES.flatMap((scope) =>

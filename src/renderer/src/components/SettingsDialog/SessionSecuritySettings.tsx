@@ -503,7 +503,9 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       <>
         <dl
           data-testid="SessionSecuritySettings.summary"
-          className="grid grid-cols-2 gap-x-6 gap-y-3"
+          // One column below 640px (phones); `sm:` is a no-op on the desktop
+          // dialog, whose viewport is always wider than the breakpoint.
+          className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3"
         >
           {rows.map((row) => (
             <div
@@ -625,7 +627,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       </span>
     ) : null,
     <>
-      <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
         {/* Sign-in requirement */}
         <div>
           <label className="block text-[10px] text-text-muted/70 mb-1">Sign-in requirement</label>

@@ -317,10 +317,12 @@ function ProviderCard({
       className="border border-border/40 rounded-md p-2.5 space-y-2"
     >
       <div className="flex justify-between gap-2">
-        <div>
+        {/* min-w-0 + truncate: a long provider id is unbreakable text and would
+            otherwise push the action buttons off a phone. No-op on desktop. */}
+        <div className="min-w-0">
           <b className="text-[13px] text-text-primary">{definition.name}</b>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-muted">
-            <code>{definition.id}</code>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-muted min-w-0">
+            <code className="truncate">{definition.id}</code>
             <span
               className={`rounded-full px-1.5 py-0.5 ${status?.connected ? 'bg-green-500/10 text-green-400' : 'bg-white/5'}`}
             >
@@ -328,7 +330,7 @@ function ProviderCard({
             </span>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 shrink-0">
           <button
             data-testid="SharedProviderCard.sync"
             disabled={busy || readOnly}
@@ -528,7 +530,9 @@ function ProviderForm({
           One definition is projected into every enabled harness.
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      {/* Stacked below 640px (phones); the `sm:` breakpoint is a no-op on the
+          desktop dialog, whose viewport is always wider than that. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <label className="space-y-1 text-[10px] text-text-muted">
           Provider ID
           <input
@@ -551,7 +555,7 @@ function ProviderForm({
           />
         </label>
       </div>
-      <div className="grid grid-cols-[180px_1fr] gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-[180px_1fr] gap-2">
         <label className="space-y-1 text-[10px] text-text-muted">
           Protocol
           <SelectMenu
@@ -597,7 +601,7 @@ function ProviderForm({
       <div className="space-y-1.5">
         <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Models</div>
         {draft.models.map((m, i) => (
-          <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-1.5">
+          <div key={i} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-1.5">
             <input
               data-testid="SharedProviderForm.modelId"
               value={m.id}
@@ -614,7 +618,9 @@ function ProviderForm({
             <button
               type="button"
               onClick={() => set({ models: draft.models.filter((_, n) => n !== i) })}
-              className="rounded px-2 text-[10px] text-text-muted hover:bg-bg-hover hover:text-red-400"
+              // `justify-self-start` is a no-op in the desktop `auto` column and
+              // stops the button spanning the full width of the stacked layout.
+              className="justify-self-start rounded px-2 py-1 text-[10px] text-text-muted hover:bg-bg-hover hover:text-red-400"
             >
               Remove
             </button>

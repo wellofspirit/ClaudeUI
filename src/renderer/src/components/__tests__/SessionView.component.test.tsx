@@ -76,6 +76,17 @@ vi.mock('../terminal/TerminalPanel', () => ({
 vi.mock('../QuitWorktreeModal', () => ({
   QuitWorktreeModal: () => <div data-testid="QuitWorktreeModal" />
 }))
+// SessionView hosts the settings dialog on MOBILE ONLY (the sidebar drawer that
+// hosts it on desktop is unmounted when it closes, so it cannot both dismiss the
+// drawer and survive). Stubbed so the assertion is about the routing, not about
+// the ~200KB settings-sections tree.
+let settingsProps: { initialScope?: string; initialSection?: string } | undefined
+vi.mock('../SettingsDialog', () => ({
+  SettingsDialog: (props: { initialScope?: string; initialSection?: string }) => {
+    settingsProps = props
+    return <div data-testid="SettingsDialog" />
+  }
+}))
 vi.mock('../../hooks/useGitWatcher', () => ({ useGitWatcher: () => {} }))
 vi.mock('../../hooks/useAutomationEvents', () => ({ useAutomationEvents: () => {} }))
 vi.mock('../../hooks/useTerminalColdCleanup', () => ({ useTerminalColdCleanup: () => {} }))
@@ -238,5 +249,69 @@ describe('SessionView — mobile task takeover', () => {
     // rightPanel is a single slot — the last opener owns it.
     expect(screen.getByTestId('MobileTaskView')).toBeInTheDocument()
     expect(screen.queryByTestId('MobileGitView')).not.toBeInTheDocument()
+  })
+
+  // ── mobile settings host ──────────────────────────────────────────────────
+  //
+  // `open-settings` is the app-wide deep-link channel. On desktop SettingsPanel
+  // (inside the sidebar) answers it; on mobile the sidebar drawer is UNMOUNTED
+  // when it closes, so SessionView answers instead and dismisses the drawer with
+  // it. Both halves must not answer at once.
+
+  it('mobile: an open-settings event mounts the settings dialog outside the drawer', async () => {
+    mockIsMobile = true
+    settingsProps = undefined
+    await renderSessionView()
+
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+    })
+
+    expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
+    // The owning scope is inferred from the section, as SettingsPanel does.
+    expect(settingsProps).toMatchObject({ initialScope: 'claude', initialSection: 'sandbox' })
+  })
+
+  it('desktop: SessionView ignores open-settings (SettingsPanel still owns it)', async () => {
+    mockIsMobile = false
+    await renderSessionView()
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+    })
+
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+  })
+
+  it('widening past the breakpoint drops the mobile dialog instead of parking it', async () => {
+    mockIsMobile = true
+    const { SessionView } = await import('../SessionView')
+    let view!: ReturnType<typeof render>
+    await act(async () => {
+      view = render(React.createElement(SessionView))
+    })
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('open-settings', { detail: {} }))
+    })
+    expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
+
+    // Rotate the iPad to landscape / widen the window. Ownership goes back to
+    // SettingsPanel, so this host must FORGET its dialog — parked state would
+    // make Settings reappear unbidden the next time the viewport narrows.
+    mockIsMobile = false
+    await act(async () => {
+      view.rerender(React.createElement(SessionView))
+    })
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+
+    // Narrowing again must NOT resurrect it.
+    mockIsMobile = true
+    await act(async () => {
+      view.rerender(React.createElement(SessionView))
+    })
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
   })
 })
