@@ -5,7 +5,9 @@ import type {
   McpServerConnectionStatus,
   McpServerConfig
 } from '../../../../shared/types'
+import { useIsMobile } from '../../hooks/useIsMobile'
 import { McpDialogView } from './View'
+import { McpMobileView } from './MobileView'
 import { SCOPE_META, SCOPE_ORDER, type ServerGroup, type AddServerPayload } from './utils'
 
 interface McpDialogProps {
@@ -21,6 +23,7 @@ export function McpDialog({
   cwd,
   routingId
 }: McpDialogProps): React.JSX.Element | null {
+  const isMobile = useIsMobile()
   const [servers, setServers] = useState<McpServerInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -129,11 +132,16 @@ export function McpDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routingId])
 
-  // Reset on close
+  // Reset on close. Selection is included: on mobile it IS the navigation state
+  // (a kept selection would reopen straight into some server's detail screen
+  // instead of the list), and desktop is unaffected either way — its View
+  // auto-selects nothing and simply shows the empty detail pane until a row is
+  // tapped, exactly as it does on a first open.
   useEffect(() => {
     if (!open) {
       setFilter('')
       setShowAddForm(false)
+      setSelected(null)
     }
   }, [open])
 
@@ -281,10 +289,27 @@ export function McpDialog({
     [cwd, routingId, refreshServers]
   )
 
+  /**
+   * Selection is navigation on mobile (the MobileGitView contract): null puts
+   * the phone back on the list screen. Widening the parameter here rather than
+   * in `View.tsx` keeps the desktop view untouched — `(string | null) => void`
+   * is assignable to the `(string) => void` it declares.
+   */
+  const handleSelect = useCallback((name: string | null): void => {
+    setSelected(name)
+    setShowAddForm(false)
+  }, [])
+
   if (!open) return null
 
+  // Same props, two presentations (the PermissionsDialog / SettingsDialog
+  // pattern): a phone gets a fullscreen list ⇄ detail drill-down, because the
+  // desktop dialog is a fixed 920×580 box with a 280px side list. Container
+  // state — servers, selection, loading, every mutation — is shared verbatim.
+  const View = isMobile ? McpMobileView : McpDialogView
+
   return (
-    <McpDialogView
+    <View
       servers={servers}
       filteredServers={filteredServers}
       groups={groups}
@@ -296,10 +321,7 @@ export function McpDialog({
       actionLoading={actionLoading}
       hasRoutingId={routingId !== null}
       hasCwd={cwd !== null}
-      onSelect={(name) => {
-        setSelected(name)
-        setShowAddForm(false)
-      }}
+      onSelect={handleSelect}
       onChangeFilter={setFilter}
       onOpenAddForm={() => setShowAddForm(true)}
       onCancelAddForm={() => setShowAddForm(false)}

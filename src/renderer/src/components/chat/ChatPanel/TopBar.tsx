@@ -82,39 +82,94 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   /**
    * Mobile overflow ("⋯") menu contents. The desktop right-side buttons don't
    * fit a phone bar, so the ones that still make sense there live behind this
-   * menu. Kept as an array so future entries (Skills, MCP) slot in with their
-   * own gates — and so an empty list can hide the button entirely rather than
-   * opening an empty popover.
+   * menu, in the same left-to-right order the desktop bar shows them. Each
+   * entry carries EXACTLY the gate its desktop button uses (Skills: capSkills;
+   * MCP: canUseMcp && engineId==='claude' — see the desktop button's comment
+   * for why the engine scope is load-bearing), so the two surfaces can never
+   * disagree about what this session can do. An empty list hides the ⋯ button
+   * entirely rather than opening an empty popover.
    */
-  const overflowItems = useMemo(
-    () =>
-      cwd
-        ? [
-            {
-              id: 'permissions',
-              label: 'Permissions',
-              testId: 'TopBar.overflowMenuPermissions',
-              icon: (
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="shrink-0"
-                >
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                </svg>
-              ),
-              onSelect: () => setPermissionsOpen(true)
-            }
-          ]
-        : [],
-    [cwd]
-  )
+  const overflowItems = useMemo(() => {
+    if (!cwd) return []
+    const items: Array<{
+      id: string
+      label: string
+      testId: string
+      icon: React.JSX.Element
+      onSelect: () => void
+    }> = []
+    if (capSkills) {
+      items.push({
+        id: 'skills',
+        label: 'Skills',
+        testId: 'TopBar.overflowMenuSkills',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+        ),
+        onSelect: () => setSkillsOpen(true)
+      })
+    }
+    if (canUseMcp && engineId === 'claude') {
+      items.push({
+        id: 'mcp',
+        label: 'MCP Servers',
+        testId: 'TopBar.overflowMenuMcp',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <path d="M12 22v-5" />
+            <path d="M9 8V2" />
+            <path d="M15 8V2" />
+            <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
+          </svg>
+        ),
+        onSelect: () => setMcpOpen(true)
+      })
+    }
+    items.push({
+      id: 'permissions',
+      label: 'Permissions',
+      testId: 'TopBar.overflowMenuPermissions',
+      icon: (
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0"
+        >
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+      ),
+      onSelect: () => setPermissionsOpen(true)
+    })
+    return items
+  }, [cwd, capSkills, canUseMcp, engineId])
 
   // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
   // that starts outside never lands on whatever the menu was covering.

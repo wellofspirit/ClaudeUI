@@ -20,7 +20,8 @@ import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { SidebarContext } from '../../../SessionView'
-import type { GitStatusData, StatusLineData } from '../../../../../../shared/types'
+import type { GitStatusData, SessionStatus, StatusLineData } from '../../../../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-topbar'
@@ -471,6 +472,35 @@ describe('TopBar — mobile entry points', () => {
     )
   }
 
+  /**
+   * The bar takes `isMobile` from SidebarContext, but the dialogs it opens fork
+   * on `useIsMobile()` — a viewport read. A menu test that only sets the context
+   * would open the DESKTOP dialog and quietly assert the wrong end of the flow,
+   * so tests that follow the tap into a dialog set the viewport too.
+   */
+  const originalMatchMedia = window.matchMedia
+  const originalInnerWidth = window.innerWidth
+
+  function setViewportIsMobile(isMobile: boolean): void {
+    // useIsMobile seeds from innerWidth and only then subscribes to the media
+    // query, so BOTH have to say the same thing.
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: isMobile ? 390 : 1280
+    })
+    window.matchMedia = ((query: string) => ({
+      matches: isMobile && query.includes('max-width: 768px'),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false
+    })) as unknown as typeof window.matchMedia
+  }
+
   beforeEach(async () => {
     app = await bootTestApp()
     // The permissions dialog loads on open; keep both probes resolvable so the
@@ -482,6 +512,11 @@ describe('TopBar — mobile entry points', () => {
       additionalDirectories: []
     }))
     app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
+    // Same for the Skills / MCP dialogs the menu can now open.
+    app.bridge.ipcMain.handle('config:load-skill-details' as never, async () => [])
+    app.bridge.ipcMain.handle('mcp:load-servers' as never, async () => ({}))
+    app.bridge.ipcMain.handle('mcp:read-disabled' as never, async () => [])
+    app.bridge.ipcMain.handle('mcp:status' as never, async () => null)
     useSessionStore.getState().createNewSession(ROUTE, PLAIN_CWD)
     useSessionStore.setState({ activeSessionId: ROUTE })
   })
@@ -493,6 +528,12 @@ describe('TopBar — mobile entry points', () => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
     mirrorStoreIntoReplica()
+    window.matchMedia = originalMatchMedia
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: originalInnerWidth
+    })
   })
 
   it('renders GitChangesPill on mobile once the session is a git repo with status', () => {
@@ -559,6 +600,114 @@ describe('TopBar — mobile entry points', () => {
     expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
     expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
+  })
+
+  // ── Skills / MCP entries (M2) ─────────────────────────────────────────────
+  // Each menu row carries EXACTLY the gate its desktop button uses. The gates
+  // live on the session status, so they are driven here through a real status
+  // event rather than by poking the store.
+
+  function seedStatus(overrides: Partial<SessionStatus>): void {
+    seed.status(ROUTE, {
+      state: 'idle',
+      // Null: a non-null sessionId that differs from the routing id would be
+      // read as a rekey and move the session out from under the test.
+      sessionId: null,
+      model: null,
+      cwd: PLAIN_CWD,
+      totalCostUsd: 0,
+      engineId: 'claude',
+      capabilities: resolveClaudeCapabilities('default'),
+      account: null,
+      ...overrides
+    })
+  }
+
+  it('offers Skills and MCP alongside Permissions when the session supports them', () => {
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.getByTestId('TopBar.overflowMenuSkills')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.overflowMenuMcp')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+  })
+
+  it('drops Skills when the engine has no skills capability', () => {
+    seedStatus({
+      capabilities: { ...resolveClaudeCapabilities('default'), skills: false }
+    })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.queryByTestId('TopBar.overflowMenuSkills')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenuMcp')).toBeInTheDocument()
+  })
+
+  it('drops MCP when the model cannot use MCP', () => {
+    seedStatus({
+      capabilities: { ...resolveClaudeCapabilities('default'), canUseMcp: false }
+    })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenuSkills')).toBeInTheDocument()
+  })
+
+  it('drops MCP for a non-Claude engine even with canUseMcp true (.mcp.json is Claude-only config)', () => {
+    seedStatus({
+      engineId: 'opencode',
+      capabilities: { ...resolveClaudeCapabilities('default'), canUseMcp: true, skills: true }
+    })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+    // Skills is engine-neutral — opencode keeps it.
+    expect(screen.getByTestId('TopBar.overflowMenuSkills')).toBeInTheDocument()
+  })
+
+  it('opens the SKILLS mobile fork from the overflow menu', async () => {
+    setViewportIsMobile(true)
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuSkills'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // End to end: a phone tap lands on the phone surface, not the 900px dialog.
+    expect(screen.getByTestId('SkillsMobileView')).toBeInTheDocument()
+    expect(screen.queryByTestId('SkillsDialog')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuSkills')).toBeNull()
+  })
+
+  it('opens the MCP mobile fork from the overflow menu', async () => {
+    setViewportIsMobile(true)
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuMcp'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(screen.getByTestId('McpMobileView')).toBeInTheDocument()
+    expect(screen.queryByTestId('McpDialog')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+  })
+
+  it('desktop still reaches Skills and MCP through its own buttons, not a menu', () => {
+    renderTopBar(false)
+
+    expect(screen.getByTestId('TopBar.skills')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.mcp')).toBeInTheDocument()
+    expect(screen.queryByTestId('TopBar.overflowMenuSkills')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
   })
 })
 
