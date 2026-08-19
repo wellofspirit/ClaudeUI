@@ -39,7 +39,7 @@ user config got swept into that channel by convenience, even though it is neithe
 - **Skills** need no bridge: opencode natively scans `.claude/skills/**/SKILL.md`, so both engines read
   the same on-disk source.
 
-**Concrete opencode mechanics** (`src/main/opencode/opencode-config.ts`, mirroring `claude-settings.ts`):
+**Concrete opencode mechanics** (`src/core/opencode/opencode-config.ts`, mirroring `claude-settings.ts`):
 
 - **Target file** = opencode's global config dir, resolved exactly as opencode does
   (`OPENCODE_CONFIG_DIR` → `XDG_CONFIG_HOME` → `~/.config`, `+ /opencode`; all platforms). Write the

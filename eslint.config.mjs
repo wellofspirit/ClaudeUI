@@ -96,8 +96,8 @@ export default defineConfig(
     }
   },
 
-  // No-Electron fence for `src/core` (ADR-051 §Topology; physical extraction
-  // landed in the S2 series).
+  // No-Electron fence for `src/core` (ADR-051 decision 5 "Headless-first",
+  // realized by ADR-058; physical extraction landed in the S2 series).
   //
   // `src/core` is the window-independent service graph — SyncCore, the engine
   // adapters, the PTY manager, the HTTP/WS server and the services they need. It
@@ -106,9 +106,12 @@ export default defineConfig(
   // enforced, not documented — the Electron dependency is exactly the kind of
   // thing that creeps in via one convenient import (a `BrowserWindow` type,
   // `app.getPath`) and is then structural. Every host-shaped concern is injected
-  // through the neutral adapters in `src/core/host.ts` (window handle, app paths,
-  // native notifications, account-state reads, mockup serving), whose desktop
-  // implementations are wired from `src/main` (`index.ts`, `boot-core.ts`).
+  // through the seven neutral adapters in `src/core/host.ts` (window handle, app
+  // paths, the packaged-build flag, the native folder picker, native
+  // notifications, data-only account-state reads, mockup serving), whose desktop
+  // implementations are wired from `src/main` (`index.ts`, `boot-core.ts`) and
+  // whose headless answers are wired — or deliberately left unset — from
+  // `src/server/main.ts`.
   //
   // Type-only imports are blocked too: a `BrowserWindow` in a signature makes
   // core's API Electron-shaped even when nothing is emitted at runtime.
@@ -123,7 +126,7 @@ export default defineConfig(
             {
               group: ['electron', 'electron/*', '@electron/*', '@electron-toolkit/*'],
               message:
-                'src/core must not import Electron (ADR-051 §Topology). Inject host behaviour through src/core/host.ts instead.'
+                'src/core must not import Electron (ADR-058). Inject host behaviour through src/core/host.ts instead.'
             }
           ]
         }

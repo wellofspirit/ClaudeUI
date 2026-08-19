@@ -63,9 +63,10 @@ ever sees them:
 Core resolver: `resolveContextWindow(modelValue)` in
 `src/shared/model-capabilities.ts`. It replicates rows 1, 3, 5 and resolves the
 `fable`/`opus` aliases itself. `getContextWindowSize()` in
-`src/main/services/context-window.ts` wraps it, layering on the
-main-process-only `CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch (the renderer has
-no access to that env var, so it calls the shared resolver directly).
+`src/core/services/context-window.ts` wraps it, layering on the
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch, which is read host-process-side
+only (the renderer has no access to that env var, so it calls the shared
+resolver directly).
 
 The window is computed **once, in the main process**, and the resulting
 `usedPercentage` / `remainingPercentage` ride along in `StatusLineData`:

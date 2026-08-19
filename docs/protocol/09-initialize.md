@@ -261,7 +261,7 @@ This is a stream event, not part of the initialize response. Our harness handles
 
 ## 9.8 Timing
 
-- **Timeout (our side):** 60 s — set in `src/main/sdk/query.ts` at the initialize promise.
+- **Timeout (our side):** 60 s — set in `src/core/sdk/query.ts` at the initialize promise.
 - **Typical latency:** 100–500ms on warm cache, up to several seconds on first-run (plugin install triggered, models listed from server).
 - **Do NOT await before sending user prompt.** cli.js queues incoming `user` messages and processes them after init completes. Blocking on init adds unavoidable user-visible latency to every first turn.
 
@@ -269,7 +269,7 @@ This is a stream event, not part of the initialize response. Our harness handles
 
 ## 9.9 Our initialize payload (current)
 
-See `src/main/sdk/query.ts` in the `initPayload` build. Summary:
+See `src/core/sdk/query.ts` in the `initPayload` build. Summary:
 
 ```ts
 const initPayload: Record<string, unknown> = { subtype: 'initialize' }

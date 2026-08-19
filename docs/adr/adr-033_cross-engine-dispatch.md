@@ -140,7 +140,7 @@ matter for maintenance are folded in below.)
   schema default is 5 s) so long Claude-target turns survive even without progress-token resets.
 - **Cycle breaks (M2):** the hosted tool gets `sessionManager`/dispatcher via setters on
   `OpencodeServerManager` wired in `main/index.ts`; `buildRuleset` extracted to
-  `src/main/opencode/permission-ruleset.ts`. The gating ask-rule is appended **after** the user's
+  `src/core/opencode/permission-ruleset.ts`. The gating ask-rule is appended **after** the user's
   compiled rules in `applyPermissionMode`, so a blanket user allow-rule can't silently un-gate
   dispatch.
 - **Card kind (M3):** no new ToolKind — `hostedMcpKind` maps `mcp__claude-ui-collab__dispatch_agent`

@@ -21,13 +21,13 @@ gap). What is left here is the part the rebuild did not change.
 
 | Piece | File | Role |
 | ----- | ---- | ---- |
-| Remote server | `src/main/services/remote-server.ts` | HTTP + WS listener; auth (ADR-039/042), E2E (tunnel), mockup/sent-file routes (ADR-007/043); serves the web client bundle |
-| Dispatcher | `src/main/services/remote-dispatcher.ts` | Routes WS `invoke` frames to the same handler functions as desktop IPC. What a remote client may reach is decided by CAPABILITY GRANTS in the command registry (`ipc/command-registry.ts`), not by the old `BLOCKED` denylist |
+| Remote server | `src/core/services/remote-server.ts` | HTTP + WS listener; auth (ADR-039/042), E2E (tunnel), mockup/sent-file routes (ADR-007/043); serves the web client bundle |
+| Dispatcher | `src/core/services/remote-dispatcher.ts` | Routes WS `invoke` frames to the same handler functions as desktop IPC. What a remote client may reach is decided by CAPABILITY GRANTS in the command registry (`ipc/command-registry.ts`), not by the old `BLOCKED` denylist |
 | WS broadcaster | inside `remote-server.ts` | A plain funnel SUBSCRIBER: `addSyncSubscriber((seq, channel, args) => broadcast(...))`, registered on `start()` and dropped on `stop()`. It broadcasts the ring's own seq and never re-numbers |
 | Desktop transport | `src/main/services/sync-port.ts` + `src/renderer/src/sync/desktop-transport.ts` | The desktop renderer is client #1 over a `MessagePortMain` pair, speaking the same frames as a WS client. One channel per renderer LOAD; the subscriber is registered only once the first `sync` has been answered, in the same tick |
-| Web client | `src/web/` (`connection.ts`, `api-adapter.ts`, `main.tsx`) | Dynamically imports the renderer's own `App`/stores. `api-adapter` is a hand-maintained `ClaudeAPI` mirror (typechecked per ADR-008) for the **invoke** surface only; both clients subscribe to events through `shared/sync/client-registry` |
-| Auth | `src/main/services/remote-auth.ts` + `remote-server.ts` | Password + passkey admission, origin classification, throttling, constant-time compares, step-up proofs (ADR-056) |
-| Tunnel + TLS | `src/main/services/tunnel-manager.ts`, `tailscale-manager.ts` | cloudflared quick tunnel (mandatory E2E) and `tailscale serve` on a pinned HTTPS port (ADR-042) |
+| Web client | `src/web/` (`connection.ts`, `api-adapter.ts`, `main.tsx`) | Dynamically imports the renderer's own `App`/stores. `api-adapter` is a hand-maintained `ClaudeAPI` mirror (typechecked per ADR-008) for the **invoke** surface only; both clients subscribe to events through `core/shared/sync/client-registry` |
+| Auth | `src/core/services/remote-auth.ts` + `remote-server.ts` | Password + passkey admission, origin classification, throttling, constant-time compares, step-up proofs (ADR-056) |
+| Tunnel + TLS | `src/core/services/tunnel-manager.ts`, `tailscale-manager.ts` | cloudflared quick tunnel (mandatory E2E) and `tailscale serve` on a pinned HTTPS port (ADR-042) |
 
 ## Wire protocol (`src/shared/remote-protocol.ts`)
 
@@ -40,7 +40,7 @@ port IS the trust):
 - `sync {lastSeq, epoch}` → `sync-catchup {events}` or `sync-full {state}` — the
   reconnect protocol. The snapshot is canonical state in the main process
   (`SyncCore.getSnapshot()`), serialized in the same synchronous tick its `seq` is read.
-  The full/catchup branching lives in `shared/sync/sync-decision.ts` so the two
+  The full/catchup branching lives in `src/core/shared/sync/sync-decision.ts` so the two
   transports cannot answer one `sync` differently.
 - `auth` / `auth-response`, `e2e-activate` / `e2e-ack`, `ping` / `pong` — WS-only
   handshake and liveness.
@@ -138,9 +138,22 @@ origin must open an E2E channel first". `RemoteStatus` loses `token` and its
 `authcfg:*` namespace (`lan-link`, `rotate-lan-key`), which is ordinary traffic.
 Everything about what any of those mean lives in security.md, not here.
 
+One ADDITIVE field followed it: `auth-response.webauthnCapableOrigin?: true`, present
+exactly when `resolveWebauthnOrigin(Host, tlsServe)` returned an RP ID for that socket.
+It is the server's own origin verdict, echoed because the client cannot compute it — a
+browser can only observe "am I a secure context", which the Cloudflare tunnel passes
+while its RP ID is an ephemeral name the next link does not share. ABSENT rather than
+`false`, so a SERVER that predates the field reads as "not capable" and the client
+withholds an enrollment offer instead of inventing one — presence is the whole test, and
+that is the safe direction to be wrong in. It is a UI signal and never an authorization one (see
+security.md §Enrollment & recovery).
+
 **One thing phase 4d added to this layer's contract:** the listener no longer depends on
 a window existing. Core boots — including this server and its autostart — before any
 window decision, and `CLAUDEUI_NO_WINDOW=1` runs it with no window at all
 (`src/main/boot-core.ts`; smoke test `src/e2e/flows/windowless-boot.e2e.test.ts`). The
 one host-local thing the server still does with a window, when there is one, is push
-`remote:status` to it.
+`remote:status` to it. **And since S3 the listener has a second host entirely:**
+`claudeui-server` (`src/server`) boots the same `src/core` service graph with no Electron
+present at all and starts this listener from its own arguments — see
+[sync-core.md](sync-core.md) §Topology.

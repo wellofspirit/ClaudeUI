@@ -31,6 +31,9 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 - `bun run rebuild:native` — **run after every `bun install`/`add`/`remove`**; bun leaves a Node-ABI `better-sqlite3` that crashes the app on boot (`ERR_DLOPEN_FAILED`)
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary; version pinned via `package.json#claudeCliVersion`
 - `bun run ensure-pi` / `update-pi` — vendor the pinned pi binary (`package.json#piCliVersion`); `ensure-opencode` / `update-opencode` likewise for opencode
+- `bun run build:server` — `claudeui-server` pure-asset bundle → `dist/server/` (needs `build:web` first)
+- `bun run build:server:compile` — bun-compiled `claudeui-server` executable → `dist/server-bin/`; run it from source instead with `bun src/server/main.ts --help`
+- `bun run verify:sqlite` — SQLite driver conformance against `bun:sqlite` (the arm vitest can't host); both `build:server*` targets run it first
 
 ## Testing
 

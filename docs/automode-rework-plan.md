@@ -56,13 +56,13 @@ the landmark table.
 
 | Path | What |
 |---|---|
-| `src/main/opencode/auto-mode-classifier.ts` | the classifier (pure, injectable) |
-| `src/main/opencode/__tests__/auto-mode-classifier.test.ts` | its tests |
-| `src/main/opencode/OpencodeSession.ts` ~1315–1440 | wiring: `autoModeConfig`, `makeJudgeFn`, `handleAutoModeApproval` |
-| `src/main/pi/permission-engine.ts` | pi's pure rule engine (`decide()`); the `gateToolCall` hook itself lives in `PiSession.ts` (~151, ~528) — the phase-4 seam |
+| `src/core/automode/classifier.ts` | the classifier (pure, injectable) |
+| `src/core/automode/__tests__/classifier.test.ts` | its tests |
+| `src/core/opencode/OpencodeSession.ts` ~1315–1440 | wiring: `autoModeConfig`, `makeJudgeFn`, `handleAutoModeApproval` |
+| `src/core/pi/permission-engine.ts` | pi's pure rule engine (`decide()`); the `gateToolCall` hook itself lives in `PiSession.ts` (~151, ~528) — the phase-4 seam |
 | `src/shared/permission-modes.ts` | mode cycle + `autoModeAvailableForEngine` |
 | `src/shared/types.ts:567` | `AutoModeConfig` (opencode-scoped today — see §7) |
-| `src/main/auth/vault/AuthVault.ts` | the vault, for the phase-5 transport question |
+| `src/core/auth/vault/AuthVault.ts` | the vault, for the phase-5 transport question |
 
 ### 0.4 Governing ADRs
 
@@ -77,7 +77,7 @@ the landmark table.
 
 ## 1 Where we actually stand
 
-Current implementation: `src/main/opencode/auto-mode-classifier.ts` (pure, injectable)
+Current implementation: `src/core/automode/classifier.ts` (pure, injectable)
 plus wiring in `OpencodeSession.ts` (`autoModeConfig`, `makeJudgeFn`,
 `handleAutoModeApproval`, ~lines 1315–1440). opencode only; pi has none.
 
@@ -206,7 +206,7 @@ why phases 1–4 needed no fork:
 
 - opencode — the `permission.asked` event → `handleAutoModeApproval` → reply.
 - pi — `PiSession.gateToolCall`, which runs the pure `PiPermissionEngine`
-  (`src/main/pi/permission-engine.ts`) and whose `ask` branch already raises
+  (`src/core/pi/permission-engine.ts`) and whose `ask` branch already raises
   `session:approval-request`.
 
 The only thing a fork would have bought is control over the judge call, and that is
@@ -218,7 +218,7 @@ benefit that evaporates is not worth the maintenance.
 ## 3 Target architecture
 
 ```
-src/main/automode/
+src/core/automode/
   classifier.ts        pure policy: prompts, staging, parsing. No engine imports.
   transport.ts         JudgeTransport interface (+ later: direct-API impl)
   ground-truth.ts      (phase 3) gitStatus / repoVisibility / outcome annotations
@@ -242,10 +242,9 @@ reviews line-by-line, runs gates independently, and commits).
 
 ### 4.1 Lift to an engine-neutral home
 
-Create `src/main/automode/`. Move `src/main/opencode/auto-mode-classifier.ts` →
-`src/main/automode/classifier.ts`; move
-`src/main/opencode/__tests__/auto-mode-classifier.test.ts` →
-`src/main/automode/__tests__/classifier.test.ts`. Update importers (only
+Create `src/core/automode/`. Move the classifier out of the opencode backend to
+`src/core/automode/classifier.ts`; move its test alongside it to
+`src/core/automode/__tests__/classifier.test.ts`. Update importers (only
 `OpencodeSession.ts` today). The module must have **no** opencode-specific imports —
 pure policy plus a transport interface, dependency-injected and unit-testable exactly
 as today.
@@ -376,7 +375,7 @@ apart from the stage instructions.
 
 ### 4.7 Tests
 
-`src/main/automode/__tests__/classifier.test.ts`, per `docs/testing-strategy.md` —
+`src/core/automode/__tests__/classifier.test.ts`, per `docs/testing-strategy.md` —
 genuine behavioural assertions, not coverage padding:
 
 - `both`: stage-1-safe → allow, transport called **once**

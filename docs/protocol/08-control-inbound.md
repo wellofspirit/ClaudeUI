@@ -1,6 +1,6 @@
 # 08 — Control requests (inbound: cli.js → us)
 
-Every `control_request` subtype cli.js emits to us. We MUST respond (or cli.js stalls). Handlers live in `src/main/sdk/query.ts::handleControlRequest()`.
+Every `control_request` subtype cli.js emits to us. We MUST respond (or cli.js stalls). Handlers live in `src/core/sdk/query.ts::handleControlRequest()`.
 
 Verified against cli.js 2.1.114. All outbound control requests originate from `MessageChannel.sendRequest` at char `~11929636`. Total of 6 subtypes.
 
@@ -161,7 +161,7 @@ If a `PermissionRequest` hook returns a decision BEFORE we respond, cli.js uses 
 
 ### Our harness implementation
 
-See `src/main/sdk/query.ts::handleCanUseTool()`. Pass-through plus:
+See `src/core/sdk/query.ts::handleCanUseTool()`. Pass-through plus:
 
 - Coerces missing `message` on deny to `"Denied"` (avoids ZodError).
 - Echoes `tool_use_id` as `toolUseID` in response.
@@ -424,7 +424,7 @@ Not a request — a one-way cancel signal. Documented here because it comes thro
 
 ## 8.10 Unknown inbound subtypes
 
-Our harness at `src/main/sdk/query.ts::handleControlRequest()` falls back to:
+Our harness at `src/core/sdk/query.ts::handleControlRequest()` falls back to:
 
 ```ts
 if (process.env.DEBUG_SDK) {

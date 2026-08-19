@@ -385,7 +385,7 @@ The `dequeue_message` matcher uses the same rule under a different name
 ")`, `Lu` keeping `text` blocks), which
 is why taking an image-carrying queued message BACK always worked while noticing it had
 been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does it in
-`src/main/sdk/queued-command-text.ts`.
+`src/core/sdk/queued-command-text.ts`.
 
 **Ordering:** Followed by a `user` message with `isReplay: true` when `replayUserMessages=true`. UI uses this to dismiss the "queued" card and show the text as a normal user message.
 

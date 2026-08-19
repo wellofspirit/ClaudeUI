@@ -77,7 +77,7 @@ cli.js passes these through to the Anthropic API verbatim. The API enforces tool
 
 ### When we send this
 
-Once per user turn, via `writer.write({type:'user', message:{role:'user', content: prompt}})`. See `src/main/sdk/query.ts` around the first-prompt forwarding block. Tool_result replies typically arrive by a DIFFERENT path — see Section 6.4 — but the wire shape when they come through stdin is the same as above.
+Once per user turn, via `writer.write({type:'user', message:{role:'user', content: prompt}})`. See `src/core/sdk/query.ts` around the first-prompt forwarding block. Tool_result replies typically arrive by a DIFFERENT path — see Section 6.4 — but the wire shape when they come through stdin is the same as above.
 
 ---
 
@@ -262,7 +262,7 @@ Pre-seeding session context. Not used by our harness.
 Outbound writer API (ours):
 
 ```ts
-import { NdjsonWriter } from 'src/main/sdk/protocol'
+import { NdjsonWriter } from 'src/core/sdk/protocol'
 
 writer.write({ type: 'user', message: { role: 'user', content: 'hello' } })
 writer.write({ type: 'control_request', request_id, request: {...} })

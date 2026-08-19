@@ -2,7 +2,7 @@
 
 How we host in-process MCP servers and handle `mcp_message` control requests from cli.js. Covers the four MCP server types cli.js supports, the `--mcp-config` JSON schema, the `mcp_message` wire protocol, and the server lifecycle.
 
-See `src/main/sdk/mcp-host.ts`, `src/main/sdk/create-sdk-mcp.ts`.
+See `src/core/sdk/mcp-host.ts`, `src/core/sdk/create-sdk-mcp.ts`.
 
 ---
 
@@ -221,10 +221,10 @@ If cli.js sends `mcp_message` for a server we don't host:
 
 ## 10.6 Registering SDK servers
 
-Use `createSdkMcpServer()` and `tool()` from `src/main/sdk`:
+Use `createSdkMcpServer()` and `tool()` from `src/core/sdk`:
 
 ```ts
-import { createSdkMcpServer, tool } from 'src/main/sdk'
+import { createSdkMcpServer, tool } from 'src/core/sdk'
 import { z } from 'zod'
 
 const mermaidServer = createSdkMcpServer({
@@ -291,7 +291,7 @@ Set automatically when `options.canUseTool` callback is provided. cli.js sends p
 
 ### Mode B: `--permission-prompt-tool <mcp_tool_name>`
 
-Set via `options.permissionPromptToolName = 'mcp__foo__check'`. cli.js invokes the named MCP tool (on any configured MCP server, including our SDK servers) to get permission decisions. Legacy — see `src/main/sdk/args.ts` validation that the two modes are mutually exclusive (throws if both set).
+Set via `options.permissionPromptToolName = 'mcp__foo__check'`. cli.js invokes the named MCP tool (on any configured MCP server, including our SDK servers) to get permission decisions. Legacy — see `src/core/sdk/args.ts` validation that the two modes are mutually exclusive (throws if both set).
 
 ---
 

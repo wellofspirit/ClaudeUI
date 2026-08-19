@@ -860,7 +860,7 @@ What actually makes this work, ranked by how much it matters and how cheap it is
     model, max retries, timeouts, `classifyAllShell`. cli.js drives all of these
     from a remote gate; we should drive them from `EngineConfig`.
 
-**Our current baseline.** `src/main/opencode/OpencodeSession.ts:1317-1389`
+**Our current baseline.** `src/core/opencode/OpencodeSession.ts:1317-1389`
 already has `AutoModeConfig` with `judgeModel` and `twoStageMode: 'both'`, and
 `src/shared/permission-modes.ts:71` has `autoModeAvailableForEngine`. So the
 skeleton matches. The gaps against this reference are, in order: the consent-bar

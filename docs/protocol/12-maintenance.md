@@ -46,7 +46,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
 4. **Re-verify the inbound control_request subtype set**
 
-   Same wire log dump. Filter for `type === 'control_request'` (inbound). Grep for subtypes. Any new subtype → document in `docs/protocol/08-control-inbound.md`. Also add a handler in `src/main/sdk/query.ts::handleControlRequest()` if it needs a real response (don't leave it on the unknown-subtype fallback).
+   Same wire log dump. Filter for `type === 'control_request'` (inbound). Grep for subtypes. Any new subtype → document in `docs/protocol/08-control-inbound.md`. Also add a handler in `src/core/sdk/query.ts::handleControlRequest()` if it needs a real response (don't leave it on the unknown-subtype fallback).
 
 5. **Re-verify CLI flags**
 
@@ -74,7 +74,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    New model generations and alias remaps land in cli.js's context-window
    resolver before anywhere else. Follow the drift check in
    `docs/protocol/13-context-window.md` §13.5 and update
-   `src/main/services/context-window.ts` if the implicit-1M model list or
+   `src/core/services/context-window.ts` if the implicit-1M model list or
    the `fable`/`opus` alias targets changed.
 
 8. **Re-issue the session on the master protocol document**
@@ -87,11 +87,11 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
 Triggers: new `QueryHandle` method, new `QueryOptions` field, new inbound subtype we choose to handle explicitly.
 
-1. **Update types** in `src/main/sdk/types.ts`.
+1. **Update types** in `src/core/sdk/types.ts`.
 2. **Update `query.ts`** (either `makeHandle()` for outbound, or `handleControlRequest()` for inbound).
 3. **Update `docs/protocol/07-control-outbound.md`** (outbound) or `08-control-inbound.md` (inbound).
 4. **Update `01-transport.md` §1.13 (harness module map)** if the change affects public API or architecture.
-5. **Add test coverage** — add or extend the appropriate test in `src/main/sdk/__tests__/` or `src/integration/`.
+5. **Add test coverage** — add or extend the appropriate test in `src/core/sdk/__tests__/` or `src/integration/`.
 
 ---
 

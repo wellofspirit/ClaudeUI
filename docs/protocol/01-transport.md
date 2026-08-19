@@ -2,7 +2,7 @@
 
 How we spawn `cli.js` and talk to it. Covers process layout, stdio pipes, newline-delimited JSON, environment variables, and startup sequencing. Everything above this layer (messages, control requests, MCP routing) rides on top of this.
 
-See `src/main/sdk/query.ts`, `src/main/sdk/protocol.ts`, `src/main/sdk/args.ts`, `src/main/sdk/locate.ts`, and `src/main/sdk/wire-log.ts` for implementations.
+See `src/core/sdk/query.ts`, `src/core/sdk/protocol.ts`, `src/core/sdk/args.ts`, `src/core/sdk/locate.ts`, and `src/core/sdk/wire-log.ts` for implementations.
 
 ---
 
@@ -12,7 +12,7 @@ See `src/main/sdk/query.ts`, `src/main/sdk/protocol.ts`, `src/main/sdk/args.ts`,
 ┌─────────────────────────────────────────┐
 │ ClaudeUI main process (Electron Node)   │
 │                                         │
-│ src/main/sdk/query.ts                   │
+│ src/core/sdk/query.ts                   │
 │   spawn(executable, [...args])          │
 │   pipe:  stdin ─→ cli.js                │
 │          stdout ←─ cli.js               │
@@ -50,7 +50,7 @@ Rationale: **[ADR-006](../adr/adr-006_rebundle-bun-binary.md)**. The previous pi
 | Production (installed app) | `<Resources>/claude-cli/bun-claude[.exe]` (extraResources) |
 | Production fallback        | `<app.asar.unpacked>/vendor/claude-cli/bun-claude[.exe]`   |
 
-Resolved by `locateBunClaude()` in `src/main/sdk/locate.ts`. `locateCliJs()` is kept as a deprecated alias returning the same path — lingering external callers.
+Resolved by `locateBunClaude()` in `src/core/sdk/locate.ts`. `locateCliJs()` is kept as a deprecated alias returning the same path — lingering external callers.
 
 ### How the binary gets there
 
@@ -97,7 +97,7 @@ Callers may pass `options.spawnClaudeCodeProcess` to substitute a custom launche
 
 ### Reader
 
-`NdjsonReader` in `src/main/sdk/protocol.ts`:
+`NdjsonReader` in `src/core/sdk/protocol.ts`:
 
 - Accumulates chunks into a string buffer.
 - Splits on `\n` inside the buffer. Leaves trailing partial line for the next `data` event.
@@ -107,7 +107,7 @@ Callers may pass `options.spawnClaudeCodeProcess` to substitute a custom launche
 
 ### Writer
 
-`NdjsonWriter` in `src/main/sdk/protocol.ts`:
+`NdjsonWriter` in `src/core/sdk/protocol.ts`:
 
 - Writes `JSON.stringify(obj) + '\n'`.
 - Silently no-ops after `stream.writable` flips false (post-close/post-error) — avoids spamming EPIPEs during teardown.
@@ -126,7 +126,7 @@ Callers may pass `options.spawnClaudeCodeProcess` to substitute a custom launche
 <executable> <executableArgs>... <cliPath> <flags>...
 ```
 
-Built by `src/main/sdk/args.ts::buildArgs()`. The prefix is always exactly:
+Built by `src/core/sdk/args.ts::buildArgs()`. The prefix is always exactly:
 
 ```
 --output-format stream-json --verbose --input-format stream-json
@@ -185,7 +185,7 @@ t=...    Normal turn progression: stream_events → assistant → tool
 
 **Key ordering invariant:** we do NOT await the initialize response before sending the first user prompt. cli.js queues incoming `user` messages and processes them after initialize is handled. Blocking would add user-visible latency to every session's first turn.
 
-**Init timeout:** 60 s. If the initialize promise hasn't resolved in that window, log to stderr and surface empty `supportedModels/Commands/Agents` rather than stall indefinitely. See `src/main/sdk/query.ts` around `control.request(initPayload, { timeoutMs: 60_000 })`.
+**Init timeout:** 60 s. If the initialize promise hasn't resolved in that window, log to stderr and surface empty `supportedModels/Commands/Agents` rather than stall indefinitely. See `src/core/sdk/query.ts` around `control.request(initPayload, { timeoutMs: 60_000 })`.
 
 ---
 
@@ -231,7 +231,7 @@ Passes `--debug-to-stderr` + sets `DEBUG=1` in the child env. cli.js writes its 
 
 ### Wire log
 
-Every query owns a ring buffer (`WireLog` in `src/main/sdk/wire-log.ts`) capturing every ndjson line with sequence, timestamp (ms since query start), direction, and parsed object.
+Every query owns a ring buffer (`WireLog` in `src/core/sdk/wire-log.ts`) capturing every ndjson line with sequence, timestamp (ms since query start), direction, and parsed object.
 
 ```ts
 const q = query({...})
@@ -269,7 +269,7 @@ Under pathological loads (very large tool inputs or huge streaming JSON), the pi
 ## 1.11 Quick reference — creating a query
 
 ```ts
-import { query } from 'src/main/sdk'
+import { query } from 'src/core/sdk'
 
 const handle = query({
   prompt: 'hello',
@@ -444,7 +444,7 @@ Register new patches in the `patches` array in `patch/apply-all.mjs`. Skills for
 
 ---
 
-## 1.13 Harness module map (`src/main/sdk/`)
+## 1.13 Harness module map (`src/core/sdk/`)
 
 | File                | Responsibility                                                                                                                                                                                                               |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

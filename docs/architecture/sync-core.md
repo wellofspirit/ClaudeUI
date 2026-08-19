@@ -49,14 +49,16 @@ follow-on. **That move has now landed (S2):** the window-independent service gra
 HTTP/WS server, the command registry and the services they need) physically lives under
 `src/core`, and the Electron-free constraint is now enforced by lint on `src/core/**`
 (no longer on the pre-move `src/main/sync/**` + `src/shared/sync/**` paths). Every
-host-shaped concern is injected through the neutral adapters in `src/core/host.ts`
-(window handle, app paths, native notifications, account-state reads, mockup serving),
-whose desktop implementations are wired from `src/main` (`index.ts`, `boot-core.ts`).
+host-shaped concern is injected through the seven neutral adapters in `src/core/host.ts`
+(window handle, app paths, the packaged-build flag, the native folder picker, native
+notifications, data-only account-state reads, mockup serving), whose desktop
+implementations are wired from `src/main` (`index.ts`, `boot-core.ts`) and whose headless
+answers are wired — or deliberately left unset — from `src/server/main.ts`.
 That seam is now broken (S3): the registrar bodies live in `src/core/ipc/**` and bind
 to `ipcMain` only through the pluggable `DesktopTransportBinder` `src/main` installs;
 `src/server` installs none and boots the same graph headless. The
-vendor-OAuth-on-a-browserless-server design session moves with that entrypoint, since it
-only becomes answerable once there is a server to provision.
+vendor-OAuth-on-a-browserless-server question that moved with that entrypoint has been
+answered and built too (ADR-057, S4) — see §Headless specifics.
 
 **The boot order is what 4d actually changed.** `bootCore()` (`src/main/boot-core.ts`)
 runs from `app.whenReady()` BEFORE any window decision and owns everything
@@ -87,17 +89,17 @@ Every feature must express each interaction as exactly one of these. There is no
 1. **Commands** (client → core): `{cmdId, type, payload}`. Schema-validated, capability-checked ([security.md](security.md)), identity-attached, audited. Executed against engines/services; acked with `{ok, seqs?, error}`. Commands never mutate client state — not even the originator's.
 2. **Domain events** (core → all clients): `{seq, type, sessionId?, payload, causedBy?}`. The **only** way replicated state changes. Order: append to log → apply to canonical state → broadcast — so any snapshot taken at seq N provably contains every event through N (kills the as-built watermark race).
 
-   **Wire encoding (as realized in 4a).** Contract 2 is transported as `{seq, channel, args}` — the as-built frame shape, kept byte-identical so no client needed a change. The mapping: `channel ≡ type`, and session scoping is **positional** (`args[0]` is the routing id for every session-scoped channel, which is what `BaseSession.send` has always sent) rather than a named `sessionId` field. `causedBy` is **not** added yet: it exists for optimistic-apply reconciliation, and nothing opts into optimistic apply until that lands, so adding the field now would be an unused wire change. `src/shared/sync/channels.ts` is the closed, fail-closed set of legal `channel` values.
+   **Wire encoding (as realized in 4a).** Contract 2 is transported as `{seq, channel, args}` — the as-built frame shape, kept byte-identical so no client needed a change. The mapping: `channel ≡ type`, and session scoping is **positional** (`args[0]` is the routing id for every session-scoped channel, which is what `BaseSession.send` has always sent) rather than a named `sessionId` field. `causedBy` is **not** added yet: it exists for optimistic-apply reconciliation, and nothing opts into optimistic apply until that lands, so adding the field now would be an unused wire change. `src/core/shared/sync/channels.ts` is the closed, fail-closed set of legal `channel` values.
 3. **Volatile streams** (core → subscribers): streaming text/thinking deltas, PTY bytes, background bash output, log batches. Subscription-scoped, **never logged** — a delta stream is fully summarized by its accumulation, which lives in canonical state, so replay is pointless and buffer-poisoning (as-built, stream deltas flush the ring and force sync-fulls). Frames carry `{streamId, turnId, offset, chunk}`; a client whose local length ≠ offset refetches the coalesced value and continues — the snapshot↔stream seam is self-healing by construction.
 
-   **AS BUILT for S1 scope** (phase 5 S1, 2026-08-16): `session:stream` and `session:subagent-stream` are off the ring, ride the frame family above, and are delivered only to connections that subscribed with `stream:watch` (a replace-set query, capped at 32, per-connection, read-class). "Refetches the coalesced value" is realized as **replay-on-subscribe**: the server pushes EVERY stream of the watched session at `offset: 0`, empty ones included, which is a REPLACE by construction — so a mismatch is cured by re-sending the same watch set and a reconnect is cured by the re-watch it performs anyway. The empty frames are load-bearing rather than defensive: a replay that only spoke about non-empty buffers could never correct one canonical had CLEARED, which is the ordinary "watch, switch away across the seal, switch back" case. `shared/sync/stream.ts` is the one interpretation, folded by core and by every replica. **AS BUILT for S2 scope** (2026-08-17): the three tails (`session:bash-output`, `session:background-output`, `automation:stream-event`) are off the ring too, on the lane's second flavor — a PASS-THROUGH frame `{type:'stream-ev', channel, args}` carrying the emission verbatim, which the client dispatches into the same per-channel listeners it always had. They are deliberately NOT forced into the frame family above: they carry counters and objects, have no accumulation and no snapshot field, so there is nothing to offset and nothing to replay. They are **honest-lossy** — a missed chunk is missed, and the durable record is the event lane's `session:tool-result` / `automation:run-message`. The automation tail is scoped by AUTOMATION rather than by run (its payload carries no run id); a second replace-set, `automationRuns`, carries that scope on the same `stream:watch`. PTY bytes keep their own dedicated lane (`term-data`). Per-channel consequences: [sync-channels.md](sync-channels.md) §The stream lane.
+   **AS BUILT for S1 scope** (phase 5 S1, 2026-08-16): `session:stream` and `session:subagent-stream` are off the ring, ride the frame family above, and are delivered only to connections that subscribed with `stream:watch` (a replace-set query, capped at 32, per-connection, read-class). "Refetches the coalesced value" is realized as **replay-on-subscribe**: the server pushes EVERY stream of the watched session at `offset: 0`, empty ones included, which is a REPLACE by construction — so a mismatch is cured by re-sending the same watch set and a reconnect is cured by the re-watch it performs anyway. The empty frames are load-bearing rather than defensive: a replay that only spoke about non-empty buffers could never correct one canonical had CLEARED, which is the ordinary "watch, switch away across the seal, switch back" case. `core/shared/sync/stream.ts` is the one interpretation, folded by core and by every replica. **AS BUILT for S2 scope** (2026-08-17): the three tails (`session:bash-output`, `session:background-output`, `automation:stream-event`) are off the ring too, on the lane's second flavor — a PASS-THROUGH frame `{type:'stream-ev', channel, args}` carrying the emission verbatim, which the client dispatches into the same per-channel listeners it always had. They are deliberately NOT forced into the frame family above: they carry counters and objects, have no accumulation and no snapshot field, so there is nothing to offset and nothing to replay. They are **honest-lossy** — a missed chunk is missed, and the durable record is the event lane's `session:tool-result` / `automation:run-message`. The automation tail is scoped by AUTOMATION rather than by run (its payload carries no run id); a second replace-set, `automationRuns`, carries that scope on the same `stream:watch`. PTY bytes keep their own dedicated lane (`term-data`). Per-channel consequences: [sync-channels.md](sync-channels.md) §The stream lane.
 
    **Owner ruling, recorded:** there is NO backward-compatibility lane for cached client bundles — no dual emission, no shim. The desktop and web clients ship with the server; an older cached bundle sees text update at message boundaries instead of token by token, which is a degraded animation rather than a broken transcript.
 4. **Queries** (client ↔ core, RPC): reads — history loads, git reads, catalogs, directory listings. No state effects.
 
 ## Replication model
 
-- **Shared reducer:** a pure `applyEvent(state, event)` in `src/shared/sync/`, used by core (canonical) and by every client replica. One interpretation of every event; snapshot/event divergence becomes unrepresentable.
+- **Shared reducer:** a pure `applyEvent(state, event)` in `src/core/shared/sync/`, used by core (canonical) and by every client replica. One interpretation of every event; snapshot/event divergence becomes unrepresentable.
 - **Canonical state in core:** per-session domain state + app-level registry. Per-session eviction mirrors today's renderer eviction; evicted sessions rehydrate from transcripts via queries.
 - **Client stores split:** a *replica store* (reducer output only — no local writes) and a *view store* (selection, drafts, layout, scroll — per-client by design; ADR-041's lesson, now type-enforced).
 - **Cursor discipline:** `lastSeq` advances only after an event is **applied**; pre-mount events buffer; a detected gap requests resync. `sync`/`sync-catchup`/`sync-full` + per-process `epoch` semantics carry over unchanged from the as-built protocol.
@@ -173,7 +175,7 @@ Details and supersessions: ADR-053.
 
 ## Client library
 
-One `sync-client` library, two transports: MessagePort/IPC (desktop renderer) and WebSocket+E2E (web). **Landed in 4c** — `src/shared/sync/client-registry.ts` is the single subscription surface, typed by `src/shared/sync/events.ts` (`SyncEventMap`), and both entry points install their transport's `SyncClient` in it before React mounts.
+One `sync-client` library, two transports: MessagePort/IPC (desktop renderer) and WebSocket+E2E (web). **Landed in 4c** — `src/core/shared/sync/client-registry.ts` is the single subscription surface, typed by `src/core/shared/sync/events.ts` (`SyncEventMap`), and both entry points install their transport's `SyncClient` in it before React mounts.
 
 What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by the preload with `ipcRenderer.on` and by `api-adapter` with `connection.on`. ADR-008's typecheck could compare only the signatures, so "parity" meant two implementations that agreed about types. The signatures moved into `SyncEventMap`; the `api-adapter` mirror survives for the **invoke** surface only (untouched by 4c), and the preload's per-channel surface shrank to host-local channels plus `acquireSyncPort`.
 
@@ -187,8 +189,8 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 ## Headless specifics
 
 - `src/core` must not import Electron (lint-enforced); desktop-only behavior hangs off a host-adapter interface.
-- **Admin:** server config primarily by files (systemd-friendly); an optional `admin` capability grant for a web client behind step-up; first-boot enrollment via a console-printed one-time URL. The as-built "desktop-only channels" concept is replaced by the `admin`/`host` capabilities — a headless deployment has no desktop.
-- **Open item (deferred by owner until implementation):** vendor OAuth provisioning on a browserless server — direction is vault sync from a desktop enrollment (ADR-036) and/or device-code flows where vendors support them. Gets its own design session before phase-4 completion.
+- **Admin, AS BUILT (S3):** settings are **DB-resident and web-editable**, not files. The CLI surface is deliberately tiny and covers only what a setting cannot: BOOTSTRAP (`--port`, `--bind`, `--tls` as a tri-state where an absent flag leaves the persisted mode alone) and the HOST ANCHOR (`--disable-auth`, which warns on every start, and `show-link`). Everything else — passkeys, the break-glass password, step-up tiers, the terminal toggle, audit retention — is edited from the web UI once you are connected (`src/server/cli.ts`'s help text is the surface of record). First-boot enrollment is a console-printed one-time URL, re-printed on every start until a credential exists (`src/server/first-boot.ts`; [security.md](security.md) §Headless bootstrap chain). The as-built "desktop-only channels" concept is replaced by the `admin`/`host` capabilities — a headless deployment has no desktop.
+- **Vendor OAuth on a browserless server — LANDED (ADR-057).** The design session happened and its answer is *the host exchanges, the browser returns the code by paste*: the host always holds the PKCE verifier and performs the token exchange, while consent and the return of the authorization CODE work from any browser. Claude rides cli.js's existing `manualUrl` (and `AuthManager.signIn({remote})` derives "do not open the host browser" from `connection.identity.method`); the Codex vault accepts a pasted callback URL, query fragment or bare code; opencode's `code` method works unchanged while its `auto` method is refused remotely with an actionable message. Backend `a30286c`, the shared `OAuthPasteBackFlow` UI `3f84331`.
 
 ## Migration phases
 
@@ -363,11 +365,11 @@ snapshot still carries it, so a fresh client never refetches at all.
 
 **The invariant that certifies the cutover.** `restore(snapshot@N) + fold(events N+1 …
 head) === canonical@head`, over seeded random interleavings drawn from the committed
-golden fixtures (`src/main/sync/__tests__/snapshot-invariant.unit.test.ts`). It replaces
+golden fixtures (`src/core/sync/__tests__/snapshot-invariant.unit.test.ts`). It replaces
 the deleted `event-log.test.ts`, which pinned a workaround rather than a property: the old
 snapshot came from an async renderer round-trip, so the server deliberately UNDER-claimed
 the watermark; `getSnapshot()` reads the seq and serializes in one synchronous tick, so
-the claim is exact and the race is unrepresentable. `shared/sync/state.ts` gained
+the claim is exact and the race is unrepresentable. `core/shared/sync/state.ts` gained
 `fromSnapshot` (the restore half, and 4c's client-replica hydration path) and
 `reducer.ts` gained `auxFromCanonical` — the open-thinking-span flag is not on the wire
 but IS derivable from `streamingThinking`, so a client restored mid-span still recognises
@@ -401,8 +403,8 @@ line is a named next step with the reason it is not phase-4 work.
 - **Physical `src/core` extraction — LANDED (S2).** `src/main/sync/**` +
   `src/shared/sync/**` (and the engine adapters, PTY manager, HTTP/WS server, command
   registry and the services they need) moved to `src/core`; the Electron-free lint fence
-  now targets `src/core/**`. It was a MOVE plus five narrow host-adapter seams in
-  `src/core/host.ts` (window handle, app paths, native notifications, and — added when the service-graph closure proved larger than first scoped — data-only account-state reads and mockup HTTP serving; a sixth candidate, the native folder dialog, was eliminated rather than abstracted, and the OAuth-browser flow stays desktop-only in `src/main`).
+  now targets `src/core/**`. It was a MOVE plus narrow host-adapter seams in
+  `src/core/host.ts` — five in S2 (window handle, app paths, native notifications, and — added when the service-graph closure proved larger than first scoped — data-only account-state reads and mockup HTTP serving), two more in S3 (the packaged-build flag and the native folder picker, `HostPicker`), for **seven**. The picker was scoped OUT of S2 as eliminable and reinstated in S3 rather than abstracted away: the desktop wires `dialog.showOpenDialog` in `boot-core.ts` and the server sets it to `null`, which is the answer a cancelled dialog already gives — and `session:pick-folder` declares the `host` capability, so it is unreachable from a remote client either way. The OAuth-browser flow stays desktop-only in `src/main`.
   `boot-core.ts` stays in `src/main` and wires the desktop implementations.
 - **`claudeui-server` entrypoint — LANDED (S3).** `src/server` (cli.ts / first-boot.ts /
   main.ts) boots the core graph with no Electron: the registrars moved to `src/core/ipc`
@@ -415,9 +417,15 @@ line is a named next step with the reason it is not phase-4 work.
   generated dist README: node-pty ships beside the artifact for terminals, web assets
   ship beside the compiled exe, and the pure-asset bundle targets bun (jsonc-parser's
   UMD entry blocks a node-target build).
-- **Vendor OAuth on a browserless server** — direction is vault sync from a desktop
-  enrollment (ADR-036) and/or device-code flows. Only answerable once there is a server
-  to provision, which is why it moves with this phase.
+- **Vendor OAuth on a browserless server — LANDED (S4 + S4-UI, ADR-057).** The design
+  session concluded against vault sync and device codes: every vendor's `redirect_uri` is
+  fixed by a client registration we do not own, so no ClaudeUI-hosted redirect is
+  possible. The answer is **the host exchanges, the browser pastes the code back** —
+  Claude via cli.js's `manualUrl`, the Codex vault via a pasted callback URL / query
+  fragment / bare code, opencode's `code` method unchanged and its `auto` method refused
+  remotely with an actionable message. Backend `a30286c`; the shared `OAuthPasteBackFlow`
+  UI `3f84331`. Normative record: [security.md](security.md) §"The vendor-credential
+  surface".
 
 **Session-lifecycle residuals** (from the post-4 lifecycle batch that landed
 `session:removed` / `session:conversation-cleared` / the directory merge):
@@ -484,7 +492,7 @@ refetch), so a 10-minute background reconnect catches up without a `sync-full`.
 
 - **S1 is landed** (2026-08-16): the two canonical-backed stream channels. What moved,
   and what it cost: the reducer branches are DELETED (`applyEvent` refuses a `volatile`
-  channel), `shared/sync/stream.ts` owns the streamId scheme / frame validation /
+  channel), `core/shared/sync/stream.ts` owns the streamId scheme / frame validation /
   `applyStreamFrame`, `stream:watch` is registered on both transports, and the desktop
   renderer subscribes through the same lane a phone does. One deliberate consequence,
   and one preserved invariant:
@@ -543,7 +551,7 @@ refetch), so a 10-minute background reconnect catches up without a `sync-full`.
   [sync-channels.md](sync-channels.md) §Eviction). Exit criterion:
   `src/e2e/flows/watch-update-refetch.e2e.test.ts`.
 - **The voice surface's lane split remains** — `voice:error` still rings because one of
-  its two emitters is `BaseSession.send` (see the note in `shared/sync/channels.ts`).
+  its two emitters is `BaseSession.send` (see the note in `core/shared/sync/channels.ts`).
 
 **Command-registry completeness** (the `command()` migration, ADR-051 contract 1):
 

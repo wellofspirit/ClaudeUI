@@ -4,19 +4,21 @@ How ClaudeUI is put together. This directory splits the architecture by concern 
 
 | File | Covers |
 | ---- | ------ |
-| [source-layout.md](source-layout.md) | Source tree + the main-process service catalog |
+| [source-layout.md](source-layout.md) | Source tree (core / the two hosts / clients), the `host.ts` seams, and the service catalog |
 | [engines.md](engines.md) | Multi-engine seam (engine/vendor/account, capabilities, opencode + pi backends, cross-engine dispatch), auth/accounts |
 | [data-flow.md](data-flow.md) | IPC & data flow, key runtime patterns, cli.js integration pointers |
 | [persistence.md](persistence.md) | Config/operational persistence planes, settings & config wiring |
 | [ui.md](ui.md) | Views, theming, layout, working-on-the-app gotchas |
 | [remote.md](remote.md) | Remote access **transport + auth** as built — HTTP/WS listener, wire frames, auth modes, E2E, scoped URL tokens, tunnel/TLS |
-| [sync-core.md](sync-core.md) | **SyncCore** — state sync, replication, queueing, terminal, headless (ADR-051/053). Phases 0-4 landed; phase 5 + the follow-on ledger are here too |
+| [sync-core.md](sync-core.md) | **SyncCore** — state sync, replication, queueing, terminal, headless (ADR-051/053). Phases 0-5 and the headless follow-on arc are landed; the follow-ons ledger is here too |
 | [security.md](security.md) | Remote-access security model **as built** — the two axes (login modes and step-up tiers), passkeys, capability grants, the read/act split, the host anchor + `authcfg:*`, audit (ADR-052 + ADR-054) |
 | [sync-channels.md](sync-channels.md) | Every event channel classified — ring / canonical / delivery, plus the recorded gaps and the payload additions (SyncCore phases 4a-4b + the post-4 `session:created` birth config) |
 
 ## Overview
 
-ClaudeUI is an Electron app. The **main process** owns the engines (spawning Claude Code's `bun-claude` binary, driving `opencode serve` over HTTP+SSE, driving `pi --mode rpc` over stdio JSONL), git, terminals, persistence, and the remote-access server. The **renderer** is a React 19 app fed exclusively through typed IPC events; it never touches an engine directly. A **web client** (`src/web/`) mirrors the renderer's API surface over an E2E-encrypted WebSocket (as-built: [remote.md](remote.md); target: [sync-core.md](sync-core.md)).
+**Since the S2/S3 headless arc the service graph lives in `src/core` and runs under two hosts** (ADR-058): the Electron desktop app (`src/main`) and `claudeui-server` (`src/server`), the headless entrypoint. `src/core` imports no Electron — lint-enforced — and every host-shaped concern is injected through the seams in `src/core/host.ts`. "Main process" below means the desktop host of that graph.
+
+ClaudeUI is an Electron app. The **main process** owns the engines (spawning Claude Code's `bun-claude` binary, driving `opencode serve` over HTTP+SSE, driving `pi --mode rpc` over stdio JSONL), git, terminals, persistence, and the remote-access server. The **renderer** is a React 19 app fed exclusively through typed IPC events; it never touches an engine directly. A **web client** (`src/web/`) mirrors the renderer's API surface over an E2E-encrypted WebSocket (transport + auth: [remote.md](remote.md); the sync architecture it carries: [sync-core.md](sync-core.md)).
 
 ## Tech stack
 

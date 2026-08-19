@@ -2,7 +2,7 @@
 
 Part of [architecture/](README.md). **Status:** landed with SyncCore phase 4a, updated
 by 4b (snapshot cutover) and 4c (uniform delivery, then reducer adoption). The
-machine-readable source of truth is `src/shared/sync/channels.ts`; this file is its prose
+machine-readable source of truth is `src/core/shared/sync/channels.ts`; this file is its prose
 twin, and `sync-funnel-guard.test.ts` fails if any emitted channel — or any channel either
 client subscribes to, on either surface — is missing from the table.
 
@@ -266,7 +266,7 @@ The **stream lane** carries the five `volatile` channels and nothing else. The
 
 - **`streamId`** — `<routingId>/text`, `<routingId>/thinking`,
   `<routingId>/sub/<toolUseId>/text`, `<routingId>/sub/<toolUseId>/thinking`. One
-  exported helper (`src/shared/sync/stream.ts`) builds and parses it; the server, both
+  exported helper (`src/core/shared/sync/stream.ts`) builds and parses it; the server, both
   clients and the tests import the same one.
 - **`offset`** — the accumulated length (JS string units) of that stream BEFORE this
   chunk. A frame whose offset does not match the receiver's local length is a NO-OP that
@@ -390,7 +390,7 @@ back off it.
 
 Voice input is not host-only any more: headless mode has no microphone, and the owner's
 answer to "I want to do voice input remotely" is a browser capture. The audio path is
-`AudioWorklet → shared/audio/pcm16.ts → the voice-audio frame → main/services/remote-voice.ts
+`AudioWorklet → shared/audio/pcm16.ts → the voice-audio frame → core/services/remote-voice.ts
 → the cli.js voice server`. What matters HERE is the return path, which is a third delivery
 rule on the same lane:
 

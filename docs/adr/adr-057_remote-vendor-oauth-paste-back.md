@@ -1,6 +1,6 @@
 # ADR-057 — Remote vendor OAuth: the host exchanges, the browser returns the code by paste
 
-**Status:** **Implemented** (headless-arc series S4 backend; the renderer paste-field UI is a follow-on). Normative as-built record: [security.md](../architecture/security.md) §"The vendor-credential surface (S4, ADR-057)".
+**Status:** **Implemented** — headless-arc series S4 backend (`a30286c`, 2026-08-18) and the paste-field UI in S4-UI (`3f84331`, 2026-08-18; see Consequences). Normative as-built record: [security.md](../architecture/security.md) §"The vendor-credential surface (S4, ADR-057)".
 **Relates to:** ADR-014 (native Claude OAuth — cli.js owns the flow), ADR-036 (the unified Codex auth vault this drives), ADR-051 (the command registry the shared declarations ride on), ADR-056 (the admission model + the `admin`→`config` reclassification that made these verbs base-grantable).
 **Scope:** the BACKEND — the flow the paste-field UI will call, and its tests. It does not build the renderer UI, the headless server (S3), or any admission/step-up change.
 

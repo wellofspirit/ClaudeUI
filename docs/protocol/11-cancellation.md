@@ -105,7 +105,7 @@ User triggers agent → agent calls Bash → we show permission prompt. User pre
 
 ## 11.3 Per-outbound-request timeouts
 
-`ControlChannel.request(payload, { timeoutMs })` in `src/main/sdk/control.ts`. Default **30 s**. Configurable per-call.
+`ControlChannel.request(payload, { timeoutMs })` in `src/core/sdk/control.ts`. Default **30 s**. Configurable per-call.
 
 | Subtype                            | Timeout      | Reason                                            |
 | ---------------------------------- | ------------ | ------------------------------------------------- |

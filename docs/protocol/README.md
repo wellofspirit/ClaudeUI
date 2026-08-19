@@ -1,6 +1,6 @@
 # cli.js Protocol Manual
 
-Reference documentation for the complete wire protocol between ClaudeUI's SDK harness (`src/main/sdk/`) and `vendor/claude-cli/cli.js`. This is a maintenance manual — it's meant to be kept complete, current, and specific so a future session with zero context can:
+Reference documentation for the complete wire protocol between ClaudeUI's SDK harness (`src/core/sdk/`) and `vendor/claude-cli/cli.js`. This is a maintenance manual — it's meant to be kept complete, current, and specific so a future session with zero context can:
 
 - Understand how a message crosses the wire
 - Look up the full shape of any message cli.js can send
@@ -45,7 +45,7 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 ```
 ┌─────────────────────────────────────────┐
 │  ClaudeUI (Electron main)               │
-│    src/main/sdk/query.ts                │
+│    src/core/sdk/query.ts                │
 │    - spawns cli.js                      │
 │    - speaks stream-json over stdio      │
 │    - hosts SDK MCP servers in-process   │
@@ -107,7 +107,7 @@ It is NOT:
 
 ## Conventions
 
-- **Code anchors**: where a behavior was verified, we cite `cli.js@char<offset>` (the character offset in the extracted file) or `src/main/sdk/<file>.ts:<line>`.
+- **Code anchors**: where a behavior was verified, we cite `cli.js@char<offset>` (the character offset in the extracted file) or `src/core/sdk/<file>.ts:<line>`.
 - **Gating**: when a message or subtype only fires under a specific flag or env var, it's marked **Gate:** at the top of its section.
 - **Versions**: if a field was added in a specific cli.js version, it's annotated `(added 2.1.X)`. If it was removed, `(removed 2.1.Y)`.
 - **JSON shapes**: given as JSON with comment annotations (not valid JSON). The actual wire format is strict JSON.

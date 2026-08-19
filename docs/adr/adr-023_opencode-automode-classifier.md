@@ -75,7 +75,7 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
 2. **Transcript slimming** (user text + tool *calls* only) — the dominant per-call token saver — plus
    1h prefix caching across same-turn classifier calls.
 3. **Single-stage `fast` mode** available for cheaper runs (default `both`).
-4. **Denial caps** (2-consecutive-same-rule / 3-consecutive / 20-total; category-keyed since 2026-08-01, shared tracker in src/main/automode/denial-tracker.ts) → fall back to human with the rule named in decisionReason.
+4. **Denial caps** (2-consecutive-same-rule / 3-consecutive / 20-total; category-keyed since 2026-08-01, shared tracker in src/core/automode/denial-tracker.ts) → fall back to human with the rule named in decisionReason.
 5. **Transcript-too-long** → human approval (reactive fallback; no proactive windowing).
 6. **No `(tool,input)` verdict memoization.** Deliberately omitted: a memoized verdict would override
    the user's later choice to personally approve/deny that same call. Each evaluation is fresh.
@@ -135,7 +135,7 @@ rationale: `docs/automode-rework-plan.md`; behavioural reference:
 commits 5112e74 (phase 1), 9d698c7 (phase 2), cb80d3a (phase 3), plus the
 bench 703115e.
 
-**Architecture.** The classifier is engine-neutral (`src/main/automode/`):
+**Architecture.** The classifier is engine-neutral (`src/core/automode/`):
 pure policy + a `JudgeTransport` seam (`maxTokens`/`stopSequences` advisory —
 the opencode session transport still cannot honour them; the original ADR's
 deviation stands until a phase-5 direct-API transport). opencode wiring keeps
@@ -158,7 +158,7 @@ final; unparseable stage 2 blocks fail-closed with `unavailable` unset.
   2000 chars matching cli.js's cap, per-message, last-proposal-before-reply.
 - `unavailable` → human (not block) — carried over from the original ADR.
 
-**Policy.** Our own corpus (`src/main/automode/rules/`): 1 HARD rule, 24 SOFT
+**Policy.** Our own corpus (`src/core/automode/rules/`): 1 HARD rule, 24 SOFT
 rules with per-rule `[named+specifics]` must-name consent slots (5
 adversarial-inverted), 12 mandatory ALLOW exceptions, an explicit never-block
 list, Path A/B consent with post-block inheritance. Stage 2 emits
@@ -182,7 +182,7 @@ Each judge call is stage-bounded — 60 s stage 1 / 120 s stage 2, cli.js's
 (`unavailable` → ask the human), so a wedged judge can never park a tool call
 behind a spinner.
 
-**Ground truth.** `src/main/automode/ground-truth.ts`: `{"outcome":…}`
+**Ground truth.** `src/core/automode/ground-truth.ts`: `{"outcome":…}`
 annotations (ok / error / rejected-by-user / automode-blocked only — sticky
 decisions), session-start remotes captured once and frozen, measured
 `gitStatus` meta before tree-affecting commands, `gh`-resolved repoVisibility

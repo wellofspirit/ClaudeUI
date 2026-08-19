@@ -16,13 +16,13 @@ agent. It's ClaudeUI's **third engine** (after `claude` and `opencode`), behind 
 `pi --mode rpc` child process per session, LF-framed JSONL over stdio. Two things pi lacks that
 shaped every decision:
 - **No native permission system** → a ClaudeUI-owned TypeScript extension loaded per-spawn via `-e`
-  (`src/main/pi/pi-bridge-source.ts`) whose `tool_call` hook POSTs decisions to a per-session
+  (`src/core/pi/pi-bridge-source.ts`) whose `tool_call` hook POSTs decisions to a per-session
   loopback `PiBridgeHost`; a pure `permission-engine.ts` decides.
 - **No MCP client** → hosted tools (mermaid/mockup) and `dispatch_agent` are registered via
   `pi.registerTool()` in that same extension, calling back over a second `PiBridgeHost` route.
 
-Code home: `src/main/pi/`. Auth: `src/main/auth/PiAuthProvider.ts`. Sidebar/history:
-`src/main/services/pi-session-list.ts`. Renderer tool map:
+Code home: `src/core/pi/`. Auth: `src/core/auth/PiAuthProvider.ts`. Sidebar/history:
+`src/core/services/pi-session-list.ts`. Renderer tool map:
 `src/renderer/src/components/chat/tool-registry/PiEngineToolMap.ts`. Settings:
 `src/renderer/src/components/SettingsDialog/PiVendors.tsx` + the `'pi'` scope in
 `settings-sections.tsx`.
@@ -222,4 +222,4 @@ are in the scratchpad (`scratchpad/specs/m*.md`) — pattern them for the next m
   https://github.com/earendil-works/pi`) — there is deliberately NO vendored pi source clone.
 - Auto-memory `project-pi-engine-integration` (loads each session) — the one-line status + gotchas.
 - opencode is the structural template throughout: when unsure how pi should do X, read how
-  `src/main/opencode/` does it (ADR-019/022/024/033).
+  `src/core/opencode/` does it (ADR-019/022/024/033).
