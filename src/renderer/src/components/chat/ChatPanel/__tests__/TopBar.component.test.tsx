@@ -828,9 +828,86 @@ describe('TopBar — terminal toggle button', () => {
     expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
   })
 
-  it('is hidden on mobile (terminal is desktop-web only — ADR-048)', () => {
+  it('is hidden on mobile — the phone reaches the terminal from the ⋯ menu instead', () => {
     renderTopBar(true)
     expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
+  })
+
+  // ── Mobile ⋯ entry (M3) ───────────────────────────────────────────────────
+  // The bar has no room for the button on a phone, so the entry moved into the
+  // overflow menu — carrying the desktop button's gate verbatim, so the two
+  // surfaces can never disagree about whether this client can have a shell.
+
+  it('offers Terminal in the ⋯ menu, first, matching the desktop bar order', () => {
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.getByTestId('TopBar.overflowMenuTerminal')).toBeInTheDocument()
+    // Desktop reads VSCode · Terminal · Skills · MCP · Permissions left to right.
+    const labels = screen
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('data-testid'))
+      .filter((id): id is string => !!id && id.startsWith('TopBar.overflowMenu') && id !== 'TopBar.overflowMenu')
+    expect(labels[0]).toBe('TopBar.overflowMenuTerminal')
+  })
+
+  it('drops the ⋯ Terminal entry when the host says the remote terminal is off', async () => {
+    app.api.platform = 'web'
+    terminalAvailability.mockResolvedValue({
+      allowed: false,
+      granted: false,
+      needsStepUp: false,
+      stepUp: null
+    })
+
+    renderTopBar(true)
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+    // The rest of the menu is untouched by the terminal's answer.
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+  })
+
+  it('drops the ⋯ Terminal entry while the first availability query is in flight', async () => {
+    app.api.platform = 'web'
+    // Never resolves: an affordance that flashes in and back out is worse than
+    // one that appears a beat late.
+    terminalAvailability.mockReturnValue(new Promise(() => {}))
+
+    renderTopBar(true)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+  })
+
+  it('opens the terminal from the ⋯ menu through the same helper the button uses', async () => {
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuTerminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // Same store flag, same auto-open of pool slot 0 for the active cwd.
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).toHaveBeenCalledWith(TERM_CWD, 0)
+    // The menu closes behind the takeover.
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+  })
+
+  it('desktop never grows a ⋯ Terminal entry (fork guard)', () => {
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
   })
 
   it('names the reachable binding per platform in the tooltip', () => {

@@ -377,7 +377,9 @@ export function SessionView(): React.JSX.Element {
               </>
             )}
           </div>
-          {/* Bottom terminal panel — always mounted to preserve xterm scrollback */}
+          {/* Bottom terminal panel — always mounted to preserve xterm scrollback.
+              Desktop only: a phone gets the fullscreen takeover below, because a
+              200px strip under the chat is unusable at 360px wide. */}
           {!isMobile && (
             <div style={{ display: terminalPanelOpen ? 'contents' : 'none' }}>
               <HorizontalResizeHandle onPointerDown={bottomPanel.onPointerDown} />
@@ -387,6 +389,15 @@ export function SessionView(): React.JSX.Element {
         </div>
       </div>
       <QuitWorktreeModal />
+      {/* Mobile terminal — a fullscreen takeover, hosted here (outside the
+          zoomed app root, like every other mobile takeover) so `position: fixed`
+          and the visual-viewport height it sets are measured in real pixels.
+          Mounted only while open, unlike the desktop panel: the phone's reason
+          for keeping a hidden xterm alive is gone — the host replays the
+          scrollback ring on re-attach — and a permanently-mounted terminal on a
+          memory-constrained device buys nothing. Rendered BEFORE the settings
+          dialog so an open Settings sits above it at equal z. */}
+      {isMobile && terminalPanelOpen && <TerminalPanel />}
       {isMobile && mobileSettings && (
         <SettingsDialog
           onClose={() => setMobileSettings(null)}

@@ -1,13 +1,6 @@
-import { lazy, Suspense } from 'react'
 import type { TerminalTab as TerminalTabModel } from '../../../../../shared/types'
 import { TerminalTab } from './TerminalTab'
-
-// Lazy: xterm.js + addon-fit + xterm.css must not ride the eager App chunk. This
-// panel's container is always mounted (display:none preserves scrollback), so the
-// boundary has to be XTermInstance — it mounts once per tab, and tabs start at zero.
-const XTermInstance = lazy(() =>
-  import('../XTermInstance').then((m) => ({ default: m.XTermInstance }))
-)
+import { TerminalSurface } from './TerminalSurface'
 
 export interface TerminalPanelViewProps {
   style: React.CSSProperties
@@ -122,64 +115,14 @@ export function TerminalPanelView({
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 relative overflow-hidden">
-        {allTabs.map((tab) => (
-          <div
-            key={tab.id}
-            className="absolute inset-0"
-            style={{ display: tab.id === activeId ? 'block' : 'none' }}
-          >
-            <Suspense
-              fallback={
-                <div className="h-full flex items-center justify-center text-text-muted text-xs">
-                  Loading terminal…
-                </div>
-              }
-            >
-              <XTermInstance
-                terminalId={tab.id}
-                isActive={tab.id === activeId}
-                readOnly={readOnly}
-                onBlockedInput={onBlockedInput}
-              />
-            </Suspense>
-          </div>
-        ))}
-        {visibleTabs.length === 0 &&
-          (nextSlotRunning ? (
-            // The case the pool made invisible: the tab is gone but the shell
-            // (a dev server, a `tail -f`) is still running, and nothing on
-            // screen said so — the operator reads an empty panel as an empty
-            // machine. Reopening re-attaches and replays its scrollback.
-            <div
-              data-testid="TerminalPanel.emptyRunning"
-              className="h-full flex flex-col items-center justify-center gap-1 text-text-muted text-xs"
-            >
-              <div className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-400" />A shell is still running
-                here
-              </div>
-              <div className="text-[10px] text-text-muted/70">
-                Press{' '}
-                <span className="font-mono mx-0.5 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
-                  +
-                </span>{' '}
-                to re-attach, then right-click the tab to kill it
-              </div>
-            </div>
-          ) : (
-            <div
-              data-testid="TerminalPanel.empty"
-              className="h-full flex items-center justify-center text-text-muted text-xs"
-            >
-              Press{' '}
-              <span className="font-mono mx-1 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
-                +
-              </span>{' '}
-              to open a terminal
-            </div>
-          ))}
-      </div>
+      <TerminalSurface
+        allTabs={allTabs}
+        visibleTabs={visibleTabs}
+        activeId={activeId}
+        nextSlotRunning={nextSlotRunning}
+        readOnly={readOnly}
+        onBlockedInput={onBlockedInput}
+      />
     </div>
   )
 }

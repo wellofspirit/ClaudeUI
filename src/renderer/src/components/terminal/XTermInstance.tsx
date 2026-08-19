@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { useSessionStore, type ThemeId } from '../../stores/session-store'
+import { registerTerminalInput } from './terminal-input'
 import '@xterm/xterm/css/xterm.css'
 
 interface Props {
@@ -159,6 +160,12 @@ export function XTermInstance({
       window.api.writeTerminal(terminalId, data)
     })
 
+    // The seam non-keyboard affordances type through (the mobile accessory key
+    // row: Esc/Tab/^C/arrows, which no soft keyboard offers). `input(…, true)`
+    // is xterm's "as if the user typed it" entry point, so it lands in the
+    // `onData` handler above — the SAME gate, the same write, no second path.
+    const unregisterInput = registerTerminalInput(terminalId, (data) => term.input(data, true))
+
     // PTY output -> terminal. A `replay` chunk is the scrollback ring, i.e. the
     // terminal's ENTIRE history: it must land on a cleared screen so it is never
     // appended to bytes the broadcast desktop lane already delivered for this pty.
@@ -198,6 +205,7 @@ export function XTermInstance({
 
     return () => {
       unsub()
+      unregisterInput()
       dataDisposable.dispose()
       ro.disconnect()
       term.dispose()

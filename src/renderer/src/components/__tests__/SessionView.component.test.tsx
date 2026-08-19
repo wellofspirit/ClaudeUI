@@ -150,7 +150,7 @@ describe('SessionView — mobile task takeover', () => {
     // zustand-triggered re-render runs with window.api already gone.
     cleanup()
     app.teardown()
-    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    useSessionStore.setState({ activeSessionId: null, sessions: {}, terminalPanelOpen: false })
     mirrorStoreIntoReplica()
   })
 
@@ -313,5 +313,45 @@ describe('SessionView — mobile task takeover', () => {
       view.rerender(React.createElement(SessionView))
     })
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+  })
+
+  // ── Terminal (M3) ─────────────────────────────────────────────────────────
+  // Two mount points, one component. Desktop keeps the always-mounted bottom
+  // panel (display:none preserves xterm scrollback locally); mobile mounts the
+  // fullscreen takeover only while it is open — the host replays the scrollback
+  // ring on re-attach, so a permanently-mounted hidden xterm buys a phone
+  // nothing. Exactly one of the two may ever exist.
+
+  it('mobile: the terminal mounts only while the panel flag is set', async () => {
+    mockIsMobile = true
+    await renderSessionView()
+    expect(screen.queryByTestId('TerminalPanel')).toBeNull()
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(true)
+    })
+    expect(screen.getAllByTestId('TerminalPanel')).toHaveLength(1)
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(false)
+    })
+    expect(screen.queryByTestId('TerminalPanel')).toBeNull()
+  })
+
+  it('desktop: the bottom panel stays mounted either way (regression lock)', async () => {
+    mockIsMobile = false
+    await renderSessionView()
+    // Closed, but present — the display:none wrapper is what preserves scrollback.
+    expect(screen.getAllByTestId('TerminalPanel')).toHaveLength(1)
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(true)
+    })
+    // Still exactly one: opening must not add the mobile takeover alongside it.
+    expect(screen.getAllByTestId('TerminalPanel')).toHaveLength(1)
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(false)
+    })
   })
 })

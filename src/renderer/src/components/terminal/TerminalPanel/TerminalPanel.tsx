@@ -8,17 +8,31 @@ import {
 } from '../../../stores/session-store'
 import { isNeedsStepUpError } from '../../../../../shared/remote-protocol'
 import type { TerminalAvailability } from '../../../../../shared/types'
+import { useIsMobile } from '../../../hooks/useIsMobile'
 import { TerminalStepUpPrompt } from '../TerminalStepUpPrompt'
 import { DESKTOP_AVAILABILITY } from '../terminal-availability'
 import { useTerminalPool } from '../terminal-pool'
 import { nextFreeSlot } from '../pool-slot'
 import { TerminalPanelView } from './View'
+import { TerminalMobileView } from './TerminalMobileView'
 
 interface Props {
-  style: React.CSSProperties
+  /**
+   * The desktop bottom panel's height, owned by SessionView's drag handle. The
+   * mobile takeover is fullscreen and has no height to receive, so this is
+   * optional — a frozen empty object rather than a fresh `{}` per render, which
+   * would hand the view a new style identity on every re-render.
+   */
+  style?: React.CSSProperties
 }
 
-export function TerminalPanel({ style }: Props): React.JSX.Element {
+const NO_STYLE: React.CSSProperties = Object.freeze({})
+
+export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
+  // Presentation fork only (the SkillsDialog / PermissionsDialog pattern): every
+  // question this container asks — availability, the pool, the step-up ceremony
+  // — is answered identically for both surfaces below.
+  const isMobile = useIsMobile()
   const visibleTabs = useSessionStore(useShallow(selectVisibleTerminalTabs))
   const activeId = useSessionStore(selectActiveTerminalId)
   const allTabs = useSessionStore(useShallow(selectAllTerminalTabs))
@@ -196,10 +210,58 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
   // front of shells it is entitled to see. `readsAllowed` is absent on an older
   // host, which therefore keeps the pre-ADR-054 wall exactly as it was.
   const readOnly = isWeb && !!availability?.readsAllowed && !availability.granted
+
+  // Everything both presentations need, resolved once. The two surfaces differ
+  // in CHROME only — a phone cannot use a hover-revealed close or a drag handle
+  // — so any divergence here would be a bug, not a design.
+  const surfaceProps = {
+    visibleTabs,
+    allTabs,
+    activeId,
+    onSelectTab: setActiveTerminal,
+    onCloseTab: handleCloseTab,
+    onNewTab: handleNewTab,
+    onClosePanel: () => setTerminalPanelOpen(false),
+    nextSlot,
+    nextSlotRunning: liveSlots.has(nextSlot),
+    readOnly,
+    onBlockedInput: requestStepUp
+  }
+
   if (
     isWeb &&
     (!availability || !availability.allowed || (availability.needsStepUp && !readOnly))
   ) {
+    // The gate BODY is shared; only the frame around it differs, so the phone
+    // runs the identical ADR-054 ceremony (same component, same testids) inside
+    // a takeover instead of inside a 200px strip.
+    const gate = !availability ? (
+      <div
+        data-testid="TerminalPanel.checking"
+        className="h-full flex items-center justify-center text-text-muted text-xs"
+      >
+        Checking terminal access…
+      </div>
+    ) : !availability.allowed ? (
+      <div
+        data-testid="TerminalPanel.unavailable"
+        className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center text-text-muted text-xs"
+      >
+        <div>Remote terminal is turned off.</div>
+        <div className="text-[10px] text-text-muted/70 max-w-[380px] leading-snug">
+          Turn on “Allow remote terminal” in Settings › Remote on the desktop app to open a shell
+          from here.
+        </div>
+      </div>
+    ) : (
+      <TerminalStepUpPrompt
+        passkey={availability.passkey}
+        onGranted={() => void refreshAvailability()}
+      />
+    )
+
+    if (isMobile) return <TerminalMobileView {...surfaceProps} gate={gate} />
+
     return (
       <div
         data-testid="TerminalPanel"
@@ -216,50 +278,12 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
             &times;
           </button>
         </div>
-        <div className="flex-1 min-h-0">
-          {!availability ? (
-            <div
-              data-testid="TerminalPanel.checking"
-              className="h-full flex items-center justify-center text-text-muted text-xs"
-            >
-              Checking terminal access…
-            </div>
-          ) : !availability.allowed ? (
-            <div
-              data-testid="TerminalPanel.unavailable"
-              className="h-full flex flex-col items-center justify-center gap-1 px-6 text-center text-text-muted text-xs"
-            >
-              <div>Remote terminal is turned off.</div>
-              <div className="text-[10px] text-text-muted/70 max-w-[380px] leading-snug">
-                Turn on “Allow remote terminal” in Settings › Remote on the desktop app to open a
-                shell from here.
-              </div>
-            </div>
-          ) : (
-            <TerminalStepUpPrompt
-              passkey={availability.passkey}
-              onGranted={() => void refreshAvailability()}
-            />
-          )}
-        </div>
+        <div className="flex-1 min-h-0">{gate}</div>
       </div>
     )
   }
 
-  return (
-    <TerminalPanelView
-      style={style}
-      visibleTabs={visibleTabs}
-      allTabs={allTabs}
-      activeId={activeId}
-      onSelectTab={setActiveTerminal}
-      onCloseTab={handleCloseTab}
-      onNewTab={handleNewTab}
-      onClosePanel={() => setTerminalPanelOpen(false)}
-      nextSlot={nextSlot}
-      nextSlotRunning={liveSlots.has(nextSlot)}
-      readOnly={readOnly}
-      onBlockedInput={requestStepUp}
-    />
-  )
+  if (isMobile) return <TerminalMobileView {...surfaceProps} />
+
+  return <TerminalPanelView style={style} {...surfaceProps} />
 }

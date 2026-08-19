@@ -98,6 +98,40 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       icon: React.JSX.Element
       onSelect: () => void
     }> = []
+    // Terminal leads, matching the desktop bar's left-to-right order. Its gate
+    // is the desktop button's, verbatim — the host's own availability answer
+    // (`allowed === true`, so a null "still asking" renders nothing). The extra
+    // condition it inherits from this menu is `cwd`, and it is load-bearing:
+    // with no active directory, toggle-terminal.ts opens the panel but creates
+    // nothing, so a phone would land in the empty state whose `+` button spawns
+    // into TerminalPanel's `cwd || '.'` fallback — an invisible orphan pty with
+    // no second entry point to reach it from afterwards.
+    if (terminalAvailability?.allowed === true) {
+      items.push({
+        id: 'terminal',
+        label: 'Terminal',
+        testId: 'TopBar.overflowMenuTerminal',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <path d="M4 17l6-6-6-6" />
+            <path d="M12 19h8" />
+          </svg>
+        ),
+        // The same single source of truth the desktop button and the keybinding
+        // call — the takeover opens off `terminalPanelOpen` like the panel does.
+        onSelect: toggleTerminalPanel
+      })
+    }
     if (capSkills) {
       items.push({
         id: 'skills',
@@ -169,7 +203,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       onSelect: () => setPermissionsOpen(true)
     })
     return items
-  }, [cwd, capSkills, canUseMcp, engineId])
+  }, [cwd, capSkills, canUseMcp, engineId, terminalAvailability])
 
   // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
   // that starts outside never lands on whatever the menu was covering.
@@ -536,8 +570,9 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             appears once `terminal:availability` says yes — no affordance for a
             shell this client cannot get. Null (web, first query in flight)
             renders nothing: appearing a beat late beats flashing out. The panel
-            re-asks the same question itself — defense in depth (ADR-048:
-            terminal is desktop-web only). */}
+            re-asks the same question itself — defense in depth. Mobile reaches
+            the same helper from the ⋯ menu (the bar has no room for it), which
+            carries this exact gate. */}
         {!isMobileCtx && terminalAvailability?.allowed === true && (
           <button
             data-testid="TopBar.terminal"
