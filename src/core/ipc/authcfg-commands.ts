@@ -54,6 +54,7 @@ import {
 } from '../../shared/remote-protocol'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../shared/types'
 import {
+  auditSettingsChange,
   withAuthSurfaceReaction,
   type AuthSurfaceDisconnector
 } from '../services/auth-policy'
@@ -124,23 +125,22 @@ function assertSettingsSession(connection: CommandConnection): void {
   if (!authcfgAllowed(connection)) throw new Error(NEEDS_SETTINGS_SESSION_ERROR)
 }
 
-/** Audit a settings write that is NOT an admission-rule change (no disconnect). */
-function auditSettingsChange(connection: CommandConnection, detail: string): void {
-  auditAuthcfg(connection, 'auth:settings-change', detail)
-}
-
 /**
  * Audit a SESSION event — the editor opening or closing. Its own channel
  * because it is not a settings WRITE: nothing about the configuration moved,
  * only who is currently allowed to move it. (The OPEN row is written by the
  * transport, which is where the ceremony completes; this file writes the
  * explicit close.)
+ *
+ * The `auth:settings-change` sibling this used to share a helper with now lives
+ * in `auth-policy.ts` as `auditSettingsChange`, because the host anchor writes
+ * that row too. What is left here is one channel with one caller, so it is spelt
+ * out rather than parameterised.
+ *
+ * Never throws: the trail is observability, and refusing to close the editor
+ * because the DB is wedged would be the worse failure.
  */
 function auditSettingsSession(connection: CommandConnection, detail: string): void {
-  auditAuthcfg(connection, 'auth:settings-session', detail)
-}
-
-function auditAuthcfg(connection: CommandConnection, channel: string, detail: string): void {
   try {
     appendAuditLog({
       ts: Date.now(),
@@ -149,7 +149,7 @@ function auditAuthcfg(connection: CommandConnection, channel: string, detail: st
       label: connection.identity.label,
       capability: 'admin',
       kind: 'command',
-      channel,
+      channel: 'auth:settings-session',
       sessionId: null,
       outcome: 'ok',
       detail
@@ -157,7 +157,7 @@ function auditAuthcfg(connection: CommandConnection, channel: string, detail: st
   } catch (err) {
     logger.error(
       'authcfg',
-      `${channel} audit append failed: ${err instanceof Error ? err.message : String(err)}`
+      `auth:settings-session audit append failed: ${err instanceof Error ? err.message : String(err)}`
     )
   }
 }

@@ -112,6 +112,11 @@ export function provisionPassword(password: string): void {
   dbSetRemotePassword(salt.toString('hex'), hash, kdfParams)
 }
 
+// The AUDITED host-anchor wrapper around `provisionPassword` lives in
+// `break-glass.ts`, not here. This module is deliberately thin — its unit tests
+// mock `db` down to two functions, which is a property worth keeping — and the
+// wrapper needs `auth-policy` + `command-registry` to name an actor.
+
 // ---------------------------------------------------------------------------
 // Verification (Phase 2)
 // ---------------------------------------------------------------------------

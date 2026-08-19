@@ -398,6 +398,43 @@ export function auditAuthPolicyChange(connection: CommandConnection, detail?: st
 }
 
 /**
+ * Append the `auth:settings-change` row for a settings write that is NOT an
+ * admission-rule change — nothing about WHO may connect moved, so it triggers no
+ * 4009 re-admission sweep (security.md §Audit; ADR-054 decision 5).
+ *
+ * ONE writer, for the same reason {@link auditAuthPolicyChange} is one: the
+ * break-glass password is rotatable from three surfaces now — `authcfg:set-
+ * password` over the wire, `remote:set-password` on the desktop host anchor, and
+ * `claudeui-server set-password` on a headless console — and an audit reader must
+ * not have to know which one produced a given row to read it. `detail` carries
+ * the path, `connection` carries the actor.
+ *
+ * Never throws: the trail is observability, and refusing the operator's password
+ * rotation because the DB is wedged would be the worse failure.
+ */
+export function auditSettingsChange(connection: CommandConnection, detail: string): void {
+  try {
+    appendAuditLog({
+      ts: Date.now(),
+      connectionId: connection.connectionId,
+      method: connection.identity.method,
+      label: connection.identity.label,
+      capability: 'admin',
+      kind: 'command',
+      channel: 'auth:settings-change',
+      sessionId: null,
+      outcome: 'ok',
+      detail
+    })
+  } catch (err) {
+    logger.error(
+      'auth-policy',
+      `auth settings-change audit append failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/**
  * What an auth-surface writer needs from the running server: the mass
  * re-admission disconnect. An interface rather than the concrete `RemoteServer`
  * so this module stays out of that import graph.

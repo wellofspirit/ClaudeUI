@@ -163,20 +163,51 @@ merely followed: a flag exists only for something a setting cannot cover.
   cannot reach yet. `--tls` is a **tri-state**: absent leaves the persisted `tlsMode`
   alone, because an absent flag must not silently turn TLS off for a server whose stored
   config asked for it.
-- **Host anchor** — `--disable-auth` (policy `off`) and the `show-link` subcommand. On a
-  headless box the console IS the host anchor (ADR-054/056), and these are the two things
-  no remote client may ever do: disable authentication, and mint a fresh enrollment link
-  when the only one you had expired. `--disable-auth` is deliberately not
-  `--disable-auth=false` — re-enabling is a Settings action, because a flag that can
+- **Host anchor** — `--disable-auth` (policy `off`) and the `show-link` / `set-password`
+  subcommands. On a headless box the console IS the host anchor (ADR-054/056), and these
+  are the things no remote client may ever do: disable authentication, mint a fresh
+  enrollment link when the only one you had expired, and provision the break-glass
+  credential on a box that currently admits nobody (security.md §Headless bootstrap chain
+  step 4 — with zero passkeys and no password there is no connection to set a password
+  over, so the console is the only surface that exists). `--disable-auth` is deliberately
+  not `--disable-auth=false` — re-enabling is a Settings action, because a flag that can
   silently re-enable is a flag that can silently disable on the next restart when someone
   edits the unit file — and it warns on **every** start, not just the one where the switch
-  was flipped.
+  was flipped. `set-password` carries the mirror-image asymmetry: it PROVISIONS and never
+  clears, because `passwordBreakGlass: false` is reachable from Settings the moment you
+  can connect, while a console `--clear` on a passkey-less box is a self-brick. Its secret
+  arrives on **stdin only** — never argv, never an environment variable, both of which any
+  process on the box can read — asked twice with echo off on a terminal and taken as one
+  unconfirmed line on a pipe, with `process.stdin.isTTY` (the same primitive echo
+  suppression needs) deciding rather than a flag that could disagree with it.
 - **Everything else is a DB setting**, editable from the web UI once connected: passkeys,
   the break-glass password, step-up tiers, the terminal toggle, audit retention.
 
 `--disable-auth` routes through the SAME host-anchor writer `remote:set-config` uses, so
 the validation, the audit row and the disconnect-every-client reaction are one
-implementation on both host surfaces.
+implementation on both host surfaces. `set-password` shares its writer the same way, but
+one level down: `provisionBreakGlassPassword` (in `core/services/break-glass.ts`) is
+`provisionPassword` + `auditSettingsChange`, and BOTH host anchors call it — the desktop's
+`HostAnchor.setPassword`, which then adds the 4008 sweep of the clients holding the
+credential that just died, and the console, which has no listener to sweep. So there is
+one strength rule, one KDF and one `auth:settings-change` row, with a `via` label naming
+the surface. Note the honest limit: only the SUCCESS row is common. A refused attempt
+leaves a dispatch error row on the web path (`authcfg:set-password` goes through the
+command registry) and nothing at all on the desktop/console paths, which are raw
+host-anchor calls with no registry around them.
+
+The writer sits in its own module, `break-glass.ts` — NOT in `boot/host-anchor.ts`, and
+deliberately NOT in `remote-auth.ts` either. The first exclusion is the reason the command
+makes concrete: **`set-password` must open a database and boot nothing else.** The second
+is a constraint `remote-auth.ts` carries on purpose: it is a thin credential module whose
+unit tests mock `db` down to two functions, and an audited wrapper would widen every one
+of those mocks (its own header says so).
+`host-anchor.ts` reaches `remote-server.ts`, and an earlier revision of this command went
+through `startCoreServices` — which installs a recursive `fs.watch` on `~/.claude`, starts
+the usage poller (which can lazily spawn an engine), arms every automation's cron timer and
+lets `credentialSync` write and delete engine credential files — and then `process.exit`ed
+through the middle of it, next to a `serve` process racing it over the same DB and vault. A
+one-row command gets a one-row module graph.
 
 The first-boot console chain (`src/server/first-boot.ts`) is what makes ADR-056's
 "nothing can connect to a fresh install" a bootstrap rather than a brick: it prints a

@@ -53,7 +53,7 @@ import {
 import { sanitizedRemoteConfig } from '../services/remote-config-view'
 import { MAX_SESSION_MAX_AGE_HOURS } from '../services/step-up-tier'
 import { desktopConnection } from '../ipc/command-registry'
-import { provisionPassword } from '../services/remote-auth'
+import { provisionBreakGlassPassword } from '../services/break-glass'
 import { logger } from '../services/logger'
 import type {
   RemoteAuthPolicy,
@@ -91,7 +91,16 @@ export interface HostAnchor {
   status(): RemoteStatus
   getConfig(): ReturnType<typeof sanitizedRemoteConfig>
   setConfig(partial: RemoteConfigPatch): ReturnType<typeof sanitizedRemoteConfig>
-  setPassword(password: string): void
+  /**
+   * Provision the break-glass credential.
+   *
+   * `via` names the host surface in the audit row — the desktop's
+   * `remote:set-password` by default, `claudeui-server set-password` from a
+   * headless console. It is a LABEL, never an authorization input: both callers
+   * are the host anchor by construction (this module has no remote
+   * registration), so nothing branches on it.
+   */
+  setPassword(password: string, opts?: { via?: string }): void
   clearPassword(): void
   tailscaleDetect(): Promise<TailscaleDetection>
   forceReserve(): Promise<void>
@@ -332,8 +341,20 @@ export function createHostAnchor({
     // Provisioning/clearing rotates the credential, so any live session that
     // authenticated with the OLD password must not outlive it. Token clients are
     // untouched (their credential didn't change).
-    setPassword(password) {
-      provisionPassword(password)
+    //
+    // The credential write AND its audit row are `provisionBreakGlassPassword`,
+    // shared verbatim with `claudeui-server set-password` — see `break-glass.ts`
+    // for the row it writes and for why it is its own module rather than a body
+    // here (a console that only needs a DB must not drag this module's
+    // `remote-server` graph in). Until S5 this path wrote no row at all, so the
+    // trail said nothing about the credential having moved unless the operator
+    // happened to rotate it over the wire.
+    //
+    // The 4008 sweep is what this host adds and the console cannot. A rotation is
+    // not an auth-SURFACE change — the methods on offer did not move, only the
+    // secret — so it deliberately does not ride the 4009 reaction.
+    setPassword(password, opts) {
+      provisionBreakGlassPassword(password, { via: opts?.via ?? 'remote:set-password' })
       remoteServer.disconnectPasswordClients()
     },
 

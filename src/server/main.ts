@@ -13,6 +13,10 @@
  *   4. calling `startCoreServices` and starting the listener;
  *   5. the first-boot console chain and a clean shutdown.
  *
+ * Steps 2, 4 and 5 are for the commands that SERVE. `set-password` is the one
+ * subcommand that does not: it stops after step 1 plus a single DB write, and the
+ * branch that enforces that carries the reasoning.
+ *
  * ## Runtime detection lives HERE, deliberately
  *
  * The driver SEAM refuses to sniff — an entrypoint may, a library may not. This
@@ -50,10 +54,21 @@ import { setHostAuth, setHostIsPackaged, setHostPaths, setHostPicker } from '../
 import { logger } from '../core/services/logger'
 import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
+import { PASSWORD_SET_CONFIRMATION, readNewPassword, stdinSecretIo } from './set-password'
 
 /** stdout, one line at a time — the console chain's only side effect. */
 function print(line: string): void {
   process.stdout.write(`${line}\n`)
+}
+
+/**
+ * Report an operator-facing failure and stop. No stack trace: everything routed
+ * here is something a person typed (a mismatched password, one too short to
+ * accept), and a stack at that person tells them nothing they can act on.
+ */
+function fail(err: unknown): never {
+  process.stderr.write(`claudeui-server: ${err instanceof Error ? err.message : String(err)}\n`)
+  process.exit(1)
 }
 
 /** Whether this process is bun. The ONE runtime sniff in the codebase. */
@@ -184,8 +199,48 @@ async function main(): Promise<void> {
     return
   }
 
+  // `set-password` reads the secret BEFORE anything else boots, and the ordering
+  // is deliberate. A mismatch or an empty entry then costs nothing at all — not
+  // even a database file, which is what makes "nothing was changed" literally
+  // true rather than nearly true — and no log line from a migration or a driver
+  // can land between the prompt and the (invisible) keystrokes, which is how an
+  // operator loses track of which entry they are typing into.
+  const newPassword =
+    options.command === 'set-password' ? await readNewPassword(stdinSecretIo()).catch(fail) : null
+
   // Driver first — before ANY module that might reach the DB is constructed.
   setSqliteDriver(await loadSqliteDriver())
+
+  // `set-password` STOPS HERE, and the narrowness is the point.
+  //
+  // It is one row in one table, so it opens the database and constructs the
+  // credential writer, and boots nothing else — no `startCoreServices`. Booting
+  // the full graph for it was actively harmful, not merely wasteful: that graph
+  // installs a recursive `fs.watch` on `~/.claude`, starts the usage poller (which
+  // can lazily SPAWN an engine), runs the usage reconciler and block-usage
+  // recalculation, arms every automation's cron timer, and lets `credentialSync`
+  // write and delete engine credential files — all of which this command then
+  // `process.exit`ed through the middle of. And it is a command an operator runs
+  // NEXT TO a live `claudeui-server serve`, so it would have been a second full
+  // graph racing the first over the same DB and the same vault.
+  //
+  // Host adapters are skipped for the same reason: nothing on this path resolves
+  // an app path, an engine locator or an account state.
+  if (newPassword !== null) {
+    const { provisionBreakGlassPassword } = await import('../core/services/break-glass')
+    try {
+      provisionBreakGlassPassword(newPassword, { via: 'claudeui-server set-password' })
+    } catch (err) {
+      fail(err)
+    }
+    // The DB's retention timer is `unref`'d, so this process would exit on its
+    // own — but exiting from the write callback is what guarantees the
+    // confirmation is flushed first when stdout is a pipe, and it costs nothing
+    // to be explicit about a command that is done.
+    process.stdout.write(`${PASSWORD_SET_CONFIRMATION}\n`, () => process.exit(0))
+    return
+  }
+
   installHostAdapters()
 
   // Imported after the adapters are wired: these modules pull in the service
