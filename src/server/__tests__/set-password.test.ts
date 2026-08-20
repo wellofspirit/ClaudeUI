@@ -381,6 +381,8 @@ async function freshConsole(): Promise<{
   db: typeof import('../../core/services/db')
   remoteAuth: typeof import('../../core/services/remote-auth')
   configView: typeof import('../../core/services/remote-config-view')
+  /** What `claudeui-server` passes as the actor — `method: 'host'`, console label. */
+  consoleActor: import('../../core/ipc/command-registry').CommandConnection
 }> {
   vi.resetModules()
   const driverSeam = await import('../../core/services/sqlite-driver')
@@ -391,32 +393,57 @@ async function freshConsole(): Promise<{
   const db = await import('../../core/services/db')
   const remoteAuth = await import('../../core/services/remote-auth')
   const configView = await import('../../core/services/remote-config-view')
-  return { provisionBreakGlassPassword, db, remoteAuth, configView }
+  const { hostConnection } = await import('../../core/ipc/command-registry')
+  return {
+    provisionBreakGlassPassword,
+    db,
+    remoteAuth,
+    configView,
+    consoleActor: hostConnection('server-console')
+  }
 }
 
-/** The same fixture plus the DESKTOP host anchor, for the shared-writer tests. */
-async function freshAnchor(): Promise<{
+/**
+ * The same fixture plus a host anchor, for the shared-writer tests.
+ *
+ * `asConsole` picks which HOST SURFACE the anchor attributes its audited writes
+ * to — the default (no `actor`) is what `src/main` constructs, the console actor
+ * is what `claudeui-server` passes through `startCoreServices`.
+ */
+async function freshAnchor(opts?: { asConsole?: boolean }): Promise<{
   anchor: import('../../core/boot/host-anchor').HostAnchor
   db: typeof import('../../core/services/db')
   disconnects: () => number
+  surfaceSweeps: () => number
 }> {
-  const { db } = await freshConsole()
+  const { db, consoleActor } = await freshConsole()
   const { createHostAnchor } = await import('../../core/boot/host-anchor')
 
   let disconnected = 0
+  let surfaceSwept = 0
   const anchor = createHostAnchor({
-    // Only `disconnectPasswordClients` is reachable from `setPassword`; a stub
-    // keeps a listener (and a machine-global port claim) out of a unit test.
+    // The two reactions the tested paths reach: `setPassword`'s 4008 sweep and
+    // `setConfig`'s 4009 auth-surface sweep. A stub keeps a listener (and a
+    // machine-global port claim) out of a unit test.
     remoteServer: {
       disconnectPasswordClients: () => {
         disconnected++
+      },
+      disconnectAuthSurfaceClients: () => {
+        surfaceSwept++
       }
     } as unknown as import('../../core/services/remote-server').RemoteServer,
     tailscaleManager:
       {} as unknown as import('../../core/services/tailscale-manager').TailscaleManager,
-    remoteAccessDisabled: true
+    remoteAccessDisabled: true,
+    ...(opts?.asConsole ? { actor: consoleActor } : {})
   })
-  return { anchor, db, disconnects: () => disconnected }
+  return {
+    anchor,
+    db,
+    disconnects: () => disconnected,
+    surfaceSweeps: () => surfaceSwept
+  }
 }
 
 /**
@@ -445,16 +472,17 @@ const VIA = 'claudeui-server set-password'
 
 describe('the set-password write path', () => {
   it('provisions a credential a normal client can authenticate with', async () => {
-    const { provisionBreakGlassPassword, remoteAuth } = await freshConsole()
+    const { provisionBreakGlassPassword, remoteAuth, consoleActor } = await freshConsole()
 
     // The whole command, in the order main.ts runs it: read a piped line, then
-    // hand it to the break-glass writer. No host anchor in sight — the console
-    // has no listener, so it constructs none.
+    // hand it to the break-glass writer under the console's own host identity.
+    // No host anchor in sight — the console has no listener, so it constructs
+    // none.
     const password = await readNewPassword({
       confirm: false,
       read: () => readPipedSecret(pipe('console-provisioned-pw\n'))
     })
-    provisionBreakGlassPassword(password, { via: VIA })
+    provisionBreakGlassPassword(password, { via: VIA, actor: consoleActor })
 
     const provider = remoteAuth.dbPasswordAuthProvider()
     const params = provider.params()
@@ -477,16 +505,85 @@ describe('the set-password write path', () => {
   })
 
   it('writes an auth:settings-change row shaped like the web path’s, naming the console', async () => {
-    const { provisionBreakGlassPassword, db } = await freshConsole()
-    provisionBreakGlassPassword('console-provisioned-pw', { via: VIA })
+    const { provisionBreakGlassPassword, db, consoleActor } = await freshConsole()
+    provisionBreakGlassPassword('console-provisioned-pw', { via: VIA, actor: consoleActor })
 
     const rows = db.listAuditLog({ limit: 20 })
     const row = rows.find((r) => r.channel === 'auth:settings-change')
     expect(row).toBeDefined()
     expect(row).toMatchObject({ capability: 'admin', kind: 'command', outcome: 'ok' })
     // The row SHAPE is shared with `authcfg:set-password` (one `auditSettingsChange`
-    // writer); `detail` is what says which surface the hands were on.
+    // writer); `detail` is what says which VERB the hands were on.
     expect(row!.detail).toBe(`break-glass password rotated via ${VIA} on the host anchor`)
+  })
+
+  // The 2026-08-20 rename, pinned end to end on a real DB. Before it, a console
+  // rotation on a headless box wrote `method: 'desktop'` / `label:
+  // 'desktop-renderer'` — a row naming a renderer that does not exist there.
+  it('attributes the console write to method "host" / label "server-console"', async () => {
+    const { provisionBreakGlassPassword, db, consoleActor } = await freshConsole()
+    provisionBreakGlassPassword('console-provisioned-pw', { via: VIA, actor: consoleActor })
+
+    const row = db.listAuditLog({ limit: 20 }).find((r) => r.channel === 'auth:settings-change')
+    expect(row).toMatchObject({ method: 'host', label: 'server-console' })
+  })
+
+  it('attributes the DESKTOP host anchor to method "host" / label "desktop-renderer"', async () => {
+    // Same method — both are the host's own surface — and the label is the whole
+    // difference. `createHostAnchor` with no `actor` is what `src/main` does.
+    const { anchor, db } = await freshAnchor()
+    anchor.setPassword('desktop-provisioned-pw')
+
+    const row = db.listAuditLog({ limit: 20 }).find((r) => r.channel === 'auth:settings-change')
+    expect(row).toMatchObject({ method: 'host', label: 'desktop-renderer' })
+  })
+
+  it('carries a construction-time actor through the anchor’s own setPassword', async () => {
+    // The knob `claudeui-server` turns: it never calls `provisionBreakGlassPassword`
+    // for `remote:set-password`, it goes through the anchor — so the actor has to
+    // survive that hop or an anchor-mediated rotation would still be attributed to
+    // a renderer.
+    const { anchor, db } = await freshAnchor({ asConsole: true })
+    anchor.setPassword('console-anchor-pw')
+
+    const row = db.listAuditLog({ limit: 20 }).find((r) => r.channel === 'auth:settings-change')
+    expect(row).toMatchObject({ method: 'host', label: 'server-console' })
+  })
+
+  // `--disable-auth` is the ONE `hostActor` consumer that fires on a live
+  // `claudeui-server serve`: `applyBootstrapSettings` turns the flag into
+  // `setConfig({ authPolicy: 'off' })`, which is the single most important row in
+  // the trail — somebody turned authentication off on this box. The LABEL is the
+  // load-bearing assertion: `method` would read `host` even on the default actor
+  // (that is the rename), so only the label proves the console's identity
+  // actually reached `auditAuthPolicyChange` rather than the renderer default.
+  it('attributes a console --disable-auth policy row to label "server-console"', async () => {
+    const { anchor, db, surfaceSweeps } = await freshAnchor({ asConsole: true })
+
+    anchor.setConfig({ authPolicy: 'off' })
+
+    const row = db.listAuditLog({ limit: 20 }).find((r) => r.channel === 'auth:policy-change')
+    expect(row).toMatchObject({
+      channel: 'auth:policy-change',
+      method: 'host',
+      label: 'server-console',
+      capability: 'admin',
+      kind: 'command',
+      outcome: 'ok'
+    })
+    expect(row!.detail).toContain('remote:set-config on the host anchor')
+    // The other half of the same branch: auditing a change nobody was
+    // re-admitted for would be a trail that lies.
+    expect(surfaceSweeps()).toBe(1)
+  })
+
+  it('leaves the DESKTOP anchor’s policy row on the renderer label', async () => {
+    const { anchor, db } = await freshAnchor()
+
+    anchor.setConfig({ authPolicy: 'off' })
+
+    const row = db.listAuditLog({ limit: 20 }).find((r) => r.channel === 'auth:policy-change')
+    expect(row).toMatchObject({ method: 'host', label: 'desktop-renderer' })
   })
 
   it('honours the SAME strength rule the web path applies, and writes nothing when it refuses', async () => {

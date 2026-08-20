@@ -47,7 +47,7 @@
 
 import {
   commandRegistry,
-  desktopConnection,
+  hostConnection,
   registerCommand,
   type CommandRegistration
 } from './command-registry'
@@ -81,10 +81,14 @@ export function setDesktopTransportBinder(next: DesktopTransportBinder | null): 
 /**
  * The dispatch thunk a binder should invoke for `channel`. Exported so the
  * ipcMain adapter does not have to restate the transport name or re-derive the
- * desktop connection — the two facts that make a desktop invoke what it is.
+ * host connection — the two facts that make a desktop invoke what it is. Note
+ * they are DIFFERENT axes that were both once spelled `desktop`: `'desktop'` is
+ * the TRANSPORT (this wire), while `hostConnection()` is the IDENTITY, and its
+ * default label — `desktop-renderer` — is the correct one here because a binder
+ * only ever exists where a renderer does.
  */
 export function dispatchDesktop(channel: string, args: unknown[]): Promise<unknown> {
-  return commandRegistry.dispatch(channel, 'desktop', args, desktopConnection())
+  return commandRegistry.dispatch(channel, 'desktop', args, hostConnection())
 }
 
 /**

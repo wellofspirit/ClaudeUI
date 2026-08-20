@@ -36,7 +36,7 @@
 
 import { MessageChannelMain, type BrowserWindow, type MessagePortMain } from 'electron'
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from '../../core/services/sync-host'
-import { desktopConnection } from '../../core/ipc/command-registry'
+import { hostConnection } from '../../core/ipc/command-registry'
 import { logger } from '../../core/services/logger'
 
 const LOG_SOURCE = 'sync-port'
@@ -130,7 +130,7 @@ function handleFrame(session: PortSession, frame: unknown): void {
     // The volatile lane (phase 5 S1). Registered alongside — and, like a WS
     // client's, it starts watching NOTHING: the renderer's watch effect sends
     // `stream:watch` for whatever session it is showing. The desktop's
-    // connection id is the process-wide `desktopConnection()`, which is the same
+    // connection id is the process-wide `hostConnection()`, which is the same
     // identity its `stream:watch` invoke dispatches under.
     //
     // NO BACKPRESSURE CAP HERE (unlike the WS sink, phase 5 S2). A `MessagePort`
@@ -139,9 +139,8 @@ function handleFrame(session: PortSession, frame: unknown): void {
     // event loop in the same process. The condition the cap exists for (a remote
     // link too slow for the token rate) cannot arise, and dropping frames on the
     // guess would cost the desktop its live typing for nothing.
-    session.unsubscribeStream = addStreamSubscriber(
-      desktopConnection().connectionId,
-      (streamFrame) => post(session, streamFrame)
+    session.unsubscribeStream = addStreamSubscriber(hostConnection().connectionId, (streamFrame) =>
+      post(session, streamFrame)
     )
   }
 }

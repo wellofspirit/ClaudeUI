@@ -295,7 +295,7 @@ vi.mock('../../../core/services/logger', () => ({
 import { registerSessionIpc } from '../../../core/ipc/session.ipc'
 import { gitServiceManager } from '../../../core/services/git-service'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
-import { desktopConnection } from '../../../core/ipc/command-registry'
+import { hostConnection } from '../../../core/ipc/command-registry'
 import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
@@ -593,7 +593,7 @@ describe('session.ipc', () => {
     afterEach(() => {
       // The registry is a module singleton shared with the remote path; unwind
       // both connections so state can't leak into the next test.
-      gitWatchRegistry.releaseConnection(desktopConnection().connectionId)
+      gitWatchRegistry.releaseConnection(hostConnection().connectionId)
       gitWatchRegistry.releaseConnection(PHONE)
     })
 

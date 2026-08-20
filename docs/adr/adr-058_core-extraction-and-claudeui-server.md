@@ -191,7 +191,21 @@ one level down: `provisionBreakGlassPassword` (in `core/services/break-glass.ts`
 `HostAnchor.setPassword`, which then adds the 4008 sweep of the clients holding the
 credential that just died, and the console, which has no listener to sweep. So there is
 one strength rule, one KDF and one `auth:settings-change` row, with a `via` label naming
-the surface. Note the honest limit, **owner-ratified as accepted (2026-08-20)**: only
+the verb.
+
+**Amendment (2026-08-20) — the row now names the surface too.** The `IdentityMethod`
+these writes were attributed under was called `desktop`, which was exactly the misnomer
+this decision retired one level up: on a headless box every host-anchor row claimed a
+renderer that does not exist there. It is `host` now — "the host's own in-process,
+fully-trusted surface" — and WHICH surface moved to the identity's `label`:
+`desktop-renderer` in the Electron app, `server-console` in `claudeui-server`. The knob is
+a construction-time `actor` on `createHostAnchor` (threaded from `startCoreServices`'s
+`hostActor`) and an optional `actor` on `provisionBreakGlassPassword`, both defaulting to
+the renderer label so the desktop path is unchanged. Pre-release: no migration and no
+epoch note — existing local audit rows keep whatever they say. `via` is unchanged and
+still finer-grained: which VERB on that surface.
+
+Note the honest limit, **owner-ratified as accepted (2026-08-20)**: only
 the SUCCESS row is common. A refused attempt
 leaves a dispatch error row on the web path (`authcfg:set-password` goes through the
 command registry) and nothing at all on the desktop/console paths, which are raw

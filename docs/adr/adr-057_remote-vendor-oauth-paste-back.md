@@ -26,7 +26,7 @@ The invariant that makes this tractable: **the host always performs the token EX
 
 cli.js's `claude_authenticate` already returns a `manualUrl` whose claude.ai page displays a code, and `claude_oauth_callback(code, state)` already exchanges it host-side (ADR-014's manual fallback). Remote just needed the verbs registered and `manualUrl` surfaced, plus one behavioural change: **the host must not open its own browser for a remote-initiated sign-in.**
 
-`AuthManager.signIn({ remote })` is the whole change. `remote` is derived, not asserted: the shared handler reads `connection.identity.method` — the desktop connection is `'desktop'` (opens the host browser, byte-identical to before), any other method is remote (skips `shell.openExternal`, returns `manualUrl` on the `AuthFlowState`). This is the "origin-derived flag": ONE handler body whose behaviour follows WHO called, never a second copy. `account:add` threads the same flag (it kicks off a login for the new account). The code returns via `auth:submit-code`.
+`AuthManager.signIn({ remote })` is the whole change. `remote` is derived, not asserted: the shared handler reads `connection.identity.method` — the host's own in-process connection is `'host'` (opens the host browser, byte-identical to before; the value was spelled `'desktop'` until the 2026-08-20 rename — see ADR-058's amendment), any other method is remote (skips `shell.openExternal`, returns `manualUrl` on the `AuthFlowState`). This is the "origin-derived flag": ONE handler body whose behaviour follows WHO called, never a second copy. `account:add` threads the same flag (it kicks off a login for the new account). The code returns via `auth:submit-code`.
 
 ### 2. Codex vault — paste the whole callback URL
 

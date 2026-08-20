@@ -66,7 +66,7 @@ import {
   authcfgSetPassword,
   type AuthcfgHost
 } from '../../../core/ipc/authcfg-commands'
-import { desktopConnection, makeRemoteConnection, type CommandConnection } from '../../../core/ipc/command-registry'
+import { hostConnection, makeRemoteConnection, type CommandConnection } from '../../../core/ipc/command-registry'
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
   LAN_LINK_UNAVAILABLE_ERROR,
@@ -199,7 +199,7 @@ describe('the settings-session backstop', () => {
   })
 
   it.each(verbs)('%s lets the DESKTOP through — it is the host anchor', async (_n, call) => {
-    await expect(call(desktopConnection())).resolves.toMatchObject({ ok: true })
+    await expect(call(hostConnection())).resolves.toMatchObject({ ok: true })
   })
 })
 
@@ -211,7 +211,7 @@ describe('the LAN channel link (ADR-056 item C)', () => {
   })
 
   it('lets the DESKTOP read it with no ceremony — it is the host anchor', async () => {
-    await expect(authcfgLanLink(desktopConnection(), makeHost())).resolves.toMatchObject({
+    await expect(authcfgLanLink(hostConnection(), makeHost())).resolves.toMatchObject({
       url: expect.stringContaining('#k=')
     })
   })
@@ -278,7 +278,7 @@ describe('authcfgApply — the batch', () => {
     // `off` auth-mode on every transport; the desktop's own `off` path is
     // `remote:set-config` with its typed confirmation, which is a different
     // writer with a different ceremony — not this verb being lenient at home.
-    await expect(authcfgApply(desktopConnection(), { authMode: 'off' })).rejects.toThrow(
+    await expect(authcfgApply(hostConnection(), { authMode: 'off' })).rejects.toThrow(
       AUTH_MODE_OFF_HOST_ANCHOR_ERROR
     )
     expect(configWrites).toEqual([])

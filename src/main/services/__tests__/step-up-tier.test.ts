@@ -42,7 +42,7 @@ import {
 import {
   PINNED_CAPABILITIES,
   makeRemoteConnection,
-  desktopConnection,
+  hostConnection,
   type Capability,
   type CommandKind
 } from '../../../core/ipc/command-registry'
@@ -464,10 +464,10 @@ describe('presenceOf / tierOf', () => {
   it('reads the desktop connection as EXEMPT (the ADR-052 sentinel, unchanged)', () => {
     // `shellGrantExpiresAt === undefined` stays the ONE exemption test, so the
     // two axes cannot disagree about who is the host surface.
-    expect(presenceOf(desktopConnection()).exempt).toBe(true)
-    expect(shellReadAllowed(desktopConnection())).toBe(true)
-    expect(shellActAllowed(desktopConnection())).toBe(true)
-    expect(authcfgAllowed(desktopConnection())).toBe(true)
+    expect(presenceOf(hostConnection()).exempt).toBe(true)
+    expect(shellReadAllowed(hostConnection())).toBe(true)
+    expect(shellActAllowed(hostConnection())).toBe(true)
+    expect(authcfgAllowed(hostConnection())).toBe(true)
   })
 
   it('carries the tier the connection was admitted under', () => {

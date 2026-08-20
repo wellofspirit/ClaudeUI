@@ -1513,7 +1513,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
   // Per-connection interest (phase 5 S2). Same declaration the remote transport
   // registers — see `ipc/git-watch.ts`. The desktop is a connection like any
-  // other: it dispatches under the process-wide `desktopConnection()` id, which is
+  // other: it dispatches under the process-wide `hostConnection()` id, which is
   // what its watch set is keyed by.
   handleIpc(GIT_WATCH_COMMAND)
 

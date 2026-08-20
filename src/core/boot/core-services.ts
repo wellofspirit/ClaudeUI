@@ -49,6 +49,7 @@ import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
+import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
 import type { AuthCommandDeps } from '../ipc/auth-commands'
 import type { AutomationManager } from '../services/automation-manager'
@@ -91,6 +92,16 @@ export interface CoreServicesOptions {
    * that decision made for it by a persisted checkbox.
    */
   autostart: boolean
+  /**
+   * WHICH host surface this process is, for the host anchor's audit rows.
+   *
+   * Both values carry `method: 'host'` — the anchor is the host's own surface in
+   * either deployment — so this selects the row's LABEL. The desktop takes the
+   * default (`desktop-renderer`); `claudeui-server` passes
+   * `hostConnection('server-console')`, because a headless box has no renderer and
+   * a row naming one would misattribute.
+   */
+  hostActor?: CommandConnection
   /** See the module header — fires between the session graph and credential sync. */
   afterSessionGraph?: (manager: SessionManager) => void
 }
@@ -100,7 +111,8 @@ export interface CoreServicesOptions {
  * Call ONCE per process.
  */
 export function startCoreServices(options: CoreServicesOptions): CoreServices {
-  const { remoteAccessDisabled, authDeps, notifier, autostart, afterSessionGraph } = options
+  const { remoteAccessDisabled, authDeps, notifier, autostart, hostActor, afterSessionGraph } =
+    options
 
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.
@@ -178,7 +190,12 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // has no remote registration at all.
   registerAuthcfgIpc(remoteServer)
 
-  const hostAnchor = createHostAnchor({ remoteServer, tailscaleManager, remoteAccessDisabled })
+  const hostAnchor = createHostAnchor({
+    remoteServer,
+    tailscaleManager,
+    remoteAccessDisabled,
+    actor: hostActor
+  })
 
   // Autostart: fire-and-forget so a listen failure (e.g. EADDRINUSE from a
   // stale previous instance) never blocks or crashes app startup. The error

@@ -115,7 +115,7 @@ import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { terminalService } from '../../../core/services/terminal-service'
 import { registerRemoteHandlers } from '../../../core/ipc/remote-handlers'
 import { registerTerminalIpc } from '../../../core/ipc/terminal.ipc'
-import { commandRegistry, desktopConnection } from '../../../core/ipc/command-registry'
+import { commandRegistry, hostConnection } from '../../../core/ipc/command-registry'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -579,7 +579,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
   it('a remote client opening slot 0 shares the DESKTOP’s pty, and both sinks see the bytes', async () => {
     remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
     // The desktop opens terminal 0 of this repo first.
-    const desktopId = terminalService.create(desktopConnection(), '/repo', 0)
+    const desktopId = terminalService.create(hostConnection(), '/repo', 0)
     expect(ptyStub.spawned).toHaveLength(1)
 
     const client = await connect()
@@ -624,8 +624,8 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     // Desktop opens the same slot — same pty — and attaches. Its lane is a
     // broadcast, so it already saw the live chunk; the replay is flagged so the
     // client resets rather than appending.
-    expect(terminalService.create(desktopConnection(), '/repo', 0)).toBe(remoteId)
-    expect(terminalService.attach(desktopConnection(), remoteId)).toBe(true)
+    expect(terminalService.create(hostConnection(), '/repo', 0)).toBe(remoteId)
+    expect(terminalService.attach(hostConnection(), remoteId)).toBe(true)
 
     ptyStub.spawned[0].emitData('after\r\n')
     await flushPtyBatch()
@@ -642,7 +642,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
     // A shell the operator has open on the desktop — precisely what an
     // unauthorized client must not be able to reach by naming its slot.
-    const desktopId = terminalService.create(desktopConnection(), '/repo', 0)
+    const desktopId = terminalService.create(hostConnection(), '/repo', 0)
 
     const client = await connect()
     await expect(client.invoke('terminal:create', '/repo', 0)).rejects.toThrow('needs-step-up')

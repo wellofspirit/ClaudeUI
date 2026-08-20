@@ -76,7 +76,16 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
 // ---------------------------------------------------------------------------
 
 /**
- * How a connection proved who it is. `desktop` is the in-process renderer.
+ * How a connection proved who it is.
+ *
+ * `host` is the HOST'S OWN in-process, fully-trusted surface — the one identity
+ * that presented no credential because it never crossed a wire. Which surface it
+ * was is the {@link ConnectionIdentity.label}: `desktop-renderer` in the Electron
+ * app, `server-console` in `claudeui-server`. It was called `desktop` until
+ * 2026-08-20, which misattributed every host-anchor row written on a headless box
+ * — since ADR-058 `src/main` and `src/server` are sibling HOSTS, and there is no
+ * desktop on one of them. Pre-release, so old local audit rows keep whatever they
+ * say and there is no migration.
  *
  * `webauthn` is a completed passkey assertion (the only method that proves a
  * human rather than a cached secret), `enroll-token` a one-time link that may do
@@ -89,13 +98,17 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
  * for a person. Neither can authenticate a connection any more, so neither can
  * appear on an audit row's `method` — what survives of the tailnet login is the
  * `label`, which a password connection on the serve origin still carries.
+ *
+ * Not to be confused with {@link Transport}, whose `'desktop'` member is a
+ * different axis entirely: WHICH WIRE a channel is served on (`ipcMain.handle`
+ * vs the WebSocket), not who is on the far end of it.
  */
 export type IdentityMethod =
   | 'password'
   | 'webauthn'
   | 'enroll-token'
   | 'none'
-  | 'desktop'
+  | 'host'
 
 export interface ConnectionIdentity {
   method: IdentityMethod
@@ -124,8 +137,8 @@ export interface CommandConnection {
   /**
    * Phase 2 (ADR-052 decision 5): expiry of a DECAYING `shell` grant.
    *
-   *  - `undefined` — this connection's grants never decay (the desktop
-   *    renderer: it *is* the host surface, so sudo semantics are meaningless);
+   *  - `undefined` — this connection's grants never decay (the `host` identity:
+   *    it *is* the host surface, so sudo semantics are meaningless);
    *  - `null`      — decaying-grant connection with no grant armed;
    *  - `number`    — epoch ms after which the grant is stale and the next
    *    shell-bearing command must be answered with `needs-step-up`.
@@ -169,7 +182,7 @@ export interface CommandConnection {
    * a token would add leakable surface without adding proof.
    *
    * Same three-state convention as the two windows above — `undefined` on the
-   * exempt desktop connection, which is the host anchor and needs no session at
+   * exempt `host` connection, which IS the host anchor and needs no session at
    * all.
    */
   settingsSessionExpiresAt?: number | null
@@ -192,7 +205,7 @@ export interface CommandConnection {
 // `services/step-up-tier.ts` owns the predicates now (`shellReadAllowed`,
 // `shellActAllowed`), and both the transport and the service backstop read them.
 
-/** Every capability — the desktop renderer's grant set. */
+/** Every capability — the `host` identity's grant set. */
 export const ALL_GRANTS: ReadonlySet<Capability> = new Set<Capability>(CAPABILITIES)
 
 /**
@@ -266,20 +279,35 @@ export const FULL_REMOTE_GRANTS: ReadonlySet<Capability> = new Set<Capability>([
 export const ENROLL_ONLY_GRANTS: ReadonlySet<Capability> = new Set<Capability>(['enroll'])
 
 /**
- * The desktop renderer's synthetic connection. One id per app run so audit rows
- * from a single session group together; ALL grants (it is the host surface).
+ * Which host surface a `host`-method identity is. A CLOSED union rather than a
+ * free string: the two values are compared by eye in audit rows across three
+ * files, and a typo would produce a row that reads plausibly and attributes
+ * nothing.
  */
-let desktopConnectionSingleton: CommandConnection | null = null
+export type HostSurfaceLabel = 'desktop-renderer' | 'server-console'
 
-export function desktopConnection(): CommandConnection {
-  if (!desktopConnectionSingleton) {
-    desktopConnectionSingleton = {
-      connectionId: randomUUID(),
-      identity: { method: 'desktop', label: 'desktop-renderer', connectedAt: Date.now() },
-      grants: ALL_GRANTS
-    }
+/**
+ * The host's own synthetic connection. One id per label per process run, so
+ * audit rows from a single run group together; ALL grants (it IS the host
+ * surface).
+ *
+ * Memoized PER LABEL rather than once, because a process could in principle
+ * write under both — and two surfaces sharing one `connectionId` would make the
+ * trail claim they were one actor. In practice the Electron app only ever uses
+ * the default and `claudeui-server` only ever passes `server-console`.
+ */
+const hostConnections = new Map<HostSurfaceLabel, CommandConnection>()
+
+export function hostConnection(label: HostSurfaceLabel = 'desktop-renderer'): CommandConnection {
+  const existing = hostConnections.get(label)
+  if (existing) return existing
+  const connection: CommandConnection = {
+    connectionId: randomUUID(),
+    identity: { method: 'host', label, connectedAt: Date.now() },
+    grants: ALL_GRANTS
   }
-  return desktopConnectionSingleton
+  hostConnections.set(label, connection)
+  return connection
 }
 
 /**
@@ -292,7 +320,7 @@ export function desktopConnection(): CommandConnection {
  * it, every rejected handshake would be an orphan row.
  */
 export function makeRemoteConnection(
-  method: Exclude<IdentityMethod, 'desktop'>,
+  method: Exclude<IdentityMethod, 'host'>,
   login: string | null,
   grants: ReadonlySet<Capability> = AUTH_OFF_GRANTS,
   opts?: {

@@ -52,7 +52,7 @@ import {
 } from '../services/auth-policy'
 import { sanitizedRemoteConfig } from '../services/remote-config-view'
 import { MAX_SESSION_MAX_AGE_HOURS } from '../services/step-up-tier'
-import { desktopConnection } from '../ipc/command-registry'
+import { hostConnection, type CommandConnection } from '../ipc/command-registry'
 import { provisionBreakGlassPassword } from '../services/break-glass'
 import { logger } from '../services/logger'
 import type {
@@ -94,11 +94,12 @@ export interface HostAnchor {
   /**
    * Provision the break-glass credential.
    *
-   * `via` names the host surface in the audit row — the desktop's
-   * `remote:set-password` by default, `claudeui-server set-password` from a
-   * headless console. It is a LABEL, never an authorization input: both callers
-   * are the host anchor by construction (this module has no remote
-   * registration), so nothing branches on it.
+   * `via` names the VERB in the audit row — the desktop's `remote:set-password`
+   * by default, `claudeui-server set-password` from a headless console. It is a
+   * LABEL, never an authorization input: both callers are the host anchor by
+   * construction (this module has no remote registration), so nothing branches
+   * on it. WHICH host surface is separately on the row, as the identity's
+   * `label` (see {@link HostAnchorDeps.actor}).
    */
   setPassword(password: string, opts?: { via?: string }): void
   clearPassword(): void
@@ -118,12 +119,25 @@ export interface HostAnchorDeps {
    * reconcile, autostart or force-reserve.
    */
   remoteAccessDisabled: boolean
+  /**
+   * The identity this anchor's audited writes are attributed to.
+   *
+   * Always a `method: 'host'` connection — the anchor IS the host's own surface,
+   * which is the whole reason it is reachable from neither transport — so what
+   * this knob actually selects is the LABEL: `desktop-renderer` (the default, the
+   * Electron app) or `server-console` (`claudeui-server`). Taken at CONSTRUCTION
+   * rather than per call because a host has exactly one of these for its whole
+   * run; a per-call actor would invite a caller to pass a remote connection's
+   * identity into a surface no remote connection can reach.
+   */
+  actor?: CommandConnection
 }
 
 export function createHostAnchor({
   remoteServer,
   tailscaleManager,
-  remoteAccessDisabled
+  remoteAccessDisabled,
+  actor = hostConnection()
 }: HostAnchorDeps): HostAnchor {
   return {
     interfaces() {
@@ -317,7 +331,7 @@ export function createHostAnchor({
         // the two produced a given row.
         const moved = describeAuthSurfaceChange(before, after)
         auditAuthPolicyChange(
-          desktopConnection(),
+          actor,
           moved ? `${moved} (via remote:set-config on the host anchor)` : null
         )
         if (after.effectiveAuthPolicy === 'off') {
@@ -354,7 +368,7 @@ export function createHostAnchor({
     // not an auth-SURFACE change — the methods on offer did not move, only the
     // secret — so it deliberately does not ride the 4009 reaction.
     setPassword(password, opts) {
-      provisionBreakGlassPassword(password, { via: opts?.via ?? 'remote:set-password' })
+      provisionBreakGlassPassword(password, { via: opts?.via ?? 'remote:set-password', actor })
       remoteServer.disconnectPasswordClients()
     },
 

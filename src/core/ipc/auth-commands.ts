@@ -18,7 +18,7 @@
  * remote caller must not trigger a host-physical browser open:
  *
  *  - `auth:sign-in` / `account:add` (native Claude OAuth, cli.js-owned): the
- *    handler reads `connection.identity.method` — the desktop connection opens
+ *    handler reads `connection.identity.method` — the `host` connection opens
  *    the host browser (byte-identical to before), a remote connection skips
  *    `shell.openExternal` and gets `manualUrl` back on the state instead
  *    (threaded through `signIn({ remote })`). The token EXCHANGE stays host-side
@@ -74,9 +74,9 @@ export interface AuthCommandDeps {
   setAccountEnabled(enabled: boolean): Promise<AccountsState> | AccountsState
 }
 
-/** True for any transport other than the in-process desktop renderer. */
+/** True for any caller other than the host's own in-process surface. */
 function isRemote(connection: CommandConnection): boolean {
-  return connection.identity.method !== 'desktop'
+  return connection.identity.method !== 'host'
 }
 
 /**

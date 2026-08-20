@@ -45,7 +45,7 @@ import {
   FULL_REMOTE_GRANTS,
   ENROLL_ONLY_GRANTS,
   PINNED_CAPABILITIES,
-  desktopConnection,
+  hostConnection,
   makeRemoteConnection,
   type CommandConnection
 } from '../../../core/ipc/command-registry'
@@ -399,7 +399,7 @@ describe('AUTO effective-policy flip on a credential change', () => {
     setPolicy({ authPolicy: null }) // AUTO
     const service = liveService(1) // 1 credential ⇒ effective passkey-always
     const host = hostSpy()
-    const desktop = desktopConnection()
+    const desktop = hostConnection()
 
     await expect(webauthnRevoke(desktop, 'cred-0', host as never, service)).resolves.toEqual({
       ok: true
@@ -409,7 +409,7 @@ describe('AUTO effective-policy flip on a credential change', () => {
     expect(policyRows()).toHaveLength(1)
     expect(policyRows()[0]).toMatchObject({
       channel: 'auth:policy-change',
-      method: 'desktop',
+      method: 'host',
       label: 'desktop-renderer',
       capability: 'admin',
       kind: 'command',
@@ -428,7 +428,7 @@ describe('AUTO effective-policy flip on a credential change', () => {
     const host = hostSpy()
 
     await expect(
-      webauthnRevoke(desktopConnection(), 'cred-0', host as never, service)
+      webauthnRevoke(hostConnection(), 'cred-0', host as never, service)
     ).resolves.toEqual({ ok: true })
 
     expect(policyRows()).toHaveLength(0)
@@ -441,7 +441,7 @@ describe('AUTO effective-policy flip on a credential change', () => {
     const host = hostSpy()
 
     await expect(
-      webauthnRevoke(desktopConnection(), 'cred-0', host as never, service)
+      webauthnRevoke(hostConnection(), 'cred-0', host as never, service)
     ).rejects.toThrow('last-credential-lockout')
 
     expect(policyRows()).toHaveLength(0)
@@ -481,7 +481,7 @@ describe('AUTO effective-policy flip on a credential change', () => {
     setPolicy({ authPolicy: null })
     const service = liveService(1)
     await expect(
-      webauthnRevoke(desktopConnection(), 'cred-0', null, service)
+      webauthnRevoke(hostConnection(), 'cred-0', null, service)
     ).resolves.toEqual({ ok: true })
     expect(policyRows()).toHaveLength(1)
   })

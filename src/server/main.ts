@@ -227,9 +227,21 @@ async function main(): Promise<void> {
   // Host adapters are skipped for the same reason: nothing on this path resolves
   // an app path, an engine locator or an account state.
   if (newPassword !== null) {
-    const { provisionBreakGlassPassword } = await import('../core/services/break-glass')
+    // Both imports are DYNAMIC and both live here, after the driver is
+    // installed, for the same reason: their module graphs reach `services/db`,
+    // and a static import at the top of this file would evaluate it before the
+    // driver seam had an engine.
+    const [{ provisionBreakGlassPassword }, { hostConnection }] = await Promise.all([
+      import('../core/services/break-glass'),
+      import('../core/ipc/command-registry')
+    ])
     try {
-      provisionBreakGlassPassword(newPassword, { via: 'claudeui-server set-password' })
+      provisionBreakGlassPassword(newPassword, {
+        via: 'claudeui-server set-password',
+        // `method: 'host'` either way — this names WHICH host surface, and a
+        // headless box has no renderer to name.
+        actor: hostConnection('server-console')
+      })
     } catch (err) {
       fail(err)
     }
@@ -246,11 +258,25 @@ async function main(): Promise<void> {
   // Imported after the adapters are wired: these modules pull in the service
   // graph, and a static import would run their module bodies before
   // `setHostPaths` had published the app path the engine locators read.
-  const { startCoreServices } = await import('../core/boot/core-services')
-  const { sanitizedRemoteConfig } = await import('../core/services/remote-config-view')
+  const [{ startCoreServices }, { sanitizedRemoteConfig }, { hostConnection }] = await Promise.all([
+    import('../core/boot/core-services'),
+    import('../core/services/remote-config-view'),
+    import('../core/ipc/command-registry')
+  ])
 
   const core = startCoreServices({
     remoteAccessDisabled: false,
+    // Who this process's host-anchor writes are attributed to. On a `serve` run
+    // that is exactly ONE path today: `--disable-auth`, which
+    // `applyBootstrapSettings` turns into `setConfig({ authPolicy: 'off' })` and
+    // whose `auth:policy-change` row is the most important line in the trail.
+    // (`anchor.setPassword` is NOT reachable here — `remote:set-password` is
+    // ipcMain-only wiring that no headless host binds; the console rotates
+    // through the `set-password` subcommand above, which never builds an anchor.)
+    // `method` is `host` on both deployments — the anchor is the host's own
+    // surface by construction — so the LABEL is what stops a headless box
+    // claiming a `desktop-renderer` it does not have.
+    hostActor: hostConnection('server-console'),
     // The desktop-auth pair. A headless server has no OAuth browser and no
     // multi-account UI, so both refuse loudly rather than pretending: the
     // channels stay REGISTERED (the surface must not depend on the host, or the

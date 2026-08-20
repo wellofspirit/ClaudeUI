@@ -649,7 +649,11 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     expect(auditAfter[0]).toMatchObject({
       channel: 'auth:policy-change',
       capability: 'admin',
-      method: 'desktop',
+      // The HOST ANCHOR wrote it. This boot wires the desktop host, so the label
+      // names the renderer; `claudeui-server` writes the same row as
+      // `server-console`.
+      method: 'host',
+      label: 'desktop-renderer',
       kind: 'command',
       outcome: 'ok'
     })

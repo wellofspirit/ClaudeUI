@@ -2144,11 +2144,23 @@ export function renameWebauthnCredential(credId: string, nickname: string | null
 export interface AuditLogRow {
   id: number
   ts: number
-  /** Per-connection uuid (one per authenticated socket / per desktop app run). */
+  /** Per-connection uuid (one per authenticated socket / per host surface per run). */
   connectionId: string
-  /** 'token' | 'password' | 'tailnet-identity' | 'desktop'. */
+  /**
+   * The `IdentityMethod` the connection was admitted under: 'password' |
+   * 'webauthn' | 'enroll-token' | 'none' | 'host'.
+   *
+   * TEXT rather than an enum because it is a HISTORICAL record — rows written by
+   * an older build keep whatever vocabulary that build had, and the retired
+   * values ('token' and 'tailnet-identity', both gone in ADR-056; 'desktop',
+   * renamed to 'host' on 2026-08-20) may still be sitting in a local DB. Nothing
+   * reads this column back for a decision, so there is no migration.
+   */
   method: string
-  /** Tailnet login when known, else the method name. */
+  /**
+   * Tailnet login / passkey nickname when known; for `host`, WHICH host surface
+   * ('desktop-renderer' or 'server-console'); else the method name.
+   */
   label: string
   capability: string
   kind: string

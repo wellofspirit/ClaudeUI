@@ -7,7 +7,7 @@ import { logger } from '../../core/services/logger'
 import { SessionManager } from '../../core/services/session-manager'
 import { AutomationManager } from '../../core/services/automation-manager'
 import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
-import { commandRegistry, desktopConnection, registerCommand } from '../../core/ipc/command-registry'
+import { commandRegistry, hostConnection, registerCommand } from '../../core/ipc/command-registry'
 import { addStreamObserver, addSyncSubscriber } from '../../core/services/sync-host'
 import { streamFrameToEmission } from '../../core/shared/sync/stream'
 import type {
@@ -475,7 +475,7 @@ export class PluginManager {
           handler: (...args: unknown[]) => handler(...args)
         })
         ipcMain.handle(fullChannel, (_event, ...args: unknown[]) =>
-          commandRegistry.dispatch(fullChannel, 'desktop', args, desktopConnection())
+          commandRegistry.dispatch(fullChannel, 'desktop', args, hostConnection())
         )
         pluginLogger.debug(`Registered IPC handler: ${fullChannel}`)
 

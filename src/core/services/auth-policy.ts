@@ -363,9 +363,9 @@ export function readEffectiveStepUpTier(ctx: AuthPolicyContext = readAuthPolicyC
  * `:revoke`). They already drifted once at the level above this (the config
  * path reacted, the credential path did not); letting each also spell out its
  * own row shape would guarantee that an audit reader has to know which path
- * wrote it. `connection` is the ACTOR, so the trail names who did it —
- * `desktop-renderer`, a passkey nickname, or `enroll-token` for the very first
- * device.
+ * wrote it. `connection` is the ACTOR, so the trail names who did it — the host
+ * anchor (`method: 'host'`, labelled `desktop-renderer` or `server-console`), a
+ * passkey nickname, or `enroll-token` for the very first device.
  *
  * `detail` (ADR-054 decision 5) records the INTENT — what actually moved, and
  * through which path — so an audit reader does not have to infer it from the

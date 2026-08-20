@@ -26,7 +26,7 @@ import {
   AUTH_OFF_GRANTS,
   ALL_GRANTS,
   PINNED_CAPABILITIES,
-  desktopConnection,
+  hostConnection,
   makeRemoteConnection,
   type CommandRegistration
 } from '../../../core/ipc/command-registry'
@@ -165,12 +165,12 @@ describe('capability gating', () => {
     )
   })
 
-  it('the desktop connection holds every capability', async () => {
+  it('the host connection holds every capability', async () => {
     for (const capability of ALL_GRANTS) {
-      expect(desktopConnection().grants.has(capability)).toBe(true)
+      expect(hostConnection().grants.has(capability)).toBe(true)
     }
     registry.register(reg({ channel: 'host:thing', capability: 'host', transport: 'desktop' }))
-    await expect(registry.dispatch('host:thing', 'desktop', [], desktopConnection())).resolves.toBe(
+    await expect(registry.dispatch('host:thing', 'desktop', [], hostConnection())).resolves.toBe(
       'ok'
     )
   })
@@ -248,16 +248,37 @@ describe('audit', () => {
     expect(appendAuditLog).not.toHaveBeenCalled()
   })
 
-  it('audits desktop dispatches with method "desktop"', async () => {
+  // The two axes that both used to be spelled `desktop` and are now deliberately
+  // different words: the TRANSPORT (which wire served the invoke) stays
+  // `'desktop'`, while the identity METHOD is `'host'` and the SURFACE moves to
+  // the label. On a headless box the same dispatch would read
+  // `label: 'server-console'`.
+  it('audits desktop-transport dispatches with method "host" / label "desktop-renderer"', async () => {
     registry.register(
       reg({ channel: 'claude:save-permissions', capability: 'config', transport: 'desktop' })
     )
-    await registry.dispatch('claude:save-permissions', 'desktop', [], desktopConnection())
+    await registry.dispatch('claude:save-permissions', 'desktop', [], hostConnection())
     expect(appendAuditLog.mock.calls[0][0]).toMatchObject({
-      method: 'desktop',
+      method: 'host',
       label: 'desktop-renderer',
       outcome: 'ok'
     })
+  })
+
+  it('labels the console host surface without changing the method', () => {
+    // Same METHOD (both are the host's own surface, so both are fully trusted
+    // and hold every grant); different LABEL, which is the only thing a reader
+    // needs to tell a renderer row from a console row.
+    expect(hostConnection('server-console').identity).toMatchObject({
+      method: 'host',
+      label: 'server-console'
+    })
+    expect(hostConnection('server-console').grants).toBe(hostConnection().grants)
+    // Distinct surfaces are distinct actors: sharing one connectionId would make
+    // the trail claim the renderer and the console were one.
+    expect(hostConnection('server-console').connectionId).not.toBe(hostConnection().connectionId)
+    // …and each is memoized, so rows from one run group together.
+    expect(hostConnection('server-console')).toBe(hostConnection('server-console'))
   })
 
   it('records sessionId only where the registration declares one', async () => {

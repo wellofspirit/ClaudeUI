@@ -114,10 +114,10 @@ export class TerminalService {
    * shows the terminal affordance only from this), plus the params the step-up
    * proof is derived from.
    *
-   * The desktop renderer is never gated by the REMOTE toggle — that switch
-   * exists to arm the `shell` capability for remote connections, not to take
-   * the local shell away from the person sitting at the machine. It never runs
-   * a ceremony either, hence `stepUp: null` there.
+   * The host's own surface (`method: 'host'`) is never gated by the REMOTE
+   * toggle — that switch exists to arm the `shell` capability for remote
+   * connections, not to take the local shell away from the person sitting at
+   * the machine. It never runs a ceremony either, hence `stepUp: null` there.
    *
    * `stepUp` is carried HERE rather than left to `/remote/auth-info` because
    * auth-info advertises AUTHENTICATION methods, and the tunnel transport
@@ -127,7 +127,7 @@ export class TerminalService {
    * verifies the proof against, so the two can never disagree in production.
    */
   availability(connection: CommandConnection): TerminalAvailability {
-    if (connection.identity.method === 'desktop') {
+    if (connection.identity.method === 'host') {
       return {
         allowed: true,
         needsStepUp: false,
@@ -184,7 +184,7 @@ export class TerminalService {
    * own class, so the split is visible at the method it governs.
    */
   private assertAllowed(connection: CommandConnection, cls: 'read' | 'act'): void {
-    if (connection.identity.method === 'desktop') return
+    if (connection.identity.method === 'host') return
     if (!readTerminalPolicy().allowTerminal) throw new Error(TERMINAL_DISABLED_ERROR)
     const ok = cls === 'read' ? shellReadAllowed(connection) : shellActAllowed(connection)
     if (!ok) throw new Error(NEEDS_STEP_UP_ERROR)
@@ -292,12 +292,20 @@ export class TerminalService {
    * client), which the caller surfaces rather than throwing.
    *
    * TWO LANES, one ring. A remote connection is registered in the pty manager's
-   * attachment set and has the replay PUSHED to its socket. The desktop has no
-   * attachment set to join — its bytes ride a broadcast `terminal:data` channel
-   * that predates multi-attach — so its attach only pulls the ring and delivers
-   * it on that same channel, flagged `replay`.
+   * attachment set and has the replay PUSHED to its socket. The `host` identity
+   * has no attachment set to join — its bytes ride a broadcast `terminal:data`
+   * channel that predates multi-attach — so its attach only pulls the ring and
+   * delivers it on that same channel, flagged `replay`.
    *
-   * The flag matters because the desktop lane is NOT attachment-gated: between a
+   * That second lane assumes a renderer, and since the 2026-08-20 rename `host`
+   * also covers the server console. `sendData` no-ops without a window, so a
+   * windowless host caller would be told `true` after being delivered NOTHING —
+   * an honest return only because it does mean "the pty exists". Recorded rather
+   * than guarded: the host anchor exposes only the ten `remote:*` ops, so no
+   * console path reaches a terminal verb, and a branch for a caller that cannot
+   * exist would be a second lane nobody drives.
+   *
+   * The flag matters because the host lane is NOT attachment-gated: between a
    * renderer installing its `terminal:data` listener and this call landing, live
    * bytes may already have been written to the xterm — and they are in the ring
    * too (the ring is fed in the same statement that sends them). `replay: true`
@@ -308,7 +316,7 @@ export class TerminalService {
    */
   attach(connection: CommandConnection, id: string): boolean {
     this.assertAllowed(connection, 'read')
-    if (connection.identity.method !== 'desktop') {
+    if (connection.identity.method !== 'host') {
       return this.manager.attach(id, connection.connectionId)
     }
     if (!this.manager.has(id)) return false

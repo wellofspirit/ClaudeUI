@@ -42,8 +42,8 @@
  * the old proof stops verifying.
  *
  * **It is not the web path's writer.** `authcfg:set-password` is session-gated and
- * has a REAL connection identity to attribute, so it must not borrow
- * `desktopConnection()`. It composes the same two shared pieces —
+ * has a REAL connection identity to attribute, so it must not borrow the host
+ * identity. It composes the same two shared pieces —
  * {@link provisionPassword} and `auditSettingsChange` — under its own actor. What
  * all three surfaces share is therefore the credential (one strength rule, one
  * KDF, one stored shape) and the audit ROW shape; what differs is who is named on
@@ -54,7 +54,7 @@
 
 import { auditSettingsChange } from './auth-policy'
 import { provisionPassword } from './remote-auth'
-import { desktopConnection } from '../ipc/command-registry'
+import { hostConnection, type CommandConnection } from '../ipc/command-registry'
 
 /**
  * Provision the break-glass credential from a host anchor, audit row included.
@@ -63,19 +63,25 @@ import { desktopConnection } from '../ipc/command-registry'
  * or `claudeui-server set-password`. It is a LABEL, never an authorization input:
  * both callers are the host anchor by construction, so nothing branches on it.
  *
- * The actor is `desktopConnection()`, matching how `--disable-auth` attributes
- * itself through `remote:set-config`: it is the process's host-anchor identity,
- * and `via` is what tells a reader whether the hands were on a renderer or on a
- * console.
+ * `actor` is the identity the row is attributed to, and it defaults to the
+ * renderer-labelled host connection so the desktop path needs no argument. Both
+ * possibilities carry `method: 'host'` — the trail's METHOD column says "the
+ * host's own surface did this" and its LABEL says which surface
+ * (`desktop-renderer` / `server-console`), which is why `claudeui-server` passes
+ * its own rather than borrowing a label naming a renderer that does not exist on
+ * that box. `via` remains the finer-grained answer: which VERB on that surface.
  *
  * Throws (from `provisionPassword`) if the password is too short, BEFORE anything
  * is written or audited — so a refusal leaves no trace of a rotation that did not
  * happen.
  */
-export function provisionBreakGlassPassword(password: string, opts: { via: string }): void {
+export function provisionBreakGlassPassword(
+  password: string,
+  opts: { via: string; actor?: CommandConnection }
+): void {
   provisionPassword(password)
   auditSettingsChange(
-    desktopConnection(),
+    opts.actor ?? hostConnection(),
     `break-glass password rotated via ${opts.via} on the host anchor`
   )
 }
