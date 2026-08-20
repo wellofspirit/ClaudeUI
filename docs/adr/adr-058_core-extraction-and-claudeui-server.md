@@ -191,7 +191,8 @@ one level down: `provisionBreakGlassPassword` (in `core/services/break-glass.ts`
 `HostAnchor.setPassword`, which then adds the 4008 sweep of the clients holding the
 credential that just died, and the console, which has no listener to sweep. So there is
 one strength rule, one KDF and one `auth:settings-change` row, with a `via` label naming
-the surface. Note the honest limit: only the SUCCESS row is common. A refused attempt
+the surface. Note the honest limit, **owner-ratified as accepted (2026-08-20)**: only
+the SUCCESS row is common. A refused attempt
 leaves a dispatch error row on the web path (`authcfg:set-password` goes through the
 command registry) and nothing at all on the desktop/console paths, which are raw
 host-anchor calls with no registry around them.
