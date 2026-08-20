@@ -56,7 +56,12 @@ export function EnrollPrompt({ onEnroll, onDismiss }: EnrollPromptProps): React.
   return (
     <div
       data-testid="EnrollPrompt"
-      className="fixed top-0 inset-x-0 z-[9998] flex items-center gap-3 px-3 py-2 bg-bg-secondary border-b border-border text-[12px] text-text-secondary"
+      // Below the TopBar (h-12 + the safe-area inset), not over it: at top-0 the
+      // strip intercepted every tap on the hamburger / new-session / ⋯ buttons
+      // until it was dealt with — a non-blocking offer must not block the app's
+      // own controls (owner ruling, 2026-08-20). It still overlays the top of
+      // the transcript, which scrolls; the controls don't.
+      className="fixed top-[calc(3rem+env(safe-area-inset-top,0px))] inset-x-0 z-[9998] flex items-center gap-3 px-3 py-2 bg-bg-secondary border-b border-border text-[12px] text-text-secondary"
     >
       {needsDesktop ? (
         <span data-testid="EnrollPrompt.needsDesktop" className="flex-1 leading-snug">
