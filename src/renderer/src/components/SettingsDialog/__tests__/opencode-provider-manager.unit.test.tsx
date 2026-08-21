@@ -110,9 +110,39 @@ const getOpencodeProviderModels = vi.fn(async (providerId: string) => {
  *   renderer no longer re-derives it from the settings payload, so a test for a
  *   disabled provider must say so here, not via `initial.disabledProviders`.
  */
+/**
+ * Orphan-guard fixtures. `getEngineModels` is what tells the section which
+ * models an edit would make disappear; `loadEngineConfig` is where the
+ * references that must survive live.
+ */
+const OPENAI_ENGINE_MODELS = [
+  {
+    engineId: 'opencode' as const,
+    vendorId: 'openai',
+    vendorName: 'OpenAI',
+    models: [
+      {
+        value: 'openai/gpt-5.5',
+        displayName: 'GPT 5.5',
+        description: '',
+        engineId: 'opencode' as const,
+        vendorId: 'openai'
+      },
+      {
+        value: 'openai/gpt-5.4',
+        displayName: 'GPT 5.4',
+        description: '',
+        engineId: 'opencode' as const,
+        vendorId: 'openai'
+      }
+    ]
+  }
+]
+
 function installApiStub(
   initial: OpencodeConfigSettings,
-  catalog: OpencodeProviderCatalogEntry[] = CATALOG
+  catalog: OpencodeProviderCatalogEntry[] = CATALOG,
+  guard?: { models?: unknown[]; engineConfig?: Record<string, unknown> }
 ): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
@@ -126,7 +156,12 @@ function installApiStub(
     vendorAuthRemove: vi.fn(async () => undefined),
     vendorAuthOauthCancel: vi.fn(async () => undefined),
     setOpencodeProviderDisabled,
-    removeOpencodeProvider
+    removeOpencodeProvider,
+    // Orphan-guard inputs: the section loads the discovered opencode models and
+    // every engine's config to refuse an edit that would strand a configured
+    // model reference. Empty by default — only the guard's own tests supply data.
+    getEngineModels: vi.fn(async () => guard?.models ?? []),
+    loadEngineConfig: vi.fn(async () => guard?.engineConfig ?? {})
   }
 }
 
@@ -374,4 +409,126 @@ describe('opencode provider manager', () => {
       expect(screen.getByText(/1 selected/)).toBeTruthy()
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Orphan guard (Item 3d): an edit that would delete a model some setting
+  // still names is REFUSED, not applied-and-warned. After the write the
+  // reference is already broken and the config that names it is a different
+  // dialog away.
+  // -------------------------------------------------------------------------
+  describe('orphan guard — configured model references block the edit', () => {
+    const OPENAI_ENTRY = entry({ id: 'openai', name: 'OpenAI', modelCount: 2 })
+
+    /** PRE-FIX: the allowlist saved and the judge model quietly became stale. */
+    it('refuses an allowlist save that would remove the auto-mode judge model', async () => {
+      installApiStub({ modelAllowlist: { openai: ['gpt-5.5', 'gpt-5.4'] } }, [OPENAI_ENTRY], {
+        models: OPENAI_ENGINE_MODELS,
+        engineConfig: { autoMode: { judgeModel: 'openai/gpt-5.5' } }
+      })
+      await act(async () => {
+        renderManager()
+      })
+      await openModelDialog('openai')
+
+      // Uncheck the judge model, then save.
+      const rows = await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
+      const luna = rows.find((r) => r.getAttribute('data-id') === 'gpt-5.5')!
+      await act(async () => {
+        fireEvent.click(luna)
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
+      })
+
+      const error = await screen.findByTestId('ModelAllowlistDialog.orphanError')
+      expect(error.textContent).toContain('openai/gpt-5.5')
+      expect(error.textContent).toContain('auto-mode judge model')
+      // Refused, not applied — and the dialog stays open so it can be fixed.
+      expect(saveOpencodeSettings).not.toHaveBeenCalled()
+      expect(screen.getByTestId('ModelAllowlistDialog')).toBeTruthy()
+    })
+
+    it('allows an allowlist save that keeps every referenced model', async () => {
+      installApiStub({ modelAllowlist: { openai: ['gpt-5.5', 'gpt-5.4'] } }, [OPENAI_ENTRY], {
+        models: OPENAI_ENGINE_MODELS,
+        engineConfig: { autoMode: { judgeModel: 'openai/gpt-5.5' } }
+      })
+      await act(async () => {
+        renderManager()
+      })
+      await openModelDialog('openai')
+
+      const rows = await screen.findAllByTestId('ModelAllowlistDialog.modelRow')
+      const mini = rows.find((r) => r.getAttribute('data-id') === 'gpt-5.4')!
+      await act(async () => {
+        fireEvent.click(mini)
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('ModelAllowlistDialog.save'))
+      })
+
+      await waitFor(() => expect(saveOpencodeSettings).toHaveBeenCalled())
+      expect(screen.queryByTestId('ModelAllowlistDialog.orphanError')).toBeNull()
+    })
+
+    it('refuses to DISABLE a provider whose models are still referenced', async () => {
+      installApiStub({}, [OPENAI_ENTRY], {
+        models: OPENAI_ENGINE_MODELS,
+        engineConfig: { dispatch: { defaultModel: 'openai/gpt-5.4' } }
+      })
+      await act(async () => {
+        renderManager()
+      })
+      const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
+      const row = rows.find((r) => r.getAttribute('data-id') === 'openai')!
+      await act(async () => {
+        fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.disable'))
+      })
+
+      const error = await screen.findByTestId('VendorOpencodeSection.orphanError')
+      expect(error.textContent).toContain('openai/gpt-5.4')
+      expect(setOpencodeProviderDisabled).not.toHaveBeenCalled()
+    })
+
+    it('refuses to REMOVE a provider whose models are still referenced, surfacing it in the confirm dialog', async () => {
+      installApiStub({}, [OPENAI_ENTRY], {
+        models: OPENAI_ENGINE_MODELS,
+        engineConfig: { autoMode: { judgeModel: 'openai/gpt-5.5' } }
+      })
+      await act(async () => {
+        renderManager()
+      })
+      const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
+      const row = rows.find((r) => r.getAttribute('data-id') === 'openai')!
+      await act(async () => {
+        fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.remove'))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('VendorOpencodeSection.removeConfirm.confirm'))
+      })
+
+      const confirm = await screen.findByTestId('VendorOpencodeSection.removeConfirm')
+      expect(confirm.textContent).toContain('openai/gpt-5.5')
+      expect(removeOpencodeProvider).not.toHaveBeenCalled()
+    })
+
+    it('still allows disabling a provider nothing references', async () => {
+      installApiStub({}, [OPENAI_ENTRY], {
+        models: OPENAI_ENGINE_MODELS,
+        engineConfig: { autoMode: { judgeModel: 'anthropic/claude-sonnet-5' } }
+      })
+      await act(async () => {
+        renderManager()
+      })
+      const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
+      const row = rows.find((r) => r.getAttribute('data-id') === 'openai')!
+      await act(async () => {
+        fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.disable'))
+      })
+
+      await waitFor(() => expect(setOpencodeProviderDisabled).toHaveBeenCalledWith('openai', true))
+      expect(screen.queryByTestId('VendorOpencodeSection.orphanError')).toBeNull()
+    })
+  })
+
 })

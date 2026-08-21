@@ -19,6 +19,8 @@ import type {
 import type { Provider, AuthOption } from './protocol/types'
 import { logger } from '../services/logger'
 import { engineMeta, FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
+import { ModelUnavailableError } from '../../shared/model-errors'
+export { ModelUnavailableError } from '../../shared/model-errors'
 
 let cachedGroups: EngineModelGroup[] | null = null
 
@@ -481,31 +483,36 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
  * standalone agent-generate transport, so a stale or disabled per-session model
  * (e.g. the default `opencode/mimo-v2.5-free` after its OpenCode Zen provider
  * was disabled) can never reach the backend and desync from what the picker
- * shows. Resolution order mirrors the renderer's `resolveOpencodeModel`:
+ * shows. Resolution order:
  *   1. the requested model, if it is actually available
- *   2. a free OpenCode Zen model (vendor 'opencode'/'zen'), if its provider is enabled
- *   3. the first available opencode model
- *   4. the requested value unchanged when discovery yields nothing — let opencode
- *      apply its own configured default rather than guessing a substitute.
+ *   2. a requested model that is NOT available, against a non-empty catalog →
+ *      {@link ModelUnavailableError}. A REQUEST is an explicit reference, and an
+ *      explicit reference that has vanished must be said out loud rather than
+ *      swapped for a model with different capabilities (owner ruling
+ *      2026-08-21). This replaces a warn-and-substitute that surfaced as a
+ *      vision-capable pick spawning a no-vision session.
+ *   3. NO request → the built-in heuristic ladder (a free OpenCode Zen model,
+ *      else the first available one). Nothing was configured, so nothing is
+ *      being overridden — `agent-generate.ts` relies on this path.
+ *   4. the requested value unchanged when discovery yields nothing — an empty
+ *      catalog cannot distinguish "gone" from "not discovered yet", so let
+ *      opencode apply its own configured default rather than guessing.
  */
 export async function resolveOpencodeSpawnModel(requested?: string): Promise<string | undefined> {
+  let groups: EngineModelGroup[]
   try {
-    const groups = await discoverOpencodeModels()
-    const all = groups.flatMap((g) => g.models)
-    if (all.length === 0) return requested
-    if (requested && all.some((m) => m.value === requested)) return requested
-    const free = all.find((m) => m.vendorId === 'opencode' || m.vendorId === 'zen')
-    const resolved = (free ?? all[0]).value
-    if (requested && requested !== resolved) {
-      logger.warn(
-        'opencode',
-        `Requested model "${requested}" is unavailable (provider disabled or removed); spawning with "${resolved}" instead.`
-      )
-    }
-    return resolved
+    groups = await discoverOpencodeModels()
   } catch {
     return requested
   }
+  const all = groups.flatMap((g) => g.models)
+  if (all.length === 0) return requested
+  if (requested) {
+    if (all.some((m) => m.value === requested)) return requested
+    throw new ModelUnavailableError('opencode', requested)
+  }
+  const free = all.find((m) => m.vendorId === 'opencode' || m.vendorId === 'zen')
+  return (free ?? all[0]).value
 }
 
 /**

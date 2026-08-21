@@ -5,6 +5,7 @@
  * catalog into EngineModelGroup[]/ModelInfo, caching, and graceful failure.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { MODEL_UNAVAILABLE_CODE } from '../../../shared/model-errors'
 
 const {
   mockStart,
@@ -423,28 +424,31 @@ describe('resolvePiSpawnModel — spawn-model resolution ladder', () => {
     expect(logger.warn).not.toHaveBeenCalled()
   })
 
-  it('rung 2: cross-engine/stale requested model swaps to PI_DEFAULT_MODEL when the catalog has it (warn-logged)', async () => {
+  // Rung 2 used to SWAP a stale/cross-engine request onto PI_DEFAULT_MODEL (or
+  // the first catalog entry). It now throws: a request is an explicit reference,
+  // and substituting one silently is what let a session spawn on a model with
+  // different capabilities than the picker showed (owner ruling 2026-08-21).
+  // `importFresh()` resets the module registry, so the error CLASS the SUT
+  // throws is a different object identity from a statically imported one —
+  // assert on the stable `code`/message, never on `instanceof`.
+  const expectUnavailable = async (p: Promise<unknown>, model: string): Promise<void> => {
+    await expect(p).rejects.toMatchObject({ code: MODEL_UNAVAILABLE_CODE, requested: model })
+    await expect(p).rejects.toThrow(new RegExp(model.replace(/[.\\/]/g, '\\$&')))
+  }
+
+  it('rung 2: a stale/cross-engine requested model THROWS instead of swapping', async () => {
     // The observed real-app bug: an opencode "openai/gpt-5.5" remembered on
     // the session slot must never reach set_model.
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     const { resolvePiSpawnModel } = await importFresh()
-    const { logger } = await import('../../services/logger')
-    expect(await resolvePiSpawnModel('openai/gpt-5.5')).toBe('openai-codex/gpt-5.6-luna')
-    expect(logger.warn).toHaveBeenCalledWith(
-      'pi',
-      expect.stringContaining('"openai/gpt-5.5" is unavailable')
-    )
-    expect(logger.warn).toHaveBeenCalledWith(
-      'pi',
-      expect.stringContaining('"openai-codex/gpt-5.6-luna"')
-    )
+    await expectUnavailable(resolvePiSpawnModel('openai/gpt-5.5'), 'openai/gpt-5.5')
   })
 
-  it('rung 2 fallback: PI_DEFAULT_MODEL not in the catalog → first catalog value', async () => {
+  it('rung 2: throws even when PI_DEFAULT_MODEL is absent (no first-catalog stand-in either)', async () => {
     const anthropicOnly = CATALOG.filter((m) => m.provider === 'anthropic')
     mockRequest.mockResolvedValue({ success: true, data: { models: anthropicOnly } })
     const { resolvePiSpawnModel } = await importFresh()
-    expect(await resolvePiSpawnModel('openai/gpt-5.5')).toBe('anthropic/claude-sonnet-4-6')
+    await expectUnavailable(resolvePiSpawnModel('openai/gpt-5.5'), 'openai/gpt-5.5')
   })
 
   it('rung 3: requested absent → undefined without even spawning discovery', async () => {

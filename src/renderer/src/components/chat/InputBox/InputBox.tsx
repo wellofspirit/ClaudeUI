@@ -1,9 +1,11 @@
 import { useRef, useCallback, useEffect, useMemo } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   useSessionStore,
   useActiveSession,
-  resolveOpencodeModel,
-  bootstrapPermissionMode
+  bootstrapPermissionMode,
+  engineDefaultModels,
+  resolveEngineDefaultModel
 } from '../../../stores/session-store'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
@@ -206,27 +208,38 @@ export function InputBox(): React.JSX.Element {
   // session's OWN engine — never surface a same-valued model from another
   // harness. For opencode use the same resolver the spawn path uses so display
   // == what will actually run.
-  const opencodeDefaultModel = useSessionStore((s) => s.opencodeDefaultModel)
-  const piDefaultModel = useSessionStore((s) => s.piDefaultModel)
+  const engineDefaults = useSessionStore(useShallow(engineDefaultModels))
+  const lastSelectedModelByEngine = useSessionStore((s) => s.lastSelectedModelByEngine)
   const selectedModel = useMemo(() => {
     const engine = effectiveEngineId ?? 'claude'
     const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
-    const exact = sameEngine.find((m) => m.value === selectedModelValue)
-    if (exact) return exact
-    if (engine === 'opencode') {
-      const resolved = resolveOpencodeModel(models, opencodeDefaultModel)
-      const m = resolved ? sameEngine.find((mm) => mm.value === resolved) : undefined
+    /** The picker's "nothing resolved" row — never a substitute model. */
+    const unset: (typeof sameEngine)[number] = {
+      value: '',
+      displayName: 'Select a model',
+      shortName: 'Select model',
+      description: '',
+      engineId: engine,
+      supportsAdaptiveThinking: false,
+      supportsEffort: false
+    }
+    // Welcome screen: there is no session holding the pick, so the per-engine
+    // stickiness map is where it lives. Ahead of `exact` because the empty
+    // session's placeholder `selectedModel` would otherwise win.
+    if (!activeSessionId) {
+      const sticky = lastSelectedModelByEngine[engine]
+      const m = sticky ? sameEngine.find((mm) => mm.value === sticky) : undefined
       if (m) return m
     }
-    if (engine === 'pi') {
-      // Mirror resolvePiSpawnModel's resolution ladder (requested → default →
-      // first catalog): `exact` above already covers "requested", this covers
-      // "default", and `sameEngine[0]` below covers "first catalog". Looking the
-      // configured default up in `models` keeps display consistent with what
-      // would actually spawn — never surfaces it if pi's catalog doesn't have it.
-      const m = models.find(
-        (mm) => mm.value === piDefaultModel && (mm.engineId ?? 'claude') === 'pi'
-      )
+    const exact = sameEngine.find((m) => m.value === selectedModelValue)
+    if (exact) return exact
+    if (engine === 'opencode' || engine === 'pi') {
+      // The SAME resolver the store seeds sessions with, so the pill shows what
+      // will actually spawn. `null` = the user's configured default is gone:
+      // show the unset row rather than a substitute whose capabilities differ.
+      const resolved = resolveEngineDefaultModel(engine, models, engineDefaults)
+      if (resolved === null) return unset
+      const m = sameEngine.find((mm) => mm.value === resolved)
       if (m) return m
     }
     return (
@@ -248,7 +261,14 @@ export function InputBox(): React.JSX.Element {
           : { engineId: engine, supportsAdaptiveThinking: false, supportsEffort: false })
       }
     )
-  }, [models, effectiveEngineId, selectedModelValue, opencodeDefaultModel, piDefaultModel])
+  }, [
+    models,
+    effectiveEngineId,
+    selectedModelValue,
+    engineDefaults,
+    lastSelectedModelByEngine,
+    activeSessionId
+  ])
 
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)
@@ -341,6 +361,25 @@ export function InputBox(): React.JSX.Element {
     }
   }
 
+  /**
+   * Refuse to spawn a non-Claude engine with an EMPTY model.
+   *
+   * An empty `selectedModel` on opencode/pi only happens when the user's
+   * configured default named a model that is gone (the store seeds `''` and
+   * banners it rather than substituting). Passing that through would hand the
+   * spawn resolver `undefined`, which for pi means "use pi's own default" — the
+   * silent substitute this whole path exists to prevent. Claude's `'default'`
+   * alias is a real value and never trips this.
+   */
+  function assertModelResolved(routingId: string): void {
+    const session = useSessionStore.getState().sessions[routingId]
+    const engineId = session?.selectedEngineId ?? 'claude'
+    if (engineId === 'claude' || session?.selectedModel) return
+    throw new Error(
+      `No model selected for this ${engineId} session — the configured default model is no longer available. Pick one in the model picker.`
+    )
+  }
+
   const doSend = useCallback(
     async (
       prompt: string,
@@ -348,6 +387,7 @@ export function InputBox(): React.JSX.Element {
     ) => {
       if (!activeSessionId) return
       if (!sdkActive) {
+        assertModelResolved(activeSessionId)
         const { sessions } = useSessionStore.getState()
         const session = sessions[activeSessionId]
         const opts = resolveSessionSdkOptions(activeSessionId)
@@ -399,6 +439,7 @@ export function InputBox(): React.JSX.Element {
   const ensureSession = useCallback(async () => {
     if (!activeSessionId) return
     if (!sdkActive) {
+      assertModelResolved(activeSessionId)
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
       const opts = resolveSessionSdkOptions(activeSessionId)

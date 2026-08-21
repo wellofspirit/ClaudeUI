@@ -53,6 +53,7 @@ const {
   mockLoadEngineConfig,
   mockLocatePiBinary,
   mockGetPiModelCatalog,
+  mockDiscoverPiModels,
   mockLoadPiSessionHistory,
   mockFindPiSessionFile,
   mockRecordUsageEvent,
@@ -278,6 +279,7 @@ const {
     mockLoadEngineConfig: vi.fn().mockReturnValue({ autoMode: { enabled: false } }),
     mockLocatePiBinary: vi.fn().mockReturnValue('/fake/pi'),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
+    mockDiscoverPiModels: vi.fn().mockResolvedValue([]),
     mockLoadPiSessionHistory: vi.fn().mockResolvedValue([]),
     mockFindPiSessionFile: vi.fn().mockReturnValue(null),
     mockRecordUsageEvent: vi.fn(),
@@ -332,7 +334,15 @@ vi.mock('../pi-locate', () => ({
 // calls it directly and it has no I/O to fake.
 vi.mock('../model-discovery', async () => {
   const actual = await vi.importActual<typeof import('../model-discovery')>('../model-discovery')
-  return { ...actual, getPiModelCatalog: mockGetPiModelCatalog }
+  // `discoverPiModels` is doubled too: the auto-mode judge validates a
+  // CONFIGURED judgeModel against it, and an EMPTY catalog (the default here)
+  // validates nothing — which is what keeps every other auto-mode test on its
+  // original path.
+  return {
+    ...actual,
+    getPiModelCatalog: mockGetPiModelCatalog,
+    discoverPiModels: mockDiscoverPiModels
+  }
 })
 vi.mock('../../services/pi-session-list', () => ({
   loadPiSessionHistory: mockLoadPiSessionHistory,
@@ -457,6 +467,7 @@ beforeEach(() => {
   judgeScript.rejectPrompt = false
   judgeScript.hold = null
   mockLoadEngineConfig.mockReset().mockReturnValue({ autoMode: { enabled: false } })
+  mockDiscoverPiModels.mockReset().mockResolvedValue([])
   MockPiRpcClient.mockClear()
   mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
@@ -2156,6 +2167,58 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     })
     expect(judgeInstances).toHaveLength(0)
     expect(sentChannels(win)).not.toContain('session:approval-request')
+    session.dispose()
+  })
+
+  /**
+   * Item 3c. `PiJudge` reads a null `resolveModel()` as "keep pi's own default",
+   * so a stale CONFIGURED judge model silently became a judge on some other
+   * model. It must fail CLOSED instead, and say so once.
+   *
+   * PRE-FIX: the judge process spawned and `set_model` was attempted with the
+   * stale value (or skipped, leaving pi's default judging).
+   */
+  it('a stale CONFIGURED judge model → one session:error + the human decides, with NO judge process', async () => {
+    enableAutoMode({ judgeModel: 'openai-codex/gone' })
+    mockDiscoverPiModels.mockResolvedValue([
+      {
+        engineId: 'pi',
+        vendorId: 'openai-codex',
+        vendorName: 'openai-codex',
+        models: [{ value: 'openai-codex/gpt-5.6-luna', displayName: 'luna', description: '' }]
+      }
+    ])
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-stale-judge', win)
+
+    void gate('call_stale1', 'bash', { command: 'npm test' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+
+    // Never judged — not by the stale model, not by the session's own.
+    expect(judgeInstances).toHaveLength(0)
+    const errors = (sentPayloads(win, 'session:error') as string[]).filter((e) =>
+      String(e).includes('openai-codex/gone')
+    )
+    expect(errors).toHaveLength(1)
+    session.dispose()
+  })
+
+  it('a configured judge model that IS in the catalog judges normally', async () => {
+    enableAutoMode({ judgeModel: 'openai-codex/gpt-5.6-luna' })
+    mockDiscoverPiModels.mockResolvedValue([
+      {
+        engineId: 'pi',
+        vendorId: 'openai-codex',
+        vendorName: 'openai-codex',
+        models: [{ value: 'openai-codex/gpt-5.6-luna', displayName: 'luna', description: '' }]
+      }
+    ])
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-live-judge', win)
+
+    expect(await gate('call_live1', 'bash', { command: 'npm test' })).toEqual({ behavior: 'allow' })
+    expect(judgeInstances).toHaveLength(1)
     session.dispose()
   })
 

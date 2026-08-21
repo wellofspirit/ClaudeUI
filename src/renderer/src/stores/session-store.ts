@@ -11,6 +11,7 @@ import {
 import type { AutonomyMode } from '../../../shared/model-capabilities'
 import {
   engineMeta,
+  ENGINE_META,
   OPENCODE_DEFAULT_MODEL,
   PI_DEFAULT_MODEL,
   FREE_OPENCODE_VENDOR_IDS
@@ -150,27 +151,117 @@ function isModelForEngine(model: ModelInfo, engineId: EngineId): boolean {
   return (model.engineId ?? 'claude') === engineId
 }
 
-function resolveEngineDefaultModel(
+/**
+ * The per-engine default-model inputs `resolveEngineDefaultModel` needs, bundled
+ * so the CONFIGURED flag always travels with the value it qualifies. Splitting
+ * them (a raw string plus a boolean argument per engine) is how the two drift.
+ */
+export interface EngineDefaultModels {
+  opencodeDefaultModel: string
+  opencodeDefaultModelConfigured: boolean
+  piDefaultModel: string
+  piDefaultModelConfigured: boolean
+}
+
+/** Narrow a store snapshot to the default-model inputs. */
+export function engineDefaultModels(state: {
+  opencodeDefaultModel: string
+  opencodeDefaultModelConfigured: boolean
+  piDefaultModel: string
+  piDefaultModelConfigured: boolean
+}): EngineDefaultModels {
+  return {
+    opencodeDefaultModel: state.opencodeDefaultModel,
+    opencodeDefaultModelConfigured: state.opencodeDefaultModelConfigured,
+    piDefaultModel: state.piDefaultModel,
+    piDefaultModelConfigured: state.piDefaultModelConfigured
+  }
+}
+
+/**
+ * The default model VALUE a fresh session on `engineId` should start from, or
+ * `null` when the user's OWN configured default names a model that the engine no
+ * longer offers.
+ *
+ * `null` is deliberately NOT a fallback signal: an explicit user-configured model
+ * reference that has disappeared must surface as an error and leave the picker
+ * unset, never resolve to a silent substitute (the substitute is how a no-vision
+ * model got seeded onto a session whose picker showed a vision model). A BUILTIN
+ * heuristic default carries no such promise, so the not-configured ladder keeps
+ * falling back quietly.
+ *
+ * "No longer offers" requires a NON-EMPTY engine model list — an empty list means
+ * discovery has not run (or every provider is off), which cannot distinguish a
+ * stale reference from an unavailable engine, so the configured value passes
+ * through unchanged exactly as the main-process spawn resolvers do.
+ */
+export function resolveEngineDefaultModel(
   engineId: EngineId,
   models: ModelInfo[],
-  opencodeDefaultModel: string,
-  piDefaultModel: string
-): string {
+  defaults: EngineDefaultModels
+): string | null {
   if (engineId === 'opencode') {
+    const oc = models.filter((model) => isModelForEngine(model, 'opencode'))
+    if (defaults.opencodeDefaultModelConfigured && oc.length > 0) {
+      return oc.some((model) => model.value === defaults.opencodeDefaultModel)
+        ? defaults.opencodeDefaultModel
+        : null
+    }
     return (
-      resolveOpencodeModel(models, opencodeDefaultModel) ??
-      engineMeta(engineId).defaultModelValue(opencodeDefaultModel)
+      resolveOpencodeModel(models, defaults.opencodeDefaultModel) ??
+      engineMeta(engineId).defaultModelValue(defaults.opencodeDefaultModel)
     )
   }
   if (engineId === 'pi') {
     const piModels = models.filter((model) => isModelForEngine(model, 'pi'))
+    if (defaults.piDefaultModelConfigured && piModels.length > 0) {
+      return piModels.some((model) => model.value === defaults.piDefaultModel)
+        ? defaults.piDefaultModel
+        : null
+    }
     return (
-      piModels.find((model) => model.value === piDefaultModel)?.value ??
+      piModels.find((model) => model.value === defaults.piDefaultModel)?.value ??
       piModels[0]?.value ??
-      engineMeta(engineId).defaultModelValue(piDefaultModel)
+      engineMeta(engineId).defaultModelValue(defaults.piDefaultModel)
     )
   }
   return engineMeta(engineId).defaultModelValue()
+}
+
+/** The configured-but-missing default model for `engineId`, for error copy. */
+function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
+  return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
+}
+
+/**
+ * The banner shown when an engine's CONFIGURED default model has vanished. Names
+ * the model and the settings surface that owns it — an unactionable "model not
+ * found" is what made the silent substitute look preferable in the first place.
+ */
+export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
+  return (
+    `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
+    `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
+  )
+}
+
+/** localStorage key holding the last model picked for one engine. */
+function lastSelectedModelKey(engineId: EngineId): string {
+  return `lastSelectedModel:${engineId}`
+}
+
+/**
+ * Load the per-engine model stickiness map. One plain-string key per engine
+ * (matching `lastSelectedEngineId`'s style) rather than one JSON blob, so a
+ * corrupt entry can only lose that engine's memory.
+ */
+function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
+  const out: Partial<Record<EngineId, string>> = {}
+  for (const id of Object.keys(ENGINE_META) as EngineId[]) {
+    const value = localStorage.getItem(lastSelectedModelKey(id))
+    if (value) out[id] = value
+  }
+  return out
 }
 
 /**
@@ -434,7 +525,12 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   useSessionStore.setState({
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
-    piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL
+    // The `*Configured` flags keep "the user named this model" distinguishable
+    // from "we fell back to the builtin constant" — the two resolve identically
+    // while the model exists and must diverge the moment it does not.
+    opencodeDefaultModelConfigured: !!opencodeSettings?.model,
+    piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
+    piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel
   })
   // Replicated app-level state goes through the replica (SyncCore phase 4c), which
   // projects it into the store. Not a competing source of truth: the HOST seeds
@@ -928,12 +1024,25 @@ export interface SessionState {
 
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
+  /** Remembered MODEL choice, per engine — the model twin of `lastSelectedEngineId`.
+   *  Persisted in localStorage; pre-fills the model for newly created sessions so a
+   *  pick made on the welcome screen (where there is no session to write to) is not
+   *  dropped. Heuristic stickiness, NOT user configuration: a stale entry falls back
+   *  to the engine default silently. */
+  lastSelectedModelByEngine: Partial<Record<EngineId, string>>
   /** Configurable opencode default model (engines/opencode.json `opencodeConfig.model`).
    *  The opencode-engine value `engineMeta('opencode').defaultModelValue()` resolves to. */
   opencodeDefaultModel: string
+  /** True when {@link opencodeDefaultModel} came from the user's own opencode config
+   *  rather than the builtin {@link OPENCODE_DEFAULT_MODEL}. An explicit user
+   *  reference that no longer resolves must ERROR, never silently substitute; the
+   *  builtin heuristic may keep falling back. */
+  opencodeDefaultModelConfigured: boolean
   /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
    *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
   piDefaultModel: string
+  /** The pi twin of {@link opencodeDefaultModelConfigured}. */
+  piDefaultModelConfigured: boolean
   /** `settings.defaultAutonomyMode` mapped to a renderer PermissionMode. A
    *  SESSION-BOOTSTRAP concern only: it seeds the mode of sessions created from
    *  here on. Running sessions keep the mode they were spawned with (cli.js
@@ -1239,8 +1348,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
+  lastSelectedModelByEngine: loadLastSelectedModels(),
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
+  opencodeDefaultModelConfigured: false,
   piDefaultModel: PI_DEFAULT_MODEL,
+  piDefaultModelConfigured: false,
   // Pre-hydration seed only. `hydrate()` overwrites this from
   // `settings.defaultAutonomyMode` before any session can be created; 'default'
   // is the conservative placeholder for the window in between.
@@ -1343,24 +1455,42 @@ export const useSessionStore = create<SessionState>((set) => ({
       // would show a Claude model in the picker while routing send to a phantom
       // opencode model (the desync regression). Fall back to claude in that case.
       let engineId = state.lastSelectedEngineId
-      let defaultModel = resolveEngineDefaultModel(
-        engineId,
-        state.availableModels,
-        state.opencodeDefaultModel,
-        state.piDefaultModel
-      )
+      const defaults = engineDefaultModels(state)
+      // The user's last pick on THIS engine wins over the engine default — the
+      // model twin of `lastSelectedEngineId`. Only when it is still offered:
+      // stickiness is a heuristic, so a stale entry falls through quietly (the
+      // configured-default error rule below still applies underneath it).
+      const sticky = state.lastSelectedModelByEngine[engineId]
+      const stickyAvailable =
+        !!sticky &&
+        state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
+      // `null` = the user's CONFIGURED default named a model this engine no longer
+      // offers. Seed the picker's unset state and say so, rather than substituting
+      // a model whose capabilities differ from the one the user asked for.
+      let defaultModel = stickyAvailable
+        ? (sticky as string)
+        : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+      const staleDefault = defaultModel === null ? configuredDefaultModelOf(engineId, defaults) : null
       if (
         engineId === 'opencode' &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
       ) {
+        // Distinct from the stale-default case above: opencode has NO usable model
+        // at all, so there is no picker state to land in — fall back to claude.
         engineId = 'claude'
         defaultModel = 'default'
       }
+      const seededModel = defaultModel ?? ''
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
       const sessionEngines = {
         ...state.sessionEngines,
-        [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(defaultModel) }
+        [routingId]: {
+          engineId,
+          // An unresolved model must not be encoded — `decodeModelValue('')` would
+          // persist a phantom ModelRef that reopen would then restore.
+          ...(seededModel ? { model: engineMeta(engineId).decodeModelValue(seededModel) } : {})
+        }
       }
       // A session created here has not spawned, so NO event carries its engine,
       // model or permission mode — they exist nowhere but this client until the
@@ -1373,21 +1503,27 @@ export const useSessionStore = create<SessionState>((set) => ({
           cwd,
           permissionMode: bootstrapPermissionMode(state, engineId),
           selectedEngineId: engineId,
-          selectedModel: defaultModel,
+          selectedModel: seededModel,
           // Seed status.engineId/capabilities to match so they're correct before spawn
           status: {
             ...EMPTY_SESSION_STATE.status,
             engineId,
             capabilities: engineMeta(engineId).seedCapabilities(
-              defaultModel,
+              seededModel,
               state.availableModels.find(
-                (m) => m.value === defaultModel && isModelForEngine(m, engineId)
+                (m) => m.value === seededModel && isModelForEngine(m, engineId)
               )
             )
           }
         },
         { create: true }
       )
+      // After the session exists — `addError` writes through `updateSession`.
+      if (staleDefault) {
+        useSessionStore
+          .getState()
+          .addError(routingId, staleDefaultModelMessage(engineId, staleDefault))
+      }
       patchLocalApp({ recentSessionIds, sessionEngines })
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       if (switchTo) {
@@ -1449,18 +1585,20 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (!id || !session || session.sdkActive || session.status.sessionId || session.isHistorical)
       return
     if (session.selectedEngineId === engineId) return
-    const model = resolveEngineDefaultModel(
-      engineId,
-      state.availableModels,
-      state.opencodeDefaultModel,
-      state.piDefaultModel
-    )
+    const defaults = engineDefaultModels(state)
+    const resolved = resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+    // A stale CONFIGURED default leaves the picker unset (and says why) instead of
+    // handing the new engine a substitute model — same rule as `createNewSession`.
+    const model = resolved ?? ''
     const modelInfo = state.availableModels.find(
       (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
     )
     const sessionEngines = {
       ...state.sessionEngines,
-      [id]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+      [id]: {
+        engineId,
+        ...(model ? { model: engineMeta(engineId).decodeModelValue(model) } : {})
+      }
     }
     localStorage.setItem('lastSelectedEngineId', engineId)
     set({ lastSelectedEngineId: engineId })
@@ -1476,14 +1614,23 @@ export const useSessionStore = create<SessionState>((set) => ({
         capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
       }
     })
+    if (resolved === null) {
+      useSessionStore
+        .getState()
+        .addError(id, staleDefaultModelMessage(engineId, configuredDefaultModelOf(engineId, defaults)))
+    }
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
   },
 
   setOpencodeDefaultModel: (model) =>
-    set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
+    set({
+      opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL,
+      opencodeDefaultModelConfigured: !!model
+    }),
 
-  setPiDefaultModel: (model) => set({ piDefaultModel: model || PI_DEFAULT_MODEL }),
+  setPiDefaultModel: (model) =>
+    set({ piDefaultModel: model || PI_DEFAULT_MODEL, piDefaultModelConfigured: !!model }),
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
@@ -2216,16 +2363,49 @@ export const useSessionStore = create<SessionState>((set) => ({
   setSelectedModel: (model) => {
     const state = useSessionStore.getState()
     const id = state.activeSessionId
+    const session = id ? state.sessions[id] : undefined
+    // With no active session the picker is the WELCOME picker, which edits
+    // `lastSelectedEngineId` (InputBox's `effectiveEngineId`) — that is the engine
+    // this pick belongs to.
+    const targetEngine = id ? (session?.selectedEngineId ?? 'claude') : state.lastSelectedEngineId
+
+    // Per-engine stickiness, recorded for BOTH picker surfaces so "new session uses
+    // my last model" behaves the same however the pick was made. Previously the
+    // no-session branch returned early and the welcome pick was simply lost.
+    localStorage.setItem(lastSelectedModelKey(targetEngine), model)
+    set((s) => ({
+      lastSelectedModelByEngine: { ...s.lastSelectedModelByEngine, [targetEngine]: model }
+    }))
+
     if (!id) return
-    const session = state.sessions[id]
-    const targetEngine = session?.selectedEngineId ?? 'claude'
 
     // Persist the engine-correct ModelRef into sessionEngines so it seeds
     // selectedModel + engine on reopen.
     const existing = state.sessionEngines[id]
     const modelRef = engineMeta(targetEngine).decodeModelValue(model)
+    // Pre-spawn, NOTHING re-seeds `status.capabilities` for a model switch: the
+    // backend's `setModel` → `session:status` only exists once a session has
+    // started, so an un-started session kept the capabilities of the model it was
+    // created with (a no-vision seed silently swallowed pasted images even after
+    // the user picked a vision model). Mirrors `setSelectedEngine`. A STARTED
+    // session is left alone — its engine's own re-emitted status is authoritative.
+    const reseedCapabilities = !!session && !session.status.sessionId
+    const modelInfo = reseedCapabilities
+      ? state.availableModels.find((m) => m.value === model && isModelForEngine(m, targetEngine))
+      : undefined
     // Always reset reasoningVariant on model change — different models have different variants.
-    patchLocalSession(id, { selectedModel: model, reasoningVariant: null })
+    patchLocalSession(id, {
+      selectedModel: model,
+      reasoningVariant: null,
+      ...(reseedCapabilities && session
+        ? {
+            status: {
+              ...session.status,
+              capabilities: engineMeta(targetEngine).seedCapabilities(model, modelInfo)
+            }
+          }
+        : {})
+    })
     if (existing) {
       const sessionEngines = { ...state.sessionEngines, [id]: { ...existing, model: modelRef } }
       patchLocalApp({ sessionEngines })

@@ -210,6 +210,38 @@ describe('PiAutoModeSection — load', () => {
     expect(field.textContent).toContain('local/mystery')
     expect(field.textContent).not.toContain('Same as session model')
   })
+
+  /**
+   * Item 3e. Verbatim is not enough on its own: discovery HAS reported pi's
+   * models and this value was not among them, so it is stale and will fail the
+   * moment auto mode uses it. Mark it in place, keeping the value visible —
+   * the fix is to change this very setting.
+   */
+  it('marks a configured judge model the engine no longer offers as unavailable', async () => {
+    installApiStub({
+      loadEngineConfig: vi.fn(async () => ({ autoMode: { judgeModel: 'local/mystery' } }))
+    })
+    await renderLoaded()
+
+    const field = screen.getByTestId('PiAutoModeSection.judgeModel')
+    expect(field.textContent).toContain('(unavailable)')
+    const notice = screen.getByTestId('PiAutoModeSection.judgeModel.staleModel')
+    expect(notice.getAttribute('data-model')).toBe('local/mystery')
+  })
+
+  it('does NOT mark an unset judge model, nor one that IS discovered', async () => {
+    installApiStub({
+      loadEngineConfig: vi.fn(async () => ({
+        autoMode: { judgeModel: 'openai-codex/gpt-5.6-mini' }
+      }))
+    })
+    await renderLoaded()
+
+    expect(screen.getByTestId('PiAutoModeSection.judgeModel').textContent).not.toContain(
+      '(unavailable)'
+    )
+    expect(screen.queryByTestId('PiAutoModeSection.judgeModel.staleModel')).toBeNull()
+  })
 })
 
 describe('PiAutoModeSection — saves merge into engines/pi.json, never clobber', () => {

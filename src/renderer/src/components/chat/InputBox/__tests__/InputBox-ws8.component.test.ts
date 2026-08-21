@@ -158,6 +158,53 @@ describe('InputBox FC — WS8 behaviors', () => {
     expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('')
   })
 
+  /**
+   * Item 3b send-side block. A stale CONFIGURED default leaves the session with
+   * NO model; sending anyway would hand the spawn resolver `undefined`, which
+   * pi reads as "use pi's own default" — the silent substitution the whole
+   * no-fallback rule exists to prevent.
+   *
+   * PRE-FIX: an empty model was passed straight through to session:create.
+   */
+  it('refuses to send a non-Claude session with no resolved model, keeping the draft', async () => {
+    let created = 0
+    app.bridge.ipcMain.handle('session:create', () => {
+      created += 1
+      return null
+    })
+    app.bridge.ipcMain.handle('session:send', () => null)
+
+    useSessionStore.setState({
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: 'openai/gone',
+      opencodeDefaultModelConfigured: true,
+      availableModels: [
+        {
+          value: 'opencode/mimo-v2.5-free',
+          displayName: 'MiMo',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'opencode'
+        }
+      ]
+    })
+    useSessionStore.getState().createNewSession('no-model-route', '/test/cwd')
+    useSessionStore.setState({ activeSessionId: 'no-model-route' })
+    expect(useSessionStore.getState().sessions['no-model-route'].selectedModel).toBe('')
+
+    useSessionStore.getState().setDraftText('please run')
+    renderFC()
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    expect(created).toBe(0)
+    const session = useSessionStore.getState().sessions['no-model-route']
+    expect(session.draftText).toBe('please run')
+    expect(session.errors.join(' ')).toMatch(/No model selected/)
+  })
+
   it('reads attachments from the active session and swaps them on session switch (gpt#14)', () => {
     // Seed two sessions with different draft attachments.
     useSessionStore.getState().createNewSession('OTHER', '/test/cwd')

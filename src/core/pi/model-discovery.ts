@@ -12,7 +12,7 @@
  */
 import { homedir } from 'node:os'
 import type { EngineModelGroup, ModelInfo } from '../../shared/types'
-import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
+import { ModelUnavailableError } from '../../shared/model-errors'
 import type { EffortLevel } from '../../shared/model-capabilities'
 import { PiRpcClient } from './PiRpcClient'
 import { locatePiBinary, piBinaryAvailable } from './pi-locate'
@@ -203,8 +203,11 @@ export async function getPiModelCatalog(): Promise<PiModel[]> {
  * Resolution ladder:
  *   1. `requested` present AND in the catalog → `requested`.
  *   2. `requested` present but NOT in the catalog (catalog non-empty) →
- *      PI_DEFAULT_MODEL when the catalog has it, else the first catalog value
- *      (logged swap, mirroring opencode's warn message shape).
+ *      {@link ModelUnavailableError}. A request is an EXPLICIT reference, and an
+ *      explicit reference that no longer resolves must error rather than be
+ *      swapped for a model with different capabilities and cost (owner ruling
+ *      2026-08-21). This replaces a warn-and-substitute onto PI_DEFAULT_MODEL /
+ *      the first catalog entry.
  *   3. `requested` absent, OR the catalog is empty (no auth configured /
  *      discovery failed) → undefined.
  *
@@ -215,23 +218,31 @@ export async function getPiModelCatalog(): Promise<PiModel[]> {
  * set_model entirely, so pi keeps its OWN model (session-restored from
  * model_change entries on resume, or its settings.json default) — which
  * PiSession then reports honestly in status.model via its get_state adoption.
+ * That is only acceptable when NOTHING was requested; rung 2 is why a stale
+ * request can no longer land there.
  */
 export async function resolvePiSpawnModel(requested?: string): Promise<string | undefined> {
   if (!requested) return undefined
+  let values: string[]
   try {
     const groups = await discoverPiModels()
-    const values = groups.flatMap((g) => g.models.map((m) => m.value))
-    if (values.length === 0) return undefined
-    if (values.includes(requested)) return requested
-    const resolved = values.includes(PI_DEFAULT_MODEL) ? PI_DEFAULT_MODEL : values[0]
-    logger.warn(
-      'pi',
-      `Requested model "${requested}" is unavailable (not in pi's configured catalog); spawning with "${resolved}" instead.`
-    )
-    return resolved
+    values = groups.flatMap((g) => g.models.map((m) => m.value))
   } catch {
     return undefined
   }
+  if (values.length === 0) return undefined
+  if (values.includes(requested)) return requested
+  throw new ModelUnavailableError('pi', requested)
+}
+
+/**
+ * Synchronous, cache-only peek at the discovered pi model groups — null on a
+ * cold cache. The twin of opencode's `peekOpencodeModels`: it NEVER spawns the
+ * probe process, so it is safe on paths that must stay synchronous and
+ * side-effect-free (validating a configured judge model mid-approval).
+ */
+export function peekPiModels(): EngineModelGroup[] | null {
+  return cachedGroups
 }
 
 /** Invalidate the model discovery cache (call on auth/config change — M3). */

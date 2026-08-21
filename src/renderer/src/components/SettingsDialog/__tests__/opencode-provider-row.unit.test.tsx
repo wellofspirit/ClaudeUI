@@ -60,7 +60,11 @@ function installApiStub(catalog: OpencodeProviderCatalogEntry[]): void {
     vendorAuthOauthCancel: vi.fn(async () => undefined),
     listSharedProviders: vi.fn(async () => []),
     setOpencodeProviderDisabled,
-    removeOpencodeProvider
+    removeOpencodeProvider,
+    // Orphan-guard inputs (see VendorOpencodeSection.reload) — empty means the
+    // guard never blocks, which is what these action tests assert against.
+    getEngineModels: vi.fn(async () => []),
+    loadEngineConfig: vi.fn(async () => ({}))
   }
 }
 

@@ -189,6 +189,17 @@ vi.mock('../../../core/sdk/proxy', () => ({ setProxyEnv: vi.fn(async () => {}), 
 vi.mock('../../../core/sdk/endpoint-env', () => ({ setEndpointEnv: vi.fn() }))
 vi.mock('../../../core/sdk/model-env', () => ({ setModelEnv: vi.fn() }))
 
+// Partial mock: only the spawn-model resolver is doubled, so the module's other
+// exports (OpencodeSession reads several) stay real.
+const opencodeDiscoveryMocks = vi.hoisted(() => ({
+  resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m)
+}))
+vi.mock('../../../core/opencode/model-discovery', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  resolveOpencodeSpawnModel: opencodeDiscoveryMocks.resolveOpencodeSpawnModel
+}))
+
+import { ModelUnavailableError } from '../../../shared/model-errors'
 import { registerSessionIpc } from '../../../core/ipc/session.ipc'
 import { setHostWindow } from '../../../core/services/host-window'
 
@@ -311,5 +322,28 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     // Pre-fix, the else-is-claude branch applied Anthropic vendor config + env for
     // any non-'opencode' id (including bogus ones). Post-fix, require() throws first.
     expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Item 3a end-to-end: spawn-prep throws → prepareAndCreateSession rejects →
+   * the IPC invoke rejects with a message naming the model, and NO session is
+   * created. Pre-fix the resolver substituted a different model and the session
+   * spawned on it silently.
+   */
+  it('Item 3a GUARD: an unavailable requested model rejects session:create and never reaches SessionManager', async () => {
+    uiConfigMocks.loadEngineConfig.mockReturnValue({})
+    opencodeDiscoveryMocks.resolveOpencodeSpawnModel.mockRejectedValueOnce(
+      new ModelUnavailableError('opencode', 'openai/gpt-5.5')
+    )
+
+    await expect(
+      harness.call(
+        'session:create', 'routing-stale-model', '/tmp/cwd',
+        undefined, undefined, undefined, 'openai/gpt-5.5', undefined, undefined, undefined,
+        'opencode'
+      )
+    ).rejects.toThrow(/openai\/gpt-5\.5/)
+
+    expect(sessionManagerSpies.create).not.toHaveBeenCalled()
   })
 })

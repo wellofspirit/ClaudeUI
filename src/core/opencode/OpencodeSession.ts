@@ -27,6 +27,7 @@ import {
   getOpencodeModelContextWindow,
   getOpencodeModelCapabilities,
   discoverOpencodeModels,
+  peekOpencodeModels,
   parseModelString
 } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -256,6 +257,10 @@ export class OpencodeSession extends BaseSession {
   // judge call; the object identity is the cache, so every judge transport
   // built for this session shares one probe.
   private judgeEndpointProbe: JudgeEndpointProbe = {}
+  // One `session:error` per session for a CONFIGURED judge model that no longer
+  // exists — the check runs on every gated approval, and a banner per tool call
+  // would bury the transcript.
+  private staleJudgeModelReported = false
   // The USER-authored half of the last ruleset we patched onto the session
   // (compiled allow/ask/deny). Kept so the auto-mode gatekeeper can re-match a
   // pending approval against the user's own `ask` rules, which outrank the
@@ -1744,7 +1749,38 @@ export class OpencodeSession extends BaseSession {
    * {@link judgeEndpointProbe}; see judge-transport.ts for why the probe reads
    * `/doc` rather than POSTing the prompt speculatively.
    */
+  /**
+   * True when `autoMode.judgeModel` names a model opencode no longer offers.
+   *
+   * Fail-closed on purpose: the caller drops to the human instead of judging
+   * with a substitute, and specifically instead of falling through to
+   * `?? this._model` — silently promoting the SESSION's model to security judge
+   * is not what "I picked a cheaper/stronger judge" asked for.
+   *
+   * Cache-only (`peekOpencodeModels`): a cold or empty catalog cannot tell
+   * "removed" from "not discovered yet", so it validates nothing and the
+   * configured model passes through. eagerConnect already awaits
+   * `discoverOpencodeModels()`, so the cache is warm by the time approvals flow.
+   */
+  private judgeModelUnavailable(): boolean {
+    const configured = this.autoModeConfig().judgeModel
+    if (!configured) return false
+    const all = (peekOpencodeModels() ?? []).flatMap((g) => g.models)
+    if (all.length === 0) return false
+    if (all.some((m) => m.value === configured)) return false
+    if (!this.staleJudgeModelReported) {
+      this.staleJudgeModelReported = true
+      this.send(
+        'session:error',
+        `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
+          `Change it in Settings → Engines → opencode → Auto mode.`
+      )
+    }
+    return true
+  }
+
   private makeJudgeFn(): JudgeTransport | null {
+    if (this.judgeModelUnavailable()) return null
     const fallback = this.makeSessionJudgeFn()
     if (!fallback) return null
     const conn = this.conn

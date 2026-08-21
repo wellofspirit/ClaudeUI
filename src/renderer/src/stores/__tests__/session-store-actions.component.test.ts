@@ -25,9 +25,16 @@ import type {
   DiffComment,
   PlanComment,
   WorktreeInfo,
-  GitStatusData
+  GitStatusData,
+  ModelInfo
 } from '../../../../shared/types'
-import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { engineMeta } from '../../../../shared/engine-meta'
+import {
+  seed,
+  seedSession,
+  resetReplicaSeam,
+  mirrorStoreIntoReplica
+} from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2013,5 +2020,284 @@ describe('resolveClaudeCapabilities (Phase 2 replacement for capabilitiesFor)', 
     expect(caps.canUseMcp).toBe(true)
     expect(caps.canUseSubagents).toBe(true)
     expect(caps.isAgentCapable).toBe(true)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Model picks: capability re-seeding, welcome-screen stickiness, stale defaults
+// ---------------------------------------------------------------------------
+
+/** Minimal discovered ModelInfo for a non-claude engine. */
+function engineModel(
+  engineId: 'opencode' | 'pi',
+  value: string,
+  extra: Partial<ModelInfo> = {}
+): ModelInfo {
+  const [vendorId] = value.split('/')
+  return {
+    value,
+    displayName: value,
+    description: '',
+    engineId,
+    vendorId,
+    ...extra
+  } as ModelInfo
+}
+
+const NO_VISION = engineModel('opencode', 'opencode/plain-free', {
+  vision: false,
+  toolCalling: true
+})
+const VISION = engineModel('opencode', 'opencode/mimo-v2.5-free', {
+  vision: true,
+  toolCalling: true
+})
+const PI_REASONING = engineModel('pi', 'openai-codex/gpt-5.6-luna', {
+  vision: true,
+  toolCalling: true,
+  supportsEffort: true,
+  supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+})
+const PI_PLAIN = engineModel('pi', 'openai-codex/plain', {
+  vision: false,
+  toolCalling: true,
+  supportsEffort: false
+})
+
+/** Stage an un-started session on `engineId` seeded from `seedModel`. */
+function stageUnstarted(
+  routingId: string,
+  engineId: 'opencode' | 'pi',
+  seedModel: ModelInfo,
+  models: ModelInfo[]
+): void {
+  useSessionStore.setState({ availableModels: models, lastSelectedEngineId: engineId })
+  seedSession(routingId, {
+    cwd: '/proj',
+    selectedEngineId: engineId,
+    selectedModel: seedModel.value,
+    status: {
+      ...makeSessionStatus({ engineId, sessionId: null }),
+      capabilities: engineMeta(engineId).seedCapabilities(seedModel.value, seedModel)
+    }
+  })
+  useSessionStore.setState({ activeSessionId: routingId })
+}
+
+describe('setSelectedModel - pre-spawn capability re-seed (Item 1)', () => {
+  /**
+   * PRE-FIX: `setSelectedModel` patched only `selectedModel`, so an un-started
+   * session kept the capabilities of the model it was CREATED with. The attach
+   * menu stayed hidden and pasted images were silently dropped after switching
+   * to a vision model.
+   */
+  it('re-seeds status.capabilities from the new model on an un-started opencode session', () => {
+    stageUnstarted('r-oc', 'opencode', NO_VISION, [NO_VISION, VISION])
+    expect(store().sessions['r-oc'].status.capabilities.vision).toBe(false)
+
+    store().setSelectedModel(VISION.value)
+
+    expect(store().sessions['r-oc'].selectedModel).toBe(VISION.value)
+    expect(store().sessions['r-oc'].status.capabilities.vision).toBe(true)
+    expect(store().sessions['r-oc'].status.capabilities.toolCalling).toBe(true)
+  })
+
+  it('leaves status.capabilities alone on a STARTED session (the backend event is authoritative)', () => {
+    stageUnstarted('r-oc-live', 'opencode', NO_VISION, [NO_VISION, VISION])
+    seedSession('r-oc-live', {
+      status: {
+        ...makeSessionStatus({ engineId: 'opencode', sessionId: 'ses_live' }),
+        capabilities: engineMeta('opencode').seedCapabilities(NO_VISION.value, NO_VISION)
+      }
+    })
+
+    store().setSelectedModel(VISION.value)
+
+    expect(store().sessions['r-oc-live'].selectedModel).toBe(VISION.value)
+    expect(store().sessions['r-oc-live'].status.capabilities.vision).toBe(false)
+  })
+
+  it('re-seeds pi effort tiers from the new model (PI_META path)', () => {
+    stageUnstarted('r-pi-caps', 'pi', PI_PLAIN, [PI_PLAIN, PI_REASONING])
+    expect(store().sessions['r-pi-caps'].status.capabilities.reasoning.effort).toBeUndefined()
+
+    store().setSelectedModel(PI_REASONING.value)
+
+    const caps = store().sessions['r-pi-caps'].status.capabilities
+    expect(caps.vision).toBe(true)
+    expect(caps.reasoning.effort?.levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+})
+
+describe('welcome-screen model pick stickiness (Item 2)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useSessionStore.setState({ lastSelectedModelByEngine: {} })
+  })
+
+  /** PRE-FIX: `setSelectedModel` returned early with no active session. */
+  it('records a no-session pick under the welcome picker engine and persists it', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      availableModels: [NO_VISION, VISION]
+    })
+
+    store().setSelectedModel(VISION.value)
+
+    expect(store().lastSelectedModelByEngine.opencode).toBe(VISION.value)
+    expect(localStorage.getItem('lastSelectedModel:opencode')).toBe(VISION.value)
+  })
+
+  it('createNewSession seeds the welcome pick - model AND capabilities', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: NO_VISION.value,
+      opencodeDefaultModelConfigured: true,
+      availableModels: [NO_VISION, VISION]
+    })
+    store().setSelectedModel(VISION.value)
+
+    store().createNewSession('r-welcome', '/proj')
+
+    expect(store().sessions['r-welcome'].selectedModel).toBe(VISION.value)
+    expect(store().sessions['r-welcome'].status.capabilities.vision).toBe(true)
+  })
+
+  it('a STALE welcome pick falls through to the default resolution', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      lastSelectedModelByEngine: { opencode: 'opencode/deleted-model' },
+      opencodeDefaultModel: NO_VISION.value,
+      opencodeDefaultModelConfigured: true,
+      availableModels: [NO_VISION, VISION]
+    })
+
+    store().createNewSession('r-stale-sticky', '/proj')
+
+    expect(store().sessions['r-stale-sticky'].selectedModel).toBe(NO_VISION.value)
+    expect(store().sessions['r-stale-sticky'].errors).toEqual([])
+  })
+
+  it('keeps picks per engine - an opencode pick never leaks into a pi session', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      availableModels: [VISION, PI_REASONING, PI_PLAIN],
+      piDefaultModel: PI_PLAIN.value,
+      piDefaultModelConfigured: true
+    })
+    store().setSelectedModel(VISION.value)
+
+    useSessionStore.setState({ lastSelectedEngineId: 'pi' })
+    store().createNewSession('r-pi-iso', '/proj')
+
+    expect(store().lastSelectedModelByEngine.pi).toBeUndefined()
+    expect(store().sessions['r-pi-iso'].selectedModel).toBe(PI_PLAIN.value)
+  })
+
+  it('an on-session pick is remembered for the NEXT new session on that engine', () => {
+    stageUnstarted('r-remember', 'opencode', NO_VISION, [NO_VISION, VISION])
+    store().setSelectedModel(VISION.value)
+
+    useSessionStore.setState({ activeSessionId: null })
+    store().createNewSession('r-remember-2', '/proj')
+
+    expect(store().sessions['r-remember-2'].selectedModel).toBe(VISION.value)
+  })
+})
+
+describe('stale CONFIGURED default model errors instead of substituting (Item 3b)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useSessionStore.setState({ lastSelectedModelByEngine: {} })
+  })
+
+  /**
+   * PRE-FIX: `resolveOpencodeModel` substituted the first free zen model, which
+   * is how a no-vision model reached a session whose picker showed a vision one.
+   */
+  it('createNewSession seeds NO model and banners the stale opencode default', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: 'openai/gpt-5.5',
+      opencodeDefaultModelConfigured: true,
+      availableModels: [NO_VISION, VISION]
+    })
+
+    store().createNewSession('r-stale-default', '/proj')
+
+    const session = store().sessions['r-stale-default']
+    expect(session.selectedEngineId).toBe('opencode')
+    expect(session.selectedModel).toBe('')
+    expect(session.errors.join(' ')).toContain('openai/gpt-5.5')
+    // Not encoded into the registry - a phantom ModelRef would be restored on reopen.
+    expect(store().sessionEngines['r-stale-default'].model).toBeUndefined()
+  })
+
+  it('the same value NOT configured still falls back silently (builtin heuristic)', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'opencode',
+      opencodeDefaultModel: 'openai/gpt-5.5',
+      opencodeDefaultModelConfigured: false,
+      availableModels: [NO_VISION, VISION]
+    })
+
+    store().createNewSession('r-builtin', '/proj')
+
+    // The builtin ladder's own answer (first free zen model), reached with no
+    // banner - that silent substitution is the CORRECT behaviour when nothing
+    // was configured.
+    expect(store().sessions['r-builtin'].selectedModel).toBe(NO_VISION.value)
+    expect(store().sessions['r-builtin'].errors).toEqual([])
+  })
+
+  it('a stale CONFIGURED pi default behaves the same way', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'pi',
+      piDefaultModel: 'openai-codex/gone',
+      piDefaultModelConfigured: true,
+      availableModels: [PI_PLAIN, PI_REASONING]
+    })
+
+    store().createNewSession('r-pi-stale', '/proj')
+
+    expect(store().sessions['r-pi-stale'].selectedModel).toBe('')
+    expect(store().sessions['r-pi-stale'].errors.join(' ')).toContain('openai-codex/gone')
+  })
+
+  it('an EMPTY engine model list cannot validate, so the configured value passes through', () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'pi',
+      piDefaultModel: 'openai-codex/not-discovered-yet',
+      piDefaultModelConfigured: true,
+      availableModels: []
+    })
+
+    store().createNewSession('r-pi-cold', '/proj')
+
+    expect(store().sessions['r-pi-cold'].selectedModel).toBe('openai-codex/not-discovered-yet')
+    expect(store().sessions['r-pi-cold'].errors).toEqual([])
+  })
+
+  it('setOpencodeDefaultModel/setPiDefaultModel track the CONFIGURED flag', () => {
+    store().setOpencodeDefaultModel('openai/gpt-5.9')
+    expect(store().opencodeDefaultModelConfigured).toBe(true)
+    store().setOpencodeDefaultModel('')
+    expect(store().opencodeDefaultModelConfigured).toBe(false)
+    expect(store().opencodeDefaultModel).toBe(OPENCODE_DEFAULT_MODEL)
+
+    store().setPiDefaultModel('openai-codex/x')
+    expect(store().piDefaultModelConfigured).toBe(true)
+    store().setPiDefaultModel('')
+    expect(store().piDefaultModelConfigured).toBe(false)
+    expect(store().piDefaultModel).toBe(PI_DEFAULT_MODEL)
   })
 })

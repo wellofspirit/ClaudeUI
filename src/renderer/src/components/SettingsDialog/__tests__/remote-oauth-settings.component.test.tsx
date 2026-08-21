@@ -168,6 +168,9 @@ function installOpencodeApi(platform: string, over: Record<string, unknown> = {}
     vendorAuthOauthCancel: vi.fn(async () => {}),
     getOpencodeProviderModels: vi.fn(async () => []),
     listSharedProviders: vi.fn(async () => []),
+    // Orphan-guard inputs (see VendorOpencodeSection.reload).
+    getEngineModels: vi.fn(async () => []),
+    loadEngineConfig: vi.fn(async () => ({})),
     ...over
   }
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.open = vi.fn()

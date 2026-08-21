@@ -40,7 +40,7 @@ import type {
   PiGetStateData,
   PiRpcCommand
 } from './pi-protocol'
-import { getPiModelCatalog, effortLevelsFromModel } from './model-discovery'
+import { getPiModelCatalog, discoverPiModels, effortLevelsFromModel } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../services/fork-anchor'
 import { recordUsageEvent } from '../services/usage-recorder'
@@ -328,6 +328,9 @@ export class PiSession extends BaseSession {
   /** The warm judge process (pi-judge.ts). Created on the first classified
    *  approval, disposed with the session. */
   private piJudge: PiJudge | null = null
+  // One `session:error` per session for a CONFIGURED judge model that is gone —
+  // the check runs on every gated approval (see judgeModelUnavailable).
+  private staleJudgeModelReported = false
   /** How prior tool calls ended, keyed by toolCallId — the classifier's
    *  `{"outcome":…}` annotations. The ONLY channel by which a refusal reaches
    *  the judge, since the transcript slimmer drops tool RESULTS. Bounded by
@@ -2006,6 +2009,47 @@ export class PiSession extends BaseSession {
     return Object.keys(meta).length > 0 ? meta : undefined
   }
 
+  /** One banner per session, whatever made the configured judge model unusable. */
+  private reportStaleJudgeModel(configured: string): void {
+    if (this.staleJudgeModelReported) return
+    this.staleJudgeModelReported = true
+    this.send(
+      'session:error',
+      `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
+        `Change it in Settings → Engines → pi → Auto mode.`
+    )
+  }
+
+  /**
+   * True when `autoMode.judgeModel` names a model pi's catalog no longer has.
+   *
+   * Fail-closed, and pi needs this MORE than opencode does: `PiJudge` treats a
+   * null `resolveModel()` as "leave pi on its own default", so a stale configured
+   * judge silently became a judge on some other model — a `catch → null` that
+   * read as robustness and behaved as a substitution. `?? this._model` is the
+   * same hazard one line up.
+   *
+   * `discoverPiModels()` rather than a cache-only peek because pi has no groups
+   * cache until someone calls it; the underlying catalog fetch is already warm
+   * from `resolveCapsForModel` at connect, so this costs a regroup, not a spawn.
+   * An EMPTY catalog (no auth / probe failed) validates nothing and passes
+   * through — it cannot tell "removed" from "never discovered".
+   */
+  private async judgeModelUnavailable(): Promise<boolean> {
+    const configured = this.autoModeConfig().judgeModel
+    if (!configured) return false
+    let values: string[] = []
+    try {
+      values = (await discoverPiModels()).flatMap((g) => g.models.map((m) => m.value))
+    } catch {
+      return false
+    }
+    if (values.length === 0) return false
+    if (values.includes(configured)) return false
+    this.reportStaleJudgeModel(configured)
+    return true
+  }
+
   /** The warm judge process's transport, created on first use (pi-judge.ts).
    *  Judge model = `autoMode.judgeModel` or this session's own, resolved lazily
    *  at each spawn so a live `setModel()` is picked up on the next respawn. */
@@ -2013,10 +2057,18 @@ export class PiSession extends BaseSession {
     this.piJudge ??= new PiJudge({
       cwd: this.cwd,
       resolveModel: () => {
+        const configured = this.autoModeConfig().judgeModel
         try {
-          return engineMeta('pi').decodeModelValue(this.autoModeConfig().judgeModel ?? this._model)
-        } catch {
-          return null
+          return engineMeta('pi').decodeModelValue(configured ?? this._model)
+        } catch (err) {
+          // A CONFIGURED judge model that will not decode must not degrade to
+          // `null` — PiJudge reads null as "keep pi's own default", which is the
+          // silent substitution this path forbids. Throwing reaches `classify()`
+          // as an unavailable transport, i.e. ask the human. Only the
+          // session's-own-model case may fall back.
+          if (!configured) return null
+          this.reportStaleJudgeModel(configured)
+          throw err instanceof Error ? err : new Error(String(err))
         }
       }
     })
@@ -2066,6 +2118,11 @@ export class PiSession extends BaseSession {
     // alone deliberately: widening a SHARED allow set to cover a path that
     // cannot be reached would be risk with no benefit.
     if (isAutoModeFastPathAllowed(toolName)) return decided({ behavior: 'allow' })
+
+    // A configured judge model that no longer exists fails CLOSED — never judged
+    // by a stand-in (see judgeModelUnavailable). Checked after the fast path so a
+    // stale judge does not start prompting for reads.
+    if (await this.judgeModelUnavailable()) return ASK_HUMAN
 
     try {
       // Ground truth. actionMeta FIRST: it is what resolves repo visibility,

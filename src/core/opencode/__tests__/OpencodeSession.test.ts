@@ -157,6 +157,9 @@ vi.mock('../../services/ui-config', () => ({
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
 const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
 const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+// Cache-only peek — the auto-mode judge validates a CONFIGURED judgeModel
+// against it. `null` (cold cache) validates nothing, which is the default.
+const mockPeekOpencodeModels = vi.hoisted(() => vi.fn().mockReturnValue(null))
 // parseModelString mirrors the real "providerID/modelID" split (bare id →
 // 'opencode') since OpencodeSession.ts now imports the shared copy from
 // model-discovery.ts instead of defining it locally (Item 6b dedup).
@@ -164,6 +167,7 @@ vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
   getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
   discoverOpencodeModels: mockDiscoverOpencodeModels,
+  peekOpencodeModels: mockPeekOpencodeModels,
   invalidateOpencodeModelCache: vi.fn(),
   parseModelString: (model: string) => {
     const slash = model.indexOf('/')
@@ -256,6 +260,8 @@ function setupMocks(): void {
   mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
   mockDiscoverOpencodeModels.mockReset()
   mockDiscoverOpencodeModels.mockResolvedValue([])
+  mockPeekOpencodeModels.mockReset()
+  mockPeekOpencodeModels.mockReturnValue(null)
   mockDiscoverOpencodeSkills.mockReset()
   mockDiscoverOpencodeSkills.mockResolvedValue([])
   mockCaptureGitRemotes.mockReset()
@@ -1499,6 +1505,72 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     await session.run('go')
     await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_read', 'once'))
     expect(mockPrompt).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  /**
+   * Item 3c. A CONFIGURED judge model that opencode no longer offers must fail
+   * CLOSED — ask the human — and say so ONCE. It must never fall through to
+   * `?? this._model`: silently promoting the session's own model to security
+   * judge is not what "I picked a cheaper/stronger judge" asked for.
+   *
+   * PRE-FIX: the judge was built with the stale model string and prompted.
+   */
+  it('stale CONFIGURED judge model → one session:error + human fallback, never a substitute judge', async () => {
+    enableAutoMode({ judgeModel: 'openai/gpt-5.6-luna' })
+    mockPeekOpencodeModels.mockReturnValue([
+      {
+        engineId: 'opencode',
+        vendorId: 'opencode',
+        vendorName: 'OpenCode Zen',
+        models: [{ value: 'opencode/mimo-v2.5-free', displayName: 'MiMo', description: '' }]
+      }
+    ])
+    feedPermissionAsked('bash', 'per_stale_judge')
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_stale_judge', win, '/tmp', { permissionMode: 'full' })
+    await session.run('go')
+
+    const sends = (): unknown[][] => (win as unknown as MockWindow).webContents.send.mock.calls
+    await vi.waitFor(() => {
+      expect(sends().some((c) => c[0] === 'session:approval-request')).toBe(true)
+    })
+    const errors = sends().filter(
+      (c) => c[0] === 'session:error' && String(c[2]).includes('openai/gpt-5.6-luna')
+    )
+    expect(errors).toHaveLength(1)
+    // No judge call at all — not on the stale model, not on the session's own.
+    expect(mockPrompt).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('a configured judge model that IS available still judges normally', async () => {
+    enableAutoMode({ judgeModel: 'opencode/mimo-v2.5-free' })
+    mockPeekOpencodeModels.mockReturnValue([
+      {
+        engineId: 'opencode',
+        vendorId: 'opencode',
+        vendorName: 'OpenCode Zen',
+        models: [{ value: 'opencode/mimo-v2.5-free', displayName: 'MiMo', description: '' }]
+      }
+    ])
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_live_judge')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_live_judge', 'once'))
+    session.dispose()
+  })
+
+  it('a COLD discovery cache validates nothing — the configured judge is still used', async () => {
+    enableAutoMode({ judgeModel: 'openai/gpt-5.6-luna' })
+    mockPeekOpencodeModels.mockReturnValue(null)
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_cold_cache')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_cold_cache', 'once'))
     session.dispose()
   })
 

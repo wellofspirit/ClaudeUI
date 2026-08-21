@@ -1,11 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import {
-  useActiveSession,
-  useSessionStore,
-  OPENCODE_DEFAULT_MODEL,
-  PI_DEFAULT_MODEL
-} from '../../stores/session-store'
+import { useActiveSession, useSessionStore, PI_DEFAULT_MODEL } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import {
@@ -42,7 +37,8 @@ import {
   type EngineCapabilities,
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
-import { engineMeta } from '../../../../shared/engine-meta'
+import { engineMeta, ENGINE_META } from '../../../../shared/engine-meta'
+import { findModelReferences, formatModelReferences } from '../../../../shared/model-references'
 import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
 import {
   SettingsToggle,
@@ -533,12 +529,28 @@ function toModelDisplays(models: ModelInfo[]): ModelDisplay[] {
 }
 
 /**
+ * A configured value that is missing from a NON-EMPTY discovered list is STALE
+ * — the engine reported its models and this one was not among them. An empty
+ * list means discovery hasn't run (or nothing is authenticated), which says
+ * nothing about the value, so it is never flagged.
+ */
+function isStaleModelValue(models: ModelInfo[], value: string): boolean {
+  return !!value && models.length > 0 && !models.some((m) => m.value === value)
+}
+
+/** Suffix marking a configured model the engine no longer offers. */
+const UNAVAILABLE_SUFFIX = ' (unavailable)'
+
+/**
  * The `ModelDisplay` a settings ModelPicker should show as selected.
  *
  * An unset value ('') means "inherit / not set" and reads as `emptyLabel`,
  * matching the pinned empty row. A CONFIGURED-but-undiscovered model
  * (hand-edited, or a provider not authenticated yet) is shown VERBATIM rather
- * than collapsing to the empty label, which would misreport what is saved.
+ * than collapsing to the empty label, which would misreport what is saved —
+ * and once discovery HAS reported models without it, it is marked unavailable
+ * in place. Keeping the value visible is the point: the fix is to change this
+ * setting, which the user cannot do without seeing what it currently says.
  */
 function selectedModelDisplay(
   models: ModelInfo[],
@@ -547,11 +559,34 @@ function selectedModelDisplay(
 ): ModelDisplay {
   const known = models.find((m) => m.value === value)
   if (known) return { ...known, shortName: known.displayName || known.value }
-  return {
-    value,
-    displayName: value || emptyLabel,
-    shortName: value || emptyLabel
-  }
+  const label = value ? `${value}${isStaleModelValue(models, value) ? UNAVAILABLE_SUFFIX : ''}` : emptyLabel
+  return { value, displayName: label, shortName: label }
+}
+
+/**
+ * Inline warning under a settings model picker whose saved value no longer
+ * exists. Rendered next to the picker rather than folded into it so the
+ * warning styling does not have to leak into the shared ModelPicker.
+ */
+function StaleModelNotice({
+  testid,
+  models,
+  value
+}: {
+  testid: string
+  models: ModelInfo[]
+  value: string
+}): React.JSX.Element | null {
+  if (!isStaleModelValue(models, value)) return null
+  return (
+    <div
+      data-testid={`${testid}.staleModel`}
+      data-model={value}
+      className="mt-1 text-[10px] text-yellow-400 leading-relaxed"
+    >
+      “{value}” is no longer available. Pick another model — this one will fail when it is used.
+    </div>
+  )
 }
 
 /** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
@@ -729,6 +764,7 @@ function AutoModeSection({
                 onSelectModel={(v) => update({ judgeModel: v || undefined })}
               />
             </div>
+            <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
           </div>
           <SettingsSelect
             testid={`${testid}.twoStageMode`}
@@ -898,6 +934,7 @@ function DispatchSection({
             onSelectModel={(v) => update({ defaultModel: v || undefined })}
           />
         </div>
+        <StaleModelNotice testid={`${testid}.defaultModel`} models={models} value={defaultModel} />
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
@@ -1132,12 +1169,15 @@ function ModelAllowlistDialog({
   providerId,
   providerName,
   current,
+  error,
   onSave,
   onClose
 }: {
   providerId: string
   providerName: string
   current: string[] | undefined
+  /** Blocking orphan-guard message from the last save attempt; keeps the dialog open. */
+  error?: string | null
   onSave: (ids: string[]) => void
   onClose: () => void
 }): React.JSX.Element {
@@ -1303,6 +1343,15 @@ function ModelAllowlistDialog({
           )}
         </div>
 
+        {error && (
+          <div
+            data-testid="ModelAllowlistDialog.orphanError"
+            className="px-4 pt-2 text-[11px] text-red-400 leading-relaxed"
+          >
+            {error}
+          </div>
+        )}
+
         <div className="px-4 py-3 border-t border-border/50 flex items-center justify-end gap-2">
           <button
             data-testid="ModelAllowlistDialog.cancel"
@@ -1361,6 +1410,19 @@ function VendorOpencodeSection(): React.JSX.Element {
   const [removeTarget, setRemoveTarget] = useState<OpencodeProviderCatalogEntry | null>(null)
   // Provider whose credential panel is expanded inline on its row.
   const [credentialId, setCredentialId] = useState<string | null>(null)
+  // Orphan guard (see `findModelReferences`): the last edit refused because it
+  // would have deleted a model some setting still names. Cleared on the next
+  // successful edit; the allowlist dialog gets its own copy so the message lands
+  // where the edit was attempted.
+  const [orphanError, setOrphanError] = useState<string | null>(null)
+  const [allowlistOrphanError, setAllowlistOrphanError] = useState<string | null>(null)
+  // opencode's DISCOVERED models — the set an edit can make disappear. Loaded
+  // here (not read from the store) so the guard does not depend on whether a
+  // chat surface has populated `availableModels` yet.
+  const [opencodeModels, setOpencodeModels] = useState<ModelInfo[]>([])
+  // Every engine's ClaudeUI config, so a reference from ANOTHER engine (claude's
+  // cross-engine `dispatch.defaultModel` names opencode models) is caught too.
+  const [engineConfigs, setEngineConfigs] = useState<Partial<Record<EngineId, EngineConfig>>>({})
   const mountedRef = useRef(true)
   const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth, submitVendorOAuthCode } =
     useSessionStore(
@@ -1395,6 +1457,22 @@ function VendorOpencodeSection(): React.JSX.Element {
       setCatalog(cat)
       setOpencodeCfg(settings)
       setOptions(opts)
+    })
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        if (!mountedRef.current) return
+        setOpencodeModels(groups.filter((g) => g.engineId === 'opencode').flatMap((g) => g.models))
+      })
+      .catch(() => {})
+    Promise.all(
+      (Object.keys(ENGINE_META) as EngineId[]).map(async (id) => {
+        const cfg = await window.api.loadEngineConfig(id).catch(() => ({}) as EngineConfig)
+        return [id, cfg] as const
+      })
+    ).then((entries) => {
+      if (!mountedRef.current) return
+      setEngineConfigs(Object.fromEntries(entries))
     })
   }
 
@@ -1443,6 +1521,24 @@ function VendorOpencodeSection(): React.JSX.Element {
     const a = allowlist[id]
     if (a === undefined) return 'all models'
     return `${a.length} model${a.length === 1 ? '' : 's'}`
+  }
+
+  /** Every discovered opencode model VALUE this provider contributes. */
+  const modelsOfProvider = (providerId: string): string[] =>
+    opencodeModels.filter((m) => m.vendorId === providerId).map((m) => m.value)
+
+  /**
+   * The orphan guard: `null` when the removal is safe, otherwise the message to
+   * show INSTEAD of applying it. Refusing beats applying-and-warning — after the
+   * write the reference is already broken, and the config that named it is a
+   * different dialog away.
+   */
+  const blockingReferences = (removedValues: string[]): string | null => {
+    const refs = findModelReferences(
+      { opencode: cfg, engines: engineConfigs },
+      removedValues
+    )
+    return refs.length > 0 ? formatModelReferences(refs) : null
   }
 
   // Finalize adding a provider: clear it from disabledProviders, seed an empty
@@ -1509,6 +1605,16 @@ function VendorOpencodeSection(): React.JSX.Element {
    * how the original bug (a veto outliving what it vetoed) became possible.
    */
   const handleToggleDisabled = async (vendorId: string, nextDisabled: boolean): Promise<void> => {
+    // Disabling hides every model this provider contributes — refuse while one
+    // of them is still named by a setting.
+    if (nextDisabled) {
+      const blocked = blockingReferences(modelsOfProvider(vendorId))
+      if (blocked) {
+        setOrphanError(blocked)
+        return
+      }
+    }
+    setOrphanError(null)
     setRemoving((prev) => ({ ...prev, [vendorId]: true }))
     try {
       await window.api.setOpencodeProviderDisabled(vendorId, nextDisabled)
@@ -1529,6 +1635,11 @@ function VendorOpencodeSection(): React.JSX.Element {
    */
   const handleRemove = async (entry: OpencodeProviderCatalogEntry): Promise<void> => {
     if (!entry.actions.removeKind) return
+    // Throwing (rather than a section-level banner) is deliberate: ConfirmModal
+    // keeps itself open and renders the reason under "Could not remove", which is
+    // exactly where the user is looking.
+    const blocked = blockingReferences(modelsOfProvider(entry.id))
+    if (blocked) throw new Error(blocked)
     await window.api.removeOpencodeProvider(entry.id, entry.actions.removeKind)
     const settings = await window.api.loadOpencodeSettings().catch(() => null)
     if (settings && mountedRef.current) setOpencodeCfg(settings)
@@ -1610,6 +1721,14 @@ function VendorOpencodeSection(): React.JSX.Element {
     <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary">
       {oauthError && (
         <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
+      )}
+      {orphanError && (
+        <div
+          data-testid="VendorOpencodeSection.orphanError"
+          className="text-[11px] text-red-400 leading-relaxed"
+        >
+          {orphanError}
+        </div>
       )}
 
       {/* All providers — enabled and disabled, in one list. */}
@@ -2006,8 +2125,22 @@ function VendorOpencodeSection(): React.JSX.Element {
           providerId={dialogProvider.id}
           providerName={dialogProvider.name}
           current={allowlist[dialogProvider.id]}
-          onClose={() => setModelDialogId(null)}
+          error={allowlistOrphanError}
+          onClose={() => {
+            setAllowlistOrphanError(null)
+            setModelDialogId(null)
+          }}
           onSave={(ids) => {
+            // `ids` are BARE model ids; references are stored as picker VALUES.
+            const kept = new Set(ids.map((id) => `${dialogProvider.id}/${id}`))
+            const blocked = blockingReferences(
+              modelsOfProvider(dialogProvider.id).filter((value) => !kept.has(value))
+            )
+            if (blocked) {
+              setAllowlistOrphanError(blocked)
+              return
+            }
+            setAllowlistOrphanError(null)
             updateCfg({ modelAllowlist: { ...allowlist, [dialogProvider.id]: ids } })
             setModelDialogId(null)
             reload()
@@ -2142,8 +2275,11 @@ function OpencodeModelsSection(): React.JSX.Element {
     window.api.saveOpencodeSettings(next).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
+    // The RAW value, not the constant — an empty string is what tells the store
+    // nothing is configured, which is what separates "the builtin default may
+    // fall back silently" from "the user named this model".
     if ('model' in patch) {
-      useSessionStore.getState().setOpencodeDefaultModel(patch.model || OPENCODE_DEFAULT_MODEL)
+      useSessionStore.getState().setOpencodeDefaultModel(patch.model ?? '')
     }
     useSessionStore.getState().reloadModels()
   }
@@ -2170,6 +2306,11 @@ function OpencodeModelsSection(): React.JSX.Element {
             onSelectModel={(v) => update({ model: v || undefined })}
           />
         </div>
+        <StaleModelNotice
+          testid="OpencodeModelsSection.model"
+          models={models}
+          value={cfg.model ?? ''}
+        />
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
@@ -2189,6 +2330,11 @@ function OpencodeModelsSection(): React.JSX.Element {
             onSelectModel={(v) => update({ smallModel: v || undefined })}
           />
         </div>
+        <StaleModelNotice
+          testid="OpencodeModelsSection.smallModel"
+          models={models}
+          value={cfg.smallModel ?? ''}
+        />
       </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
         Changes apply on the next opencode server start for each working directory.
@@ -2271,7 +2417,10 @@ function PiDefaultModelSection(): React.JSX.Element {
     window.api.saveEngineConfig('pi', next).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened pi
     // sessions pick it up immediately, and refresh the picker model list.
-    useSessionStore.getState().setPiDefaultModel(value || PI_DEFAULT_MODEL)
+    // The RAW value (not the constant): an empty string is what tells the store
+    // that nothing is configured, which is what separates "the builtin default
+    // may fall back silently" from "the user named this model".
+    useSessionStore.getState().setPiDefaultModel(value)
     useSessionStore.getState().reloadModels()
   }
 
@@ -2350,14 +2499,20 @@ function PiDefaultModelSection(): React.JSX.Element {
         >
           Manage models ({allowlist === undefined ? 'all' : allowlist.length === 0 ? 'none' : `${allowlist.length} selected`})
         </button>
-        {defaultExcluded && (
+        {defaultExcluded ? (
           <div
             data-testid="PiDefaultModelSection.excludedDefaultWarning"
             className="mt-1 text-[10px] text-warning/90"
           >
-            The configured default is excluded by the model allowlist. ClaudeUI will use an
-            available fallback until it is enabled or replaced.
+            The configured default is excluded by the model allowlist. New pi sessions will start
+            with no model selected until it is enabled or replaced.
           </div>
+        ) : (
+          <StaleModelNotice
+            testid="PiDefaultModelSection.defaultModel"
+            models={models}
+            value={current}
+          />
         )}
         {!known && !defaultExcluded && (
           <div
