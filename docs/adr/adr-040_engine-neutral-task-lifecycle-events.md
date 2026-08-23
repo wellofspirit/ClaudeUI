@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Relates to:** ADR-038 (the same principle for approvals — lifecycle state mirrors explicit wire
 events, never inferred from turn/tool state), ADR-033 (cross-engine dispatch renders through the
-same TaskCard), `docs/protocol/04-system-subtypes.md` §4.4/§4.5 (the cli.js wire shapes)
+same TaskCard), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5 (the cli.js wire shapes)
 
 ## Context
 

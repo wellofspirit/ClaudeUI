@@ -3,7 +3,7 @@
  *
  * Renders the full classifier system prompt from the rule corpus plus
  * host-supplied environment facts. Structure mirrors cli.js's prompt
- * (docs/protocol/14-auto-mode-classifier.md §4): role → threat model →
+ * (docs/protocol-cc/14-auto-mode-classifier.md §4): role → threat model →
  * default rule → out-of-scope → user intent (consent model) → evaluation
  * rules → environment → definitions → HARD → SOFT → ALLOW.
  */

@@ -131,7 +131,7 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
 
 Everything below supersedes the corresponding original sections. Plan and
 rationale: `docs/automode-rework-plan.md`; behavioural reference:
-`docs/protocol/14-auto-mode-classifier.md` (cli.js 2.1.220). Shipped as
+`docs/protocol-cc/14-auto-mode-classifier.md` (cli.js 2.1.220). Shipped as
 commits 5112e74 (phase 1), 9d698c7 (phase 2), cb80d3a (phase 3), plus the
 bench 703115e.
 

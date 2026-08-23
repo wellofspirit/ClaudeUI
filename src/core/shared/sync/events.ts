@@ -138,7 +138,7 @@ export interface SyncEventMap {
     }
   ) => void
   'session:message': (routingId: string, msg: ChatMessage) => void
-  /** Refusal-fallback retraction (docs/protocol/04-system-subtypes.md §4.20). */
+  /** Refusal-fallback retraction (docs/protocol-cc/04-system-subtypes.md §4.20). */
   'session:messages-retracted': (routingId: string, data: { messageIds: string[] }) => void
   'session:tool-result': (
     routingId: string,

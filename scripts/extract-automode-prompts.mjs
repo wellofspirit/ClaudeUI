@@ -7,7 +7,7 @@
  * survives minification, walk to the enclosing template literal's boundaries,
  * and evaluate it.
  *
- * Reference for what comes out: docs/protocol/14-auto-mode-classifier.md
+ * Reference for what comes out: docs/protocol-cc/14-auto-mode-classifier.md
  *
  * Usage:
  *   node scripts/extract-automode-prompts.mjs [cli.js] [outPrefix]

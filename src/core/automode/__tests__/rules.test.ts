@@ -1,6 +1,6 @@
 /**
  * The rule corpus + policy document (phase 2 of `docs/automode-rework-plan.md`,
- * behavioural reference `docs/protocol/14-auto-mode-classifier.md` §4/§6/§9).
+ * behavioural reference `docs/protocol-cc/14-auto-mode-classifier.md` §4/§6/§9).
  *
  * Two things are worth testing about a prompt document:
  *  1. **Structural invariants of the DATA** — the properties the classifier's

@@ -96,7 +96,7 @@ relaxes the review bar.
   (`opencode:<generated-password>`). Target the **v1** API (`/session`, `/event`, `/auth/{id}`) —
   NOT the `/api/*` v2 family. The shared `/event` stream multiplexes all sessions → filter by
   `properties.sessionID`. Binary/plugin locators use `app.getAppPath()`, not `__dirname`.
-- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol/` first, then probe
+- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol-cc/` first, then probe
   the real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
   `/bundle-analyzer` to navigate the bundle.
 - **pi wire (ADR-035).** For any pi-integration question, consult `docs/protocol-pi/` first (the

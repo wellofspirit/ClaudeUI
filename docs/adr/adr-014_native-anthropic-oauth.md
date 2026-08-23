@@ -36,7 +36,7 @@ cli.js owns the entire subscription OAuth flow — PKCE, opening the browser, th
 service `Claude Code-credentials`, plaintext fallback `~/.claude/.credentials.json`,
 wrapped under the `claudeAiOauth` key). It exposes this through three **native**
 control-request subtypes (no patch required; see
-`docs/protocol/07-control-outbound.md §7.5`), already surfaced on our QueryHandle
+`docs/protocol-cc/07-control-outbound.md §7.5`), already surfaced on our QueryHandle
 (`src/main/sdk/query.ts`):
 
 | QueryHandle method               | control subtype                    | returns                          |

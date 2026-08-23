@@ -21,7 +21,7 @@ src/
                          its contract) + host-anchor.ts (the ten `remote:*` bodies,
                          callable, never registered on any transport)
     sdk/               — in-house cli.js harness: query(), tool(), createSdkMcpServer()
-                         (module map: docs/protocol/01-transport.md §1.13)
+                         (module map: docs/protocol-cc/01-transport.md §1.13)
     providers/         — engine seam: ISession, BaseSession, EngineRegistry,
                          SpawnPrepRegistry, session-queue, register-engines
     opencode/          — opencode backend: OpencodeServerManager, OpencodeClient,
@@ -141,7 +141,7 @@ Key modules in `src/core/services/`:
 | `usage-recorder.ts` / `usage-reconciler.ts` / `usage-aggregation.ts` / `usage-provider.ts` / `usage-windows.ts` | DB-backed metering: live recording, backfill reconcile, SQL aggregation, window identity (ADR-011/020) |
 | `opencode-pricing.ts`       | Pricing from opencode's `/config/providers`, persisted supplemental table                               |
 | `opencode-session-list.ts` / `pi-session-list.ts` | Sidebar lists for opencode / pi sessions, read from those engines' own stores       |
-| `context-window.ts`         | Mirror of cli.js's model context-window resolution (`docs/protocol/13-context-window.md`)               |
+| `context-window.ts`         | Mirror of cli.js's model context-window resolution (`docs/protocol-cc/13-context-window.md`)               |
 | `db.ts`                     | Operational SQLite DB — migrations + typed repos, on the driver seam (below)                            |
 | `sqlite-driver.ts` + `sqlite/` | The storage seam: one API, three engines (`better-sqlite3-driver`, `bun-sqlite-driver`, `node-sqlite-driver`); the ENTRYPOINT installs one (ADR-058) |
 | `ui-config.ts`              | Plain-text config: settings.json, engines/vendors JSON, sessions, slash commands                        |

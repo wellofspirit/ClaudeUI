@@ -7,7 +7,7 @@ import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
  * Auto-mode LLM permission gatekeeper — engine-neutral policy core (ADR-023,
  * amended by `docs/automode-rework-plan.md` §4).
  *
- * Parity target: Claude cli.js's "security monitor" (`docs/protocol/14-auto-mode-classifier.md`).
+ * Parity target: Claude cli.js's "security monitor" (`docs/protocol-cc/14-auto-mode-classifier.md`).
  * An independent judge decides a would-be-`ask` tool call from the slimmed
  * transcript + environment + the proposed action, returning a block/allow
  * verdict, **fail-closed**.

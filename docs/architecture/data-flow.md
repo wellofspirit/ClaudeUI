@@ -32,4 +32,4 @@ User prompt → InputBox → addUserMessage() (Zustand) → window.api.sendPromp
 
 ## cli.js integration
 
-Everything about the wire — message shapes, control subtypes, MCP hosting, cancellation, the build pipeline, patches — is in **[`docs/protocol/`](../protocol/README.md)**. Consult it before theorizing, and before touching `src/core/sdk/`, `scripts/extract-cli.mjs`, or `patch/`. cli.js itself is ~13 MB minified: use the `/bundle-analyzer` skill to navigate it (find by string literals, never by minified names).
+Everything about the wire — message shapes, control subtypes, MCP hosting, cancellation, the build pipeline, patches — is in **[`docs/protocol-cc/`](../protocol/README.md)**. Consult it before theorizing, and before touching `src/core/sdk/`, `scripts/extract-cli.mjs`, or `patch/`. cli.js itself is ~13 MB minified: use the `/bundle-analyzer` skill to navigate it (find by string literals, never by minified names).

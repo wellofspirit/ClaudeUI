@@ -900,7 +900,7 @@ export function decideWithSource(
  * (`../opencode/permission-compiler.ts`) — read that one for the full argument
  * and the live evasion that motivated it. In short: cli.js's auto-mode fast path
  * re-runs the permission check "with classifier-bypassing allow rules filtered
- * out" (`docs/protocol/14-auto-mode-classifier.md` §3 step 2). A user allow rule
+ * out" (`docs/protocol-cc/14-auto-mode-classifier.md` §3 step 2). A user allow rule
  * says "don't interrupt me for this"; in auto mode it must not also mean "skip
  * the security monitor", or every allow rule is a hole straight through the gate
  * (live: `Bash(git:*)` made every git command invisible to the judge, and an

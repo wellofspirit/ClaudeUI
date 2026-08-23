@@ -67,7 +67,7 @@ export function getSdkVersion(): string {
 /**
  * cli.js compares retracted_message_uuids against frame uuids truncated to 24
  * chars (its `JWK` constant) so per-block derived uuids resolve to their base
- * frame. Mirror that here. See docs/protocol/04-system-subtypes.md §4.20.
+ * frame. Mirror that here. See docs/protocol-cc/04-system-subtypes.md §4.20.
  */
 const RETRACTION_UUID_PREFIX_LEN = 24
 
@@ -1239,7 +1239,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     if (msg.subtype === 'queued_command_consumed') {
       // cli.js has taken this text off its queue and is injecting it into the
-      // turn (docs/protocol/04-system-subtypes.md §4.10). Text correlation is
+      // turn (docs/protocol-cc/04-system-subtypes.md §4.10). Text correlation is
       // all the wire gives us — ADR-053 pins first-match, duplicates being
       // interchangeable.
       //
@@ -1269,7 +1269,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * (availability error → swap for this turn only). Surface it as a warning
    * banner so the user knows which model is actually answering — without this,
    * the only trace is the `model` field on subsequent assistant messages.
-   * Shapes in docs/protocol/04-system-subtypes.md §4.20–4.21.
+   * Shapes in docs/protocol-cc/04-system-subtypes.md §4.20–4.21.
    */
   private handleModelFallback(msg: SystemMessage): void {
     const fallbackText =
@@ -1374,7 +1374,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const taskId = msg.task_id || ''
     const outputFile = msg.output_file || ''
     // taskIdMap is populated by task_started/detectTaskMapping and is the
-    // normal path, but the wire's own tool_use_id (docs/protocol/04-system-
+    // normal path, but the wire's own tool_use_id (docs/protocol-cc/04-system-
     // subtypes.md §4.4) is a reliable fallback for the rare case the reverse
     // lookup misses (e.g. task_started never arrived, or the mapping was
     // already evicted by an earlier stopTask/task_updated race).

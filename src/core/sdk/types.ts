@@ -140,7 +140,7 @@ export interface SystemMessage extends BaseSDKMessage {
    * (cli.js's own `ZPe`/`VV_` rule) before comparing it to anything.
    */
   prompt?: string | Array<{ type?: string; text?: string }>
-  /** model_refusal_fallback / model_fallback fields (docs/protocol/04-system-subtypes.md §4.20–4.21) */
+  /** model_refusal_fallback / model_fallback fields (docs/protocol-cc/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'
   original_model?: string
@@ -177,7 +177,7 @@ export interface ResultMessage extends BaseSDKMessage {
   result?: string
   errors?: string[]
   /** Per-turn token usage — `{input_tokens, output_tokens, cache_creation_input_tokens,
-   *  cache_read_input_tokens, ...}` (docs/protocol/03-inbound-messages.md §3.7). */
+   *  cache_read_input_tokens, ...}` (docs/protocol-cc/03-inbound-messages.md §3.7). */
   usage?: Record<string, unknown>
   /** Per-model usage breakdown when the turn spanned multiple models (fallback, etc.). */
   modelUsage?: Record<string, ModelUsageEntry>

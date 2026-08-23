@@ -2,7 +2,7 @@
  * Auto-mode rule corpus (phase 2 of docs/automode-rework-plan.md).
  *
  * Our own condensed policy — structure and mechanics mirror cli.js's auto mode
- * (docs/protocol/14-auto-mode-classifier.md §6/§9), the prose is ours, tuned to
+ * (docs/protocol-cc/14-auto-mode-classifier.md §6/§9), the prose is ours, tuned to
  * the engines ClaudeUI drives (opencode, pi): shell + file + git + MCP tools,
  * no browser/computer-use surface.
  *

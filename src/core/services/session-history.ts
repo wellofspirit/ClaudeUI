@@ -725,7 +725,7 @@ export interface SessionHistoryResult {
 /**
  * Render text for a `fallback` content block — the canonical-replacement frame
  * cli.js emits when a refused partial is retracted and the turn retried on a
- * fallback model (docs/protocol/04-system-subtypes.md §4.20). Live sessions
+ * fallback model (docs/protocol-cc/04-system-subtypes.md §4.20). Live sessions
  * normally evict the whole message via retracted_message_uuids; this text is
  * the fallback rendering when the frame survives (history, older CLIs).
  */

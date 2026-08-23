@@ -10,7 +10,7 @@ Coding agents live in the terminal. ClaudeUI gives them a proper surface: stream
 
 ## What makes it different
 
-- **Native Claude Code integration, no SDK.** ClaudeUI rebundles Anthropic's official standalone binary with a set of content-anchored patches, then speaks the stream-json wire protocol directly from an in-house harness. The patches unlock what the stock CLI doesn't expose: live subagent streaming, unbuffered bash output, per-request token usage, rate-limit relay, and file-based credentials. The full protocol is documented in [`docs/protocol/`](docs/protocol/).
+- **Native Claude Code integration, no SDK.** ClaudeUI rebundles Anthropic's official standalone binary with a set of content-anchored patches, then speaks the stream-json wire protocol directly from an in-house harness. The patches unlock what the stock CLI doesn't expose: live subagent streaming, unbuffered bash output, per-request token usage, rate-limit relay, and file-based credentials. The full protocol is documented in [`docs/protocol-cc/`](docs/protocol-cc/).
 - **True multi-engine.** opencode is a first-class second engine, bringing OpenAI, Google, and local models under the same UI — same tool cards, same approval flow, same session list, same usage dashboard. Engine capabilities are resolved per session and per model, so the UI only offers what the backend can actually do.
 - **Cross-engine dispatch.** A session on one engine can delegate a task to a headless agent on the other — ask a GPT-backed opencode agent to review a Claude session's diff, or vice versa. The dispatched work renders as a live-streaming task card in the calling chat, with approvals forwarded, a cost cap, and usage attributed back to the dispatching session.
 - **Multiple accounts.** Run several Claude accounts with per-account credentials and switch between them; usage is attributed to the right account and billing window.
@@ -41,7 +41,7 @@ The pinned engine versions live in `package.json` (`claudeCliVersion`, `opencode
 
 Issues and PRs are welcome. For anything non-trivial, open an issue first to discuss the approach.
 
-**Orientation.** `CLAUDE.md` is the map of the codebase — architecture, services, gotchas. Design decisions are recorded in [`docs/adr/`](docs/adr/); the Claude Code wire protocol in [`docs/protocol/`](docs/protocol/). Read the relevant ADR before changing a documented seam.
+**Orientation.** `CLAUDE.md` is the map of the codebase — architecture, services, gotchas. Design decisions are recorded in [`docs/adr/`](docs/adr/); the Claude Code wire protocol in [`docs/protocol-cc/`](docs/protocol-cc/). Read the relevant ADR before changing a documented seam.
 
 **Development.**
 

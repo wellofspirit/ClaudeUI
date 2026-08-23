@@ -2,7 +2,7 @@
  * Context-window resolution for a model value, mirroring cli.js's own logic.
  *
  * cli.js resolves the window in `DR(model, betas)` (cli.js@char3227080,
- * verified against 2.1.114) — full write-up in docs/protocol/13-context-window.md:
+ * verified against 2.1.114) — full write-up in docs/protocol-cc/13-context-window.md:
  *
  *   1. `/\[1m\]/i` in the model name            → 1M
  *   2. betas include "context-1m-2025-08-07"    → 1M (eligible models only)

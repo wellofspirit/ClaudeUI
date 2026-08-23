@@ -1885,7 +1885,7 @@ export class CrossEngineDispatcher {
       entry.lastReportedTotalCostUsd = reportedTotalCostUsd
       const durationMs = result.duration_ms ?? null
 
-      // A turn-level error (see docs/protocol/03-inbound-messages.md §result
+      // A turn-level error (see docs/protocol-cc/03-inbound-messages.md §result
       // subtypes) does NOT kill the process — the target stays alive for
       // continuation, parity with the opencode info.error handling above.
       if (result.subtype && result.subtype !== 'success') {

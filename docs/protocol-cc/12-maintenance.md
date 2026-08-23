@@ -42,11 +42,11 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    # exercise a complex turn
    ```
 
-   Dump `queryHandle.wireLog()` after the turn. Grep for `type` values that aren't in `docs/protocol/03-inbound-messages.md`. Any new type → document it.
+   Dump `queryHandle.wireLog()` after the turn. Grep for `type` values that aren't in `docs/protocol-cc/03-inbound-messages.md`. Any new type → document it.
 
 4. **Re-verify the inbound control_request subtype set**
 
-   Same wire log dump. Filter for `type === 'control_request'` (inbound). Grep for subtypes. Any new subtype → document in `docs/protocol/08-control-inbound.md`. Also add a handler in `src/core/sdk/query.ts::handleControlRequest()` if it needs a real response (don't leave it on the unknown-subtype fallback).
+   Same wire log dump. Filter for `type === 'control_request'` (inbound). Grep for subtypes. Any new subtype → document in `docs/protocol-cc/08-control-inbound.md`. Also add a handler in `src/core/sdk/query.ts::handleControlRequest()` if it needs a real response (don't leave it on the unknown-subtype fallback).
 
 5. **Re-verify CLI flags**
 
@@ -56,7 +56,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
    node vendor/claude-cli/cli.js --help
    ```
 
-   Diff against `docs/protocol/02-cli-flags.md`. New flags → document.
+   Diff against `docs/protocol-cc/02-cli-flags.md`. New flags → document.
 
 6. **Re-run the protocol test harnesses**
 
@@ -73,13 +73,13 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    New model generations and alias remaps land in cli.js's context-window
    resolver before anywhere else. Follow the drift check in
-   `docs/protocol/13-context-window.md` §13.5 and update
+   `docs/protocol-cc/13-context-window.md` §13.5 and update
    `src/core/services/context-window.ts` if the implicit-1M model list or
    the `fable`/`opus` alias targets changed.
 
 8. **Re-issue the session on the master protocol document**
 
-   Update `docs/protocol/README.md`'s version banner to the new cli.js version. Update any "verified against cli.js X.Y.Z" annotations in sub-docs.
+   Update `docs/protocol-cc/README.md`'s version banner to the new cli.js version. Update any "verified against cli.js X.Y.Z" annotations in sub-docs.
 
 ---
 
@@ -89,7 +89,7 @@ Triggers: new `QueryHandle` method, new `QueryOptions` field, new inbound subtyp
 
 1. **Update types** in `src/core/sdk/types.ts`.
 2. **Update `query.ts`** (either `makeHandle()` for outbound, or `handleControlRequest()` for inbound).
-3. **Update `docs/protocol/07-control-outbound.md`** (outbound) or `08-control-inbound.md` (inbound).
+3. **Update `docs/protocol-cc/07-control-outbound.md`** (outbound) or `08-control-inbound.md` (inbound).
 4. **Update `01-transport.md` §1.13 (harness module map)** if the change affects public API or architecture.
 5. **Add test coverage** — add or extend the appropriate test in `src/core/sdk/__tests__/` or `src/integration/`.
 

@@ -168,7 +168,7 @@ export function compileClaudeRulesToOpencode(perms: ClaudePermissions): Opencode
  * The compiled user ruleset with every ALLOW rule removed — what auto mode
  * patches onto the opencode session instead of the full set.
  *
- * ## Why (cli.js parity, `docs/protocol/14-auto-mode-classifier.md` §3 step 2)
+ * ## Why (cli.js parity, `docs/protocol-cc/14-auto-mode-classifier.md` §3 step 2)
  *
  * cli.js's auto-mode fast path re-runs the permission check "with
  * classifier-bypassing allow rules **filtered out**". We had no equivalent, and

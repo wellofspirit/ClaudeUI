@@ -132,7 +132,7 @@ Built by `src/core/sdk/args.ts::buildArgs()`. The prefix is always exactly:
 --output-format stream-json --verbose --input-format stream-json
 ```
 
-Everything else is optional. See `docs/protocol/02-cli-flags.md` for the complete flag reference.
+Everything else is optional. See `docs/protocol-cc/02-cli-flags.md` for the complete flag reference.
 
 **Flag order matters.** cli.js's parser is tolerant, but we mirror the upstream SDK's order exactly so future diffs against `sdk.mjs` stay clean. Never reorder without re-checking.
 

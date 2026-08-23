@@ -4,7 +4,7 @@
  * ## Why this exists
  *
  * `system/queued_command_consumed` (patch `queue-control`,
- * docs/protocol/04-system-subtypes.md §4.10) carries the attachment's `prompt`
+ * docs/protocol-cc/04-system-subtypes.md §4.10) carries the attachment's `prompt`
  * **verbatim**:
  *
  * ```js

@@ -305,7 +305,7 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   } else {
     // No in-app proxy configured: do NOT delete inherited HTTP_PROXY/HTTPS_PROXY/
     // ALL_PROXY. cli.js honors an env-configured proxy for its own API traffic
-    // (docs/protocol/01-transport §1.5); deleting them left a user behind a
+    // (docs/protocol-cc/01-transport §1.5); deleting them left a user behind a
     // corporate/env proxy with no connectivity (M-CL4). Only clear our own
     // marker so the default subprocess-proxy-strip behavior applies.
     delete env.CLAUDEUI_PROXY_SUBPROCESSES
