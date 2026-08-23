@@ -189,7 +189,7 @@ decisions), session-start remotes captured once and frozen, measured
 for exfil-capable ones. All captures spawn(shell:false), time-budgeted, and
 emit nothing on failure.
 
-**Evidence.** `scripts/automode-bench/`: 38 labeled scenarios × 4 models
+**Evidence.** `scripts/automode-bench/` (since removed — superseded by the standalone JudgEval repo; recoverable from git history): 38 labeled scenarios × 4 models
 (gpt-5.6-luna/terra, qwen3.8-max-preview, glm-5.2): 37/37 evidence-available
 with zero false blocks pre-phase-3; the single unanimous miss
 (gitStatus-dependent) passes with ground truth injected, categorized
