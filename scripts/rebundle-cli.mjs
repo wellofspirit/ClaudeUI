@@ -556,10 +556,23 @@ function main() {
       `__BUN,__bun at 0x${sectionOff.toString(16)}, size ${sectionSize}` +
         (macho.codeSig ? `, code-sig at 0x${macho.codeSig.dataOff.toString(16)}` : '')
     )
+  } else if (format === 'elf') {
+    // Linux: Bun's ELF standalone layout is not implemented yet. ubuntu CI
+    // still runs extract+patch to prove every patch APPLIES against the
+    // linux-x64 bundle, so a clean SKIP keeps that gate meaningful — and it
+    // stays fail-closed for consumers: no bun-claude output is written at all,
+    // so nothing can silently spawn an UNPATCHED binary on Linux. Implementing
+    // the ELF rewrite lifts this (the extract side already parses the trailer
+    // platform-independently).
+    console.log(
+      'rebundle-cli: ELF (Linux) rebundle not implemented — skipping. ' +
+        'Patched cli.js remains at vendor/claude-cli/cli.js; no bun-claude binary was produced.'
+    )
+    process.exit(0)
   } else {
     die(
       `unsupported format "${format}" (first bytes: ${buf.subarray(0, 4).toString('hex')}). ` +
-        'PE (Windows) and 64-bit LE Mach-O (macOS arm64/x64) are supported; ELF (Linux) is planned.'
+        'PE (Windows) and 64-bit LE Mach-O (macOS arm64/x64) are supported.'
     )
   }
 
