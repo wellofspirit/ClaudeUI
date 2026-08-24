@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { getContextWindowSize } from '../context-window'
+import { getContextWindowSize } from '../../../core/services/context-window'
 
 const ONE_M = 1_000_000
 const DEFAULT = 200_000

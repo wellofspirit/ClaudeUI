@@ -41,12 +41,20 @@ afterEach(() => {
 const OPENCODE_MODEL: ModelRef = { engineId: 'opencode', vendorId: 'openai', modelId: 'gpt-5' }
 
 async function fresh(): Promise<{
-  db: typeof import('../db')
-  ui: typeof import('../ui-config')
+  db: typeof import('../../../core/services/db')
+  ui: typeof import('../../../core/services/ui-config')
 }> {
   vi.resetModules()
-  const db = await import('../db')
-  const ui = await import('../ui-config')
+  // `vi.resetModules()` hands back a fresh `sqlite-driver` module too, and the
+  // seam deliberately has no default engine (S3 stage 1) — so the driver the
+  // setup file installed is not on THIS instance of it. Install it again, right
+  // where the fresh `db` is imported: the two are one act.
+  const driverSeam = await import('../../../core/services/sqlite-driver')
+  const { betterSqlite3Driver } =
+    await import('../../../core/services/sqlite/better-sqlite3-driver')
+  driverSeam.setSqliteDriver(betterSqlite3Driver())
+  const db = await import('../../../core/services/db')
+  const ui = await import('../../../core/services/ui-config')
   return { db, ui }
 }
 

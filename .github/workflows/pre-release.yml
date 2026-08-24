@@ -39,16 +39,15 @@ jobs:
       - name: Determine next pre-release version
         id: bump
         run: |
-          # Find the latest stable tag (no hyphen = no pre-release suffix)
-          LATEST_STABLE=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
+          # Major.minor comes from package.json; patch auto-increments from the
+          # latest stable tag on that major.minor line (no hyphen = no pre suffix)
+          PKG_MM=$(jq -r .version package.json | cut -d. -f1,2)
+          LATEST_STABLE=$(git tag -l "v${PKG_MM}.*" --sort=-v:refname | grep -v '-' | head -1)
           if [ -z "$LATEST_STABLE" ]; then
-            NEXT_BASE="1.0.0"
+            NEXT_BASE="${PKG_MM}.0"
           else
-            CURRENT="${LATEST_STABLE#v}"
-            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-            MINOR=$(echo "$CURRENT" | cut -d. -f2)
-            PATCH=$(echo "$CURRENT" | cut -d. -f3)
-            NEXT_BASE="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            PATCH="${LATEST_STABLE##*.}"
+            NEXT_BASE="${PKG_MM}.$((PATCH + 1))"
           fi
 
           # Find the latest pre-release tag for this base version and increment

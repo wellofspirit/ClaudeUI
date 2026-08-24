@@ -25,6 +25,7 @@ import React from 'react'
 import { render, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
 // Mobile flag — mutated per-test, read lazily by the mocked hook
@@ -75,6 +76,17 @@ vi.mock('../terminal/TerminalPanel', () => ({
 vi.mock('../QuitWorktreeModal', () => ({
   QuitWorktreeModal: () => <div data-testid="QuitWorktreeModal" />
 }))
+// SessionView hosts the settings dialog on MOBILE ONLY (the sidebar drawer that
+// hosts it on desktop is unmounted when it closes, so it cannot both dismiss the
+// drawer and survive). Stubbed so the assertion is about the routing, not about
+// the ~200KB settings-sections tree.
+let settingsProps: { initialScope?: string; initialSection?: string } | undefined
+vi.mock('../SettingsDialog', () => ({
+  SettingsDialog: (props: { initialScope?: string; initialSection?: string }) => {
+    settingsProps = props
+    return <div data-testid="SettingsDialog" />
+  }
+}))
 vi.mock('../../hooks/useGitWatcher', () => ({ useGitWatcher: () => {} }))
 vi.mock('../../hooks/useAutomationEvents', () => ({ useAutomationEvents: () => {} }))
 vi.mock('../../hooks/useTerminalColdCleanup', () => ({ useTerminalColdCleanup: () => {} }))
@@ -86,7 +98,11 @@ vi.mock('../../hooks/useTerminalColdCleanup', () => ({ useTerminalColdCleanup: (
 // its internal entry-classification logic.
 vi.mock('../TaskDetailPanel/View', () => ({
   TaskDetailPanelView: (props: { variant?: string; style?: React.CSSProperties }) => (
-    <div data-testid="TaskDetailPanel" data-variant={props.variant ?? 'panel'} style={props.style} />
+    <div
+      data-testid="TaskDetailPanel"
+      data-variant={props.variant ?? 'panel'}
+      style={props.style}
+    />
   )
 }))
 
@@ -116,7 +132,7 @@ describe('SessionView — mobile task takeover', () => {
     useSessionStore.setState({ activeSessionId: ROUTE })
     // Give the session a Task tool_use so TaskDetailPanel's real FC (wrapped
     // by the stubbed View) has something to classify.
-    useSessionStore.getState().addMessage(ROUTE, {
+    seed.message(ROUTE, {
       id: 'm1',
       role: 'assistant',
       content: [
@@ -138,7 +154,8 @@ describe('SessionView — mobile task takeover', () => {
     // zustand-triggered re-render runs with window.api already gone.
     cleanup()
     app.teardown()
-    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    useSessionStore.setState({ activeSessionId: null, sessions: {}, terminalPanelOpen: false })
+    mirrorStoreIntoReplica()
   })
 
   async function renderSessionView(): Promise<void> {
@@ -236,5 +253,109 @@ describe('SessionView — mobile task takeover', () => {
     // rightPanel is a single slot — the last opener owns it.
     expect(screen.getByTestId('MobileTaskView')).toBeInTheDocument()
     expect(screen.queryByTestId('MobileGitView')).not.toBeInTheDocument()
+  })
+
+  // ── mobile settings host ──────────────────────────────────────────────────
+  //
+  // `open-settings` is the app-wide deep-link channel. On desktop SettingsPanel
+  // (inside the sidebar) answers it; on mobile the sidebar drawer is UNMOUNTED
+  // when it closes, so SessionView answers instead and dismisses the drawer with
+  // it. Both halves must not answer at once.
+
+  it('mobile: an open-settings event mounts the settings dialog outside the drawer', async () => {
+    mockIsMobile = true
+    settingsProps = undefined
+    await renderSessionView()
+
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+    })
+
+    expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
+    // The owning scope is inferred from the section, as SettingsPanel does.
+    expect(settingsProps).toMatchObject({ initialScope: 'claude', initialSection: 'sandbox' })
+  })
+
+  it('desktop: SessionView ignores open-settings (SettingsPanel still owns it)', async () => {
+    mockIsMobile = false
+    await renderSessionView()
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+    })
+
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+  })
+
+  it('widening past the breakpoint drops the mobile dialog instead of parking it', async () => {
+    mockIsMobile = true
+    const { SessionView } = await import('../SessionView')
+    let view!: ReturnType<typeof render>
+    await act(async () => {
+      view = render(React.createElement(SessionView))
+    })
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('open-settings', { detail: {} }))
+    })
+    expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
+
+    // Rotate the iPad to landscape / widen the window. Ownership goes back to
+    // SettingsPanel, so this host must FORGET its dialog — parked state would
+    // make Settings reappear unbidden the next time the viewport narrows.
+    mockIsMobile = false
+    await act(async () => {
+      view.rerender(React.createElement(SessionView))
+    })
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+
+    // Narrowing again must NOT resurrect it.
+    mockIsMobile = true
+    await act(async () => {
+      view.rerender(React.createElement(SessionView))
+    })
+    expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
+  })
+
+  // ── Terminal (M3) ─────────────────────────────────────────────────────────
+  // Two mount points, one component. Desktop keeps the always-mounted bottom
+  // panel (display:none preserves xterm scrollback locally); mobile mounts the
+  // fullscreen takeover only while it is open — the host replays the scrollback
+  // ring on re-attach, so a permanently-mounted hidden xterm buys a phone
+  // nothing. Exactly one of the two may ever exist.
+
+  it('mobile: the terminal mounts only while the panel flag is set', async () => {
+    mockIsMobile = true
+    await renderSessionView()
+    expect(screen.queryByTestId('TerminalPanel')).toBeNull()
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(true)
+    })
+    expect(screen.getAllByTestId('TerminalPanel')).toHaveLength(1)
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(false)
+    })
+    expect(screen.queryByTestId('TerminalPanel')).toBeNull()
+  })
+
+  it('desktop: the bottom panel stays mounted either way (regression lock)', async () => {
+    mockIsMobile = false
+    await renderSessionView()
+    // Closed, but present — the display:none wrapper is what preserves scrollback.
+    expect(screen.getAllByTestId('TerminalPanel')).toHaveLength(1)
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(true)
+    })
+    // Still exactly one: opening must not add the mobile takeover alongside it.
+    expect(screen.getAllByTestId('TerminalPanel')).toHaveLength(1)
+
+    await act(async () => {
+      useSessionStore.getState().setTerminalPanelOpen(false)
+    })
   })
 })

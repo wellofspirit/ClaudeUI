@@ -45,8 +45,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { CrossEngineDispatcher } from '../../main/services/cross-engine-dispatcher'
-import type { DispatchContext } from '../../main/services/cross-engine-dispatcher'
+import { CrossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
+import type { DispatchContext } from '../../core/services/cross-engine-dispatcher'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
@@ -74,60 +74,66 @@ function hasCodexCredentials(): boolean {
 const BINARY_MISSING = !findBinary()
 const CREDENTIALS_MISSING = !hasCodexCredentials()
 
-describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)('pi dispatch TARGET integration (ADR-033 M4c)', () => {
-  let dispatcher: CrossEngineDispatcher
-  let tmpDir: string
+describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
+  'pi dispatch TARGET integration (ADR-033 M4c)',
+  () => {
+    let dispatcher: CrossEngineDispatcher
+    let tmpDir: string
 
-  beforeAll(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'pi-dispatch-target-integration-'))
-    dispatcher = new CrossEngineDispatcher({
-      // opencode-direction deps are structurally required by DispatcherDeps
-      // but never invoked dispatching engine:'pi' — throwing stubs make that
-      // guarantee loud if it's ever violated by a future change.
-      serverManager: {
-        acquire: async () => {
-          throw new Error('serverManager.acquire should never be called dispatching engine: "pi"')
+    beforeAll(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'pi-dispatch-target-integration-'))
+      dispatcher = new CrossEngineDispatcher({
+        // opencode-direction deps are structurally required by DispatcherDeps
+        // but never invoked dispatching engine:'pi' — throwing stubs make that
+        // guarantee loud if it's ever violated by a future change.
+        serverManager: {
+          acquire: async () => {
+            throw new Error('serverManager.acquire should never be called dispatching engine: "pi"')
+          },
+          release: () => {
+            throw new Error('serverManager.release should never be called dispatching engine: "pi"')
+          }
         },
-        release: () => {
-          throw new Error('serverManager.release should never be called dispatching engine: "pi"')
-        }
-      },
-      makeClient: () => {
-        throw new Error('makeClient should never be called dispatching engine: "pi"')
-      },
-      loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
-      dispatchTimeoutMs: 60_000,
-      recordDispatchedUsage: () => {}
-      // spawnPiTarget intentionally OMITTED — exercises the REAL
-      // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).
+        makeClient: () => {
+          throw new Error('makeClient should never be called dispatching engine: "pi"')
+        },
+        loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
+        dispatchTimeoutMs: 60_000,
+        recordDispatchedUsage: () => {}
+        // spawnPiTarget intentionally OMITTED — exercises the REAL
+        // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).
+      })
     })
-  })
 
-  afterAll(async () => {
-    dispatcher.disposeFor(ROUTING_ID)
-    // Windows holds the cwd handle briefly after the child process exits —
-    // wait, with a bounded fallback, before touching the tmp dir (mirrors
-    // pi-hosted-tools.integration.test.ts's identical precedent).
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  })
+    afterAll(async () => {
+      dispatcher.disposeFor(ROUTING_ID)
+      // Windows holds the cwd handle briefly after the child process exits —
+      // wait, with a bounded fallback, before touching the tmp dir (mirrors
+      // pi-hosted-tools.integration.test.ts's identical precedent).
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    })
 
-  it('a real dispatch into pi spawns the real binary and returns a real one-word answer', async () => {
-    const ctx: DispatchContext = {
-      fromEngine: 'claude',
-      fromRoutingId: ROUTING_ID,
-      cwd: tmpDir,
-      autonomyMode: 'default',
-      emit: () => {}
-    }
+    it('a real dispatch into pi spawns the real binary and returns a real one-word answer', async () => {
+      const ctx: DispatchContext = {
+        fromEngine: 'claude',
+        fromRoutingId: ROUTING_ID,
+        cwd: tmpDir,
+        autonomyMode: 'default',
+        emit: () => {}
+      }
 
-    const result = await dispatcher.dispatch(
-      { engine: 'pi', prompt: "Reply with exactly one word: 'hello'. No other text, no punctuation." },
-      ctx
-    )
+      const result = await dispatcher.dispatch(
+        {
+          engine: 'pi',
+          prompt: "Reply with exactly one word: 'hello'. No other text, no punctuation."
+        },
+        ctx
+      )
 
-    expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
-    expect(result.text.trim().toLowerCase()).toContain('hello')
-    expect(result.sessionId).toBeTruthy()
-  }, 90_000)
-})
+      expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
+      expect(result.text.trim().toLowerCase()).toContain('hello')
+      expect(result.sessionId).toBeTruthy()
+    }, 90_000)
+  }
+)

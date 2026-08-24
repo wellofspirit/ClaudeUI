@@ -2,7 +2,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import { E2ECrypto } from '../e2e-crypto'
+import { E2ECrypto, WebCryptoUnavailableError, webCryptoAvailable } from '../e2e-crypto'
 
 // Generate a valid 32-byte hex key for testing
 const TEST_KEY_HEX = 'a'.repeat(64) // 32 bytes of 0xAA
@@ -204,6 +204,113 @@ describe('E2ECrypto', () => {
       // Each side's first inbound frame is seq 1 and must be accepted.
       expect(await b.decrypt(aToB)).toEqual({ dir: 'a->b', n: 1 })
       expect(await a.decrypt(bToA)).toEqual({ dir: 'b->a', n: 1 })
+    })
+  })
+
+  /**
+   * The insecure-context case, which is not an edge case: it is EVERY phone
+   * browser on the LAN link (`http://192.168.x.x:<port>`), where `crypto.subtle`
+   * is `undefined` because the origin is not a secure context. Node always has
+   * WebCrypto, so the only way to exercise the pure-JS branch here is to take it
+   * away (ADR-056 amendment 2026-08-18).
+   */
+  describe('a context WITHOUT Web Crypto (the plain-http LAN origin)', () => {
+    /** Run `fn` with `crypto.subtle` removed, restoring it whatever happens. */
+    async function withoutSubtle<T>(fn: () => Promise<T>): Promise<T> {
+      const real = globalThis.crypto
+      Object.defineProperty(globalThis, 'crypto', {
+        // `getRandomValues` survives: it is NOT gated on a secure context, which
+        // is why nonces were never the problem and the fallback needs no PRNG.
+        value: { getRandomValues: real.getRandomValues.bind(real) },
+        configurable: true
+      })
+      try {
+        return await fn()
+      } finally {
+        Object.defineProperty(globalThis, 'crypto', { value: real, configurable: true })
+      }
+    }
+
+    it('webCryptoAvailable() reports the context, both ways', async () => {
+      expect(webCryptoAvailable()).toBe(true)
+      await withoutSubtle(async () => {
+        expect(webCryptoAvailable()).toBe(false)
+      })
+      expect(webCryptoAvailable()).toBe(true)
+    })
+
+    it('initializes and round-trips on the pure-JS path', async () => {
+      await withoutSubtle(async () => {
+        const crypto = new E2ECrypto()
+        await crypto.init(TEST_KEY_HEX)
+        expect(crypto.isReady).toBe(true)
+        const other = new E2ECrypto()
+        await other.init(TEST_KEY_HEX)
+        expect(await other.decrypt(await crypto.encrypt({ hello: 'lan' }))).toEqual({
+          hello: 'lan'
+        })
+      })
+    })
+
+    /**
+     * THE interop pin, and the reason the fallback is a fallback rather than a
+     * second protocol. A LAN session is ALWAYS a mixed pair: the phone has no
+     * `subtle` and the server always does. If HKDF or the tag placement differed
+     * by a byte between the two implementations, every frame would fail its GCM
+     * tag and the channel would die in a way that looks exactly like a bad key.
+     */
+    it('interoperates with a Web Crypto peer, in BOTH directions (GUARD)', async () => {
+      const webCryptoPeer = new E2ECrypto()
+      await webCryptoPeer.init(TEST_KEY_HEX)
+
+      const noblePeer = await withoutSubtle(async () => {
+        const peer = new E2ECrypto()
+        await peer.init(TEST_KEY_HEX)
+        return peer
+      })
+
+      // noble → WebCrypto. Encrypted with `subtle` absent, decrypted with it back.
+      const fromNoble = await withoutSubtle(() => noblePeer.encrypt({ dir: 'noble->web', n: 1 }))
+      expect(await webCryptoPeer.decrypt(fromNoble)).toEqual({ dir: 'noble->web', n: 1 })
+
+      // WebCrypto → noble.
+      const fromWeb = await webCryptoPeer.encrypt({ dir: 'web->noble', n: 1 })
+      expect(await withoutSubtle(() => noblePeer.decrypt(fromWeb))).toEqual({
+        dir: 'web->noble',
+        n: 1
+      })
+    })
+
+    it('rejects a TAMPERED frame on the pure-JS path too', async () => {
+      await withoutSubtle(async () => {
+        const a = new E2ECrypto()
+        const b = new E2ECrypto()
+        await a.init(TEST_KEY_HEX)
+        await b.init(TEST_KEY_HEX)
+        const payload = await a.encrypt({ secret: 1 })
+        const bytes = Buffer.from(payload, 'base64')
+        bytes[bytes.length - 1] ^= 0xff // flip a bit of the GCM tag
+        await expect(b.decrypt(bytes.toString('base64'))).rejects.toThrow()
+      })
+    })
+
+    it('a MALFORMED key is still a key error — the only failure init has left', async () => {
+      await withoutSubtle(async () => {
+        const crypto = new E2ECrypto()
+        await expect(crypto.init('zz'.repeat(32))).rejects.toThrow(/Invalid hex string/)
+        await expect(crypto.init('aa')).rejects.toThrow('E2E key must be 32 bytes')
+      })
+    })
+
+    it('the typed context error is now UNREACHABLE from init (GUARD)', async () => {
+      await withoutSubtle(async () => {
+        const crypto = new E2ECrypto()
+        // It used to throw exactly this for a perfectly valid key, which is the
+        // regression the amendment removed. The class survives only as an
+        // invariant guard for `subtle` vanishing mid-session.
+        await expect(crypto.init(TEST_KEY_HEX)).resolves.toBeUndefined()
+        expect(new WebCryptoUnavailableError()).toBeInstanceOf(Error)
+      })
     })
   })
 

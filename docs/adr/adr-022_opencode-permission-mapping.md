@@ -26,14 +26,14 @@ ruleset)**:
 Two facts established by reading the opencode source (vendored 1.17.9 binary), not just probing:
 
 - **Composition / precedence.** At eval time opencode computes `K = merge(agent.permission,
-  session.permission)` then `K.findLast(match)`. So the **session-level permission is layered AFTER the
+session.permission)` then `K.findLast(match)`. So the **session-level permission is layered AFTER the
   agent and overrides it** (last-match-wins).
 - **Session patch is cumulative.** `PATCH /session/{id}` does `setPermission(merge(existing, payload))`
   — there is **no replace/clear**; session permission only grows.
 - **Built-in agents** are themselves `merge(base, override, userConfig)`. The `build` agent is
   permissive (`{*:allow}` baseline + `doom_loop`/`external_directory`/`*.env`-read asks). The **`plan`
   agent** = `merge(base, { question:"allow", plan_exit:"allow", task:{ general:"deny" },
-  edit:{ "*":"deny", <plan-files>:"allow" } })` — it denies edits (except plan markdown) and **denies
+edit:{ "*":"deny", <plan-files>:"allow" } })` — it denies edits (except plan markdown) and **denies
   only the `general` subagent**; other subagents (e.g. read-only `explore`) stay allowed.
 
 opencode's interactive TUI layers prompting on top of the bare server agents; the server agents
@@ -46,7 +46,7 @@ a single wildcard rule `[{ permission:'*', pattern:'*', action: allow|ask }]`:
   opencode raises a `permission.asked` for the `task` tool itself (on the parent session) and parks
   the task at `status=running`; with the renderer also failing to surface that approval, the turn hung
   forever and no subagent was ever spawned.
-- `acceptEdits` → `{*:* allow}` allowed *everything* (incl. bash) — not "auto-accept *edits*".
+- `acceptEdits` → `{*:* allow}` allowed _everything_ (incl. bash) — not "auto-accept _edits_".
 - All modes clobbered opencode's own protections (`.env` reads, external-directory, doom-loop).
 
 ## Decision
@@ -56,21 +56,21 @@ opencode's own agents are structured), so read-class tools and `task` stay auto-
 write-class tools are gated. `applyPermissionMode` **always** patches the mode's full ruleset
 (including `plan`).
 
-A self-contained ruleset is the *robust* choice given the source facts above: because session
+A self-contained ruleset is the _robust_ choice given the source facts above: because session
 permission **overrides** the agent and is **cumulative (cannot be cleared)**, a ruleset patched as the
 latest payload always has its rules evaluated last → it **dominates** regardless of which agent is
 active or what prior modes accumulated. (A delta-only ruleset would be vulnerable to stale overrides
 from a previous mode, since you can't un-patch them.)
 
-| Autonomy (Claude mode string) | agent  | session permission ruleset (last-match-wins)                          |
-| ----------------------------- | ------ | --------------------------------------------------------------------- |
-| `plan`                        | `plan` | `[{*:allow}, {edit:* deny}, {task:general deny}]`                     |
-| `ask` (`default`)             | `build`| `[{*:allow}, {edit:ask}, {bash:ask}, {webfetch:ask}]`                 |
-| `autoEdit` (`acceptEdits`)    | `build`| `[{*:allow}, {bash:ask}, {webfetch:ask}]`                            |
-| `full` (`auto`)               | `build`| `[{*:allow}]`                                                         |
+| Autonomy (Claude mode string) | agent   | session permission ruleset (last-match-wins)          |
+| ----------------------------- | ------- | ----------------------------------------------------- |
+| `plan`                        | `plan`  | `[{*:allow}, {edit:* deny}, {task:general deny}]`     |
+| `ask` (`default`)             | `build` | `[{*:allow}, {edit:ask}, {bash:ask}, {webfetch:ask}]` |
+| `autoEdit` (`acceptEdits`)    | `build` | `[{*:allow}, {bash:ask}, {webfetch:ask}]`             |
+| `full` (`auto`)               | `build` | `[{*:allow}]`                                         |
 
 - **`ask` is Claude-faithful**: reads/glob/grep/list/`task` auto-allowed; edit/bash/webfetch prompt.
-  `task` is *not* gated → no spurious subagent-spawn prompt, no hang.
+  `task` is _not_ gated → no spurious subagent-spawn prompt, no hang.
 - **`plan`** mirrors opencode's own `plan` agent: deny edits, and deny **only the `general`
   subagent** (`{task:general deny}`) — read-only subagents (e.g. `explore`) stay allowed via the
   baseline, so **plan-mode `task`/research still works**. `deny` refuses without a permission
@@ -98,8 +98,8 @@ independent of the permission mapping above.
   guard: its safe form needs an env-specific allow-list for opencode's own tool-output/temp dirs, so a
   bare `{external_directory:ask}` would spuriously prompt on opencode's internal writes. A proper
   "additional directories" mapping is part of the broader unified-permission design (below).
-- **Known residual (deferred):** the event mapper's cross-session filter drops *all* child-session
-  events, so a subagent that *did* raise its own `permission.asked` (child `sessionID`) would be
+- **Known residual (deferred):** the event mapper's cross-session filter drops _all_ child-session
+  events, so a subagent that _did_ raise its own `permission.asked` (child `sessionID`) would be
   invisible and could hang. The mapping above avoids this in practice (subagents don't prompt under
   their permissive agents), but full child-session handling is part of the deferred Phase-6 subagent
   work (`subagents: false` in 5b).
@@ -123,6 +123,7 @@ so the same allow/ask/deny rules + additional directories govern both engines.
   replicating Claude's deny>ask>allow precedence. All three scopes (user/project/local) merged.
 
 **Pending follow-on (decided, not yet built):**
+
 - **"Always-allow" write-back** — generate Claude-format `suggestions` for opencode approvals and, on
   accept, `replyPermission('always')` (live session) **and** persist via `saveClaudePermissions`
   (shared store → reapplies next spawn, visible in PermissionsDialog). Full parity with Claude.

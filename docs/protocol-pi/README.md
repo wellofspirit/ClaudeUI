@@ -35,19 +35,19 @@ Key source locations: `packages/coding-agent/src/modes/rpc/` (RPC types + server
 
 See `vendor/pi-cli/docs/rpc.md` for full shapes. The integration surface:
 
-| Command | Use |
-|---|---|
-| `prompt` (`message`, `images?`, `streamingBehavior?`) | send user input; **during streaming you MUST pass `streamingBehavior: "steer" \| "followUp"` or the command fails** |
-| `steer` / `follow_up` | queue-steer parity |
-| `abort` | interrupt current turn (session survives) |
-| `set_model` (`provider`, `modelId`) / `get_available_models` | model switch + discovery |
-| `set_thinking_level` (`off…max`) | reasoning control |
-| `get_state` / `get_messages` / `get_entries` (`since` cursor, returns `leafId`) | state + history |
-| `get_session_stats` | token/cost cross-check |
-| `get_commands` | slash commands: extension commands, prompt templates, `skill:*` |
-| `set_session_name` / `fork` / `get_fork_messages` / `switch_session` / `new_session` | session ops |
-| `compact` / `set_auto_compaction` | compaction |
-| `extension_ui_response` | reply to extension dialog requests |
+| Command                                                                              | Use                                                                                                                 |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `prompt` (`message`, `images?`, `streamingBehavior?`)                                | send user input; **during streaming you MUST pass `streamingBehavior: "steer" \| "followUp"` or the command fails** |
+| `steer` / `follow_up`                                                                | queue-steer parity                                                                                                  |
+| `abort`                                                                              | interrupt current turn (session survives)                                                                           |
+| `set_model` (`provider`, `modelId`) / `get_available_models`                         | model switch + discovery                                                                                            |
+| `set_thinking_level` (`off…max`)                                                     | reasoning control                                                                                                   |
+| `get_state` / `get_messages` / `get_entries` (`since` cursor, returns `leafId`)      | state + history                                                                                                     |
+| `get_session_stats`                                                                  | token/cost cross-check                                                                                              |
+| `get_commands`                                                                       | slash commands: extension commands, prompt templates, `skill:*`                                                     |
+| `set_session_name` / `fork` / `get_fork_messages` / `switch_session` / `new_session` | session ops                                                                                                         |
+| `compact` / `set_auto_compaction`                                                    | compaction                                                                                                          |
+| `extension_ui_response`                                                              | reply to extension dialog requests                                                                                  |
 
 ## Events (verified sequence)
 
@@ -94,8 +94,8 @@ display (live path only sums assistant `message_end` usage) — accepted, not a 
   `-`, wrap in `--…--`. `D:\Work\App` → `--D--Work-App--`. Lossy one-way, same philosophy as our
   `projectKey` (ADR-025) — always map cwd → dir, never parse back.
 - File format: documented in `vendor/pi-cli/docs/session-format.md` (header `{type:"session",
-  version:3, id, timestamp, cwd, parentSession?}`, then tree entries `{type, id, parentId,
-  timestamp, …}`; `message` / `model_change` / `thinking_level_change` / `compaction` /
+version:3, id, timestamp, cwd, parentSession?}`, then tree entries `{type, id, parentId,
+timestamp, …}`; `message` / `model_change` / `thinking_level_change` / `compaction` /
   `branch_summary` / `session_info` / `label` / `custom` / `custom_message`).
 - **Resume verified**: kill the process, respawn with `--session <file>` → same `sessionId`, full
   message history, and the model restored from `model_change` entries.
@@ -112,7 +112,7 @@ display (live path only sums assistant `message_end` usage) — accepted, not a 
   auth.json. A transplanted opencode token drives pi successfully (verified with
   `openai-codex/gpt-5.6-luna`).
 - **Refresh-rotation caveat**: pi auto-refreshes expired OAuth tokens in place. If a token is
-  *shared* with opencode (transplant), a pi-side refresh may rotate the refresh token and strand
+  _shared_ with opencode (transplant), a pi-side refresh may rotate the refresh token and strand
   the opencode copy. Testing used an isolated `USERPROFILE`/`HOME` so the user's real
   `~/.pi` and opencode credentials are untouched; the product auth story is M3's.
 
@@ -195,7 +195,7 @@ Probed for M5c fork/sideQuestion (2026-07-21, same binary):
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next
   prompt**, and emits no event.
-- `prompt` responses signal *acceptance*; failures after acceptance surface only in the event
+- `prompt` responses signal _acceptance_; failures after acceptance surface only in the event
   stream.
 - Windows: pi requires a bash (`C:\Program Files\Git\bin\bash.exe` auto-detected; `shellPath` in
   `~/.pi/agent/settings.json` overrides).

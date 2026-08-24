@@ -42,13 +42,7 @@ describe('ApprovalButtons', () => {
   it('calls onApproval with allow decision when Allow clicked', async () => {
     const onApproval = vi.fn().mockResolvedValue(undefined)
     const approval = makeApproval()
-    render(
-      <ApprovalButtons
-        approval={approval}
-        permissionMode="default"
-        onApproval={onApproval}
-      />
-    )
+    render(<ApprovalButtons approval={approval} permissionMode="default" onApproval={onApproval} />)
     await act(async () => {
       fireEvent.click(screen.getByText('Allow'))
     })
@@ -58,13 +52,7 @@ describe('ApprovalButtons', () => {
   it('calls onApproval with deny decision when Deny clicked', async () => {
     const onApproval = vi.fn().mockResolvedValue(undefined)
     const approval = makeApproval()
-    render(
-      <ApprovalButtons
-        approval={approval}
-        permissionMode="default"
-        onApproval={onApproval}
-      />
-    )
+    render(<ApprovalButtons approval={approval} permissionMode="default" onApproval={onApproval} />)
     await act(async () => {
       fireEvent.click(screen.getByText('Deny'))
     })
@@ -151,13 +139,7 @@ describe('ApprovalButtons', () => {
     ]
     const onApproval = vi.fn().mockResolvedValue(undefined)
     const approval = makeApproval({ suggestions })
-    render(
-      <ApprovalButtons
-        approval={approval}
-        permissionMode="default"
-        onApproval={onApproval}
-      />
-    )
+    render(<ApprovalButtons approval={approval} permissionMode="default" onApproval={onApproval} />)
 
     // Check the second suggestion checkbox
     const checkboxes = screen.getAllByRole('checkbox')
@@ -182,13 +164,7 @@ describe('ApprovalButtons', () => {
     ]
     const onApproval = vi.fn().mockResolvedValue(undefined)
     const approval = makeApproval({ suggestions })
-    render(
-      <ApprovalButtons
-        approval={approval}
-        permissionMode="default"
-        onApproval={onApproval}
-      />
-    )
+    render(<ApprovalButtons approval={approval} permissionMode="default" onApproval={onApproval} />)
 
     // Check the checkbox
     const checkboxes = screen.getAllByRole('checkbox')
@@ -213,13 +189,7 @@ describe('ApprovalButtons', () => {
     ]
     const onApproval = vi.fn().mockResolvedValue(undefined)
     const approval = makeApproval({ suggestions })
-    render(
-      <ApprovalButtons
-        approval={approval}
-        permissionMode="default"
-        onApproval={onApproval}
-      />
-    )
+    render(<ApprovalButtons approval={approval} permissionMode="default" onApproval={onApproval} />)
 
     // Leave checkboxes unchecked, click Allow
     await act(async () => {

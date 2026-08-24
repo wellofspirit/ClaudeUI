@@ -27,7 +27,7 @@ patches must be narrow and re-verified per bump.
 1. **opencode: fork + patch, never upstream.** Patches are built into the
    vendored binary via the existing ensure/update pipeline. Initial inventory:
    - **P1 — tool-less judge/completion endpoint**: `{model, system, user,
-     maxTokens, stopSequences, cacheHint}` → text; bypasses the session/tool/
+maxTokens, stopSequences, cacheHint}` → text; bypasses the session/tool/
      permission machinery entirely. Resolves the ADR-023 deviation AND Q5 (no
      tool layer → nothing to pierce); deliberately avoids the in-rewrite
      permission layer (v2 schema already staged in 1.17.14) so it survives it.

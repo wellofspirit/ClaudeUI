@@ -8,11 +8,11 @@ Shipped in `bfe380a` (viewer), `3834cb2` (attachment rehydration), `da4b984`
 
 ## Context
 
-Attached images rendered as inert 200px thumbnails; images in *historical*
+Attached images rendered as inert 200px thumbnails; images in _historical_
 sessions vanished entirely (all three engines persist them — cli.js as base64
 content blocks in the jsonl, opencode as data-URI file parts in its sqlite,
 pi natively — but the Claude and opencode history loaders discarded them);
-and images *returned by tools* (Read on a .png, screenshot tools, MCP tools)
+and images _returned by tools_ (Read on a .png, screenshot tools, MCP tools)
 were dropped at every process boundary — the Claude-side text collapse
 (`(c.text)||''` joined) turned an image-only tool result into `''`, which
 `FileReadBody` then hid completely, so an image Read rendered as nothing.
@@ -25,7 +25,7 @@ in the viewer.
 
 1. **One `ImageViewerOverlay` for both surfaces — a portalled modal, not an
    ADR-048 content-slot takeover.** ADR-048's takeover pattern exists for
-   *pane-sized workflows* that need a navigation contract; a media viewer is
+   _pane-sized workflows_ that need a navigation contract; a media viewer is
    transient modal chrome with an identical interaction model on both surfaces
    (the only divergence is input modality, which Pointer Events unify). It
    portals to `<body>` at `z-[300]` (above the `z-50`–`z-[200]` dialog/sheet
@@ -40,7 +40,7 @@ in the viewer.
    sealed but never acted on.** The obvious implementation (`click` +
    `e.target === e.currentTarget`) is unsound: once `setPointerCapture` is
    taken on the viewport for an image-originated gesture, Chromium retargets
-   the trailing `click` to the *capturing element*, so a plain click on the
+   the trailing `click` to the _capturing element_, so a plain click on the
    image arrives as `target === viewport` and closes the viewer. jsdom
    implements no capture retargeting, which is exactly why the naive version
    passed its tests — the defect was proven in a live Chromium repro.
@@ -65,7 +65,7 @@ in the viewer.
    the block object — galleries re-derive on every streaming partial, and
    re-encoding multi-MB base64 each time would be an allocation storm.
 
-4. **Two galleries, surfaced as tabs: Attachments (image blocks on *user*
+4. **Two galleries, surfaced as tabs: Attachments (image blocks on _user_
    messages) and Tool results (`tool_result.images`).** The tab bar renders
    only when 2+ galleries are non-empty, so the common attachments-only case
    shows no tab chrome and the Tool results tab lights up exactly when there
@@ -73,7 +73,7 @@ in the viewer.
 
 5. **Tool-returned images are a first-class field on the engine-neutral
    block: `tool_result.images?: ToolResultImage[]`** (`{mediaType, base64Data,
-   fileName?}` — following the `fileDiffs` precedent for enriching
+fileName?}` — following the `fileDiffs` precedent for enriching
    `tool_result`, not a new block type, so existing text/diff handling is
    untouched). Producers omit the key when empty; presence drives UI. The
    four previously hand-rolled media-type allowlists consolidated into
@@ -97,7 +97,7 @@ in the viewer.
      text-only by design (the image appears on completion).
 
 6. **History rehydration mirrors the live echo, not storage order.** Both
-   Claude jsonl user-line parsers emit attachment blocks *before* the text
+   Claude jsonl user-line parsers emit attachment blocks _before_ the text
    block, and opencode's `convertStoredMessage` hoists user attachments ahead
    of other parts (opencode persists `[text, …files]` while the live echo puts
    attachments first — replay must not render the same message differently).
@@ -115,7 +115,7 @@ in the viewer.
    `expanded` is deliberate: the image IS the result, and a collapsed card
    gives no hint one exists — same posture as the bash streaming/background
    footers. Custom-layout kinds (diagram/mockup) render their own card and
-   get no strip; they synthesize visuals from tool *input* and never return
+   get no strip; they synthesize visuals from tool _input_ and never return
    images (pinned by test).
 
 ## Consequences
@@ -143,13 +143,13 @@ in the viewer.
   makes single-image messages a dead end.
 - **Store-based viewer state (zustand slice) instead of a context provider** —
   rejected: the viewer would need per-list scoping anyway (chat vs automation
-  run vs subagent transcript); a provider *is* the scope, and keeps the viewer
+  run vs subagent transcript); a provider _is_ the scope, and keeps the viewer
   mountable in tests without the session store.
 - **Rendering tool images per kind body (FileReadBody etc.)** — rejected: any
   kind can return an image (MCP), and N per-kind edits would drift; one shared
   placement can't.
 - **A `screenshot`/`image` ToolKind** — rejected: kind classification is by
-  tool *name*; whether a result contains an image is a per-invocation runtime
+  tool _name_; whether a result contains an image is a per-invocation runtime
   fact, so it belongs on the result block, not the kind.
 - **Deleting SentFilesWidget's lightbox but keeping it single-image** —
   superseded by reusing the shared viewer with its own single-tab gallery,

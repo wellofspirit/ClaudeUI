@@ -1,4 +1,3 @@
-
 export interface WelcomeScreenViewProps {
   loading: boolean
   onOpen: () => void

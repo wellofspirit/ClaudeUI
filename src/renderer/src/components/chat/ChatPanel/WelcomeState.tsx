@@ -129,7 +129,10 @@ export function WelcomeState(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="WelcomeState" className="flex flex-col items-center gap-4 -mt-16 animate-fade-in">
+    <div
+      data-testid="WelcomeState"
+      className="flex flex-col items-center gap-4 -mt-16 animate-fade-in"
+    >
       {/* Icon */}
       <div
         style={{ width: 56, height: 56, borderRadius: 16 }}

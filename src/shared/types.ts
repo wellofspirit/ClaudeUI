@@ -1,5 +1,10 @@
 import type { ResolvedCapabilities } from './model-capabilities'
 import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  RegistrationResponseJSON,
+  RemoteKdfParams
+} from './remote-protocol'
+import type {
   ConfigurableHarnessId,
   SharedProviderDefinition,
   SharedProviderModel,
@@ -114,6 +119,19 @@ export interface ChatMessage {
   content: ContentBlock[]
   timestamp: number
   planContent?: string
+  /**
+   * Elapsed wall-clock ms of the thinking span this message SEALS, stamped by
+   * the emitter (`BaseSession.send`) — SyncCore phase 4b.
+   *
+   * A transient wire hint, not stored state: the shared reducer moves it onto
+   * the sealed thinking block's `durationMs` and drops the field, so canonical
+   * state (and every snapshot built from it) carries the duration where the
+   * renderer expects it. It exists because `applyEvent` is clock-free by
+   * contract — a reducer that measured the span itself would fold a different
+   * state on every replay — so the only honest source of elapsed time is the
+   * process that watched the clock: the emitter.
+   */
+  thinkingDurationMs?: number
 }
 
 export type EngineId = 'claude' | 'opencode' | 'pi'
@@ -699,6 +717,15 @@ export interface AskUserQuestionInput {
   questions: AskUserQuestion[]
 }
 
+/**
+ * The payload `BaseSession.send('session:stream', …)` carries.
+ *
+ * NOT a `SyncEventMap` entry any more (phase 5 S1): this channel left the event
+ * lane, so nothing subscribes to it — the deltas arrive as `StreamFrame`s and
+ * fold through `shared/sync/stream.ts`. The type survives because the EMITTERS
+ * still speak it and `streamFrameFrom` still parses it; it is the wire shape of
+ * an emission, not of a subscription.
+ */
 export interface StreamDelta {
   type: 'text' | 'thinking'
   text: string
@@ -731,6 +758,22 @@ export interface SentFile {
   toolUseId: string
   /** Present when the paired tool_result was an error (missing file, UNC, URL, …). */
   error?: string
+}
+
+/**
+ * One prompt in a session's queue of record (ADR-053 / sync-core.md §Queue).
+ *
+ * Itemized, never a pre-joined blob: the `\n` join happens at take-back time in
+ * the client, so each item can still be correlated one-for-one with the
+ * engine's own queue entry. `consumed` and `recalled` are terminal — main
+ * broadcasts them exactly once (long enough for clients to synthesize the chat
+ * message) and then prunes them from the list.
+ */
+export interface QueuedItem {
+  itemId: string
+  text: string
+  attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  state: 'queued' | 'consumed' | 'recalled'
 }
 
 export interface TaskProgress {
@@ -767,6 +810,7 @@ export interface TaskNotification {
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
 }
 
+/** The subagent twin of {@link StreamDelta} — same phase-5 note applies. */
 export interface SubagentStreamDelta {
   toolUseId: string
   type: 'text' | 'thinking'
@@ -807,10 +851,44 @@ export interface BashOutputData {
   totalBytes: number
 }
 
+/**
+ * A watched external session changed on disk — a NOTIFY since phase 5 S4.
+ *
+ * The payload used to carry a full re-read of the transcript, which put hundreds
+ * of transcripts in a 5000-entry ring and replayed every one of them to a
+ * reconnecting client. The content is a SEED now
+ * (`SyncCore.seedWatchedSession`, applied BEFORE this event is emitted), so what
+ * rides the wire is the ADDRESS of the thing that changed and nothing else.
+ *
+ * `messages` / `taskNotifications` / `statusLine` survive as OLD-shape fields:
+ * committed golden fixtures and any ring a client catches up from across the
+ * upgrade still carry them, and the reducer still folds them (see its branch).
+ * Nothing emits them any more.
+ */
 export interface WatchUpdate {
   routingId: string
-  messages: ChatMessage[]
-  taskNotifications: TaskNotification[]
+  /**
+   * The watched session's working directory. Optional for OLD-shape events only
+   * (a cached `/remote` bundle whose `watchSession` invoke sends three args) —
+   * the reducer leaves the existing cwd alone when it is absent. See
+   * `main/services/session-watcher.ts` for why it has to ride the event.
+   */
+  cwd?: string
+  /**
+   * Where the transcript lives, so a client's refetch does not have to guess it.
+   * `routingId` is the sessionId today (the sidebar's eye passes
+   * `SessionInfo.sessionId` as both), but `watchSession` takes them separately,
+   * and `projectKey` is `cwdToProjectKey`'s lossy, irreversible output — a value
+   * only the emitter has. Absent on old-shape events; a client that has neither
+   * skips the refetch and heals on its next snapshot.
+   */
+  sessionId?: string
+  projectKey?: string
+  /** @deprecated OLD-shape only — see the interface comment. */
+  messages?: ChatMessage[]
+  /** @deprecated OLD-shape only — see the interface comment. */
+  taskNotifications?: TaskNotification[]
+  /** @deprecated OLD-shape only — see the interface comment. */
   statusLine?: StatusLineData | null
 }
 
@@ -906,7 +984,14 @@ interface SessionAPI {
     forkSession?: boolean,
     engineId?: EngineId
   ): Promise<void>
-  rekeySession(oldId: string, newId: string): Promise<void>
+  /**
+   * `rekeySession` was DELETED in SyncCore phase 4c. Core owns the rekey: it
+   * applies `rekeyTargetFor` to canonical state and re-keys its own session
+   * registry in the same tick it emits the `session:status` that implies one, so a
+   * client telling main to rekey was a client racing the authority. The main-side
+   * `session:rekey` handler SURVIVES as a shim for cached phone bundles that still
+   * invoke it (it logs and applies a rekey core did not own).
+   */
   /** Resolve the fork ("branch off") anchor for an engine session. Claude:
    *  `messageId` (the renderer's ChatMessage.id) resolves to a JSONL line
    *  uuid; `messageIndex` is unused. pi: no stable id exists, so `messageIndex`
@@ -926,6 +1011,12 @@ interface SessionAPI {
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void>
   cancelSession(routingId: string): Promise<void>
+  /**
+   * Reset a session's conversation in place ("start fresh"). Emits the
+   * replicated `session:conversation-cleared`; `permissionMode` is the mode a
+   * fresh RUN starts in, which only a client can resolve.
+   */
+  clearConversation(routingId: string, permissionMode?: string): Promise<void>
   interruptSession(routingId: string): Promise<void>
   respondApproval(
     routingId: string,
@@ -951,7 +1042,12 @@ interface SessionAPI {
   loadPiHistory(sessionId: string): Promise<ChatMessage[]>
   loadSessionHistory(
     sessionId: string,
-    projectKey: string
+    projectKey: string,
+    /**
+     * Fork/branch anchor (a JSONL line uuid) to TRUNCATE the load at, inclusive
+     * — the value the session was resumed with. Omit to load the whole file.
+     */
+    resumeSessionAt?: string
   ): Promise<{
     messages: ChatMessage[]
     taskNotifications: TaskNotification[]
@@ -976,59 +1072,24 @@ interface SessionAPI {
     taskId: string,
     outputFile?: string
   ): Promise<{ content: string | null; purged: boolean }>
-  onSessionCreated(
-    cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void
-  ): () => void
-  onUserMessage(
-    cb: (
-      routingId: string,
-      data: {
-        prompt: string
-        attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-        queued?: boolean
-      }
-    ) => void
-  ): () => void
-  onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
-  onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
-  onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void
-  /** Externally-resolved approval (e.g. opencode's deny-cascade on a dispatch target, ADR-033) — remove the card. */
-  onApprovalDismiss(cb: (routingId: string, data: { requestId: string }) => void): () => void
-  onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
-  onResult(cb: (routingId: string, result: SessionResult) => void): () => void
-  onError(cb: (routingId: string, error: string) => void): () => void
-  onVendorAuthRequired(cb: (routingId: string, data: { vendorId: string; message: string }) => void): () => void
-  onWarning(cb: (routingId: string, warning: string) => void): () => void
-  /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
-  onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
-  onToolResult(
-    cb: (
-      routingId: string,
-      data: {
-        toolUseId: string
-        result: string
-        isError: boolean
-        fileDiffs?: FileDiff[]
-        /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
-        images?: ToolResultImage[]
-      }
-    ) => void
-  ): () => void
+  /**
+   * Ask the host for this client's sync transport (SyncCore phase 4c).
+   *
+   * Desktop: the preload is holding a `MessagePort` from main and forwards it into
+   * the main world with `window.postMessage` (a port is not a type
+   * `contextBridge` can marshal). Call it AFTER installing the `message` listener
+   * — see `renderer/src/sync/desktop-transport.ts`.
+   *
+   * Web: a no-op. The WebSocket connection is constructed before `window.api`
+   * exists and installs its own client, so there is nothing to acquire. Present on
+   * both transports so the renderer has one call site.
+   *
+   * Replicated and volatile events arrive on that transport, subscribed to with
+   * `shared/sync/client-registry.onSyncEvent` and typed by `SyncEventMap`. The
+   * `onFoo` members that remain on this interface are HOST-LOCAL only.
+   */
+  acquireSyncPort(): void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
-  onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
-  onTaskNotification(cb: (routingId: string, data: TaskNotification) => void): () => void
-  /** Task exists and is running — see TaskStartedData for why this is needed. */
-  onTaskStarted(cb: (routingId: string, data: TaskStartedData) => void): () => void
-  onSubagentStream(cb: (routingId: string, data: SubagentStreamDelta) => void): () => void
-  onSubagentMessage(cb: (routingId: string, data: SubagentMessageData) => void): () => void
-  onSubagentMessageBatch(
-    cb: (routingId: string, data: SubagentMessageBatchData) => void
-  ): () => void
-  onSubagentToolResult(cb: (routingId: string, data: SubagentToolResultData) => void): () => void
-  onPermissionMode(cb: (routingId: string, mode: PermissionMode) => void): () => void
-  onSandboxViolation(cb: (routingId: string, message: string) => void): () => void
-  onBashOutput(cb: (routingId: string, data: BashOutputData) => void): () => void
-  onBackgroundOutput(cb: (routingId: string, data: BackgroundOutput) => void): () => void
   watchBackground(routingId: string, toolUseId: string): Promise<void>
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>
   readBackgroundRange(
@@ -1050,9 +1111,20 @@ interface SessionAPI {
     routingId: string,
     toolUseId: string
   ): Promise<{ success: boolean; error?: string }>
+  /**
+   * @deprecated ADR-053 — superseded by {@link ClaudeAPI.recallQueued}. Kept so a
+   * `/remote` bundle cached in a phone browser still takes messages back; the
+   * host ignores `value` and recalls everything, reporting the count as `removed`.
+   */
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
+  /**
+   * Take back every still-recallable queued item (ADR-053). `recalled` carries
+   * their texts in queue order for the client to join with `\n`; `notRecalled`
+   * counts items the engine had already started consuming — those stay on the
+   * card until their `consumed` transition arrives.
+   */
+  recallQueued(routingId: string): Promise<{ recalled: string[]; notRecalled: number }>
   askSideQuestion(routingId: string, question: string): Promise<string | null>
-  onSteerConsumed(cb: (routingId: string, data: { prompt: string }) => void): () => void
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
@@ -1083,23 +1155,14 @@ interface SessionAPI {
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
   getPlanContent(routingId: string): Promise<string | null>
   getSessionLogPath(routingId: string): Promise<string | null>
-  watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
+  watchSession(
+    routingId: string,
+    sessionId: string,
+    projectKey: string,
+    /** Optional only for old clients — see `services/session-watcher.ts`. */
+    cwd?: string
+  ): Promise<void>
   unwatchSession(routingId: string): Promise<void>
-  onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
-  onDirectoriesChanged(cb: () => void): () => void
-  onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
-  onSkills(cb: (routingId: string, names: string[]) => void): () => void
-  /** Login status from session init: 'authenticated' | 'none' (logged-in vs not).
-   *  The oauth-vs-api-key distinction now lives only in the auth probe's
-   *  billingType (via OAuthAccount). See ADR-014 / Phase 4 (ADR-021). */
-  onAuthSource(cb: (routingId: string, source: string) => void): () => void
-  onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
-  /** Engine-neutral metering snapshot (Phase 7 Pass 2). Emitted alongside
-   *  onStatusLine; both engines send it. The status line itself is unchanged. */
-  onMetering(cb: (routingId: string, data: MeteringSnapshot) => void): () => void
-  onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
-  onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
-  onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
@@ -1132,11 +1195,23 @@ interface SessionAPI {
   /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
   patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
-  readOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<OpencodeAgentDetail | null>
+  readOpencodeAgent(
+    name: string,
+    scope: OpencodeAgentScope,
+    cwd?: string
+  ): Promise<OpencodeAgentDetail | null>
   saveOpencodeAgent(input: OpencodeAgentInput, cwd?: string): Promise<void>
   deleteOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<void>
-  setOpencodeAgentDisabled(name: string, scope: OpencodeAgentScope, cwd: string | undefined, disabled: boolean): Promise<void>
-  generateOpencodeAgent(description: string, cwd?: string): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
+  setOpencodeAgentDisabled(
+    name: string,
+    scope: OpencodeAgentScope,
+    cwd: string | undefined,
+    disabled: boolean
+  ): Promise<void>
+  generateOpencodeAgent(
+    description: string,
+    cwd?: string
+  ): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
   logError(source: string, message: string): void
 }
 
@@ -1188,9 +1263,17 @@ interface GitAPI {
   gitPushWithUpstream(cwd: string, branch: string): Promise<void>
   gitPull(cwd: string): Promise<{ summary: string }>
   gitFetch(cwd: string): Promise<void>
-  gitStartWatching(cwd: string): Promise<void>
-  gitStopWatching(cwd: string): Promise<void>
-  onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
+  /**
+   * Replace this connection's set of git-watched cwds (phase 5 S2).
+   *
+   * The union of every connection's set drives the host's polling, so `[]` is how
+   * a client stops watching and there is no separate stop verb. Per-connection:
+   * the set dies with the socket, which is why the watcher re-sends on every
+   * answered `sync`. Bounded server-side (`MAX_GIT_WATCH`); an over-long set is
+   * refused rather than clipped. Answering always emits a `git:status-update` for
+   * every cwd in the set — a fresh poller's first tick, or the cached status.
+   */
+  watchGit(cwds: string[]): Promise<void>
 }
 
 interface McpAPI {
@@ -1210,9 +1293,6 @@ interface McpAPI {
   removeMcpServer(scope: McpServerScope, serverName: string, cwd?: string): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
-  onMcpServers(
-    cb: (routingId: string, servers: Array<{ name: string; status: string }>) => void
-  ): () => void
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
   saveClaudePermissions(
     scope: PermissionScope,
@@ -1229,13 +1309,109 @@ interface McpAPI {
 }
 
 interface TerminalAPI {
-  createTerminal(cwd: string): Promise<string>
+  /**
+   * Open terminal `index` of this cwd's POOL (`cwd#0`, `cwd#1`, …) and get its
+   * id back. The slot resolves attach-or-spawn in main: if that slot already
+   * holds a live pty — one this surface never spawned, e.g. the desktop's
+   * terminal 0 seen from a phone — the same id comes back and its history
+   * arrives on the next `attachTerminal`. Omitting the index means "next free
+   * slot", i.e. always a fresh shell (the pre-pool behavior).
+   */
+  createTerminal(cwd: string, index?: number): Promise<string>
   writeTerminal(id: string, data: string): Promise<void>
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>
   killTerminal(id: string): Promise<void>
   killTerminalsByCwd(cwd: string): Promise<string[]>
-  onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
+  /**
+   * PTY bytes. `replay: true` marks a scrollback replay delivered on attach: it
+   * is the terminal's whole history, so the receiver must CLEAR and write it
+   * rather than append (the desktop lane is a broadcast, so some of those bytes
+   * may already have been rendered). The clear has to be IN BAND — write
+   * `ESC c` (RIS) immediately ahead of the data, not `Terminal.reset()`, whose
+   * synchronous execution would race the deferred write queue and leave the
+   * replay drawn after a no-op clear. Live chunks always follow a replay, never
+   * interleave with it.
+   */
+  onTerminalData(
+    cb: (data: { terminalId: string; data: string; replay?: boolean }) => void
+  ): () => void
   onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
+  /**
+   * May this client open a terminal, and does it need a step-up first?
+   * (SyncCore phase 2.) Desktop answers a constant; the web client gates its
+   * whole terminal affordance on it.
+   */
+  terminalAvailability(): Promise<TerminalAvailability>
+  /**
+   * Which slots of `cwd`'s terminal POOL currently hold a LIVE pty.
+   *
+   * Terminals are an ordered per-cwd pool shared by every surface, and closing
+   * a tab only DETACHES this surface — so "open terminal N" may resolve to a
+   * shell that is still running from an earlier tab (or from a phone). Nothing
+   * else on the wire tells a client that: `terminal:create` answers with a bare
+   * id whether it spawned or attached, and `terminal:availability` is cwd-less.
+   * This is the query the open/reopen affordance badges "running" from.
+   *
+   * Declares the `shell` capability like every other terminal verb, so it runs
+   * the same three gates (toggle, grant, decay) — a refusal must read as "no
+   * information", never as "no shells here".
+   */
+  terminalPool(cwd: string): Promise<number[]>
+  /**
+   * Replace this connection's volatile-stream subscription set (phase 5 S1).
+   *
+   * REPLACE, never additive — the client sends the set it wants. The host
+   * answers by pushing the coalesced value of every non-empty stream of those
+   * sessions as `offset: 0` frames, which is what makes re-sending the same set
+   * the cure for a mid-connection offset mismatch. Bounded server-side
+   * (`MAX_STREAM_WATCH`); an over-long set is refused rather than clipped.
+   *
+   * `automationIds` is the lane's second scope (phase 5 S2) — what
+   * `automation:stream-event` is filtered by. Replaced independently, so omitting
+   * it leaves the automation set alone; pass `[]` to stop watching automations.
+   * Automation-level, not run-level: the emission carries no run id.
+   */
+  watchStreams(sessionIds: string[], automationIds?: string[]): Promise<void>
+  /**
+   * Run the step-up ceremony with the operator's remote-access password.
+   * Desktop resolves `{ok:true}` without a ceremony — there is nothing to step
+   * up to when you are already at the machine.
+   *
+   * `intent: 'settings'` additionally opens the settings-editing session
+   * (ADR-054 §6 amendment); the deadline comes back on
+   * `settingsSessionExpiresAt`. The two members keep their terminal-flavoured
+   * NAMES from ADR-052, when the terminal was the only thing a step-up could
+   * buy — a rename would touch the preload, the adapter, the harness API and
+   * every mock, for no behavioral gain. The doc comments carry the truth: this
+   * is THE ceremony surface.
+   */
+  terminalStepUp(password: string, intent?: StepUpIntent): Promise<TerminalStepUpResult>
+  /**
+   * Run the step-up ceremony with a PASSKEY (ADR-052 decision 5: step-up is
+   * passkey-first, password only as fallback). Fetches a fresh `step-up`-kind
+   * challenge, signs it, and sends the assertion — no password ever leaves the
+   * device. Desktop resolves `{ok:true}` for the same reason
+   * {@link TerminalAPI.terminalStepUp} does.
+   *
+   * Refusals arrive as a resolved `{ok:false, code}`, not a throw: `code` is
+   * what tells the prompt whether to offer the password instead
+   * (`passkey-unavailable`) or to keep insisting on the passkey
+   * (`passkey-required` from the password path).
+   */
+  terminalStepUpPasskey(intent?: StepUpIntent): Promise<TerminalStepUpResult>
+  /**
+   * Subscribe this client to a live PTY (server-side scrollback replays first).
+   * Real on BOTH surfaces since the terminal pool landed: a desktop tab can
+   * resolve to a pty it did not spawn, and the replay is how it renders that
+   * terminal's history. False means the terminal is gone (a stale tab).
+   */
+  attachTerminal(id: string): Promise<boolean>
+  detachTerminal(id: string): Promise<void>
+  /**
+   * The server dropped this client's attachment (toggle turned off, grant
+   * decayed, or the socket fell too far behind). Never fires on desktop.
+   */
+  onTerminalDetached(cb: (data: { terminalId: string; reason: string }) => void): () => void
 }
 
 interface AutomationAPI {
@@ -1249,19 +1425,6 @@ interface AutomationAPI {
   cancelAutomationRun(automationId: string): Promise<void>
   dismissAutomationRun(automationId: string, runId: string): Promise<void>
   sendAutomationMessage(automationId: string, prompt: string): Promise<void>
-  onAutomationRunUpdate(
-    cb: (data: { automationId: string; run: AutomationRun }) => void
-  ): () => void
-  onAutomationsChanged(cb: (automations: Automation[]) => void): () => void
-  onAutomationRunMessage(
-    cb: (data: { automationId: string; message: ChatMessage }) => void
-  ): () => void
-  onAutomationStreamEvent(
-    cb: (data: { automationId: string; type: string; text: string }) => void
-  ): () => void
-  onAutomationProcessing(
-    cb: (data: { automationId: string; isProcessing: boolean }) => void
-  ): () => void
 }
 
 interface FileAPI {
@@ -1336,9 +1499,7 @@ interface VendorAuthAPI {
 
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
-  onAccountUsage(cb: (data: AccountUsage) => void): () => void
   fetchBlockUsage(): Promise<BlockUsageData>
-  onBlockUsage(cb: (data: BlockUsageData) => void): () => void
   /** Filter usage analytics to one account email (null = all accounts) */
   setUsageAccountFilter(account: string | null): Promise<void>
   // --- Native Anthropic OAuth (ADR-014) ---
@@ -1399,9 +1560,142 @@ export interface RemoteConfig {
    * bookkeeping for the startup reconciliation.
    */
   tlsHttpsPort: number
+  /**
+   * Desktop-side master switch for remote terminals (ADR-052 decision 6), OFF
+   * by default. It lives in `remote_config` — NOT in UISettings — because
+   * `config:save-settings` is remotely reachable, and a settings-blob flag
+   * would let a remote client arm its own `shell` capability.
+   */
+  allowTerminal: boolean
+  /** Idle window before a stepped-up `shell` grant decays, in minutes. */
+  shellGrantIdleMinutes: number
+  /**
+   * Stored auth policy, or `null` for AUTO (≥1 credential ⇒ `passkey-always`,
+   * else `password`). Same table + same desktop-only write path as
+   * {@link RemoteConfig.allowTerminal}, and for the same reason: a remotely
+   * writable policy would let a client downgrade its own authentication.
+   */
+  authPolicy: RemoteAuthPolicy | null
+  /** What AUTO resolves to right now, given the enrolled-credential count. */
+  effectiveAuthPolicy: RemoteAuthPolicy
+  /** Number of enrolled WebAuthn credentials (what AUTO resolves against). */
+  credentialCount: number
+  /** Break-glass password enabled (default true); the `passkey-only` toggle clears it. */
+  passwordBreakGlass: boolean
+  /**
+   * Stored step-up tier (ADR-054). The SECOND axis: `authPolicy` governs the
+   * login ceremony, this governs post-login freshness. Never null — an
+   * unrecognised stored value reads as `medium`.
+   */
+  stepUpTier: StepUpTier
+  /**
+   * What the tier resolves to right now. Auth-mode `off` FORCES tier `off`
+   * (ADR-054 decision 3): you cannot demand a ceremony from an identity that was
+   * never established. Exposed alongside the raw value for the same reason
+   * {@link RemoteConfig.effectiveAuthPolicy} is — a settings UI must not
+   * re-derive the rule and drift from the enforced one.
+   */
+  effectiveStepUpTier: StepUpTier
+  /** Idle window for the strong tier's NON-shell mutation grant, in minutes. */
+  stepUpMutationIdleMinutes: number
+  /** Strong-tier absolute session lifetime, in hours (close 4010 at expiry). */
+  sessionMaxAgeHours: number
+  /** Audit-log retention window in days, floor 30 (clamped at READ). */
+  auditRetentionDays: number
   passwordSet: boolean
   passwordUpdatedAt: number | null
 }
+
+/**
+ * What the terminal affordance may do on THIS client right now
+ * (`terminal:availability`).
+ *
+ * - `allowed`     — the host permits a terminal for this connection at all
+ *                   (always true on desktop; the opt-in toggle over remote);
+ * - `granted`     — a live `shell` grant is held, so commands will run;
+ * - `needsStepUp` — allowed but not granted: run the step-up ceremony;
+ * - `readsAllowed`— this connection may WATCH terminals (ADR-054's read/act
+ *                   split): attach, stream, resize, list the pool;
+ * - `stepUp`      — the public params to derive the ceremony's proof from, or
+ *                   null when no credential exists (so no factor exists either).
+ */
+export interface TerminalAvailability {
+  allowed: boolean
+  granted: boolean
+  needsStepUp: boolean
+  /**
+   * May this client WATCH terminals right now (ADR-054 decision 4)?
+   *
+   * `granted` answers "may I ACT" and kept that ADR-052 meaning, because that is
+   * what the affordance asks. The split made a THIRD state real: a connection
+   * that armed once (so scrollback is unlocked for the socket's lifetime) but
+   * whose act window has since decayed may keep an attached view streaming while
+   * every keystroke is refused. Without this field a client can only see
+   * `granted: false` and would wall off a terminal it is perfectly entitled to
+   * watch.
+   *
+   * Optional so an older host — which had no such state — simply reads as
+   * "reads follow acts", the pre-ADR-054 behavior.
+   */
+  readsAllowed?: boolean
+  stepUp: TerminalStepUpParams | null
+  /**
+   * Can THIS client run a passkey step-up ceremony (ADR-052 decision 5)?
+   *
+   * Filled in by the WEB transport, not by the host: whether a ceremony is
+   * possible is a fact about the browser's origin and this socket's auth
+   * method, and `terminal:availability` is answered by a service that knows
+   * neither. Absent on desktop, where step-up does not exist at all.
+   *
+   * It only decides which affordance the prompt leads with — the server still
+   * refuses a factor it does not accept, and both refusals
+   * (`passkey-unavailable` / `passkey-required`) flip the prompt to the other
+   * one. Optional so an older host/adapter simply reads as "password only".
+   */
+  passkey?: boolean
+}
+
+/**
+ * Public inputs for the step-up proof — the same salt + KDF params
+ * `/remote/auth-info` advertises, delivered on this channel instead.
+ *
+ * Auth-info cannot carry them over the tunnel: that transport refuses password
+ * AUTHENTICATION (an E2E session needs the fragment key a password client does
+ * not have), so it correctly omits `password` from the advertised methods. A
+ * step-up is a different act — an already-authenticated, E2E-active socket
+ * proving a human is present — so its params ride the authenticated channel.
+ * Both are public by construction (a salt discloses nothing).
+ */
+export interface TerminalStepUpParams {
+  saltHex: string
+  kdf: RemoteKdfParams
+}
+
+/** Outcome of a step-up ceremony (see `WsStepUpResponse`). */
+export interface TerminalStepUpResult {
+  ok: boolean
+  error?: string
+  code?: string
+  retryable?: boolean
+  expiresAt?: number
+  /**
+   * Success only, and only when the ceremony carried the `settings` intent: the
+   * server-side deadline of the settings-editing session it just opened
+   * (ADR-054 §6 amendment). The editor's countdown ticks from this, so the pane
+   * and the server cannot disagree about when the mode ends.
+   */
+  settingsSessionExpiresAt?: number
+}
+
+/**
+ * What a step-up ceremony is FOR.
+ *
+ * `'settings'` additionally opens the five-minute settings-editing session on
+ * this connection. Absent means an ordinary step-up (presence, and the shell
+ * where the toggle allows) — which is what every caller but the settings pane
+ * wants.
+ */
+export type StepUpIntent = 'settings'
 
 interface RemoteAPI {
   getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
@@ -1409,22 +1703,125 @@ interface RemoteAPI {
     port?: number
     host?: string
     tunnel?: boolean
-  }): Promise<{ port: number; token: string; lanUrl: string }>
+  }): Promise<{ port: number; lanUrl: string }>
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
-  /** Persisted remote-server config (fixed port, bind host, autostart, tls
-   *  placeholder, password status). Main-only — never reachable via the
-   *  remote WS dispatcher (RemoteDispatcher.BLOCKED). */
+  /**
+   * The persisted remote-server config as a UI may see it (fixed port, bind
+   * host, autostart, TLS, auth surface, ADR-054 tier + dials, password status;
+   * never salt/hash/KDF params).
+   *
+   * TWO transports, ONE shape (ADR-054 series 2). On the desktop this is
+   * `remote:get-config`, the host anchor's own read. On the WEB client it is
+   * `authcfg:get` — the read half of decision 6, `admin`-gated and free of any
+   * freshness demand, because a settings pane must be able to render the tier
+   * before it asks anyone to prove presence in order to change it. Both answer
+   * with the same sanitized object (`services/remote-config-view.ts`), which is
+   * what lets the settings components be shared and branch only on WRITES.
+   */
   getRemoteConfig(): Promise<RemoteConfig>
-  /** Partial update of the persisted config; returns the fresh sanitized config. */
+  /**
+   * Partial update of the persisted config; returns the fresh sanitized config.
+   *
+   * HOST ANCHOR ONLY (ADR-054 decision 6): this is the writer that can reach the
+   * `off` master switch, so it has no remote registration at all and REJECTS on
+   * the web client. Web settings writes go through the `authcfg:*` verbs below,
+   * which are the routine subset — the `off` switch is not among them.
+   */
   setRemoteConfig(partial: {
     port?: number
     bindHost?: string | null
     autostart?: boolean
     tlsMode?: number
     tlsHttpsPort?: number
+    allowTerminal?: boolean
+    shellGrantIdleMinutes?: number
+    /** `null` restores AUTO. Host-anchor only by construction (ADR-054 dec. 6). */
+    authPolicy?: RemoteAuthPolicy | null
+    passwordBreakGlass?: boolean
+    /** ADR-054's second axis. */
+    stepUpTier?: StepUpTier
+    /** Strong-tier idle window for non-shell mutations, 1–1440 minutes. */
+    stepUpMutationIdleMinutes?: number
+    /** Strong-tier absolute session lifetime, 1–168 hours. */
+    sessionMaxAgeHours?: number
+    /** Audit-log retention window, ≥30 days. */
+    auditRetentionDays?: number
   }): Promise<RemoteConfig>
+  /**
+   * ADR-054 §6 — the ROUTINE remote-access settings, reachable from a web client
+   * inside an open **settings-editing session**: one deliberate step-up carrying
+   * `intent: 'settings'` unlocks the editor for five minutes, and every mutation
+   * here demands it. A locked editor answers the typed
+   * `needs-settings-session`, which the web transport deliberately does NOT cure
+   * ambiently — unlocking is the operator pressing Edit, not a retry.
+   *
+   * Registered on BOTH transports so the capability/kind declaration is a single
+   * reviewed fact. The desktop connection is exempt — it IS the host anchor, so
+   * its editor needs no ceremony and has no TTL — and its pane saves through
+   * `setRemoteConfig` regardless, which is the only writer of the `off` switch.
+   *
+   * SAVE: the whole edited set as one batch. Validated together and written
+   * once, so a refused field changes nothing; one audit row carrying the diff;
+   * one 4009 re-admission sweep (except the actor, which re-snapshots in place).
+   * A patch that changes nothing is a success that writes no row and drops
+   * nobody. `'off'` as an auth mode is refused with
+   * `auth-off-is-host-anchor-only`.
+   */
+  authcfgApply(patch: {
+    /** `null` restores AUTO. `'off'` is refused — host anchor only. */
+    authMode?: RemoteAuthPolicy | null
+    stepUpTier?: StepUpTier
+    /** 1–1440. */
+    stepUpMutationIdleMinutes?: number
+    /** 1–168 (the one-week `setTimeout` ceiling). */
+    sessionMaxAgeHours?: number
+    /** The TERMINAL's own act window, 1–1440 (ADR-052's `shell` grant decay). */
+    shellGrantIdleMinutes?: number
+    /** ≥30 — the audit floor is a refusal here, not a silent clamp. */
+    auditRetentionDays?: number
+    /** The admission toggle — an auth-surface member, so it sweeps too. */
+    passwordBreakGlass?: boolean
+  }): Promise<{ ok: true; config: RemoteConfig }>
+  /**
+   * Close the editor: Save, Cancel, and pane unmount all call it, so the bounded
+   * mode ends on the operator's action rather than only on its TTL. Idempotent —
+   * calling it with no session open is a no-op success.
+   */
+  authcfgEnd(): Promise<{ ok: true }>
+  /**
+   * The LAN channel link — `http://<ip>:<port>/#k=<key>` (ADR-056 item C).
+   *
+   * SETTINGS-SESSION GATED, unlike its namespace sibling `authcfg:get`: it
+   * returns a channel SECRET, so the "the pane's default state is the read"
+   * exemption explicitly does not apply. The desktop connection is exempt like
+   * everywhere else — it is the host anchor.
+   *
+   * Throws `lan-link-unavailable` when the running server serves no non-loopback
+   * bind (stopped, or `tailscale serve` mode, which binds loopback only).
+   */
+  authcfgLanLink(): Promise<{ url: string }>
+  /**
+   * Rotate the persistent LAN channel key and return the NEW link.
+   *
+   * Never strands anybody: established E2E channels survive (the key is consumed
+   * at handshake only, and each connection derives its own session keys at
+   * activation), so nobody is disconnected — only NEW handshakes need the new
+   * key. Audited as a settings change, with no 4009 sweep, because the admission
+   * rules for existing identities did not move.
+   */
+  authcfgRotateLanKey(): Promise<{ url: string }>
+  /**
+   * Rotate the break-glass password. Session-gated like the rest of the area.
+   *
+   * NOTE for web callers: this disconnects every socket that authenticated with
+   * the OLD password — which can include the caller. A password-authenticated
+   * actor is closed with 4008 BEFORE the invoke response is sent, so close-4008
+   * is that flow's success signal; a passkey-authenticated actor gets the normal
+   * response.
+   */
+  authcfgSetPassword(password: string): Promise<{ ok: true }>
   /**
    * Re-run `tailscale serve` enablement for the running server with
    * `force: true` — it CLAIMS the pinned HTTPS port, overwriting whatever
@@ -1449,19 +1846,96 @@ interface RemoteAPI {
 }
 
 /**
+ * One enrolled passkey, as shown in the management UI (ADR-052 / security.md
+ * §Enrollment). Never carries the COSE public key — the list is a UI surface,
+ * not a credential export.
+ *
+ * Declared HERE rather than next to the service that produces it because both
+ * clients render it and `webauthn-service.ts` is main-only (it imports
+ * `@simplewebauthn/server`). That module aliases its `WebauthnCredentialSummary`
+ * to this type, so the row a client renders and the row the server maps cannot
+ * drift.
+ */
+export interface WebauthnCredential {
+  /** base64url credential id — also the rename/revoke key. */
+  credId: string
+  /** Operator-chosen label, or null when the device was never named. */
+  nickname: string | null
+  createdAt: number
+  lastUsedAt: number | null
+  /**
+   * The authenticator says this credential is backed up / syncable (iCloud
+   * Keychain, Google Password Manager). Surfaced because "synced across my
+   * devices" and "lives only in this phone" are very different things to revoke.
+   */
+  backedUp: boolean
+  transports: string[] | null
+}
+
+/**
+ * A freshly minted one-time enrollment link (`webauthn:mint-enroll-token`).
+ *
+ * `url` is the whole product: `https://<tailnet-host>/remote#enroll=<token>`.
+ * The hostname in it IS the RP ID the new credential will bind to, which is why
+ * minting fails with `enroll-unavailable` while `tailscale serve` is down. Every
+ * mint is SINGLE-USE — a UI must mint per action, never cache one.
+ */
+export interface WebauthnEnrollToken {
+  token: string
+  /** Epoch ms; the server drops the token at this point regardless. */
+  expiresAt: number
+  url: string
+}
+
+/**
+ * Passkey enrollment + management (ADR-052). Six verbs, split by transport:
+ *
+ * - the four MANAGEMENT verbs run on both — the desktop renderer is where an
+ *   operator lists and revokes credentials, and mints the link for a new device;
+ * - the two REGISTER verbs are remote-only, because a ceremony needs a browser
+ *   on a WebAuthn-capable origin and the desktop renderer is loaded from
+ *   `file://` / the vite dev server. The desktop implementations therefore
+ *   REJECT rather than invoke a channel that is not registered for that
+ *   transport (`webauthn.ipc.ts` registers four, not six).
+ */
+interface WebauthnAPI {
+  /** Enrolled credentials, newest-first ordering is the caller's business. */
+  webauthnCredentials(): Promise<WebauthnCredential[]>
+  /** Rename one credential; `null` clears the nickname. */
+  webauthnRename(credId: string, nickname: string | null): Promise<{ ok: boolean }>
+  /**
+   * Revoke one credential. THROWS `last-credential-lockout` when removing the
+   * last passkey while the policy is explicitly `passkey-always` with no usable
+   * break-glass password — the UI must render that as an explanation, not as a
+   * raw error string.
+   */
+  webauthnRevoke(credId: string): Promise<{ ok: boolean }>
+  /**
+   * Mint a one-time "add this device" link. THROWS `enroll-unavailable` when
+   * `tailscale serve` is not up. Single-use: mint per action.
+   */
+  webauthnMintEnrollToken(): Promise<WebauthnEnrollToken>
+  /**
+   * Begin a registration ceremony on THIS connection (remote/web only). The
+   * options go straight into `startRegistration({ optionsJSON })` — neither end
+   * reshapes them.
+   */
+  webauthnRegisterOptions(): Promise<PublicKeyCredentialCreationOptionsJSON>
+  /** Finish it. `response` is `startRegistration()`'s output, verbatim. */
+  webauthnRegisterVerify(payload: {
+    response: RegistrationResponseJSON
+    nickname?: string | null
+  }): Promise<{ ok: boolean; credId?: string; backedUp?: boolean; error?: string }>
+}
+
+/**
  * States {@link TailscaleDetection} can report, and the value carried by
  * `RemoteStatus.tls.detection`. Declared here (not in the main-only
  * `tailscale-manager.ts`) because both the renderer and the web client need it;
  * `tailscale-manager.ts` imports it, so the two can never drift.
  */
 export type RemoteTlsDetection =
-  | 'ok'
-  | 'not-installed'
-  | 'daemon-down'
-  | 'logged-out'
-  | 'https-disabled'
-  | 'no-operator'
-  | 'error'
+  'ok' | 'not-installed' | 'daemon-down' | 'logged-out' | 'https-disabled' | 'no-operator' | 'error'
 
 /** Outcome of probing the local `tailscale` CLI (`TailscaleManager.detect()`). */
 export type TailscaleDetection =
@@ -1494,21 +1968,72 @@ export type TailscaleDetection =
     }
 
 export type TunnelState =
-  | 'stopped'
-  | 'starting'
-  | 'downloading'
-  | 'connected'
-  | 'error'
-  | 'restarting'
+  'stopped' | 'starting' | 'downloading' | 'connected' | 'error' | 'restarting'
 
 /**
- * Auth methods the remote server accepts on a connection. `'token'` is the
- * per-start random bearer token from the URL fragment; `'password'` is the
- * scrypt proof derived from the user's persisted credential;
- * `'tailnet-identity'` is the spoof-stripped `Tailscale-User-Login` header a
- * `tailscale serve` proxy attaches, accepted for the node owner's login only.
+ * Auth methods the remote server ADVERTISES or ACCEPTS (ADR-056 collapsed the
+ * two lists into one union with one asymmetric member — see below).
+ *
+ * - `'password'` — the scrypt proof derived from the user's persisted
+ *   credential. Since ADR-056 it is the ONLY credential a non-WebAuthn origin
+ *   (LAN, tunnel) can present, and it always travels inside E2E there.
+ * - `'webauthn'` — a completed passkey assertion: the only method that proves a
+ *   HUMAN rather than a cached client secret.
+ * - `'enroll-token'` — the one-time minted enrollment link, which authenticates
+ *   a socket that may do nothing but register a credential.
+ * - `'none'` — the `off` policy mode, where authentication is disabled outright.
+ * - `'tailnet-identity'` — ADVERTISEMENT ONLY since ADR-056. It appears in
+ *   `RemoteAuthInfo.methods` / `RemoteStatus.authMethods` to say "this server
+ *   recognises your tailnet login and will use it as the username hint", and it
+ *   is never an `auth-response.method`: ambient network identity stopped being
+ *   an admission credential when the link stopped being an identity.
+ *
+ * `'token'` is GONE (ADR-056): the per-start bearer token in the URL fragment
+ * was a link that carried authority, which is exactly what that ADR retires.
  */
-export type RemoteAuthMethod = 'token' | 'password' | 'tailnet-identity'
+export type RemoteAuthMethod =
+  'password' | 'tailnet-identity' | 'webauthn' | 'enroll-token' | 'none'
+
+/**
+ * Remote authentication POLICY (ADR-052 decision 3, ADR-056 §grant collapse /
+ * security.md §"Policy modes"). Persisted in `remote_config.auth_policy`, where
+ * **NULL means auto**: ≥1 enrolled credential resolves to `passkey-always`,
+ * otherwise `password`. An explicitly stored value always wins.
+ *
+ * - `passkey-always` — every connection arriving on a WebAuthn-capable origin
+ *   must complete the assertion ceremony (break-glass password aside).
+ * - `password` — no ceremony is owed; admission is a break-glass password (or
+ *   an enrollment link). It is what AUTO resolves to with nothing enrolled, and
+ *   it is **effective-only**: the operator cannot pin it, because pinning it
+ *   would mean "keep accepting a password after I enrol a passkey", which is
+ *   what `passwordBreakGlass` already says.
+ * - `off` — MASTER SWITCH: all authentication disabled. HOST-ANCHOR only to set
+ *   (ADR-054 decision 6), audited on every change, and warned about at startup.
+ *
+ * ADR-054 removed `passkey-for-grants`; ADR-056 removed `legacy`, whose meaning
+ * ("the as-built ADR-039 stack") died with the token and the ambient tailnet
+ * admission it named. Migration v13 rewrites stored `legacy` rows to NULL,
+ * i.e. back to AUTO — which resolves to `passkey-always` or `password`
+ * depending on whether a credential exists, and is what `legacy` was standing
+ * in for on either side of that line.
+ */
+export type RemoteAuthPolicy = 'passkey-always' | 'password' | 'off'
+
+/**
+ * Post-login presence-freshness tier (ADR-054 decision 1). Persisted in
+ * `remote_config.step_up_tier`; default (and fail-parse) is `medium`.
+ *
+ * - `strong` — reads and the sync stream are free; every MUTATING command needs
+ *   a presence proof no older than its idle window (shell acts 10 min, all
+ *   other mutations 60 min), and the session has an absolute max-age after
+ *   which the socket is cut (close 4010) and a full ceremony is owed.
+ * - `medium` — the shipped ADR-052 behavior, named: step-up gates exactly the
+ *   terminal (with the read/act split) and the remote-settings surface.
+ *   Everything else rides connection auth for the connection's lifetime.
+ * - `off` — nothing is gated post-login; the session lives until disconnect.
+ *   Auth-mode `off` forces this tier flat.
+ */
+export type StepUpTier = 'strong' | 'medium' | 'off'
 
 /**
  * Why a `tailscale serve` mutation failed. Declared here (not in the main-only
@@ -1568,8 +2093,18 @@ export interface RemoteTlsStatus {
 export interface RemoteStatus {
   running: boolean
   port: number | null
-  token: string | null
+  /**
+   * `http://<lan-ip>:<port>/remote#k=<channel key>` while the server serves a
+   * non-loopback bind, else null.
+   *
+   * The fragment carries the PERSISTENT LAN channel key (ADR-056 item C), never
+   * an access token: it opens the encrypted channel, and the identity inside it
+   * is still a password. It is a secret, which is why `remote:status` has no
+   * remote registration and this field never crosses the WS — the web-reachable
+   * equivalent is `authcfg:lan-link`, behind a settings-editing session.
+   */
   lanUrl: string | null
+  /** Same shape over the tunnel, with the EPHEMERAL tunnel key that dies with it. */
   tunnelUrl: string | null
   tunnelState: TunnelState | null
   tunnelError: string | null
@@ -1577,7 +2112,8 @@ export interface RemoteStatus {
   clientIps: string[]
   /**
    * Tailnet logins of the connected clients, parallel to `clientIps`. A `null`
-   * entry means that client authenticated with the token or the password.
+   * entry means the server has no username hint for that client (a password
+   * login off the tailnet, an enrollment link).
    */
   clientLogins: (string | null)[]
   /** `tailscale serve` state, or null when the running server is not in TLS mode. */
@@ -1587,11 +2123,11 @@ export interface RemoteStatus {
    *  since the last stop(). Surfaces autostart failures, which are otherwise
    *  invisible (no modal open to report them to). */
   lastError: string | null
-  /** Methods this running server will accept: always `'token'`, plus
-   *  `'password'` when a credential is provisioned AND the server is not in
-   *  tunnel (E2E) mode, plus `'tailnet-identity'` when `tailscale serve` is up
-   *  and the node owner's login is known. Empty when not running. Derived
-   *  exactly the same way as `/remote/auth-info`'s `methods`. */
+  /** Methods this running server advertises: `'password'` when a credential is
+   *  provisioned, plus `'tailnet-identity'` when `tailscale serve` is up and the
+   *  node owner's login is known — a username HINT, not an admission credential
+   *  (ADR-056). Empty when not running. Derived exactly the same way as
+   *  `/remote/auth-info`'s `methods`. */
   authMethods: RemoteAuthMethod[]
 }
 
@@ -1665,7 +2201,6 @@ interface VoiceAPI {
   voiceStopRecording(routingId: string): Promise<void>
   onVoiceTranscript(cb: (routingId: string, data: VoiceTranscript) => void): () => void
   onVoiceState(cb: (routingId: string, state: VoiceState) => void): () => void
-  onVoiceError(cb: (routingId: string, error: string) => void): () => void
 }
 
 export interface ClaudeAPI
@@ -1679,6 +2214,7 @@ export interface ClaudeAPI
     AccountAPI,
     VendorAuthAPI,
     RemoteAPI,
+    WebauthnAPI,
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
@@ -1752,6 +2288,26 @@ export interface AccountsState {
   enabled: boolean
   activeId: string | null
   accounts: AccountInfo[]
+  /**
+   * The login `account:add` just started, echoed back on the RESPONSE only
+   * (ADR-057 / S4-UI).
+   *
+   * `addAccount` creates the account and kicks off a sign-in whose `manualUrl`
+   * a remote client needs in order to render the paste-back flow. That URL used
+   * to exist only on the `auth:state` event, which is `host-local` — so a remote
+   * add-account started a flow the caller could never see.
+   *
+   * Delivering it here rather than widening `auth:state`'s delivery is
+   * deliberate: an in-flight OAuth flow belongs to the ONE client that started
+   * it, and `manualUrl` carries that flow's `state` (its CSRF token). Fanning it
+   * out would let any other admitted client finish someone else's sign-in with
+   * their own account. `auth:sign-in` already returns its state to its caller
+   * for the same reason; this makes `account:add` consistent with it.
+   *
+   * Present ONLY on the value returned by a REMOTE `account:add`. Never
+   * persisted, never on `account:changed`, never on `account:get`.
+   */
+  pendingSignIn?: AuthFlowState
 }
 
 export type AuthFlowStatus = 'idle' | 'authorizing' | 'success' | 'error'
@@ -1764,6 +2320,14 @@ export interface AuthFlowState {
   status: AuthFlowStatus
   account: OAuthAccount | null
   error: string | null
+  /**
+   * The claude.ai URL to open in ANY browser for a REMOTE-initiated sign-in
+   * (ADR-057): the host does not open a browser on itself, so the remote UI
+   * shows this URL, the user consents anywhere, claude.ai displays a code, and
+   * `auth:submit-code` completes the exchange host-side. Absent on the desktop
+   * path, which opens the host browser directly (byte-identical to before).
+   */
+  manualUrl?: string
 }
 
 /**
@@ -2089,12 +2653,7 @@ export interface SkillInfo {
 
 export type McpServerScope = 'user' | 'project' | 'local' | 'claudeai' | 'managed'
 export type McpServerConnectionStatus =
-  | 'connected'
-  | 'failed'
-  | 'needs-auth'
-  | 'pending'
-  | 'disabled'
-  | 'not_started'
+  'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_started'
 export type McpServerTransport = 'stdio' | 'sse' | 'http'
 
 export interface McpServerToolInfo {
@@ -2182,6 +2741,12 @@ export interface TerminalTab {
   id: string
   title: string
   cwd: string
+  /**
+   * Slot this tab occupies in the cwd's terminal pool. Optional so a tab can be
+   * constructed without one (tests, older state); when absent the panel falls
+   * back to the tab's position when it needs to pick the next free slot.
+   */
+  poolIndex?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -2325,7 +2890,6 @@ interface PluginAPI {
   readMockupHtml(cwd: string, directory: string): Promise<string>
   watchMockup(cwd: string, directory: string): Promise<void>
   unwatchMockup(cwd: string, directory: string): Promise<void>
-  onMockupFileChanged(cb: (directory: string) => void): () => void
   /**
    * The iframe `src` for a mockup preview. Platform-specific transport:
    * desktop returns a `mockup-asset://` URL (privileged Electron protocol);

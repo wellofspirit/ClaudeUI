@@ -72,7 +72,12 @@ describe('OpencodeEngineToolMap.kindOf', () => {
 
 describe('OpencodeEngineToolMap.normalize', () => {
   it('command: maps command + result output', () => {
-    const result = { type: 'tool_result', toolUseId: 'x', toolResult: 'done', isError: false } as const
+    const result = {
+      type: 'tool_result',
+      toolUseId: 'x',
+      toolResult: 'done',
+      isError: false
+    } as const
     const view = OpencodeEngineToolMap.normalize('command', { command: 'ls -la' }, result)
     expect(view).toMatchObject({ kind: 'command', command: 'ls -la', output: 'done' })
   })
@@ -92,7 +97,10 @@ describe('OpencodeEngineToolMap.normalize', () => {
   })
 
   it('fileEdit: patch shape (no old/new) → empty before/after (generic fallback in body)', () => {
-    const view = OpencodeEngineToolMap.normalize('fileEdit', { filePath: '/src/a.ts', patch: '@@ -1 +1 @@' })
+    const view = OpencodeEngineToolMap.normalize('fileEdit', {
+      filePath: '/src/a.ts',
+      patch: '@@ -1 +1 @@'
+    })
     expect(view).toMatchObject({ kind: 'fileEdit', path: '/src/a.ts', before: '', after: '' })
   })
 
@@ -103,10 +111,20 @@ describe('OpencodeEngineToolMap.normalize', () => {
       toolResult: 'Success. Updated the following files:\nM a.ts',
       isError: false,
       fileDiffs: [
-        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' as const }
+        {
+          path: 'a.ts',
+          patch: '@@ -1 +1 @@\n-old\n+new',
+          additions: 1,
+          deletions: 1,
+          changeType: 'update' as const
+        }
       ]
     }
-    const view = OpencodeEngineToolMap.normalize('fileEdit', { patchText: '*** Begin Patch ***' }, result)
+    const view = OpencodeEngineToolMap.normalize(
+      'fileEdit',
+      { patchText: '*** Begin Patch ***' },
+      result
+    )
     expect(view).toMatchObject({ kind: 'fileEdit', files: result.fileDiffs })
   })
 
@@ -140,7 +158,12 @@ describe('OpencodeEngineToolMap.normalize', () => {
   })
 
   it('fileRead: maps opencode filePath → path and result → content', () => {
-    const result = { type: 'tool_result', toolUseId: 'x', toolResult: 'contents', isError: false } as const
+    const result = {
+      type: 'tool_result',
+      toolUseId: 'x',
+      toolResult: 'contents',
+      isError: false
+    } as const
     const view = OpencodeEngineToolMap.normalize('fileRead', { filePath: '/src/a.ts' }, result)
     expect(view).toMatchObject({ kind: 'fileRead', path: '/src/a.ts', content: 'contents' })
   })
@@ -238,7 +261,10 @@ describe('OpencodeEngineToolMap.normalize', () => {
         {
           question: 'Pick a framework',
           header: 'Framework',
-          options: [{ label: 'React', description: 'UI library' }, { label: 'Vue', description: 'Another' }],
+          options: [
+            { label: 'React', description: 'UI library' },
+            { label: 'Vue', description: 'Another' }
+          ],
           multiple: true
         }
       ]
@@ -250,7 +276,10 @@ describe('OpencodeEngineToolMap.normalize', () => {
           question: 'Pick a framework',
           header: 'Framework',
           multiSelect: true,
-          options: [{ label: 'React', description: 'UI library' }, { label: 'Vue', description: 'Another' }]
+          options: [
+            { label: 'React', description: 'UI library' },
+            { label: 'Vue', description: 'Another' }
+          ]
         }
       ]
     })
@@ -271,7 +300,10 @@ describe('OpencodeEngineToolMap.normalize', () => {
   })
 
   it('diagram: maps plugin source/title (same as Claude)', () => {
-    const view = OpencodeEngineToolMap.normalize('diagram', { source: 'graph TD; A-->B', title: 'Flow' })
+    const view = OpencodeEngineToolMap.normalize('diagram', {
+      source: 'graph TD; A-->B',
+      title: 'Flow'
+    })
     expect(view).toMatchObject({ kind: 'diagram', source: 'graph TD; A-->B', title: 'Flow' })
   })
 
@@ -292,7 +324,10 @@ describe('OpencodeEngineToolMap.normalize', () => {
   })
 
   it('mcp / unknown: pass input through', () => {
-    expect(OpencodeEngineToolMap.normalize('mcp', { a: 1 })).toMatchObject({ kind: 'mcp', input: { a: 1 } })
+    expect(OpencodeEngineToolMap.normalize('mcp', { a: 1 })).toMatchObject({
+      kind: 'mcp',
+      input: { a: 1 }
+    })
     expect(OpencodeEngineToolMap.normalize('unknown', { b: 2 })).toMatchObject({
       kind: 'unknown',
       input: { b: 2 }

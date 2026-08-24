@@ -53,11 +53,7 @@ export function ThinkingBlock({ text, isActive, durationMs }: Props): React.JSX.
     return () => clearInterval(interval)
   }, [isActive, thinkingStartedAt])
 
-  const durationSec = isActive
-    ? elapsed
-    : durationMs != null
-      ? Math.round(durationMs / 1000)
-      : null
+  const durationSec = isActive ? elapsed : durationMs != null ? Math.round(durationMs / 1000) : null
 
   const label = isActive
     ? `Thinking\u2009....\u2009(${durationSec}s)`

@@ -178,7 +178,9 @@ describe('MobileConfigSheet — root page', () => {
 
 describe('MobileConfigSheet — mode row + submenu', () => {
   it('renders the mode row with the current label when showModePicker is true', () => {
-    render(<MobileConfigSheet {...makeProps({ showModePicker: true, permissionMode: 'acceptEdits' })} />)
+    render(
+      <MobileConfigSheet {...makeProps({ showModePicker: true, permissionMode: 'acceptEdits' })} />
+    )
     openSheet()
     expect(screen.getByTestId('MobileConfigSheet.mode')).toHaveTextContent('Accept Edits')
   })
@@ -247,9 +249,7 @@ describe('MobileConfigSheet — mode row + submenu', () => {
   it('clicking a disabled mode option does not call onSelectMode', () => {
     const onSelectMode = vi.fn()
     render(
-      <MobileConfigSheet
-        {...makeProps({ showModePicker: true, canPlan: false, onSelectMode })}
-      />
+      <MobileConfigSheet {...makeProps({ showModePicker: true, canPlan: false, onSelectMode })} />
     )
     openSheet()
     fireEvent.click(screen.getByTestId('MobileConfigSheet.mode'))

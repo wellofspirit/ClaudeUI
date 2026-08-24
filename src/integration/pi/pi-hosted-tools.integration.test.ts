@@ -42,10 +42,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { PiRpcClient } from '../../main/pi/PiRpcClient'
-import { PiBridgeHost, writeBridgeExtension } from '../../main/pi/PiBridgeHost'
-import type { PiHostedToolPayload, PiHostedToolResult } from '../../main/pi/PiBridgeHost'
-import { createMermaidServer } from '../../main/services/mermaid-tool'
+import { PiRpcClient } from '../../core/pi/PiRpcClient'
+import { PiBridgeHost, writeBridgeExtension } from '../../core/pi/PiBridgeHost'
+import type { PiHostedToolPayload, PiHostedToolResult } from '../../core/pi/PiBridgeHost'
+import { createMermaidServer } from '../../core/services/mermaid-tool'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
@@ -74,7 +74,9 @@ const BINARY_MISSING = !findBinary()
 const CREDENTIALS_MISSING = !hasCodexCredentials()
 
 /** Find the render_mermaid toolResult message in a batch of raw wire events (loose-typed — see pi-rpc.integration.test.ts's identical precedent for why this file doesn't fight PiEvent's discriminated union in test code). */
-function findMermaidToolResult(events: Record<string, unknown>[]): { isError: boolean; text: string } | null {
+function findMermaidToolResult(
+  events: Record<string, unknown>[]
+): { isError: boolean; text: string } | null {
   for (const ev of events) {
     if (ev.type !== 'message_end') continue
     const msg = ev.message as Record<string, unknown> | undefined
@@ -89,96 +91,111 @@ function findMermaidToolResult(events: Record<string, unknown>[]): { isError: bo
   return null
 }
 
-describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)('pi hosted-tools integration (M4a)', () => {
-  let client: PiRpcClient
-  let bridgeHost: PiBridgeHost
-  let tmpDir: string
-  const events: Record<string, unknown>[] = []
+describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
+  'pi hosted-tools integration (M4a)',
+  () => {
+    let client: PiRpcClient
+    let bridgeHost: PiBridgeHost
+    let tmpDir: string
+    const events: Record<string, unknown>[] = []
 
-  beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'pi-hosted-tools-guard-'))
+    beforeAll(async () => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'pi-hosted-tools-guard-'))
 
-    // Gate handler: real product code, always-allow (the hosted-tool
-    // auto-allow gating itself is unit-tested in permission-engine.test.ts —
-    // this integration test only proves the TRANSPORT, not the gate policy).
-    const gateHandler = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
-    // Hosted-tool handler: the SAME real createMermaidServer() handler
-    // PiSession.handleHostedTool delegates to (real product code) for
-    // render_mermaid; the other three names are handled minimally since no
-    // model turn is driven against them in this file (see the file header).
-    const mermaidServer = createMermaidServer()
-    const hostedToolHandler = async (payload: PiHostedToolPayload): Promise<PiHostedToolResult> => {
-      if (payload.toolName === 'render_mermaid') {
-        const tool = mermaidServer.tools.find((t) => t.name === 'render_mermaid')!
-        return (await tool.handler(payload.input, undefined)) as unknown as PiHostedToolResult
+      // Gate handler: real product code, always-allow (the hosted-tool
+      // auto-allow gating itself is unit-tested in permission-engine.test.ts —
+      // this integration test only proves the TRANSPORT, not the gate policy).
+      const gateHandler = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
+      // Hosted-tool handler: the SAME real createMermaidServer() handler
+      // PiSession.handleHostedTool delegates to (real product code) for
+      // render_mermaid; the other three names are handled minimally since no
+      // model turn is driven against them in this file (see the file header).
+      const mermaidServer = createMermaidServer()
+      const hostedToolHandler = async (
+        payload: PiHostedToolPayload
+      ): Promise<PiHostedToolResult> => {
+        if (payload.toolName === 'render_mermaid') {
+          const tool = mermaidServer.tools.find((t) => t.name === 'render_mermaid')!
+          return (await tool.handler(payload.input, undefined)) as unknown as PiHostedToolResult
+        }
+        return {
+          content: [{ type: 'text', text: `unhandled in this guard test: ${payload.toolName}` }]
+        }
       }
-      return { content: [{ type: 'text', text: `unhandled in this guard test: ${payload.toolName}` }] }
-    }
-    bridgeHost = new PiBridgeHost(gateHandler, hostedToolHandler)
-    const { url, token } = await bridgeHost.start()
-    // Also real product code — the SAME file writer PiSession.doStart() calls.
-    const bridgePath = writeBridgeExtension()
+      bridgeHost = new PiBridgeHost(gateHandler, hostedToolHandler)
+      const { url, token } = await bridgeHost.start()
+      // Also real product code — the SAME file writer PiSession.doStart() calls.
+      const bridgePath = writeBridgeExtension()
 
-    const binary = findBinary()!
-    client = new PiRpcClient(binary, {
-      cwd: tmpDir,
-      args: ['--mode', 'rpc', '-e', bridgePath, '--session-dir', tmpDir],
-      env: {
-        CLAUDEUI_PI_BRIDGE_URL: url,
-        CLAUDEUI_PI_BRIDGE_TOKEN: token,
-        // The exact env vars PiSession.doStart() sets when capabilities.hostedMcp
-        // / capabilities.crossEngineDispatch are true (M4a+b) — proves the real
-        // bridge extension registers under this real gating, not a synthetic one.
-        CLAUDEUI_PI_HOSTED_TOOLS: '1',
-        CLAUDEUI_PI_DISPATCH_ENABLED: '1'
-      }
+      const binary = findBinary()!
+      client = new PiRpcClient(binary, {
+        cwd: tmpDir,
+        args: ['--mode', 'rpc', '-e', bridgePath, '--session-dir', tmpDir],
+        env: {
+          CLAUDEUI_PI_BRIDGE_URL: url,
+          CLAUDEUI_PI_BRIDGE_TOKEN: token,
+          // The exact env vars PiSession.doStart() sets when capabilities.hostedMcp
+          // / capabilities.crossEngineDispatch are true (M4a+b) — proves the real
+          // bridge extension registers under this real gating, not a synthetic one.
+          CLAUDEUI_PI_HOSTED_TOOLS: '1',
+          CLAUDEUI_PI_DISPATCH_ENABLED: '1'
+        }
+      })
+      client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
+      await client.start()
+
+      const setModelResp = await client.request(
+        { type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId },
+        45_000
+      )
+      expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
+    }, 45_000)
+
+    afterAll(async () => {
+      client?.dispose()
+      bridgeHost?.dispose()
+      // Windows holds the cwd handle briefly after the parent process exits —
+      // wait, with a bounded fallback, before touching the tmp dir. Mirrors
+      // pi-bridge.integration.test.ts's identical precedent.
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     })
-    client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
-    await client.start()
 
-    const setModelResp = await client.request({ type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId }, 45_000)
-    expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
-  }, 45_000)
-
-  afterAll(async () => {
-    client?.dispose()
-    bridgeHost?.dispose()
-    // Windows holds the cwd handle briefly after the parent process exits —
-    // wait, with a bounded fallback, before touching the tmp dir. Mirrors
-    // pi-bridge.integration.test.ts's identical precedent.
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  })
-
-  /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). */
-  async function waitForTurnEnd(fromIndex: number, timeoutMs = 60_000): Promise<Record<string, unknown>[]> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const slice = events.slice(fromIndex)
-      if (slice.some((ev) => ev.type === 'agent_settled')) return slice
-      await new Promise((resolve) => setTimeout(resolve, 200))
+    /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). */
+    async function waitForTurnEnd(
+      fromIndex: number,
+      timeoutMs = 60_000
+    ): Promise<Record<string, unknown>[]> {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const slice = events.slice(fromIndex)
+        if (slice.some((ev) => ev.type === 'agent_settled')) return slice
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+      throw new Error(
+        `turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`
+      )
     }
-    throw new Error(`turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`)
+
+    it('a real model turn calls render_mermaid and the tool_execution/message shows a successful tool result', async () => {
+      const fromIndex = events.length
+      const resp = await client.request({
+        type: 'prompt',
+        message:
+          "Call the render_mermaid tool exactly once with EXACTLY source 'graph TD; A-->B' and nothing else " +
+          '-- no explanation, no other tool calls, do not modify the source in any way.'
+      })
+      expect(resp.success).toBe(true)
+
+      const turnEvents = await waitForTurnEnd(fromIndex)
+      const toolResult = findMermaidToolResult(turnEvents)
+
+      expect(
+        toolResult,
+        `model never called render_mermaid -- events: ${JSON.stringify(turnEvents)}`
+      ).not.toBeNull()
+      expect(toolResult!.isError).toBe(false)
+      expect(toolResult!.text).toMatch(/rendered successfully/i)
+    }, 90_000)
   }
-
-  it('a real model turn calls render_mermaid and the tool_execution/message shows a successful tool result', async () => {
-    const fromIndex = events.length
-    const resp = await client.request({
-      type: 'prompt',
-      message:
-        "Call the render_mermaid tool exactly once with EXACTLY source 'graph TD; A-->B' and nothing else " +
-        '-- no explanation, no other tool calls, do not modify the source in any way.'
-    })
-    expect(resp.success).toBe(true)
-
-    const turnEvents = await waitForTurnEnd(fromIndex)
-    const toolResult = findMermaidToolResult(turnEvents)
-
-    expect(
-      toolResult,
-      `model never called render_mermaid -- events: ${JSON.stringify(turnEvents)}`
-    ).not.toBeNull()
-    expect(toolResult!.isError).toBe(false)
-    expect(toolResult!.text).toMatch(/rendered successfully/i)
-  }, 90_000)
-})
+)

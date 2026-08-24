@@ -41,7 +41,7 @@ const origLoad = (Module as unknown as { _load: (...a: unknown[]) => unknown }).
 }
 
 // Silence logger writes during tests.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -51,7 +51,7 @@ vi.mock('../logger', () => ({
 }))
 
 // Import after mocks are registered.
-import { PtyManager } from '../pty-manager'
+import { PtyManager } from '../../../core/services/pty-manager'
 
 // Convenience: flush queued microtasks (for kill -> emitExit via queueMicrotask).
 const flushMicrotasks = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve))

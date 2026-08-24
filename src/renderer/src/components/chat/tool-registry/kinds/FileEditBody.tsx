@@ -42,7 +42,9 @@ function FileDiffSections({ files }: { files: FileDiff[] }): React.JSX.Element {
           <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-text-secondary">
             <span className="truncate">{shorten(file.path)}</span>
             <span className="flex shrink-0 items-center gap-1.5 text-text-muted">
-              {file.changeType && <span className="uppercase tracking-wider">{file.changeType}</span>}
+              {file.changeType && (
+                <span className="uppercase tracking-wider">{file.changeType}</span>
+              )}
               {typeof file.additions === 'number' && (
                 <span className="text-success">+{file.additions}</span>
               )}

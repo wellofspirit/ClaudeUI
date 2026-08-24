@@ -54,12 +54,16 @@ describe('ui-config migration: config-plane split', () => {
   }
 
   it('migrates sandbox and proxy from settings.json to engines/claude.json', async () => {
-    const sandbox = { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false }
+    const sandbox = {
+      enabled: true,
+      autoAllowBashIfSandboxed: false,
+      allowUnsandboxedCommands: false
+    }
     const proxy = { enabled: true, type: 'http', hostname: 'proxy.example.com', port: 8080 }
     writeSettings({ theme: 'dark', sandbox, proxy })
 
     // Import the module with paths pointing to temp dir
-    vi.doMock('../../../main/services/ui-config', async () => {
+    vi.doMock('../../../core/services/ui-config', async () => {
       // We can't easily intercept path constants, so directly test the migration logic
       // by running it in isolation using the actual module implementation
       return {}
@@ -103,7 +107,13 @@ describe('ui-config migration: config-plane split', () => {
 
   it('migrates anthropicEndpoint and modelOverride to vendors/anthropic.json', async () => {
     const anthropicEndpoint = { enabled: true, baseUrl: 'http://localhost:1234', authToken: 'test' }
-    const modelOverride = { enabled: true, model: 'my-model', sonnetModel: '', opusModel: '', haikuModel: '' }
+    const modelOverride = {
+      enabled: true,
+      model: 'my-model',
+      sonnetModel: '',
+      opusModel: '',
+      haikuModel: ''
+    }
     writeSettings({ theme: 'dark', anthropicEndpoint, modelOverride })
 
     const raw = readJson(settingsFile) as Record<string, unknown>
@@ -134,8 +144,16 @@ describe('ui-config migration: config-plane split', () => {
   })
 
   it('is idempotent — does not overwrite existing engine config fields', () => {
-    const originalSandbox = { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false }
-    const existingSandboxInTarget = { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false }
+    const originalSandbox = {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false
+    }
+    const existingSandboxInTarget = {
+      enabled: false,
+      autoAllowBashIfSandboxed: false,
+      allowUnsandboxedCommands: false
+    }
 
     writeSettings({ sandbox: originalSandbox })
     fs.mkdirSync(enginesDir, { recursive: true })
@@ -160,7 +178,11 @@ describe('ui-config migration: config-plane split', () => {
 
   it('is idempotent — does not overwrite existing vendor config fields', () => {
     const originalEndpoint = { enabled: true, baseUrl: 'http://new.example.com', authToken: '' }
-    const existingEndpointInTarget = { enabled: false, baseUrl: 'http://old.example.com', authToken: '' }
+    const existingEndpointInTarget = {
+      enabled: false,
+      baseUrl: 'http://old.example.com',
+      authToken: ''
+    }
 
     writeSettings({ anthropicEndpoint: originalEndpoint })
     fs.mkdirSync(vendorsDir, { recursive: true })
@@ -180,7 +202,9 @@ describe('ui-config migration: config-plane split', () => {
     // The existing endpoint in target should NOT be overwritten
     const vendorResult = readJson(anthropicJson)
     expect(vendorResult?.endpoint).toEqual(existingEndpointInTarget)
-    expect((vendorResult?.endpoint as Record<string, unknown>).baseUrl).toBe('http://old.example.com')
+    expect((vendorResult?.endpoint as Record<string, unknown>).baseUrl).toBe(
+      'http://old.example.com'
+    )
   })
 
   it('does not modify settings.json if no migrateable fields are present', () => {
@@ -188,8 +212,11 @@ describe('ui-config migration: config-plane split', () => {
     writeSettings(original)
 
     const raw = readJson(settingsFile) as Record<string, unknown>
-    const settingsChanged = raw.sandbox !== undefined || raw.proxy !== undefined
-      || raw.anthropicEndpoint !== undefined || raw.modelOverride !== undefined
+    const settingsChanged =
+      raw.sandbox !== undefined ||
+      raw.proxy !== undefined ||
+      raw.anthropicEndpoint !== undefined ||
+      raw.modelOverride !== undefined
 
     expect(settingsChanged).toBe(false)
 
@@ -202,8 +229,11 @@ describe('ui-config migration: config-plane split', () => {
     writeSettings({})
 
     const raw = readJson(settingsFile) as Record<string, unknown>
-    const settingsChanged = raw.sandbox !== undefined || raw.proxy !== undefined
-      || raw.anthropicEndpoint !== undefined || raw.modelOverride !== undefined
+    const settingsChanged =
+      raw.sandbox !== undefined ||
+      raw.proxy !== undefined ||
+      raw.anthropicEndpoint !== undefined ||
+      raw.modelOverride !== undefined
 
     expect(settingsChanged).toBe(false)
     expect(readJson(settingsFile)).toEqual({})

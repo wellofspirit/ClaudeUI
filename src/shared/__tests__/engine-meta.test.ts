@@ -121,9 +121,16 @@ describe('opencode encode/decode', () => {
     expect(ref.modelId).toBe('mimo')
   })
   it('round-trips a handful of values through encode(decode(v)) === v', () => {
-    const values = ['openai/gpt-5.4', 'qwen-sandbox/qwen3.6:27b', 'a/b/c', 'anthropic/claude-sonnet-4-6']
+    const values = [
+      'openai/gpt-5.4',
+      'qwen-sandbox/qwen3.6:27b',
+      'a/b/c',
+      'anthropic/claude-sonnet-4-6'
+    ]
     for (const v of values) {
-      expect(engineMeta('opencode').encodeModelValue(engineMeta('opencode').decodeModelValue(v))).toBe(v)
+      expect(
+        engineMeta('opencode').encodeModelValue(engineMeta('opencode').decodeModelValue(v))
+      ).toBe(v)
     }
   })
 })
@@ -161,7 +168,9 @@ describe('pi encode/decode', () => {
 
 describe('seedCapabilities parity with the pre-existing resolvers', () => {
   it('claude("default") matches resolveClaudeCapabilities("default")', () => {
-    expect(engineMeta('claude').seedCapabilities('default')).toEqual(resolveClaudeCapabilities('default'))
+    expect(engineMeta('claude').seedCapabilities('default')).toEqual(
+      resolveClaudeCapabilities('default')
+    )
   })
   it('claude("claude-opus-4-8") matches resolveClaudeCapabilities("claude-opus-4-8")', () => {
     expect(engineMeta('claude').seedCapabilities('claude-opus-4-8')).toEqual(
@@ -169,7 +178,9 @@ describe('seedCapabilities parity with the pre-existing resolvers', () => {
     )
   })
   it('opencode with no modelInfo matches resolveOpencodeCapabilitiesFromModel(undefined)', () => {
-    expect(engineMeta('opencode').seedCapabilities('x')).toEqual(resolveOpencodeCapabilitiesFromModel(undefined))
+    expect(engineMeta('opencode').seedCapabilities('x')).toEqual(
+      resolveOpencodeCapabilitiesFromModel(undefined)
+    )
   })
   it('opencode with a modelInfo matches resolveOpencodeCapabilitiesFromModel({vision, toolCalling})', () => {
     const modelInfo: ModelInfo = {
@@ -184,7 +195,9 @@ describe('seedCapabilities parity with the pre-existing resolvers', () => {
     )
   })
   it('pi with no modelInfo matches resolvePiCapabilitiesFromModel(undefined)', () => {
-    expect(engineMeta('pi').seedCapabilities('x')).toEqual(resolvePiCapabilitiesFromModel(undefined))
+    expect(engineMeta('pi').seedCapabilities('x')).toEqual(
+      resolvePiCapabilitiesFromModel(undefined)
+    )
   })
   it('pi with a modelInfo matches resolvePiCapabilitiesFromModel({vision})', () => {
     const modelInfo: ModelInfo = {

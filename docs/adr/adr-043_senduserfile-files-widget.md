@@ -1,6 +1,6 @@
 # ADR-043: SendUserFile client integration — Files widget, preview, remote download
 
-**Status:** Accepted (2026-07-30) — the "renderer store is the single source of truth; main stays a pure relay" doctrine (Decision 5's rationale) is **superseded by ADR-051 (SyncCore)**, which inverts it; the sent-file mechanism itself remains as-built until SyncCore phase 4.
+**Status:** Accepted (2026-07-30) — the "renderer store is the single source of truth; main stays a pure relay" doctrine (Decision 5's rationale) is **superseded by ADR-051 (SyncCore)**, which inverts it. **SyncCore phase 4 completed 2026-08-14 and the sent-file MECHANISM survived it unchanged**: the URL shape, the scoped `fileToken`, the extension allowlist and the size cap are all as documented below. What inverted is where the allowlist reads its truth — canonical state in the main process, read in-process, instead of a renderer round-trip (phase 4b; see the note under the allowlist bullet, and `ipc/__tests__/sync-funnel-guard.test.ts`, which asserts the route takes exactly one `SyncCore.getSnapshot()` and never calls `executeJavaScript`).
 
 ## Context
 
@@ -77,12 +77,21 @@ mockup-preview precedent:
   to the web client, and passed as a query parameter. The primary WS token is
   never placed in URLs; a URL-borne token stays low-privilege and independently
   revocable.
-- **Allowlist, not just path validation:** on each request the server calls
-  `EventLog.getFullState()` (the existing renderer round-trip) and requires the
-  requested path to match an entry in that session's `sentFiles` (resolved
-  against the session cwd). The renderer store is the single source of truth;
-  main stays a pure relay (no parallel ledger to drift). Downloads are
-  user-click-frequency, so the round-trip cost is irrelevant.
+- **Allowlist, not just path validation:** on each request the server takes a full
+  state snapshot and requires the requested path to match an entry in that
+  session's `sentFiles` (resolved against the session cwd). One source of truth,
+  no parallel ledger to drift.
+
+  _Superseded in mechanism by SyncCore phase 4b (ADR-051), not in intent:_ the
+  snapshot is now `SyncCore.getSnapshot()` — canonical state in the main process,
+  read in-process — instead of `EventLog.getFullState()`'s `executeJavaScript`
+  round-trip into the renderer store. The allowlist is still derived from the
+  transcript by the SAME `buildSentFilesFromMessages` scanner (it moved into the
+  shared reducer), so the security property is unchanged; what changes is that the
+  route no longer depends on a live, responsive `BrowserWindow`. ADR-043's "the
+  renderer store is the single source of truth; main stays a pure relay" framing is
+  the part ADR-051 inverts.
+
 - `validateLocalFilePath` still applies on top, plus the existing Host allowlist,
   security headers, and constant-time token compare. Responses stream with a
   correct Content-Type, `nosniff`, and `Content-Disposition: attachment` unless

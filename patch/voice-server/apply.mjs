@@ -64,10 +64,14 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   console.log('\n--- Locating voice stream function (hb8) ---')
 
-  // hb8 is an async function that takes 2 params (callbacks, options).
-  // Its body starts with await IY() and contains the OAuth token check string.
+  // hb8 is an async function that takes 2 params (callbacks, options) — 2.1.241
+  // added a third optional credentials param (`async function fFl(e,t,r)`; r
+  // undefined → `$t()&&r!==void 0` is false → ambient `Hb();ya()` auth path, so
+  // our 2-arg call keeps the old behaviour). Its body contains the OAuth token
+  // check string; the body prefix may itself contain braces (2.1.241:
+  // `Hb({credentials:r})`), so the gap matcher is [\s\S] with a tight bound.
   const hb8Re = new RegExp(
-    `async function (${V})\\((${V}),(${V})\\)\\{[^}]{0,200}\\[voice_stream\\] No OAuth token available`
+    `async function (${V})\\((${V}),(${V})(?:,${V})?\\)\\{[\\s\\S]{0,300}?\\[voice_stream\\] No OAuth token available`
   )
   const hb8Match = hb8Re.exec(src)
   if (!hb8Match) {

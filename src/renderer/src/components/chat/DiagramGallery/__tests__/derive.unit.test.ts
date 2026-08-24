@@ -14,8 +14,18 @@ import { OpencodeEngineToolMap } from '../../tool-registry/OpencodeEngineToolMap
 import { PiEngineToolMap } from '../../tool-registry/PiEngineToolMap'
 import type { ChatMessage, ContentBlock } from '../../../../../../shared/types'
 
-function diagramCall(toolUseId: string, toolName: string, source: string, title?: string): ContentBlock {
-  return { type: 'tool_use', toolUseId, toolName, toolInput: { source, ...(title ? { title } : {}) } }
+function diagramCall(
+  toolUseId: string,
+  toolName: string,
+  source: string,
+  title?: string
+): ContentBlock {
+  return {
+    type: 'tool_use',
+    toolUseId,
+    toolName,
+    toolInput: { source, ...(title ? { title } : {}) }
+  }
 }
 
 function assistant(id: string, content: ContentBlock[]): ChatMessage {
@@ -52,8 +62,12 @@ describe('deriveDiagrams', () => {
       assistant('a1', [diagramCall('tu-1', toolName, 'graph TD; A-->B')])
     ]
 
-    expect(deriveDiagrams(messages('mcp__claude-ui__render_mermaid'), ClaudeEngineToolMap)).toHaveLength(1)
-    expect(deriveDiagrams(messages('claudeui_render_mermaid'), OpencodeEngineToolMap)).toHaveLength(1)
+    expect(
+      deriveDiagrams(messages('mcp__claude-ui__render_mermaid'), ClaudeEngineToolMap)
+    ).toHaveLength(1)
+    expect(deriveDiagrams(messages('claudeui_render_mermaid'), OpencodeEngineToolMap)).toHaveLength(
+      1
+    )
     expect(deriveDiagrams(messages('render_mermaid'), PiEngineToolMap)).toHaveLength(1)
 
     // …and a name belonging to another engine is not silently accepted.
@@ -89,7 +103,12 @@ describe('deriveDiagrams', () => {
           },
           // A diagram call with no source at all — nothing to render, so nothing
           // to page to.
-          { type: 'tool_use', toolUseId: 'tu-4', toolName: 'mcp__claude-ui__render_mermaid', toolInput: {} },
+          {
+            type: 'tool_use',
+            toolUseId: 'tu-4',
+            toolName: 'mcp__claude-ui__render_mermaid',
+            toolInput: {}
+          },
           { type: 'text', text: 'hello' },
           { type: 'thinking', text: 'hmm' }
         ]),

@@ -40,11 +40,11 @@ vi.mock('os', async () => {
   }
 })
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn(), error: vi.fn() }
 }))
 
-import { scanCustomCommands, _resetCache } from '../custom-command-scanner'
+import { scanCustomCommands, _resetCache } from '../../../core/services/custom-command-scanner'
 
 const USER_COMMANDS = path.join(hoisted.TEST_HOME, '.claude', 'commands')
 const USER_SKILLS = path.join(hoisted.TEST_HOME, '.claude', 'skills')

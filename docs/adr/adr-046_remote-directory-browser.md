@@ -31,7 +31,7 @@ autocomplete — which works over remote today — and the `@`-mention browser).
 2. **`file:list-dir` keeps its current (unconfined-beyond-dotfiles) posture.** No path
    containment was added. Rationale: the remote channel is gated by ADR-039 auth, and an
    authenticated remote client can already create a session with an arbitrary cwd and run
-   full `git:*` mutations — a directory *listing* is strictly weaker than what the token
+   full `git:*` mutations — a directory _listing_ is strictly weaker than what the token
    already grants. Dotfiles/noise stay hidden by the handler. If the remote trust model
    ever weakens (e.g. scoped/guest tokens), containment must be revisited HERE first —
    `path-containment.ts` (`isPathInside`) is the ready-made primitive.
@@ -39,9 +39,9 @@ autocomplete — which works over remote today — and the `@`-mention browser).
    need a host directory on web (AutomationConfig's cwd field, the first-run screen).
    PermissionsDialog's `AddRuleInput` keeps its private copy of the path mechanics for now;
    whoever touches it next should lift the shared helpers out of `DirectoryBrowserInput`.
-   *(Partially done by ADR-048: the mechanics were extracted into `useDirSuggestions` in
+   _(Partially done by ADR-048: the mechanics were extracted into `useDirSuggestions` in
    `PermissionsDialog/shared.ts`, shared by the desktop input and the mobile entry sheet.
-   Unifying with `DirectoryBrowserInput` is still open — start from the hook.)*
+   Unifying with `DirectoryBrowserInput` is still open — start from the hook.)_
 
 ## Consequences
 

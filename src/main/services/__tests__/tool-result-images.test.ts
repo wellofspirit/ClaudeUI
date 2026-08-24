@@ -19,8 +19,8 @@ import { describe, it, expect } from 'vitest'
 import {
   extractToolResultContent,
   type ToolResultContent
-} from '../tool-result-content'
-import { transformAssistantMessage } from '../assistant-message'
+} from '../../../core/services/tool-result-content'
+import { transformAssistantMessage } from '../../../core/services/assistant-message'
 
 function imageBlock(mediaType: string, data: string): Record<string, unknown> {
   return { type: 'image', source: { type: 'base64', media_type: mediaType, data } }

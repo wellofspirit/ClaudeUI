@@ -6,7 +6,15 @@
  * hoisted mock so piAgentDir() resolves inside the fixture tree.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, existsSync, readdirSync } from 'node:fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  utimesSync,
+  existsSync,
+  readdirSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -26,8 +34,8 @@ import {
   findPiSessionFile,
   deletePiSession,
   resolvePiForkAnchor
-} from '../pi-session-list'
-import { PI_FORK_CLONE_LATEST_SENTINEL } from '../fork-anchor'
+} from '../../../core/services/pi-session-list'
+import { PI_FORK_CLONE_LATEST_SENTINEL } from '../../../core/services/fork-anchor'
 
 let testHome: string
 
@@ -56,10 +64,49 @@ afterEach(() => {
 describe('listPiSessionsGlobal', () => {
   it('prefers the LAST session_info name over the first-user-message fallback', async () => {
     writeSessionFile('--proj-fork--', '2024-01-01T00-00-00_sess-fork-1.jsonl', [
-      { type: 'session', version: 3, id: 'sess-fork-1', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/fork' },
-      { type: 'message', id: 'e1', parentId: null, timestamp: '2024-01-01T00:00:01.000Z', message: { role: 'user', content: 'First message here', timestamp: 1 } },
-      { type: 'message', id: 'e2', parentId: 'e1', timestamp: '2024-01-01T00:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }], api: 'a', provider: 'p', model: 'm', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: 2 } },
-      { type: 'session_info', id: 'einfo', parentId: 'e2', timestamp: '2024-01-01T00:00:03.000Z', name: 'Renamed Session' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-fork-1',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/fork'
+      },
+      {
+        type: 'message',
+        id: 'e1',
+        parentId: null,
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'First message here', timestamp: 1 }
+      },
+      {
+        type: 'message',
+        id: 'e2',
+        parentId: 'e1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'reply' }],
+          api: 'a',
+          provider: 'p',
+          model: 'm',
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
+          stopReason: 'stop',
+          timestamp: 2
+        }
+      },
+      {
+        type: 'session_info',
+        id: 'einfo',
+        parentId: 'e2',
+        timestamp: '2024-01-01T00:00:03.000Z',
+        name: 'Renamed Session'
+      }
     ])
 
     const result = await listPiSessionsGlobal()
@@ -75,7 +122,13 @@ describe('listPiSessionsGlobal', () => {
 
   it('falls back to the first user message (first line, trimmed) when there is no session_info', async () => {
     writeSessionFile('--proj-b--', 'x_sess-b.jsonl', [
-      { type: 'session', version: 3, id: 'sess-b', timestamp: '2024-01-02T00:00:00.000Z', cwd: '/proj/b' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-b',
+        timestamp: '2024-01-02T00:00:00.000Z',
+        cwd: '/proj/b'
+      },
       {
         type: 'message',
         id: 'e1',
@@ -90,7 +143,13 @@ describe('listPiSessionsGlobal', () => {
 
   it('falls back to "Untitled" when there is neither a session_info nor a user message', async () => {
     writeSessionFile('--proj-c--', 'x_sess-c.jsonl', [
-      { type: 'session', version: 3, id: 'sess-c', timestamp: '2024-01-03T00:00:00.000Z', cwd: '/proj/c' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-c',
+        timestamp: '2024-01-03T00:00:00.000Z',
+        cwd: '/proj/c'
+      }
     ])
     const infos = await listPiSessionsGlobal()
     expect(infos[0].title).toBe('Untitled')
@@ -98,10 +157,22 @@ describe('listPiSessionsGlobal', () => {
 
   it('sorts newest-first by file mtime, across multiple project directories', async () => {
     const older = writeSessionFile('--proj-old--', 'x_sess-old.jsonl', [
-      { type: 'session', version: 3, id: 'sess-old', timestamp: '2020-01-01T00:00:00.000Z', cwd: '/proj/old' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-old',
+        timestamp: '2020-01-01T00:00:00.000Z',
+        cwd: '/proj/old'
+      }
     ])
     const newer = writeSessionFile('--proj-new--', 'x_sess-new.jsonl', [
-      { type: 'session', version: 3, id: 'sess-new', timestamp: '2025-01-01T00:00:00.000Z', cwd: '/proj/new' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-new',
+        timestamp: '2025-01-01T00:00:00.000Z',
+        cwd: '/proj/new'
+      }
     ])
     const oldTime = new Date('2020-01-01T00:00:00.000Z')
     const newTime = new Date('2025-06-01T00:00:00.000Z')
@@ -118,7 +189,13 @@ describe('listPiSessionsGlobal', () => {
 
   it('skips a row with no cwd rather than throwing', async () => {
     writeSessionFile('--no-cwd--', 'x_sess-nocwd.jsonl', [
-      { type: 'session', version: 3, id: 'sess-nocwd', timestamp: '2024-01-01T00:00:00.000Z', cwd: '' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-nocwd',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: ''
+      }
     ])
     expect(await listPiSessionsGlobal()).toEqual([])
   })
@@ -130,10 +207,38 @@ describe('listPiSessionsGlobal', () => {
     // message and the rename exercises exactly that skip-but-keep-scanning path.
     const bigBase64 = 'A'.repeat(200_000)
     writeSessionFile('--proj-img--', 'x_sess-img.jsonl', [
-      { type: 'session', version: 3, id: 'sess-img', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/img' },
-      { type: 'message', id: 'e1', parentId: null, timestamp: '2024-01-01T00:00:01.000Z', message: { role: 'user', content: 'First user prompt', timestamp: 1 } },
-      { type: 'message', id: 'e2', parentId: 'e1', timestamp: '2024-01-01T00:00:02.000Z', message: { role: 'user', content: [{ type: 'image', image: bigBase64, mimeType: 'image/png' }], timestamp: 2 } },
-      { type: 'session_info', id: 'einfo', parentId: 'e2', timestamp: '2024-01-01T00:00:03.000Z', name: 'Renamed After Image' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-img',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/img'
+      },
+      {
+        type: 'message',
+        id: 'e1',
+        parentId: null,
+        timestamp: '2024-01-01T00:00:01.000Z',
+        message: { role: 'user', content: 'First user prompt', timestamp: 1 }
+      },
+      {
+        type: 'message',
+        id: 'e2',
+        parentId: 'e1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        message: {
+          role: 'user',
+          content: [{ type: 'image', image: bigBase64, mimeType: 'image/png' }],
+          timestamp: 2
+        }
+      },
+      {
+        type: 'session_info',
+        id: 'einfo',
+        parentId: 'e2',
+        timestamp: '2024-01-01T00:00:03.000Z',
+        name: 'Renamed After Image'
+      }
     ])
 
     const result = await listPiSessionsGlobal()
@@ -143,7 +248,13 @@ describe('listPiSessionsGlobal', () => {
 })
 
 describe('loadPiSessionHistory — active-branch walk (fork)', () => {
-  const HEADER = { type: 'session', version: 3, id: 'sess-fork-2', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/fork2' }
+  const HEADER = {
+    type: 'session',
+    version: 3,
+    id: 'sess-fork-2',
+    timestamp: '2024-01-01T00:00:00.000Z',
+    cwd: '/proj/fork2'
+  }
   const userEntry = (id: string, parentId: string | null, text: string) => ({
     type: 'message',
     id,
@@ -162,13 +273,19 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
       api: 'a',
       provider: 'p',
       model: 'm',
-      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
       stopReason: 'stop',
       timestamp: 2
     }
   })
 
-  it('follows the LAST entry\'s parentId chain — the abandoned branch is absent', async () => {
+  it("follows the LAST entry's parentId chain — the abandoned branch is absent", async () => {
     // e1 -> e2 -> (fork: e3 abandoned, e4 -> e5 active, e5 is LAST in file)
     writeSessionFile('--proj-fork2--', 'x_sess-fork-2.jsonl', [
       HEADER,
@@ -189,7 +306,13 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
 
   it('pairs a toolCall with its later toolResult entry in the SAME assistant message', async () => {
     writeSessionFile('--proj-tool--', 'x_sess-tool.jsonl', [
-      { type: 'session', version: 3, id: 'sess-tool', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/tool' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-tool',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/tool'
+      },
       userEntry('u1', null, 'run ls'),
       {
         type: 'message',
@@ -202,7 +325,13 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
           api: 'a',
           provider: 'p',
           model: 'm',
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
           stopReason: 'toolUse',
           timestamp: 2
         }
@@ -233,11 +362,17 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     ])
   })
 
-  it('carries a toolResult\'s image content onto the folded tool_result block', async () => {
+  it("carries a toolResult's image content onto the folded tool_result block", async () => {
     // pi's read tool on an image returns `{type:'image', data, mimeType}` content
     // blocks alongside (or instead of) text; the replay used to keep only text.
     writeSessionFile('--proj-toolimg--', 'x_sess-toolimg.jsonl', [
-      { type: 'session', version: 3, id: 'sess-toolimg', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/toolimg' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-toolimg',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/toolimg'
+      },
       userEntry('u1', null, 'read the png'),
       {
         type: 'message',
@@ -246,11 +381,19 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
         timestamp: '2024-01-01T00:00:01.000Z',
         message: {
           role: 'assistant',
-          content: [{ type: 'toolCall', id: 'call_img', name: 'read', arguments: { path: '/x.png' } }],
+          content: [
+            { type: 'toolCall', id: 'call_img', name: 'read', arguments: { path: '/x.png' } }
+          ],
           api: 'a',
           provider: 'p',
           model: 'm',
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
           stopReason: 'toolUse',
           timestamp: 2
         }
@@ -291,7 +434,13 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
 
   it('converts a compaction entry to a compact_separator system message', async () => {
     writeSessionFile('--proj-compact--', 'x_sess-compact.jsonl', [
-      { type: 'session', version: 3, id: 'sess-compact', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/compact' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-compact',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/compact'
+      },
       userEntry('u1', null, 'hi'),
       {
         type: 'compaction',
@@ -320,7 +469,13 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     // `seen` set must stop the walk the second time it revisits an id rather
     // than looping forever.
     writeSessionFile('--proj-cycle--', 'x_sess-cycle.jsonl', [
-      { type: 'session', version: 3, id: 'sess-cycle', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/cycle' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-cycle',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/cycle'
+      },
       userEntry('e1', 'e2', 'first'),
       userEntry('e2', 'e1', 'second')
     ])
@@ -370,7 +525,13 @@ describe('resolvePiForkAnchor', () => {
       api: 'a',
       provider: 'p',
       model: 'm',
-      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
       stopReason: 'stop',
       timestamp: 2
     }
@@ -386,7 +547,13 @@ describe('resolvePiForkAnchor', () => {
 
   it('forking an earlier assistant returns the id of the following user entry — a model_change entry in between is skipped', () => {
     writeSessionFile('--proj-fork-anchor--', 'x_sess-anchor-1.jsonl', [
-      { type: 'session', version: 3, id: 'sess-anchor-1', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/anchor1' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-anchor-1',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/anchor1'
+      },
       userEntry('u1', null, 'first question'),
       assistantEntry('a1', 'u1', 'first answer'),
       modelChangeEntry('mc1', 'a1'),
@@ -402,12 +569,20 @@ describe('resolvePiForkAnchor', () => {
 
   it('forking the latest assistant message returns the clone-latest sentinel', () => {
     writeSessionFile('--proj-fork-anchor--', 'x_sess-anchor-2.jsonl', [
-      { type: 'session', version: 3, id: 'sess-anchor-2', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/anchor2' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-anchor-2',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/anchor2'
+      },
       userEntry('u1', null, 'only question'),
       assistantEntry('a1', 'u1', 'only answer')
     ])
 
-    expect(resolvePiForkAnchor('sess-anchor-2', 1)).toEqual({ anchorUuid: PI_FORK_CLONE_LATEST_SENTINEL })
+    expect(resolvePiForkAnchor('sess-anchor-2', 1)).toEqual({
+      anchorUuid: PI_FORK_CLONE_LATEST_SENTINEL
+    })
   })
 
   it('returns transcript-not-found for an unknown sessionId', () => {
@@ -419,7 +594,13 @@ describe('resolvePiForkAnchor', () => {
 
   it('returns message-not-found when the index is out of range', () => {
     writeSessionFile('--proj-fork-anchor--', 'x_sess-anchor-3.jsonl', [
-      { type: 'session', version: 3, id: 'sess-anchor-3', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/anchor3' },
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-anchor-3',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/anchor3'
+      },
       userEntry('u1', null, 'q')
     ])
 
@@ -433,7 +614,13 @@ describe('resolvePiForkAnchor', () => {
 describe('findPiSessionFile', () => {
   it('finds a file by its `_<sessionId>.jsonl` suffix', () => {
     const file = writeSessionFile('--proj-find--', '2024-01-01T00-00-00_find-me-123.jsonl', [
-      { type: 'session', version: 3, id: 'find-me-123', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/find' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'find-me-123',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/find'
+      }
     ])
     expect(findPiSessionFile('find-me-123')).toBe(file)
   })
@@ -447,7 +634,13 @@ describe('deletePiSession', () => {
   it('unlinks the session file and prunes the now-empty parent dir', async () => {
     const projectDir = join(sessionsRoot(), '--proj-del--')
     const file = writeSessionFile('--proj-del--', '2024-01-01T00-00-00_del-me.jsonl', [
-      { type: 'session', version: 3, id: 'del-me', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/del' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'del-me',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/del'
+      }
     ])
     expect(existsSync(file)).toBe(true)
 
@@ -460,10 +653,22 @@ describe('deletePiSession', () => {
   it('does not prune the parent dir when other session files remain', async () => {
     const projectDir = join(sessionsRoot(), '--proj-multi--')
     writeSessionFile('--proj-multi--', 'a_keep-me.jsonl', [
-      { type: 'session', version: 3, id: 'keep-me', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/multi' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'keep-me',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/multi'
+      }
     ])
     writeSessionFile('--proj-multi--', 'b_del-me-2.jsonl', [
-      { type: 'session', version: 3, id: 'del-me-2', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/multi' }
+      {
+        type: 'session',
+        version: 3,
+        id: 'del-me-2',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/multi'
+      }
     ])
 
     await deletePiSession('del-me-2')

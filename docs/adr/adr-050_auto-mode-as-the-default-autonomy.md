@@ -26,9 +26,9 @@ Two problems with that, independent of the default's value:
 
 - Claude Code's config silently governed opencode and pi sessions, which is
   backwards even under ADR-022's "one config applies to all harnesses" (that ADR
-  is about permission *rules*, which genuinely are shared; the startup autonomy
+  is about permission _rules_, which genuinely are shared; the startup autonomy
   of a pi session is not Claude's business).
-- The Settings picker *wrote* that file, so changing the default in ClaudeUI
+- The Settings picker _wrote_ that file, so changing the default in ClaudeUI
   also changed how the user's bare `claude` CLI behaved.
 
 ## Decision
@@ -42,17 +42,17 @@ Two problems with that, independent of the default's value:
 2. **Claude's `permissions.defaultMode` seeds it exactly once.** This is how
    upstream's "pinned defaults are preserved" rule is honoured: a profile that
    already carried a `defaultMode` keeps that mode; a profile with nothing set
-   adopts auto. Absence of the *key* (not a falsy value) marks a pre-upgrade
+   adopts auto. Absence of the _key_ (not a falsy value) marks a pre-upgrade
    profile, and the seed is persisted immediately so a later edit to Claude's
    file can never re-seed and clobber a deliberate ClaudeUI pick. A `defaultMode`
    with no ClaudeUI equivalent (`bypassPermissions`, `dontAsk`) seeds the new
-   default instead — every such mode is *more* permissive than classifier-gated
+   default instead — every such mode is _more_ permissive than classifier-gated
    auto, so this only ever de-escalates.
 
 3. **Auto is gated at session creation, not at spawn.** `createNewSession`
    downgrades `auto` → `default` when `autoModeAvailableForEngine()` says the
    engine/account can't do auto, or when Claude settings carry
-   `disableAutoMode: "disable"`. With auto merely *available* this was
+   `disableAutoMode: "disable"`. With auto merely _available_ this was
    defensive; with auto as the shipped default it is load-bearing — otherwise an
    account without auto spawns with `--permission-mode auto`, cli.js rejects it,
    and the user watches the mode snap back mid-session. The pre-existing
@@ -61,7 +61,7 @@ Two problems with that, independent of the default's value:
 4. **`disableAutoMode` is now read (and round-tripped) from Claude settings.**
    cli.js honours it both nested under `permissions` and at the top level; the
    loader normalizes both into one field. `saveClaudePermissions` rebuilds the
-   `permissions` object from scratch, so it previously *dropped* this key on any
+   `permissions` object from scratch, so it previously _dropped_ this key on any
    permission edit — it now preserves the on-disk nested value verbatim. Only
    user-scope settings are consulted; a full managed/enterprise policy read is
    out of scope.
@@ -70,7 +70,7 @@ Two problems with that, independent of the default's value:
    route each non-read tool call through the ADR-023 classifier, which bills a
    judge call. That cost is accepted because the failure mode is safe: the
    classifier is fail-closed — no judge, an unavailable judge, or an unparseable
-   verdict all degrade to *asking the human*, never to auto-approval — and
+   verdict all degrade to _asking the human_, never to auto-approval — and
    read-only tools fast-path without a judge call at all. The 3-consecutive /
    20-total block caps the blog describes already exist engine-neutrally in
    `automode/denial-tracker.ts` (plus a stricter same-category cap), so no

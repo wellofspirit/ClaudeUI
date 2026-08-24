@@ -178,13 +178,15 @@ function EnumChecklist({
 }): React.JSX.Element {
   const selected = Array.isArray(value) ? (value as string[]) : []
   const toggle = (opt: string): void => {
-    const next = selected.includes(opt)
-      ? selected.filter((v) => v !== opt)
-      : [...selected, opt]
+    const next = selected.includes(opt) ? selected.filter((v) => v !== opt) : [...selected, opt]
     onChange(next.length > 0 ? next : undefined)
   }
   return (
-    <div data-testid="OpencodeSchemaForm.enumArray" data-id={fieldKey} className="flex flex-wrap gap-1.5">
+    <div
+      data-testid="OpencodeSchemaForm.enumArray"
+      data-id={fieldKey}
+      className="flex flex-wrap gap-1.5"
+    >
       {options.map((opt) => {
         const on = selected.includes(opt)
         return (
@@ -356,7 +358,14 @@ function RecordField({ node, defs, fieldKey, value, onChange }: FieldProps): Rea
   )
 }
 
-function ObjectFieldset({ node, defs, fieldKey, value, onChange, depth }: FieldProps): React.JSX.Element {
+function ObjectFieldset({
+  node,
+  defs,
+  fieldKey,
+  value,
+  onChange,
+  depth
+}: FieldProps): React.JSX.Element {
   const props = (node.properties as Record<string, SchemaNode>) ?? {}
   const keys = Object.keys(props)
   const [open, setOpen] = useState(depth === 0 || keys.length <= 4)

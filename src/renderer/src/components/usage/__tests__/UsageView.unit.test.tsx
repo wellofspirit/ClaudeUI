@@ -138,14 +138,24 @@ describe('UsageView — Current Block tab with active block', () => {
           startTime: now - 3_600_000,
           endTime: now + 3_600_000,
           actualEndTime: now + 3_600_000,
-          tokens: { inputTokens: 10_000, outputTokens: 5_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+          tokens: {
+            inputTokens: 10_000,
+            outputTokens: 5_000,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0
+          },
           costUsd: 0.05,
           requestCount: 2,
           isActive: true,
           models: [
             {
               model: 'claude-opus-4-6-20250514',
-              tokens: { inputTokens: 10_000, outputTokens: 5_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+              tokens: {
+                inputTokens: 10_000,
+                outputTokens: 5_000,
+                cacheCreationTokens: 0,
+                cacheReadTokens: 0
+              },
               costUsd: 0.05,
               requestCount: 2
             }
@@ -206,19 +216,34 @@ describe('UsageView — opencode section present', () => {
         perEngine: [
           {
             engineId: 'opencode',
-            tokens: { inputTokens: 500_000, outputTokens: 240_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+            tokens: {
+              inputTokens: 500_000,
+              outputTokens: 240_000,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 0
+            },
             costUsd: 0.41,
             requestCount: 23,
             models: [
               {
                 model: 'zen/glm-4.6',
-                tokens: { inputTokens: 300_000, outputTokens: 140_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+                tokens: {
+                  inputTokens: 300_000,
+                  outputTokens: 140_000,
+                  cacheCreationTokens: 0,
+                  cacheReadTokens: 0
+                },
                 costUsd: 0.27,
                 requestCount: 14
               },
               {
                 model: 'grok-code-fast',
-                tokens: { inputTokens: 200_000, outputTokens: 100_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+                tokens: {
+                  inputTokens: 200_000,
+                  outputTokens: 100_000,
+                  cacheCreationTokens: 0,
+                  cacheReadTokens: 0
+                },
                 costUsd: 0.14,
                 requestCount: 9
               }
@@ -249,7 +274,9 @@ describe('UsageView — opencode section present', () => {
     // shortModelName('zen/glm-4.6') → 'glm-4.6' (falls back to last segment)
     // shortModelName('grok-code-fast') → 'code-fast' (falls back)
     // These exist in the table regardless of exact shortened form
-    expect(screen.getByText('zen/glm-4.6').closest('tr') ?? screen.queryByText('glm-4.6')).toBeTruthy()
+    expect(
+      screen.getByText('zen/glm-4.6').closest('tr') ?? screen.queryByText('glm-4.6')
+    ).toBeTruthy()
     // Second model appears somewhere
     const allCells = document.querySelectorAll('td')
     const cellTexts = Array.from(allCells).map((c) => c.textContent ?? '')
@@ -362,8 +389,20 @@ describe('UsageView — Delegated (dispatched) usage section', () => {
 
   it('renders one row per (targetEngine, targetModel) once data resolves', async () => {
     ;(window as any).api.fetchDispatchedUsage = vi.fn().mockResolvedValue([
-      { targetEngine: 'opencode', targetModel: 'openai/gpt-5', dispatches: 3, totalTokens: 1500, costUsd: 0.05 },
-      { targetEngine: 'claude', targetModel: 'haiku', dispatches: 1, totalTokens: 200, costUsd: 0.001 }
+      {
+        targetEngine: 'opencode',
+        targetModel: 'openai/gpt-5',
+        dispatches: 3,
+        totalTokens: 1500,
+        costUsd: 0.05
+      },
+      {
+        targetEngine: 'claude',
+        targetModel: 'haiku',
+        dispatches: 1,
+        totalTokens: 200,
+        costUsd: 0.001
+      }
     ])
     render(<UsageView onClose={vi.fn()} />)
 
@@ -394,7 +433,13 @@ describe('UsageView — Delegated (dispatched) usage section', () => {
       accountUsage: null
     } as any)
     ;(window as any).api.fetchDispatchedUsage = vi.fn().mockResolvedValue([
-      { targetEngine: 'claude', targetModel: 'haiku', dispatches: 1, totalTokens: 200, costUsd: 0.001 }
+      {
+        targetEngine: 'claude',
+        targetModel: 'haiku',
+        dispatches: 1,
+        totalTokens: 200,
+        costUsd: 0.001
+      }
     ])
     render(<UsageView onClose={vi.fn()} />)
     await waitFor(() => expect(screen.getByTestId('DelegatedUsage')).toBeInTheDocument())

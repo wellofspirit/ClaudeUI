@@ -13,6 +13,7 @@ import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { SentFilesWidget, resolveSentFilePath } from '../SentFilesWidget'
 import type { SentFile } from '../../../../shared/types'
+import { seedSession, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-sent-files'
 const CWD = '/d/repo'
@@ -53,6 +54,7 @@ describe('SentFilesWidget', () => {
     window.localStorage.clear()
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('renders nothing when no files were sent', () => {
@@ -61,12 +63,12 @@ describe('SentFilesWidget', () => {
   })
 
   it('renders the count and one row per file, newest first', () => {
-    useSessionStore
-      .getState()
-      .setSentFiles(ROUTE, [
+    seedSession(ROUTE, {
+      sentFiles: [
         makeFile({ path: 'a/old.txt', toolUseId: 'tu-a' }),
         makeFile({ path: 'b/new.txt', toolUseId: 'tu-b' })
-      ])
+      ]
+    })
 
     const { getByTestId, getAllByTestId } = render(<SentFilesWidget />)
     expect(getByTestId('SentFilesWidget')).toBeInTheDocument()
@@ -81,12 +83,12 @@ describe('SentFilesWidget', () => {
   })
 
   it('expands each row individually', () => {
-    useSessionStore
-      .getState()
-      .setSentFiles(ROUTE, [
+    seedSession(ROUTE, {
+      sentFiles: [
         makeFile({ path: 'one.txt', toolUseId: 'tu-1', caption: 'first caption' }),
         makeFile({ path: 'two.txt', toolUseId: 'tu-2', caption: 'second caption' })
-      ])
+      ]
+    })
 
     const { getAllByTestId, container } = render(<SentFilesWidget />)
     expect(container.textContent).not.toContain('first caption')
@@ -110,7 +112,7 @@ describe('SentFilesWidget', () => {
   it('Open calls api.openPath with the cwd-resolved absolute path', async () => {
     const openPath = vi.fn().mockResolvedValue({})
     ;(window.api as unknown as Record<string, unknown>).openPath = openPath
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/report.html' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'out/report.html' })] })
 
     const { getByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -122,7 +124,7 @@ describe('SentFilesWidget', () => {
   it('passes an already-absolute path through untouched', async () => {
     const showInFolder = vi.fn().mockResolvedValue({})
     ;(window.api as unknown as Record<string, unknown>).showInFolder = showInFolder
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'D:\\other\\x.png' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'D:\\other\\x.png' })] })
 
     const { getByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -135,7 +137,7 @@ describe('SentFilesWidget', () => {
     ;(window.api as unknown as Record<string, unknown>).openPath = vi
       .fn()
       .mockResolvedValue({ error: 'File does not exist' })
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'gone.txt' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'gone.txt' })] })
 
     const { getByTestId, container } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -145,9 +147,9 @@ describe('SentFilesWidget', () => {
   })
 
   it('shows the tool error on an errored row', () => {
-    useSessionStore
-      .getState()
-      .setSentFiles(ROUTE, [makeFile({ path: 'nope.txt', error: 'File not found: nope.txt' })])
+    seedSession(ROUTE, {
+      sentFiles: [makeFile({ path: 'nope.txt', error: 'File not found: nope.txt' })]
+    })
 
     const { getByTestId, container } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -155,7 +157,7 @@ describe('SentFilesWidget', () => {
   })
 
   it('hides the shell buttons when the api methods are absent (remote web client)', () => {
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile()])
+    seedSession(ROUTE, { sentFiles: [makeFile()] })
     const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
     expect(queryByTestId('SentFilesWidget.open')).toBeNull()
@@ -173,7 +175,7 @@ describe('SentFilesWidget', () => {
   it('fetches a thumbnail lazily when an image row is first expanded', async () => {
     const getSentFilePreview = vi.fn().mockResolvedValue({ src: 'data:image/png;base64,AAAA' })
     setPreview(getSentFilePreview)
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/shot.png' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'out/shot.png' })] })
 
     const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
     // Nothing is fetched until the row is opened.
@@ -196,7 +198,7 @@ describe('SentFilesWidget', () => {
   it('does not request a preview for non-image files', () => {
     const getSentFilePreview = vi.fn().mockResolvedValue({ src: 'data:x' })
     setPreview(getSentFilePreview)
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/report.html' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'out/report.html' })] })
 
     const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -206,7 +208,7 @@ describe('SentFilesWidget', () => {
 
   it('shows a preview error inline and keeps the plain path row', async () => {
     setPreview(vi.fn().mockResolvedValue({ error: 'Image is too large to preview (max 10 MB)' }))
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'big.png' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'big.png' })] })
 
     const { getByTestId, queryByTestId, container } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -219,7 +221,7 @@ describe('SentFilesWidget', () => {
   // ImageViewerOverlay, so these assert that component's testids now.
   it('opens and closes the shared image viewer from the thumbnail', async () => {
     setPreview(vi.fn().mockResolvedValue({ src: 'data:image/png;base64,BBBB' }))
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'shot.png' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'shot.png' })] })
 
     const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -246,18 +248,18 @@ describe('SentFilesWidget', () => {
 
   it('pages the viewer across every sent file that has a loaded preview', async () => {
     setPreview(
-      vi
-        .fn()
-        .mockImplementation((_session: string, path: string) =>
-          Promise.resolve({ src: `data:image/png;base64,${path.endsWith('a.png') ? 'AAAA' : 'BBBB'}` })
-        )
+      vi.fn().mockImplementation((_session: string, path: string) =>
+        Promise.resolve({
+          src: `data:image/png;base64,${path.endsWith('a.png') ? 'AAAA' : 'BBBB'}`
+        })
+      )
     )
-    useSessionStore
-      .getState()
-      .setSentFiles(ROUTE, [
+    seedSession(ROUTE, {
+      sentFiles: [
         makeFile({ path: 'a.png', toolUseId: 'tu-a' }),
         makeFile({ path: 'b.png', toolUseId: 'tu-b' })
-      ])
+      ]
+    })
 
     const { getAllByTestId, getByTestId } = render(<SentFilesWidget />)
     // Rows render newest-first, so the gallery is [b.png, a.png].
@@ -281,7 +283,7 @@ describe('SentFilesWidget', () => {
   it('shows a Download anchor on the web client once the file token arrives', () => {
     ;(window.api as unknown as Record<string, unknown>).platform = 'web'
     ;(window as unknown as Record<string, unknown>).__FILE_TOKEN__ = 'f'.repeat(64)
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ path: 'out/report.html' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'out/report.html' })] })
 
     const { getByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -296,7 +298,7 @@ describe('SentFilesWidget', () => {
 
   it('hides Download on the web client while the token is missing', () => {
     ;(window.api as unknown as Record<string, unknown>).platform = 'web'
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile()])
+    seedSession(ROUTE, { sentFiles: [makeFile()] })
     const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
     expect(queryByTestId('SentFilesWidget.download')).toBeNull()
@@ -304,7 +306,7 @@ describe('SentFilesWidget', () => {
 
   it('hides Download on the desktop even if a token somehow exists', () => {
     ;(window as unknown as Record<string, unknown>).__FILE_TOKEN__ = 'f'.repeat(64)
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile()])
+    seedSession(ROUTE, { sentFiles: [makeFile()] })
     const { getByTestId, queryByTestId } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
     expect(queryByTestId('SentFilesWidget.download')).toBeNull()
@@ -315,7 +317,7 @@ describe('SentFilesWidget', () => {
   // -------------------------------------------------------------------------
 
   it('keeps header click-to-expand working and detaches only on a real drag', () => {
-    useSessionStore.getState().setSentFiles(ROUTE, [makeFile({ caption: 'cap' })])
+    seedSession(ROUTE, { sentFiles: [makeFile({ caption: 'cap' })] })
     const { getByTestId, container } = render(<SentFilesWidget />)
     const header = getByTestId('SentFilesWidget.toggle')
 

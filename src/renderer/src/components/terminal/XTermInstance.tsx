@@ -2,11 +2,29 @@ import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { useSessionStore, type ThemeId } from '../../stores/session-store'
+import { registerTerminalInput } from './terminal-input'
 import '@xterm/xterm/css/xterm.css'
 
 interface Props {
   terminalId: string
   isActive: boolean
+  /**
+   * The connection may WATCH this pty but not act on it (ADR-054's read/act
+   * split): the arming proof still holds, so the stream keeps flowing, but the
+   * act window has decayed and the server will refuse keystrokes.
+   *
+   * It refuses them SILENTLY — a `term-input` error would be an oracle for which
+   * terminals exist — so the client cannot learn from a dropped frame and has to
+   * hold the key back itself. Always false on desktop, which is never gated.
+   */
+  readOnly?: boolean
+  /**
+   * A keystroke was held back because {@link Props.readOnly} was set. The panel
+   * turns this into a step-up ceremony; the keystroke itself is DROPPED (the
+   * user retypes), because buffering input across a ceremony means replaying
+   * whatever was typed at a shell whose state has moved on.
+   */
+  onBlockedInput?: () => void
 }
 
 function buildXtermTheme(themeId: ThemeId): Record<string, string> {
@@ -86,11 +104,24 @@ function buildXtermTheme(themeId: ThemeId): Record<string, string> {
   }
 }
 
-export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Element {
+export function XTermInstance({
+  terminalId,
+  isActive,
+  readOnly,
+  onBlockedInput
+}: Props): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const theme = useSessionStore((s) => s.settings.theme)
+  /**
+   * Read through a ref inside the mount effect: that effect keys on
+   * `terminalId` alone and must not re-run (it would tear down the pty
+   * attachment and the scrollback with it), so the `onData` handler installed
+   * once has to see the CURRENT gate rather than the one that existed at mount.
+   */
+  const inputGate = useRef({ readOnly, onBlockedInput })
+  inputGate.current = { readOnly, onBlockedInput }
 
   // Initialize Terminal once on mount
   useEffect(() => {
@@ -117,14 +148,51 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
     termRef.current = term
     fitAddonRef.current = fitAddon
 
-    // User input -> IPC -> PTY
+    // User input -> IPC -> PTY, unless this view is read-only (ADR-054): the
+    // server would drop the frame without saying so, so the FIRST key is what
+    // asks for a fresh presence proof, and it is dropped rather than buffered.
     const dataDisposable = term.onData((data) => {
+      const gate = inputGate.current
+      if (gate.readOnly) {
+        gate.onBlockedInput?.()
+        return
+      }
       window.api.writeTerminal(terminalId, data)
     })
 
-    // PTY output -> terminal
-    const unsub = window.api.onTerminalData(({ terminalId: id, data }) => {
-      if (id === terminalId) term.write(data)
+    // The seam non-keyboard affordances type through (the mobile accessory key
+    // row: Esc/Tab/^C/arrows, which no soft keyboard offers). `input(…, true)`
+    // is xterm's "as if the user typed it" entry point, so it lands in the
+    // `onData` handler above — the SAME gate, the same write, no second path.
+    const unregisterInput = registerTerminalInput(terminalId, (data) => term.input(data, true))
+
+    // PTY output -> terminal. A `replay` chunk is the scrollback ring, i.e. the
+    // terminal's ENTIRE history: it must land on a cleared screen so it is never
+    // appended to bytes the broadcast desktop lane already delivered for this pty.
+    //
+    // The clear is IN-BAND (RIS, `ESC c`) rather than `term.reset()` on purpose.
+    // `Terminal.write()` is DEFERRED — xterm queues into its WriteBuffer and
+    // drains on a later task — while `reset()` runs SYNCHRONOUSLY and does not
+    // discard that queue. So `reset(); write(replay)` in a batch that also
+    // carried a live chunk resets an empty screen and then draws live+replay,
+    // duplicating scrollback in exactly the race this flag exists to close.
+    // RIS is parsed in stream order, so it clears precisely the bytes ahead of it.
+    const unsub = window.api.onTerminalData(({ terminalId: id, data, replay }) => {
+      if (id !== terminalId) return
+      term.write(replay ? `\x1bc${data}` : data)
+    })
+
+    // Multi-attach: subscribe this client to the live PTY. Registered AFTER the
+    // data listener on purpose — attaching replays the server-side scrollback
+    // ring first, so a listener installed afterwards would miss the history it
+    // exists to deliver. Real on both surfaces now that terminals are a per-cwd
+    // pool: this tab may have resolved to a pty another surface spawned.
+    //
+    // The api handle is captured, not re-read on cleanup: detach must go through
+    // the same surface the attach did (and `window.api` can be gone by teardown).
+    const api = window.api
+    void api.attachTerminal(terminalId).catch(() => {
+      /* stale tab / grant decayed — the panel re-checks availability */
     })
 
     // Fit on resize
@@ -137,9 +205,13 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
 
     return () => {
       unsub()
+      unregisterInput()
       dataDisposable.dispose()
       ro.disconnect()
       term.dispose()
+      void api.detachTerminal(terminalId).catch(() => {
+        /* the connection is already gone; the server detaches on close anyway */
+      })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [terminalId])
@@ -165,5 +237,12 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
     }
   }, [theme])
 
-  return <div data-testid="XTermInstance" ref={containerRef} className="h-full w-full" style={{ padding: '4px 8px' }} />
+  return (
+    <div
+      data-testid="XTermInstance"
+      ref={containerRef}
+      className="h-full w-full"
+      style={{ padding: '4px 8px' }}
+    />
+  )
 }

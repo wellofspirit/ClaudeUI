@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import WebSocket from 'ws'
 import * as http from 'node:http'
+import * as net from 'node:net'
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -69,8 +70,8 @@ const { remoteConfigRef, serveRecordWrites } = vi.hoisted(() => ({
   remoteConfigRef: { current: null as unknown },
   serveRecordWrites: [] as Array<{ httpsPort: number; localPort: number } | 'clear'>
 }))
-vi.mock('../db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../db')>()
+vi.mock('../../../core/services/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/db')>()
   return {
     ...actual,
     getRemoteConfig: () => remoteConfigRef.current,
@@ -89,13 +90,20 @@ vi.mock('../db', async (importOriginal) => {
         row.lastServeHttpsPort = null
         row.lastServeLocalPort = null
       }
+    },
+    // ADR-056 item C. Faked for the same reason the serve record is: the lazy
+    // key generation happens inside a real `start()`, and a unit test must never
+    // write a channel secret into the developer's own operational.db.
+    setLanE2eKey: (keyHex: string) => {
+      const row = remoteConfigRef.current as Record<string, unknown> | null
+      if (row) row.lanE2eKey = keyHex
     }
   }
 })
 
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
 // uses two static methods (addExtraWindow/removeExtraWindow). Stub the module.
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   ClaudeSession: {
     addExtraWindow: vi.fn(),
     removeExtraWindow: vi.fn()
@@ -103,7 +111,7 @@ vi.mock('../claude-session', () => ({
 }))
 
 // Silence the logger.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -112,15 +120,28 @@ vi.mock('../logger', () => ({
   }
 }))
 
+/**
+ * The stub tunnel's public URL, mutable per test.
+ *
+ * Load-bearing since ADR-056: the server CLASSIFIES a socket's origin, and the
+ * tunnel arm is read off the `Host` the tunnel forwards verbatim — so "this
+ * client is on the tunnel" is a fact about the request now, not about the server
+ * holding a key. A tunnel test must give the stub a URL and send a matching Host.
+ */
+const { tunnelUrlRef } = vi.hoisted(() => ({ tunnelUrlRef: { current: null as string | null } }))
+
+/** Hostname of {@link tunnelUrlRef} — the `Host` a tunnelled client must send. */
+const TUNNEL_HOST = 'unit-test-tunnel.trycloudflare.com'
+
 // TunnelManager ships with a CloudFlare download path; stub completely.
-vi.mock('../tunnel-manager', () => {
+vi.mock('../../../core/services/tunnel-manager', () => {
   class StubTunnelManager {
     private cb: ((status: unknown) => void) | null = null
     setStatusHandler(fn: (status: unknown) => void): void {
       this.cb = fn
     }
     getStatus() {
-      return { state: 'stopped' as const, url: null, error: null }
+      return { state: 'stopped' as const, url: tunnelUrlRef.current, error: null }
     }
     async start(): Promise<void> {
       /* no-op */
@@ -137,25 +158,84 @@ vi.mock('../tunnel-manager', () => {
 })
 
 // Imported after the mocks are registered.
-import { RemoteServer, getNetworkInterfaces, evaluateIdentity } from '../remote-server'
-import { RemoteDispatcher } from '../remote-dispatcher'
-import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../git-watch-registry'
-import { BaseSession } from '../../providers/BaseSession'
+import {
+  RemoteServer,
+  classifyConnectionOrigin,
+  evaluateIdentity,
+  getNetworkInterfaces,
+  originRequiresE2E
+} from '../../../core/services/remote-server'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { registerCommand } from '../../../core/ipc/command-registry'
+import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
+import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { emitEvent, syncCore } from '../../../core/services/sync-host'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import type { WsEvent } from '../../../shared/remote-protocol'
 import type { GitStatusData } from '../../../shared/types'
-import { computeStoredCredential } from '../remote-auth'
-import { TailscaleServeError, serveTargetForPort } from '../tailscale-manager'
-import type { ServeOccupancy } from '../tailscale-manager'
-import type { RemoteConfigRow } from '../db'
-import type { PasswordAuthProvider } from '../remote-auth'
+import { computeStoredCredential } from '../../../core/services/remote-auth'
+import { TailscaleServeError, serveTargetForPort } from '../../../core/services/tailscale-manager'
+import type { ServeOccupancy } from '../../../core/services/tailscale-manager'
+import type { RemoteConfigRow } from '../../../core/services/db'
+import type { PasswordAuthProvider } from '../../../core/services/remote-auth'
 import type { TailscaleDetection } from '../../../shared/types'
+import { setHostPaths, setHostMockup } from '../../../core/host'
+import { routeHttpMockup, serveMockup } from '../mockup-protocol'
+
+// `getWebClientDir()` now reads the core `HostPaths` seam (getAppPath) rather
+// than Electron's `app` directly. Route it at the same mutable ref the suites
+// point at a temp web dir, preserving the prior electron-mock behaviour.
+setHostPaths({ getAppPath: () => appPathRef.current || process.cwd() })
+
+// `/mockup` serving now rides the core `HostMockup` seam; wire it to the same
+// PURE route+serve functions boot-core composes on the desktop.
+setHostMockup((pathname, searchParams, selfSource) =>
+  serveMockup(routeHttpMockup(pathname, searchParams), selfSource)
+)
 
 // Default for EVERY test in this file: no password provisioned. Suites that
 // need one call `provisionPassword()` below.
 beforeEach(() => {
   remoteConfigRef.current = null
+  tunnelUrlRef.current = null
 })
+
+/**
+ * Disable authentication for this test (`remote_config.auth_policy = 'off'`).
+ *
+ * ADR-056 made this necessary and made it HONEST. A server with no password and
+ * no passkey now admits nobody — there is no bearer token left to wave — so a
+ * case that only needs "an authenticated socket" (sync, broadcast, the scoped
+ * `/mockup` and `/sent-file` route tokens, idle sweeps) has to say which of the
+ * two it means: a real credential, or no authentication at all. These cases mean
+ * the second, and saying so keeps the credential paths concentrated in the
+ * suites that actually assert them.
+ */
+function useAuthDisabled(): void {
+  remoteConfigRef.current = {
+    port: 0,
+    bindHost: null,
+    autostart: false,
+    tlsMode: 0,
+    tlsHttpsPort: 443,
+    lastServeHttpsPort: null,
+    lastServeLocalPort: null,
+    allowTerminal: false,
+    shellGrantIdleMinutes: 10,
+    authPolicy: 'off',
+    passwordBreakGlass: true,
+    lanE2eKey: null,
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
+    passwordSalt: null,
+    passwordHash: null,
+    kdfParams: null,
+    passwordUpdatedAt: null,
+    updatedAt: 1
+  } satisfies RemoteConfigRow
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -265,6 +345,16 @@ function provisionPassword(password: string, saltHex: string): string {
     tlsHttpsPort: 443,
     lastServeHttpsPort: null,
     lastServeLocalPort: null,
+    allowTerminal: false,
+    shellGrantIdleMinutes: 10,
+    authPolicy: null,
+    passwordBreakGlass: true,
+    lanE2eKey: null,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: saltHex,
     passwordHash: hash,
     kdfParams,
@@ -342,11 +432,42 @@ async function waitUntil(pred: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
+/**
+ * Await `server.stop()` under a bound. A teardown that never resolves — the
+ * exact failure mode a socket ws-lib still tracks produces — then fails as an
+ * assertion instead of hanging the whole file until vitest's own timeout.
+ */
+async function stopWithin(server: RemoteServer, ms: number): Promise<'resolved' | 'still pending'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      // `Promise.resolve(...)` rather than `.then` directly: the assertions that
+      // follow — not a TypeError here — are what must catch a stop() that stops
+      // returning a promise.
+      Promise.resolve(server.stop()).then(() => 'resolved' as const),
+      new Promise<'still pending'>((resolve) => {
+        timer = setTimeout(() => resolve('still pending'), ms)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The sockets ws-lib itself tracks — the set `wss.close()` waits on. */
+function trackedSockets(server: RemoteServer): Set<WebSocket> {
+  const { wss } = server as unknown as { wss: { clients: Set<WebSocket> } | null }
+  return wss?.clients ?? new Set()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer', () => {
+  // Every case in this block needs an authenticated socket and nothing more.
+  // Since ADR-056 that has to be STATED rather than assumed — see useAuthDisabled.
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
 
@@ -356,9 +477,9 @@ describe('RemoteServer', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -368,7 +489,10 @@ describe('RemoteServer', () => {
     const res = await server.start(port, '127.0.0.1')
 
     expect(res.port).toBe(port)
-    expect(res.token).toMatch(/^[a-f0-9]{64}$/)
+    // No `token` in the result any more (ADR-056) — and no `#k=` either on this
+    // loopback bind, which mints no LAN channel key.
+    expect(res).not.toHaveProperty('token')
+    expect(res.lanUrl).toBe(`http://127.0.0.1:${port}/remote`)
 
     // The HTTP handler serves either the real web client or a placeholder
     // at `/remote` and `/`. Either way we should get a 200.
@@ -425,38 +549,39 @@ describe('RemoteServer', () => {
     expect(closed.code).toBe(4000)
   })
 
-  it('rejects a WebSocket client with an invalid token', async () => {
+  it('IGNORES a bearer token entirely — the field is retired (ADR-056)', async () => {
+    // No compatibility lane, by owner ruling: a stale cached bundle that still
+    // sends `{type:'auth', token}` gets a typed refusal, not a crash and not an
+    // accept. The frame is read as a frame with NO credential, so on this
+    // (non-E2E, no-password) server it is the ordinary missing-credential path.
+    //
+    // RED before ADR-056: this exact frame authenticated.
+    remoteConfigRef.current = null
     await server.start(port, '127.0.0.1')
 
-    // Use a hex string of the same length so timingSafeEqual doesn't early-exit —
-    // this exercises the real comparison path.
-    const bogus = 'f'.repeat(64)
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
     await new Promise<void>((resolve, reject) => {
       ws.once('open', () => resolve())
       ws.once('error', reject)
     })
 
-    // Collect the plaintext auth-response before the close.
     const authResp = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
       ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
-      ws.send(JSON.stringify({ type: 'auth', token: bogus }))
+      ws.send(JSON.stringify({ type: 'auth', token: 'f'.repeat(64) }))
     })
 
     expect(authResp.ok).toBe(false)
-    expect(authResp.error).toBe('Invalid token')
+    expect(authResp.error).toBe('Missing credential')
 
     const closed = await waitForTerminal(ws)
     expect(closed.code).toBe(4001)
   })
 
-  it('accepts a WebSocket client with a valid token (upgrade + auth success)', async () => {
-    const res = await server.start(port, '127.0.0.1')
+  it('accepts a WebSocket client under auth-mode `off` (upgrade + auth success)', async () => {
+    useAuthDisabled()
+    await server.start(port, '127.0.0.1')
 
-    const client = await connectRemoteClient({
-      url: `ws://127.0.0.1:${port}/`,
-      token: res.token
-    })
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
 
     // `ready` only resolves once we see `auth-response { ok: true }`.
     await client.ready
@@ -466,12 +591,12 @@ describe('RemoteServer', () => {
     client.close()
   })
 
-  it('allows multiple simultaneous clients with the same token', async () => {
-    const res = await server.start(port, '127.0.0.1')
+  it('allows multiple simultaneous clients', async () => {
+    await server.start(port, '127.0.0.1')
 
-    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
-    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
-    const c3 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const c3 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
 
     await Promise.all([c1.ready, c2.ready, c3.ready])
     expect(server.getStatus().connectedClients).toBe(3)
@@ -482,10 +607,10 @@ describe('RemoteServer', () => {
   })
 
   it('stop() disconnects all connected clients cleanly', async () => {
-    const res = await server.start(port, '127.0.0.1')
+    await server.start(port, '127.0.0.1')
 
-    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
-    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await Promise.all([c1.ready, c2.ready])
 
     const terminals = Promise.all([waitForTerminal(c1.ws), waitForTerminal(c2.ws)])
@@ -500,17 +625,61 @@ describe('RemoteServer', () => {
     // getStatus after stop() should reflect zero clients.
     expect(server.getStatus().connectedClients).toBe(0)
   })
+
+  // The clients are deliberately NOT closed from the test side in either guard
+  // below: stop() alone has to drain them, which is the whole point of it being
+  // awaitable. Closing them here would prove nothing about stop().
+  it('stop() resolves only once every socket it tracks has closed', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await Promise.all([c1.ready, c2.ready])
+    const tracked = trackedSockets(server)
+    expect(tracked.size).toBe(2)
+
+    expect(await stopWithin(server, 3000)).toBe('resolved')
+
+    // Empty, not merely emptying: a worker fork exiting right here has a quiet
+    // event loop rather than two sockets mid-handshake.
+    expect(tracked.size).toBe(0)
+
+    // The listener is released too — the port takes a fresh bind immediately.
+    await new Promise<void>((resolve, reject) => {
+      const probe = net.createServer()
+      probe.once('error', (err) => probe.close(() => reject(err)))
+      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()))
+    })
+  })
+
+  it('stop() drains a PRE-AUTH socket, which is in no client map', async () => {
+    await server.start(port, '127.0.0.1')
+    // Never sends an auth frame: ws-lib tracks it, `this.clients` never does,
+    // and it holds a pre-auth deadline timer the close handler has to clear.
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    const tracked = trackedSockets(server)
+    await waitUntil(() => tracked.size === 1)
+    expect(server.getStatus().connectedClients).toBe(0)
+
+    expect(await stopWithin(server, 3000)).toBe('resolved')
+    expect(tracked.size).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
 // Git watching lifecycle — a departed client must not leave a 5s poller behind.
 //
-// A remote client that drops abruptly (phone sleeps, tab closed) never sends
-// git:stop-watching, so the collective 'remote' owner in gitWatchRegistry has to
-// be released by the server itself once the last client is gone.
+// A remote client that drops abruptly (phone sleeps, tab closed) never states an
+// empty set, so its interest is released by the server itself, keyed to the
+// SOCKET (phase 5 S2). The retired collective-owner model could only do this once
+// the LAST client left; a per-connection set shrinks the union immediately.
 // ---------------------------------------------------------------------------
 
-describe('RemoteServer — git watch owner release', () => {
+describe('RemoteServer — git watch release on disconnect', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
   let releaseSpy: ReturnType<typeof vi.spyOn>
@@ -518,56 +687,60 @@ describe('RemoteServer — git watch owner release', () => {
   beforeEach(async () => {
     server = new RemoteServer(new RemoteDispatcher())
     port = await ephemeralPort()
-    releaseSpy = vi.spyOn(gitWatchRegistry, 'releaseOwner')
+    releaseSpy = vi.spyOn(gitWatchRegistry, 'releaseConnection')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     releaseSpy.mockRestore()
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
   })
 
-  it("releases the 'remote' owner only when the LAST client disconnects", async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
-    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+  it('releases EACH connection as its own socket closes, not just the last', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    const c2 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await Promise.all([c1.ready, c2.ready])
     releaseSpy.mockClear()
 
     c1.close()
     await waitForTerminal(c1.ws)
     await waitUntil(() => server.getStatus().connectedClients === 1)
-    // One client still connected — its watch must survive.
-    expect(releaseSpy).not.toHaveBeenCalled()
+    // THE S2 CHANGE: the departed client's interest is released immediately. Under
+    // the collective owner this call could not happen while c2 was still here, so
+    // c1's cwd kept a 5 s poller alive for nobody.
+    await waitUntil(() => releaseSpy.mock.calls.length === 1)
 
     c2.close()
     await waitForTerminal(c2.ws)
-    await waitUntil(() => releaseSpy.mock.calls.length > 0)
-    expect(releaseSpy).toHaveBeenCalledWith(GIT_WATCH_OWNER_REMOTE)
+    await waitUntil(() => releaseSpy.mock.calls.length === 2)
+    // Two distinct connection ids — never the same one twice.
+    const ids = releaseSpy.mock.calls.map((c) => c[0])
+    expect(new Set(ids).size).toBe(2)
   })
 
-  it('releases the owner on stop() without waiting for the sockets to close', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+  it('releases every live connection on stop() without waiting for the sockets', async () => {
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await c1.ready
     releaseSpy.mockClear()
 
     server.stop()
-    expect(releaseSpy).toHaveBeenCalledWith(GIT_WATCH_OWNER_REMOTE)
+    expect(releaseSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('releasing an owner that holds nothing is harmless (no throw, real registry)', async () => {
+  it('releasing a connection that holds nothing is harmless (no throw, real registry)', async () => {
     releaseSpy.mockRestore()
-    const res = await server.start(port, '127.0.0.1')
-    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await server.start(port, '127.0.0.1')
+    const c1 = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await c1.ready
     c1.close()
     await waitForTerminal(c1.ws)
     await waitUntil(() => server.getStatus().connectedClients === 0)
-    expect(gitWatchRegistry.ownersOf('/anything')).toEqual([])
+    expect(gitWatchRegistry.watchersOf('/anything')).toEqual([])
   })
 })
 
@@ -587,38 +760,33 @@ describe('RemoteServer — git watch owner release', () => {
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer — remote git watching end-to-end', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
   let repo: TempGitRepo
 
   beforeEach(async () => {
     const dispatcher = new RemoteDispatcher()
-    // The live-watch pair, registered exactly as remote-handlers.ts does.
-    // `registerRemoteHandlers()` itself cannot be loaded in this file — it pulls
-    // the entire session/engine/auth service graph, which this file deliberately
-    // does not mock. That single hop (the `dispatcher.register` call and its owner
-    // id) is covered by remote-handlers.ipc.test.ts; everything DOWNSTREAM of the
-    // handler here is the real production path.
-    dispatcher.register('git:start-watching', async (cwd: string) => {
-      gitWatchRegistry.startWatching(cwd, GIT_WATCH_OWNER_REMOTE)
-    })
-    dispatcher.register('git:stop-watching', async (cwd: string) => {
-      gitWatchRegistry.stopWatching(cwd, GIT_WATCH_OWNER_REMOTE)
-    })
+    // The live-watch verb, registered from the SAME shared declaration
+    // remote-handlers.ts spreads. `registerRemoteHandlers()` itself cannot be
+    // loaded in this file — it pulls the entire session/engine/auth service graph,
+    // which this file deliberately does not mock. That single hop (the
+    // registration) is covered by remote-handlers.ipc.test.ts; everything
+    // DOWNSTREAM of the handler here is the real production path.
+    registerCommand({ ...GIT_WATCH_COMMAND, transport: 'remote' })
 
     server = new RemoteServer(dispatcher)
     port = await ephemeralPort()
 
     // Production installs this fan-out in registerSessionIpc(); replicated here
-    // verbatim minus the desktop main window (there is none in this harness). The
-    // `BaseSession.getExtraWindows()` hop is the load-bearing one: RemoteServer
-    // .start() registers its RemoteBridge there, and the bridge is what turns the
-    // send into a WS frame. Pushing to the server directly instead would bypass
-    // the bridge and prove nothing, so this is the ONLY wiring the test does.
+    // verbatim. Since SyncCore phase 4a that means ONE `emitEvent` call: the
+    // funnel appends to the ring and hands the seq to the RemoteBridge, which is
+    // what turns it into a WS frame. The bridge hop is still the load-bearing one
+    // (RemoteServer.start() registers it as an extra sink) — pushing to the
+    // server directly would bypass it and prove nothing, so this stays the ONLY
+    // wiring the test does. `win` is omitted: there is no desktop window here.
     gitWatchRegistry.init((cwd, status) => {
-      for (const w of BaseSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
-      }
+      emitEvent('git:status-update', [{ cwd, status }])
     })
 
     // A committed file, then a real uncommitted modification to it.
@@ -627,64 +795,57 @@ describe('RemoteServer — remote git watching end-to-end', () => {
   })
 
   afterEach(async () => {
-    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
     gitWatchRegistry.init(null)
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
     await repo.cleanup()
   })
 
-  it(
-    'pushes a real git:status-update frame to an authenticated client after git:start-watching',
-    async () => {
-      const res = await server.start(port, '127.0.0.1')
-      const client = await connectRemoteClient({
-        url: `ws://127.0.0.1:${port}/`,
-        token: res.token
-      })
-      await client.ready
+  it('pushes a real git:status-update frame to an authenticated client after git:watch', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
 
-      // Collect RAW frames: the assertion is about what actually crosses the
-      // socket, not about a helper's parsed convenience view.
-      const frames: WsEvent[] = []
-      client.onMessage((msg) => {
-        if (msg.type === 'event' && msg.channel === 'git:status-update') frames.push(msg)
-      })
+    // Collect RAW frames: the assertion is about what actually crosses the
+    // socket, not about a helper's parsed convenience view.
+    const frames: WsEvent[] = []
+    client.onMessage((msg) => {
+      if (msg.type === 'event' && msg.channel === 'git:status-update') frames.push(msg)
+    })
 
-      await client.invoke('git:start-watching', repo.path)
-      expect(gitWatchRegistry.ownersOf(repo.path)).toEqual([GIT_WATCH_OWNER_REMOTE])
+    await client.invoke('git:watch', { cwds: [repo.path] })
+    expect(gitWatchRegistry.watchersOf(repo.path)).toHaveLength(1)
 
-      // No 5s wait: the poller's FIRST poll always emits (the fingerprint-reset
-      // invariant in GitService.stopPolling()). Generous ceiling only because a
-      // real `git status` on Windows costs a few hundred ms.
-      await waitUntil(() => frames.length > 0, 20000)
-      expect(frames).toHaveLength(1)
+    // No 5s wait: the poller's FIRST poll always emits (the fingerprint-reset
+    // invariant in GitService.stopPolling()). Generous ceiling only because a
+    // real `git status` on Windows costs a few hundred ms.
+    await waitUntil(() => frames.length > 0, 20000)
+    expect(frames).toHaveLength(1)
 
-      const payload = frames[0].args[0] as { cwd: string; status: GitStatusData }
-      expect(payload.cwd).toBe(repo.path)
-      expect(payload.status.branch).toBe('main')
-      expect(payload.status.files.length).toBeGreaterThan(0)
-      expect(payload.status.files.some((f) => f.path === 'tracked.txt')).toBe(true)
-      expect(payload.status.linesAdded).toBeGreaterThan(0)
+    const payload = frames[0].args[0] as { cwd: string; status: GitStatusData }
+    expect(payload.cwd).toBe(repo.path)
+    expect(payload.status.branch).toBe('main')
+    expect(payload.status.files.length).toBeGreaterThan(0)
+    expect(payload.status.files.some((f) => f.path === 'tracked.txt')).toBe(true)
+    expect(payload.status.linesAdded).toBeGreaterThan(0)
 
-      // Tearing down removes the only owner, so the poller is stopped and the
-      // GitService released.
-      await client.invoke('git:stop-watching', repo.path)
-      expect(gitWatchRegistry.ownersOf(repo.path)).toEqual([])
+    // An empty set removes the only watcher, so the poller is stopped and the
+    // GitService released.
+    await client.invoke('git:watch', { cwds: [] })
+    expect(gitWatchRegistry.watchersOf(repo.path)).toEqual([])
 
-      const framesAfterStop = frames.length
-      client.close()
-      await waitForTerminal(client.ws)
-      expect(frames).toHaveLength(framesAfterStop)
-    },
-    40000
-  )
+    const framesAfterStop = frames.length
+    client.close()
+    await waitForTerminal(client.ws)
+    expect(frames).toHaveLength(framesAfterStop)
+  }, 40000)
 })
 
 describe('RemoteServer — mockup HTTP route', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
   let cwd: string
@@ -718,9 +879,9 @@ describe('RemoteServer — mockup HTTP route', () => {
     )
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -730,8 +891,8 @@ describe('RemoteServer — mockup HTTP route', () => {
   })
 
   /** Pull the mockup token from a WS full-sync (its new, authenticated home). */
-  async function fetchMockupTokenViaWs(wsToken: string): Promise<string | null> {
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: wsToken })
+  async function fetchMockupTokenViaWs(): Promise<string | null> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await client.ready
     const token = await new Promise<string | null>((resolve) => {
       const off = client.onMessage((msg) => {
@@ -751,8 +912,8 @@ describe('RemoteServer — mockup HTTP route', () => {
   // (an unauthenticated visitor to /remote must not obtain it). It is delivered
   // over the authenticated WS instead.
   it('does not inject the mockup token into the served HTML', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const authed = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
+    await server.start(port, '127.0.0.1')
+    const authed = await httpGet(`http://127.0.0.1:${port}/remote`)
     expect(authed.body).not.toContain('__MOCKUP_TOKEN__')
     const anon = await httpGet(`http://127.0.0.1:${port}/remote`)
     expect(anon.body).not.toContain('__MOCKUP_TOKEN__')
@@ -772,11 +933,12 @@ describe('RemoteServer — mockup HTTP route', () => {
   })
 
   it('delivers the mockup token over the authenticated WS (sync-full)', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const token = await fetchMockupTokenViaWs(res.token)
+    await server.start(port, '127.0.0.1')
+    const token = await fetchMockupTokenViaWs()
     expect(token).toMatch(/^[a-f0-9]{64}$/)
-    // The mockup token must NOT be the WS token.
-    expect(token).not.toBe(res.token)
+    // There is no WS access token left to be distinct FROM (ADR-056). The
+    // surviving distinctness — mockup token ≠ file token — is pinned in the
+    // /sent-file suite, which can see both.
   })
 
   it('rejects /mockup requests without the mockup token', async () => {
@@ -834,8 +996,8 @@ describe('RemoteServer — mockup HTTP route', () => {
   })
 
   it('serves the mockup HTML with a valid mockup token (end-to-end)', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const token = (await fetchMockupTokenViaWs(res.token))!
+    await server.start(port, '127.0.0.1')
+    const token = (await fetchMockupTokenViaWs())!
 
     const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${token}`)
     expect(got.status).toBe(200)
@@ -854,6 +1016,7 @@ describe('RemoteServer — mockup HTTP route', () => {
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer — static asset encoding + caching', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
   let appDir: string
@@ -884,9 +1047,9 @@ describe('RemoteServer — static asset encoding + caching', () => {
     await server.start(port, '127.0.0.1')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -972,55 +1135,74 @@ describe('RemoteServer — static asset encoding + caching', () => {
 
 // ---------------------------------------------------------------------------
 // ADR-043 §5 — `GET /sent-file`. Authenticated by a THIRD scoped token and
-// allowlisted against the renderer's own `sentFiles` snapshot, so the route can
-// never read a host path the model didn't explicitly deliver.
+// allowlisted against the session's `sentFiles`, so the route can never read a
+// host path the model didn't explicitly deliver.
+//
+// SyncCore phase 4b: that allowlist comes from CANONICAL state now, not from an
+// `executeJavaScript` pull of the renderer's store — so these tests seed it the
+// way production does, by emitting the `SendUserFile` tool_use the reducer
+// derives `sentFiles` from. The stubbed renderer is gone: there is no renderer in
+// this path any more, which is the point of the cutover.
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer — /sent-file route', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
   let cwd: string
   const SESSION = 'route-files'
 
-  /** Point the server's EventLog at a fake renderer returning `snapshot`. */
-  function stubRendererState(snapshot: Record<string, unknown>): void {
-    server.setWindow({
-      isDestroyed: () => false,
-      // `send` is used by notifyStatus on every connect/disconnect — without it
-      // the status push throws asynchronously and fails the run.
-      webContents: { executeJavaScript: async () => snapshot, send: () => {} }
-    } as unknown as Parameters<RemoteServer['setWindow']>[0])
-  }
-
-  function snapshotWith(files: Array<{ path: string }>): Record<string, unknown> {
-    return {
-      seq: 0,
-      sessions: { [SESSION]: { routingId: SESSION, cwd, sentFiles: files } },
-      directories: [],
-      activeSessionId: SESSION,
-      settings: {},
-      recentSessionIds: [],
-      pinnedSessionIds: [],
-      customTitles: {},
-      worktreeInfoMap: {}
-    }
+  /**
+   * Put `files` on the session's delivered list the only way anything can: a
+   * `SendUserFile` tool call in the transcript. `sentFiles` is DERIVED
+   * (`buildSentFilesFromMessages`), so seeding it any other way would test a
+   * shape production can't produce.
+   */
+  function seedDeliveredFiles(files: Array<{ path: string }>): void {
+    syncCore.resetCanonicalForTests()
+    emitEvent('session:created', [SESSION, { cwd }])
+    if (files.length === 0) return
+    emitEvent('session:message', [
+      SESSION,
+      {
+        id: 'm-send',
+        role: 'assistant',
+        timestamp: 0,
+        content: files.map((f, i) => ({
+          type: 'tool_use',
+          toolUseId: `tu-${i}`,
+          toolName: 'SendUserFile',
+          toolInput: { files: [f.path], display: 'attach' }
+        }))
+      }
+    ])
   }
 
   /** Pull the file token from a WS full-sync (its only authenticated home). */
-  async function fetchFileTokenViaWs(wsToken: string): Promise<string | null> {
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: wsToken })
+  async function fetchScopedTokensViaWs(): Promise<{
+    fileToken: string | null
+    mockupToken: string | null
+  }> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await client.ready
-    const token = await new Promise<string | null>((resolve) => {
-      const off = client.onMessage((msg) => {
-        if (msg.type === 'sync-full') {
-          off()
-          resolve((msg as { fileToken?: string }).fileToken ?? null)
-        }
-      })
-      void client.send({ type: 'sync', lastSeq: 0 })
-    })
+    const tokens = await new Promise<{ fileToken: string | null; mockupToken: string | null }>(
+      (resolve) => {
+        const off = client.onMessage((msg) => {
+          if (msg.type === 'sync-full') {
+            off()
+            const full = msg as { fileToken?: string; mockupToken?: string }
+            resolve({ fileToken: full.fileToken ?? null, mockupToken: full.mockupToken ?? null })
+          }
+        })
+        void client.send({ type: 'sync', lastSeq: 0 })
+      }
+    )
     client.close()
-    return token
+    return tokens
+  }
+
+  async function fetchFileTokenViaWs(): Promise<string | null> {
+    return (await fetchScopedTokensViaWs()).fileToken
   }
 
   function urlFor(
@@ -1044,9 +1226,9 @@ describe('RemoteServer — /sent-file route', () => {
     fs.writeFileSync(path.join(cwd, 'secret.txt'), 'never delivered')
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1054,15 +1236,18 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('delivers a file token over the authenticated WS, distinct from the others', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = await fetchFileTokenViaWs(res.token)
+    await server.start(port, '127.0.0.1')
+    const { fileToken, mockupToken } = await fetchScopedTokensViaWs()
     expect(fileToken).toMatch(/^[a-f0-9]{64}$/)
-    expect(fileToken).not.toBe(res.token)
+    // The two scoped ROUTE tokens must never be the same secret: each travels in
+    // a URL its own consumer can read, so sharing one would silently widen both.
+    // (The WS access token they were also compared against is gone — ADR-056.)
+    expect(fileToken).not.toBe(mockupToken)
   })
 
   it('rejects a missing or wrong token with 403 (constant-time compare)', async () => {
     await server.start(port, '127.0.0.1')
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const noToken = await httpGet(
       `http://127.0.0.1:${port}/sent-file?session=${SESSION}&path=${Buffer.from(
@@ -1078,9 +1263,9 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('404s an unknown session', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const got = await httpGet(
       urlFor(fileToken, path.join(cwd, 'out', 'report.html'), { session: 'nope' })
@@ -1089,9 +1274,9 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('404s a path that was never delivered (not an existence oracle)', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     // Exists on disk, inside the cwd — but not on the renderer's list.
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'secret.txt')))
@@ -1104,17 +1289,17 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('404s when the session delivered nothing at all', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([])
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
     expect(got.status).toBe(404)
   })
 
   it('serves an allowlisted file as an attachment with nosniff', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
     expect(got.status).toBe(200)
@@ -1127,9 +1312,9 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('honours inline=1 for images', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/shot.png' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/shot.png' }])
 
     const got = await httpGet(
       urlFor(fileToken, path.join(cwd, 'out', 'shot.png'), { inline: true })
@@ -1140,9 +1325,9 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('FORCES attachment for a non-image even when inline=1 is requested', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/report.html' }])
 
     const got = await httpGet(
       urlFor(fileToken, path.join(cwd, 'out', 'report.html'), { inline: true })
@@ -1153,25 +1338,25 @@ describe('RemoteServer — /sent-file route', () => {
   })
 
   it('404s an allowlisted entry whose file has since disappeared', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/gone.txt' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/gone.txt' }])
     const got = await httpGet(urlFor(fileToken, path.join(cwd, 'out', 'gone.txt')))
     expect(got.status).toBe(404)
   })
 
   it('405s a non-GET method', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/report.html' }])
     const got = await httpRequest('POST', urlFor(fileToken, path.join(cwd, 'out', 'report.html')))
     expect(got.status).toBe(405)
   })
 
   it('404s a structurally broken path parameter', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const fileToken = (await fetchFileTokenViaWs(res.token))!
-    stubRendererState(snapshotWith([{ path: 'out/report.html' }]))
+    await server.start(port, '127.0.0.1')
+    const fileToken = (await fetchFileTokenViaWs())!
+    seedDeliveredFiles([{ path: 'out/report.html' }])
     const got = await httpGet(
       `http://127.0.0.1:${port}/sent-file?session=${SESSION}&path=!!!&token=${fileToken}`
     )
@@ -1180,41 +1365,48 @@ describe('RemoteServer — /sent-file route', () => {
 })
 
 // ---------------------------------------------------------------------------
-// R2 — E2E enforcement. Once the server has an E2E key (tunnel mode), it must
-// refuse any client that doesn't activate E2E, and must reject plaintext frames
-// after activation (no silent cleartext fallback — H3).
+// R2 — E2E enforcement, in the ADR-056 order.
+//
+// On an E2E ORIGIN (the tunnel here) the channel comes FIRST: `e2e-activate`
+// proves possession of the key, the ack is the first encrypted frame, and the
+// `auth` frame travels inside the ciphertext. A socket that sends anything else
+// first is refused — which is also the whole of the plaintext-on-LAN refusal —
+// and a plaintext frame spliced in after activation still fails GCM (H3).
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer — E2E enforcement (R2)', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
 
   beforeEach(async () => {
+    // A real tunnel URL, so a client sending its Host classifies as `tunnel`.
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
     server = new RemoteServer(new RemoteDispatcher())
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
   })
 
+  /** A socket that LOOKS like a tunnel client (the Host decides the origin). */
   async function rawConnect(): Promise<WebSocket> {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { headers: { Host: TUNNEL_HOST } })
     await new Promise<void>((resolve, reject) => {
       ws.once('open', () => resolve())
       ws.once('error', reject)
     })
     return ws
   }
-  function nextJson(ws: WebSocket): Promise<Record<string, unknown>> {
-    return new Promise((resolve) =>
-      ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
-    )
-  }
+  // `nextJson` is gone with the plaintext half of this handshake: on an E2E
+  // origin the ONLY plaintext frame either end sends is `e2e-activate`, and
+  // everything the server answers — ack, auth-response, invoke-response — is
+  // ciphertext (ADR-056). Frames are read raw and decrypted.
   function nextRaw(ws: WebSocket): Promise<string> {
     return new Promise((resolve) => ws.once('message', (raw) => resolve(raw.toString())))
   }
@@ -1226,39 +1418,48 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
    *  no longer plaintext — see the "encrypt the e2e-ack" fix). */
   async function serverKeyedCrypto(): Promise<E2ECrypto> {
     const e2e = new E2ECrypto()
-    await e2e.init((server as unknown as { e2eKey: string }).e2eKey)
+    await e2e.init((server as unknown as { tunnelE2eKey: string }).tunnelE2eKey)
     return e2e
   }
 
-  it('closes a client that authenticates but never activates E2E (GUARD)', async () => {
-    const res = await server.start(port, '127.0.0.1', { tunnel: true })
-    const ws = await rawConnect()
-    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
-    const authResp = await nextJson(ws)
-    expect(authResp).toMatchObject({ type: 'auth-response', ok: true })
+  /** Open the channel and return the crypto both ends now share. */
+  async function activate(ws: WebSocket): Promise<E2ECrypto> {
+    const keyed = await serverKeyedCrypto()
+    ws.send(JSON.stringify({ type: 'e2e-activate' }))
+    const rawAck = await nextRaw(ws)
+    // GUARD: the ack is the FIRST ENCRYPTED frame, not a plaintext one. It is
+    // also how a client learns its key was right — a stale link decrypts
+    // nothing and is reaped by the pre-auth deadline.
+    expect(rawAck.startsWith('{')).toBe(false)
+    expect(await keyed.decrypt(rawAck)).toEqual({ type: 'e2e-ack' })
+    return keyed
+  }
 
+  it('REFUSES a client that sends an auth frame before opening the channel (GUARD)', async () => {
+    // The order inversion, as a refusal: on an E2E origin nothing is read in the
+    // clear, so a plaintext `auth` frame is not "authentication that skipped
+    // encryption" — it is the first frame of a socket that never proved the
+    // channel. RED before ADR-056, where this frame authenticated.
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const ws = await rawConnect()
     const closed = onClose(ws)
-    // First post-auth frame is NOT e2e-activate — must be refused, not run cleartext.
+    ws.send(JSON.stringify({ type: 'auth' }))
+    expect(await closed).toBe(4004)
+    expect(server.getStatus().connectedClients).toBe(0)
+  })
+
+  it('refuses any other plaintext first frame on an E2E origin (GUARD)', async () => {
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const ws = await rawConnect()
+    const closed = onClose(ws)
     ws.send(JSON.stringify({ type: 'sync', lastSeq: 0 }))
     expect(await closed).toBe(4004)
   })
 
   it('rejects (closes on) a plaintext frame after E2E activation (GUARD)', async () => {
-    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    await server.start(port, '127.0.0.1', { tunnel: true })
     const ws = await rawConnect()
-    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
-    await nextJson(ws) // auth-response
-    ws.send(JSON.stringify({ type: 'e2e-activate' }))
-
-    // The ack is now the FIRST encrypted frame, not the last plaintext one
-    // (regression f707979 fix — a plaintext ack here is silently dropped by
-    // the real client's strict post-activation decoder and deadlocks the
-    // handshake forever).
-    const rawAck = await nextRaw(ws)
-    // GUARD: the ack frame is encrypted, not plaintext.
-    expect(rawAck.startsWith('{')).toBe(false)
-    const keyed = await serverKeyedCrypto()
-    await expect(keyed.decrypt(rawAck)).resolves.toEqual({ type: 'e2e-ack' })
+    await activate(ws)
 
     const closed = onClose(ws)
     // A spliced plaintext frame post-activation fails GCM decrypt → closed.
@@ -1266,20 +1467,115 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
     expect(await closed).toBe(4002)
   })
 
-  it('a fully E2E client completes the handshake (non-vacuity)', async () => {
-    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+  it('a fully E2E client completes the handshake INSIDE the channel (non-vacuity)', async () => {
+    await server.start(port, '127.0.0.1', { tunnel: true })
     const ws = await rawConnect()
-    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
-    await nextJson(ws)
-    ws.send(JSON.stringify({ type: 'e2e-activate' }))
-    const rawAck = await nextRaw(ws)
-    const keyed = await serverKeyedCrypto()
-    // GUARD: the ack frame is encrypted, not plaintext.
-    expect(rawAck.startsWith('{')).toBe(false)
-    expect(await keyed.decrypt(rawAck)).toEqual({ type: 'e2e-ack' })
-    // The connection stays open (server counts it as a live client).
+    const keyed = await activate(ws)
+
+    // Not authenticated yet — the channel is a channel, never an identity.
+    expect(server.getStatus().connectedClients).toBe(0)
+
+    // The credential travels as CIPHERTEXT, and so does the answer.
+    ws.send(await keyed.encrypt({ type: 'auth' }))
+    const authResp = await nextRaw(ws)
+    expect(authResp.startsWith('{')).toBe(false)
+    const accept = await keyed.decrypt(authResp)
+    expect(accept).toMatchObject({
+      type: 'auth-response',
+      ok: true,
+      authDisabled: true
+    })
+    // THE TUNNEL IS NEVER A WEBAUTHN ORIGIN, and the accept has to say so. The
+    // page is HTTPS, so every browser-side capability test the client could run
+    // answers "yes" — while the RP ID would be this run's ephemeral
+    // `*.trycloudflare.com` name, which the next tunnel does not share. The web
+    // client gates its enrollment offer on this field precisely because it
+    // cannot work that out for itself.
+    expect(accept).not.toHaveProperty('webauthnCapableOrigin')
     expect(server.getStatus().connectedClients).toBe(1)
     ws.close()
+  })
+
+  it('a WRONG channel key SPENDS the per-key budget, and enough of them throttle (GUARD)', async () => {
+    // Review F2: ADR-056 and remote.md both promise that activation failures
+    // throttle, and nothing charged for them — so `#k=` was the one 256-bit
+    // secret on the server that could be guessed without limit. RED before the
+    // fix: the sixth attempt below was answered normally instead of 4006.
+    //
+    // A wrong key IS observable server-side: the server activates against ITS
+    // key, so the client's first encrypted frame fails to decrypt on a pre-auth
+    // socket, which is where the charge lands.
+    await server.start(port, '127.0.0.1', { tunnel: true })
+
+    const wrongKeyAttempt = async (): Promise<number | undefined> => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { headers: { Host: TUNNEL_HOST } })
+      const opened = await new Promise<boolean>((resolve) => {
+        ws.once('open', () => resolve(true))
+        ws.once('close', () => resolve(false))
+        ws.once('error', () => resolve(false))
+      })
+      if (!opened) {
+        // Refused at connection time — that IS the throttle answer.
+        return await new Promise<number | undefined>((resolve) => {
+          if (ws.readyState === WebSocket.CLOSED) resolve(4006)
+          else ws.once('close', (code) => resolve(code))
+        })
+      }
+      const closed = waitForTerminal(ws)
+      const wrong = new E2ECrypto()
+      await wrong.init('ab'.repeat(32))
+      ws.send(JSON.stringify({ type: 'e2e-activate' }))
+      await nextRaw(ws) // the ack we cannot read
+      // Speak on the channel with the wrong key — the server's decrypt fails.
+      ws.send(await wrong.encrypt({ type: 'auth' }))
+      return (await closed).code
+    }
+
+    // Five failures fit the budget and are answered on their own terms (4002).
+    for (let i = 0; i < 5; i++) {
+      expect(await wrongKeyAttempt(), `attempt ${i + 1}`).toBe(4002)
+    }
+    // The sixth connection is refused UP FRONT, before any frame.
+    const throttled = await new Promise<number | undefined>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { headers: { Host: TUNNEL_HOST } })
+      ws.once('close', (code) => resolve(code))
+      ws.once('error', () => resolve(undefined))
+    })
+    expect(throttled).toBe(4006)
+  })
+
+  it('refuses a WRONG channel key: nothing decrypts and the pre-auth deadline reaps it', async () => {
+    // What a stale `#k=` bookmark meets after a rotation. The server activates
+    // against ITS key, so the client's ack is undecryptable, it never sends a
+    // credential, and the socket dies on the pre-auth clock rather than being
+    // admitted on a channel neither end agrees about.
+    const impatient = new RemoteServer(
+      new RemoteDispatcher(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { preAuthMs: 150 }
+    )
+    const otherPort = await ephemeralPort()
+    try {
+      await impatient.start(otherPort, '127.0.0.1', { tunnel: true })
+      const ws = new WebSocket(`ws://127.0.0.1:${otherPort}/`, { headers: { Host: TUNNEL_HOST } })
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve())
+        ws.once('error', reject)
+      })
+      const closed = onClose(ws)
+      const wrong = new E2ECrypto()
+      await wrong.init('ab'.repeat(32))
+      ws.send(JSON.stringify({ type: 'e2e-activate' }))
+      const rawAck = await nextRaw(ws)
+      await expect(wrong.decrypt(rawAck)).rejects.toThrow()
+      expect(await closed).toBe(4000)
+      expect(impatient.getStatus().connectedClients).toBe(0)
+    } finally {
+      await impatient.stop()
+    }
   })
 
   // Hardening — inbound decrypts are NOT guaranteed to resolve in frame-arrival
@@ -1288,23 +1584,23 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
   // and the earlier frame's decrypt then fails its own replay check — closing
   // the socket with 4002 even though nothing was actually replayed.
   it('processes two encrypted frames in arrival order even when the first frame decrypts slowly (GUARD)', async () => {
-    const res = await server.start(port, '127.0.0.1', { tunnel: true })
+    await server.start(port, '127.0.0.1', { tunnel: true })
     const ws = await rawConnect()
-    ws.send(JSON.stringify({ type: 'auth', token: res.token }))
-    await nextJson(ws)
-    ws.send(JSON.stringify({ type: 'e2e-activate' }))
-    const rawAck = await nextRaw(ws)
-    const clientCrypto = await serverKeyedCrypto() // stands in for the client's own E2ECrypto
-    expect(await clientCrypto.decrypt(rawAck)).toEqual({ type: 'e2e-ack' })
+    const clientCrypto = await activate(ws) // stands in for the client's own E2ECrypto
+    ws.send(await clientCrypto.encrypt({ type: 'auth' }))
+    await nextRaw(ws) // the encrypted auth-response
 
-    // Reach the server's per-connection client record and delay only the
-    // FIRST decrypt() call ~50ms (wrapping the original) — simulates
-    // WebCrypto resolving a later frame's decrypt before an earlier one's.
-    const clients = (server as unknown as { clients: Map<unknown, { e2e: E2ECrypto }> }).clients
+    // Reach the server's per-connection CHANNEL and delay only the FIRST
+    // decrypt() call ~50ms (wrapping the original) — simulates WebCrypto
+    // resolving a later frame's decrypt before an earlier one's.
+    const clients = (
+      server as unknown as { clients: Map<unknown, { channel: { e2e: E2ECrypto } }> }
+    ).clients
     const client = [...clients.values()][0]
-    const originalDecrypt = client.e2e.decrypt.bind(client.e2e)
+    const e2e = client.channel.e2e
+    const originalDecrypt = e2e.decrypt.bind(e2e)
     let decryptCalls = 0
-    client.e2e.decrypt = async (payload: string): Promise<unknown> => {
+    e2e.decrypt = async (payload: string): Promise<unknown> => {
       decryptCalls++
       if (decryptCalls === 1) {
         await new Promise((r) => setTimeout(r, 50))
@@ -1353,6 +1649,7 @@ describe('RemoteServer — E2E enforcement (R2)', () => {
 // ---------------------------------------------------------------------------
 
 describe('RemoteServer — sync epoch (R7)', () => {
+  beforeEach(useAuthDisabled)
   let server: RemoteServer
   let port: number
 
@@ -1361,9 +1658,9 @@ describe('RemoteServer — sync epoch (R7)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1383,8 +1680,8 @@ describe('RemoteServer — sync epoch (R7)', () => {
   }
 
   it('a fresh sync returns a full snapshot carrying the epoch', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await client.ready
     const p = nextSync(client)
     await client.send({ type: 'sync', lastSeq: 0 })
@@ -1395,11 +1692,11 @@ describe('RemoteServer — sync epoch (R7)', () => {
   })
 
   it('a sync with a STALE epoch returns a full snapshot, not a false catchup (GUARD)', async () => {
-    const res = await server.start(port, '127.0.0.1')
+    await server.start(port, '127.0.0.1')
     // Seed some events so a same-epoch catchup would be possible.
     server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
     server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await client.ready
     const p = nextSync(client)
     // lastSeq > 0 but a mismatched epoch — pre-fix this returned an empty
@@ -1411,27 +1708,146 @@ describe('RemoteServer — sync epoch (R7)', () => {
   })
 
   it('a sync with the CURRENT epoch returns a catchup', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
-    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
-    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 3 })
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
     await client.ready
 
-    // Learn the current epoch from a fresh full sync.
+    // Learn the epoch AND the current watermark before pushing. Since SyncCore
+    // phase 4a the ring is process-global (one app, one ring — which is the whole
+    // point of the single-append invariant), so seq numbers are no longer
+    // per-server and cannot be hardcoded.
     const fullP = nextSync(client)
     await client.send({ type: 'sync', lastSeq: 0 })
     const full = await fullP
     const epoch = full.epoch as string
+    const base = (full.state as { seq: number }).seq
 
-    // Now catch up from seq 1 with the matching epoch → events 2 and 3.
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 1 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 2 })
+    server.pushNonSessionEvent('git:status-update', { cwd: '/x', n: 3 })
+
+    // Catch up from the first of the three with the matching epoch → the last two.
     const catchP = nextSync(client)
-    await client.send({ type: 'sync', lastSeq: 1, epoch })
+    await client.send({ type: 'sync', lastSeq: base + 1, epoch })
     const msg = await catchP
     expect(msg.type).toBe('sync-catchup')
-    expect((msg.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([2, 3])
+    expect((msg.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([base + 2, base + 3])
     expect(msg.epoch).toBe(epoch)
     client.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SyncCore phase 4b — `sync-full` carries CANONICAL state.
+//
+// Every test here runs with NO window ever registered on the server, which is
+// the assertion that matters: before the cutover this suite had to stub a fake
+// renderer (`executeJavaScript`) to get a non-empty snapshot at all, and a real
+// desktop whose renderer was busy, reloading or absent got the same empty
+// snapshot a missing stub gives (remote.md defect 2).
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    syncCore.resetCanonicalForTests()
+  })
+
+  afterEach(async () => {
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  async function firstSyncFull(): Promise<Record<string, unknown>> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+    const msg = await new Promise<Record<string, unknown>>((resolve) => {
+      const off = client.onMessage((m) => {
+        if (m.type === 'sync-full') {
+          off()
+          resolve(m as unknown as Record<string, unknown>)
+        }
+      })
+      void client.send({ type: 'sync', lastSeq: 0 })
+    })
+    client.close()
+    return msg
+  }
+
+  it('serves state built from the event stream, with no renderer involved', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
+    emitEvent('session:message', [
+      'canon-1',
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'from canonical' }],
+        timestamp: 0
+      }
+    ])
+    emitEvent('session:metering', [
+      'canon-1',
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        billingType: 'subscription',
+        tokens: { input: 7, output: 3, cacheWrite: 0, cacheRead: 0, total: 10 },
+        equivalentCostUsd: 0.05,
+        contextWindow: { used: 10, size: 200000 }
+      }
+    ])
+
+    const msg = await firstSyncFull()
+    const state = msg.state as {
+      seq: number
+      sessions: Record<
+        string,
+        { messages: Array<{ id: string }>; metering?: { equivalentCostUsd: number } }
+      >
+      activeSessionId: string | null
+    }
+    expect(state.sessions['canon-1'].messages.map((m) => m.id)).toEqual(['a1'])
+    // Metering had no snapshot field before 4a and no canonical source before 4b.
+    expect(state.sessions['canon-1'].metering?.equivalentCostUsd).toBe(0.05)
+    // Selection is per-client (ADR-041): core has no opinion, and the web client
+    // resolves its own landing session from recents (`hydrateReplica`).
+    expect(state.activeSessionId).toBeNull()
+  })
+
+  it('claims the watermark EXACTLY — the catchup from it is empty', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
+    const msg = await firstSyncFull()
+    const state = msg.state as { seq: number }
+    // Same tick capture ⇒ the snapshot contains everything through `seq` and
+    // nothing after it. The old renderer-pull deliberately under-claimed here.
+    expect(state.seq).toBe(syncCore.currentSeq())
+    expect(syncCore.getAfter(state.seq)).toEqual([])
+  })
+
+  it('a resync mid-stream carries the accumulated streaming buffers', async () => {
+    await server.start(port, '127.0.0.1')
+    emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
+    emitEvent('session:stream', ['canon-1', { type: 'thinking', text: 'weighing' }])
+    emitEvent('session:stream', ['canon-1', { type: 'text', text: 'partial ' }])
+
+    const msg = await firstSyncFull()
+    const state = msg.state as {
+      sessions: Record<string, { streamingText: string; streamingThinking: string }>
+    }
+    expect(state.sessions['canon-1'].streamingText).toBe('partial ')
+    // The thinking buffer was sealed by the text delta, exactly as every client
+    // replica seals it — canonical is not a second interpretation.
+    expect(state.sessions['canon-1'].streamingThinking).toBe('')
   })
 })
 
@@ -1454,16 +1870,16 @@ describe('RemoteServer — listen failure resets state (M-RM2)', () => {
       const status = victim.getStatus()
       expect(status.running).toBe(false)
       expect(status.port).toBeNull()
-      expect(status.token).toBeNull()
+      expect(status.lanUrl).toBeNull()
 
       // A retry on a free port must now succeed (not throw "already running").
       const freePort = await ephemeralPort()
       const res = await victim.start(freePort, '127.0.0.1')
       expect(res.port).toBe(freePort)
       expect(victim.getStatus().running).toBe(true)
-      victim.stop()
+      await victim.stop()
     } finally {
-      occupant.stop()
+      await occupant.stop()
     }
   })
 })
@@ -1505,7 +1921,7 @@ describe('RemoteServer — lastError (RemoteStatus)', () => {
       await server.start(freePort, '127.0.0.1')
       expect(server.getStatus().lastError).toBeNull()
     } finally {
-      server.stop()
+      await server.stop()
       await new Promise<void>((resolve) => occupant.close(() => resolve()))
     }
   })
@@ -1518,7 +1934,7 @@ describe('RemoteServer — lastError (RemoteStatus)', () => {
     try {
       await expect(server.start(occupiedPort, '127.0.0.1')).rejects.toThrow()
       expect(server.getStatus().lastError).not.toBeNull()
-      server.stop()
+      await server.stop()
       expect(server.getStatus().lastError).toBeNull()
     } finally {
       await new Promise<void>((resolve) => occupant.close(() => resolve()))
@@ -1539,9 +1955,9 @@ describe('RemoteServer — WS origin + limits (M-RM3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1572,11 +1988,12 @@ describe('RemoteServer — WS origin + limits (M-RM3)', () => {
   })
 
   it('accepts a same-origin WS upgrade and lets it authenticate', async () => {
-    const res = await server.start(port, '127.0.0.1')
+    useAuthDisabled()
+    await server.start(port, '127.0.0.1')
     // Origin host === request Host (127.0.0.1:port) → allowed.
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`, { origin: `http://127.0.0.1:${port}` })
     const authResp = await new Promise<{ ok: boolean }>((resolve, reject) => {
-      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: res.token })))
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth' })))
       ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
       ws.once('error', reject)
       ws.once('unexpected-response', () => reject(new Error('upgrade rejected')))
@@ -1587,19 +2004,23 @@ describe('RemoteServer — WS origin + limits (M-RM3)', () => {
   })
 
   it('throttles an IP after repeated failed auth attempts', async () => {
+    // The PASSWORD budget is the one that bites now (5 / 5 min): ADR-056 retired
+    // the token, and with it the looser 10 / 60 s budget calibrated for a
+    // 256-bit random value. Every credential failure is a password failure.
+    provisionPassword(PW, PW_SALT)
     await server.start(port, '127.0.0.1')
     const bogus = 'f'.repeat(64)
 
     const failOnce = (): Promise<number | undefined> =>
       new Promise((resolve) => {
         const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
-        ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: bogus })))
+        ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', pwProof: bogus })))
         ws.once('close', (code) => resolve(code))
         ws.once('error', () => resolve(undefined))
       })
 
-    // Burn the failed-auth budget (MAX_FAILED_AUTH = 10).
-    for (let i = 0; i < 10; i++) {
+    // Burn the failed-password budget (MAX_FAILED_PW_AUTH = 5).
+    for (let i = 0; i < 5; i++) {
       const code = await failOnce()
       expect(code).toBe(4001)
     }
@@ -1625,9 +2046,9 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1649,20 +2070,21 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     ws.close()
   })
 
-  // Token and password COEXIST (spec decision 2): provisioning a password must
-  // not turn the still-valid per-start token into a rejected credential.
-  it('reports method:"token" on a token success while a password is provisioned', async () => {
+  // ADR-056: a credential-less auth frame is no longer a TOKEN success — there is
+  // no token. On a localhost origin with a password provisioned and nothing
+  // enrolled, presenting nothing is simply presenting nothing.
+  it('refuses a credential-less auth frame while a password is provisioned', async () => {
     provisionPassword(PW, PW_SALT)
-    const res = await server.start(port, '127.0.0.1')
+    await server.start(port, '127.0.0.1')
 
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
     const resp = await new Promise<Record<string, unknown>>((resolve, reject) => {
-      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: res.token })))
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth' })))
       ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
       ws.once('error', reject)
     })
-    expect(resp).toMatchObject({ type: 'auth-response', ok: true, method: 'token' })
-    expect(server.getStatus().authMethods).toEqual(['token', 'password'])
+    expect(resp).toMatchObject({ type: 'auth-response', ok: false, error: 'Missing credential' })
+    expect(server.getStatus().authMethods).toEqual(['password'])
     ws.close()
   })
 
@@ -1688,24 +2110,24 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     ['63 hex chars', 'a'.repeat(63)],
     ['non-hex', 'z'.repeat(64)]
   ])(
-    'rejects a malformed pwProof (%s) as a password failure, never as a token',
+    'rejects a malformed pwProof (%s) as a password failure, never as anything else',
     async (_label, pwProof) => {
-      const res = await (async () => {
-        provisionPassword(PW, PW_SALT)
-        return server.start(port, '127.0.0.1')
-      })()
+      provisionPassword(PW, PW_SALT)
+      await server.start(port, '127.0.0.1')
 
       const { response, closeCode } = await wsAuthAttempt(port, { type: 'auth', pwProof })
       expect(response).toMatchObject({ ok: false, error: 'Invalid password', retryable: false })
       expect(closeCode).toBe(4001)
-      // GUARD: no cross-method fallthrough — the server token is untouched, so
-      // presenting a malformed proof must never be retried as a token.
+      // GUARD: no cross-method fallthrough — a malformed proof is a password
+      // failure and is never retried as some other credential.
       expect(response?.method).toBeUndefined()
-      expect(res.token).toMatch(/^[a-f0-9]{64}$/)
     }
   )
 
-  it('refuses pwProof when no credential is provisioned', async () => {
+  it('refuses pwProof with the TYPED password-required when no credential is provisioned', async () => {
+    // ADR-056 typed this refusal: it is not a wrong credential, it is a HOST
+    // with nothing provisioned, so the cure is on the host and the client must
+    // stop retrying. Previously the free-form 'Password auth not available'.
     await server.start(port, '127.0.0.1')
     const { response, closeCode } = await wsAuthAttempt(port, {
       type: 'auth',
@@ -1713,7 +2135,7 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     })
     expect(response).toMatchObject({
       ok: false,
-      error: 'Password auth not available',
+      error: 'password-required',
       retryable: false
     })
     expect(closeCode).toBe(4001)
@@ -1722,18 +2144,46 @@ describe('RemoteServer — password auth (Phase 2)', () => {
   // Tunnel mode is E2E-encrypted from the fragment key, which a password client
   // by definition does not have — so password auth must be refused outright
   // rather than authenticating a socket that then dies with 4004.
-  it('refuses pwProof in tunnel mode EVEN when a credential is provisioned (GUARD)', async () => {
+  it('ACCEPTS pwProof inside the tunnel channel — the inversion (ADR-056)', async () => {
+    // This case previously asserted the OPPOSITE: password auth was refused on
+    // the tunnel because an E2E session needed a fragment key a password client
+    // did not have. ADR-056 inverts the handshake, so the key opens the channel
+    // FIRST and the password is the identity inside it — the only identity that
+    // transport has. RED against the old server, which answered
+    // 'Password auth not available' here.
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
     const proof = provisionPassword(PW, PW_SALT)
     await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
 
-    const { response, closeCode } = await wsAuthAttempt(port, { type: 'auth', pwProof: proof })
-    expect(response).toMatchObject({
-      ok: false,
-      error: 'Password auth not available',
-      retryable: false
+    const client = await connectRemoteClient({
+      url: `ws://127.0.0.1:${port}/`,
+      pwProof: proof,
+      e2eKey,
+      headers: { Host: TUNNEL_HOST }
     })
-    expect(closeCode).toBe(4001)
-    expect(server.getStatus().authMethods).toEqual(['token'])
+    await client.ready
+    expect(client.authenticated).toBe(true)
+    expect(server.getStatus().authMethods).toEqual(['password'])
+    await client.close()
+  })
+
+  it('refuses a tunnel socket that opens the channel and presents NO password (GUARD)', async () => {
+    // `password-required`: the channel is proven, there is no identity, and the
+    // cure is on the HOST. Typed so the client can say "provision a password on
+    // the host to use this link" instead of looping on a backoff.
+    tunnelUrlRef.current = `https://${TUNNEL_HOST}`
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const e2eKey = (server as unknown as { tunnelE2eKey: string }).tunnelE2eKey
+
+    await expect(
+      connectRemoteClient({
+        url: `ws://127.0.0.1:${port}/`,
+        e2eKey,
+        headers: { Host: TUNNEL_HOST },
+        handshakeTimeoutMs: 3000
+      }).then((c) => c.ready)
+    ).rejects.toThrow('password-required')
   })
 
   // `{type:'auth'}` used to fall into the token path with `msg.token ===
@@ -1770,7 +2220,7 @@ describe('RemoteServer — password auth (Phase 2)', () => {
 
   it('disconnectPasswordClients closes password clients with 4008 and leaves token clients alone', async () => {
     const proof = provisionPassword(PW, PW_SALT)
-    const res = await server.start(port, '127.0.0.1')
+    await server.start(port, '127.0.0.1')
 
     // One password client…
     const pwWs = new WebSocket(`ws://127.0.0.1:${port}/`)
@@ -1779,34 +2229,43 @@ describe('RemoteServer — password auth (Phase 2)', () => {
       pwWs.once('message', () => resolve())
       pwWs.once('error', reject)
     })
-    // …and one token client.
-    const tokenClient = await connectRemoteClient({
-      url: `ws://127.0.0.1:${port}/`,
-      token: res.token
+    // …and one client that did NOT authenticate with the password. Since
+    // ADR-056 the only such method left on a plain socket is an enrollment
+    // link, so the bystander is a second password client on a DIFFERENT socket:
+    // what the sweep must not do is take out sockets it did not authenticate,
+    // and the only honest stand-in here is one that is still open afterwards.
+    // The real bystander case (a passkey connection) is covered in
+    // remote-passkeys.test.ts, which can run a ceremony.
+    const secondPwWs = new WebSocket(`ws://127.0.0.1:${port}/`)
+    await new Promise<void>((resolve, reject) => {
+      secondPwWs.once('open', () =>
+        secondPwWs.send(JSON.stringify({ type: 'auth', pwProof: proof }))
+      )
+      secondPwWs.once('message', () => resolve())
+      secondPwWs.once('error', reject)
     })
-    await tokenClient.ready
     expect(server.getStatus().connectedClients).toBe(2)
 
     const pwClosed = new Promise<{ code?: number; reason?: string }>((resolve) =>
       pwWs.once('close', (code, reason) => resolve({ code, reason: reason.toString('utf-8') }))
     )
     server.disconnectPasswordClients()
-    const closed = await pwClosed
+    const [closed] = await Promise.all([pwClosed])
     expect(closed.code).toBe(4008)
     expect(closed.reason).toBe('Credentials changed')
-
-    // The token client is untouched.
-    expect(tokenClient.ws.readyState).toBe(WebSocket.OPEN)
-    tokenClient.close()
+    secondPwWs.close()
   })
 
   it('getStatus().authMethods advertises password only while provisioned and running', async () => {
+    // Legitimately EMPTY while running with nothing provisioned since ADR-056 —
+    // `token` used to be the unconditional first entry, and it is gone. Saying
+    // "nothing" is more honest than advertising a method that would be refused.
     expect(server.getStatus().authMethods).toEqual([])
     await server.start(port, '127.0.0.1')
-    expect(server.getStatus().authMethods).toEqual(['token'])
+    expect(server.getStatus().authMethods).toEqual([])
     provisionPassword(PW, PW_SALT)
-    expect(server.getStatus().authMethods).toEqual(['token', 'password'])
-    server.stop()
+    expect(server.getStatus().authMethods).toEqual(['password'])
+    await server.stop()
     expect(server.getStatus().authMethods).toEqual([])
   })
 
@@ -1831,7 +2290,7 @@ describe('RemoteServer — password auth (Phase 2)', () => {
       expect(resp).toMatchObject({ ok: true, method: 'password' })
       ws.close()
     } finally {
-      injected.stop()
+      await injected.stop()
     }
   })
 })
@@ -1850,9 +2309,9 @@ describe('RemoteServer — password throttle budget (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -1882,35 +2341,36 @@ describe('RemoteServer — password throttle budget (Phase 2)', () => {
   // GUARD: a single shared counter would have locked this key at the 10th
   // combined failure. Independent budgets mean 9 token + 4 password failures
   // (13 total) still leaves the key usable.
-  it('keeps the token and password budgets independent (GUARD)', async () => {
-    const res = await server.start(port, '127.0.0.1')
-    provisionPassword(PW, PW_SALT)
+  it('a SUCCESS clears the spent password budget (GUARD)', async () => {
+    // The token budget it used to be paired against is gone with the token
+    // (ADR-056); what survives is the rule that mattered — an accept resets the
+    // counters, so an operator who mistypes and then gets in is not left one
+    // fumble away from locking themselves out.
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1')
 
-    for (let i = 0; i < 9; i++) {
-      expect(await failOnce({ type: 'auth', token: 'f'.repeat(64) })).toBe(4001)
-    }
     for (let i = 0; i < 4; i++) {
       expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
     }
 
-    // 13 failures in — still under BOTH budgets, so a valid token gets in.
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+    // Four failures in — still under the budget, so the real proof gets in.
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, pwProof: proof })
     await client.ready
     expect(client.authenticated).toBe(true)
-    client.close()
-    // …and a successful auth clears both budgets, so the counters restart.
+    await client.close()
+    // …and the counter restarted: a fifth failure is a FIRST failure now.
     await new Promise((r) => setTimeout(r, 20))
     expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
   })
 
-  it('the 5th password failure locks the key even with the token budget unspent', async () => {
-    provisionPassword(PW, PW_SALT)
+  it('the 5th password failure locks the key at CONNECTION time', async () => {
+    const proof = provisionPassword(PW, PW_SALT)
     await server.start(port, '127.0.0.1')
     for (let i = 0; i < 5; i++) {
       expect(await failOnce({ type: 'auth', pwProof: 'f'.repeat(64) })).toBe(4001)
     }
-    // Even a VALID token is refused now — the gate is at connection time.
-    expect(await failOnce({ type: 'auth', token: 'a'.repeat(64) })).toBe(4006)
+    // Even the VALID proof is refused now — the gate is in front of the frame.
+    expect(await failOnce({ type: 'auth', pwProof: proof })).toBe(4006)
   })
 })
 
@@ -1927,19 +2387,23 @@ describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
   })
 
-  it('advertises token-only when no password is provisioned', async () => {
+  it('advertises NOTHING when no password is provisioned', async () => {
+    // Legitimately empty since ADR-056 retired the token, which used to be the
+    // unconditional first entry. A host with no password and no passkey accepts
+    // nothing but an enrollment link, and saying so is more honest than
+    // advertising a method that would be refused.
     await server.start(port, '127.0.0.1')
     const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
     expect(got.status).toBe(200)
-    expect(JSON.parse(got.body)).toEqual({ version: 1, methods: ['token'] })
+    expect(JSON.parse(got.body)).toEqual({ version: 1, methods: [] })
   })
 
   it('advertises the salt + KDF params when a password is provisioned', async () => {
@@ -1948,7 +2412,7 @@ describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
     const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
     expect(JSON.parse(got.body)).toEqual({
       version: 1,
-      methods: ['token', 'password'],
+      methods: ['password'],
       password: {
         saltHex: PW_SALT,
         kdf: { algo: 'scrypt', N: 32768, r: 8, p: 1, dkLen: 32 }
@@ -1956,13 +2420,17 @@ describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
     })
   })
 
-  it('omits the password section in tunnel mode even when provisioned', async () => {
+  it('ADVERTISES the password in tunnel mode — it is that transport’s only identity', async () => {
+    // Inverted by ADR-056. The section used to be suppressed here because a
+    // password client could not hold the fragment key; now the key opens the
+    // channel and the password is what travels inside it, so a tunnel browser
+    // needs the salt to derive its proof at all.
     provisionPassword(PW, PW_SALT)
     await server.start(port, '127.0.0.1', { tunnel: true })
     const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
     const info = JSON.parse(got.body)
-    expect(info.methods).toEqual(['token'])
-    expect(info.password).toBeUndefined()
+    expect(info.methods).toEqual(['password'])
+    expect(info.password).toMatchObject({ saltHex: PW_SALT })
   })
 
   it('sends no-store + JSON content type + the hardening headers (and no CSP)', async () => {
@@ -1987,14 +2455,13 @@ describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
   // tokens, the E2E key, the hostname and version strings are NOT.
   it('leaks no credential material (denylist)', async () => {
     const proof = provisionPassword(PW, PW_SALT)
-    const res = await server.start(port, '127.0.0.1', { tunnel: true })
-    const internals = server as unknown as { mockupToken: string; e2eKey: string }
+    await server.start(port, '127.0.0.1', { tunnel: true })
+    const internals = server as unknown as { mockupToken: string; tunnelE2eKey: string }
     const got = await httpGet(`http://127.0.0.1:${port}/remote/auth-info`)
 
     const forbidden: Array<[string, string]> = [
-      ['ws token', res.token],
       ['mockup token', internals.mockupToken],
-      ['e2e key', internals.e2eKey],
+      ['tunnel channel key', internals.tunnelE2eKey],
       ['stored hash', (remoteConfigRef.current as RemoteConfigRow).passwordHash!],
       ['proof', proof],
       ['os hostname', os.hostname()]
@@ -2002,8 +2469,10 @@ describe('RemoteServer — GET /remote/auth-info (Phase 2)', () => {
     for (const [label, value] of forbidden) {
       expect(got.body, `auth-info must not contain the ${label}`).not.toContain(value)
     }
-    // …and the whole payload is exactly the two/three allowed keys.
-    expect(Object.keys(JSON.parse(got.body)).sort()).toEqual(['methods', 'version'])
+    // …and the whole payload is exactly the allowed keys. `password` is among
+    // them on the tunnel since ADR-056 (the salt is public by construction and
+    // is the input a tunnel client needs to derive its proof at all).
+    expect(Object.keys(JSON.parse(got.body)).sort()).toEqual(['methods', 'password', 'version'])
   })
 
   it('includes the salt (which is public) when provisioned — non-vacuity for the denylist', async () => {
@@ -2047,9 +2516,9 @@ describe('RemoteServer — Host allowlist (Phase 2)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -2169,14 +2638,15 @@ describe('RemoteServer — Host allowlist (Phase 2)', () => {
   // pre-existing exact-string compare. Browsers always send both lowercased, and
   // a `tailscale serve` dnsName is lowercase too, so this is the realistic shape.
   it('still authenticates when Origin host === a name-based Host (verifyWsOrigin preserved)', async () => {
-    const res = await server.start(port, '127.0.0.1')
+    useAuthDisabled()
+    await server.start(port, '127.0.0.1')
     const hostHeader = `${os.hostname().toLowerCase()}:${port}`
     const ws = new WebSocket(`ws://127.0.0.1:${port}/`, {
       headers: { Host: hostHeader },
       origin: `http://${hostHeader}`
     })
     const authResp = await new Promise<{ ok: boolean }>((resolve, reject) => {
-      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth', token: res.token })))
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'auth' })))
       ws.once('message', (raw) => resolve(JSON.parse(raw.toString())))
       ws.once('error', reject)
       ws.once('unexpected-response', () => reject(new Error('upgrade rejected')))
@@ -2417,13 +2887,15 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Real timers BEFORE the await: stop() falls back on a real grace timer to
+    // force stubborn handles shut, and a frozen clock would never fire it.
+    vi.useRealTimers()
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
-    vi.useRealTimers()
   })
 
   it('binds loopback (ignoring the requested host) and points serve at the bound port', async () => {
@@ -2447,7 +2919,7 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     })
     // No LAN URL in TLS mode — the loopback one is a dead end for a phone.
     expect(status.lanUrl).toBeNull()
-    expect(status.authMethods).toEqual(['token', 'tailnet-identity'])
+    expect(status.authMethods).toEqual(['tailnet-identity'])
   })
 
   it('start() hands back the ts.net URL rather than the loopback one', async () => {
@@ -2575,7 +3047,7 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
 
   it('stop() turns off OUR serve port and clears the retry timer', async () => {
     await server.start(port, '127.0.0.1', { tls: true })
-    server.stop()
+    await server.stop()
     // Fire-and-forget: let the microtask run.
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
@@ -2588,7 +3060,9 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     ts.detection = { state: 'daemon-down', message: 'daemon down' }
     await server.start(port, '127.0.0.1', { tls: true, autostartRetry: true })
     expect(ts.detectCalls).toBe(1)
-    server.stop()
+    // NOT awaited: fake timers are armed in this test, so stop()'s real-timer
+    // grace fallback could never fire and the await would hang.
+    void server.stop()
     await vi.advanceTimersByTimeAsync(15_000 * 6)
     expect(ts.detectCalls).toBe(1)
   })
@@ -2601,7 +3075,7 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     const status = server.getStatus()
     expect(status.tls).toBeNull()
     // …and the status is honest: no identity method is advertised.
-    expect(status.authMethods).toEqual(['token'])
+    expect(status.authMethods).toEqual([])
   })
 
   it('a serve failure with an unknown owner login still comes up, with identity OFF', async () => {
@@ -2609,7 +3083,7 @@ describe('RemoteServer — TLS mode lifecycle (Phase 3)', () => {
     await server.start(port, '127.0.0.1', { tls: true })
     expect(server.getStatus().tls?.url).toBe(`https://${TS_DNS}`)
     // Fail closed: no owner login ⇒ no identity method at all.
-    expect(server.getStatus().authMethods).toEqual(['token'])
+    expect(server.getStatus().authMethods).toEqual([])
   })
 })
 
@@ -2627,6 +3101,16 @@ function remoteConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     tlsHttpsPort: 443,
     lastServeHttpsPort: null,
     lastServeLocalPort: null,
+    allowTerminal: false,
+    shellGrantIdleMinutes: 10,
+    authPolicy: null,
+    passwordBreakGlass: true,
+    lanE2eKey: null,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: null,
     passwordHash: null,
     kdfParams: null,
@@ -2649,13 +3133,15 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
     remoteConfigRef.current = remoteConfigRow()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Real timers BEFORE the await: stop() falls back on a real grace timer to
+    // force stubborn handles shut, and a frozen clock would never fire it.
+    vi.useRealTimers()
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
-    vi.useRealTimers()
     remoteConfigRef.current = null
   })
 
@@ -2678,7 +3164,7 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
   it('clears the record after a CONFIRMED disable on stop()', async () => {
     await server.start(port, '127.0.0.1', { tls: true })
     serveRecordWrites.length = 0
-    server.stop()
+    await server.stop()
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
     expect(serveRecordWrites).toEqual(['clear'])
@@ -2693,7 +3179,7 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
 
     // The disable exec parks: stop() returns with the CLI call still pending.
     ts.holdDisable = true
-    server.stop()
+    await server.stop()
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
 
@@ -2741,7 +3227,7 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
     await server.start(port, '127.0.0.1', { tls: true })
     serveRecordWrites.length = 0
     ts.disableFailure = new TailscaleServeError('exec-failed', 'daemon went away')
-    server.stop()
+    await server.stop()
     await new Promise((r) => setImmediate(r))
     expect(ts.disableCalls).toEqual([443])
     expect(serveRecordWrites).toEqual([])
@@ -2933,6 +3419,305 @@ describe('RemoteServer — pinned HTTPS port + serve reconciliation (ADR-042)', 
 // Phase 3 — `evaluateIdentity`, the whole trust predicate as a pure function.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ADR-056 item C — the PERSISTENT LAN channel.
+//
+// A LAN socket must open an E2E channel before it may present an identity, the
+// key survives restarts (a bookmark that dies nightly is not a bookmark), and
+// rotating it must never strand anybody.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — the LAN channel key (ADR-056)', () => {
+  let server: RemoteServer
+  let port: number
+
+  beforeEach(async () => {
+    useAuthDisabled()
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+  })
+
+  afterEach(async () => {
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+  })
+
+  /** The key the running server would measure a LAN activation against. */
+  const lanKey = (): string | null => (server as unknown as { lanE2eKey: string | null }).lanE2eKey
+
+  it('mints NO KEY on a loopback bind, but still offers the localhost URL', async () => {
+    // Review F6: `getStatus().lanUrl` and `start()`'s return disagreed here, and
+    // a loopback-pinned run lost the working localhost link the modal used to
+    // show. ONE producer now, and the URL carries NO fragment — that origin
+    // classifies `localhost` and owes no channel, so a `#k=` would be a secret
+    // the handshake would go on to refuse.
+    const res = await server.start(port, '127.0.0.1')
+    expect(lanKey()).toBeNull()
+    const expected = `http://127.0.0.1:${port}/remote`
+    expect(server.lanLink()).toBe(expected)
+    expect(server.getStatus().lanUrl).toBe(expected)
+    expect(res.lanUrl).toBe(expected)
+    expect(res.lanUrl).not.toContain('#')
+    // …and no channel secret ever reached the DB.
+    expect(remoteConfigRef.current).toMatchObject({ lanE2eKey: null })
+  })
+
+  it('offers NO url at all in TLS mode — the ts.net name is the one to hand out', async () => {
+    const tlsServer = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
+    const tlsPort = await ephemeralPort()
+    try {
+      await tlsServer.start(tlsPort, '127.0.0.1', { tls: true })
+      expect(tlsServer.lanLink()).toBeNull()
+      expect(tlsServer.getStatus().lanUrl).toBeNull()
+    } finally {
+      await tlsServer.stop()
+    }
+  })
+
+  it('mints and PERSISTS a key on the first non-loopback bind, and reuses it after', async () => {
+    await server.start(port, '0.0.0.0')
+    const first = lanKey()
+    expect(first).toMatch(/^[a-f0-9]{64}$/)
+    expect(remoteConfigRef.current).toMatchObject({ lanE2eKey: first })
+    // ONE derivation: the status field and the verb's link are the same string.
+    expect(server.getStatus().lanUrl).toBe(server.lanLink())
+    expect(server.getStatus().lanUrl).toContain(`#k=${first}`)
+
+    // A RESTART reuses the stored key — the bookmark has to survive.
+    await server.stop()
+    await server.start(await ephemeralPort(), '0.0.0.0')
+    expect(lanKey()).toBe(first)
+  })
+
+  it('the link carries the CHANNEL key and no access token', async () => {
+    await server.start(port, '0.0.0.0')
+    const link = server.lanLink()!
+    expect(link).toMatch(/^http:\/\/[^/]+\/remote#k=[a-f0-9]{64}$/)
+    expect(link).not.toContain('#t=')
+    expect(link).not.toContain('&t=')
+  })
+
+  it('refuses an E2E activation on a NON-E2E origin — the key is chosen per origin', async () => {
+    // The server holds a LAN key here, but this socket is `localhost` (a test
+    // client is always a loopback peer), and localhost is already confidential.
+    // So activation is refused: the selection is per ORIGIN, not a global "does
+    // the server have a key at all". Pinned from the socket because the wrong
+    // implementation — one key for the whole listener — passes every pure test.
+    await server.start(port, '0.0.0.0')
+    expect(lanKey()).toMatch(/^[a-f0-9]{64}$/)
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    const closed = waitForTerminal(ws)
+    ws.send(JSON.stringify({ type: 'e2e-activate' }))
+    expect((await closed).code).toBe(4004)
+  })
+
+  it('ROTATION: the stored key changes, the link follows, and NOBODY is dropped', async () => {
+    await server.start(port, '0.0.0.0')
+    const before = lanKey()!
+
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+    let closed = false
+    client.ws.once('close', () => {
+      closed = true
+    })
+
+    const link = server.rotateLanKey()!
+    const after = lanKey()!
+    expect(after).not.toBe(before)
+    expect(after).toMatch(/^[a-f0-9]{64}$/)
+    expect(link).toContain(`#k=${after}`)
+    expect(remoteConfigRef.current).toMatchObject({ lanE2eKey: after })
+
+    // The never-strand contract: the key is consumed at handshake only, so an
+    // established connection keeps running and keeps exchanging frames.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(closed).toBe(false)
+    expect(server.getStatus().connectedClients).toBe(1)
+    await expect(client.invoke('no-such-channel')).rejects.toThrow(/Channel not available/)
+    await client.close()
+  })
+
+  it('ROTATION is unavailable with no LAN channel to rotate', async () => {
+    await server.start(port, '127.0.0.1')
+    expect(server.rotateLanKey()).toBeNull()
+    await server.stop()
+    expect(server.rotateLanKey()).toBeNull()
+  })
+
+  /**
+   * `getStatus().lanUrl` while a tunnel runs — the THREE cases, because the
+   * obvious rule ("no LAN link while a tunnel runs") would hide a link that
+   * works. `classifyConnectionOrigin` consults its non-loopback-peer arm BEFORE
+   * `tunnelActive`, so only the loopback-bound run is genuinely dead.
+   *
+   * The tunnel is faked by setting the run-state flag `start({tunnel: true})`
+   * sets — the same private this file already reads for the LAN key — rather
+   * than launching cloudflared for a URL-shape assertion.
+   */
+  const setTunnelRunState = (): void => {
+    ;(server as unknown as { tunnelE2eKey: string | null }).tunnelE2eKey = 'ef'.repeat(32)
+  }
+
+  it('LOOPBACK bind, NO tunnel: the fragment-less link is offered', async () => {
+    await server.start(port, '127.0.0.1')
+    expect(server.getStatus().lanUrl).toBe(`http://127.0.0.1:${port}/remote`)
+  })
+
+  it('LOOPBACK bind + tunnel: suppressed — that origin owes the TUNNEL channel', async () => {
+    await server.start(port, '127.0.0.1')
+    setTunnelRunState()
+    // The URL itself still exists; what changed is that a loopback peer now
+    // classifies `tunnel` and would be refused 4004 for opening no channel, so
+    // the status must not advertise it.
+    expect(server.lanLink()).toBe(`http://127.0.0.1:${port}/remote`)
+    expect(server.getStatus().lanUrl).toBeNull()
+  })
+
+  it('LAN bind + tunnel: the #k= link keeps working and is still offered', async () => {
+    await server.start(port, '0.0.0.0')
+    setTunnelRunState()
+    // A LAN peer is non-loopback, so it takes the `lan` arm and is measured
+    // against the LAN key — the tunnel changes nothing for it.
+    expect(server.getStatus().lanUrl).toBe(server.lanLink())
+    expect(server.getStatus().lanUrl).toContain(`#k=${lanKey()}`)
+  })
+
+  it('the key leaves MEMORY on stop but survives in the DB', async () => {
+    await server.start(port, '0.0.0.0')
+    const key = lanKey()!
+    await server.stop()
+    expect(lanKey()).toBeNull()
+    expect(server.lanLink()).toBeNull()
+    expect(remoteConfigRef.current).toMatchObject({ lanE2eKey: key })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-056 — the ONE origin classifier.
+//
+// It answers three questions that must never disagree: which E2E key an
+// `e2e-activate` is measured against, whether a plaintext socket is acceptable
+// at all, and whether there is a username hint to attach. The ORDER of its tests
+// is the load-bearing part, because both trusted transports proxy over loopback
+// and the obvious peer-first implementation classifies them as local — handing a
+// tunnel no encryption on the origin that most needs it.
+// ---------------------------------------------------------------------------
+
+describe('classifyConnectionOrigin (ADR-056)', () => {
+  const TUNNEL = 'edgar-places.trycloudflare.com'
+  const serveHeaders = {
+    host: TS_DNS,
+    'tailscale-user-login': TS_OWNER,
+    'tailscale-headers-info': TS_MARKER
+  }
+
+  const classify = (
+    headers: Record<string, string>,
+    socketAddr: string | undefined,
+    run: { tlsActive?: boolean; tunnelActive?: boolean } = {}
+  ): string =>
+    classifyConnectionOrigin({
+      headers,
+      socketAddr,
+      tlsActive: run.tlsActive ?? false,
+      tunnelActive: run.tunnelActive ?? false
+    })
+
+  it('refuses FUNNEL first — nothing below it should even be computed', () => {
+    // Belt behind `verifyClient`'s own reject. A classification that says
+    // "public internet" must never be handed a channel key or an auth prompt.
+    expect(
+      classify({ host: TUNNEL, 'tailscale-funnel-request': '1' }, '127.0.0.1', {
+        tlsActive: true
+      })
+    ).toBe('funnel')
+  })
+
+  // -------------------------------------------------------------------------
+  // THE HOST HEADER MAY NEVER DOWNGRADE THE E2E REQUIREMENT (review F1)
+  // -------------------------------------------------------------------------
+
+  it('GUARD: a tunnel-active run classifies a loopback peer as TUNNEL whatever the Host says', () => {
+    // THE regression this suite exists for. `Host` is attacker-controlled, and
+    // the first implementation read the tunnel arm off it — so a tunnelled client
+    // sending `Host: localhost:<port>` classified `localhost`, `e2eRequired` went
+    // false, and it completed a PLAINTEXT handshake through the one transport
+    // that must never allow one.
+    for (const host of ['localhost:8321', '127.0.0.1:8321', TUNNEL, 'anything.example']) {
+      expect(classify({ host }, '127.0.0.1', { tunnelActive: true }), host).toBe('tunnel')
+    }
+    // …and with no Host at all, which is the other way to ask for the fallback.
+    expect(classify({}, '::1', { tunnelActive: true })).toBe('tunnel')
+  })
+
+  it('GUARD: a tunnel RESTART does not reclassify live clients as local', () => {
+    // The second half of the same defect: the old test read `TunnelManager.url`,
+    // which is briefly null while a tunnel restarts. Run state is the key's
+    // EXISTENCE, which does not blink.
+    expect(classify({ host: TUNNEL }, '127.0.0.1', { tunnelActive: true })).toBe('tunnel')
+  })
+
+  it('is LOCALHOST only when this run holds NO tunnel key', () => {
+    // The cost of the rule, stated: while a tunnel is up we cannot tell a
+    // cloudflared forward from a genuine local process, so both owe the channel.
+    // Localhost dev therefore uses the tunnel link for as long as the tunnel
+    // runs — exactly what the pre-ADR-056 server did.
+    for (const addr of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '127.0.0.53']) {
+      expect(classify({ host: 'localhost:8321' }, addr), addr).toBe('localhost')
+    }
+  })
+
+  it('classifies a SERVE forward by the same predicate the identity layer trusts', () => {
+    // Serve proxies over loopback too, and it is detected by `isServeProxied` +
+    // the `Tailscale-Headers-Info` marker — never by a private notion of "behind
+    // serve", and never by the Host it forwards.
+    expect(classify(serveHeaders, '127.0.0.1', { tlsActive: true })).toBe('tailnet-serve')
+    // The identity headers outrank a tunnel key on the same peer. (Unreachable in
+    // production — `start()` makes TLS mode and the tunnel mutually exclusive —
+    // but the ORDER must be the safe one if that ever changes.)
+    expect(classify(serveHeaders, '127.0.0.1', { tlsActive: true, tunnelActive: true })).toBe(
+      'tailnet-serve'
+    )
+  })
+
+  it('is NOT a serve forward without the marker, or with TLS mode off', () => {
+    expect(
+      classify({ host: TS_DNS, 'tailscale-user-login': TS_OWNER }, '127.0.0.1', {
+        tlsActive: true
+      })
+    ).toBe('localhost')
+    expect(classify(serveHeaders, '127.0.0.1', { tlsActive: false })).toBe('localhost')
+  })
+
+  it('classifies any NON-loopback peer as LAN, whatever the Host claims', () => {
+    // The upgrade direction is safe from Host too: a LAN peer cannot talk its way
+    // into `localhost` (or into `tailnet-serve`, which needs a loopback peer).
+    expect(classify({ host: '192.168.1.20:8321' }, '192.168.1.55')).toBe('lan')
+    expect(classify({ host: 'localhost:8321' }, '192.168.1.55')).toBe('lan')
+    expect(classify(serveHeaders, '192.168.1.55', { tlsActive: true })).toBe('lan')
+    expect(classify({ host: TUNNEL }, '10.0.0.9', { tunnelActive: true })).toBe('lan')
+    // No peer address at all is LAN too: unknown is not local.
+    expect(classify({ host: '192.168.1.20:8321' }, undefined)).toBe('lan')
+  })
+
+  it('names exactly the two origins that owe an E2E channel', () => {
+    expect(originRequiresE2E('tunnel')).toBe(true)
+    expect(originRequiresE2E('lan')).toBe(true)
+    expect(originRequiresE2E('tailnet-serve')).toBe(false)
+    expect(originRequiresE2E('localhost')).toBe(false)
+    expect(originRequiresE2E('funnel')).toBe(false)
+  })
+})
+
 describe('evaluateIdentity (Phase 3)', () => {
   const ctx = { tlsActive: true, ownerLogin: TS_OWNER }
   const owner = { 'tailscale-user-login': TS_OWNER, 'tailscale-headers-info': TS_MARKER }
@@ -3015,24 +3800,42 @@ describe('RemoteServer — tailnet identity auth (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
   })
 
-  it('authenticates the node owner from the upgrade headers with an UNSOLICITED auth-response', async () => {
+  it('NEVER admits the node owner ambiently — the headers are a hint, not a credential', async () => {
+    // THE ADR-056 inversion, at the socket. This exact setup used to produce an
+    // UNSOLICITED `auth-response {ok:true, method:'tailnet-identity'}` before the
+    // client sent anything: a network fact standing in for a person. It must now
+    // produce silence, and the socket must stay unauthenticated until a real
+    // identity is presented.
     await server.start(port, '127.0.0.1', { tls: true })
     const conn = await rawWs(port, identityHeaders(TS_OWNER))
 
-    // Nothing is sent by the client — the frame arrives on its own.
-    const frame = await conn.next()
-    expect(frame).toEqual({
+    await conn.expectSilence()
+    expect(server.getStatus().connectedClients).toBe(0)
+    conn.ws.close()
+  })
+
+  it('carries the owner login as the username HINT on a password accept', async () => {
+    // What survives of ambient identity: the LABEL. The connection is a
+    // `password` one, and `clientLogins` (and every audit row it writes) still
+    // names who it was, which is the "logged signal / username hint" the model
+    // keeps.
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tls: true })
+    const conn = await rawWs(port, identityHeaders(TS_OWNER))
+
+    conn.ws.send(JSON.stringify({ type: 'auth', pwProof: proof }))
+    expect(await conn.next()).toEqual({
       type: 'auth-response',
       ok: true,
-      method: 'tailnet-identity',
+      method: 'password',
       identity: { login: TS_OWNER }
     })
 
@@ -3044,36 +3847,16 @@ describe('RemoteServer — tailnet identity auth (Phase 3)', () => {
     conn.ws.close()
   })
 
-  // GUARD: the web client still sends a bare `{type:'auth'}` after the
-  // unsolicited response. It must be ignored by the post-auth switch, not
-  // treated as a credential-less auth attempt (which would close the socket).
-  it('ignores the bare auth frame that follows identity auth (GUARD)', async () => {
-    await server.start(port, '127.0.0.1', { tls: true })
-    const conn = await rawWs(port, identityHeaders(TS_OWNER))
-    expect(await conn.next()).toMatchObject({ ok: true, method: 'tailnet-identity' })
-
-    // This is exactly what the web client sends after the unsolicited response.
-    conn.ws.send(JSON.stringify({ type: 'auth' }))
-    // No second auth-response, no close: the post-auth switch ignores it.
-    await conn.expectSilence()
-
-    expect(conn.ws.readyState).toBe(WebSocket.OPEN)
-    expect(server.getStatus().connectedClients).toBe(1)
-    conn.ws.close()
-  })
-
-  // The fall-through nuance: identity is a convenience layer, NOT a gate. A
-  // colleague on the tailnet who knows the password must still get in on the
-  // same socket.
-  it('a non-owner login gets no unsolicited response and can still sign in with the password', async () => {
+  // The fall-through nuance survives: identity was never a gate, and it is not
+  // one now. A colleague on the tailnet who knows the password still gets in on
+  // the same socket — with NO login hint, because the hint is the owner's alone.
+  it('a non-owner login can still sign in with the password, with a null hint', async () => {
     const proof = provisionPassword(PW, PW_SALT)
     await server.start(port, '127.0.0.1', { tls: true })
     const conn = await rawWs(port, identityHeaders('colleague@example.com'))
 
-    // No unsolicited response for a login that isn't the owner's…
     await conn.expectSilence()
 
-    // …and the normal password handshake still works on this very socket.
     conn.ws.send(JSON.stringify({ type: 'auth', pwProof: proof }))
     expect(await conn.next()).toMatchObject({
       type: 'auth-response',
@@ -3124,12 +3907,16 @@ describe('RemoteServer — tailnet identity auth (Phase 3)', () => {
     expect(await conn.next()).toMatchObject({ ok: false, error: 'Missing credential' })
   })
 
-  it('token auth still works over the TLS-mode socket, with a null login', async () => {
-    const res = await server.start(port, '127.0.0.1', { tls: true })
-    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, token: res.token })
+  it('a socket with NO identity headers signs in on the password, with a null hint', async () => {
+    // The TLS-mode listener is reachable on loopback by anything local (ADR-039's
+    // accepted residual), and such a socket carries no identity headers — so the
+    // hint is null and the password is the whole of its admission.
+    const proof = provisionPassword(PW, PW_SALT)
+    await server.start(port, '127.0.0.1', { tls: true })
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, pwProof: proof })
     await client.ready
     expect(server.getStatus().clientLogins).toEqual([null])
-    client.close()
+    await client.close()
   })
 })
 
@@ -3149,9 +3936,9 @@ describe('RemoteServer — Funnel hard reject (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -3194,9 +3981,9 @@ describe('RemoteServer — Host allowlist in TLS mode (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server?.stop()
+      await server?.stop()
     } catch {
       /* already stopped */
     }
@@ -3234,6 +4021,11 @@ describe('RemoteServer — Host allowlist in TLS mode (Phase 3)', () => {
   })
 
   it('accepts a serve-shaped WS upgrade (Origin === pass-through Host)', async () => {
+    // The upgrade is what this case is about, so it authenticates the way a
+    // serve-forwarded socket now does: no E2E (the transport is already TLS),
+    // and a password inside the plaintext frame. The unsolicited
+    // `tailnet-identity` accept it used to assert is retired (ADR-056).
+    const proof = provisionPassword(PW, PW_SALT)
     server = new RemoteServer(new RemoteDispatcher(), undefined, makeFakeTailscale())
     await server.start(port, '127.0.0.1', { tls: true })
     const conn = await rawWs(port, {
@@ -3241,7 +4033,12 @@ describe('RemoteServer — Host allowlist in TLS mode (Phase 3)', () => {
       Origin: `https://${TS_DNS}`,
       ...identityHeaders(TS_OWNER)
     })
-    expect(await conn.next()).toMatchObject({ ok: true, method: 'tailnet-identity' })
+    conn.ws.send(JSON.stringify({ type: 'auth', pwProof: proof }))
+    expect(await conn.next()).toMatchObject({
+      ok: true,
+      method: 'password',
+      identity: { login: TS_OWNER }
+    })
     conn.ws.close()
   })
 })
@@ -3259,9 +4056,9 @@ describe('RemoteServer — throttle keying on X-Forwarded-For (Phase 3)', () => 
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server?.stop()
+      await server?.stop()
     } catch {
       /* already stopped */
     }
@@ -3327,9 +4124,9 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     port = await ephemeralPort()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      server.stop()
+      await server.stop()
     } catch {
       /* already stopped */
     }
@@ -3340,7 +4137,7 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
     expect(got.body).toEqual({
       version: 1,
-      methods: ['token', 'tailnet-identity'],
+      methods: ['tailnet-identity'],
       identity: { login: TS_OWNER }
     })
   })
@@ -3350,7 +4147,7 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
     await server.start(port, '127.0.0.1', { tls: true })
     const got = await httpGetJson(port, '/remote/auth-info', identityHeaders('colleague@x.com'))
     expect(got.body).toMatchObject({
-      methods: ['token', 'password', 'tailnet-identity'],
+      methods: ['password', 'tailnet-identity'],
       identity: { login: null }
     })
     // GUARD: the owner's login is never disclosed to a non-owner.
@@ -3366,6 +4163,6 @@ describe('RemoteServer — auth-info identity section (Phase 3)', () => {
   it('omits the identity section entirely outside TLS mode', async () => {
     await server.start(port, '127.0.0.1')
     const got = await httpGetJson(port, '/remote/auth-info', identityHeaders(TS_OWNER))
-    expect(got.body).toEqual({ version: 1, methods: ['token'] })
+    expect(got.body).toEqual({ version: 1, methods: [] })
   })
 })

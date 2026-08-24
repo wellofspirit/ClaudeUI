@@ -39,17 +39,15 @@ jobs:
       - name: Determine next version
         id: bump
         run: |
-          # Only consider stable tags (no hyphen = no pre-release suffix)
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
+          # Major.minor comes from package.json; patch auto-increments from the
+          # latest stable tag on that major.minor line (no hyphen = no pre suffix)
+          PKG_MM=$(jq -r .version package.json | cut -d. -f1,2)
+          LATEST_TAG=$(git tag -l "v${PKG_MM}.*" --sort=-v:refname | grep -v '-' | head -1)
           if [ -z "$LATEST_TAG" ]; then
-            NEXT="1.0.0"
+            NEXT="${PKG_MM}.0"
           else
-            # Strip leading 'v'
-            CURRENT="${LATEST_TAG#v}"
-            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-            MINOR=$(echo "$CURRENT" | cut -d. -f2)
-            PATCH=$(echo "$CURRENT" | cut -d. -f3)
-            NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            PATCH="${LATEST_TAG##*.}"
+            NEXT="${PKG_MM}.$((PATCH + 1))"
           fi
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
           echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"

@@ -18,7 +18,8 @@ const QUIET = process.argv.includes('--quiet')
 // Redirects to a file stay free of escape codes.
 const forceColor = process.env.FORCE_COLOR
 const useColor =
-  !!process.stdout.isTTY || (forceColor !== undefined && forceColor !== '0' && forceColor !== 'false')
+  !!process.stdout.isTTY ||
+  (forceColor !== undefined && forceColor !== '0' && forceColor !== 'false')
 const green = (s) => (useColor ? `\x1b[32m${s}\x1b[0m` : s)
 const red = (s) => (useColor ? `\x1b[31m${s}\x1b[0m` : s)
 

@@ -6,79 +6,16 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { useSessionStore, buildTodosFromMessages } from '../../renderer/src/stores/session-store'
+import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { makeChatMessage, makeToolUseBlock, resetFactoryCounter } from '@test/factories/messages'
-import type { ChatMessage, SessionStatus, StreamDelta, TodoItem } from '../../shared/types'
 
 let app: TestApp
-let eventCleanups: Array<() => void>
 
-const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
-
-function rebuildTodos(routingId: string): void {
-  const { sessions, setTodos } = useSessionStore.getState()
-  const session = sessions[routingId]
-  if (!session) return
-  const todos = buildTodosFromMessages(session.messages)
-  if (todos) setTodos(routingId, todos)
-}
-
-function wireEventHandlers(app: TestApp): Array<() => void> {
-  const cleanups: Array<() => void> = []
-  const store = useSessionStore.getState
-
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
-      app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => {
-        app.bridge.ipcRenderer.removeListener(channel, handler)
-      }
-      cleanups.push(cleanup)
-      return cleanup
-    }
-  }
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-    const hasTaskTool = msg.content.some((b) => b.type === 'tool_use' && TASK_TOOLS.has(b.toolName))
-    if (hasTaskTool) rebuildTodos(routingId)
-  })
-  onEvent<(routingId: string, data: StreamDelta) => void>('session:stream')((routingId, data) => {
-    if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
-    else store().appendStreamingText(routingId, data.text)
-  })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
-    (routingId, status) => {
-      let effective = routingId
-      if (status.sessionId && status.sessionId !== routingId) {
-        const s = store()
-        if (s.sessions[routingId]) {
-          s.rekeySession(routingId, status.sessionId)
-          effective = status.sessionId
-        }
-      }
-      if (status.state === 'disconnected') {
-        store().markSdkInactive(effective)
-        store().setStatus(effective, { ...status, state: 'idle' })
-        store().clearPendingApprovals(effective)
-        return
-      }
-      store().setStatus(effective, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effective)
-    }
-  )
-  onEvent<(routingId: string) => void>('session:result')((routingId) => {
-    const s = store()
-    const session = s.sessions[routingId]
-    if (session && session.todos.length > 0) {
-      const allDone = session.todos.every((t: TodoItem) => t.status === 'completed')
-      if (allDone) s.setTodos(routingId, [])
-    }
-  })
-
-  return cleanups
-}
+// SyncCore phase 4c: the ~20-handler `wireEventHandlers` table this file used to
+// carry — a hand-maintained copy of useClaudeEvents, itself a copy of the reducer —
+// is DELETED. `app.emit` feeds the harness SyncClient, whose raw-event tap folds
+// `applyEvent` and projects the result into the store (boot-test-app §5), so these
+// flows now exercise the real interpretation instead of a third one.
 
 beforeEach(async () => {
   resetFactoryCounter()
@@ -91,11 +28,9 @@ beforeEach(async () => {
     pinnedSessionIds: [],
     customTitles: {}
   })
-  eventCleanups = wireEventHandlers(app)
 })
 
 afterEach(() => {
-  eventCleanups.forEach((fn) => fn())
   app.teardown()
 })
 

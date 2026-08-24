@@ -13,76 +13,14 @@ import {
   makeSessionStatus,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type { ChatMessage, PendingApproval, StreamDelta, SessionStatus } from '../../shared/types'
 
 let app: TestApp
-let eventCleanups: Array<() => void>
 
-function wireEventHandlers(app: TestApp): Array<() => void> {
-  const cleanups: Array<() => void> = []
-  const store = useSessionStore.getState
-
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
-      app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => {
-        app.bridge.ipcRenderer.removeListener(channel, handler)
-      }
-      cleanups.push(cleanup)
-      return cleanup
-    }
-  }
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-  })
-  onEvent<(routingId: string, data: StreamDelta) => void>('session:stream')((routingId, data) => {
-    if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
-    else store().appendStreamingText(routingId, data.text)
-  })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
-    (routingId, status) => {
-      let effective = routingId
-      if (status.sessionId && status.sessionId !== routingId) {
-        const s = store()
-        if (s.sessions[routingId]) {
-          s.rekeySession(routingId, status.sessionId)
-          effective = status.sessionId
-        }
-      }
-      if (status.state === 'disconnected') {
-        store().markSdkInactive(effective)
-        store().setStatus(effective, { ...status, state: 'idle' })
-        store().clearPendingApprovals(effective)
-        return
-      }
-      store().setStatus(effective, status)
-      // Do NOT clear pending approvals on idle — background subagents outlive
-      // the parent turn's result. See useClaudeEvents.ts's onStatus.
-    }
-  )
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
-    (routingId, approval) => {
-      store().addPendingApproval(routingId, approval)
-    }
-  )
-  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
-    (routingId, { requestId }) => {
-      store().removePendingApproval(routingId, requestId)
-    }
-  )
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
-    'session:user-message'
-  )((routingId, data) => {
-    const s = store()
-    if (!s.sessions[routingId]) return
-    if (data.queued) s.setQueuedText(routingId, data.prompt)
-    else s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
-  })
-
-  return cleanups
-}
+// SyncCore phase 4c: the ~20-handler `wireEventHandlers` table this file used to
+// carry — a hand-maintained copy of useClaudeEvents, itself a copy of the reducer —
+// is DELETED. `app.emit` feeds the harness SyncClient, whose raw-event tap folds
+// `applyEvent` and projects the result into the store (boot-test-app §5), so these
+// flows now exercise the real interpretation instead of a third one.
 
 beforeEach(async () => {
   resetFactoryCounter()
@@ -95,11 +33,9 @@ beforeEach(async () => {
     pinnedSessionIds: [],
     customTitles: {}
   })
-  eventCleanups = wireEventHandlers(app)
 })
 
 afterEach(() => {
-  eventCleanups.forEach((fn) => fn())
   app.teardown()
 })
 
@@ -158,6 +94,14 @@ describe('E2E: session switching during streaming', () => {
   it('switching active session does not clear or replay events on the other session', () => {
     useSessionStore.getState().createNewSession('A', '/a')
     useSessionStore.getState().createNewSession('B', '/b')
+    // SPAWN both before switching. `switchSession` runs `cleanupEmptySession`,
+    // which drops the session being left when it has no messages, no draft and
+    // no live engine — so without this, B is gone by the time it is switched back
+    // to. That used to be invisible here: the reducer's `ensured()` re-minted a
+    // placeholder for B's next event. F7 deleted that, and a session that can
+    // emit engine events is by definition one that spawned.
+    app.emit('session:created', 'A', { cwd: '/a' })
+    app.emit('session:created', 'B', { cwd: '/b' })
     useSessionStore.getState().switchSession('A')
 
     app.emit('session:message', 'A', makeAssistantMessage('hello A'))

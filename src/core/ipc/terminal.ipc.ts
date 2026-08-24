@@ -1,0 +1,128 @@
+import { terminalService } from '../services/terminal-service'
+import { type CommandConnection } from './command-registry'
+import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
+
+const TERMINAL_IPC_CHANNELS = [
+  'terminal:create',
+  'terminal:write',
+  'terminal:resize',
+  'terminal:kill',
+  'terminal:kill-by-cwd',
+  'terminal:availability',
+  'terminal:pool',
+  'terminal:attach',
+  'terminal:detach'
+]
+
+/**
+ * Register the terminal channels. Window-free since SyncCore phase 4d: the pty
+ * manager is process-lifetime, so the registration is too, and the two
+ * window-LIFETIME concerns it used to own — where `terminal:data`/`terminal:exit`
+ * are delivered (`terminalService.setWindow`) and killing the shells when the
+ * window closes — moved to `createWindow()`. A windowless boot therefore still
+ * serves `terminal:*` to remote clients (phase 2 multi-attach) with no local sink.
+ */
+export function registerTerminalIpc(): void {
+  unbindDesktopChannels(TERMINAL_IPC_CHANNELS)
+
+  // `index` is the pool slot (`cwd#0`, `cwd#1`, …). Omitted ⇒ next free slot,
+  // which is what a caller that predates the pool always got: a fresh pty.
+  handleIpc({
+    channel: 'terminal:create',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, cwd: string, index?: number) =>
+      terminalService.create(connection, cwd, index)
+  })
+
+  handleIpc({
+    channel: 'terminal:write',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string, data: string) => {
+      terminalService.write(connection, id, data)
+    }
+  })
+
+  handleIpc({
+    channel: 'terminal:resize',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string, cols: number, rows: number) => {
+      terminalService.resize(connection, id, cols, rows)
+    }
+  })
+
+  handleIpc({
+    channel: 'terminal:kill',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string) => {
+      terminalService.kill(connection, id)
+    }
+  })
+
+  // Which slots of a cwd's pool are live — what the "+" affordance badges
+  // "running" with, since a plain close only DETACHES this surface. `shell`
+  // like every other terminal verb (so the same three gates run, and the remote
+  // transport's capability-driven step-up gate covers it automatically), and a
+  // `query` because it moves nothing: the audit records the LIFECYCLE, and a
+  // listing of slot numbers is not part of it.
+  handleIpc({
+    channel: 'terminal:pool',
+    capability: 'shell',
+    kind: 'query',
+    withConnection: true,
+    handler: (connection: CommandConnection, cwd: string) =>
+      terminalService.poolSlots(connection, cwd)
+  })
+
+  handleIpc({
+    channel: 'terminal:kill-by-cwd',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, cwd: string) =>
+      terminalService.killByCwd(connection, cwd)
+  })
+
+  // Attach/detach exist on the DESKTOP transport too as of the terminal-pool
+  // work. They used to be remote-only (and stubbed as local no-ops in the
+  // preload) because desktop output has always been broadcast on `terminal:data`
+  // — but a desktop tab can now resolve to a pty someone else spawned, and
+  // without an attach it would render a blank screen instead of the history the
+  // scrollback ring already holds. Same `command`-kind declaration as the remote
+  // side, so the lifecycle is audited identically on both surfaces.
+  handleIpc({
+    channel: 'terminal:attach',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string) => terminalService.attach(connection, id)
+  })
+
+  handleIpc({
+    channel: 'terminal:detach',
+    capability: 'shell',
+    kind: 'command',
+    withConnection: true,
+    handler: (connection: CommandConnection, id: string) => {
+      terminalService.detach(connection, id)
+    }
+  })
+
+  // Same channel the web client gates its terminal affordance on. On desktop it
+  // is a constant (`allowed/granted: true`) — the remote toggle arms the `shell`
+  // capability for REMOTE connections and never takes the local shell away.
+  handleIpc({
+    channel: 'terminal:availability',
+    capability: 'config',
+    kind: 'query',
+    withConnection: true,
+    handler: (connection: CommandConnection) => terminalService.availability(connection)
+  })
+}

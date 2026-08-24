@@ -9,7 +9,7 @@
  * reaches this callback, so only residual asks land here and are denied.
  */
 import { describe, it, expect } from 'vitest'
-import { buildCanUseTool, type CanUseToolResult } from '../automation-manager'
+import { buildCanUseTool, type CanUseToolResult } from '../../../core/services/automation-manager'
 
 describe('buildCanUseTool', () => {
   it('allows mcp__claude-ui__-prefixed tools', async () => {

@@ -25,7 +25,7 @@ beforeEach(() => {
     vendorAuthOauthAuthorize: vi.fn(),
     vendorAuthOauthCallback: vi.fn(),
     vendorAuthOauthCancel: vi.fn().mockResolvedValue(undefined),
-    vendorAuthProbe: vi.fn().mockResolvedValue({}),
+    vendorAuthProbe: vi.fn().mockResolvedValue({})
   }
 })
 
@@ -54,7 +54,9 @@ describe('authorizeVendorOAuth — auto flow (method: "auto")', () => {
     )
 
     // vendorAuthOauthCallback was called WITHOUT a code arg (auto flow)
-    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<typeof vi.fn>
+    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<
+      typeof vi.fn
+    >
     expect(callbackMock).toHaveBeenCalledTimes(1)
     // Should be called with (engineId, vendorId, methodIdx) — no code
     expect(callbackMock).toHaveBeenCalledWith('opencode', 'openai', 0)
@@ -116,7 +118,9 @@ describe('authorizeVendorOAuth — code flow (method: "code")', () => {
     })
 
     // Callback must NOT be called for code flow
-    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<typeof vi.fn>
+    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<
+      typeof vi.fn
+    >
     expect(callbackMock).not.toHaveBeenCalled()
 
     // vendorOAuth stays null (code flow doesn't set waiting state)
@@ -134,9 +138,9 @@ describe('authorizeVendorOAuth — callback failure', () => {
       method: 'auto',
       instructions: 'Open browser'
     })
-    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi.fn().mockRejectedValue(
-      new Error('Connection refused')
-    )
+    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi
+      .fn()
+      .mockRejectedValue(new Error('Connection refused'))
 
     const result = await useSessionStore.getState().authorizeVendorOAuth('opencode', 'openai')
 
@@ -184,7 +188,9 @@ describe('authorizeVendorOAuth — cancel-then-late-resolve (SHOULD-FIX 4)', () 
       method: 'auto',
       instructions: 'Open browser'
     })
-    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi.fn().mockReturnValue(callbackPromise)
+    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi
+      .fn()
+      .mockReturnValue(callbackPromise)
 
     // Start the flow (don't await yet — the callback is pending).
     const flowPromise = useSessionStore.getState().authorizeVendorOAuth('opencode', 'openai')
@@ -222,7 +228,9 @@ describe('authorizeVendorOAuth — cancel-then-late-resolve (SHOULD-FIX 4)', () 
       method: 'auto',
       instructions: 'Open browser'
     })
-    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi.fn().mockReturnValue(callbackPromise)
+    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi
+      .fn()
+      .mockReturnValue(callbackPromise)
 
     const flowPromise = useSessionStore.getState().authorizeVendorOAuth('opencode', 'openai')
     await Promise.resolve()

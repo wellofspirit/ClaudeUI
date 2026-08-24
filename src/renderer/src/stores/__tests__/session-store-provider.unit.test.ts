@@ -20,6 +20,7 @@ import {
 } from '../session-store'
 import type { EngineId, ModelInfo } from '../../../../shared/types'
 import { claudeModel } from '../../../../shared/types'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 /** Minimal opencode ModelInfo builder for picker-value resolution tests. */
 const ocModel = (vendorId: string, modelId: string): ModelInfo => ({
@@ -34,6 +35,10 @@ const store = () => useSessionStore.getState()
 let saveSessionConfigSpy: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   saveSessionConfigSpy = vi.fn()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
@@ -58,6 +63,7 @@ beforeEach(() => {
     terminalGroups: {},
     activeView: { type: 'chat' }
   })
+  mirrorStoreIntoReplica()
 })
 
 // ---------------------------------------------------------------------------
@@ -192,7 +198,7 @@ describe('engine persistence: rekeySession', () => {
   it('carries sessionEngines entry over to the new key', () => {
     useSessionStore.setState({ lastSelectedEngineId: 'claude' as EngineId })
     store().createNewSession('claude-temp', '/tmp/proj')
-    store().rekeySession('claude-temp', 'claude-real')
+    seed.rekey('claude-temp', 'claude-real')
     // entry should be under the new key, not the old one
     expect(store().sessionEngines['claude-real']).toBeDefined()
     expect(store().sessionEngines['claude-temp']).toBeUndefined()
@@ -202,7 +208,8 @@ describe('engine persistence: rekeySession', () => {
     useSessionStore.setState({
       sessionEngines: { same: { engineId: 'claude' as EngineId } }
     })
-    store().rekeySession('same', 'same')
+    mirrorStoreIntoReplica()
+    seed.rekey('same', 'same')
     expect(store().sessionEngines['same']?.engineId).toBe('claude')
   })
 })
@@ -213,7 +220,7 @@ describe('engine persistence: rekeySession', () => {
 
 describe('engine persistence: applyExternalSessionConfig', () => {
   it('restores sessionEngines from the config snapshot', () => {
-    store().applyExternalSessionConfig({
+    seed.sessionsConfig({
       recentSessions: ['s1', 's2'],
       sessionEngines: { s1: { engineId: 'claude' as EngineId } }
     })
@@ -222,7 +229,7 @@ describe('engine persistence: applyExternalSessionConfig', () => {
   })
 
   it('defaults sessionEngines to empty object when absent from config', () => {
-    store().applyExternalSessionConfig({ recentSessions: [] })
+    seed.sessionsConfig({ recentSessions: [] })
     expect(store().sessionEngines).toEqual({})
   })
 })
@@ -235,7 +242,7 @@ describe('engine persistence: applyExternalSessionConfig', () => {
 describe('sessionEngines migration shape acceptance', () => {
   it('accepts migrated sessionEngines with engineId:claude (formerly codex or any value)', () => {
     // Simulate what loadSessionConfig() returns after migrating 'codex' → { engineId: 'claude' }
-    store().applyExternalSessionConfig({
+    seed.sessionsConfig({
       sessionEngines: {
         'old-codex-session': { engineId: 'claude' as EngineId }
       }
@@ -260,7 +267,7 @@ describe('model persistence loop', () => {
   it('rekeySession carries the chosen model to the canonical id', () => {
     store().createNewSession('r-temp', '/tmp/proj')
     store().setSelectedModel('claude-opus-4-8')
-    store().rekeySession('r-temp', 'sess-uuid')
+    seed.rekey('r-temp', 'sess-uuid')
     expect(store().sessionEngines['sess-uuid']?.model?.modelId).toBe('claude-opus-4-8')
     expect(store().sessionEngines['r-temp']).toBeUndefined()
   })
@@ -270,11 +277,12 @@ describe('model persistence loop', () => {
     // Full loop: create → setModel → rekey → simulate fresh reopen.
     store().createNewSession('r-temp', '/tmp/proj')
     store().setSelectedModel('claude-opus-4-8')
-    store().rekeySession('r-temp', 'sess-uuid')
+    seed.rekey('r-temp', 'sess-uuid')
 
     // Simulate a fresh launch: clear in-memory sessions but keep persisted config
     const persisted = store().sessionEngines
     useSessionStore.setState({ sessions: {}, activeSessionId: null, sessionEngines: persisted })
+    mirrorStoreIntoReplica()
 
     store().loadHistoricalSession('sess-uuid', [], '/tmp/proj')
     expect(store().sessions['sess-uuid']?.selectedEngineId).toBe('claude')
@@ -290,6 +298,7 @@ describe('model persistence loop', () => {
         }
       }
     })
+    mirrorStoreIntoReplica()
     store().loadHistoricalSession('oc-x', [], '/tmp/proj')
     expect(store().sessions['oc-x']?.selectedEngineId).toBe('opencode')
     expect(store().sessions['oc-x']?.selectedModel).toBe('qwen-sandbox/qwen3.6:27b')
@@ -300,6 +309,7 @@ describe('model persistence loop', () => {
     useSessionStore.setState({
       sessionEngines: { 'sess-x': { engineId: 'claude' as EngineId } }
     })
+    mirrorStoreIntoReplica()
     store().loadHistoricalSession('sess-x', [], '/tmp/proj')
     expect(store().sessions['sess-x']?.selectedModel).toBe('default')
 
@@ -309,6 +319,7 @@ describe('model persistence loop', () => {
       sessionEngines: { 'oc-y': { engineId: 'opencode' as EngineId } },
       opencodeDefaultModel: 'anthropic/claude-sonnet-4-6'
     })
+    mirrorStoreIntoReplica()
     store().loadHistoricalSession('oc-y', [], '/tmp/proj')
     expect(store().sessions['oc-y']?.selectedEngineId).toBe('opencode')
     expect(store().sessions['oc-y']?.selectedModel).toBe('anthropic/claude-sonnet-4-6')
@@ -324,6 +335,7 @@ describe('model persistence loop', () => {
       piDefaultModel: 'anthropic/claude-sonnet-5',
       opencodeDefaultModel: 'opencode/mimo-v2.5-free'
     })
+    mirrorStoreIntoReplica()
     store().loadHistoricalSession('pi-y', [], '/tmp/proj')
     expect(store().sessions['pi-y']?.selectedEngineId).toBe('pi')
     expect(store().sessions['pi-y']?.selectedModel).toBe('anthropic/claude-sonnet-5')
@@ -382,6 +394,7 @@ describe('setSelectedEngine', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     store().setSelectedEngine('pi')
     expect(store().sessions['committed-engine'].selectedEngineId).toBe('claude')
   })
@@ -397,6 +410,7 @@ describe('setSelectedEngine', () => {
         }
       }
     }))
+    mirrorStoreIntoReplica()
     store().setSelectedEngine('pi')
     expect(store().sessions['initializing-engine'].selectedEngineId).toBe('claude')
   })

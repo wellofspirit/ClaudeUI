@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { emitEvent, clearSyncSubscribersForTests, syncCore } from '../../../core/services/sync-host'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -51,32 +52,20 @@ vi.mock('os', async () => {
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
 // Don't pull the real SDK bundle — we only need the named export to exist.
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: vi.fn()
 }))
 
-// claude-session imports the SDK and Electron app internals. Replace with a
-// minimal surface that exposes the static addExtraWindow/removeExtraWindow
-// methods plugin-manager calls on construction/shutdown.
-vi.mock('../claude-session', () => {
-  const extraWindows = new Set<unknown>()
-  return {
-    ClaudeSession: {
-      addExtraWindow: (w: unknown) => {
-        extraWindows.add(w)
-      },
-      removeExtraWindow: (w: unknown) => {
-        extraWindows.delete(w)
-      },
-      getExtraWindows: () => extraWindows
-    }
-  }
-})
+// claude-session imports the SDK and Electron app internals. A bare stub is
+// enough since SyncCore phase 4c: the plugin bridge registers itself with the
+// FUNNEL (`addSyncSubscriber`), not as a static "extra window" on ClaudeSession,
+// so there are no statics left to fake.
+vi.mock('../../../core/services/claude-session', () => ({ ClaudeSession: {} }))
 
 // Silence logger chatter and capture warn/error calls for assertions.
 // The factory runs at hoisted-time before any top-level bindings exist, so we
 // instantiate the spies inside the factory and re-export them for use below.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -92,8 +81,8 @@ vi.mock('../logger', () => ({
 import { PluginManager } from '../plugin-manager'
 import { TestIpcBridge } from '../../../test/bridges/test-ipc-bridge'
 import { setIpcBridge } from '../../../test/stubs/electron-shim'
-import { RemoteDispatcher } from '../remote-dispatcher'
-import { logger as loggerMod } from '../logger'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { logger as loggerMod } from '../../../core/services/logger'
 
 // Typed handles on the mocked logger spies (for assertions).
 const loggerSpies = loggerMod as unknown as {
@@ -198,17 +187,27 @@ function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }
   }
 }
 
-/** Fire a session event through the bridge the same way ClaudeSession.send() would. */
+/**
+ * Fire a session event the way `BaseSession.send()` does — through the funnel.
+ *
+ * 4c: no reaching into a private bridge object any more. The manager is a plain
+ * subscriber, so driving `emitEvent` exercises the real chain (ring → canonical →
+ * every subscriber → `fireEvent`) instead of poking a fake window's shim. The
+ * `manager` argument is kept so every call site reads unchanged.
+ */
 function fireSessionEventViaBridge(
-  manager: PluginManager,
+  _manager: PluginManager,
   channel: string,
   routingId: string,
   data: unknown
 ): void {
-  // Grab the bridge instance by reaching into the manager. The bridge registers
-  // itself as an ExtraWindow on ClaudeSession via addExtraWindow().
-  const bridge: any = (manager as any).bridge
-  bridge.webContents.send(channel, routingId, data)
+  // Canonical must KNOW the session, on BOTH lanes: since phase 5 S1 a stream
+  // delta is placed by OFFSET, and there is no length to measure against a
+  // session that does not exist — so core drops it rather than delivering an
+  // unplaceable frame. Production gets the entry from the `session:created` that
+  // `prepareAndCreateSession` emits at spawn; this seed is that, minus the spawn.
+  if (!syncCore.getCanonicalState().sessions[routingId]) syncCore.seedSession(routingId, {})
+  emitEvent(channel, [routingId, data])
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +225,9 @@ describe('PluginManager', () => {
 
   afterEach(() => {
     s.manager.stopAll()
+    // The manager subscribed to the funnel on construction; a leaked subscription
+    // would fan the next test's events into a shut-down manager.
+    clearSyncSubscribersForTests()
     clearPluginsDir()
   })
 
@@ -478,6 +480,126 @@ describe('PluginManager', () => {
       delete (global as any).__sessionEvents
     })
 
+    it('forwards VOLATILE-lane deltas with the pre-phase-5 payload shape (parity guard)', async () => {
+      // `session:stream` / `session:subagent-stream` stopped being events in
+      // phase 5 S1. A plugin's contract predates that split and must not change
+      // because of it, so the bridge observes the stream lane in-process and
+      // re-materializes the emission through the SHARED inverse. This test is the
+      // guard: it fails if the observer, the gate or the inverse regresses.
+      s = scaffold({ sessionIdFor: (rid) => (rid === 'R-1' ? 'SID-1' : null) })
+
+      writePlugin({
+        id: 'delta-listener',
+        entryJs: `
+          module.exports = {
+            activate: (ctx) => {
+              global.__deltas = []
+              ctx.on('session:stream', (evt) => { global.__deltas.push(['parent', evt]) })
+              ctx.on('session:subagent-stream', (evt) => { global.__deltas.push(['sub', evt]) })
+            }
+          }
+        `
+      })
+      await s.manager.loadAll()
+
+      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', {
+        type: 'thinking',
+        text: 'weighing'
+      })
+      fireSessionEventViaBridge(s.manager, 'session:subagent-stream', 'R-1', {
+        toolUseId: 'tu-1',
+        type: 'text',
+        text: 'sub output'
+      })
+
+      const deltas = (global as any).__deltas as any[]
+      expect(deltas).toHaveLength(2)
+      expect(deltas[0]).toEqual([
+        'parent',
+        { routingId: 'R-1', sessionId: 'SID-1', type: 'thinking', text: 'weighing' }
+      ])
+      expect(deltas[1]).toEqual([
+        'sub',
+        {
+          routingId: 'R-1',
+          sessionId: 'SID-1',
+          type: 'text',
+          toolUseId: 'tu-1',
+          text: 'sub output'
+        }
+      ])
+      delete (global as any).__deltas
+    })
+
+    it('forwards the VOLATILE TAILS with their pre-phase-5 payload shape (parity guard)', async () => {
+      // The S2 half of the same promise: `session:bash-output`,
+      // `session:background-output` and `automation:stream-event` left the event
+      // lane too, so a plain sync subscriber no longer sees them. They ride the
+      // lane in the PASS-THROUGH flavor — the emission verbatim — so the bridge
+      // needs no inverse for them, only the observer. This fails if the observer
+      // stops forwarding `stream-ev`, which would silently delete bash output
+      // from every plugin that watches a command run.
+      s = scaffold({ sessionIdFor: (rid) => (rid === 'R-1' ? 'SID-1' : null) })
+
+      writePlugin({
+        id: 'tail-listener',
+        entryJs: `
+          module.exports = {
+            activate: (ctx) => {
+              global.__tails = []
+              ctx.on('session:bash-output', (evt) => { global.__tails.push(['bash', evt]) })
+              ctx.on('session:background-output', (evt) => { global.__tails.push(['bg', evt]) })
+              ctx.on('automation:stream-event', (evt) => { global.__tails.push(['auto', evt]) })
+            }
+          }
+        `
+      })
+      await s.manager.loadAll()
+
+      fireSessionEventViaBridge(s.manager, 'session:bash-output', 'R-1', {
+        toolUseId: 'tu-1',
+        output: 'hello\n',
+        totalLines: 1,
+        totalBytes: 6
+      })
+      fireSessionEventViaBridge(s.manager, 'session:background-output', 'R-1', {
+        toolUseId: 'tu-1',
+        tail: 'bg\n',
+        totalSize: 3,
+        done: false
+      })
+      // The automation tail is NOT session-scoped: one arg, no routingId, so the
+      // bridge hands it through unwrapped exactly as it always did.
+      emitEvent('automation:stream-event', [{ automationId: 'auto-1', type: 'text', text: 'tok' }])
+
+      const tails = (global as any).__tails as any[]
+      expect(tails).toHaveLength(3)
+      expect(tails[0]).toEqual([
+        'bash',
+        {
+          routingId: 'R-1',
+          sessionId: 'SID-1',
+          toolUseId: 'tu-1',
+          output: 'hello\n',
+          totalLines: 1,
+          totalBytes: 6
+        }
+      ])
+      expect(tails[1]).toEqual([
+        'bg',
+        {
+          routingId: 'R-1',
+          sessionId: 'SID-1',
+          toolUseId: 'tu-1',
+          tail: 'bg\n',
+          totalSize: 3,
+          done: false
+        }
+      ])
+      expect(tails[2]).toEqual(['auto', { automationId: 'auto-1', type: 'text', text: 'tok' }])
+      delete (global as any).__tails
+    })
+
     it('emits sessionId: null when SessionManager has no mapping yet (ADR-005 early events)', async () => {
       s = scaffold({ sessionIdFor: () => null })
 
@@ -494,13 +616,13 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
 
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-temp', { chunk: 'hi' })
+      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-temp', { type: 'text', text: 'hi' })
 
       const events = (global as any).__early as any[]
       expect(events).toHaveLength(1)
       expect(events[0].routingId).toBe('R-temp')
       expect(events[0].sessionId).toBeNull()
-      expect(events[0].chunk).toBe('hi')
+      expect(events[0].text).toBe('hi')
       delete (global as any).__early
     })
 
@@ -520,7 +642,7 @@ describe('PluginManager', () => {
       await s.manager.loadAll()
 
       fireSessionEventViaBridge(s.manager, 'session:result', 'R-1', { cost: 1 })
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', { chunk: 'x' })
+      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', { type: 'text', text: 'x' })
 
       expect((global as any).__streamHits).toBe(1)
       expect((global as any).__resultHits).toBe(0)

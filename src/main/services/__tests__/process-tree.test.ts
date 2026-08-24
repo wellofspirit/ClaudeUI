@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
-import { killProcessTree } from '../process-tree'
+import { killProcessTree } from '../../../core/services/process-tree'
 
 /**
  * A fake child with a settable pid and a kill() spy that records call ORDER
@@ -34,11 +34,9 @@ describe('killProcessTree', () => {
 
     // taskkill reaps the LIVE tree…
     expect(spawn).toHaveBeenCalledTimes(1)
-    expect(spawn).toHaveBeenCalledWith(
-      'taskkill',
-      ['/pid', '4321', '/T', '/F'],
-      { stdio: 'ignore' }
-    )
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/pid', '4321', '/T', '/F'], {
+      stdio: 'ignore'
+    })
     // …and child.kill() never fires on the happy path (pre-fix it ran BEFORE
     // taskkill, orphaning the tree — this is the guard assertion).
     expect(child.kill).not.toHaveBeenCalled()

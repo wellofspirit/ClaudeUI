@@ -250,7 +250,9 @@ describe('PiVendors', () => {
 
   it('renders only the shared ChatGPT settings link and never removes its pi credential directly', async () => {
     const opened: Array<{ scope?: string; section?: string }> = []
-    const listener = (event: Event): void => { opened.push((event as CustomEvent).detail) }
+    const listener = (event: Event): void => {
+      opened.push((event as CustomEvent).detail)
+    }
     window.addEventListener('open-settings', listener)
     render(<PiVendors />)
     await waitFor(() => screen.getByTestId('PiVendors.openSharedProviders'))

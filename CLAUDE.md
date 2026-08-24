@@ -10,7 +10,7 @@ A desktop client for coding agents, built with Electron + React 19 + TypeScript.
 
 Full documentation index: [docs/README.md](docs/README.md)
 
-Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; remote layer as-built in `remote.md`, accepted target designs in `sync-core.md` + `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
+Architecture, services, persistence, multi-engine design → `docs/architecture/` (README.md is the index; sync/replication/queue/headless in `sync-core.md` — phases 0-4 as built, phase 5 + follow-ons as designed; remote transport + auth as-built in `remote.md`; security model as-built — passkeys, policy modes, capabilities, audit — in `security.md`). cli.js wire protocol + build pipeline + patches → `docs/protocol-cc/` (authoritative — consult before theorizing about cli.js behavior). pi wire protocol → `docs/protocol-pi/` (+ version-exact docs in `vendor/pi-cli/docs/`; ADR-035). Design decisions → `docs/adr/`. Discover these while working; read the one that matches the task.
 
 ## Development Workflow (read this first)
 
@@ -31,6 +31,9 @@ Trivial one-line/mechanical edits and conversational answers are exempt.
 - `bun run rebuild:native` — **run after every `bun install`/`add`/`remove`**; bun leaves a Node-ABI `better-sqlite3` that crashes the app on boot (`ERR_DLOPEN_FAILED`)
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary; version pinned via `package.json#claudeCliVersion`
 - `bun run ensure-pi` / `update-pi` — vendor the pinned pi binary (`package.json#piCliVersion`); `ensure-opencode` / `update-opencode` likewise for opencode
+- `bun run build:server` — `claudeui-server` pure-asset bundle → `dist/server/` (needs `build:web` first)
+- `bun run build:server:compile` — bun-compiled `claudeui-server` executable → `dist/server-bin/`; run it from source instead with `bun src/server/main.ts --help`
+- `bun run verify:sqlite` — SQLite driver conformance against `bun:sqlite` (the arm vitest can't host); both `build:server*` targets run it first
 
 ## Testing
 

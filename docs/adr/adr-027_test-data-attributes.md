@@ -8,9 +8,9 @@ step), ADR-008 (the remote web client is type-checked against the same renderer)
 
 The surface for a renderer change is pixels in the running Electron window, and our evidence protocol
 (`verifier-electron` / `scripts/app-shot.mjs`) ends in a screenshot. But a screenshot is a slow,
-lossy, last-resort check: it can't tell you *which component* rendered (only what a region looks
+lossy, last-resort check: it can't tell you _which component_ rendered (only what a region looks
 like), it can't be asserted on programmatically, and reading a PNG is the most expensive verification
-step we have. app-shot's only structural probe was a free-text needle count, which hits user *data*
+step we have. app-shot's only structural probe was a free-text needle count, which hits user _data_
 (session titles, chat text) as often as UI chrome.
 
 We also drive the app by clicking — and the only selectors available were brittle ones: `text=...`
@@ -86,15 +86,15 @@ that doesn't explicitly forward it.
 - **Stable & semantic.** A testid is part of the verification contract — derived from the component's
   identity/role, never from copy text or styling. Renaming a component updates its testid and any
   selectors that target it.
-- **One Tier-1 id per rendered component instance type;** uniqueness of a *specific* instance comes
+- **One Tier-1 id per rendered component instance type;** uniqueness of a _specific_ instance comes
   from `data-id`, not from minting per-instance testids.
 - **Every DOM-producing render path carries the id** — including `loading` / `empty` / `error` /
   `not-installed` early-return branches, so a component is assertable in those states too (not only
   when fully loaded). Such early returns are mutually exclusive with the main return, so reusing the
-  same id never duplicates. Only a literal `return null` is exempt; a loading/empty message *nested
-  inside an already-stamped root* doesn't need its own copy.
+  same id never duplicates. Only a literal `return null` is exempt; a loading/empty message _nested
+  inside an already-stamped root_ doesn't need its own copy.
 - **Kept in all builds.** No production stripping. This is a desktop app (DOM size is a non-issue), the
-  app-shot drive runs the *built* app, and the ids aid remote-support debugging. The earlier ad-hoc
+  app-shot drive runs the _built_ app, and the ids aid remote-support debugging. The earlier ad-hoc
   kebab id (`mockup-console-entries`) is migrated to the convention.
 - **Not a styling or behavior hook.** `data-testid` is read-only metadata; never key CSS or logic off
   it.

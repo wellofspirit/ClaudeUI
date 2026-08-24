@@ -5,71 +5,32 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { createElement } from 'react'
+import { render, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { useClaudeEvents } from '../../renderer/src/hooks/useClaudeEvents'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { makeChatMessage, makeSessionStatus, resetFactoryCounter } from '@test/factories/messages'
-import type { ChatMessage, SessionStatus, StreamDelta } from '../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let app: TestApp
-let eventCleanups: Array<() => void>
 
-function wireEventHandlers(app: TestApp): Array<() => void> {
-  const cleanups: Array<() => void> = []
-  const store = useSessionStore.getState
-
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
-      app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => {
-        app.bridge.ipcRenderer.removeListener(channel, handler)
-      }
-      cleanups.push(cleanup)
-      return cleanup
-    }
-  }
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-  })
-  onEvent<(routingId: string, data: StreamDelta) => void>('session:stream')((routingId, data) => {
-    if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
-    else store().appendStreamingText(routingId, data.text)
-  })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
-    (routingId, status) => {
-      let effective = routingId
-      if (status.sessionId && status.sessionId !== routingId) {
-        const s = store()
-        if (s.sessions[routingId]) {
-          s.rekeySession(routingId, status.sessionId)
-          effective = status.sessionId
-        }
-      }
-      if (status.state === 'disconnected') {
-        store().markSdkInactive(effective)
-        store().setStatus(effective, { ...status, state: 'idle' })
-        store().clearPendingApprovals(effective)
-        return
-      }
-      store().setStatus(effective, status)
-      if (status.state === 'idle') store().clearPendingApprovals(effective)
-    }
-  )
-  onEvent<(routingId: string, error: string) => void>('session:error')((routingId, error) => {
-    store().addError(routingId, error)
-  })
-  onEvent<(routingId: string, warning: string) => void>('session:warning')((routingId, warning) => {
-    store().addWarning(routingId, warning)
-  })
-  onEvent<(routingId: string, data: { messageIds: string[] }) => void>(
-    'session:messages-retracted'
-  )((routingId, data) => {
-    store().retractMessages(routingId, data.messageIds)
-  })
-
-  return cleanups
+/**
+ * Mounts the real hook. `session:error` / `session:warning` are `canonical: false`
+ * channels (docs/architecture/sync-channels.md): no snapshot field, so no reducer
+ * branch - their store writers live in `useClaudeEvents`, which is therefore the
+ * only thing that can turn one of those events into store state (SyncCore 4c).
+ */
+function EventHarness(): null {
+  useClaudeEvents()
+  return null
 }
+
+// SyncCore phase 4c: the ~20-handler `wireEventHandlers` table this file used to
+// carry — a hand-maintained copy of useClaudeEvents, itself a copy of the reducer —
+// is DELETED. `app.emit` feeds the harness SyncClient, whose raw-event tap folds
+// `applyEvent` and projects the result into the store (boot-test-app §5), so these
+// flows now exercise the real interpretation instead of a third one.
 
 beforeEach(async () => {
   resetFactoryCounter()
@@ -82,11 +43,12 @@ beforeEach(async () => {
     pinnedSessionIds: [],
     customTitles: {}
   })
-  eventCleanups = wireEventHandlers(app)
+  mirrorStoreIntoReplica()
+  render(createElement(EventHarness))
 })
 
 afterEach(() => {
-  eventCleanups.forEach((fn) => fn())
+  cleanup()
   app.teardown()
 })
 
@@ -134,7 +96,10 @@ describe('E2E: error propagation', () => {
 
     app.emit('session:error', routingId, 'persistent error')
     // Simulate status going back to idle
-    useSessionStore.getState().setStatus(routingId, makeSessionStatus({ state: 'idle', sessionId: routingId, model: null, cwd: null }))
+    seed.status(
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId, model: null, cwd: null })
+    )
     expect(useSessionStore.getState().sessions[routingId].errors).toEqual(['persistent error'])
   })
 })
@@ -167,15 +132,15 @@ describe('E2E: warning propagation (model_refusal_fallback / model_fallback)', (
     const routingId = 'r1'
     const store = useSessionStore.getState()
     store.createNewSession(routingId, '/test')
-    store.addMessage(
+    seed.message(
       routingId,
       makeChatMessage({ id: 'msg_refused', content: [{ type: 'text', text: 'partial' }] })
     )
-    store.addMessage(
+    seed.message(
       routingId,
       makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] })
     )
-    store.appendStreamingText(routingId, 'refused partial stream')
+    seed.streamText(routingId, 'refused partial stream')
 
     app.emit('session:messages-retracted', routingId, { messageIds: ['msg_refused'] })
 

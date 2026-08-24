@@ -16,7 +16,10 @@ import {
   type ThinkingMode
 } from '../../../../../shared/model-capabilities'
 import type { EngineId, PermissionMode } from '../../../../../shared/types'
-import { PERMISSION_MODE_CYCLE, PERMISSION_MODE_LABELS } from '../../../../../shared/permission-modes'
+import {
+  PERMISSION_MODE_CYCLE,
+  PERMISSION_MODE_LABELS
+} from '../../../../../shared/permission-modes'
 import { ENGINE_META, engineMeta } from '../../../../../shared/engine-meta'
 import { EngineLogo } from '../../shared/EngineLogo'
 import {

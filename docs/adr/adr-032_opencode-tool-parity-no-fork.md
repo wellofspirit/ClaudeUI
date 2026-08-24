@@ -13,11 +13,11 @@ Three user-visible gaps separated the opencode engine from the Claude engine's t
    after completion.
 2. **`apply_patch` rendered as a one-liner.** The tool result text is "Success. Updated the
    following files: …"; the rendered card showed that string (or a generic JSON dump), not diffs.
-3. **Auto-mode was opaque and rejections were fatal.** The ADR-023 judge's block *reason* went only
-   to the log (`autoReply(id,'reject')` carried nothing), and *any* opencode permission rejection —
+3. **Auto-mode was opaque and rejections were fatal.** The ADR-023 judge's block _reason_ went only
+   to the log (`autoReply(id,'reject')` carried nothing), and _any_ opencode permission rejection —
    judge or human — ended the whole turn: the agent could never see why or retry. On Claude, a deny
    is a tool error with a message (`Auto mode blocked: <reason>` / `answers?.feedback || 'User
-   denied'`) that the agent responds to.
+denied'`) that the agent responds to.
 
 The working assumption was that fixing (3) — and possibly (1) — would require forking opencode and
 bundling a patched build (as we do for Claude's cli.js). Source inspection (checkout at
@@ -25,20 +25,20 @@ bundling a patched build (as we do for Claude's cli.js). Source inspection (chec
 every file cited here) disproved that:
 
 - **(1) is already on the wire.** opencode's shell tool republishes a cumulative stdout+stderr tail
-  preview (≤30 000 chars) via `ctx.metadata({metadata:{output}})` on *every chunk*; each call
+  preview (≤30 000 chars) via `ctx.metadata({metadata:{output}})` on _every chunk_; each call
   surfaces as a `message.part.updated` event with `state.status:'running'` and
   `state.metadata.output`. Our event mapper snapshotted the state and dropped it.
 - **(2) is already on the wire.** `apply_patch` results carry `metadata: { diff, files: [{filePath,
-  relativePath, type: add|update|delete|move, patch, additions, deletions}] }`; `edit` results carry
+relativePath, type: add|update|delete|move, patch, additions, deletions}] }`; `edit` results carry
   `metadata: { diff, filediff: {file, patch, additions, deletions} }` (singular). `write` carries no
   diff (its `permission.asked` metadata has one, but not the result). Our `extractToolResult` kept
   only `state.output`.
 - **(3) has first-class upstream support.** `POST /permission/{id}/reply` accepts `{reply,
-  message?}`. Reject **with** `message` raises `CorrectedError({feedback})` — which (a) fails only
-  that tool call with model-visible text *"The user rejected permission to use this specific tool
-  call with the following feedback: `<message>`"*, and (b) does **not** trip the turn-ending
+message?}`. Reject **with** `message` raises `CorrectedError({feedback})` — which (a) fails only
+  that tool call with model-visible text _"The user rejected permission to use this specific tool
+  call with the following feedback: `<message>`"_, and (b) does **not** trip the turn-ending
   `ctx.blocked` flag (processor.ts checks `instanceof RejectedError` only). Additionally,
-  `experimental.continue_loop_on_deny: true` makes even *bare* rejects non-fatal — needed because
+  `experimental.continue_loop_on_deny: true` makes even _bare_ rejects non-fatal — needed because
   opencode cascade-rejects all other same-session pending permissions with the bare (message-less)
   `RejectedError`.
 
@@ -52,7 +52,7 @@ the reply/config surface it already exposes. **Do not fork opencode.** Concretel
    existing engine-neutral `session:bash-output` → `LiveBashOutput` path. Own-session parts only;
    gate entries cancelled on completion and on session teardown.
 2. **Diff rendering**: a typed, narrow `FileDiff { path, patch, additions?, deletions?,
-   changeType? }` is extracted shape-gated (not tool-name-gated) from result metadata
+changeType? }` is extracted shape-gated (not tool-name-gated) from result metadata
    (`files[]` → apply_patch, `filediff` → edit) by `extractFileDiffs`, attached as
    `fileDiffs?: FileDiff[]` on the `tool_result` ContentBlock, and flows through live
    (`session:tool-result`, subagent variant included), history (`convertStoredMessage`), and store
@@ -74,7 +74,7 @@ the reply/config surface it already exposes. **Do not fork opencode.** Concretel
   tool error instead of a silent session stop. This **amends ADR-023's guard #8** (observability):
   the decision reason now reaches the transcript/UI, not just the log. The denial caps (3
   consecutive / 20 total → human) are unchanged.
-- A *human* deny also no longer ends the opencode turn (the agent answers instead) — deliberate
+- A _human_ deny also no longer ends the opencode turn (the agent answers instead) — deliberate
   Claude-parity change of behavior vs. opencode's own TUI, where reject stops the turn.
 - Live bash output is preview-based (30 KB tail, `totalLines`/`totalBytes` are preview-derived
   approximations) — sufficient for the `LiveBashOutput` panel, which replaces content per update.

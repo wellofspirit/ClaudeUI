@@ -66,10 +66,10 @@ function jsonlLine(id: string, tsMs: number): string {
 }
 
 async function freshService(): Promise<
-  InstanceType<(typeof import('../block-usage'))['BlockUsageService']>
+  InstanceType<(typeof import('../../../core/services/block-usage'))['BlockUsageService']>
 > {
   vi.resetModules()
-  const bu = await import('../block-usage')
+  const bu = await import('../../../core/services/block-usage')
   return new bu.BlockUsageService()
 }
 

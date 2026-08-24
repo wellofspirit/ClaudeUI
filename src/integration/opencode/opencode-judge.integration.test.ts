@@ -30,7 +30,7 @@ import {
   JUDGE_COMPLETION_PATH,
   makeJudgeTransportWithFallback,
   probeJudgeEndpoint
-} from '../../main/opencode/judge-transport'
+} from '../../core/opencode/judge-transport'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'

@@ -5,12 +5,15 @@
  *
  * Verifies:
  *  - allowed channels are registered and dispatch to the underlying service
- *  - RemoteDispatcher's blocklist rejects desktop-only channels without
- *    invoking the underlying handler
+ *  - desktop-only channels are never exposed on the remote transport
+ *    (capability grants — the denylist they used to sit on is gone)
  *  - the dispatcher propagates handler errors so remote clients see them
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
+import { setHostAuth, type HostAuth } from '../../../core/host'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -20,7 +23,7 @@ import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 // Mocks for every service remote-handlers.ts imports.
 // ---------------------------------------------------------------------------
 
-vi.mock('../../services/session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => [{ id: 'dir-1' }]),
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
   loadSubagentHistory: vi.fn(async () => []),
@@ -28,7 +31,7 @@ vi.mock('../../services/session-history', () => ({
   loadBackgroundOutput: vi.fn(() => '')
 }))
 
-vi.mock('../../services/delete-session-files', () => ({
+vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
   deleteProjectFiles: vi.fn(async () => {})
 }))
@@ -43,9 +46,9 @@ const uiConfigMocks = vi.hoisted(() => ({
   loadVendorConfig: vi.fn(() => ({}))
 }))
 
-vi.mock('../../services/ui-config', () => uiConfigMocks)
+vi.mock('../../../core/services/ui-config', () => uiConfigMocks)
 
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/model-discovery', () => ({
   resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free'),
   invalidateOpencodeModelCache: vi.fn(),
   discoverOpencodeModels: vi.fn(async () => []),
@@ -53,11 +56,11 @@ vi.mock('../../opencode/model-discovery', () => ({
   getOpencodeProviderModels: vi.fn(async () => [])
 }))
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { isBinaryAvailable: vi.fn(() => false) }
 }))
 
-vi.mock('../../pi/model-discovery', () => ({
+vi.mock('../../../core/pi/model-discovery', () => ({
   discoverPiModels: vi.fn(async () => []),
   getPiModelCatalogGroups: vi.fn(async () => []),
   // Also consumed by the shared-providers graph pulled in transitively.
@@ -67,12 +70,12 @@ vi.mock('../../pi/model-discovery', () => ({
   effortLevelsFromModel: vi.fn(() => [])
 }))
 
-vi.mock('../../pi/pi-locate', () => ({
+vi.mock('../../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
   locatePiBinary: vi.fn(() => null)
 }))
 
-vi.mock('../../auth/vault/CredentialSync', () => ({
+vi.mock('../../../core/auth/vault/CredentialSync', () => ({
   credentialSync: { getStatus: vi.fn(() => ({ connected: false })) }
 }))
 
@@ -80,12 +83,12 @@ vi.mock('../../services/account-manager', () => ({
   accountManager: { getState: vi.fn(() => ({ enabled: false, accounts: [] })) }
 }))
 
-vi.mock('../../services/session-watcher', () => ({
+vi.mock('../../../core/services/session-watcher', () => ({
   watchSession: vi.fn(),
   unwatchSession: vi.fn()
 }))
 
-vi.mock('../../services/opencode-session-list', () => ({
+vi.mock('../../../core/services/opencode-session-list', () => ({
   listOpencodeSessionsGlobal: vi.fn(async () => []),
   loadOpencodeSessionHistory: vi.fn(async () => [])
 }))
@@ -125,24 +128,24 @@ const gitManagerSpies = vi.hoisted(() => ({
   getIfExists: vi.fn(() => gitSvcStub)
 }))
 
-vi.mock('../../services/git-service', () => ({
+vi.mock('../../../core/services/git-service', () => ({
   gitServiceManager: gitManagerSpies
 }))
 
-vi.mock('../../sdk/proxy', () => ({
+vi.mock('../../../core/sdk/proxy', () => ({
   setProxyEnv: vi.fn(),
   setProxyAllSubprocesses: vi.fn()
 }))
 
-vi.mock('../../sdk/endpoint-env', () => ({
+vi.mock('../../../core/sdk/endpoint-env', () => ({
   setEndpointEnv: vi.fn()
 }))
 
-vi.mock('../../sdk/model-env', () => ({
+vi.mock('../../../core/sdk/model-env', () => ({
   setModelEnv: vi.fn()
 }))
 
-vi.mock('../../services/socks-bridge', () => ({
+vi.mock('../../../core/services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
   stopSocksBridge: vi.fn(async () => {}),
   // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
@@ -156,7 +159,7 @@ const claudeSettingsSpies = vi.hoisted(() => ({
   isWorkspaceTrusted: vi.fn(() => true)
 }))
 
-vi.mock('../../services/claude-settings', () => ({
+vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
   saveCleanupPeriodDays: vi.fn(),
@@ -164,24 +167,24 @@ vi.mock('../../services/claude-settings', () => ({
   isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
 }))
 
-vi.mock('../../services/claude-mcp', () => ({
+vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])
 }))
 
-vi.mock('../../services/skill-scanner', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({
   scanSkills: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/custom-command-scanner', () => ({
+vi.mock('../../../core/services/custom-command-scanner', () => ({
   scanCustomCommands: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/usage-fetcher', () => ({
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })), setIntervalSecs: vi.fn() }
 }))
 
-vi.mock('../../services/block-usage', () => ({
+vi.mock('../../../core/services/block-usage', () => ({
   blockUsageService: {
     getData: vi.fn(() => null),
     recalculate: vi.fn(async () => ({ blocks: [] })),
@@ -189,29 +192,17 @@ vi.mock('../../services/block-usage', () => ({
   }
 }))
 
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
-vi.mock('../../services/claude-session', () => {
-  const extraWindows = new Set<any>()
-  return {
-    ClaudeSession: class {
-      static addExtraWindow(w: any): void {
-        extraWindows.add(w)
-      }
-      static removeExtraWindow(w: any): void {
-        extraWindows.delete(w)
-      }
-      static getExtraWindows(): Set<any> {
-        return extraWindows
-      }
-    },
-    getSdkExecutableOpts: vi.fn(() => ({}))
-  }
-})
+vi.mock('../../../core/services/claude-session', () => ({
+  // 4c: no static extra-window registry to stub — clients are subscribers.
+  ClaudeSession: class {},
+  getSdkExecutableOpts: vi.fn(() => ({}))
+}))
 
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: vi.fn(() => {
     async function* empty(): AsyncGenerator<unknown> {
       /* */
@@ -231,12 +222,12 @@ const crossEngineSpies = vi.hoisted(() => ({
   stopDispatch: vi.fn(() => false)
 }))
 
-vi.mock('../../services/cross-engine-dispatcher', () => ({
+vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: crossEngineSpies,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -247,17 +238,35 @@ vi.mock('../../services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { RemoteDispatcher } from '../../services/remote-dispatcher'
-import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
-import { gitWatchRegistry, GIT_WATCH_OWNER_REMOTE } from '../../services/git-watch-registry'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import {
+  registerRemoteHandlers,
+  registerRemoteVersionInfo
+} from '../../../core/ipc/remote-handlers'
+import {
+  CommandRegistry,
+  commandRegistry,
+  makeRemoteConnection,
+  AUTH_OFF_GRANTS,
+  ENROLL_ONLY_GRANTS,
+  PINNED_CAPABILITIES
+} from '../../../core/ipc/command-registry'
+import { setAutomationManager } from '../../../core/ipc/automation-commands'
+import {
+  AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
+  AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
+  SHELL_ACT_VERBS,
+  SHELL_READ_VERBS
+} from '../../../core/services/step-up-tier'
+import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
-import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
-import { setProxyEnv } from '../../sdk/proxy'
-import { setEndpointEnv } from '../../sdk/endpoint-env'
-import { setModelEnv } from '../../sdk/model-env'
-import { usageFetcher } from '../../services/usage-fetcher'
-import { blockUsageService } from '../../services/block-usage'
-import { logger } from '../../services/logger'
+import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
+import { setProxyEnv } from '../../../core/sdk/proxy'
+import { setEndpointEnv } from '../../../core/sdk/endpoint-env'
+import { setModelEnv } from '../../../core/sdk/model-env'
+import { usageFetcher } from '../../../core/services/usage-fetcher'
+import { blockUsageService } from '../../../core/services/block-usage'
+import { logger } from '../../../core/services/logger'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -267,11 +276,31 @@ function makeRequest(channel: string, ...args: unknown[]): WsInvokeRequest {
   return { type: 'invoke', id: 'req-1', channel, args }
 }
 
+/**
+ * The connection every dispatch in this file runs as: a token-authenticated
+ * remote client holding the legacy-policy grant set — exactly what
+ * RemoteServer mints on authentication. Using the real grants (not an
+ * all-capability stand-in) is what makes these tests double as the parity
+ * check: a channel that stopped being reachable would fail here.
+ */
+const remoteConn = makeRemoteConnection('password', null)
+
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A remote-originated broadcast used to be asserted by watching the DESKTOP
+ * window's `webContents.send` — the remote handler passed `notifyMainWindow: true`
+ * so the desktop, uniquely, got a targeted send. 4c deleted that: every client
+ * (desktop included) is a subscriber, so the stub subscribes and the assertions
+ * below keep reading the same `send(channel, ...args)` shape.
+ */
 function makeFakeWindow(): any {
-  return {
+  const win = {
     webContents: { send: vi.fn() },
     isDestroyed: () => false
   }
+  subscribeWindowToSync(win)
+  return win
 }
 
 const sessionStub: any = {
@@ -286,6 +315,9 @@ const sessionStub: any = {
   stopTask: vi.fn(async () => ({ success: true })),
   backgroundTask: vi.fn(async () => ({ success: true })),
   dequeueMessage: vi.fn(async () => ({ removed: 1 })),
+  queuedItems: [],
+  enqueuePrompt: vi.fn(),
+  recallQueued: vi.fn(async () => ({ recalled: ['a'], notRecalled: 0 })),
   setPermissionMode: vi.fn(async () => {}),
   setModel: vi.fn(async () => {}),
   setEffort: vi.fn(),
@@ -308,56 +340,35 @@ const sessionManagerStub: any = {
   setSessionTimeout: vi.fn()
 }
 
-describe('RemoteDispatcher', () => {
+// Routing basics run against a PRIVATE registry so they can never pollute the
+// shared one the parity pin at the bottom of this file reads. Capability gating
+// itself is covered in remote-dispatcher.test.ts.
+describe('RemoteDispatcher routing', () => {
+  let registry: CommandRegistry
   let dispatcher: RemoteDispatcher
 
   beforeEach(() => {
-    dispatcher = new RemoteDispatcher()
+    registry = new CommandRegistry()
+    dispatcher = new RemoteDispatcher(registry)
   })
 
   it('throws when dispatching to an unregistered channel', async () => {
-    await expect(dispatcher.handle(makeRequest('ghost:channel'))).rejects.toThrow(
+    await expect(dispatcher.handle(makeRequest('ghost:channel'), remoteConn)).rejects.toThrow(
       /Channel not available: ghost:channel/
     )
   })
 
   it('propagates handler errors for allowed channels', async () => {
-    dispatcher.register('test:boom', async () => {
-      throw new Error('fail')
+    registry.register({
+      channel: 'test:boom',
+      capability: 'chat',
+      kind: 'query',
+      transport: 'remote',
+      handler: async () => {
+        throw new Error('fail')
+      }
     })
-    await expect(dispatcher.handle(makeRequest('test:boom'))).rejects.toThrow('fail')
-  })
-
-  it('silently skips registration of blocklisted channels', () => {
-    const handler = vi.fn()
-    dispatcher.register('session:pick-folder', handler)
-    expect(dispatcher.has('session:pick-folder')).toBe(false)
-  })
-
-  it.each([
-    'window:minimize',
-    'window:maximize',
-    'window:close',
-    'session:pick-folder',
-    'app:quit-confirm',
-    'app:open-in-vscode',
-    'terminal:create',
-    'terminal:write',
-    'terminal:resize',
-    'terminal:kill',
-    'terminal:kill-by-cwd'
-  ])('blocks desktop-only channel: %s', async (channel) => {
-    const handler = vi.fn(async () => 'SHOULD NOT RUN')
-    dispatcher.register(channel, handler)
-
-    // Not registered.
-    expect(dispatcher.has(channel)).toBe(false)
-    // Dispatching rejects with a typed error.
-    await expect(dispatcher.handle(makeRequest(channel))).rejects.toThrow(
-      new RegExp(`Channel not available: ${channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
-    )
-    // The underlying handler was never invoked.
-    expect(handler).not.toHaveBeenCalled()
+    await expect(dispatcher.handle(makeRequest('test:boom'), remoteConn)).rejects.toThrow('fail')
   })
 })
 
@@ -366,6 +377,11 @@ describe('registerRemoteHandlers', () => {
   let win: any
 
   beforeEach(() => {
+    // `account:get` now reads the core HostAuth seam (S2) rather than importing
+    // account-manager directly — wire a stub with the state the test asserts on.
+    setHostAuth({
+      getAccountState: () => ({ enabled: false, accounts: [] })
+    } as unknown as HostAuth)
     dispatcher = new RemoteDispatcher()
     win = makeFakeWindow()
     Object.values(sessionManagerStub).forEach((fn) => {
@@ -375,19 +391,21 @@ describe('registerRemoteHandlers', () => {
       if (typeof fn === 'function') (fn as any).mockClear?.()
     })
     sessionManagerStub.get.mockReturnValue(sessionStub)
-    registerRemoteHandlers(dispatcher, sessionManagerStub, win)
+    registerRemoteHandlers(dispatcher, sessionManagerStub)
   })
 
   afterEach(() => {
     // gitWatchRegistry is a module singleton shared with the desktop IPC path —
-    // unwind the remote owner so watch state can't leak between tests.
-    gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
+    // unwind this connection's interest so watch state can't leak between tests.
+    gitWatchRegistry.releaseConnection(remoteConn.connectionId)
+    clearSyncSubscribersForTests()
     vi.clearAllMocks()
   })
 
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
     await dispatcher.handle(
-      makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' })
+      makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' }),
+      remoteConn
     )
     expect(crossEngineSpies.resolveApproval).toHaveBeenCalledWith(
       'xeng:perm-7',
@@ -399,7 +417,10 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('routes ordinary approval responses to the session', async () => {
-    await dispatcher.handle(makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'))
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'),
+      remoteConn
+    )
     expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-1', 'allow', undefined, undefined)
     expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
   })
@@ -407,7 +428,8 @@ describe('registerRemoteHandlers', () => {
   it("routes a known dispatch toolUseId to the cross-engine dispatcher's stopDispatch, scoped by routingId (ADR-033 M3)", async () => {
     crossEngineSpies.stopDispatch.mockReturnValueOnce(true)
     const res = await dispatcher.handle(
-      makeRequest('session:stop-task', 'rid-1', 'toolu_dispatch_1')
+      makeRequest('session:stop-task', 'rid-1', 'toolu_dispatch_1'),
+      remoteConn
     )
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_dispatch_1', 'rid-1')
     expect(res).toEqual({ success: true })
@@ -415,7 +437,10 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('falls through to the session stopTask when the id is not a known dispatch', async () => {
-    const res = await dispatcher.handle(makeRequest('session:stop-task', 'rid-1', 'toolu_ordinary_1'))
+    const res = await dispatcher.handle(
+      makeRequest('session:stop-task', 'rid-1', 'toolu_ordinary_1'),
+      remoteConn
+    )
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_ordinary_1', 'rid-1')
     expect(sessionStub.stopTask).toHaveBeenCalledWith('toolu_ordinary_1')
     expect(res).toEqual({ success: true })
@@ -424,7 +449,8 @@ describe('registerRemoteHandlers', () => {
   it('isDispatch=true: arms a durable stop-intent, returns success even with no live turn, never touches the session path', async () => {
     // Default stopDispatch mock returns false — the upstream race window.
     const res = await dispatcher.handle(
-      makeRequest('session:stop-task', 'rid-1', 'toolu_disp_racy', true)
+      makeRequest('session:stop-task', 'rid-1', 'toolu_disp_racy', true),
+      remoteConn
     )
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_disp_racy', 'rid-1', {
       armIfUnknown: true
@@ -452,6 +478,8 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:models'
     ])
       expect(channels).toContain(channel)
+    // The shared-provider MUTATIONS are now remote-registered too (S4 / ADR-057):
+    // the everything-remote ruling reaches provider routing as well.
     for (const channel of [
       'shared-provider:save',
       'shared-provider:remove',
@@ -461,56 +489,101 @@ describe('registerRemoteHandlers', () => {
       'shared-provider:disconnect',
       'shared-provider:set-default'
     ])
-      expect(channels).not.toContain(channel)
+      expect(channels).toContain(channel)
+    // ADR-052 passkeys: registered for remote, but behind `enroll`/`admin`,
+    // neither of which a token/tailnet connection ever holds.
+    for (const channel of [
+      'webauthn:register-options',
+      'webauthn:register-verify',
+      'webauthn:credentials',
+      'webauthn:rename',
+      'webauthn:revoke',
+      'webauthn:mint-enroll-token'
+    ])
+      expect(channels).toContain(channel)
   })
 
-  it('does NOT register blocklisted channels', () => {
+  it('does NOT expose desktop-only channels on the remote transport', () => {
     const channels = dispatcher.channels()
     expect(channels).not.toContain('session:pick-folder')
     expect(channels).not.toContain('app:quit-confirm')
     expect(channels).not.toContain('window:minimize')
   })
 
+  it('keeps every remote:* server-config channel OFF the remote transport (ADR-052 `off`)', () => {
+    // The auth policy — including the `off` master switch — is written ONLY
+    // through `remote:set-config`. That channel having no remote registration is
+    // the structural reason a remote client can never disable authentication;
+    // the `admin` pin alone is no longer sufficient, because a passkey
+    // connection DOES hold `admin`.
+    const channels = dispatcher.channels()
+    for (const channel of [
+      'remote:get-config',
+      'remote:set-config',
+      'remote:set-password',
+      'remote:clear-password',
+      'remote:tailscale-detect',
+      'remote:force-reserve'
+    ])
+      expect(channels).not.toContain(channel)
+  })
+
   it('session:send dispatches to session.run + broadcasts', async () => {
-    await dispatcher.handle(makeRequest('session:send', 'rid-1', 'hi'))
+    await dispatcher.handle(makeRequest('session:send', 'rid-1', 'hi'), remoteConn)
     expect(sessionStub.run).toHaveBeenCalledWith('hi', undefined)
     expect(win.webContents.send).toHaveBeenCalledWith(
       'session:user-message',
       'rid-1',
-      expect.objectContaining({ prompt: 'hi', queued: false })
+      expect.objectContaining({ prompt: 'hi' })
+    )
+  })
+
+  // ADR-053 — a queued send produces a queue item, never a user-message relay.
+  it('session:send on a busy session enqueues instead of broadcasting', async () => {
+    sessionStub.willQueue = true
+    try {
+      await dispatcher.handle(makeRequest('session:send', 'rid-1', 'later'), remoteConn)
+    } finally {
+      sessionStub.willQueue = false
+    }
+    expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('later', undefined)
+    expect(win.webContents.send).not.toHaveBeenCalledWith(
+      'session:user-message',
+      'rid-1',
+      expect.anything()
     )
   })
 
   it('session:send rejects when routingId not found', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    await expect(dispatcher.handle(makeRequest('session:send', 'missing', 'x'))).rejects.toThrow(
-      /No session for routingId/
-    )
+    await expect(
+      dispatcher.handle(makeRequest('session:send', 'missing', 'x'), remoteConn)
+    ).rejects.toThrow(/No session for routingId/)
   })
 
   it('session:cancel dispatches to manager.cancel', async () => {
-    await dispatcher.handle(makeRequest('session:cancel', 'rid-1'))
+    await dispatcher.handle(makeRequest('session:cancel', 'rid-1'), remoteConn)
     expect(sessionManagerStub.cancel).toHaveBeenCalledWith('rid-1')
   })
 
   it('config:load-settings returns settings', async () => {
-    const res = await dispatcher.handle(makeRequest('config:load-settings'))
+    const res = await dispatcher.handle(makeRequest('config:load-settings'), remoteConn)
     expect(res).toEqual({ theme: 'dark' })
   })
 
   it('usage:fetch dispatches to usageFetcher.fetch', async () => {
-    const res = await dispatcher.handle(makeRequest('usage:fetch'))
+    const res = await dispatcher.handle(makeRequest('usage:fetch'), remoteConn)
     expect(res).toEqual({ a: 1 })
   })
 
   it('mcp:status returns empty when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('mcp:status', 'ghost'))
+    const res = await dispatcher.handle(makeRequest('mcp:status', 'ghost'), remoteConn)
     expect(res).toEqual([])
   })
 
   it('mcp:status routes to session.mcpServerStatus when session present', async () => {
-    const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-1'))
+    const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-1'), remoteConn)
     expect(res).toEqual([{ name: 'srv', connected: true }])
     expect(sessionStub.mcpServerStatus).toHaveBeenCalled()
   })
@@ -519,7 +592,7 @@ describe('registerRemoteHandlers', () => {
   // replaced with capability checks + optional-call (`?.`) + neutral forEach.
   describe('ISession optional-member safety (Item 3)', () => {
     it('claude:set-cleanup-period triggers notifySettingsChanged via the neutral forEach', async () => {
-      await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30))
+      await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30), remoteConn)
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
 
@@ -529,7 +602,7 @@ describe('registerRemoteHandlers', () => {
         capabilities: resolveClaudeCapabilities('default')
         // No mcpServerStatus method.
       })
-      const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'))
+      const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'), remoteConn)
       expect(res).toEqual([])
     })
   })
@@ -551,7 +624,10 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('persists the rules and hot-reloads sessions for a user-scope write', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'user', PERMS, undefined),
+        remoteConn
+      )
       expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
         'user',
         PERMS,
@@ -561,12 +637,18 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('notifies user-scope writes even when a cwd is supplied (rules are global)', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'))
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'),
+        remoteConn
+      )
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
 
     it('scopes a project-scope write to sessions on that cwd', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'),
+        remoteConn
+      )
       expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
         'project',
         PERMS,
@@ -578,21 +660,30 @@ describe('registerRemoteHandlers', () => {
       sessionManagerStub.forEach.mockImplementationOnce((cb: (s: any) => void) =>
         cb({ ...sessionStub, cwd: '/repo-a' })
       )
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'))
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'),
+        remoteConn
+      )
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('survives a session whose notifySettingsChanged rejects', async () => {
       sessionStub.notifySettingsChanged.mockRejectedValueOnce(new Error('child is gone'))
       await expect(
-        dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined))
+        dispatcher.handle(
+          makeRequest('claude:save-permissions', 'user', PERMS, undefined),
+          remoteConn
+        )
       ).resolves.toBeUndefined()
     })
   })
 
   it('claude:workspace-trust reports the trust flag for a cwd', async () => {
     claudeSettingsSpies.isWorkspaceTrusted.mockReturnValueOnce(false)
-    const res = await dispatcher.handle(makeRequest('claude:workspace-trust', '/repo-a'))
+    const res = await dispatcher.handle(
+      makeRequest('claude:workspace-trust', '/repo-a'),
+      remoteConn
+    )
     expect(claudeSettingsSpies.isWorkspaceTrusted).toHaveBeenCalledWith('/repo-a')
     expect(res).toBe(false)
   })
@@ -600,7 +691,8 @@ describe('registerRemoteHandlers', () => {
   it('file:list-dir returns structured result on error (no throw)', async () => {
     // Invalid path → handler catches internally and returns default shape.
     const res: any = await dispatcher.handle(
-      makeRequest('file:list-dir', '/does/not/exist/zzzzz-unique')
+      makeRequest('file:list-dir', '/does/not/exist/zzzzz-unique'),
+      remoteConn
     )
     expect(res).toHaveProperty('entries')
     expect(res).toHaveProperty('isRoot')
@@ -610,13 +702,19 @@ describe('registerRemoteHandlers', () => {
 
   it('session:stop-task returns error shape when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('session:stop-task', 'ghost', 'tool-1'))
+    const res = await dispatcher.handle(
+      makeRequest('session:stop-task', 'ghost', 'tool-1'),
+      remoteConn
+    )
     expect(res).toEqual({ success: false, error: 'No active session' })
   })
 
   it('session:dequeue-message returns {removed:0} when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('session:dequeue-message', 'ghost', 'val'))
+    const res = await dispatcher.handle(
+      makeRequest('session:dequeue-message', 'ghost', 'val'),
+      remoteConn
+    )
     expect(res).toEqual({ removed: 0 })
   })
 
@@ -625,24 +723,33 @@ describe('registerRemoteHandlers', () => {
   // hit "Channel not available". They're now wired end-to-end.
   describe('newly-bridged channels', () => {
     it('session:interrupt routes to manager.interrupt', async () => {
-      await dispatcher.handle(makeRequest('session:interrupt', 'rid-1'))
+      await dispatcher.handle(makeRequest('session:interrupt', 'rid-1'), remoteConn)
       expect(sessionManagerStub.interrupt).toHaveBeenCalledWith('rid-1')
     })
 
     it('session:set-thinking-mode routes to session.setThinkingMode', async () => {
-      await dispatcher.handle(makeRequest('session:set-thinking-mode', 'rid-1', 'think'))
+      await dispatcher.handle(
+        makeRequest('session:set-thinking-mode', 'rid-1', 'think'),
+        remoteConn
+      )
       expect(sessionStub.setThinkingMode).toHaveBeenCalledWith('think')
     })
 
     it('session:ask-side-question returns the session answer', async () => {
-      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'rid-1', 'q?'))
+      const res = await dispatcher.handle(
+        makeRequest('session:ask-side-question', 'rid-1', 'q?'),
+        remoteConn
+      )
       expect(sessionStub.askSideQuestion).toHaveBeenCalledWith('q?')
       expect(res).toBe('answer')
     })
 
     it('session:ask-side-question returns null when session missing', async () => {
       sessionManagerStub.get.mockReturnValueOnce(undefined)
-      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'ghost', 'q?'))
+      const res = await dispatcher.handle(
+        makeRequest('session:ask-side-question', 'ghost', 'q?'),
+        remoteConn
+      )
       expect(res).toBeNull()
     })
 
@@ -656,7 +763,7 @@ describe('registerRemoteHandlers', () => {
   it('registerRemoteVersionInfo exposes app:version-info on the dispatcher', async () => {
     expect(dispatcher.has('app:version-info')).toBe(false)
     registerRemoteVersionInfo({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
-    const res = await dispatcher.handle(makeRequest('app:version-info'))
+    const res = await dispatcher.handle(makeRequest('app:version-info'), remoteConn)
     expect(res).toEqual({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
   })
 
@@ -685,13 +792,13 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('mockup:read-html returns the mockup index.html contents', async () => {
-      const res = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      const res = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'), remoteConn)
       expect(res).toBe('<h1>hello</h1>')
     })
 
     it('mockup:read-html rejects for a missing mockup', async () => {
       await expect(
-        dispatcher.handle(makeRequest('mockup:read-html', cwd, 'does-not-exist'))
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, 'does-not-exist'), remoteConn)
       ).rejects.toThrow()
     })
 
@@ -702,31 +809,31 @@ describe('registerRemoteHandlers', () => {
       const outside = path.join(cwd, '.claude', 'ui', 'secret.html')
       fs.writeFileSync(outside, '<h1>secret</h1>')
       await expect(
-        dispatcher.handle(makeRequest('mockup:read-html', cwd, '../../secret'))
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, '../../secret'), remoteConn)
       ).rejects.toThrow(/Invalid mockup directory/)
       // Sanity: the in-root path still works (non-vacuous).
-      const ok = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      const ok = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'), remoteConn)
       expect(ok).toBe('<h1>hello</h1>')
     })
 
     it('mockup:watch/unwatch are idempotent and tolerate a missing directory', async () => {
       // Missing dir → no-op, no throw.
       await expect(
-        dispatcher.handle(makeRequest('mockup:watch', cwd, 'ghost'))
+        dispatcher.handle(makeRequest('mockup:watch', cwd, 'ghost'), remoteConn)
       ).resolves.toBeUndefined()
       // Real dir → watches; second call is a no-op (already watching).
-      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'))
-      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'))
+      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'), remoteConn)
+      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'), remoteConn)
       // Unwatch tears down without throwing; double-unwatch is safe.
-      await dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
+      await dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'), remoteConn)
       await expect(
-        dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
+        dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'), remoteConn)
       ).resolves.toBeUndefined()
     })
   })
 
-  // R5 — full channel parity (user decision: register every non-BLOCKED channel
-  // the web api-adapter invokes). These were previously missing from the
+  // R5 — full channel parity (user decision: register every channel the web
+  // api-adapter invokes that a remote grant covers). These were missing from the
   // dispatcher, so the web client hit "Channel not available" for git, live
   // transcript watching, multi-engine catalogs, account state, etc.
   describe('full channel parity (R5)', () => {
@@ -752,28 +859,27 @@ describe('registerRemoteHandlers', () => {
         'git:fetch',
         // Live watching: previously unregistered web no-ops, which is why the
         // remote client's gitStatus stayed null and its changes pill never
-        // rendered. Now routed through the shared gitWatchRegistry.
-        'git:start-watching',
-        'git:stop-watching'
+        // rendered. Now a per-connection interest set on the shared registry.
+        'git:watch'
       ]) {
-        // register() silently skips BLOCKED channels, so a channel appearing here
-        // also proves it is not on the denylist. (remote-channel-parity.test.ts
-        // asserts the denylist side independently, from source.)
+        // Exposure now means "registered for the remote transport"; that the
+        // capability is also granted is pinned by the parity block at the
+        // bottom of this file.
         expect(channels).toContain(ch)
       }
     })
 
-    it('git:start-watching registers the remote owner and starts exactly one poller', async () => {
+    it('git:watch registers this connection and starts exactly one poller', async () => {
       await expect(
-        dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+        dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
       expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
-      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([GIT_WATCH_OWNER_REMOTE])
+      expect(gitWatchRegistry.watchersOf('/tmp/proj')).toEqual([remoteConn.connectionId])
 
-      // A second remote client on the same cwd attaches; it must NOT re-start the
-      // poller (that would replace the live callback).
-      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+      // Re-stating the same set must NOT re-start the poller (that would replace
+      // the live callback and silence every other watcher).
+      await dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
       expect(gitSvcStub.startPolling).toHaveBeenCalledTimes(1)
     })
 
@@ -785,7 +891,7 @@ describe('registerRemoteHandlers', () => {
       // broadcast for every later test in this file.
       gitWatchRegistry.init((cwd, status) => pushed.push({ cwd, status }))
       try {
-        await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+        await dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
         const emit = gitSvcStub.startPolling.mock.calls[0][0] as (s: unknown) => void
         emit({ files: [], branch: 'main' })
         expect(pushed).toEqual([{ cwd: '/tmp/proj', status: { files: [], branch: 'main' } }])
@@ -794,19 +900,19 @@ describe('registerRemoteHandlers', () => {
       }
     })
 
-    it('git:stop-watching releases the remote owner and stops the poller', async () => {
-      await dispatcher.handle(makeRequest('git:start-watching', '/tmp/proj'))
+    it('an empty git:watch set releases the cwd and stops the poller', async () => {
+      await dispatcher.handle(makeRequest('git:watch', { cwds: ['/tmp/proj'] }), remoteConn)
       await expect(
-        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/proj'))
+        dispatcher.handle(makeRequest('git:watch', { cwds: [] }), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitSvcStub.stopPolling).toHaveBeenCalledTimes(1)
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
-      expect(gitWatchRegistry.ownersOf('/tmp/proj')).toEqual([])
+      expect(gitWatchRegistry.watchersOf('/tmp/proj')).toEqual([])
     })
 
-    it('git:stop-watching for a cwd nobody watches is a no-op', async () => {
+    it('an empty git:watch from a connection watching nothing is a no-op', async () => {
       await expect(
-        dispatcher.handle(makeRequest('git:stop-watching', '/tmp/never'))
+        dispatcher.handle(makeRequest('git:watch', { cwds: [] }), remoteConn)
       ).resolves.toBeUndefined()
       expect(gitSvcStub.stopPolling).not.toHaveBeenCalled()
     })
@@ -838,7 +944,7 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('git:commit dispatches to the service with get/release bracketing', async () => {
-      const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'))
+      const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'), remoteConn)
       expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
       expect(gitSvcStub.commit).toHaveBeenCalledWith('msg')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
@@ -847,27 +953,36 @@ describe('registerRemoteHandlers', () => {
 
     it('git service is released even when the operation throws', async () => {
       gitSvcStub.push.mockRejectedValueOnce(new Error('remote rejected'))
-      await expect(dispatcher.handle(makeRequest('git:push', '/tmp/proj'))).rejects.toThrow(
-        'remote rejected'
-      )
+      await expect(
+        dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)
+      ).rejects.toThrow('remote rejected')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
     })
 
     it('account:get returns the account-manager state', async () => {
-      const res = await dispatcher.handle(makeRequest('account:get'))
+      const res = await dispatcher.handle(makeRequest('account:get'), remoteConn)
       expect(res).toEqual({ enabled: false, accounts: [] })
     })
 
     it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'claude'))).toBe(true)
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'))).toBe(false)
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'))).toBe(false)
+      expect(
+        await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)
+      ).toBe(true)
+      expect(
+        await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)
+      ).toBe(false)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(
+        false
+      )
     })
 
-    it('does NOT register account mutations (denylist still holds)', () => {
+    it('registers the account mutations (S4 / ADR-057 — config, not admin)', () => {
+      // Previously desktop-only; now remote-registered under the everything-
+      // remote ruling. They declare `config` (in AUTH_OFF_GRANTS) and `account:add`
+      // is remote-aware (skips the host browser, surfaces manualUrl).
       const channels = dispatcher.channels()
       for (const ch of ['account:add', 'account:switch', 'account:delete', 'account:set-enabled']) {
-        expect(channels).not.toContain(ch)
+        expect(channels).toContain(ch)
       }
     })
   })
@@ -890,7 +1005,8 @@ describe('registerRemoteHandlers', () => {
           undefined,
           undefined,
           'opencode'
-        )
+        ),
+        remoteConn
       )
       expect(sessionManagerStub.create).toHaveBeenCalled()
       // manager.create's 5th positional arg (index 4) is engineId.
@@ -904,7 +1020,7 @@ describe('registerRemoteHandlers', () => {
         sandbox: { enabled: true, DIFFERENT: true }
       } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
 
-      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'), remoteConn)
 
       expect(sessionManagerStub.create).toHaveBeenCalled()
       // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
@@ -912,7 +1028,7 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
-      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'))
+      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'), remoteConn)
 
       expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
       expect(resolveOpencodeSpawnModel).not.toHaveBeenCalled()
@@ -932,20 +1048,23 @@ describe('registerRemoteHandlers', () => {
           undefined,
           undefined,
           'opencode'
-        )
+        ),
+        remoteConn
       )
 
       expect(resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
       expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
-      const resolvedModel = await (
-        resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>
-      ).mock.results[0].value
+      const resolvedModel = await (resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>)
+        .mock.results[0].value
       // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
       expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
     })
 
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
-      await dispatcher.handle(makeRequest('session:create', 'rid-broadcast', '/tmp/proj'))
+      await dispatcher.handle(
+        makeRequest('session:create', 'rid-broadcast', '/tmp/proj'),
+        remoteConn
+      )
 
       expect(win.webContents.send).toHaveBeenCalledWith(
         'session:created',
@@ -968,7 +1087,8 @@ describe('registerRemoteHandlers', () => {
           proxy: { enabled: true, marker: 'sentinel' },
           anthropicEndpoint: { enabled: true, marker: 'sentinel' },
           modelOverride: { enabled: true, marker: 'sentinel' }
-        })
+        }),
+        remoteConn
       )
 
       expect(uiConfigMocks.saveSettings).toHaveBeenCalled()
@@ -987,7 +1107,7 @@ describe('registerRemoteHandlers', () => {
         modelOverride: { enabled: true, model: 'sentinel-model' }
       })
 
-      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }))
+      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }), remoteConn)
       // applyProxyEnv is fire-and-forget (`.catch(...)`) — flush the microtask queue.
       await new Promise((r) => setImmediate(r))
 
@@ -1009,7 +1129,8 @@ describe('registerRemoteHandlers', () => {
           logLevel: 'debug',
           logFilter: 'Proxy',
           sessionTimeoutMins: 5
-        })
+        }),
+        remoteConn
       )
 
       expect(usageFetcher.setIntervalSecs).toHaveBeenCalledWith(77)
@@ -1023,7 +1144,8 @@ describe('registerRemoteHandlers', () => {
         makeRequest('config:save-settings', {
           theme: 'light',
           sandbox: { enabled: true, marker: 'sentinel' }
-        })
+        }),
+        remoteConn
       )
 
       expect(win.webContents.send).toHaveBeenCalledWith(
@@ -1062,7 +1184,8 @@ describe('registerRemoteHandlers', () => {
       async (projectKey, sessionId) => {
         await expect(
           dispatcher.handle(
-            makeRequest('session:write-custom-title', sessionId, projectKey, 'pwned')
+            makeRequest('session:write-custom-title', sessionId, projectKey, 'pwned'),
+            remoteConn
           )
         ).rejects.toThrow(/Invalid (sessionId|projectKey)/)
         expect(appendSpy).not.toHaveBeenCalled()
@@ -1071,17 +1194,18 @@ describe('registerRemoteHandlers', () => {
 
     it('rejects empty identifiers without writing', async () => {
       await expect(
-        dispatcher.handle(makeRequest('session:write-custom-title', '', 'proj', 't'))
+        dispatcher.handle(makeRequest('session:write-custom-title', '', 'proj', 't'), remoteConn)
       ).rejects.toThrow(/Invalid sessionId/)
       await expect(
-        dispatcher.handle(makeRequest('session:write-custom-title', 'sess-1', '', 't'))
+        dispatcher.handle(makeRequest('session:write-custom-title', 'sess-1', '', 't'), remoteConn)
       ).rejects.toThrow(/Invalid projectKey/)
       expect(appendSpy).not.toHaveBeenCalled()
     })
 
     it('still writes for plain identifiers, under the projects root', async () => {
       await dispatcher.handle(
-        makeRequest('session:write-custom-title', 'sess-1', '-d-proj', 'My title')
+        makeRequest('session:write-custom-title', 'sess-1', '-d-proj', 'My title'),
+        remoteConn
       )
       expect(appendSpy).toHaveBeenCalledTimes(1)
       const [target, payload] = appendSpy.mock.calls[0]
@@ -1090,5 +1214,829 @@ describe('registerRemoteHandlers', () => {
       )
       expect(String(payload)).toContain('"customTitle":"My title"')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PARITY PIN — "zero change to the effective remote surface" (SyncCore phase 1).
+//
+// Encoded LITERALLY from the pre-port registrations (`dispatcher.register(...)`
+// in remote-handlers.ts) minus the then-dispatcher's BLOCKED denylist — which
+// subtracted nothing, because the denylist and the registration set never
+// overlapped: the denylist was belt-and-braces over an explicit allowlist.
+//
+// This is the review gate for the port. It runs against the REAL shared
+// registry after the real registrars, so it fails on a channel that silently
+// gained or lost remote reachability — including via a capability change,
+// since every listed channel must also resolve under the legacy grant set.
+//
+// Later phases add to this list ONLY with a deliberate, reviewed entry:
+//   - `session:recall-queued` (phase 3 / ADR-053) — the itemized replacement
+//     for `session:dequeue-message`, same `chat` capability as the channel it
+//     supersedes, so the effective remote surface is unchanged in substance.
+// ---------------------------------------------------------------------------
+
+const PRE_PORT_REMOTE_CHANNELS = [
+  'account:get',
+  'app:version-info',
+  'claude:get-cleanup-period',
+  'claude:load-permissions',
+  'claude:save-permissions',
+  'claude:set-cleanup-period',
+  'claude:workspace-trust',
+  'config:load-sessions',
+  'config:load-settings',
+  'config:load-skill-details',
+  'config:load-slash-commands',
+  'config:save-sessions',
+  'config:save-settings',
+  'config:scan-custom-commands',
+  'engine:is-installed',
+  'file:list-dir',
+  'git:branches',
+  'git:check-repo',
+  'git:checkout',
+  'git:commit',
+  'git:create-branch',
+  'git:discard-file',
+  'git:fetch',
+  'git:file-contents',
+  'git:file-patch',
+  'git:pull',
+  'git:push',
+  'git:push-with-upstream',
+  'git:stage-all',
+  'git:stage-file',
+  'git:status',
+  'git:watch',
+  'git:unstage-all',
+  'git:unstage-file',
+  'mcp:load-servers',
+  'mcp:read-disabled',
+  'mcp:status',
+  'mockup:read-html',
+  'mockup:unwatch',
+  'mockup:watch',
+  'pi:auth-status',
+  'pi:binary-path',
+  'session:approval-response',
+  'session:ask-side-question',
+  'session:background-task',
+  'session:build-subagent-file-map',
+  'session:cancel',
+  'session:create',
+  'session:delete-project',
+  'session:delete-session',
+  'session:dequeue-message',
+  'session:generate-commit-message',
+  'session:generate-title',
+  'session:get-engine-models',
+  'session:get-models',
+  'session:get-opencode-provider-models',
+  'session:get-opencode-providers',
+  'session:get-pi-model-catalog',
+  'session:get-plan-content',
+  'session:get-session-log-path',
+  'session:interrupt',
+  'session:list-directories',
+  'session:list-opencode',
+  'session:list-pi',
+  'session:load-background-output',
+  'session:load-history',
+  'session:load-opencode-history',
+  'session:load-pi-history',
+  'session:load-subagent-history',
+  'session:read-background-range',
+  'session:recall-queued',
+  'session:rekey',
+  'session:remove-opencode-provider',
+  'session:resolve-fork-anchor',
+  'session:send',
+  'session:set-effort',
+  'session:set-model',
+  'session:set-opencode-provider-disabled',
+  'session:set-permission-mode',
+  'session:set-reasoning-variant',
+  'session:set-thinking-mode',
+  'session:stop-task',
+  'session:unwatch-background',
+  'session:unwatch-session',
+  'session:watch-background',
+  'session:watch-session',
+  'session:write-custom-title',
+  'shared-provider:list',
+  'shared-provider:models',
+  'shared-provider:statuses',
+  // The volatile lane's subscription verb (SyncCore phase 5 S1). `chat`, and a
+  // QUERY — a subscription toggle with no domain effect, so it is unaudited.
+  'stream:watch',
+  'usage:fetch',
+  'usage:fetch-block',
+  'usage:fetch-dispatched',
+  'usage:set-account-filter'
+] as const
+
+/**
+ * THE ONE SANCTIONED SURFACE CHANGE since the phase-1 port (SyncCore phase 2,
+ * ADR-052 decision 6 / security.md §"Terminal posture").
+ *
+ * Why this is not the failure mode the pin above exists to catch: every channel
+ * here declares `shell`, which is NOT in {@link AUTH_OFF_GRANTS}, so
+ * registering them changes nothing about what an authenticated connection can
+ * do. Reaching them requires all three gates, all enforced server-side —
+ * (1) the desktop-only `allow_terminal` toggle (persisted in `remote_config`,
+ * never in remotely-writable settings), (2) a step-up ceremony that verifies a
+ * fresh password proof against the same failure budget as auth, and (3) an idle
+ * decay on the grant that ceremony arms.
+ *
+ * `terminal:availability` is the exception's exception: `config`-capability
+ * (hence reachable) because a client must be able to ask "may I?" WITHOUT
+ * already holding the answer. It returns three booleans and nothing else.
+ *
+ * `terminal:kill-by-cwd` is deliberately absent — that lifecycle sweep belongs
+ * to the desktop's own cold-session cleanup, and a remote client has no reason
+ * to mass-kill the operator's shells.
+ */
+const PHASE2_TERMINAL_CHANNELS = [
+  'terminal:attach',
+  'terminal:availability',
+  'terminal:create',
+  'terminal:detach',
+  'terminal:kill',
+  'terminal:resize',
+  'terminal:write'
+] as const
+
+/**
+ * Terminal channels added AFTER the phase-2 widening, listed separately for the
+ * same reason {@link POST_PORT_CHANNELS} is: the set above is the record of
+ * what that widening exposed, and later additions must read as their own
+ * decision rather than be back-dated into it.
+ *
+ * `terminal:pool` reports which slots of a cwd hold a live pty — what the tab
+ * strip badges "a shell is still running here" from, now that closing a tab
+ * only detaches. It declares `shell`, so it joins the gated set below and
+ * inherits every pin in this file.
+ */
+const POST_PHASE2_TERMINAL_CHANNELS = ['terminal:pool'] as const
+
+/** Every terminal channel behind the `shell` capability (i.e. all but availability). */
+const SHELL_GATED_CHANNELS = [
+  ...PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability'),
+  ...POST_PHASE2_TERMINAL_CHANNELS
+]
+
+/**
+ * Channels added AFTER the phase-1 port, listed separately so the pre-port set
+ * above stays a faithful record of what the port had to preserve.
+ *
+ * `session:clear-conversation` (F4) is `chat`, the same capability as
+ * `session:cancel` and `session:send`: "start fresh" is a conversation action a
+ * phone must be able to take, and it touches nothing outside the session it
+ * names.
+ */
+const POST_PORT_CHANNELS = ['session:clear-conversation'] as const
+
+/**
+ * ADR-052 passkeys. Listed separately for the same reason the terminal set is:
+ * these are the SECOND deliberate widening of the remote surface, and the pins
+ * below must show them as an explicit decision rather than absorb them into the
+ * pre-port baseline.
+ *
+ * Every one declares `enroll` or `admin`, neither of which is in
+ * {@link AUTH_OFF_GRANTS} — so registering them changed what a
+ * passkey-authenticated connection can reach, and changed NOTHING for a
+ * token/tailnet one.
+ */
+const PASSKEY_CHANNELS = [
+  'webauthn:credentials',
+  'webauthn:mint-enroll-token',
+  'webauthn:register-options',
+  'webauthn:register-verify',
+  'webauthn:rename',
+  'webauthn:revoke'
+] as const
+
+/**
+ * ADR-054 decision 6 — the remote-access SETTINGS WRITES. The THIRD deliberate
+ * widening, listed separately for the same reason the other two are.
+ *
+ * Every one declares `admin` (outside {@link AUTH_OFF_GRANTS}, so
+ * authenticating never suffices) AND is gated on a presence proof inside the
+ * mutation window on every tier — the transport classifies this namespace as
+ * `authcfg`. What makes the widening safe to review is what is ABSENT: the `off`
+ * master switch. Auth-DISABLING operations stay host-anchor only and stay in
+ * `remote:set-config`, which has no remote registration at all (pinned below).
+ */
+const AUTHCFG_WRITE_CHANNELS = [
+  'authcfg:apply',
+  // ADR-056 item C. `authcfg:lan-link` sits in the WRITE half despite being a
+  // `query`, and that is the decision under test: what gates a verb in this
+  // namespace is what it DISCLOSES — here a live channel key — not its kind.
+  'authcfg:lan-link',
+  'authcfg:rotate-lan-key',
+  'authcfg:set-password'
+] as const
+
+/**
+ * The FREE half. Same `admin` gate, but no settings session demanded:
+ * `authcfg:get` READS (the pane's default state is the read), and `authcfg:end`
+ * only ever gives authority back — gating a revocation would let an operator
+ * open an editor under `strong` and then be refused permission to close it.
+ *
+ * Listed apart from the writes because the pins below say different things about
+ * them: all four are registered and all need `admin`, but only the writes may
+ * appear in the classifier's `AUTHCFG_CHANNELS`.
+ */
+const AUTHCFG_FREE_CHANNELS_PIN = ['authcfg:end', 'authcfg:get'] as const
+
+/** Everything in the namespace, for the registration pins. */
+const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNELS] as const
+
+/**
+ * SyncCore phase 5 S3 — remote browser voice input. Listed separately for the
+ * same reason every other widening is: it must read as its own decision.
+ *
+ * Unlike the three above, these declare `chat` — INSIDE
+ * {@link AUTH_OFF_GRANTS} — so they widen what an ordinary token/tailnet
+ * connection can do, and that is deliberate: a capture produces a draft message,
+ * which is exactly what `session:send` already lets the same connection do. What
+ * makes it a narrow widening rather than a broad one is what these verbs
+ * DON'T reach: no host device (the microphone is the browser's), no filesystem,
+ * no shell. The audio never comes through the registry at all — it rides the
+ * `voice-audio` lane frame, accepted only while one of these has bound a capture
+ * to the connection.
+ */
+const VOICE_CHANNELS = ['voice:start', 'voice:stop'] as const
+
+/**
+ * S1b — the registration sweep for the everything-remote ruling (2026-08-17):
+ * everything is changeable from the remote UI except host-PHYSICAL verbs.
+ *
+ * The FOURTH deliberate widening, and the widest one, so it gets the same
+ * treatment as the other three: its own list, read as its own decision.
+ *
+ * Unlike the terminal / passkey / authcfg sets, every channel here declares
+ * `config`, `git` or `chat` — all INSIDE {@link AUTH_OFF_GRANTS} — so this
+ * genuinely widens what an ordinary authenticated connection reaches. That is
+ * the ruling, not an accident, and what bounds it is the same rule as always:
+ * host-physical verbs (`session:pick-folder`, `app:open-in-vscode`, `window:*`)
+ * declare `host` and are not registered on this transport at all.
+ *
+ * They are also not SECOND registrations: `session.ipc.ts` (desktop) and
+ * `remote-handlers.ts` (remote) spread the same declarations from
+ * `ipc/config-commands.ts` / `ipc/automation-commands.ts`, so a capability can
+ * no more drift between the two surfaces here than it can for `stream:watch`.
+ *
+ * `automation:*` is the port half: it was raw `ipcMain.handle` with no
+ * capability, no audit and no remote twin. It declares `config` — host-side
+ * configuration — and the seven mutating channels are therefore GONE from
+ * `PINNED_CAPABILITIES`, which may only hold capabilities the base grant set
+ * lacks. `log-viewer:*` stays pinned and unregistered: window chrome, forever
+ * desktop.
+ */
+const S1B_SWEEP_CHANNELS = [
+  'automation:cancel',
+  'automation:delete',
+  'automation:dismiss-run',
+  'automation:list',
+  'automation:list-runs',
+  'automation:load-run-history',
+  'automation:run-now',
+  'automation:save',
+  'automation:send-message',
+  'automation:toggle',
+  'config:load-engine-config',
+  'config:load-opencode-settings',
+  'config:load-vendor-config',
+  'config:patch-opencode-native',
+  'config:read-opencode-native-raw',
+  'config:save-engine-config',
+  'config:save-opencode-settings',
+  'config:save-slash-commands',
+  'config:save-vendor-config',
+  'mcp:reconnect',
+  'mcp:remove-server',
+  'mcp:save-servers',
+  'mcp:set-servers',
+  'mcp:toggle',
+  'mcp:toggle-disabled',
+  'opencode-agents:delete',
+  'opencode-agents:generate',
+  'opencode-agents:list',
+  'opencode-agents:read',
+  'opencode-agents:save',
+  'opencode-agents:set-disabled',
+  'proxy:test-connection',
+  'usage:refresh-prices',
+  'worktree:create',
+  'worktree:list',
+  'worktree:remove',
+  'worktree:status'
+] as const
+
+/**
+ * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
+ *
+ * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
+ * throughout — all INSIDE {@link AUTH_OFF_GRANTS} — so an ordinary authenticated
+ * connection reaches every one. That is the everything-remote ruling reaching
+ * the LAST family S1b deferred: a vendor credential is engine configuration, not
+ * the session-security surface (ADR-056), and consent + code-return now work
+ * from any browser (ADR-057). What bounds it: token material never crosses the
+ * wire (`probe`/`list-keys` return booleans/kind/labels), and the two flow verbs
+ * that would open a host browser (`auth:sign-in`, `account:add`) derive
+ * remote-vs-desktop from the connection and skip `openExternal` for a remote
+ * caller — the exchange stays host-side either way.
+ *
+ * They are also not SECOND registrations: `session.ipc.ts` (desktop) and
+ * `remote-handlers.ts` (remote) spread the same declarations from
+ * `ipc/auth-commands.ts`, so a capability cannot drift between the two surfaces.
+ */
+const S4_VENDOR_CREDENTIAL_CHANNELS = [
+  'account:add',
+  'account:delete',
+  'account:set-enabled',
+  'account:switch',
+  'auth:cancel',
+  'auth:sign-in',
+  'auth:submit-code',
+  'shared-provider:disconnect',
+  'shared-provider:remove',
+  'shared-provider:save',
+  'shared-provider:set-default',
+  'shared-provider:set-key',
+  'shared-provider:set-route',
+  'shared-provider:sync',
+  'vendor-auth:list-keys',
+  'vendor-auth:list-options',
+  'vendor-auth:oauth-authorize',
+  'vendor-auth:oauth-callback',
+  'vendor-auth:oauth-cancel',
+  'vendor-auth:probe',
+  'vendor-auth:remove',
+  'vendor-auth:set-key'
+] as const
+
+/** channel → the capability it must declare (the reachability decision). */
+const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
+  'webauthn:register-options': 'enroll',
+  'webauthn:register-verify': 'enroll',
+  'webauthn:credentials': 'admin',
+  'webauthn:mint-enroll-token': 'admin',
+  'webauthn:rename': 'admin',
+  'webauthn:revoke': 'admin'
+}
+
+describe('remote surface parity (phase 1 port)', () => {
+  // The dispatcher the two S1b reachability cases below actually call through —
+  // the same object `registerRemoteHandlers` was handed, resolving against the
+  // shared registry exactly as production does.
+  let dispatcher: RemoteDispatcher
+
+  beforeEach(() => {
+    // Subscribes a fake desktop client to the funnel, mirroring production's
+    // "somebody else is listening too" (the parity assertions below read the
+    // registry, not this sink).
+    makeFakeWindow()
+    dispatcher = new RemoteDispatcher()
+    registerRemoteHandlers(dispatcher, sessionManagerStub)
+    // Registered later in the real bootstrap, once build versions are known.
+    registerRemoteVersionInfo({ appVersion: '1', sdkVersion: '2', cliVersion: '3' })
+  })
+
+  afterEach(() => {
+    gitWatchRegistry.releaseConnection(remoteConn.connectionId)
+  })
+
+  it('exposes exactly the pre-port channel set plus the phase-2 terminal and passkey channels', () => {
+    expect(commandRegistry.channels('remote')).toEqual(
+      [
+        ...PRE_PORT_REMOTE_CHANNELS,
+        ...PHASE2_TERMINAL_CHANNELS,
+        ...POST_PHASE2_TERMINAL_CHANNELS,
+        ...POST_PORT_CHANNELS,
+        ...PASSKEY_CHANNELS,
+        ...AUTHCFG_CHANNELS,
+        ...VOICE_CHANNELS,
+        ...S1B_SWEEP_CHANNELS,
+        ...S4_VENDOR_CREDENTIAL_CHANNELS
+      ].sort()
+    )
+  })
+
+  it('the S1b sweep is reachable with the base grant set, and audited where it mutates', async () => {
+    // The point of the sweep: a phone holding nothing but an ordinary
+    // authenticated connection reaches these. Asserted through the CAPABILITY
+    // (what dispatch actually checks) rather than by calling every handler —
+    // most of them would touch the real filesystem.
+    const caps = S1B_SWEEP_CHANNELS.map(
+      (c) => [c, commandRegistry.declaration(c)?.capability] as const
+    )
+    const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
+    expect(
+      ungranted,
+      `S1b channels a base connection cannot reach: ${ungranted.map(([c]) => c).join(', ')}`
+    ).toEqual([])
+    // `opencode-agents:generate` spends model tokens, so it is `chat`, not
+    // `config` — the one deliberate difference inside the sweep.
+    expect(commandRegistry.declaration('opencode-agents:generate')?.capability).toBe('chat')
+    expect(commandRegistry.declaration('worktree:create')?.capability).toBe('git')
+    // Automations are host-side CONFIGURATION (see ipc/automation-commands.ts),
+    // and their reads are reads.
+    expect(commandRegistry.declaration('automation:save')).toMatchObject({
+      capability: 'config',
+      kind: 'command'
+    })
+    expect(commandRegistry.declaration('automation:list')).toMatchObject({
+      capability: 'config',
+      kind: 'query'
+    })
+  })
+
+  it('automation:save dispatches over the remote transport, and fails closed without `config`', async () => {
+    // RED BEFORE S1b: `automation:*` had no remote registration at all, so this
+    // same dispatch answered `Channel not available: automation:save` — the
+    // unregistered-channel shape, which `automation-commands.test.ts` pins
+    // explicitly against a registry that has not registered them.
+    const saved: unknown[] = []
+    setAutomationManager({
+      upsert: (a: unknown) => saved.push(a)
+    } as unknown as Parameters<typeof setAutomationManager>[0])
+
+    const granted = makeRemoteConnection('password', null)
+    await dispatcher.handle(makeRequest('automation:save', { id: 'nightly' }), granted)
+    expect(saved).toEqual([{ id: 'nightly' }])
+
+    // An enrollment link holds `enroll` and nothing else — the narrowest real
+    // connection the server mints.
+    const ungranted = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+    await expect(
+      dispatcher.handle(makeRequest('automation:save', { id: 'nightly' }), ungranted)
+    ).rejects.toThrow(/Permission denied: "automation:save" requires the "config" capability/)
+    expect(saved).toHaveLength(1)
+  })
+
+  it('refuses a traversal id on every newly-remote path-building family (F1)', async () => {
+    // RED BEFORE the F1 fix: `config:save-engine-config` with this engineId wrote
+    // `~/.claude/settings.json` — Claude Code's hooks + permissions file, whose
+    // contents execute with no approval gate — from any authenticated remote
+    // connection. `opencode-agents:save` was the same shape against arbitrary
+    // `.md` (e.g. `~/.claude/CLAUDE.md`, standing model instructions).
+    //
+    // This asserts the PERIMETER (`ipc/config-commands.ts`), which is the layer a
+    // transport can see: `ui-config` is mocked in this file, so nothing here could
+    // reach the service backstop. That second layer is unit-tested directly in
+    // `services/__tests__/ui-config-path-guard.test.ts` and
+    // `opencode/__tests__/opencode-agents.test.ts`.
+    const conn = makeRemoteConnection('password', null)
+    const escapes = ['../../settings', '..', 'a/b', 'a\\b', 'C:evil', '.hidden', '']
+
+    for (const bad of escapes) {
+      // The two config families throw (no `safeHandler` envelope on them).
+      await expect(
+        dispatcher.handle(makeRequest('config:save-engine-config', bad, {}), conn),
+        `engineId ${JSON.stringify(bad)}`
+      ).rejects.toThrow(/Invalid engineId/)
+      await expect(
+        dispatcher.handle(makeRequest('config:load-engine-config', bad), conn)
+      ).rejects.toThrow(/Invalid engineId/)
+      await expect(
+        dispatcher.handle(makeRequest('config:save-vendor-config', bad, {}), conn)
+      ).rejects.toThrow(/Invalid vendorId/)
+      await expect(
+        dispatcher.handle(makeRequest('config:load-vendor-config', bad), conn)
+      ).rejects.toThrow(/Invalid vendorId/)
+
+      // The agent family is `safeHandler`-wrapped, so the refusal arrives as the
+      // envelope the desktop and the web client both already read.
+      for (const [channel, args] of [
+        ['opencode-agents:read', [bad, 'global']],
+        ['opencode-agents:save', [{ name: bad, scope: 'global', mode: 'all' }]],
+        ['opencode-agents:delete', [bad, 'global']],
+        ['opencode-agents:set-disabled', [bad, 'global', undefined, true]]
+      ] as Array<[string, unknown[]]>) {
+        const result = (await dispatcher.handle(makeRequest(channel, ...args), conn)) as {
+          ok: boolean
+          error?: string
+        }
+        expect(result.ok, `${channel} ${JSON.stringify(bad)}`).toBe(false)
+        expect(result.error).toMatch(/Invalid agent name/)
+      }
+    }
+
+    // …and the real vocabularies still pass: engine ids, provider ids, and the
+    // agent names the settings UI produces.
+    for (const good of ['claude', 'opencode', 'pi']) {
+      await expect(
+        dispatcher.handle(makeRequest('config:load-engine-config', good), conn)
+      ).resolves.toBeDefined()
+    }
+    for (const good of ['anthropic', 'openai-codex', 'github-copilot', 'zen']) {
+      await expect(
+        dispatcher.handle(makeRequest('config:load-vendor-config', good), conn)
+      ).resolves.toBeDefined()
+    }
+  })
+
+  it('a traversal automation id is refused at the perimeter, over the remote transport too', async () => {
+    const spy = vi.fn()
+    setAutomationManager({ delete: spy } as unknown as Parameters<typeof setAutomationManager>[0])
+    await expect(
+      dispatcher.handle(
+        makeRequest('automation:delete', '../..'),
+        makeRemoteConnection('password', null)
+      )
+    ).rejects.toThrow(/Invalid automation id/)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('every exposed channel outside the shell/passkey sets is reachable under the legacy grant set', () => {
+    const unreachable = commandRegistry
+      .channels('remote')
+      .map((c) => [c, commandRegistry.declaration(c)!.capability] as const)
+      .filter(([, cap]) => !AUTH_OFF_GRANTS.has(cap))
+    // The complete list of channels a token/tailnet connection cannot reach:
+    // the shell-gated terminal set (step-up) and the passkey set (a proven
+    // human, or a one-time enrollment link). Anything else appearing here is a
+    // channel that silently stopped being reachable — or started being one.
+    const expected = [
+      ...SHELL_GATED_CHANNELS.map((c) => [c, 'shell'] as const),
+      ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const),
+      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const)
+    ].sort(([a], [b]) => a.localeCompare(b))
+    expect(
+      [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
+      `these channels declare a capability remote connections do not hold: ${unreachable
+        .map(([c, cap]) => `${c}(${cap})`)
+        .join(', ')}`
+    ).toEqual(expected)
+  })
+
+  it('the passkey channels are unreachable from a plain token connection', async () => {
+    const conn = makeRemoteConnection('password', null)
+    for (const channel of PASSKEY_CHANNELS) {
+      await expect(
+        commandRegistry.dispatch(channel, 'remote', ['x'], conn),
+        `${channel} must require enroll/admin`
+      ).rejects.toThrow(/Permission denied/)
+    }
+  })
+
+  it('the authcfg channels are unreachable from a plain token connection', async () => {
+    // The capability half of the gate. The FRESHNESS half (a presence proof
+    // inside the mutation window, on every tier) is enforced at the transport
+    // and asserted over a real socket in remote-step-up-tiers.test.ts.
+    const conn = makeRemoteConnection('password', null)
+    for (const channel of AUTHCFG_CHANNELS) {
+      await expect(
+        commandRegistry.dispatch(channel, 'remote', ['x'], conn),
+        `${channel} must require admin`
+      ).rejects.toThrow(/Permission denied/)
+    }
+  })
+
+  it('every registered `shell` channel is classified read or act — exactly once', () => {
+    // The LIVE half of the ADR-054 coverage pin (its static twin, over
+    // PINNED_CAPABILITIES, is in services/__tests__/step-up-tier.test.ts). A new
+    // terminal channel that nobody classified would silently take
+    // `classifyDispatch`'s fail-closed ACT branch, which is the right failure but
+    // the wrong way to find out.
+    const shellChannels = commandRegistry
+      .channels()
+      .filter((c) => commandRegistry.declaration(c)!.capability === 'shell')
+    expect(shellChannels.length).toBeGreaterThan(5)
+    const unclassified = shellChannels.filter(
+      (c) => !SHELL_READ_VERBS.has(c) && !SHELL_ACT_VERBS.has(c)
+    )
+    expect(unclassified, `unclassified shell verbs: ${unclassified.join(', ')}`).toEqual([])
+    const both = shellChannels.filter((c) => SHELL_READ_VERBS.has(c) && SHELL_ACT_VERBS.has(c))
+    expect(both, `classified BOTH ways: ${both.join(', ')}`).toEqual([])
+  })
+
+  it('the CLASSIFIER knows exactly the authcfg MUTATIONS that are registered', () => {
+    // The coupling that makes the namespace's freshness rule real: a verb
+    // registered here but missing from `AUTHCFG_CHANNELS` in step-up-tier.ts
+    // would be classified `mutation` — i.e. silently FREE under the default
+    // `medium` tier — instead of demanding a presence proof on every tier.
+    // Compared against this file's own literal list so the pin stays
+    // independent of the thing it is pinning.
+    expect([...CLASSIFIED_AUTHCFG_CHANNELS].sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
+  })
+
+  it('every registered authcfg channel is in EXACTLY ONE classifier set', () => {
+    // The guard that keeps "outside the gated set" from ever meaning
+    // "accidentally free". Two members of this namespace are legitimately exempt
+    // (`authcfg:get` reads; `authcfg:end` only revokes), so "is it in
+    // AUTHCFG_CHANNELS?" stopped being a complete question on its own — and a
+    // new verb added to NEITHER set would be classified `mutation`, i.e.
+    // reachable with no unlocked editor at all under the default tier.
+    //
+    // So the namespace is pinned as a partition: every registered channel is in
+    // one set or the other, never both and never neither, and this file's own
+    // literal lists say which. A verb someone forgets to classify fails here even
+    // if they also forget to update these lists.
+    const registered = commandRegistry.channels('remote').filter((c) => c.startsWith('authcfg:'))
+    const gated = registered.filter((c) => CLASSIFIED_AUTHCFG_CHANNELS.has(c))
+    const free = registered.filter((c) => CLASSIFIED_AUTHCFG_FREE_CHANNELS.has(c))
+    expect(gated.sort()).toEqual([...AUTHCFG_WRITE_CHANNELS].sort())
+    expect(free.sort()).toEqual([...AUTHCFG_FREE_CHANNELS_PIN].sort())
+    expect([...gated, ...free].sort()).toEqual([...registered].sort())
+    for (const channel of registered) {
+      expect(
+        CLASSIFIED_AUTHCFG_CHANNELS.has(channel) && CLASSIFIED_AUTHCFG_FREE_CHANNELS.has(channel),
+        `${channel} is in BOTH sets`
+      ).toBe(false)
+    }
+    // The one that must never be gated, stated on its own so the reason survives
+    // a future edit to the lists above: Cancel has to work unconditionally.
+    expect(CLASSIFIED_AUTHCFG_CHANNELS.has('authcfg:end')).toBe(false)
+  })
+
+  it('no remotely-registered channel can write the auth-DISABLING switch', () => {
+    // ADR-054 decision 6, structurally. `remote:set-config` is the only writer of
+    // `authPolicy: 'off'`, and it has no remote registration — so the host anchor
+    // holds by construction rather than by a capability check (a passkey
+    // connection DOES hold `admin`). The settings verbs that ARE web-reachable
+    // live in their own namespace, and `authcfg:apply` refuses an `off` auth-mode
+    // with a typed error (asserted in authcfg-commands.test.ts).
+    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([])
+    expect(
+      commandRegistry
+        .channels('remote')
+        .filter((c) => c.startsWith('authcfg:'))
+        .sort()
+    ).toEqual([...AUTHCFG_CHANNELS].sort())
+  })
+
+  it('declares the terminal KINDS the gates depend on', () => {
+    // Since ADR-054 the shell idle deadline is refreshed by the read/act VERB
+    // SETS, not by `kind` — `terminal:attach` is a `command` that reads and
+    // `terminal:pool` is a `query` that is still a shell read, so keying the
+    // refresh on `kind` would have been wrong in both directions (that coupling
+    // is pinned in step-up-tier.test.ts).
+    //
+    // `kind` still carries the AUDIT contract, which is why these declarations
+    // stay pinned: a terminal lifecycle channel relabelled `query` silently
+    // stops being audited, and security.md §Audit requires spawn/attach/detach/
+    // exit in the trail. `terminal:pool` is a `query` precisely because it moves
+    // no lifecycle and has nothing to record.
+    expect(commandRegistry.declaration('terminal:pool')).toMatchObject({
+      capability: 'shell',
+      kind: 'query'
+    })
+    for (const channel of ['terminal:create', 'terminal:kill', 'terminal:attach'] as const) {
+      expect(commandRegistry.declaration(channel), channel).toMatchObject({
+        capability: 'shell',
+        kind: 'command'
+      })
+    }
+  })
+
+  it('the phase-2 terminal channels are unreachable WITHOUT a step-up grant', async () => {
+    // The registration is not the gate — the grant set is. A connection holding
+    // the standard remote grants is refused by the registry itself.
+    const conn = makeRemoteConnection('password', null)
+    for (const channel of SHELL_GATED_CHANNELS) {
+      await expect(
+        commandRegistry.dispatch(channel, 'remote', ['x'], conn),
+        `${channel} must require the shell capability`
+      ).rejects.toThrow(/Permission denied/)
+    }
+    // …and the honesty query stays answerable without it.
+    await expect(
+      commandRegistry.dispatch('terminal:availability', 'remote', [], conn)
+    ).resolves.toMatchObject({ allowed: false, granted: false })
+  })
+
+  it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
+    // THREE sanctioned widenings, each deliberate and each behind a ceremony:
+    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), and
+    // the `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with
+    // the two LAN-channel verbs — which is also when the namespace joined the
+    // pin table, `admin` having shrunk to exactly these two families).
+    // Everything else in the pin table must still be absent from the remote
+    // surface — which, for `remote:set-config`, is what makes the `off` master
+    // switch structurally unreachable from a remote client now that a passkey
+    // connection holds `admin`.
+    const exposed = new Set(commandRegistry.channels('remote'))
+    const sanctioned = new Set<string>([
+      ...SHELL_GATED_CHANNELS,
+      ...PASSKEY_CHANNELS,
+      ...AUTHCFG_CHANNELS
+    ])
+    for (const channel of Object.keys(PINNED_CAPABILITIES)) {
+      if (sanctioned.has(channel)) continue
+      expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S4 — the vendor-OAuth / account / native-OAuth family, dispatched (ADR-057).
+//
+// The parity block above pins that these channels are REGISTERED and reachable
+// under the base grant set. This block drives them through the shared registry
+// with an injected fake auth provider, so it covers what registration alone
+// cannot: fail-closed gating, token-never-on-wire, and the opencode-`auto`
+// remote refusal.
+// ---------------------------------------------------------------------------
+
+describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
+  let dispatcher: RemoteDispatcher
+
+  // A fake provider standing in for whatever engineId is asked for — the branch
+  // that matters (opencode-auto refusal) keys on the engineId ARG, not on which
+  // provider object comes back.
+  const fakeProvider = {
+    probe: vi.fn(async () => ({
+      openai: { authState: 'authenticated', billingType: 'apiKey', label: 'API key' }
+    })),
+    listVendorCredentialIds: vi.fn(async () => ({ openai: 'api' as const })),
+    oauthAuthorize: vi.fn(async () => ({
+      url: 'https://auth.example.com/oauth?x=1',
+      method: 'auto' as const,
+      instructions: 'Sign in.'
+    })),
+    cancelVendorOauth: vi.fn(async () => {}),
+    oauthCallback: vi.fn(async () => true)
+  }
+
+  beforeEach(() => {
+    fakeProvider.probe.mockClear()
+    fakeProvider.cancelVendorOauth.mockClear()
+    makeFakeWindow()
+    dispatcher = new RemoteDispatcher()
+    registerRemoteHandlers(dispatcher, sessionManagerStub, undefined, {
+      requireEngineAuth: () => fakeProvider as never,
+      setAccountEnabled: async (enabled: boolean) => ({
+        enabled,
+        activeId: null,
+        accounts: []
+      })
+    })
+  })
+
+  afterEach(() => {
+    gitWatchRegistry.releaseConnection(remoteConn.connectionId)
+    clearSyncSubscribersForTests()
+  })
+
+  it('an ordinary authenticated (config) connection reaches vendor-auth:probe', async () => {
+    const conn = makeRemoteConnection('password', null)
+    const res = (await dispatcher.handle(makeRequest('vendor-auth:probe', 'opencode'), conn)) as {
+      ok: boolean
+      data?: unknown
+    }
+    expect(res.ok).toBe(true)
+    expect(fakeProvider.probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('an enroll-only connection is refused (fail-closed — config not held)', async () => {
+    const conn = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+    await expect(
+      dispatcher.handle(makeRequest('vendor-auth:probe', 'opencode'), conn)
+    ).rejects.toThrow(/Permission denied: "vendor-auth:probe" requires the "config" capability/)
+    expect(fakeProvider.probe).not.toHaveBeenCalled()
+  })
+
+  it('token material never crosses the wire (probe/list-keys carry no access/refresh/key)', async () => {
+    const conn = makeRemoteConnection('password', null)
+    const probe = (await dispatcher.handle(makeRequest('vendor-auth:probe', 'opencode'), conn)) as {
+      ok: boolean
+      data: Record<string, Record<string, unknown>>
+    }
+    const keys = (await dispatcher.handle(
+      makeRequest('vendor-auth:list-keys', 'opencode'),
+      conn
+    )) as { ok: boolean; data: Record<string, unknown> }
+    const SECRET_FIELDS = ['access', 'refresh', 'token', 'key', 'apiKey', 'secret']
+    for (const entry of Object.values(probe.data)) {
+      for (const field of SECRET_FIELDS) expect(entry).not.toHaveProperty(field)
+    }
+    // list-keys is a map of vendorId → 'api' | 'oauth' — kinds, never material.
+    expect(Object.values(keys.data)).toEqual(['api'])
+  })
+
+  it("refuses opencode's `auto` method from a REMOTE caller and tears the flow down", async () => {
+    const conn = makeRemoteConnection('password', null)
+    const res = (await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-authorize', 'opencode', 'anthropic', 0),
+      conn
+    )) as { ok: boolean; error?: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/only completes on the host machine/)
+    expect(fakeProvider.cancelVendorOauth).toHaveBeenCalledTimes(1)
+  })
+
+  it("does NOT refuse pi's Codex `auto` remotely — it completes via paste-back", async () => {
+    const conn = makeRemoteConnection('password', null)
+    const res = (await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-authorize', 'pi', 'openai-codex', 0),
+      conn
+    )) as { ok: boolean; data?: { url: string } }
+    expect(res.ok).toBe(true)
+    expect(res.data?.url).toContain('auth.example.com')
+    expect(fakeProvider.cancelVendorOauth).not.toHaveBeenCalled()
   })
 })

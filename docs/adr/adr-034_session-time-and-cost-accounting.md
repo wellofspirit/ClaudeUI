@@ -19,7 +19,7 @@ inconsistent and lossy:
 - **Nothing survived a reload.** Cost and duration lived only in in-memory accumulators.
 
 Probing the pinned bun-claude binary surfaced the load-bearing wire facts (now recorded in
-docs/protocol/03-inbound-messages.md §3.7):
+docs/protocol-cc/03-inbound-messages.md §3.7):
 
 1. `result.total_cost_usd` and `result.modelUsage` (per-model `costUSD`) are **cumulative within one
    cli.js process** and **reset to zero on `--resume`**; only `usage`/`duration_ms`/`duration_api_ms`
@@ -92,7 +92,7 @@ failed turn that crosses simply causes the next turn to be rejected.
 - Both engines report the same session-time semantic; the tooltip shows Session time (live-ticking),
   API time (Claude), and a per-model cost breakdown that survives app restarts.
 - Two double-count bugs rooted in the undocumented cumulative semantics are fixed (session headline
-  cost; dispatch cost cap/rows). The wire facts are now pinned in docs/protocol §3.7 so future
+  cost; dispatch cost cap/rows). The wire facts are now pinned in docs/protocol-cc §3.7 so future
   consumers can't repeat the mistake.
 - Own-engine durability reads engine-native transcripts, not our DB (consistent with ADR-020's
   "no private copies" stance); the DB is used only where no transcript carries the data

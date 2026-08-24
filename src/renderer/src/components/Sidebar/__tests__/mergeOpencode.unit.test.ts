@@ -8,7 +8,7 @@
  * Also verifies that sessions with different projectKeys create separate groups.
  */
 import { describe, it, expect } from 'vitest'
-import { mergeOpencodeIntoDirectories } from '../Sidebar'
+import { mergeOpencodeIntoDirectories } from '../../../../../shared/directory-merge'
 import type { DirectoryGroup, SessionInfo } from '../../../../../shared/types'
 
 function makeClaudeSession(id: string, cwd: string, projectKey: string): SessionInfo {
@@ -49,7 +49,11 @@ describe('mergeOpencodeIntoDirectories', () => {
     const claudeSession = makeClaudeSession('c1', 'D:/WorkPlace/ClaudeUI', 'D--WorkPlace-ClaudeUI')
     const claudeGroup = makeGroup('D:/WorkPlace/ClaudeUI', 'D--WorkPlace-ClaudeUI', [claudeSession])
 
-    const opencodeSession = makeOpencodeSession('o1', 'D:/WorkPlace/ClaudeUI', 'D--WorkPlace-ClaudeUI')
+    const opencodeSession = makeOpencodeSession(
+      'o1',
+      'D:/WorkPlace/ClaudeUI',
+      'D--WorkPlace-ClaudeUI'
+    )
 
     const result = mergeOpencodeIntoDirectories([claudeGroup], [opencodeSession])
 
@@ -84,15 +88,14 @@ describe('mergeOpencodeIntoDirectories', () => {
     // First merge: o1 + o2
     const first = mergeOpencodeIntoDirectories(
       [claudeGroup],
-      [
-        makeOpencodeSession('o1', '/proj', '-proj'),
-        makeOpencodeSession('o2', '/proj', '-proj')
-      ]
+      [makeOpencodeSession('o1', '/proj', '-proj'), makeOpencodeSession('o2', '/proj', '-proj')]
     )
     expect(first[0].sessions.map((s) => s.sessionId).sort()).toEqual(['c1', 'o1', 'o2'].sort())
 
     // Second merge: only o3 — o1 and o2 must be gone
-    const second = mergeOpencodeIntoDirectories(first, [makeOpencodeSession('o3', '/proj', '-proj')])
+    const second = mergeOpencodeIntoDirectories(first, [
+      makeOpencodeSession('o3', '/proj', '-proj')
+    ])
     expect(second[0].sessions.map((s) => s.sessionId).sort()).toEqual(['c1', 'o3'].sort())
   })
 

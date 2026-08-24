@@ -28,8 +28,8 @@ import {
   MIGRATIONS,
   type Migration,
   type Db
-} from '../db'
-import { logger } from '../logger'
+} from '../../../core/services/db'
+import { logger } from '../../../core/services/logger'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
 beforeEach(() => {
@@ -134,15 +134,19 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v8)', () => {
+  it('applies the real production migration set (v1–v12)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
       runMigrations(db)
       // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
       // v5: daily_usage, v6: dispatched_usage, v7: remote_config,
-      // v8: remote_config pinned HTTPS port + serve cleanup record
-      expect(userVersion(db)).toBe(8)
+      // v8: remote_config pinned HTTPS port + serve cleanup record,
+      // v9: audit_log, v10: remote-terminal posture columns,
+      // v11: webauthn_credential + auth-policy columns (ADR-052 passkeys),
+      // v12: step-up tier columns + audit detail/retention (ADR-054),
+      // v13: LAN channel key + the `legacy` policy retirement (ADR-056)
+      expect(userVersion(db)).toBe(13)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -221,7 +225,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(8)
+      expect(userVersion(db)).toBe(13)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -230,8 +234,157 @@ describe('migration framework — user_version guard', () => {
         password_hash: 'deadbeef',
         tls_https_port: 443,
         last_serve_https_port: null,
-        last_serve_local_port: null
+        last_serve_local_port: null,
+        // v10 backfills the terminal posture at its (closed) defaults.
+        allow_terminal: 0,
+        shell_grant_idle_minutes: 10,
+        // v11 backfills the auth policy at AUTO (NULL) with break-glass ON and
+        // no tailnet exemption — i.e. the as-built stack until a passkey is
+        // enrolled. A v7 row upgraded across four migrations must not land on a
+        // policy the operator never chose, and least of all on `off`.
+        auth_policy: null,
+        password_break_glass: 1,
+        passkey_tailnet_exempt: 0,
+        // v12 backfills the second axis at its defaults too: `medium` is the
+        // shipped posture, so a row upgraded across five migrations must land
+        // neither on a tier that locks the operator out of their own terminal
+        // nor on one that silently disables every freshness check.
+        step_up_tier: 'medium',
+        step_up_mutation_idle_minutes: 60,
+        session_max_age_hours: 4,
+        audit_retention_days: 365
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  // ADR-054 v12: the second policy axis, the audit `detail` column, and the
+  // one-time retirement of `passkey-for-grants`.
+  it('v12 adds the step-up columns with their defaults and audit_log.detail', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      const columns = (
+        db
+          .prepare('SELECT name, "notnull", dflt_value FROM pragma_table_info(?)')
+          .all('remote_config') as Array<{
+          name: string
+          notnull: number
+          dflt_value: string | null
+        }>
+      ).filter(
+        (c) =>
+          c.name.startsWith('step_up') ||
+          c.name.startsWith('session_max') ||
+          c.name.startsWith('audit_')
+      )
+
+      expect(columns.map((c) => c.name).sort()).toEqual([
+        'audit_retention_days',
+        'session_max_age_hours',
+        'step_up_mutation_idle_minutes',
+        'step_up_tier'
+      ])
+      // All four are NOT NULL with a default: unlike `auth_policy` there is no
+      // AUTO state for freshness, so nullability would only invite a second
+      // "what does null mean here" rule.
+      for (const c of columns) expect(c.notnull, c.name).toBe(1)
+      const tier = columns.find((c) => c.name === 'step_up_tier')!
+      expect(tier.dflt_value).toMatch(/medium/)
+
+      const detail = (
+        db.prepare('SELECT name, "notnull" FROM pragma_table_info(?)').all('audit_log') as Array<{
+          name: string
+          notnull: number
+        }>
+      ).find((c) => c.name === 'detail')
+      // Nullable BY DESIGN: command rows carry no intent to record.
+      expect(detail).toBeDefined()
+      expect(detail!.notnull).toBe(0)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v12 then v13 walk `passkey-for-grants` all the way to AUTO', () => {
+    // Two hops, one row: v12 rewrote it to `legacy` (the mode was "legacy login
+    // + medium tier" written as one knob), and v13 rewrites `legacy` to NULL
+    // because ADR-056 retired what `legacy` named. The end state is AUTO, which
+    // resolves to `passkey-always` or `password` on the credential count — i.e.
+    // to whichever of the two things `legacy` was standing in for.
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 11)
+      )
+      // The literal a pre-ADR-054 build could have stored.
+      db.prepare(
+        `INSERT INTO remote_config (id, port, auth_policy, password_break_glass, updated_at)
+         VALUES (1, 4568, 'passkey-for-grants', 0, 1)`
+      ).run()
+
+      runMigrations(db)
+
+      expect(userVersion(db)).toBe(13)
+      expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
+        auth_policy: null,
+        step_up_tier: 'medium',
+        // Everything else the operator chose survives untouched.
+        port: 4568,
+        password_break_glass: 0
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('leaves every SURVIVING stored policy alone — including `off`', () => {
+    // `legacy` is deliberately absent: v13 rewrites it (see the case above).
+    // What must never move is `off` — no migration may ever set OR clear the
+    // master switch — and `passkey-always`, which is an explicit operator choice.
+    for (const policy of ['passkey-always', 'off']) {
+      const db = openRawDb()
+      try {
+        runMigrations(
+          db,
+          MIGRATIONS.filter((m) => m.version <= 11)
+        )
+        db.prepare(`INSERT INTO remote_config (id, auth_policy, updated_at) VALUES (1, ?, 1)`).run(
+          policy
+        )
+        runMigrations(db)
+        expect(
+          (
+            db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
+              auth_policy: string
+            }
+          ).auth_policy,
+          policy
+        ).toBe(policy)
+      } finally {
+        db.close()
+      }
+    }
+  })
+
+  it('v12 leaves an AUTO (NULL) policy as AUTO', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 11)
+      )
+      db.prepare('INSERT INTO remote_config (id, updated_at) VALUES (1, 1)').run()
+      runMigrations(db)
+      expect(
+        (
+          db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
+            auth_policy: string | null
+          }
+        ).auth_policy
+      ).toBeNull()
     } finally {
       db.close()
     }
@@ -591,6 +744,39 @@ describe('remote_config repository', () => {
     expect(config?.port).toBe(5000)
     expect(config?.bindHost).toBe('10.0.0.1')
     expect(config?.autostart).toBe(true)
+  })
+
+  // v10 — the remote-terminal posture (ADR-052 decision 6).
+  it('defaults the terminal posture to OFF with a 10-minute grant window', () => {
+    setRemoteConfig({ port: 4568 })
+    const config = getRemoteConfig()
+    expect(config?.allowTerminal).toBe(false)
+    expect(config?.shellGrantIdleMinutes).toBe(10)
+  })
+
+  it('round-trips allowTerminal + shellGrantIdleMinutes and preserves them on partial writes', () => {
+    setRemoteConfig({ allowTerminal: true, shellGrantIdleMinutes: 25 })
+    expect(getRemoteConfig()?.allowTerminal).toBe(true)
+    expect(getRemoteConfig()?.shellGrantIdleMinutes).toBe(25)
+
+    // An unrelated config write must not silently re-arm or disarm the shell.
+    setRemoteConfig({ port: 9999 })
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(9999)
+    expect(config?.allowTerminal).toBe(true)
+    expect(config?.shellGrantIdleMinutes).toBe(25)
+
+    setRemoteConfig({ allowTerminal: false })
+    expect(getRemoteConfig()?.allowTerminal).toBe(false)
+    expect(getRemoteConfig()?.shellGrantIdleMinutes).toBe(25)
+  })
+
+  it('setRemotePassword leaves the terminal posture untouched', () => {
+    setRemoteConfig({ allowTerminal: true, shellGrantIdleMinutes: 3 })
+    setRemotePassword('aa'.repeat(16), 'bb'.repeat(32), '{"algo":"scrypt"}')
+    const config = getRemoteConfig()
+    expect(config?.allowTerminal).toBe(true)
+    expect(config?.shellGrantIdleMinutes).toBe(3)
   })
 
   it('setRemoteConfig accepts bindHost: null to mean "all interfaces"', () => {

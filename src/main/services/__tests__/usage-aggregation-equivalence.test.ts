@@ -20,9 +20,9 @@ import {
   type AggEntry,
   type ApiWindow,
   type ProjectionSample
-} from '../usage-aggregation'
+} from '../../../core/services/usage-aggregation'
 import type { TokenCounts, UsageBlock, ModelTokenBreakdown } from '../../../shared/types'
-import { accountForTimestamp, type AccountLogRecord } from '../usage-windows'
+import { accountForTimestamp, type AccountLogRecord } from '../../../core/services/usage-windows'
 
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
@@ -356,7 +356,12 @@ describe('groupEntriesIntoBlocks — equivalence with old block-usage grouping',
   }
 
   it('single entry, no windows → floorToHour block', () => {
-    assertEquivalent([entry(BASE + 17 * MS_PER_MINUTE, 'claude-sonnet-4-6', 1000, 500, 0, 0, 0.01)], [], [], NOW)
+    assertEquivalent(
+      [entry(BASE + 17 * MS_PER_MINUTE, 'claude-sonnet-4-6', 1000, 500, 0, 0, 0.01)],
+      [],
+      [],
+      NOW
+    )
   })
 
   it('multiple entries within 5h → one block', () => {
@@ -387,7 +392,9 @@ describe('groupEntriesIntoBlocks — equivalence with old block-usage grouping',
 
   it('window-aligned grouping (one known window)', () => {
     const windowEnd = BASE + 5 * MS_PER_HOUR
-    const windows: ApiWindow[] = [{ start: windowEnd - SESSION_DURATION_MS, end: windowEnd, account: null }]
+    const windows: ApiWindow[] = [
+      { start: windowEnd - SESSION_DURATION_MS, end: windowEnd, account: null }
+    ]
     const entries = [
       entry(BASE + 10 * MS_PER_MINUTE, 'claude-sonnet-4-6', 1000, 500, 0, 0, 0.01),
       entry(BASE + 2 * MS_PER_HOUR, 'claude-opus-4-8', 500, 300, 0, 0, 0.05)
@@ -414,7 +421,9 @@ describe('groupEntriesIntoBlocks — equivalence with old block-usage grouping',
     const windowEnd = windowStart + SESSION_DURATION_MS
     const windows: ApiWindow[] = [{ start: windowStart, end: windowEnd, account: null }]
     // Entry 20min before window start (within 30min grace)
-    const entries = [entry(windowStart - 20 * MS_PER_MINUTE, 'claude-sonnet-4-6', 1000, 500, 0, 0, 0.01)]
+    const entries = [
+      entry(windowStart - 20 * MS_PER_MINUTE, 'claude-sonnet-4-6', 1000, 500, 0, 0, 0.01)
+    ]
     assertEquivalent(entries, windows, [], NOW)
   })
 
@@ -446,7 +455,9 @@ describe('groupEntriesIntoBlocks — equivalence with old block-usage grouping',
   it('active-block clamping (block before current window marked inactive)', () => {
     const now = BASE + 3 * MS_PER_HOUR // inside the current window
     const curStart = BASE + 2 * MS_PER_HOUR
-    const windows: ApiWindow[] = [{ start: curStart, end: curStart + SESSION_DURATION_MS, account: null }]
+    const windows: ApiWindow[] = [
+      { start: curStart, end: curStart + SESSION_DURATION_MS, account: null }
+    ]
     // An entry well before the current window — its floorToHour block would be
     // "active" by time but must be clamped inactive.
     const entries = [

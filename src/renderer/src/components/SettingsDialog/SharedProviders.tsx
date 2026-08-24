@@ -9,6 +9,12 @@ import type {
   SharedProviderStatus
 } from '../../../../shared/shared-provider'
 import { SelectMenu } from '../shared/SelectMenu'
+import {
+  OAuthOutcomeNotice,
+  OAuthPasteBackFlow,
+  classifyOAuthError
+} from '../auth/OAuthPasteBackFlow'
+import type { VendorOAuthState } from '../../stores/session-store'
 
 /**
  * Explain an enabled-but-empty route, and say where to fix it. Each string names
@@ -31,12 +37,14 @@ function routeDiagnosisText(
 const harnesses: ConfigurableHarnessId[] = ['pi', 'opencode']
 
 /** Wire protocols a custom shared provider can speak. First entry = the default. */
-const PROTOCOL_OPTIONS: { value: NonNullable<SharedProviderDefinition['protocol']>; label: string }[] =
-  [
-    { value: 'openai-completions', label: 'OpenAI completions' },
-    { value: 'openai-responses', label: 'OpenAI responses' },
-    { value: 'anthropic-messages', label: 'Anthropic messages' }
-  ]
+const PROTOCOL_OPTIONS: {
+  value: NonNullable<SharedProviderDefinition['protocol']>
+  label: string
+}[] = [
+  { value: 'openai-completions', label: 'OpenAI completions' },
+  { value: 'openai-responses', label: 'OpenAI responses' },
+  { value: 'anthropic-messages', label: 'Anthropic messages' }
+]
 const blank = (): SharedProviderDefinition => ({
   id: '',
   name: '',
@@ -58,13 +66,18 @@ export function SharedProviders(): React.JSX.Element {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
-    useShallow((s) => ({
-      vendorOAuth: s.vendorOAuth,
-      authorizeVendorOAuth: s.authorizeVendorOAuth,
-      cancelVendorOAuth: s.cancelVendorOAuth
-    }))
-  )
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth, submitVendorOAuthCode } =
+    useSessionStore(
+      useShallow((s) => ({
+        vendorOAuth: s.vendorOAuth,
+        authorizeVendorOAuth: s.authorizeVendorOAuth,
+        cancelVendorOAuth: s.cancelVendorOAuth,
+        submitVendorOAuthCode: s.submitVendorOAuthCode
+      }))
+    )
+  const [pasteBusy, setPasteBusy] = useState(false)
+  /** A remote connect that just succeeded — the mockup's success outcome. */
+  const [oauthConnected, setOauthConnected] = useState(false)
   const reload = async (): Promise<void> => {
     setError(null)
     try {
@@ -146,6 +159,26 @@ export function SharedProviders(): React.JSX.Element {
             vendorOAuth.vendorId === 'openai-codex' &&
             vendorOAuth.stage === 'waiting'
           }
+          // ADR-057 / S4-UI: on web the same Connect action parks the flow here
+          // instead of driving the host browser, and the card expands into the
+          // shared paste-back form. Null on desktop — the store never sets it.
+          oauthFlow={
+            vendorOAuth?.engineId === 'pi' && vendorOAuth.vendorId === 'openai-codex'
+              ? vendorOAuth
+              : null
+          }
+          oauthPasteBusy={pasteBusy}
+          oauthConnected={oauthConnected}
+          onPasteBack={(pasted) => {
+            setPasteBusy(true)
+            void submitVendorOAuthCode(pasted)
+              .then((result) => {
+                if (!result.ok) return undefined
+                setOauthConnected(true)
+                return reload()
+              })
+              .finally(() => setPasteBusy(false))
+          }}
           onRoute={(h, enabled) =>
             run(definition.id, () => window.api.setSharedProviderRoute(definition.id, h, enabled))
           }
@@ -161,8 +194,13 @@ export function SharedProviders(): React.JSX.Element {
           onConnect={() =>
             void authorizeVendorOAuth('pi', 'openai-codex')
               .then((result) => {
-                if (!result.ok) throw new Error('Failed to start the ChatGPT connect flow')
-                return reload()
+                if (result.ok) return reload()
+                // On web a non-ok result is the EXPECTED handoff to step 1/2 (or
+                // a refusal), both already parked on `vendorOAuth` and rendered
+                // by the card — surfacing it as a card-level error too would
+                // double-report it.
+                if (window.api.platform === 'web') return undefined
+                throw new Error(result.error ?? 'Failed to start the ChatGPT connect flow')
               })
               .catch((e) => setError(e instanceof Error ? e.message : String(e)))
           }
@@ -236,6 +274,10 @@ function ProviderCard({
   busy,
   readOnly,
   oauthBusy,
+  oauthFlow,
+  oauthPasteBusy,
+  oauthConnected,
+  onPasteBack,
   onRoute,
   onDefault,
   onSync,
@@ -251,6 +293,12 @@ function ProviderCard({
   busy: boolean
   readOnly: boolean
   oauthBusy: boolean
+  /** This provider's remote sign-in flow, or null (always null on desktop). */
+  oauthFlow: VendorOAuthState | null
+  oauthPasteBusy: boolean
+  /** A remote connect completed in THIS session — drives the success outcome. */
+  oauthConnected: boolean
+  onPasteBack: (pasted: string) => void
   onRoute: (h: ConfigurableHarnessId, enabled: boolean) => void
   onDefault: (h: ConfigurableHarnessId, id: string) => void
   onSync: () => void
@@ -260,6 +308,10 @@ function ProviderCard({
   onEdit: () => void
   onDelete: () => void
 }): React.JSX.Element {
+  // Connecting ChatGPT is the one action a remote client CAN complete — pi's
+  // Codex `auto` method finishes through ADR-057's paste-back, unlike the API-key
+  // and definition edits `readOnly` still guards.
+  const isWeb = window.api.platform === 'web'
   return (
     <div
       data-testid="SharedProviderCard"
@@ -267,10 +319,12 @@ function ProviderCard({
       className="border border-border/40 rounded-md p-2.5 space-y-2"
     >
       <div className="flex justify-between gap-2">
-        <div>
+        {/* min-w-0 + truncate: a long provider id is unbreakable text and would
+            otherwise push the action buttons off a phone. No-op on desktop. */}
+        <div className="min-w-0">
           <b className="text-[13px] text-text-primary">{definition.name}</b>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-muted">
-            <code>{definition.id}</code>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-muted min-w-0">
+            <code className="truncate">{definition.id}</code>
             <span
               className={`rounded-full px-1.5 py-0.5 ${status?.connected ? 'bg-green-500/10 text-green-400' : 'bg-white/5'}`}
             >
@@ -278,7 +332,7 @@ function ProviderCard({
             </span>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 shrink-0">
           <button
             data-testid="SharedProviderCard.sync"
             disabled={busy || readOnly}
@@ -310,34 +364,62 @@ function ProviderCard({
         </div>
       </div>
       {definition.id === 'chatgpt' && (
-        <div className="flex gap-2 items-center">
-          {status?.connected ? (
-            <button
-              data-testid="SharedProviderCard.disconnect"
-              disabled={busy || readOnly}
-              onClick={onDisconnect}
-              className="rounded bg-white/5 px-2 py-1 text-text-muted hover:text-red-400"
-            >
-              Disconnect ChatGPT
-            </button>
-          ) : (
-            <>
+        <div className="space-y-2">
+          <div className="flex gap-2 items-center">
+            {status?.connected ? (
               <button
-                data-testid="SharedProviderCard.connect"
-                disabled={busy || oauthBusy || readOnly}
-                onClick={onConnect}
-                className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40"
+                data-testid="SharedProviderCard.disconnect"
+                disabled={busy || readOnly}
+                onClick={onDisconnect}
+                className="rounded bg-white/5 px-2 py-1 text-text-muted hover:text-red-400"
               >
-                {window.api.platform === 'web'
-                  ? 'Connect from the desktop app'
-                  : oauthBusy
-                    ? 'Connecting...'
-                    : 'Connect ChatGPT'}
+                Disconnect ChatGPT
               </button>
-              {oauthBusy && <button onClick={onCancel}>Cancel</button>}
-            </>
+            ) : (
+              <>
+                <button
+                  data-testid="SharedProviderCard.connect"
+                  disabled={busy || oauthBusy || oauthFlow?.stage === 'paste'}
+                  onClick={onConnect}
+                  className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40"
+                >
+                  {oauthBusy ? 'Connecting...' : 'Connect ChatGPT'}
+                </button>
+                {oauthBusy && <button onClick={onCancel}>Cancel</button>}
+              </>
+            )}
+            {status?.connected && <span className="text-success">Central connection</span>}
+          </div>
+          {isWeb && oauthFlow?.stage === 'paste' && (
+            <div className="rounded border border-border/40 bg-bg-secondary/40 p-2.5">
+              <OAuthPasteBackFlow
+                variant="url"
+                id={definition.id}
+                url={oauthFlow.url}
+                busy={oauthPasteBusy}
+                onSubmit={onPasteBack}
+                onCancel={onCancel}
+              />
+            </div>
           )}
-          {status?.connected && <span className="text-success">Central connection</span>}
+          {isWeb && oauthFlow?.stage === 'error' && oauthFlow.error && (
+            <OAuthOutcomeNotice
+              kind={classifyOAuthError(oauthFlow.error)}
+              message={oauthFlow.error}
+              id={definition.id}
+            />
+          )}
+          {/* The mockup's success row. Its "shared with opencode" clause is
+              dropped on purpose — which harnesses actually receive the
+              credential is reported truthfully by the route rows below, and a
+              disabled opencode route would have made that clause a lie. */}
+          {isWeb && oauthConnected && !oauthFlow && (
+            <OAuthOutcomeNotice
+              kind="success"
+              message="Connected. Tokens stay on the host."
+              id={definition.id}
+            />
+          )}
         </div>
       )}
       {harnesses.map((h) => {
@@ -380,7 +462,10 @@ function ProviderCard({
             </label>
             {route.enabled && (
               <div className="mt-1">
-                <label className="text-[10px] text-text-muted" htmlFor={`${definition.id}-${h}-default`}>
+                <label
+                  className="text-[10px] text-text-muted"
+                  htmlFor={`${definition.id}-${h}-default`}
+                >
                   Default model for {h}
                 </label>
                 <SelectMenu
@@ -397,7 +482,12 @@ function ProviderCard({
                     // selectable so the control reports what is actually saved.
                     ...(route.defaultModel &&
                     !available.some((model) => model.id === route.defaultModel)
-                      ? [{ value: route.defaultModel, label: `${route.defaultModel} (unavailable)` }]
+                      ? [
+                          {
+                            value: route.defaultModel,
+                            label: `${route.defaultModel} (unavailable)`
+                          }
+                        ]
                       : []),
                     ...available.map((m) => ({ value: m.id, label: m.name || m.id }))
                   ]}
@@ -450,7 +540,9 @@ function ProviderForm({
           One definition is projected into every enabled harness.
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      {/* Stacked below 640px (phones); the `sm:` breakpoint is a no-op on the
+          desktop dialog, whose viewport is always wider than that. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <label className="space-y-1 text-[10px] text-text-muted">
           Provider ID
           <input
@@ -473,7 +565,7 @@ function ProviderForm({
           />
         </label>
       </div>
-      <div className="grid grid-cols-[180px_1fr] gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-[180px_1fr] gap-2">
         <label className="space-y-1 text-[10px] text-text-muted">
           Protocol
           <SelectMenu
@@ -517,9 +609,11 @@ function ProviderForm({
         ))}
       </div>
       <div className="space-y-1.5">
-        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Models</div>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
+          Models
+        </div>
         {draft.models.map((m, i) => (
-          <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-1.5">
+          <div key={i} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-1.5">
             <input
               data-testid="SharedProviderForm.modelId"
               value={m.id}
@@ -536,7 +630,9 @@ function ProviderForm({
             <button
               type="button"
               onClick={() => set({ models: draft.models.filter((_, n) => n !== i) })}
-              className="rounded px-2 text-[10px] text-text-muted hover:bg-bg-hover hover:text-red-400"
+              // `justify-self-start` is a no-op in the desktop `auto` column and
+              // stops the button spanning the full width of the stacked layout.
+              className="justify-self-start rounded px-2 py-1 text-[10px] text-text-muted hover:bg-bg-hover hover:text-red-400"
             >
               Remove
             </button>

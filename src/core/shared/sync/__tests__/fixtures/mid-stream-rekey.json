@@ -1,0 +1,101 @@
+{
+  "name": "mid-stream rekey with duplicate client rekey invokes",
+  "why": "A session spawns under a temporary routing id, streams, and only then learns its engine sessionId. Every client used to react to session:status by invoking session:rekey, so N clients fired N duplicate invokes; core owns the rekey now and the duplicates must converge on ONE application. The re-delivered status events below stand in for those duplicates.",
+  "events": [
+    { "channel": "session:created", "args": ["temp-1", { "cwd": "/repo" }] },
+    { "channel": "session:stream", "args": ["temp-1", { "type": "thinking", "text": "planning" }] },
+    { "channel": "session:stream", "args": ["temp-1", { "type": "text", "text": "Sure, " }] },
+    {
+      "channel": "session:status",
+      "args": [
+        "temp-1",
+        {
+          "state": "running",
+          "sessionId": "uuid-9",
+          "model": "sonnet",
+          "cwd": "/repo",
+          "totalCostUsd": 0.01,
+          "engineId": "claude",
+          "account": null
+        }
+      ]
+    },
+    {
+      "channel": "session:status",
+      "args": [
+        "temp-1",
+        {
+          "state": "running",
+          "sessionId": "uuid-9",
+          "model": "sonnet",
+          "cwd": "/repo",
+          "totalCostUsd": 0.01,
+          "engineId": "claude",
+          "account": null
+        }
+      ]
+    },
+    {
+      "channel": "session:status",
+      "args": [
+        "uuid-9",
+        {
+          "state": "running",
+          "sessionId": "uuid-9",
+          "model": "sonnet",
+          "cwd": "/repo",
+          "totalCostUsd": 0.01,
+          "engineId": "claude",
+          "account": null
+        }
+      ]
+    },
+    { "channel": "session:stream", "args": ["uuid-9", { "type": "text", "text": "done." }] },
+    {
+      "channel": "session:message",
+      "args": [
+        "uuid-9",
+        {
+          "id": "m1",
+          "role": "assistant",
+          "content": [{ "type": "text", "text": "Sure, done." }],
+          "timestamp": 0
+        }
+      ]
+    },
+    {
+      "channel": "session:status",
+      "args": [
+        "uuid-9",
+        {
+          "state": "idle",
+          "sessionId": "uuid-9",
+          "model": "sonnet",
+          "cwd": "/repo",
+          "totalCostUsd": 0.02,
+          "engineId": "claude",
+          "account": null
+        }
+      ]
+    },
+    { "channel": "session:result", "args": ["uuid-9", {}] }
+  ],
+  "expectSessionIds": ["uuid-9"],
+  "expectSession": {
+    "uuid-9": {
+      "routingId": "uuid-9",
+      "cwd": "/repo",
+      "streamingText": "",
+      "streamingThinking": "",
+      "sdkActive": true,
+      "messages": [
+        {
+          "id": "m1",
+          "role": "assistant",
+          "content": [{ "type": "text", "text": "Sure, done." }],
+          "timestamp": 0
+        }
+      ]
+    }
+  }
+}

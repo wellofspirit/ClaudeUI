@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-07
-**Refines:** [ADR-028](adr-028_opencode-native-config-in-place.md) (stays Accepted — this narrows *how* the in-place write reconciles)
+**Refines:** [ADR-028](adr-028_opencode-native-config-in-place.md) (stays Accepted — this narrows _how_ the in-place write reconciles)
 **Relates to:** [ADR-020](adr-020_v2-persistence-and-config-plane.md), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-029](adr-029_opencode-custom-agent-crud.md)
 
 ## Context
@@ -59,18 +59,18 @@ changed, and never deletes a key it does not model.**
    original. EOL detection, 2-space formatting, and `mkdir` behavior are unchanged.
 
 **Diff-base caveat (preserved):** the projection is computed from the same file we write. A provider
-declared only in the *other* global file (json vs jsonc split — see `readDeclaredProviderIds`) is
+declared only in the _other_ global file (json vs jsonc split — see `readDeclaredProviderIds`) is
 invisible to both the projection and the UI's incoming set, so it appears in neither side of the diff
 and is therefore never deleted.
 
 **Single-writer ownership of opencode.json top-level keys** (who is allowed to write each):
 
-| Key(s)                                                                                   | Owner / mechanism                                                     |
-| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `model`, `small_model`, `disabled_providers`, `enabled_providers`, `provider`, `agent`   | **This writer** — diff-driven leaf merges (settings UI + migration)   |
-| `mcp.claudeui`                                                                            | Ephemeral `OPENCODE_CONFIG_CONTENT` at spawn (ADR-028) — never persisted |
-| agent markdown files (`agent/*.md`, full agent definitions)                              | Agent CRUD (ADR-029)                                                  |
-| Everything else (`theme`, `keybinds`, `permission`, user `mcp.*`, comments, …)           | **User-owned — ClaudeUI never writes it**                             |
+| Key(s)                                                                                 | Owner / mechanism                                                        |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `model`, `small_model`, `disabled_providers`, `enabled_providers`, `provider`, `agent` | **This writer** — diff-driven leaf merges (settings UI + migration)      |
+| `mcp.claudeui`                                                                         | Ephemeral `OPENCODE_CONFIG_CONTENT` at spawn (ADR-028) — never persisted |
+| agent markdown files (`agent/*.md`, full agent definitions)                            | Agent CRUD (ADR-029)                                                     |
+| Everything else (`theme`, `keybinds`, `permission`, user `mcp.*`, comments, …)         | **User-owned — ClaudeUI never writes it**                                |
 
 ## Consequences
 
@@ -86,7 +86,7 @@ and is therefore never deleted.
 
 ## Relation to existing ADRs
 
-- **Refines ADR-028** — ADR-028 stays Accepted; it decided *where* opencode config is written (the
-  engine's own files, comment-safe). ADR-031 narrows *how* the reconcile happens (per-leaf diff, never
+- **Refines ADR-028** — ADR-028 stays Accepted; it decided _where_ opencode config is written (the
+  engine's own files, comment-safe). ADR-031 narrows _how_ the reconcile happens (per-leaf diff, never
   subtree replacement) to honor ADR-028's own "leaves every other key byte-preserved" promise for
   fields ClaudeUI doesn't model.

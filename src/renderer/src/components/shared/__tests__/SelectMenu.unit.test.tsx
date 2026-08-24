@@ -26,13 +26,12 @@ const OPTIONS = [
   { value: 'b', label: 'Beta' }
 ]
 
-function renderMenu(
-  props: Partial<React.ComponentProps<typeof SelectMenu>> = {}
-): { onChange: ReturnType<typeof vi.fn>; root: HTMLElement } {
+function renderMenu(props: Partial<React.ComponentProps<typeof SelectMenu>> = {}): {
+  onChange: ReturnType<typeof vi.fn>
+  root: HTMLElement
+} {
   const onChange = vi.fn()
-  render(
-    <SelectMenu testid="Demo" value="a" options={OPTIONS} onChange={onChange} {...props} />
-  )
+  render(<SelectMenu testid="Demo" value="a" options={OPTIONS} onChange={onChange} {...props} />)
   return { onChange, root: screen.getByTestId('Demo') }
 }
 
@@ -107,9 +106,7 @@ describe('SelectMenu', () => {
     fireEvent.click(screen.getByTestId('Demo.trigger'))
     expect(screen.getByRole('listbox')).toBeTruthy()
 
-    rerender(
-      <SelectMenu testid="Demo" value="a" options={OPTIONS} onChange={onChange} disabled />
-    )
+    rerender(<SelectMenu testid="Demo" value="a" options={OPTIONS} onChange={onChange} disabled />)
     expect(screen.queryByRole('listbox')).toBeNull()
   })
 

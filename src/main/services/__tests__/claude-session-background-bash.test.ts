@@ -109,7 +109,7 @@ class TestClaudeSession {
   }): void {
     const taskId = msg.task_id || ''
     const outputFile = msg.output_file || ''
-    // Fallback: the wire's own tool_use_id (docs/protocol/04-system-subtypes.md
+    // Fallback: the wire's own tool_use_id (docs/protocol-cc/04-system-subtypes.md
     // §4.4) covers the case where the taskIdMap reverse-lookup misses (e.g.
     // task_started never arrived, or the mapping was already evicted).
     const matchedToolUseId = this.taskIdMap.get(taskId) || msg.tool_use_id || null
@@ -227,7 +227,11 @@ describe('ClaudeSession background bash', () => {
     })
 
     it('relays session:task-started with taskId/toolUseId/taskType (async-agent Stop-button fix)', () => {
-      session.handleTaskStarted({ task_id: 'task-42', tool_use_id: 'tu-42', task_type: 'local_agent' })
+      session.handleTaskStarted({
+        task_id: 'task-42',
+        tool_use_id: 'tu-42',
+        task_type: 'local_agent'
+      })
 
       expect(session.sent).toHaveLength(1)
       expect(session.sent[0]).toEqual({

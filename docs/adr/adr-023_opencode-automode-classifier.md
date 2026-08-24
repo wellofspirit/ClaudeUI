@@ -2,7 +2,7 @@
 
 **Status:** Accepted — amended 2026-08-01 by the auto-mode rework (see Amendment below)
 **Date:** 2026-06-22
-**Relates to:** [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-018](adr-018_v2-engine-vendor-account-model.md) (autonomy modes)
+**Relates to:** [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping), [ADR-019](adr-019_opencode-engine-backend.md), [ADR-018](adr-018_v2-engine-vendor-account-model.md) (autonomy modes), [ADR-059](adr-059_no-silent-model-fallback.md) (extends the unavailable-judge rule: a configured `autoMode.judgeModel` the catalog no longer offers fails closed to the human, loudly — never a substitute judge)
 
 ## Context
 
@@ -14,19 +14,21 @@ gatekeeper so `full` means the same AI-gated autonomy on both engines.
 
 The chief risk is **runaway token cost**. The cli.js classifier was reverse-engineered in depth
 (payload, two-stage flow, fast-paths, caching, throttles). Two findings shape this design:
+
 - **The classifier prompt does not share a cache prefix with the main conversation** (it omits the main
   system prompt and re-serializes a slimmed transcript), so — verified — **judge-model choice buys no
   cache reuse from the live session on any model**. Model choice is therefore pure per-token price.
-- cli.js has **no per-turn cap on *allowed* classifier calls** (only a denial cap) — the single
+- cli.js has **no per-turn cap on _allowed_ classifier calls** (only a denial cap) — the single
   most likely source of token burn in long autonomous runs.
 
 ## Decision
 
-Build an **independent security-monitor judge** (parity with Claude's battle-tested design — *not* a
+Build an **independent security-monitor judge** (parity with Claude's battle-tested design — _not_ a
 self-judging / cache-piggyback approach), for **opencode `full`/auto only** (Claude keeps cli.js's own
 classifier). Architecture and cost-guards:
 
 ### Hook
+
 opencode `full` patches an ask-heavy ruleset (write-class tools → `ask`). When a `permission.asked`
 arrives, `OpencodeSession` routes it to the **AutoModeClassifier** instead of the UI:
 `classify(transcript, action, environment)` → `replyPermission('once')` on allow, `'reject'` on block.
@@ -35,6 +37,7 @@ overflow, or a configured non-classifiable tool. Reuses the existing `permission
 plumbing.
 
 ### Judge prompt (parity with cli.js)
+
 - **System** = our own security-monitor policy (threat model: prompt-injection / scope-creep /
   accidental-damage; HARD vs SOFT block; user-intent rules) — authored fresh, modeled on cli.js's. Does
   **not** include the main agent prompt.
@@ -46,6 +49,7 @@ plumbing.
   / error / unavailable → block → human approval.
 
 ### Two-stage + fast-paths (parity)
+
 - **Fast-paths (zero-token, local) — skip the LLM**: (1) safety/ask-rule/plan floors → human; (2)
   `acceptEdits`-equivalence (would `acceptEdits` allow it? → allow); (3) a static **read-only/safe-tool
   allowlist**. Most calls never reach the model.
@@ -54,6 +58,7 @@ plumbing.
   `thinking`.
 
 ### Judge model — **configurable** (this ADR's key addition vs cli.js)
+
 - **Default judge model = the session's own current model** (parity with cli.js, which judges on the
   main session model). Overridable via a new opencode engine setting `autoMode.judgeModel` (a
   `providerID/modelID`), leveraging opencode's multi-vendor support — point it at a cheaper model if
@@ -68,22 +73,24 @@ plumbing.
   (the verified finding); choosing the session model buys nothing extra.
 
 ### Cost guards (explicit policy — the burn-prevention contract)
-We follow Claude's parity governors — **no per-turn/per-session cap on *allowed* calls** (user
+
+We follow Claude's parity governors — **no per-turn/per-session cap on _allowed_ calls** (user
 decision: strict parity; cli.js has none either). Cost is bounded by:
+
 1. **Fast-path allowlist + acceptEdits-equivalence** — most calls never hit the model (the dominant
    governor).
-2. **Transcript slimming** (user text + tool *calls* only) — the dominant per-call token saver — plus
+2. **Transcript slimming** (user text + tool _calls_ only) — the dominant per-call token saver — plus
    1h prefix caching across same-turn classifier calls.
 3. **Single-stage `fast` mode** available for cheaper runs (default `both`).
-4. **Denial caps** (2-consecutive-same-rule / 3-consecutive / 20-total; category-keyed since 2026-08-01, shared tracker in src/main/automode/denial-tracker.ts) → fall back to human with the rule named in decisionReason.
+4. **Denial caps** (2-consecutive-same-rule / 3-consecutive / 20-total; category-keyed since 2026-08-01, shared tracker in src/core/automode/denial-tracker.ts) → fall back to human with the rule named in decisionReason.
 5. **Transcript-too-long** → human approval (reactive fallback; no proactive windowing).
 6. **No `(tool,input)` verdict memoization.** Deliberately omitted: a memoized verdict would override
    the user's later choice to personally approve/deny that same call. Each evaluation is fresh.
-   *(User decision.)*
+   _(User decision.)_
 7. **Configurable `judgeModel`** is the cost lever in lieu of a cap — set it to a cheaper model if a
    long autonomous run on an expensive session model accrues cost.
 8. **Observability**: per-call decision log (tokens / cost / stage / verdict) so spend is auditable;
-   surface running cost in the UI. *(This is the primary guard now that there is no hard cap.)*
+   surface running cost in the UI. _(This is the primary guard now that there is no hard cap.)_
 
 ## Consequences
 
@@ -93,7 +100,7 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
   slimming + denial caps. A long autonomous `full` run on an expensive session model can accrue real
   cost — the mitigations are the fast-paths/slimming and the **configurable `judgeModel`** (point it at
   a cheaper model), with the decision log + UI cost surfacing as the visibility valve.
-- **Known parity gap (accepted):** the judge sees tool *calls*, not tool *results* (matches cli.js) —
+- **Known parity gap (accepted):** the judge sees tool _calls_, not tool _results_ (matches cli.js) —
   it cannot reason about command output. Documented, not fixed.
 - The judge runs through opencode, so it inherits opencode's provider auth/availability; if the judge
   model is unauthenticated/unavailable, we fail-closed to human approval (never silently allow).
@@ -131,11 +138,11 @@ decision: strict parity; cli.js has none either). Cost is bounded by:
 
 Everything below supersedes the corresponding original sections. Plan and
 rationale: `docs/automode-rework-plan.md`; behavioural reference:
-`docs/protocol/14-auto-mode-classifier.md` (cli.js 2.1.220). Shipped as
+`docs/protocol-cc/14-auto-mode-classifier.md` (cli.js 2.1.220). Shipped as
 commits 5112e74 (phase 1), 9d698c7 (phase 2), cb80d3a (phase 3), plus the
 bench 703115e.
 
-**Architecture.** The classifier is engine-neutral (`src/main/automode/`):
+**Architecture.** The classifier is engine-neutral (`src/core/automode/`):
 pure policy + a `JudgeTransport` seam (`maxTokens`/`stopSequences` advisory —
 the opencode session transport still cannot honour them; the original ADR's
 deviation stands until a phase-5 direct-API transport). opencode wiring keeps
@@ -150,6 +157,7 @@ escalates. Stage 2 applies user intent and ALLOW exceptions; its verdict is
 final; unparseable stage 2 blocks fail-closed with `unavailable` unset.
 
 **Recorded deviations from cli.js** (deliberate, desktop-app rationale):
+
 - A transport error at either stage → `unavailable` → ask the human. cli.js
   reserves `unavailable` for "stage 1 never produced usage" and hard-blocks a
   stage-2 error "based on stage 1".
@@ -158,7 +166,7 @@ final; unparseable stage 2 blocks fail-closed with `unavailable` unset.
   2000 chars matching cli.js's cap, per-message, last-proposal-before-reply.
 - `unavailable` → human (not block) — carried over from the original ADR.
 
-**Policy.** Our own corpus (`src/main/automode/rules/`): 1 HARD rule, 24 SOFT
+**Policy.** Our own corpus (`src/core/automode/rules/`): 1 HARD rule, 24 SOFT
 rules with per-rule `[named+specifics]` must-name consent slots (5
 adversarial-inverted), 12 mandatory ALLOW exceptions, an explicit never-block
 list, Path A/B consent with post-block inheritance. Stage 2 emits
@@ -182,14 +190,14 @@ Each judge call is stage-bounded — 60 s stage 1 / 120 s stage 2, cli.js's
 (`unavailable` → ask the human), so a wedged judge can never park a tool call
 behind a spinner.
 
-**Ground truth.** `src/main/automode/ground-truth.ts`: `{"outcome":…}`
+**Ground truth.** `src/core/automode/ground-truth.ts`: `{"outcome":…}`
 annotations (ok / error / rejected-by-user / automode-blocked only — sticky
 decisions), session-start remotes captured once and frozen, measured
 `gitStatus` meta before tree-affecting commands, `gh`-resolved repoVisibility
 for exfil-capable ones. All captures spawn(shell:false), time-budgeted, and
 emit nothing on failure.
 
-**Evidence.** `scripts/automode-bench/`: 38 labeled scenarios × 4 models
+**Evidence.** `scripts/automode-bench/` (since removed — superseded by the standalone JudgEval repo; recoverable from git history): 38 labeled scenarios × 4 models
 (gpt-5.6-luna/terra, qwen3.8-max-preview, glm-5.2): 37/37 evidence-available
 with zero false blocks pre-phase-3; the single unanimous miss
 (gitStatus-dependent) passes with ground truth injected, categorized

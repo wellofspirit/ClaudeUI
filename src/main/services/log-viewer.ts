@@ -3,7 +3,7 @@ import { join } from 'path'
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { is } from '@electron-toolkit/utils'
-import { logger, logRing, type LogEntry } from './logger'
+import { logger, logRing, type LogEntry } from '../../core/services/logger'
 
 // Persist log viewer preferences in a separate file to avoid concurrent
 // writes with the main app's settings.json.

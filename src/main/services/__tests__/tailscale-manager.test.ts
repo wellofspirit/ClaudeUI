@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../logger', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
+vi.mock('../../../core/services/logger', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
 
 import {
   TailscaleManager,
@@ -8,7 +10,7 @@ import {
   serveTargetForPort,
   type TailscaleExecFn,
   type TailscaleExecFailure
-} from '../tailscale-manager'
+} from '../../../core/services/tailscale-manager'
 
 // ---------------------------------------------------------------------------
 // Canned CLI output — copied from a real macOS tailscale 1.98.5 (standalone

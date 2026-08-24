@@ -15,7 +15,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
-import type { OpencodeAgentSummary, OpencodeAgentDetail, OpencodeAgentInput } from '../../../../../shared/types'
+import type {
+  OpencodeAgentSummary,
+  OpencodeAgentDetail,
+  OpencodeAgentInput
+} from '../../../../../shared/types'
 
 // ── Store mock ───────────────────────────────────────────────────────
 
@@ -23,9 +27,7 @@ type ActiveSelector = (s: { cwd: string }) => unknown
 
 // vi.hoisted ensures this runs before the vi.mock factory (which is hoisted to the top of the file)
 const { mockUseActiveSession } = vi.hoisted(() => {
-  const mockUseActiveSession = vi.fn((selector: ActiveSelector) =>
-    selector({ cwd: '/test/cwd' })
-  )
+  const mockUseActiveSession = vi.fn((selector: ActiveSelector) => selector({ cwd: '/test/cwd' }))
   return { mockUseActiveSession }
 })
 
@@ -47,7 +49,7 @@ const CUSTOM_AGENT: OpencodeAgentSummary = {
   model: 'anthropic/claude-sonnet-4-6',
   color: '#f59e0b',
   overridden: false,
-  disabled: false,
+  disabled: false
 }
 
 const BUILTIN_AGENT: OpencodeAgentSummary = {
@@ -56,7 +58,7 @@ const BUILTIN_AGENT: OpencodeAgentSummary = {
   mode: 'subagent',
   scope: null,
   overridden: false,
-  disabled: false,
+  disabled: false
 }
 
 const DISABLED_BUILTIN: OpencodeAgentSummary = {
@@ -64,7 +66,7 @@ const DISABLED_BUILTIN: OpencodeAgentSummary = {
   kind: 'builtin',
   mode: 'primary',
   scope: null,
-  disabled: true,
+  disabled: true
 }
 
 const OVERRIDDEN_BUILTIN: OpencodeAgentSummary = {
@@ -72,7 +74,7 @@ const OVERRIDDEN_BUILTIN: OpencodeAgentSummary = {
   kind: 'builtin',
   mode: 'primary',
   scope: null,
-  overridden: true,
+  overridden: true
 }
 
 const CUSTOM_DETAIL: OpencodeAgentDetail = {
@@ -83,7 +85,7 @@ const CUSTOM_DETAIL: OpencodeAgentDetail = {
   model: 'anthropic/claude-sonnet-4-6',
   description: 'My custom agent',
   prompt: 'You are a custom agent.',
-  restrict: false,
+  restrict: false
 }
 
 const BUILTIN_DETAIL: OpencodeAgentDetail = {
@@ -92,7 +94,7 @@ const BUILTIN_DETAIL: OpencodeAgentDetail = {
   mode: 'subagent',
   scope: null,
   restrict: false,
-  disabled: false,
+  disabled: false
 }
 
 // ── window.api stub ──────────────────────────────────────────────────
@@ -106,7 +108,7 @@ const setOpencodeAgentDisabled = vi.fn(async () => {})
 const generateOpencodeAgent = vi.fn(async () => ({
   identifier: 'gen-agent',
   whenToUse: 'Use this for testing.',
-  systemPrompt: 'You are a generated agent.',
+  systemPrompt: 'You are a generated agent.'
 }))
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
@@ -161,7 +163,7 @@ describe('OpencodeAgentsSection', () => {
         CUSTOM_AGENT,
         BUILTIN_AGENT,
         DISABLED_BUILTIN,
-        OVERRIDDEN_BUILTIN,
+        OVERRIDDEN_BUILTIN
       ])
     })
 
@@ -224,7 +226,7 @@ describe('OpencodeAgentsSection', () => {
     const readOpencodeAgent = vi.fn(async () => CUSTOM_DETAIL)
     installApiStub({
       listOpencodeAgents: vi.fn(async () => [CUSTOM_AGENT]),
-      readOpencodeAgent,
+      readOpencodeAgent
     })
 
     await renderSection()
@@ -250,7 +252,7 @@ describe('OpencodeAgentsSection', () => {
     const readOpencodeAgent = vi.fn(async () => ({ ...CUSTOM_DETAIL, restrict: false }))
     installApiStub({
       listOpencodeAgents: vi.fn(async () => [CUSTOM_AGENT]),
-      readOpencodeAgent,
+      readOpencodeAgent
     })
 
     await renderSection()
@@ -283,11 +285,11 @@ describe('OpencodeAgentsSection', () => {
   it('save with restrict (ON) sends permission field', async () => {
     const readOpencodeAgent = vi.fn(async () => ({
       ...CUSTOM_DETAIL,
-      restrict: false,
+      restrict: false
     }))
     installApiStub({
       listOpencodeAgents: vi.fn(async () => [CUSTOM_AGENT]),
-      readOpencodeAgent,
+      readOpencodeAgent
     })
 
     await renderSection()
@@ -395,11 +397,11 @@ describe('OpencodeAgentsSection', () => {
     const readOpencodeAgent = vi.fn(async () => ({
       ...BUILTIN_DETAIL,
       scope: 'global' as const,
-      disabled: false,
+      disabled: false
     }))
     installApiStub({
       listOpencodeAgents: vi.fn(async () => [BUILTIN_AGENT]),
-      readOpencodeAgent,
+      readOpencodeAgent
     })
 
     await renderSection()
@@ -427,11 +429,11 @@ describe('OpencodeAgentsSection', () => {
   it('reset calls deleteOpencodeAgent for built-in agent', async () => {
     const readOpencodeAgent = vi.fn(async () => ({
       ...BUILTIN_DETAIL,
-      scope: 'global' as const,
+      scope: 'global' as const
     }))
     installApiStub({
       listOpencodeAgents: vi.fn(async () => [BUILTIN_AGENT]),
-      readOpencodeAgent,
+      readOpencodeAgent
     })
 
     await renderSection()

@@ -66,8 +66,6 @@ beforeEach(() => {
         streamingText: '',
         streamingThinking: '',
         thinkingStartedAt: null,
-        thinkingDurationMs: null,
-        pendingThinkingDurationMs: null,
         evicted: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
@@ -95,7 +93,7 @@ beforeEach(() => {
         reasoningVariant: null,
         statusLine: null,
         metering: null,
-        queuedText: '',
+        queuedItems: [],
         draftText: '',
         draftAttachments: [],
         selectedModel: 'default',
@@ -197,7 +195,13 @@ describe('renderToolBlock dispatch (via MessageBubble)', () => {
           ...state.sessions,
           'test-session': {
             ...state.sessions['test-session'],
-            status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null, engineId: 'pi' })
+            status: makeSessionStatus({
+              state: 'idle',
+              sessionId: null,
+              model: null,
+              cwd: null,
+              engineId: 'pi'
+            })
           }
         }
       }))

@@ -14,11 +14,11 @@ directory. This file is executed by the SDK via `node` or `bun` when you call
 `query()`. It is **independent** of the native `claude` binary installed on
 your system, and may trail behind in version.
 
-| Component              | Version at time of discovery                                    |
-| ---------------------- | --------------------------------------------------------------- |
-| SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49                    |
-| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49                    |
-| Last re-anchored       | 2.1.197                                                         |
+| Component              | Version at time of discovery               |
+| ---------------------- | ------------------------------------------ |
+| SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
+| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
+| Last re-anchored       | 2.1.197                                    |
 
 All versions exhibit the same behavior. Function names change between
 versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical.
@@ -57,6 +57,7 @@ reaches the SDK consumer via `transport.readMessages()`.
 ### How the Task tool executes a sub-agent
 
 **v2.1.196 and earlier:**
+
 ```
 Task.call(input, context, canUseTool, message, progressCallback)
   │
@@ -69,6 +70,7 @@ Task.call(input, context, canUseTool, message, progressCallback)
 ```
 
 **v2.1.197+ (BVe unification):**
+
 ```
 Task.call(input, context, canUseTool, message, progressCallback)
   │
@@ -115,23 +117,24 @@ async function BVe({
 ```
 
 Key variables:
-| Variable | Source | Value |
-| -------- | ------ | ----- |
-| `u` | `BVe` destructured param | `nt` onMessage callback from Task.call() |
-| `d` | `BVe` destructured param | `shouldNotifyOwner = () => Fe` |
-| `s` (v197-v198) / `i` (v207+) | `BVe` destructured param | toolUseContext; `s.toolUseId` (or `i.toolUseId`) = parent tool use ID |
-| `p` (v197–v207) / `m` (v219+) | defaulted alias `let X=d??(()=>!0)` — the Patch E gate | `() => Fe`, or `()=>!0` when no shouldNotifyOwner passed |
-| `h` | local to BVe | message collection array |
-| `ce` | loop variable | current message from sub-agent generator |
-| `W` | watchdog callback | called once per iteration |
-| `Fe` | Task.call() local | true when task is backgrounded |
-| `nt` | Task.call() local | `(MSG)=>{...}` onMessage callback |
-| `Ye` | Task.call() local | collection array fed to Tko/FVe |
+
+| Variable                      | Source                                                 | Value                                                                 |
+| ----------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------- |
+| `u`                           | `BVe` destructured param                               | `nt` onMessage callback from Task.call()                              |
+| `d`                           | `BVe` destructured param                               | `shouldNotifyOwner = () => Fe`                                        |
+| `s` (v197-v198) / `i` (v207+) | `BVe` destructured param                               | toolUseContext; `s.toolUseId` (or `i.toolUseId`) = parent tool use ID |
+| `p` (v197–v207) / `m` (v219+) | defaulted alias `let X=d??(()=>!0)` — the Patch E gate | `() => Fe`, or `()=>!0` when no shouldNotifyOwner passed              |
+| `h`                           | local to BVe                                           | message collection array                                              |
+| `ce`                          | loop variable                                          | current message from sub-agent generator                              |
+| `W`                           | watchdog callback                                      | called once per iteration                                             |
+| `Fe`                          | Task.call() local                                      | true when task is backgrounded                                        |
+| `nt`                          | Task.call() local                                      | `(MSG)=>{...}` onMessage callback                                     |
+| `Ye`                          | Task.call() local                                      | collection array fed to Tko/FVe                                       |
 
 **v2.1.219 gate rename (CRITICAL — silent semantic break):** v2.1.219 appended
 `onRunSettled:p,onTerminalSuccess:f` to the BVe/`_Ie` signature and renamed the defaulted
 shouldNotifyOwner alias from `p` to `m` (`let m=d??(()=>!0)`). A patch that hardcodes `p()` as
-the gate still *applies* cleanly but calls `onRunSettled()` instead: the gate is always falsy
+the gate still _applies_ cleanly but calls `onRunSettled()` instead: the gate is always falsy
 (background stream_events silently dropped) and the run-settled callback fires spuriously per
 message. The patch now extracts the alias structurally from
 `shouldNotifyOwner:(V1)[^)]*){let (V2)=V1??(()=>!0)` and uses `V2()` as the gate. Never
@@ -139,7 +142,7 @@ hardcode this name.
 
 **v2.1.219 Task routing + native relay:** two things changed in the runner refactor:
 
-1. The Task tool now *non-deterministically* routes even foreground (no `run_in_background`)
+1. The Task tool now _non-deterministically_ routes even foreground (no `run_in_background`)
    sub-agents through the spawned/async path (`_Ie` call without `onMessage`; the Task result
    says `async_launched`). On that route the `nt`/Gr callback (Patches A/B) never sees the
    sub-agent's messages, so Patch E's BVe-loop forwarding is the ONLY stream_event source —
@@ -563,6 +566,7 @@ Sub-agent generator → BVe() for-await loop
 ```
 
 Note: In v2.1.197+:
+
 - `p` = `shouldNotifyOwner` = `() => Fe`. Returns `true` when `Fe=true` (backgrounded); `false` when sync.
 - `s.toolUseId` = parent_tool_use_id (no description-search needed — available directly from `toolUseContext`).
 - Patch G is no longer needed: `iu8()` was merged into `BVe()`, which Patch E's BVe injection already covers.
@@ -721,21 +725,25 @@ for await (let MSG of b4({...})) {
 **Fix:** Inside the `IVe` branch, after the `FHO()` side-effect call and before the BUF flush, yield the message when it is a `stream_event`. This lets it flow through to `nt`/BVe as designed.
 
 **Anchor** (unique, 1 match):
+
 ```
 if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}
 ```
 
 More precisely as a regex (minified names vary):
+
 ```
 if(<CB>?.(),<IVe>(<MSG>)){<FHO>(<MSG>,<CFG1>,<CFG2>),yield*<BUF>,<BUF>.length=0;continue}
 ```
 
 **Before:**
+
 ```js
 if(CB?.(), IVe(MSG)){FHO(MSG, CFG, N), yield*BUF, BUF.length=0; continue}
 ```
 
 **After:**
+
 ```js
 if(CB?.(), IVe(MSG)){/*PATCHED:subagent-F2*/FHO(MSG, CFG, N),
   MSG.type==="stream_event"&&(yield MSG),
@@ -749,6 +757,7 @@ The `(yield MSG)` expression is valid inside a generator body. It is wrapped in 
 **Applicability:** F2 auto-skips on pre-2.1.197 CLIs where the `IVe/fHo` pre-filter does not exist. Patch F alone was sufficient there.
 
 **How to find this code:**
+
 ```bash
 bundle-analyzer find cli.js "IVe(MSG)){FHO" --compact
 # Or search for the buffer flush pattern unique to this generator:
@@ -756,6 +765,7 @@ bundle-analyzer find cli.js "yield*BUF,BUF.length=0;continue" --compact
 ```
 
 The `IVe` function is `Bam.has(MSG.type)` — find it by:
+
 ```bash
 bundle-analyzer find cli.js '"stream_event"' --compact
 # Look for a Set that includes "stream_event" among other streaming message types
@@ -775,6 +785,7 @@ array.
 #### v2.1.196 and earlier (for-await with push)
 
 Before:
+
 ```js
 if (O1.push(Y1),
     Y1.type !== "assistant" && Y1.type !== "user")
@@ -782,6 +793,7 @@ if (O1.push(Y1),
 ```
 
 After:
+
 ```js
 /*PATCHED:subagent-B*/
 if (Y1.type === "stream_event") {
@@ -812,6 +824,7 @@ nt callback structure (v2.1.197):
 ```
 
 The `ntCallbackRe` pattern matches the push line:
+
 ```js
 const ntCallbackRe = new RegExp(
   `if\\((%V%)\\.type!=="api_metrics"&&\\1\\.type!=="set_in_progress_tool_use_ids"\\)(%V%)\\.push\\(\\1\\)`
@@ -819,14 +832,19 @@ const ntCallbackRe = new RegExp(
 ```
 
 After (v2.1.197 nt-callback shape):
+
 ```js
 /*PATCHED:subagent-B*/
-if (MSG.type === "stream_event") {
-    if (CALLBACK) CALLBACK({type:"progress",toolUseID:`agent_${parentVar.message.id}`,
-        data:{type:"agent_stream_event",event:MSG.event,agentId:agentVar}});
-    return  // ← return: arrow function, not a loop body — NOT continue
+if (MSG.type === 'stream_event') {
+  if (CALLBACK)
+    CALLBACK({
+      type: 'progress',
+      toolUseID: `agent_${parentVar.message.id}`,
+      data: { type: 'agent_stream_event', event: MSG.event, agentId: agentVar }
+    })
+  return // ← return: arrow function, not a loop body — NOT continue
 }
-if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")Ye.push(MSG);
+if (MSG.type !== 'api_metrics' && MSG.type !== 'set_in_progress_tool_use_ids') Ye.push(MSG)
 ```
 
 **Critical:** the old path used `continue` (valid in a for-loop). The v2.1.197 path uses `return` (arrow function body, no loop). `apply.mjs` detects which shape was matched (`isNtCallback` flag) and selects the correct exit keyword.
@@ -838,6 +856,7 @@ if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")Ye.push(M
 **How to find this code in a new version:**
 
 For v2.1.197+ nt-callback:
+
 ```bash
 bundle-analyzer find cli.js '"api_metrics"&&' --compact
 # The nt callback is the only location that checks both api_metrics AND
@@ -845,6 +864,7 @@ bundle-analyzer find cli.js '"api_metrics"&&' --compact
 ```
 
 For older for-await loop shape:
+
 ```bash
 bundle-analyzer find cli.js '.push\(.*bash_progress' --regex --compact
 # Or:
@@ -1016,11 +1036,13 @@ break on v2.1.219 (`p()` called `onRunSettled` instead: gate always falsy → ba
 stream_events dropped, run-settled callback fired per message).
 
 **Anchor** (unique in BVe's for-await body):
+
 ```
 if(WATCHDOG(), MSG.type==="system"&&MSG.subtype==="api_error")continue;ARR.push(MSG)
 ```
 
 Injection is inserted **before** the watchdog call (`GATE` = the extracted alias):
+
 ```js
 /*PATCHED:subagent-E*/
 if(ce.type==="stream_event"){
@@ -1056,6 +1078,7 @@ async function BVe({...toolUseContext:VAR,...})
 The captured `VAR` (shown as `CTX` above; `i` in v2.1.207) is then used for `.toolUseId` in the injection. The patch requires exactly one matching signature in the bounded prefix and fails closed if the binding is absent or ambiguous.
 
 **Verify anchor uniqueness:**
+
 ```bash
 bundle-analyzer find cli.js 'ce.type==="system"&&ce.subtype==="api_error")continue' --compact
 # Should match exactly once (inside BVe's for-await loop body)
@@ -1252,17 +1275,20 @@ Patch E targets the _re-background_ path (foreground agent backgrounded mid-exec
 `iu8()` was a standalone async function whose `for await` loop collected messages but never forwarded anything to stdout.
 
 **Anchor** (the `iu8` function signature — no longer present in v2.1.197+):
+
 ```
 async function iu8({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,agentIdForCleanup:VAR,enableSummarization:VAR,getWorktreeResult:VAR})
 ```
 
 Find it with:
+
 ```bash
 bundle-analyzer find cli.js "taskId:.*abortController:.*makeStream:.*metadata:.*description:.*toolUseContext:.*taskRegistry:.*agentIdForCleanup" --regex --compact
 # Returns nothing in v2.1.197+ (merged into BVe)
 ```
 
 **Before** (≤v2.1.196, loop body just collects):
+
 ```js
 for await (let G of _(P)) {
     J.push(G), O.update(q, ...), G36(X, G, M, A.options.tools), q78(q, ...);
@@ -1271,6 +1297,7 @@ for await (let G of _(P)) {
 ```
 
 **After** (stream_event forwarded + continue, assistant/user forwarded then fall through):
+
 ```js
 for await (let G of _(P)) {
     /*PATCHED:subagent-G*/
@@ -1295,11 +1322,11 @@ for await (let G of _(P)) {
 
 **Key differences from legacy Patch E (≤v2.1.196):**
 
-| Aspect                      | Patch E (legacy)                                   | Patch G                                                    |
-| --------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
-| Code path                   | Re-background loop (after `backgroundSignal`)       | `iu8()` (agents launched directly as background)           |
-| `parent_tool_use_id` source | Looked up from parent message by description match  | Direct: `toolUseContext.toolUseId` (parameter available)   |
-| Loop pattern                | `for await` with `isAsync:!0` in context            | `for await(let G of _(P))` in standalone function          |
+| Aspect                      | Patch E (legacy)                                   | Patch G                                                  |
+| --------------------------- | -------------------------------------------------- | -------------------------------------------------------- |
+| Code path                   | Re-background loop (after `backgroundSignal`)      | `iu8()` (agents launched directly as background)         |
+| `parent_tool_use_id` source | Looked up from parent message by description match | Direct: `toolUseContext.toolUseId` (parameter available) |
+| Loop pattern                | `for await` with `isAsync:!0` in context           | `for await(let G of _(P))` in standalone function        |
 
 In v2.1.197+: Patch E's BVe injection handles all paths (sync, re-background, and directly-backgrounded agents). `patchGApplicable=false` so the final marker check is skipped.
 
@@ -1434,32 +1461,32 @@ Where the message content includes `type:"thinking"` blocks.
 ## Key Functions Reference
 
 | Name (v2.1.38 → v2.1.49 → v2.1.197)              | Purpose                                                            |
-| ------------------------------------------------- | ------------------------------------------------------------------ |
+| ------------------------------------------------ | ------------------------------------------------------------------ |
 | `RVY()` → `T7z()` → (still present, RVY-gate)    | cR/jy/Wy yield filter (gates what the generator yields to callers) |
-| `dR()` → (merged) → BVe()                         | Sub-agent execution generator / unified runner (v2.1.197+)         |
+| `dR()` → (merged) → BVe()                        | Sub-agent execution generator / unified runner (v2.1.197+)         |
 | `UEA()` → `Mg8()` → `Tko()`/`FVe()`              | Extract text-only result from agent messages                       |
-| `FM6()` → `r_1()` → (varies)                      | Extract text from last assistant message                           |
-| `ZhA()` → `if8()` → `ATt()`                       | Convert internal messages to SDK output format                     |
-| `U1q()` → `O6q()` → (varies)                      | Wrap progress data into progress message format                    |
-| `iO()` → `W_()` → (varies)                        | Normalize messages to individual content blocks                    |
+| `FM6()` → `r_1()` → (varies)                     | Extract text from last assistant message                           |
+| `ZhA()` → `if8()` → `ATt()`                      | Convert internal messages to SDK output format                     |
+| `U1q()` → `O6q()` → (varies)                     | Wrap progress data into progress message format                    |
+| `iO()` → `W_()` → (varies)                       | Normalize messages to individual content blocks                    |
 | `_f()` → `nk()` → `globalThis.crypto.randomUUID` | UUID generator for message wrapping (web crypto in v2.1.197+)      |
-| `iu8()` → `iu8()` → (merged into BVe)             | Standalone background agent runner (removed in v2.1.197)           |
-| `IVe()` / `Bam`                                   | Pre-filter in sub-agent generator (v2.1.197+): `Bam.has(MSG.type)` |
-| `FHO()` / `fHo()`                                 | Streaming display handler called inside IVe branch (v2.1.197+)     |
-| `BVe()`                                           | Unified sub-agent runner (sync + background) (v2.1.197+)           |
+| `iu8()` → `iu8()` → (merged into BVe)            | Standalone background agent runner (removed in v2.1.197)           |
+| `IVe()` / `Bam`                                  | Pre-filter in sub-agent generator (v2.1.197+): `Bam.has(MSG.type)` |
+| `FHO()` / `fHo()`                                | Streaming display handler called inside IVe branch (v2.1.197+)     |
+| `BVe()`                                          | Unified sub-agent runner (sync + background) (v2.1.197+)           |
 
 **v2.1.197 patch inventory (A–G + F2):**
 
-| Patch | Marker | What it does | v2.1.197 notes |
-| ----- | ------ | ------------ | -------------- |
-| F     | `subagent-F` | RVY gate bypass — yield stream_event before it's filtered in cR | Still present; now unreachable for stream_events (F2 catches them upstream), but harmless |
-| F2    | `subagent-F2` | Yield stream_event past IVe/fHo pre-filter in sub-agent generator | NEW in v2.1.197; auto-skips on older CLIs |
-| A     | `subagent-A` | Remove content-block type filter from progress callback | No structural change in v2.1.197 |
-| B     | `subagent-B` | Intercept stream_event before Ye.push in nt-callback / O1.push in for-await | v2.1.197: targets nt-callback (`ntCallbackRe`); uses `return` not `continue` |
-| C     | `subagent-C` | Add agent_stream_event handler in ZhA/ihA/ATt | No structural change in v2.1.197 |
-| D     | `subagent-D` | Include thinking blocks in .output file | No structural change in v2.1.197 |
-| E     | `subagent-E` | Background agent stdout (BVe for-await in v2.1.197+; legacy loops in v2.1.196-) | v2.1.197: targets BVe anchor; uses `s.toolUseId` |
-| G     | `subagent-G` | iu8() standalone background stdout (≤v2.1.196) | Auto-skips in v2.1.197+ (iu8 merged into BVe) |
+| Patch | Marker        | What it does                                                                    | v2.1.197 notes                                                                            |
+| ----- | ------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| F     | `subagent-F`  | RVY gate bypass — yield stream_event before it's filtered in cR                 | Still present; now unreachable for stream_events (F2 catches them upstream), but harmless |
+| F2    | `subagent-F2` | Yield stream_event past IVe/fHo pre-filter in sub-agent generator               | NEW in v2.1.197; auto-skips on older CLIs                                                 |
+| A     | `subagent-A`  | Remove content-block type filter from progress callback                         | No structural change in v2.1.197                                                          |
+| B     | `subagent-B`  | Intercept stream_event before Ye.push in nt-callback / O1.push in for-await     | v2.1.197: targets nt-callback (`ntCallbackRe`); uses `return` not `continue`              |
+| C     | `subagent-C`  | Add agent_stream_event handler in ZhA/ihA/ATt                                   | No structural change in v2.1.197                                                          |
+| D     | `subagent-D`  | Include thinking blocks in .output file                                         | No structural change in v2.1.197                                                          |
+| E     | `subagent-E`  | Background agent stdout (BVe for-await in v2.1.197+; legacy loops in v2.1.196-) | v2.1.197: targets BVe anchor; uses `s.toolUseId`                                          |
+| G     | `subagent-G`  | iu8() standalone background stdout (≤v2.1.196)                                  | Auto-skips in v2.1.197+ (iu8 merged into BVe)                                             |
 
 **Note:** Names change between versions — always use content patterns, not
 names. Use `bundle-analyzer find` with string literals as anchors.

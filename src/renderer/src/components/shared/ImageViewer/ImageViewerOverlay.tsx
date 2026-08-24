@@ -39,7 +39,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useContextMenu } from '../../../hooks/useContextMenu'
-import { rasterToPngBlob, svgToPngBlob, themeCanvasBackground, writeClipboardImage } from './copy-image'
+import {
+  rasterToPngBlob,
+  svgToPngBlob,
+  themeCanvasBackground,
+  writeClipboardImage
+} from './copy-image'
 import {
   DOUBLE_TAP_SCALE,
   FIT_TRANSFORM,
@@ -258,8 +263,7 @@ export function ImageViewerOverlay({
   useLayoutEffect(() => {
     const el = viewportRef.current
     if (!el || !hasSvgEntry) return
-    const measure = (): void =>
-      setViewportBox({ width: el.clientWidth, height: el.clientHeight })
+    const measure = (): void => setViewportBox({ width: el.clientWidth, height: el.clientHeight })
     measure()
     // Guarded because jsdom ships no ResizeObserver: without this, every test
     // that opens a diagram would have to stub one.
@@ -512,9 +516,7 @@ export function ImageViewerOverlay({
       const anchor = anchorOf(tap.x, tap.y)
       setTransform((t) =>
         clampPan(
-          t.scale > MIN_SCALE
-            ? FIT_TRANSFORM
-            : zoomTo(t, anchor, DOUBLE_TAP_SCALE),
+          t.scale > MIN_SCALE ? FIT_TRANSFORM : zoomTo(t, anchor, DOUBLE_TAP_SCALE),
           viewportSize(),
           fittedSize()
         )
@@ -797,7 +799,11 @@ function NavButton({
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        {side === 'left' ? <polyline points="15 18 9 12 15 6" /> : <polyline points="9 18 15 12 9 6" />}
+        {side === 'left' ? (
+          <polyline points="15 18 9 12 15 6" />
+        ) : (
+          <polyline points="9 18 15 12 9 6" />
+        )}
       </svg>
     </button>
   )

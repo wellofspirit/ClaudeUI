@@ -15,12 +15,14 @@
  * down the shared jsdom `window.api` out from under this one.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, fireEvent, screen, act, cleanup } from '@testing-library/react'
+import { render, fireEvent, screen, act, cleanup, waitFor } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { SidebarContext } from '../../../SessionView'
-import type { GitStatusData, StatusLineData } from '../../../../../../shared/types'
+import type { GitStatusData, SessionStatus, StatusLineData } from '../../../../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../../../../shared/model-capabilities'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-topbar'
 
@@ -53,12 +55,11 @@ describe('TopBar — Session time / API time', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('renders Session time and API time from a completed (idle) status line', () => {
-    useSessionStore
-      .getState()
-      .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 65_000, totalApiDurationMs: 40_000 }))
+    seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 65_000, totalApiDurationMs: 40_000 }))
 
     const { unmount } = render(<TopBar hasContent />)
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -70,9 +71,7 @@ describe('TopBar — Session time / API time', () => {
 
   it('formats hour-scale durations as "Nh Nm" (seconds dropped as noise)', () => {
     // 1415m 20s of active time reads terribly — the hours tier kicks in at 1h.
-    useSessionStore
-      .getState()
-      .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 84_920_000 }))
+    seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 84_920_000 }))
 
     const { unmount } = render(<TopBar hasContent />)
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -82,7 +81,7 @@ describe('TopBar — Session time / API time', () => {
   })
 
   it('hides API time when totalApiDurationMs is 0 (e.g. opencode, or a reloaded Claude session)', () => {
-    useSessionStore.getState().setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 5_000 }))
+    seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 5_000 }))
 
     const { unmount } = render(<TopBar hasContent />)
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -99,9 +98,7 @@ describe('TopBar — Session time / API time', () => {
     vi.useFakeTimers()
     try {
       const turnStartedAtMs = Date.now()
-      useSessionStore
-        .getState()
-        .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 10_000, turnStartedAtMs }))
+      seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 10_000, turnStartedAtMs }))
 
       const { unmount } = render(<TopBar hasContent />)
       fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -126,7 +123,7 @@ describe('TopBar — Session time / API time', () => {
   it('does not tick when idle (turnStartedAtMs null) even with the tooltip open', () => {
     vi.useFakeTimers()
     try {
-      useSessionStore.getState().setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 20_000 }))
+      seed.statusLine(ROUTE, makeStatusLine({ totalDurationMs: 20_000 }))
 
       const { unmount } = render(<TopBar hasContent />)
       fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
@@ -160,10 +157,11 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('hides the breakdown for a single-model session', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.23,
@@ -179,7 +177,7 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
   })
 
   it('shows the breakdown sorted by cost desc for a multi-model session', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.68,
@@ -211,13 +209,11 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
   })
 
   it('shows the breakdown for a single dispatched (cross-engine) row even with just one entry', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 0.02,
-        modelCosts: [
-          { engineId: 'opencode', modelId: 'gpt-5.4', costUsd: 0.02, dispatched: true }
-        ]
+        modelCosts: [{ engineId: 'opencode', modelId: 'gpt-5.4', costUsd: 0.02, dispatched: true }]
       })
     )
 
@@ -247,10 +243,11 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
   })
 
   it('marks a dispatched row with data-dispatched + a "· dispatched" suffix, own-engine rows unmarked', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.0,
@@ -280,7 +277,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   })
 
   it('strips the "provider/" prefix for a dispatched opencode-style model id shortModelName cannot shorten', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 0,
@@ -301,7 +298,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   })
 
   it('renders "Total incl. dispatched" as headline cost + dispatched sum when a dispatched row exists', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.0,
@@ -325,7 +322,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
   })
 
   it('hides "Total incl. dispatched" when there are no dispatched rows', () => {
-    useSessionStore.getState().setStatusLine(
+    seed.statusLine(
       ROUTE,
       makeStatusLine({
         totalCostUsd: 1.68,
@@ -403,6 +400,7 @@ describe('TopBar — mobile web fullscreen control removed', () => {
   afterEach(() => {
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
 
     window.matchMedia = originalMatchMedia
     document.documentElement.requestFullscreen = originalRequestFullscreen
@@ -472,6 +470,35 @@ describe('TopBar — mobile entry points', () => {
     )
   }
 
+  /**
+   * The bar takes `isMobile` from SidebarContext, but the dialogs it opens fork
+   * on `useIsMobile()` — a viewport read. A menu test that only sets the context
+   * would open the DESKTOP dialog and quietly assert the wrong end of the flow,
+   * so tests that follow the tap into a dialog set the viewport too.
+   */
+  const originalMatchMedia = window.matchMedia
+  const originalInnerWidth = window.innerWidth
+
+  function setViewportIsMobile(isMobile: boolean): void {
+    // useIsMobile seeds from innerWidth and only then subscribes to the media
+    // query, so BOTH have to say the same thing.
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: isMobile ? 390 : 1280
+    })
+    window.matchMedia = ((query: string) => ({
+      matches: isMobile && query.includes('max-width: 768px'),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false
+    })) as unknown as typeof window.matchMedia
+  }
+
   beforeEach(async () => {
     app = await bootTestApp()
     // The permissions dialog loads on open; keep both probes resolvable so the
@@ -483,6 +510,11 @@ describe('TopBar — mobile entry points', () => {
       additionalDirectories: []
     }))
     app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
+    // Same for the Skills / MCP dialogs the menu can now open.
+    app.bridge.ipcMain.handle('config:load-skill-details' as never, async () => [])
+    app.bridge.ipcMain.handle('mcp:load-servers' as never, async () => ({}))
+    app.bridge.ipcMain.handle('mcp:read-disabled' as never, async () => [])
+    app.bridge.ipcMain.handle('mcp:status' as never, async () => null)
     useSessionStore.getState().createNewSession(ROUTE, PLAIN_CWD)
     useSessionStore.setState({ activeSessionId: ROUTE })
   })
@@ -493,6 +525,13 @@ describe('TopBar — mobile entry points', () => {
     cleanup()
     app.teardown()
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+    window.matchMedia = originalMatchMedia
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: originalInnerWidth
+    })
   })
 
   it('renders GitChangesPill on mobile once the session is a git repo with status', () => {
@@ -559,5 +598,399 @@ describe('TopBar — mobile entry points', () => {
     expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
     expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
+  })
+
+  // ── Skills / MCP entries (M2) ─────────────────────────────────────────────
+  // Each menu row carries EXACTLY the gate its desktop button uses. The gates
+  // live on the session status, so they are driven here through a real status
+  // event rather than by poking the store.
+
+  function seedStatus(overrides: Partial<SessionStatus>): void {
+    seed.status(ROUTE, {
+      state: 'idle',
+      // Null: a non-null sessionId that differs from the routing id would be
+      // read as a rekey and move the session out from under the test.
+      sessionId: null,
+      model: null,
+      cwd: PLAIN_CWD,
+      totalCostUsd: 0,
+      engineId: 'claude',
+      capabilities: resolveClaudeCapabilities('default'),
+      account: null,
+      ...overrides
+    })
+  }
+
+  it('offers Skills and MCP alongside Permissions when the session supports them', () => {
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.getByTestId('TopBar.overflowMenuSkills')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.overflowMenuMcp')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+  })
+
+  it('drops Skills when the engine has no skills capability', () => {
+    seedStatus({
+      capabilities: { ...resolveClaudeCapabilities('default'), skills: false }
+    })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.queryByTestId('TopBar.overflowMenuSkills')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenuMcp')).toBeInTheDocument()
+  })
+
+  it('drops MCP when the model cannot use MCP', () => {
+    seedStatus({
+      capabilities: { ...resolveClaudeCapabilities('default'), canUseMcp: false }
+    })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenuSkills')).toBeInTheDocument()
+  })
+
+  it('drops MCP for a non-Claude engine even with canUseMcp true (.mcp.json is Claude-only config)', () => {
+    seedStatus({
+      engineId: 'opencode',
+      capabilities: { ...resolveClaudeCapabilities('default'), canUseMcp: true, skills: true }
+    })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+    // Skills is engine-neutral — opencode keeps it.
+    expect(screen.getByTestId('TopBar.overflowMenuSkills')).toBeInTheDocument()
+  })
+
+  it('opens the SKILLS mobile fork from the overflow menu', async () => {
+    setViewportIsMobile(true)
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuSkills'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // End to end: a phone tap lands on the phone surface, not the 900px dialog.
+    expect(screen.getByTestId('SkillsMobileView')).toBeInTheDocument()
+    expect(screen.queryByTestId('SkillsDialog')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuSkills')).toBeNull()
+  })
+
+  it('opens the MCP mobile fork from the overflow menu', async () => {
+    setViewportIsMobile(true)
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuMcp'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(screen.getByTestId('McpMobileView')).toBeInTheDocument()
+    expect(screen.queryByTestId('McpDialog')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+  })
+
+  it('desktop still reaches Skills and MCP through its own buttons, not a menu', () => {
+    renderTopBar(false)
+
+    expect(screen.getByTestId('TopBar.skills')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.mcp')).toBeInTheDocument()
+    expect(screen.queryByTestId('TopBar.overflowMenuSkills')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuMcp')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Terminal toggle button. The Ctrl/Cmd+` keybinding is unreachable in a browser
+// (macOS owns Cmd+`, Edge swallows Ctrl+`), so the bar carries the only visible
+// entry point. Both it and the keydown handler call the SAME helper
+// (components/terminal/toggle-terminal.ts) — this block is that helper's
+// behavioral coverage; SessionView's keydown path is not re-tested.
+//
+// Visibility is gated on the host's own `terminal:availability` answer, but
+// ONLY on web: desktop resolves "allowed" synchronously with no IPC at all
+// (the remote toggle governs remote access, never the local shell).
+// ---------------------------------------------------------------------------
+
+describe('TopBar — terminal toggle button', () => {
+  let app: TestApp
+  let createTerminal: ReturnType<typeof vi.fn>
+  let terminalAvailability: ReturnType<typeof vi.fn>
+
+  const TERM_CWD = '/d/repo-topbar-term'
+
+  function renderTopBar(isMobile: boolean) {
+    return render(
+      <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile }}>
+        <TopBar hasContent />
+      </SidebarContext.Provider>
+    )
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    createTerminal = vi.fn(async () => 'term-topbar-1')
+    ;(window.api as unknown as { createTerminal: unknown }).createTerminal = createTerminal
+    terminalAvailability = vi.fn(async () => ({
+      allowed: true,
+      granted: true,
+      needsStepUp: false,
+      stepUp: null
+    }))
+    ;(window.api as unknown as { terminalAvailability: unknown }).terminalAvailability =
+      terminalAvailability
+    useSessionStore.getState().createNewSession(ROUTE, TERM_CWD)
+    useSessionStore.setState({
+      activeSessionId: ROUTE,
+      terminalGroups: {},
+      terminalPanelOpen: false
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    app.teardown()
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      terminalGroups: {},
+      terminalPanelOpen: false
+    })
+    mirrorStoreIntoReplica()
+  })
+
+  it('renders on desktop without ever asking the host about availability', () => {
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+    expect(terminalAvailability).not.toHaveBeenCalled()
+  })
+
+  it('renders on web once the host says the remote terminal is allowed', async () => {
+    app.api.platform = 'web'
+    renderTopBar(false)
+
+    await waitFor(() => expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument())
+    expect(terminalAvailability).toHaveBeenCalled()
+  })
+
+  it('stays hidden on web when the owner has the remote terminal turned off', async () => {
+    app.api.platform = 'web'
+    terminalAvailability.mockResolvedValue({
+      allowed: false,
+      granted: false,
+      needsStepUp: false,
+      stepUp: null
+    })
+    renderTopBar(false)
+
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    // Flush the resolved-promise state update before asserting absence.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('stays hidden on web while the first availability query is still in flight', async () => {
+    app.api.platform = 'web'
+    // Never resolves: an affordance that flashes in and back out is worse than
+    // one that appears a beat late.
+    terminalAvailability.mockReturnValue(new Promise(() => {}))
+    renderTopBar(false)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(terminalAvailability).toHaveBeenCalled()
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('stays hidden on web when the availability query fails outright', async () => {
+    app.api.platform = 'web'
+    terminalAvailability.mockRejectedValue(new Error('no handler'))
+    renderTopBar(false)
+
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+  })
+
+  it('is hidden on mobile — the phone reaches the terminal from the ⋯ menu instead', () => {
+    renderTopBar(true)
+    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
+  })
+
+  // ── Mobile ⋯ entry (M3) ───────────────────────────────────────────────────
+  // The bar has no room for the button on a phone, so the entry moved into the
+  // overflow menu — carrying the desktop button's gate verbatim, so the two
+  // surfaces can never disagree about whether this client can have a shell.
+
+  it('offers Terminal in the ⋯ menu, first, matching the desktop bar order', () => {
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    expect(screen.getByTestId('TopBar.overflowMenuTerminal')).toBeInTheDocument()
+    // Desktop reads VSCode · Terminal · Skills · MCP · Permissions left to right.
+    const labels = screen
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('data-testid'))
+      .filter(
+        (id): id is string =>
+          !!id && id.startsWith('TopBar.overflowMenu') && id !== 'TopBar.overflowMenu'
+      )
+    expect(labels[0]).toBe('TopBar.overflowMenuTerminal')
+  })
+
+  it('drops the ⋯ Terminal entry when the host says the remote terminal is off', async () => {
+    app.api.platform = 'web'
+    terminalAvailability.mockResolvedValue({
+      allowed: false,
+      granted: false,
+      needsStepUp: false,
+      stepUp: null
+    })
+
+    renderTopBar(true)
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+    // The rest of the menu is untouched by the terminal's answer.
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+  })
+
+  it('drops the ⋯ Terminal entry while the first availability query is in flight', async () => {
+    app.api.platform = 'web'
+    // Never resolves: an affordance that flashes in and back out is worse than
+    // one that appears a beat late.
+    terminalAvailability.mockReturnValue(new Promise(() => {}))
+
+    renderTopBar(true)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+  })
+
+  it('opens the terminal from the ⋯ menu through the same helper the button uses', async () => {
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuTerminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // Same store flag, same auto-open of pool slot 0 for the active cwd.
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).toHaveBeenCalledWith(TERM_CWD, 0)
+    // The menu closes behind the takeover.
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+  })
+
+  it('desktop never grows a ⋯ Terminal entry (fork guard)', () => {
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toBeInTheDocument()
+    expect(screen.queryByTestId('TopBar.overflowMenuTerminal')).toBeNull()
+  })
+
+  it('names the reachable binding per platform in the tooltip', () => {
+    // Pinned rather than inherited from process.platform, so the assertion
+    // means the same thing on a macOS dev box as it does in CI.
+    app.api.platform = 'win32'
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toHaveAttribute('title', 'Terminal (Ctrl+`)')
+    cleanup()
+
+    app.api.platform = 'darwin'
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.terminal')).toHaveAttribute('title', 'Terminal (⌥`)')
+  })
+
+  it('opens the panel and auto-creates the first tab for the active cwd', async () => {
+    renderTopBar(false)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    // Slot 0 of this cwd's terminal POOL — which attaches to an existing shell
+    // there (another surface's) rather than always spawning a second one.
+    expect(createTerminal).toHaveBeenCalledWith(TERM_CWD, 0)
+    const group = useSessionStore.getState().terminalGroups[TERM_CWD]
+    expect(group?.tabs).toHaveLength(1)
+    expect(group?.tabs[0]).toMatchObject({
+      id: 'term-topbar-1',
+      title: 'Terminal',
+      cwd: TERM_CWD,
+      poolIndex: 0
+    })
+  })
+
+  it('closes on a second click without spawning another terminal', async () => {
+    renderTopBar(false)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(false)
+    expect(createTerminal).toHaveBeenCalledTimes(1)
+  })
+
+  it('with no active session cwd: opens the panel but spawns NOTHING (no orphan PTY)', async () => {
+    // Pre-fix, the '.'-fallback spawned a real shell into group '.', which no
+    // view ever shows (selectVisibleTerminalTabs bails on an empty cwd) — an
+    // invisible orphan the visible button would have made easy to hit from the
+    // welcome screen. The panel's own empty state is the affordance instead.
+    useSessionStore.setState({ activeSessionId: null })
+
+    renderTopBar(false)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().terminalGroups['.']).toBeUndefined()
+  })
+
+  it('reuses an existing tab group for the cwd instead of spawning a duplicate', async () => {
+    useSessionStore.getState().addTerminalTab({ id: 'term-existing', title: 'A', cwd: TERM_CWD })
+
+    renderTopBar(false)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.terminal'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
+    expect(createTerminal).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().terminalGroups[TERM_CWD]?.tabs).toHaveLength(1)
   })
 })

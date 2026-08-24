@@ -14,24 +14,24 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: vi.fn(), release: vi.fn() }
 }))
-vi.mock('../../opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
+vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
 const { mockInvalidateOpencodeModelCache } = vi.hoisted(() => ({
   mockInvalidateOpencodeModelCache: vi.fn()
 }))
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/model-discovery', () => ({
   invalidateOpencodeModelCache: mockInvalidateOpencodeModelCache
 }))
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/fake/persisted'
 }))
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }
 }))
 
-import { OpencodeAuthProvider } from '../OpencodeAuthProvider'
+import { OpencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 
 describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
   let tmpDir: string
@@ -76,11 +76,18 @@ describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
     it('creates auth.json (and the opencode data dir) when neither exists yet', async () => {
       await provider.feedOauthCredential('openai', { access: 'a1', refresh: 'r1', expires: 12345 })
       expect(fs.existsSync(authJsonPath())).toBe(true)
-      expect(readAuthJsonRaw()).toEqual({ openai: { type: 'oauth', refresh: 'r1', access: 'a1', expires: 12345 } })
+      expect(readAuthJsonRaw()).toEqual({
+        openai: { type: 'oauth', refresh: 'r1', access: 'a1', expires: 12345 }
+      })
     })
 
     it('persists accountId when provided (unlike pi)', async () => {
-      await provider.feedOauthCredential('openai', { access: 'a1', refresh: 'r1', expires: 12345, accountId: 'acct-1' })
+      await provider.feedOauthCredential('openai', {
+        access: 'a1',
+        refresh: 'r1',
+        expires: 12345,
+        accountId: 'acct-1'
+      })
       expect(readAuthJsonRaw().openai).toEqual({
         type: 'oauth',
         refresh: 'r1',
@@ -126,7 +133,11 @@ describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
 
     if (process.platform !== 'win32') {
       it('sets 0600 permissions on POSIX', async () => {
-        await provider.feedOauthCredential('openai', { access: 'a1', refresh: 'r1', expires: 12345 })
+        await provider.feedOauthCredential('openai', {
+          access: 'a1',
+          refresh: 'r1',
+          expires: 12345
+        })
         const mode = fs.statSync(authJsonPath()).mode & 0o777
         expect(mode).toBe(0o600)
       })
@@ -135,8 +146,15 @@ describe('OpencodeAuthProvider — M6b CredentialSync feed target', () => {
 
   describe('readOauthEntry', () => {
     it('returns the entry (incl. accountId) for a present oauth vendor', async () => {
-      writeAuthJson({ openai: { type: 'oauth', access: 'a1', refresh: 'r1', expires: 999, accountId: 'acct-1' } })
-      expect(await provider.readOauthEntry('openai')).toEqual({ access: 'a1', refresh: 'r1', expires: 999, accountId: 'acct-1' })
+      writeAuthJson({
+        openai: { type: 'oauth', access: 'a1', refresh: 'r1', expires: 999, accountId: 'acct-1' }
+      })
+      expect(await provider.readOauthEntry('openai')).toEqual({
+        access: 'a1',
+        refresh: 'r1',
+        expires: 999,
+        accountId: 'acct-1'
+      })
     })
 
     it('returns null when the vendor is absent', async () => {

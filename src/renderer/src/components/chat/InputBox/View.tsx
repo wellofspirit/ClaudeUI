@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type {
   FileAttachment,
   StatusLineData,
@@ -269,11 +269,51 @@ function VoiceButton({
   onVoiceStart: () => void
   onVoiceStop: () => void
 }): React.JSX.Element | null {
+  /**
+   * TOUCH is not decoration here (phase 5 S3). Hold-to-talk was mouse-only, and
+   * a mobile browser synthesizes the compatibility mouse pair only AFTER
+   * `touchend` — so a press-and-hold on a phone produced mousedown+mouseup back
+   * to back, i.e. a zero-length capture, and `onMouseLeave` never fired at all.
+   * That makes remote voice input, whose whole point is speaking into a phone,
+   * unusable.
+   *
+   * **Why this is a native listener and not `onTouchStart`.** React registers
+   * `touchstart` (with `touchmove` and `wheel`) as a PASSIVE root listener, so
+   * `e.preventDefault()` inside a React `onTouchStart` handler is silently
+   * ignored — the synthesized mouse pair would still arrive and start a SECOND
+   * capture the moment the first one finished. That second start is not merely
+   * noise: server-side it tears the finalizing capture down, which is exactly
+   * the moment the last transcript is being flushed. The suppression has to be
+   * real, so the listener is attached directly with `{ passive: false }`.
+   *
+   * `startRef` keeps the effect's dependency list empty: the callback identity
+   * changes on every parent render (InputBox does not memoize), and re-binding a
+   * DOM listener per keystroke to call the same function is pure churn.
+   */
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const startRef = useRef(onVoiceStart)
+  startRef.current = onVoiceStart
+
+  useEffect(() => {
+    const el = buttonRef.current
+    if (!el) return
+    const handleTouchStart = (e: TouchEvent): void => {
+      e.preventDefault()
+      startRef.current()
+    }
+    el.addEventListener('touchstart', handleTouchStart, { passive: false })
+    return () => el.removeEventListener('touchstart', handleTouchStart)
+    // Bound once per mounted button; `voiceEnabled: false` unmounts it entirely.
+  }, [voiceEnabled])
+
+  // AFTER the hooks — a conditional return above them would break the rules of
+  // hooks the moment the voice setting is toggled at runtime.
   if (!voiceEnabled) return null
 
   return (
     <button
       data-testid="InputBox.voice"
+      ref={buttonRef}
       onMouseDown={(e) => {
         e.preventDefault()
         onVoiceStart()
@@ -282,6 +322,13 @@ function VoiceButton({
       onMouseLeave={() => {
         if (voiceState === 'recording' || voiceState === 'connecting') onVoiceStop()
       }}
+      // The release half stays on React's synthetic events: only `touchstart` is
+      // passive, and only the start needs to preventDefault.
+      onTouchEnd={onVoiceStop}
+      // A gesture the OS took over (an incoming call, a system swipe) ends with
+      // `touchcancel` and no `touchend`. Without this the microphone would stay
+      // open with nobody holding the button.
+      onTouchCancel={onVoiceStop}
       disabled={isDisabled || voiceState === 'processing'}
       title="Hold to record"
       className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-default disabled:opacity-15 ${

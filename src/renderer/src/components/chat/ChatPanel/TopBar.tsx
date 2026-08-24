@@ -9,6 +9,8 @@ import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { toggleTerminalPanel } from '../../terminal/toggle-terminal'
+import { useTerminalAvailability } from '../../terminal/terminal-availability'
 import { shortModelName } from '../../usage/usage-utils'
 
 /** Format a millisecond duration as "Ns", "Nm Ns", or "Nh Nm" — seconds drop
@@ -62,6 +64,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const isMac = window.api.platform === 'darwin'
   const leftPadding = isMobileCtx ? 8 : sidebarCollapsed && isMac ? 148 / uiFontScale : 13
+  const terminalAvailability = useTerminalAvailability()
+  // Tooltip text only. `window.api.platform` is 'web' for every host OS, so the
+  // UA hint is the only signal a browser client has about its keyboard. Both
+  // bindings work everywhere regardless — this just names the reachable one.
+  const isMacKeyboard =
+    isMac || (window.api.platform === 'web' && /mac/i.test(navigator.platform ?? ''))
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [infoHover, setInfoHover] = useState(false)
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -74,39 +82,128 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   /**
    * Mobile overflow ("⋯") menu contents. The desktop right-side buttons don't
    * fit a phone bar, so the ones that still make sense there live behind this
-   * menu. Kept as an array so future entries (Skills, MCP) slot in with their
-   * own gates — and so an empty list can hide the button entirely rather than
-   * opening an empty popover.
+   * menu, in the same left-to-right order the desktop bar shows them. Each
+   * entry carries EXACTLY the gate its desktop button uses (Skills: capSkills;
+   * MCP: canUseMcp && engineId==='claude' — see the desktop button's comment
+   * for why the engine scope is load-bearing), so the two surfaces can never
+   * disagree about what this session can do. An empty list hides the ⋯ button
+   * entirely rather than opening an empty popover.
    */
-  const overflowItems = useMemo(
-    () =>
-      cwd
-        ? [
-            {
-              id: 'permissions',
-              label: 'Permissions',
-              testId: 'TopBar.overflowMenuPermissions',
-              icon: (
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="shrink-0"
-                >
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                </svg>
-              ),
-              onSelect: () => setPermissionsOpen(true)
-            }
-          ]
-        : [],
-    [cwd]
-  )
+  const overflowItems = useMemo(() => {
+    if (!cwd) return []
+    const items: Array<{
+      id: string
+      label: string
+      testId: string
+      icon: React.JSX.Element
+      onSelect: () => void
+    }> = []
+    // Terminal leads, matching the desktop bar's left-to-right order. Its gate
+    // is the desktop button's, verbatim — the host's own availability answer
+    // (`allowed === true`, so a null "still asking" renders nothing). The extra
+    // condition it inherits from this menu is `cwd`, and it is load-bearing:
+    // with no active directory, toggle-terminal.ts opens the panel but creates
+    // nothing, so a phone would land in the empty state whose `+` button spawns
+    // into TerminalPanel's `cwd || '.'` fallback — an invisible orphan pty with
+    // no second entry point to reach it from afterwards.
+    if (terminalAvailability?.allowed === true) {
+      items.push({
+        id: 'terminal',
+        label: 'Terminal',
+        testId: 'TopBar.overflowMenuTerminal',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <path d="M4 17l6-6-6-6" />
+            <path d="M12 19h8" />
+          </svg>
+        ),
+        // The same single source of truth the desktop button and the keybinding
+        // call — the takeover opens off `terminalPanelOpen` like the panel does.
+        onSelect: toggleTerminalPanel
+      })
+    }
+    if (capSkills) {
+      items.push({
+        id: 'skills',
+        label: 'Skills',
+        testId: 'TopBar.overflowMenuSkills',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+        ),
+        onSelect: () => setSkillsOpen(true)
+      })
+    }
+    if (canUseMcp && engineId === 'claude') {
+      items.push({
+        id: 'mcp',
+        label: 'MCP Servers',
+        testId: 'TopBar.overflowMenuMcp',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <path d="M12 22v-5" />
+            <path d="M9 8V2" />
+            <path d="M15 8V2" />
+            <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
+          </svg>
+        ),
+        onSelect: () => setMcpOpen(true)
+      })
+    }
+    items.push({
+      id: 'permissions',
+      label: 'Permissions',
+      testId: 'TopBar.overflowMenuPermissions',
+      icon: (
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0"
+        >
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+      ),
+      onSelect: () => setPermissionsOpen(true)
+    })
+    return items
+  }, [cwd, capSkills, canUseMcp, engineId, terminalAvailability])
 
   // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
   // that starts outside never lands on whatever the menu was covering.
@@ -145,8 +242,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // A single-model session's breakdown is redundant with the headline Cost
   // figure — only show it when there's actually more than one line, or a
   // dispatched (cross-engine, Slice C) row is present.
-  const showCostBreakdown =
-    rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
+  const showCostBreakdown = rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
   const sortedModelCosts = showCostBreakdown
     ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
     : []
@@ -462,6 +558,41 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               </g>
             </svg>
             <span>VSCode</span>
+          </button>
+        )}
+        {/* The only *visible* way into the terminal panel. The Ctrl/Cmd+` and
+            Alt+` keybindings stay, but Ctrl/Cmd+` is unreachable in a browser
+            (macOS owns Cmd+`, Edge swallows Ctrl+`), so web needs a button.
+            Gated on the host's own answer: on desktop the hook resolves
+            "allowed" synchronously with no IPC (the remote toggle governs
+            remote access, never the local shell), while on web the button only
+            appears once `terminal:availability` says yes — no affordance for a
+            shell this client cannot get. Null (web, first query in flight)
+            renders nothing: appearing a beat late beats flashing out. The panel
+            re-asks the same question itself — defense in depth. Mobile reaches
+            the same helper from the ⋯ menu (the bar has no room for it), which
+            carries this exact gate. */}
+        {!isMobileCtx && terminalAvailability?.allowed === true && (
+          <button
+            data-testid="TopBar.terminal"
+            onClick={toggleTerminalPanel}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title={isMacKeyboard ? 'Terminal (⌥`)' : 'Terminal (Ctrl+`)'}
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="shrink-0"
+            >
+              <path d="M4 17l6-6-6-6" />
+              <path d="M12 19h8" />
+            </svg>
           </button>
         )}
         {!isMobileCtx && cwd && capSkills && (

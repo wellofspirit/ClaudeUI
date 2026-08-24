@@ -109,6 +109,29 @@ describe('useTerminalColdCleanup', () => {
     unmount()
   })
 
+  // Closing a tab now only DETACHES this surface (terminals are a shared per-cwd
+  // pool), so a group whose tabs are all closed can still have live shells behind
+  // it. This sweep is the reaper for exactly those — before the pool it skipped
+  // tabless groups, which would have leaked every detached pty until app exit.
+  it('reaps an orphaned cwd whose tabs were all CLOSED (detached, not killed)', async () => {
+    const { unmount } = renderHook(() => useTerminalColdCleanup())
+
+    act(() => {
+      setTerminalGroup('/detached/path', [makeTab('tab-1', '/detached/path')])
+      useSessionStore.getState().closeTerminalTab('tab-1')
+    })
+    expect(useSessionStore.getState().terminalGroups['/detached/path'].tabs).toHaveLength(0)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TEN_MIN_PLUS)
+    })
+
+    expect(killTerminalsByCwd).toHaveBeenCalledWith('/detached/path')
+    expect(useSessionStore.getState().terminalGroups['/detached/path']).toBeUndefined()
+
+    unmount()
+  })
+
   it('does NOT fire when a session with that cwd exists (terminal is in use)', async () => {
     const { unmount } = renderHook(() => useTerminalColdCleanup())
 

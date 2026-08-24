@@ -73,7 +73,9 @@ function viewProps(tabs: TerminalTab[], activeId: string | null): TerminalPanelV
     onSelectTab: () => {},
     onCloseTab: () => {},
     onNewTab: () => {},
-    onClosePanel: () => {}
+    onClosePanel: () => {},
+    nextSlot: tabs.length,
+    nextSlotRunning: false
   }
 }
 

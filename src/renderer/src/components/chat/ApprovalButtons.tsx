@@ -14,13 +14,20 @@
  */
 
 import { useState, useEffect } from 'react'
-import type { PendingApproval, PermissionSuggestion, PermissionMode } from '../../../../shared/types'
+import type {
+  PendingApproval,
+  PermissionSuggestion,
+  PermissionMode
+} from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 
 export interface ApprovalButtonsProps {
   approval: PendingApproval
   permissionMode: PermissionMode | undefined
-  onApproval: (decision: 'allow' | 'deny', selectedSuggestions?: PermissionSuggestion[]) => Promise<void>
+  onApproval: (
+    decision: 'allow' | 'deny',
+    selectedSuggestions?: PermissionSuggestion[]
+  ) => Promise<void>
   /** Whether to show decisionReason and AlwaysAllowSection. Defaults to true. */
   showSuggestions?: boolean
   /** Optional testid for the root element. Defaults to "ApprovalButtons". */

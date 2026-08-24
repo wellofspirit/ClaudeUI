@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Behavioural tests for model-fallback warning plumbing in ClaudeSession
- * (docs/protocol/04-system-subtypes.md §4.20–4.21):
+ * (docs/protocol-cc/04-system-subtypes.md §4.20–4.21):
  *
  *   1. `model_refusal_fallback` / `model_fallback` system messages emit a
  *      `session:warning` event carrying the CLI's human-readable `content`.

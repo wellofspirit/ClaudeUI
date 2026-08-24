@@ -29,7 +29,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 // Both are trivially mockable.
 // ---------------------------------------------------------------------------
 
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   ClaudeSession: {
     getExtraWindows: () => []
   },
@@ -37,7 +37,7 @@ vi.mock('../claude-session', () => ({
 }))
 
 // Silence logger writes during tests.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -112,7 +112,7 @@ vi.mock('node:fs/promises', () => ({
 // test so state doesn't leak.
 // ---------------------------------------------------------------------------
 
-import { UsageFetcher } from '../usage-fetcher'
+import { UsageFetcher } from '../../../core/services/usage-fetcher'
 
 // Seed a credentials file that passes the expiry check so fetchDirect()
 // proceeds to fetch() rather than bailing silently.

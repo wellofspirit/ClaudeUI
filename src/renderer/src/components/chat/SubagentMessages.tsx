@@ -72,7 +72,11 @@ export const SubagentMessages = memo(function SubagentMessages({
   }, [messages])
 
   return (
-    <div data-testid="SubagentMessages" className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight }}>
+    <div
+      data-testid="SubagentMessages"
+      className="flex flex-col gap-2 overflow-y-auto"
+      style={{ maxHeight }}
+    >
       {/* Its OWN galleries, scoped to the subagent's messages. A subagent's tool
           results live in `subagentMessages`, outside the chat providers' message
           list, so without these the image thumbnails inside these cards would
@@ -85,7 +89,12 @@ export const SubagentMessages = memo(function SubagentMessages({
       <ImageGalleryProvider messages={messages}>
         <DiagramGalleryProvider messages={messages}>
           {messages.map((msg) => (
-            <div key={msg.id} data-testid="SubagentMessage" data-id={msg.id} className="flex flex-col gap-1.5">
+            <div
+              key={msg.id}
+              data-testid="SubagentMessage"
+              data-id={msg.id}
+              className="flex flex-col gap-1.5"
+            >
               {msg.content.map((block, i) => {
                 if (block.type === 'tool_result') return null
                 if (block.type === 'tool_use') {

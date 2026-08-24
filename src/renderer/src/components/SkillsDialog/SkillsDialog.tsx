@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import type { SkillInfo } from '../../../../shared/types'
+import { useIsMobile } from '../../hooks/useIsMobile'
 import { SkillsDialogView } from './View'
+import { SkillsMobileView } from './MobileView'
 
 interface SkillsDialogProps {
   open: boolean
@@ -9,6 +11,7 @@ interface SkillsDialogProps {
 }
 
 export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.JSX.Element | null {
+  const isMobile = useIsMobile()
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [loading, setLoading] = useState(false)
 
@@ -47,5 +50,11 @@ export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.J
 
   if (!open) return null
 
-  return <SkillsDialogView skills={skills} loading={loading} cwd={cwd} onClose={onClose} />
+  // Same props, two presentations (the PermissionsDialog / SettingsDialog
+  // pattern): a phone gets a fullscreen list ⇄ detail drill-down, because the
+  // desktop dialog is a fixed 900×560 box with a 280px side list. Loading and
+  // the skill set — everything this container owns — are shared verbatim.
+  const View = isMobile ? SkillsMobileView : SkillsDialogView
+
+  return <View skills={skills} loading={loading} cwd={cwd} onClose={onClose} />
 }

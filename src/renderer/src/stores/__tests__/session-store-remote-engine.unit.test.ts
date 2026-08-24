@@ -3,22 +3,34 @@
  * syncs must not zero the engine map.
  *
  * Covers:
- * - getRemoteStateSnapshot includes per-session sdkActive/selectedEngineId/
+ * - the replica projected to a wire snapshot includes per-session sdkActive/selectedEngineId/
  *   selectedModel + top-level sessionEngines/hiddenSessions/hiddenProjects.
- * - applyRemoteSnapshot round-trips all of them.
+ * - hydrateReplica (the replica's snapshot path) round-trips all of them.
  * - applyExternalSessionConfig without a sessionEngines key leaves the existing
  *   map intact (the file-watcher payload strips it); with the key it overwrites.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore, getRemoteStateSnapshot } from '../session-store'
+import { useSessionStore } from '../session-store'
+import { getReplicaState } from '../replica'
+import { toSnapshot } from '../../../../core/shared/sync/state'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { ModelRef } from '../../../../shared/types'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { hydrateReplica } from '@renderer/stores/replica'
 
 const store = () => useSessionStore.getState()
 const ROUTE = 'r-engine-1'
-const OPENCODE_MODEL: ModelRef = { engineId: 'opencode', vendorId: 'openai', modelId: 'openai/gpt-5' }
+const OPENCODE_MODEL: ModelRef = {
+  engineId: 'opencode',
+  vendorId: 'openai',
+  modelId: 'openai/gpt-5'
+}
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   resetFactoryCounter()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
@@ -39,6 +51,7 @@ beforeEach(() => {
     sessionEngines: {},
     availableModels: []
   })
+  mirrorStoreIntoReplica()
 })
 
 function setupOpencodeSession(): void {
@@ -57,12 +70,13 @@ function setupOpencodeSession(): void {
     hiddenSessionIds: ['h-1'],
     hiddenProjectKeys: ['p-1']
   }))
+  mirrorStoreIntoReplica()
 }
 
-describe('getRemoteStateSnapshot — engine identity (H15)', () => {
+describe('replica → wire snapshot — engine identity (H15)', () => {
   it('carries per-session sdkActive/selectedEngineId/selectedModel', () => {
     setupOpencodeSession()
-    const snap = getRemoteStateSnapshot()
+    const snap = toSnapshot(getReplicaState(), 0)
     expect(snap.sessions[ROUTE].sdkActive).toBe(true)
     expect(snap.sessions[ROUTE].selectedEngineId).toBe('opencode')
     expect(snap.sessions[ROUTE].selectedModel).toBe('openai/gpt-5')
@@ -70,17 +84,17 @@ describe('getRemoteStateSnapshot — engine identity (H15)', () => {
 
   it('carries top-level sessionEngines + hidden lists', () => {
     setupOpencodeSession()
-    const snap = getRemoteStateSnapshot()
-    expect(snap.sessionEngines[ROUTE].engineId).toBe('opencode')
+    const snap = toSnapshot(getReplicaState(), 0)
+    expect(snap.sessionEngines![ROUTE].engineId).toBe('opencode')
     expect(snap.hiddenSessions).toEqual(['h-1'])
     expect(snap.hiddenProjects).toEqual(['p-1'])
   })
 })
 
-describe('applyRemoteSnapshot — engine identity round-trip (H15)', () => {
+describe('hydrateReplica — engine identity round-trip (H15)', () => {
   it('restores sdkActive/selectedEngineId/selectedModel + sessionEngines + hidden lists', () => {
     setupOpencodeSession()
-    const snap = getRemoteStateSnapshot()
+    const snap = toSnapshot(getReplicaState(), 0)
 
     // Simulate a fresh remote client: wipe everything, then apply the snapshot.
     useSessionStore.setState({
@@ -89,7 +103,8 @@ describe('applyRemoteSnapshot — engine identity round-trip (H15)', () => {
       hiddenSessionIds: [],
       hiddenProjectKeys: []
     })
-    store().applyRemoteSnapshot({ ...snap, seq: 1 } as any)
+    mirrorStoreIntoReplica()
+    hydrateReplica({ ...snap, seq: 1 } as any)
 
     const s = store()
     expect(s.sessions[ROUTE].sdkActive).toBe(true)
@@ -103,10 +118,13 @@ describe('applyRemoteSnapshot — engine identity round-trip (H15)', () => {
 
 describe('applyExternalSessionConfig — sessionEngines preservation (H15)', () => {
   it('leaves the existing map intact when the payload omits sessionEngines', () => {
-    useSessionStore.setState({ sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } } })
+    useSessionStore.setState({
+      sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } }
+    })
+    mirrorStoreIntoReplica()
 
     // File-watcher payload (sessions.json) — carries lists but NOT sessionEngines.
-    store().applyExternalSessionConfig({ recentSessions: ['a'], pinnedSessions: ['b'] })
+    seed.sessionsConfig({ recentSessions: ['a'], pinnedSessions: ['b'] })
 
     expect(store().sessionEngines).toEqual({ s1: { engineId: 'opencode', model: OPENCODE_MODEL } })
     // Present keys still applied.
@@ -115,8 +133,11 @@ describe('applyExternalSessionConfig — sessionEngines preservation (H15)', () 
   })
 
   it('overwrites sessionEngines only when the key is genuinely present', () => {
-    useSessionStore.setState({ sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } } })
-    store().applyExternalSessionConfig({ sessionEngines: { s2: { engineId: 'pi' } } })
+    useSessionStore.setState({
+      sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } }
+    })
+    mirrorStoreIntoReplica()
+    seed.sessionsConfig({ sessionEngines: { s2: { engineId: 'pi' } } })
     expect(store().sessionEngines).toEqual({ s2: { engineId: 'pi' } })
   })
 })

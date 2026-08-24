@@ -58,9 +58,7 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
 
   const parseWindow = (key: string): RateWindow | null => {
     const w = windowSource[key] as
-      | { utilization?: number | null; resets_at?: string | null }
-      | undefined
-      | null
+      { utilization?: number | null; resets_at?: string | null } | undefined | null
     if (!w || typeof w.utilization !== 'number') return null
     return {
       usedPercent: w.utilization,
@@ -460,7 +458,10 @@ describe('recordWindowSampleFromUsage decision logic', () => {
     knownEnds: number[],
     lastKey: string | null,
     now: number
-  ): { sample: { accountUuid: string; usedPercent: number; canonicalEnd: number } | null; key: string | null } {
+  ): {
+    sample: { accountUuid: string; usedPercent: number; canonicalEnd: number } | null
+    key: string | null
+  } {
     if (usage.error) return { sample: null, key: lastKey }
     if (!accountUuid) return { sample: null, key: lastKey }
     const resetsAt = usage.fiveHour.resetsAt
@@ -574,8 +575,20 @@ describe('recordWindowSampleFromUsage decision logic', () => {
     const knownEnds: number[] = []
     const t1 = new Date('2026-06-22T13:00:00.578Z').toISOString()
     const t2 = new Date('2026-06-22T13:00:30.000Z').toISOString() // 30s later, within tolerance
-    decide({ error: null, fiveHour: { usedPercent: 42, resetsAt: t1 } }, 'uuid_1', knownEnds, null, NOW)
-    decide({ error: null, fiveHour: { usedPercent: 50, resetsAt: t2 } }, 'uuid_1', knownEnds, null, NOW)
+    decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: t1 } },
+      'uuid_1',
+      knownEnds,
+      null,
+      NOW
+    )
+    decide(
+      { error: null, fiveHour: { usedPercent: 50, resetsAt: t2 } },
+      'uuid_1',
+      knownEnds,
+      null,
+      NOW
+    )
     expect(knownEnds).toHaveLength(1) // both snapped to one canonical end
   })
 })

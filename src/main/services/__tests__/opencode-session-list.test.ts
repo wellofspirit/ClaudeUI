@@ -28,23 +28,29 @@ const {
   mockDeleteSessionFiles: vi.fn()
 }))
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
 }))
-vi.mock('../../opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
-vi.mock('../persisted-sessions-dir', () => ({ PERSISTED_SESSIONS_DIR: '/tmp/persisted' }))
-vi.mock('../db', () => ({ readOpencodeSessionRows: mockReadRows }))
-vi.mock('../delete-session-files', () => ({ deleteSessionFiles: mockDeleteSessionFiles }))
+vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
+  PERSISTED_SESSIONS_DIR: '/tmp/persisted'
+}))
+vi.mock('../../../core/services/db', () => ({ readOpencodeSessionRows: mockReadRows }))
+vi.mock('../../../core/services/delete-session-files', () => ({
+  deleteSessionFiles: mockDeleteSessionFiles
+}))
 
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory,
   deleteOpencodeSession
-} from '../opencode-session-list'
-import { deleteSessionByEngine } from '../session-delete'
+} from '../../../core/services/opencode-session-list'
+import { deleteSessionByEngine } from '../../../core/services/session-delete'
 
 beforeEach(() => {
-  mockAcquire.mockReset().mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
+  mockAcquire
+    .mockReset()
+    .mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
   mockRelease.mockReset()
   mockListMessages.mockReset()
   mockDeleteSession.mockReset()
@@ -77,9 +83,21 @@ describe('listOpencodeSessionsGlobal (direct DB read)', () => {
   it("maps opencode's default placeholder title → 'Untitled' (real generated titles pass through)", async () => {
     mockReadRows.mockReturnValue([
       // opencode's un-generated placeholder — must be hidden in the sidebar
-      { id: 'ph', directory: '/d', title: 'New session - 2026-06-26T10:20:30.123Z', timeCreated: 1, timeUpdated: 3 },
+      {
+        id: 'ph',
+        directory: '/d',
+        title: 'New session - 2026-06-26T10:20:30.123Z',
+        timeCreated: 1,
+        timeUpdated: 3
+      },
       // child-session placeholder variant
-      { id: 'ch', directory: '/d', title: 'Child session - 2026-06-26T10:20:30.123Z', timeCreated: 1, timeUpdated: 2 },
+      {
+        id: 'ch',
+        directory: '/d',
+        title: 'Child session - 2026-06-26T10:20:30.123Z',
+        timeCreated: 1,
+        timeUpdated: 2
+      },
       // a real LLM-generated title must NOT be mistaken for a placeholder
       { id: 'real', directory: '/d', title: 'New session - notes', timeCreated: 1, timeUpdated: 1 }
     ])
@@ -109,13 +127,19 @@ describe('listOpencodeSessionsGlobal (direct DB read)', () => {
 describe('loadOpencodeSessionHistory (HTTP, global-by-id)', () => {
   it('converts stored messages → ChatMessage[] and releases the server', async () => {
     mockListMessages.mockResolvedValue([
-      { info: { id: 'm1', role: 'user', time: { created: 1 } }, parts: [{ type: 'text', text: 'hi' }] },
+      {
+        info: { id: 'm1', role: 'user', time: { created: 1 } },
+        parts: [{ type: 'text', text: 'hi' }]
+      },
       {
         info: { id: 'm2', role: 'assistant', time: { created: 2 } },
         parts: [{ type: 'text', text: 'hello' }]
       },
       // system message → dropped by the converter
-      { info: { id: 'm3', role: 'system', time: { created: 3 } }, parts: [{ type: 'text', text: 's' }] }
+      {
+        info: { id: 'm3', role: 'system', time: { created: 3 } },
+        parts: [{ type: 'text', text: 's' }]
+      }
     ])
     const msgs = await loadOpencodeSessionHistory('ses_a')
     expect(msgs.map((m) => m.id)).toEqual(['m1', 'm2'])
@@ -132,7 +156,13 @@ describe('loadOpencodeSessionHistory (HTTP, global-by-id)', () => {
 describe('listOpencodeSessionsGlobal — Claude-format projectKey (merge regression guard)', () => {
   it('emits projectKey in Claude-format (D--WorkPlace-ClaudeUI) not forward-slash format', async () => {
     mockReadRows.mockReturnValue([
-      { id: 'ses_1', directory: 'D:/WorkPlace/ClaudeUI', title: 'Test', timeCreated: 1, timeUpdated: 2 }
+      {
+        id: 'ses_1',
+        directory: 'D:/WorkPlace/ClaudeUI',
+        title: 'Test',
+        timeCreated: 1,
+        timeUpdated: 2
+      }
     ])
     const infos = await listOpencodeSessionsGlobal()
     expect(infos).toHaveLength(1)

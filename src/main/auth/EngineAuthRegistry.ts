@@ -6,7 +6,7 @@
  */
 
 import type { EngineId } from '../../shared/types'
-import type { EngineAuthProvider } from './EngineAuthProvider'
+import type { EngineAuthProvider } from '../../core/auth/EngineAuthProvider'
 
 export class EngineAuthRegistry {
   private providers = new Map<EngineId, EngineAuthProvider>()

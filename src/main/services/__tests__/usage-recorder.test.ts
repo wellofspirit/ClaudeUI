@@ -18,9 +18,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { closeDb, getUsageEventByMessageId } from '../db'
-import { recordUsageEvent } from '../usage-recorder'
-import type { UsageTurnEvent } from '../usage-recorder'
+import { closeDb, getUsageEventByMessageId } from '../../../core/services/db'
+import { recordUsageEvent } from '../../../core/services/usage-recorder'
+import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
@@ -119,12 +119,14 @@ describe('recordUsageEvent — anthropic-shaped event', () => {
   })
 
   it('stores accountId, accountUuid, sessionId', () => {
-    recordUsageEvent(anthropicEvent({
-      messageId: 'msg_cl_ids',
-      accountId: 'my_account',
-      accountUuid: 'my-uuid',
-      sessionId: 'my-session'
-    }))
+    recordUsageEvent(
+      anthropicEvent({
+        messageId: 'msg_cl_ids',
+        accountId: 'my_account',
+        accountUuid: 'my-uuid',
+        sessionId: 'my-session'
+      })
+    )
     const row = getUsageEventByMessageId('msg_cl_ids')
     expect(row!.accountId).toBe('my_account')
     expect(row!.accountUuid).toBe('my-uuid')
@@ -162,11 +164,13 @@ describe('recordUsageEvent — opencode turn', () => {
   })
 
   it('equiv_cost_usd is null for an unpriced opencode model', () => {
-    recordUsageEvent(opencodeTurn({
-      messageId: 'msg_oc_free',
-      vendorId: 'opencode',
-      modelId: 'mimo-v2.5-free'
-    }))
+    recordUsageEvent(
+      opencodeTurn({
+        messageId: 'msg_oc_free',
+        vendorId: 'opencode',
+        modelId: 'mimo-v2.5-free'
+      })
+    )
     const row = getUsageEventByMessageId('msg_oc_free')
     expect(row!.equivCostUsd).toBeNull()
   })
@@ -191,10 +195,12 @@ describe('recordUsageEvent — opencode turn', () => {
 describe('recordUsageEvent — message_id dedup', () => {
   it('second call with the same message_id is silently dropped (first wins)', () => {
     recordUsageEvent(anthropicEvent({ messageId: 'msg_dedup_x' }))
-    recordUsageEvent(anthropicEvent({
-      messageId: 'msg_dedup_x',
-      tokens: { input: 999, output: 999, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
-    }))
+    recordUsageEvent(
+      anthropicEvent({
+        messageId: 'msg_dedup_x',
+        tokens: { input: 999, output: 999, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+      })
+    )
     const row = getUsageEventByMessageId('msg_dedup_x')
     // First insert's token counts should be preserved
     expect(row!.inputTokens).toBe(1000)
@@ -215,9 +221,7 @@ describe('recordUsageEvent — errors swallowed', () => {
   it('does not throw even when called with an empty message_id (degenerate)', () => {
     // An empty string message_id would fail the NOT NULL constraint. The recorder
     // should catch the error and not re-throw.
-    expect(() =>
-      recordUsageEvent(anthropicEvent({ messageId: '' }))
-    ).not.toThrow()
+    expect(() => recordUsageEvent(anthropicEvent({ messageId: '' }))).not.toThrow()
   })
 
   it('does not throw on repeated identical inserts', () => {
@@ -238,16 +242,18 @@ describe('recordUsageEvent — cache-split billing passthrough', () => {
   it('cacheWrite1h reduces 5m portion and increases 1h portion in equiv_cost', () => {
     // 1000 total cache writes, 400k at 1h rate, 600k at 5m rate
     // sonnet: 5m=$3.75/MTok, 1h=$6/MTok
-    recordUsageEvent(anthropicEvent({
-      messageId: 'msg_cache_split',
-      tokens: {
-        input: 0,
-        output: 0,
-        cacheWrite: 1000,
-        cacheWrite1h: 400,
-        cacheRead: 0
-      }
-    }))
+    recordUsageEvent(
+      anthropicEvent({
+        messageId: 'msg_cache_split',
+        tokens: {
+          input: 0,
+          output: 0,
+          cacheWrite: 1000,
+          cacheWrite1h: 400,
+          cacheRead: 0
+        }
+      })
+    )
     const row = getUsageEventByMessageId('msg_cache_split')
     // 600 at 3.75/MTok + 400 at 6/MTok (per million)
     const expected = (600 / 1_000_000) * 3.75 + (400 / 1_000_000) * 6.0

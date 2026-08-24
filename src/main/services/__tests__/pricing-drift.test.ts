@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const BLOCK_USAGE_TS = resolve(__dirname, '../block-usage.ts')
+const BLOCK_USAGE_TS = resolve(__dirname, '../../../core/services/block-usage.ts')
 
 describe('Anthropic pricing table — single source of truth', () => {
   const blockUsageSrc = readFileSync(BLOCK_USAGE_TS, 'utf-8')

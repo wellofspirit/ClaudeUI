@@ -11,7 +11,7 @@ interaction-parity series) was built with one division of labour, and it held up
 is the orchestrator and reviewer; a cheaper sub-agent writes the code.** (Originally Opus
 orchestrating Sonnet; since 2026-07-30 the tiers are **Fable orchestrating Opus** — the division of
 labour is the decision, the specific models track whatever the current tier pairing is.) Every phase that
-followed it surfaced at least one real bug *in review* — a model-picker regression, dead persisted
+followed it surfaced at least one real bug _in review_ — a model-picker regression, dead persisted
 data, a vacuous migration test, an `acquire()` race, a per-frame token overcount, a wrong auth-source
 mapping — bugs that the implementing agent's own summary did not mention. The lesson, repeatedly
 confirmed: **the implementing agent must never self-certify; correctness is owned by the reviewer who
@@ -96,14 +96,14 @@ relaxes the review bar.
   (`opencode:<generated-password>`). Target the **v1** API (`/session`, `/event`, `/auth/{id}`) —
   NOT the `/api/*` v2 family. The shared `/event` stream multiplexes all sessions → filter by
   `properties.sessionID`. Binary/plugin locators use `app.getAppPath()`, not `__dirname`.
-- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol/` first, then probe
+- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol-cc/` first, then probe
   the real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
   `/bundle-analyzer` to navigate the bundle.
 - **pi wire (ADR-035).** For any pi-integration question, consult `docs/protocol-pi/` first (the
   verified notes) + the version-exact docs shipped in the vendored payload
   (`vendor/pi-cli/docs/*.md`), then probe the real `vendor/pi-cli/pi` binary. For source-level
   questions, **shallow-clone the pinned tag** (`git clone --depth 1 --branch v<piCliVersion>
-  https://github.com/earendil-works/pi`) — there is deliberately **no** vendored pi source clone
+https://github.com/earendil-works/pi`) — there is deliberately **no** vendored pi source clone
   (unlike `vendor/opencode-src/`). The bridge extension (`pi-bridge-source.ts`) must stay
   **import-free** and **fail-closed**; product code writes only `os.tmpdir()` (the bridge file) +
   `PiAuthProvider`'s documented `~/.pi/agent/auth.json` api_key merge — never else under `~/.pi/**`.

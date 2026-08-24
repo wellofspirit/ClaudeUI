@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { deleteSessionFiles, deleteProjectFiles } from '../delete-session-files'
+import { deleteSessionFiles, deleteProjectFiles } from '../../../core/services/delete-session-files'
 
 let root: string
 
@@ -92,52 +92,50 @@ describe('deleteProjectFiles', () => {
 })
 
 // ---------------------------------------------------------------------------
-// IPC handler signature contract
+// IPC handler argument-slot contract
 //
-// Regression test: ipcMain.handle passes (event, ...args) to the handler.
-// Forgetting the leading `_e` parameter means the sessionId slot receives
-// an IpcMainInvokeEvent object, which fs.rm then blows up on with
-// "The 'path' argument must be of type string." These tests invoke the
-// exact handler closures the way the bridge does and assert they behave.
+// Regression test for an argument-slot shift: if the sessionId slot receives
+// the wrong value, fs.rm blows up with "The 'path' argument must be of type
+// string" — or worse, deletes the wrong tree. Since the SyncCore phase-1 port
+// the registry hands the handler ONLY the caller's arguments (session.ipc.ts's
+// `handleIpc` swallows the Electron event in the transport adapter), so the
+// contract inverted: these handlers must NOT declare a leading `_e`, and the
+// first parameter must be `sessionId` / `projectKey`.
 // ---------------------------------------------------------------------------
 
-describe('IPC handler signature (session:delete-session, session:delete-project)', () => {
+describe('IPC handler argument slots (session:delete-session, session:delete-project)', () => {
   // Lift the same closures the IPC file registers. Kept minimal: we want to
-  // lock in the (_e, ...args) contract, not re-test the whole IPC module.
+  // lock in the argument-slot contract, not re-test the whole IPC module.
   const makeSessionHandler =
     () =>
-    async (_e: unknown, sessionId: string, projectKey: string): Promise<void> => {
+    async (sessionId: string, projectKey: string): Promise<void> => {
       await deleteSessionFiles(sessionId, projectKey, root)
     }
   const makeProjectHandler =
     () =>
-    async (_e: unknown, projectKey: string): Promise<void> => {
+    async (projectKey: string): Promise<void> => {
       await deleteProjectFiles(projectKey, root)
     }
 
-  it('session handler ignores the IpcMainInvokeEvent first arg', async () => {
+  it('session handler takes (sessionId, projectKey) with no event slot', async () => {
     const projectDir = await seedProject('-Users-x-proj', ['s1'])
     const handler = makeSessionHandler()
-    const fakeEvent = { sender: { id: 1 } } // simulates IpcMainInvokeEvent
-    await expect(handler(fakeEvent, 's1', '-Users-x-proj')).resolves.toBeUndefined()
+    await expect(handler('s1', '-Users-x-proj')).resolves.toBeUndefined()
     expect(fs.existsSync(path.join(projectDir, 's1.jsonl'))).toBe(false)
   })
 
-  it('project handler ignores the IpcMainInvokeEvent first arg', async () => {
+  it('project handler takes (projectKey) with no event slot', async () => {
     const projectDir = await seedProject('-Users-x-proj', ['s1'])
     const handler = makeProjectHandler()
-    const fakeEvent = { sender: { id: 1 } }
-    await expect(handler(fakeEvent, '-Users-x-proj')).resolves.toBeUndefined()
+    await expect(handler('-Users-x-proj')).resolves.toBeUndefined()
     expect(fs.existsSync(projectDir)).toBe(false)
   })
 
-  it('surfaces fs errors as rejections (Electron IpcMainInvokeEvent would blow up fs.rm if leaked)', async () => {
-    // If the event were mistakenly used as the path arg, fs.rm would reject
-    // with "path argument must be of type string" — guarding against that.
+  it('only ever passes strings to fs.rm (a leaked event object would reject)', async () => {
     const spy = vi.spyOn(fs.promises, 'rm')
     const handler = makeSessionHandler()
     await seedProject('-Users-x-proj', ['s1'])
-    await handler({ sender: { id: 1 } }, 's1', '-Users-x-proj')
+    await handler('s1', '-Users-x-proj')
     // Every fs.rm call got a string — not an Event object
     for (const call of spy.mock.calls) {
       expect(typeof call[0]).toBe('string')
@@ -145,21 +143,24 @@ describe('IPC handler signature (session:delete-session, session:delete-project)
     spy.mockRestore()
   })
 
-  // Source-level guard: asserts the real session.ipc.ts registrations still
-  // declare the leading event parameter. The in-memory closures above prove
-  // the contract; this check binds it to the actual file we ship. A noisier
-  // alternative would be to load session.ipc.ts under the electron shim, but
-  // the import graph is too heavy for a single regression test.
-  it('session.ipc.ts handler registrations keep the leading _e parameter', async () => {
+  // Source-level guard: asserts the real session.ipc.ts registrations declare
+  // the caller's first argument in the first slot — and no `_e`. The in-memory
+  // closures above prove the contract; this check binds it to the actual file
+  // we ship. A noisier alternative would be to load session.ipc.ts under the
+  // electron shim, but the import graph is too heavy for a single regression
+  // test.
+  it('session.ipc.ts registrations put the real first argument in slot 0', async () => {
     const src = await fs.promises.readFile(
-      path.resolve(__dirname, '../../ipc/session.ipc.ts'),
+      path.resolve(__dirname, '../../../core/ipc/session.ipc.ts'),
       'utf8'
     )
     const sessionRegistration =
-      /ipcMain\.handle\(\s*['"]session:delete-session['"]\s*,\s*safeHandler\(\s*async\s*\(\s*_e\s*:/
+      /channel: 'session:delete-session',[\s\S]{0,200}?handler: safeHandler\(\s*async\s*\(\s*sessionId\s*:/
     const projectRegistration =
-      /ipcMain\.handle\(\s*['"]session:delete-project['"]\s*,\s*safeHandler\(\s*async\s*\(\s*_e\s*:/
+      /channel: 'session:delete-project',[\s\S]{0,200}?handler: safeHandler\(\s*async\s*\(\s*projectKey\s*:/
     expect(src).toMatch(sessionRegistration)
     expect(src).toMatch(projectRegistration)
+    // No handler in the file may reclaim the event slot.
+    expect(src).not.toMatch(/handler:\s*(?:safeHandler\(\s*)?(?:async\s*)?\(\s*_e(?:vent)?[,:)\s]/)
   })
 })

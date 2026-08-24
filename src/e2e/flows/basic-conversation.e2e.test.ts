@@ -7,7 +7,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { createElement } from 'react'
+import { render, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { useClaudeEvents } from '../../renderer/src/hooks/useClaudeEvents'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeChatMessage,
@@ -17,109 +20,26 @@ import {
   makePendingApproval,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type {
-  ChatMessage,
-  PendingApproval,
-  StreamDelta,
-  TodoItem,
-  SessionStatus
-} from '../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let app: TestApp
 
-/** Wire event handlers mirroring useClaudeEvents for the E2E test */
-function wireEventHandlers(app: TestApp): Array<() => void> {
-  const cleanups: Array<() => void> = []
-  const store = useSessionStore.getState
-
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
-      app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = () => {
-        app.bridge.ipcRenderer.removeListener(channel, handler)
-      }
-      cleanups.push(cleanup)
-      return cleanup
-    }
-  }
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-  })
-
-  onEvent<(routingId: string, data: StreamDelta) => void>('session:stream')((routingId, data) => {
-    if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
-    else store().appendStreamingText(routingId, data.text)
-  })
-
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
-    (routingId, approval) => {
-      store().addPendingApproval(routingId, approval)
-    }
-  )
-
-  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
-    (routingId, { requestId }) => {
-      store().removePendingApproval(routingId, requestId)
-    }
-  )
-
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
-    (routingId, status) => {
-      let effectiveRoutingId = routingId
-      if (status.sessionId && status.sessionId !== routingId) {
-        const s = store()
-        if (s.sessions[routingId]) {
-          s.rekeySession(routingId, status.sessionId)
-          effectiveRoutingId = status.sessionId
-        }
-      }
-      if (status.state === 'disconnected') {
-        store().markSdkInactive(effectiveRoutingId)
-        store().setStatus(effectiveRoutingId, { ...status, state: 'idle' })
-        store().clearPendingApprovals(effectiveRoutingId)
-        return
-      }
-      store().setStatus(effectiveRoutingId, status)
-      // Do NOT clear pending approvals on idle — background subagents outlive
-      // the parent turn's result. See useClaudeEvents.ts's onStatus.
-    }
-  )
-
-  onEvent<(routingId: string) => void>('session:result')((routingId) => {
-    const state = store()
-    const session = state.sessions[routingId]
-    if (session && session.todos.length > 0) {
-      const allDone = session.todos.every((t: TodoItem) => t.status === 'completed')
-      if (allDone) state.setTodos(routingId, [])
-    }
-  })
-
-  onEvent<(routingId: string, error: string) => void>('session:error')((routingId, error) => {
-    store().addError(routingId, error)
-  })
-
-  onEvent<
-    (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
-  >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
-    store().appendToolResult(routingId, toolUseId, result, isError)
-    if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
-  })
-
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
-    'session:user-message'
-  )((routingId, data) => {
-    const s = store()
-    if (!s.sessions[routingId]) return
-    if (data.queued) s.setQueuedText(routingId, data.prompt)
-    else s.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt)
-  })
-
-  return cleanups
+/**
+ * Mounts the real hook. `session:error` / `session:warning` are `canonical: false`
+ * channels (docs/architecture/sync-channels.md): no snapshot field, so no reducer
+ * branch - their store writers live in `useClaudeEvents`, which is therefore the
+ * only thing that can turn one of those events into store state (SyncCore 4c).
+ */
+function EventHarness(): null {
+  useClaudeEvents()
+  return null
 }
 
-let eventCleanups: Array<() => void>
+// SyncCore phase 4c: the ~20-handler `wireEventHandlers` table this file used to
+// carry — a hand-maintained copy of useClaudeEvents, itself a copy of the reducer —
+// is DELETED. `app.emit` feeds the harness SyncClient, whose raw-event tap folds
+// `applyEvent` and projects the result into the store (boot-test-app §5), so these
+// flows now exercise the real interpretation instead of a third one.
 
 beforeEach(async () => {
   resetFactoryCounter()
@@ -133,12 +53,13 @@ beforeEach(async () => {
     pinnedSessionIds: [],
     customTitles: {}
   })
+  mirrorStoreIntoReplica()
 
-  eventCleanups = wireEventHandlers(app)
+  render(createElement(EventHarness))
 })
 
 afterEach(() => {
-  eventCleanups.forEach((fn) => fn())
+  cleanup()
   app.teardown()
 })
 
@@ -308,11 +229,11 @@ describe('E2E: streaming with thinking', () => {
     expect(s1.streamingThinking).toBe('')
 
     // Test text streaming first (this works in other tests)
-    useSessionStore.getState().appendStreamingText(routingId, 'text works')
+    seed.streamText(routingId, 'text works')
     expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('text works')
 
     // Now test thinking — which uses the same updateSession pattern
-    useSessionStore.getState().appendStreamingThinking(routingId, 'think')
+    seed.streamThinking(routingId, 'think')
     const s2 = useSessionStore.getState().sessions[routingId]
     expect(s2.streamingThinking).toBe('think')
   })

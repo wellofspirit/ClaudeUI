@@ -16,9 +16,8 @@ interface ExitPlanModeCardProps {
 
 export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const clearConversation = useSessionStore((s) => s.clearConversation)
-  const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const openPlanPanel = useSessionStore((s) => s.openPlanPanel)
   const cwd = useActiveSession((s) => s.cwd)
@@ -47,10 +46,20 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     const sessionLogPath = await window.api.getSessionLogPath(activeSessionId)
 
     await window.api.respondApproval(activeSessionId, approval.requestId, 'deny')
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
 
     await window.api.cancelSession(activeSessionId)
-    clearConversation(activeSessionId)
+    // AWAITED: the clear is a replicated event now, and the `session:created`
+    // below must be emitted after it — otherwise the fresh session's birth
+    // config would be blanked by a clear that arrived late.
+    //
+    // Error posture matches its neighbours (which all await bare invokes and let
+    // a rejection abort the flow): if the reset did not happen, spawning a fresh
+    // session on top of the OLD transcript is worse than doing nothing — the user
+    // would be talking to an empty engine under a conversation it never saw. The
+    // approval is already denied at this point, so the plan card resolves either
+    // way and the user can retry.
+    await clearConversation(activeSessionId)
 
     // Create a fresh SDK session for the same routingId.
     await window.api.createSession(
@@ -66,7 +75,8 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
       selectedEngineId
     )
     markSdkActive(activeSessionId)
-    setPermissionMode('acceptEdits', activeSessionId)
+    // No local mode write: the fresh spawn's own init emits
+    // `session:permission-mode` with the mode it was created in (SyncCore 4c).
 
     // Build prompt matching CLI format, including transcript reference
     let prompt = `Implement the following plan:\n\n${planContent}`
@@ -80,9 +90,8 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     approval,
     cwd,
     activeSessionId,
-    removePendingApproval,
+    dismissApproval,
     clearConversation,
-    setPermissionMode,
     markSdkActive,
     selectedEngineId
   ])
@@ -91,23 +100,22 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
   const handleContinueAutoEdit = useCallback(async () => {
     if (!approval || !activeSessionId) return
     await window.api.respondApproval(activeSessionId, approval.requestId, 'allow')
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
     await waitForModeChange()
 
-    setPermissionMode('acceptEdits', activeSessionId)
+    // Invoke only — the pill follows `session:permission-mode` (SyncCore 4c).
     await window.api.setPermissionMode(activeSessionId, 'acceptEdits')
-  }, [approval, activeSessionId, removePendingApproval, setPermissionMode])
+  }, [approval, activeSessionId, dismissApproval])
 
   // Option 3: Continue, approve manually
   const handleContinueManual = useCallback(async () => {
     if (!approval || !activeSessionId) return
     await window.api.respondApproval(activeSessionId, approval.requestId, 'allow')
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
     await waitForModeChange()
 
-    setPermissionMode('default', activeSessionId)
     await window.api.setPermissionMode(activeSessionId, 'default')
-  }, [approval, activeSessionId, removePendingApproval, setPermissionMode])
+  }, [approval, activeSessionId, dismissApproval])
 
   // Option 4: Keep planning — submit feedback
   const handleKeepPlanning = useCallback(async () => {
@@ -117,10 +125,10 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     await window.api.respondApproval(activeSessionId, approval.requestId, 'deny', {
       feedback: text
     })
-    removePendingApproval(activeSessionId, approval.requestId)
+    dismissApproval(activeSessionId, approval.requestId)
     setShowFeedback(false)
     setFeedback('')
-  }, [feedback, approval, activeSessionId, removePendingApproval])
+  }, [feedback, approval, activeSessionId, dismissApproval])
 
   const handleOpenPlanPanel = useCallback(() => {
     if (activeSessionId && approval && planContent) {

@@ -51,11 +51,11 @@ vi.mock('os', async (importOriginal) => {
   }
 })
 
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
 }))
 
-vi.mock('../../opencode/OpencodeClient', () => ({
+vi.mock('../../../core/opencode/OpencodeClient', () => ({
   OpencodeClient: class {
     getConfigProviders() {
       return mockGetConfigProviders()
@@ -63,7 +63,7 @@ vi.mock('../../opencode/OpencodeClient', () => ({
   }
 }))
 
-vi.mock('../persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions-pricing-test'
 }))
 
@@ -79,21 +79,35 @@ const fakePaidProvider = {
   options: {},
   models: {
     'gpt-4o-test': {
-      id: 'gpt-4o-test', providerID: 'openai',
+      id: 'gpt-4o-test',
+      providerID: 'openai',
       api: { id: 'openai', url: '', npm: '' },
-      name: 'GPT-4o Test', family: 'gpt-4o',
-      capabilities: { temperature: true, reasoning: false, attachment: false, toolcall: true,
+      name: 'GPT-4o Test',
+      family: 'gpt-4o',
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: true,
         input: { text: true, audio: false, image: false, video: false, pdf: false },
-        output: { text: true, audio: false, image: false, video: false, pdf: false } },
+        output: { text: true, audio: false, image: false, video: false, pdf: false }
+      },
       cost: { input: 2.5, output: 10.0, cache: { read: 1.25, write: 2.5 } }
     },
     'free-tier-llm-v1': {
-      id: 'free-tier-llm-v1', providerID: 'openai',
+      id: 'free-tier-llm-v1',
+      providerID: 'openai',
       api: { id: 'openai', url: '', npm: '' },
-      name: 'Free Tier LLM', family: 'free',
-      capabilities: { temperature: true, reasoning: false, attachment: false, toolcall: false,
+      name: 'Free Tier LLM',
+      family: 'free',
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: false,
         input: { text: true, audio: false, image: false, video: false, pdf: false },
-        output: { text: true, audio: false, image: false, video: false, pdf: false } },
+        output: { text: true, audio: false, image: false, video: false, pdf: false }
+      },
       cost: { input: 0, output: 0 } // free model — 0 is a valid real cost
     }
   }
@@ -107,12 +121,19 @@ const fakeNoCostProvider = {
   options: {},
   models: {
     'llama-3': {
-      id: 'llama-3', providerID: 'local',
+      id: 'llama-3',
+      providerID: 'local',
       api: { id: 'local', url: '', npm: '' },
-      name: 'Llama 3', family: 'llama',
-      capabilities: { temperature: true, reasoning: false, attachment: false, toolcall: false,
+      name: 'Llama 3',
+      family: 'llama',
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: false,
         input: { text: true, audio: false, image: false, video: false, pdf: false },
-        output: { text: true, audio: false, image: false, video: false, pdf: false } }
+        output: { text: true, audio: false, image: false, video: false, pdf: false }
+      }
       // No cost field — should be skipped
     }
   }
@@ -122,7 +143,7 @@ const fakeNoCostProvider = {
 // Test setup
 // ---------------------------------------------------------------------------
 
-import { refreshPrices, loadPersistedPrices } from '../opencode-pricing'
+import { refreshPrices, loadPersistedPrices } from '../../../core/services/opencode-pricing'
 import { equivalentCostUsd, registerSupplementalPricing } from '../../../shared/pricing'
 
 /** The SUT's PRICES_FILE, resolved under the mocked (temp) homedir. */
@@ -168,8 +189,11 @@ describe('opencode-pricing: refreshPrices', () => {
   it('maps paid model to correct rates via equivalentCostUsd', async () => {
     await refreshPrices()
     const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(cost).toBeCloseTo(2.5)
   })
@@ -180,8 +204,11 @@ describe('opencode-pricing: refreshPrices', () => {
     // estimation signal (see isZeroCost) so it must not be registered at all;
     // equivalentCostUsd falls through to null, not a poisoned 0.
     const cost = equivalentCostUsd('openai', 'free-tier-llm-v1', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(cost).toBeNull()
   })
@@ -189,8 +216,11 @@ describe('opencode-pricing: refreshPrices', () => {
   it('skips models without a cost field (llama-3 → not registered)', async () => {
     await refreshPrices()
     const cost = equivalentCostUsd('local', 'llama-3', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(cost).toBeNull()
   })
@@ -199,8 +229,11 @@ describe('opencode-pricing: refreshPrices', () => {
     await refreshPrices()
     // gpt-4o-test: cache.read=1.25, cache.write=2.5
     const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
-      inputTokens: 0, outputTokens: 0,
-      cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 1_000_000,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(cost).toBeCloseTo(2.5) // cacheWritePerMTok = cache.write = 2.5
   })
@@ -246,8 +279,11 @@ describe('opencode-pricing: persisted-file round-trip', () => {
         vendorId: 'test-vendor',
         match: 'my-model-x1',
         pricing: {
-          inputPerMTok: 7, outputPerMTok: 28,
-          cacheWritePerMTok: 7, cacheWrite1hPerMTok: 7, cacheReadPerMTok: 1.75
+          inputPerMTok: 7,
+          outputPerMTok: 28,
+          cacheWritePerMTok: 7,
+          cacheWrite1hPerMTok: 7,
+          cacheReadPerMTok: 1.75
         }
       }
     ]
@@ -257,8 +293,11 @@ describe('opencode-pricing: persisted-file round-trip', () => {
     loadPersistedPrices()
 
     const cost = equivalentCostUsd('test-vendor', 'my-model-x1', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(cost).toBeCloseTo(7.0)
   })
@@ -270,8 +309,11 @@ describe('opencode-pricing: persisted-file round-trip', () => {
     loadPersistedPrices()
 
     const cost = equivalentCostUsd('openai', 'gpt-4o-test', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(cost).toBeCloseTo(2.5)
   })
@@ -287,16 +329,22 @@ describe('opencode-pricing: persisted-file round-trip', () => {
         vendorId: 'openai',
         match: 'poisoned-zero-cost-model',
         pricing: {
-          inputPerMTok: 0, outputPerMTok: 0,
-          cacheWritePerMTok: 0, cacheWrite1hPerMTok: 0, cacheReadPerMTok: 0
+          inputPerMTok: 0,
+          outputPerMTok: 0,
+          cacheWritePerMTok: 0,
+          cacheWrite1hPerMTok: 0,
+          cacheReadPerMTok: 0
         }
       },
       {
         vendorId: 'openai',
         match: 'legit-paid-model',
         pricing: {
-          inputPerMTok: 2.5, outputPerMTok: 10,
-          cacheWritePerMTok: 2.5, cacheWrite1hPerMTok: 2.5, cacheReadPerMTok: 1.25
+          inputPerMTok: 2.5,
+          outputPerMTok: 10,
+          cacheWritePerMTok: 2.5,
+          cacheWrite1hPerMTok: 2.5,
+          cacheReadPerMTok: 1.25
         }
       }
     ]
@@ -306,14 +354,20 @@ describe('opencode-pricing: persisted-file round-trip', () => {
     loadPersistedPrices()
 
     const zeroCost = equivalentCostUsd('openai', 'poisoned-zero-cost-model', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(zeroCost).toBeNull()
 
     const paidCost = equivalentCostUsd('openai', 'legit-paid-model', {
-      inputTokens: 1_000_000, outputTokens: 0,
-      cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
     })
     expect(paidCost).toBeCloseTo(2.5)
   })

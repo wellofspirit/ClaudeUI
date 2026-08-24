@@ -74,7 +74,9 @@ export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string)
     case 'mockup':
       // Minor wording drift from old getSummary's `show <dir8>` for show_mockup:
       // now always "show mockup" when no title. Acceptable per spec §2(e).
-      return view.kind === 'mockup' ? (view.title ?? (view.directory ? 'show mockup' : 'new mockup')) : ''
+      return view.kind === 'mockup'
+        ? (view.title ?? (view.directory ? 'show mockup' : 'new mockup'))
+        : ''
 
     case 'plan':
       return ''

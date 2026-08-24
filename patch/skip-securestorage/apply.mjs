@@ -28,6 +28,12 @@
  * Windows. We now capture the WHOLE body and prepend the short-circuit, so the
  * gate (and any future shape) is preserved. See README "Anchor 2".
  *
+ * Linux bundles (verified on 2.1.231) ship NO secure store at all: no composer,
+ * no keychain/credman backend — the plaintext file backend is the only store.
+ * That is exactly the state this patch forces, so on Linux the patch is a
+ * legitimate no-op — but only under the store-less guard below (positive
+ * evidence, not just a failed match). Any other 0-match still aborts loudly.
+ *
  * Anchors (both content-based; minified names + body shape vary by platform):
  *   1. The facade composer, via its `${X.name}-with-${Y.name}-fallback`
  *      template literal — captures the composer fn name.
@@ -75,6 +81,19 @@ const composerRe = new RegExp(
 )
 const composerMatch = src.match(composerRe)
 if (!composerMatch) {
+  // Store-less guard: Linux bundles have no secure store to bypass (see header).
+  // No-op ONLY with positive evidence of the store-less shape — the composed
+  // fallback template absent anywhere AND the plaintext backend present AND the
+  // host actually building a Linux bundle. A renamed composer on mac/win (or a
+  // future Linux secure store, whose facade would reintroduce the template)
+  // falls through to the loud abort instead of silently skipping.
+  const hasComposedFallback = src.includes('-fallback`')
+  const hasPlaintextBackend = src.includes('name:"plaintext"')
+  if (process.platform === 'linux' && !hasComposedFallback && hasPlaintextBackend) {
+    console.log('Store-less bundle (Linux is plaintext-only): nothing to bypass — skipping.')
+    console.log('skip-securestorage not needed on this platform.')
+    process.exit(0)
+  }
   console.error('ERROR: could not locate the credential-store facade composer.')
   console.error('cli.js may have changed the "keychain-with-plaintext-fallback" shape.')
   process.exit(1)
@@ -98,9 +117,7 @@ const siteRe = new RegExp(
 )
 const matches = [...src.matchAll(new RegExp(siteRe, 'g'))]
 if (matches.length !== 1) {
-  console.error(
-    `ERROR: expected exactly 1 store-getter match, found ${matches.length}. Aborting.`
-  )
+  console.error(`ERROR: expected exactly 1 store-getter match, found ${matches.length}. Aborting.`)
   process.exit(1)
 }
 

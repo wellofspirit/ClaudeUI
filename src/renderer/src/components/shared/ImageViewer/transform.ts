@@ -132,11 +132,7 @@ export function panBy(state: ViewerTransform, dx: number, dy: number): ViewerTra
  * returned untouched rather than snapped to centre, so a pan is never silently
  * swallowed before layout is known.
  */
-export function clampPan(
-  state: ViewerTransform,
-  viewport: Size,
-  fitted: Size
-): ViewerTransform {
+export function clampPan(state: ViewerTransform, viewport: Size, fitted: Size): ViewerTransform {
   if (fitted.width <= 0 || fitted.height <= 0 || viewport.width <= 0 || viewport.height <= 0) {
     return state
   }
@@ -165,12 +161,7 @@ export function clampPan(
  * "layout not known yet".
  */
 export function fitSize(natural: Size, viewport: Size, allowUpscale = false): Size {
-  if (
-    natural.width <= 0 ||
-    natural.height <= 0 ||
-    viewport.width <= 0 ||
-    viewport.height <= 0
-  ) {
+  if (natural.width <= 0 || natural.height <= 0 || viewport.width <= 0 || viewport.height <= 0) {
     return { width: 0, height: 0 }
   }
   const contain = Math.min(viewport.width / natural.width, viewport.height / natural.height)

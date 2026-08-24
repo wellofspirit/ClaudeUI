@@ -6,17 +6,18 @@
 ## Context
 
 The sidebar groups sessions into projects by a string `projectKey`. The two engines derived it
-incompatibly for the *same* physical directory, so one project listed twice:
+incompatibly for the _same_ physical directory, so one project listed twice:
 
 - **Claude** — `projectKey` is the real on-disk directory name under `~/.claude/projects/`, produced
   by Claude Code's lossy encoding of the cwd: every non-alphanumeric character → `-`
   (e.g. `D:\WorkPlace\ClaudeUI` → `D--WorkPlace-ClaudeUI`). ClaudeUI reads these dir names directly
-  (`session-history.ts`), so they are authoritative — and *lossy* (you cannot recover the original
+  (`session-history.ts`), so they are authoritative — and _lossy_ (you cannot recover the original
   path: `my.app` and `my-app` both encode to `my-app`).
 - **opencode** — stored the real cwd in its own SQLite (`D:/WorkPlace/ClaudeUI`, Windows drive +
   forward slashes) and used `cwd.replace(/\\/g,'/')` as the key — a different string.
 
 Two consequences had to be resolved together:
+
 1. **Grouping.** The keys must match for the same directory.
 2. **Deletion.** opencode's key contained `:` / `/`, which the Claude file-delete path's traversal
    guard rejected — so deleting an opencode session threw. And opencode sessions live in opencode's
@@ -30,10 +31,10 @@ A single shared helper `cwdToProjectKey(cwd)` (`src/shared/project-key.ts`) repl
 encoding (`cwd.replace(/[^a-zA-Z0-9]/g, '-')`). Both engines' sessions are grouped by it, so the same
 directory collapses to one sidebar project. Properties:
 
-- **Lossy and one-way.** The key is *never* reversed to a path. It is an identity/grouping token and
+- **Lossy and one-way.** The key is _never_ reversed to a path. It is an identity/grouping token and
   the on-disk directory name for Claude's own file ops — nothing more.
 - **Backends keep their NATIVE identity.** opencode persists the real cwd as-is in its DB; the
-  projectKey is *computed* from it for the UI. `SessionInfo` carries both `cwd` (real, for display +
+  projectKey is _computed_ from it for the UI. `SessionInfo` carries both `cwd` (real, for display +
   engine ops) and `projectKey` (derived, for grouping).
 - **Cross-format safe by construction.** `\`, `/`, `:` all map to `-`, so `D:\…` and `D:/…` produce
   the same key. The renderer's in-memory (running-session) grouping also keys on
@@ -64,7 +65,7 @@ of a merged group through the same dispatcher, so they don't reappear on the nex
 - **Match by normalized real cwd instead of the lossy key.** Rejected: the merged group must keep
   Claude's dir-name `projectKey` for Claude's own load/delete/watch file ops, which need the real
   directory name — you can't substitute a normalized cwd there.
-- **Write opencode's SQLite directly for delete.** Rejected: we only ever *read* opencode's DB
+- **Write opencode's SQLite directly for delete.** Rejected: we only ever _read_ opencode's DB
   (ADR-019 / ADR-020); deletion goes through opencode's own HTTP API so the engine owns the mechanism.
 - **A full `EnginePersistenceProvider` registry** (list/history/delete behind one interface).
   Deferred as over-engineering for a single method today; the `deleteSessionByEngine` dispatcher is the

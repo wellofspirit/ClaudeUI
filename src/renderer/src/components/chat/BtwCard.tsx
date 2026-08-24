@@ -13,7 +13,10 @@ export function BtwCard({ isMobile }: { isMobile: boolean }): React.JSX.Element 
   if (!btwQuestion) return null
 
   return (
-    <div data-testid="BtwCard" className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto w-full px-4 pb-1.5`}>
+    <div
+      data-testid="BtwCard"
+      className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto w-full px-4 pb-1.5`}
+    >
       <div className="rounded-xl border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in shadow-lg shadow-black/20">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-border">

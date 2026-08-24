@@ -50,8 +50,20 @@ describe('SCOPES structure', () => {
     it('contains the 14 app sections in order', () => {
       const ids = common.subgroups.flatMap((sg) => sg.sections.map((s) => s.id))
       expect(ids).toEqual([
-        'appearance', 'chat', 'session', 'autonomy', 'shared-providers', 'tool-output', 'diff',
-        'git', 'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+        'appearance',
+        'chat',
+        'session',
+        'autonomy',
+        'shared-providers',
+        'tool-output',
+        'diff',
+        'git',
+        'status-line',
+        'usage',
+        'logging',
+        'voice',
+        'remote',
+        'mockup'
       ])
     })
 
@@ -76,14 +88,19 @@ describe('SCOPES structure', () => {
 
     it('has 3 subgroups: Engine, Vendor · Anthropic, Account', () => {
       expect(claude.subgroups.map((sg) => sg.label)).toEqual([
-        'Engine', 'Vendor · Anthropic', 'Account'
+        'Engine',
+        'Vendor · Anthropic',
+        'Account'
       ])
     })
 
     it('Engine subgroup contains permissions, sandbox, proxy, claude-dispatch in order', () => {
       const engine = claude.subgroups.find((sg) => sg.label === 'Engine')!
       expect(engine.sections.map((s) => s.id)).toEqual([
-        'permissions', 'sandbox', 'proxy', 'claude-dispatch'
+        'permissions',
+        'sandbox',
+        'proxy',
+        'claude-dispatch'
       ])
     })
 
@@ -179,10 +196,9 @@ describe('SCOPES structure', () => {
 describe('SECTION_SCOPE_MAP', () => {
   it('maps every SECTIONS entry to a scope', () => {
     for (const section of SECTIONS) {
-      expect(
-        SECTION_SCOPE_MAP.has(section.id),
-        `SECTION_SCOPE_MAP missing "${section.id}"`
-      ).toBe(true)
+      expect(SECTION_SCOPE_MAP.has(section.id), `SECTION_SCOPE_MAP missing "${section.id}"`).toBe(
+        true
+      )
     }
   })
 
@@ -252,11 +268,21 @@ describe('Anthropic vendor section', () => {
     const mockSettings = {} as Parameters<typeof item.render>[0]
     const mockUpdate = (): void => {}
     const mockEngineConfig = {}
-    const mockVendorConfig = { endpoint: { enabled: true, baseUrl: 'https://test.com', authToken: '' }, modelOverride: { enabled: false } }
+    const mockVendorConfig = {
+      endpoint: { enabled: true, baseUrl: 'https://test.com', authToken: '' },
+      modelOverride: { enabled: false }
+    }
     const mockUpdateVendor = (): void => {}
     // Should not throw — this is the smoke test
     expect(() =>
-      item.render(mockSettings, mockUpdate, mockEngineConfig as never, mockUpdate as never, mockVendorConfig as never, mockUpdateVendor)
+      item.render(
+        mockSettings,
+        mockUpdate,
+        mockEngineConfig as never,
+        mockUpdate as never,
+        mockVendorConfig as never,
+        mockUpdateVendor
+      )
     ).not.toThrow()
   })
 })

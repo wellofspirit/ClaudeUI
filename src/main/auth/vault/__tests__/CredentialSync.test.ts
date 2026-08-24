@@ -34,9 +34,9 @@ import {
   type CodexFeedTarget,
   type CodexCredentialInput,
   type CodexEntrySnapshot
-} from '../CredentialSync'
+} from '../../../../core/auth/vault/CredentialSync'
 import type { FSWatcher } from 'node:fs'
-import type { VaultCredential } from '../codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -358,6 +358,49 @@ describe('CredentialSync route policy', () => {
     }
   })
 
+  it('completeLogin(pastedInput) drives the vault paste path and feeds both engines (ADR-057)', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = 5_000_000
+      vi.setSystemTime(now)
+      const cred: VaultCredential = {
+        type: 'oauth',
+        access: 'pasted-acc',
+        refresh: 'pasted-ref',
+        expires: now + 3_600_000
+      }
+      const { vault } = makeFakeVault(null)
+      const completePaste = vi.fn(async () => cred)
+      vault.completeLoginFromPastedInput = completePaste
+      const pi = fakeFeedTarget()
+      const opencode = fakeFeedTarget()
+      const sync = new CredentialSync({ vault })
+      sync.configure({ pi: pi.target, opencode: opencode.target })
+
+      const result = await sync.completeLogin('http://localhost:1455/auth/callback?code=c&state=s')
+
+      expect(completePaste).toHaveBeenCalledWith(
+        'http://localhost:1455/auth/callback?code=c&state=s'
+      )
+      expect(vault.completeLogin).not.toHaveBeenCalled()
+      expect(result).toBe(cred)
+      expect(pi.feed).toHaveBeenCalled()
+      expect(opencode.feed).toHaveBeenCalled()
+      sync.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('completeLogin(pastedInput) throws when the vault has no paste support', async () => {
+    // makeFakeVault does not implement the optional completeLoginFromPastedInput.
+    const { vault } = makeFakeVault(null)
+    const sync = new CredentialSync({ vault })
+    await expect(sync.completeLogin('x')).rejects.toThrow(
+      /does not support pasted login completion/
+    )
+  })
+
   it('fails closed when a configured route policy throws', async () => {
     const pi = fakeFeedTarget()
     const opencode = fakeFeedTarget()
@@ -368,7 +411,9 @@ describe('CredentialSync route policy', () => {
       }
     })
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    await expect(sync.feedAll({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })).resolves.toEqual({
+    await expect(
+      sync.feedAll({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    ).resolves.toEqual({
       pi: false,
       opencode: false
     })
@@ -390,10 +435,19 @@ describe('CredentialSync route policy', () => {
   it('removes a disabled route copy ONLY when it is the managed vault credential; never with an empty vault (M-AT3)', async () => {
     // Connected vault (refresh 'r') and the disabled opencode store holds the
     // SAME credential ClaudeUI vended → ours to clean up.
-    const readable = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
+    const readable = makeFakeVault({
+      type: 'oauth',
+      access: 'a',
+      refresh: 'r',
+      expires: Date.now() + 999_999
+    })
     const readablePi = fakeFeedTarget()
     const readableOpencode = fakeFeedTarget()
-    readableOpencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
+    readableOpencode.read.mockResolvedValue({
+      access: 'a',
+      refresh: 'r',
+      expires: Date.now() + 999_999
+    })
     const readableSync = new CredentialSync({ vault: readable.vault, getEnabledRoutes: piOnly })
     readableSync.configure({ pi: readablePi.target, opencode: readableOpencode.target })
     await readableSync.start()
@@ -404,8 +458,15 @@ describe('CredentialSync route policy', () => {
     // the user's own; never remove it (this is the M-AT3 data-loss fix).
     const emptyPi = fakeFeedTarget()
     const emptyOpencode = fakeFeedTarget()
-    emptyOpencode.read.mockResolvedValue({ access: 'u', refresh: 'user-own', expires: Date.now() + 999_999 })
-    const emptySync = new CredentialSync({ vault: makeFakeVault(null).vault, getEnabledRoutes: piOnly })
+    emptyOpencode.read.mockResolvedValue({
+      access: 'u',
+      refresh: 'user-own',
+      expires: Date.now() + 999_999
+    })
+    const emptySync = new CredentialSync({
+      vault: makeFakeVault(null).vault,
+      getEnabledRoutes: piOnly
+    })
     emptySync.configure({ pi: emptyPi.target, opencode: emptyOpencode.target })
     await emptySync.start()
     expect(emptyOpencode.remove).not.toHaveBeenCalled()
@@ -414,7 +475,11 @@ describe('CredentialSync route policy', () => {
   it('preserves a user-created disabled-route Codex credential when the vault is empty (M-AT3 guard)', async () => {
     // User ran `pi /login` themselves; ClaudeUI never connected ChatGPT.
     const pi = fakeFeedTarget()
-    pi.read.mockResolvedValue({ access: 'ua', refresh: 'user-refresh', expires: Date.now() + 999_999 })
+    pi.read.mockResolvedValue({
+      access: 'ua',
+      refresh: 'user-refresh',
+      expires: Date.now() + 999_999
+    })
     const opencode = fakeFeedTarget()
     const sync = new CredentialSync({
       vault: makeFakeVault(null).vault,
@@ -430,10 +495,19 @@ describe('CredentialSync route policy', () => {
   it('preserves an unmanaged disabled-route copy whose token does not match the vault (M-AT3)', async () => {
     // Connected vault ('r'), but the disabled opencode store holds a DIFFERENT
     // (user-owned) credential → not ClaudeUI-vended → must be left intact.
-    const { vault } = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
+    const { vault } = makeFakeVault({
+      type: 'oauth',
+      access: 'a',
+      refresh: 'r',
+      expires: Date.now() + 999_999
+    })
     const pi = fakeFeedTarget()
     const opencode = fakeFeedTarget()
-    opencode.read.mockResolvedValue({ access: 'u', refresh: 'user-own', expires: Date.now() + 999_999 })
+    opencode.read.mockResolvedValue({
+      access: 'u',
+      refresh: 'user-own',
+      expires: Date.now() + 999_999
+    })
     const sync = new CredentialSync({ vault, getEnabledRoutes: piOnly })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
@@ -468,7 +542,11 @@ describe('CredentialSync route policy', () => {
       const opencode = fakeFeedTarget()
       // Disabled store holds the managed credential (matches the vault), so the
       // provenance-checked cleanup proceeds to removeVendorAuth — which fails.
-      opencode.read.mockResolvedValue({ access: 'a', refresh: 'r', expires: Date.now() + 60 * 60 * 1000 })
+      opencode.read.mockResolvedValue({
+        access: 'a',
+        refresh: 'r',
+        expires: Date.now() + 60 * 60 * 1000
+      })
       opencode.remove.mockRejectedValueOnce(new Error('auth file is locked'))
       const sync = new CredentialSync({
         vault: makeFakeVault({
@@ -585,9 +663,23 @@ describe('CredentialSync.disconnectChatgpt', () => {
   it('prevents an in-flight refresh from restoring credentials after disconnect', async () => {
     vi.useFakeTimers()
     try {
-      const { vault, save, state } = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 999_999 })
-      let resolveRefresh: ((tokens: { access_token: string; refresh_token: string; expires_in: number }) => void) | undefined
-      const refreshAccessToken = vi.fn(() => new Promise<{ access_token: string; refresh_token: string; expires_in: number }>((resolve) => { resolveRefresh = resolve }))
+      const { vault, save, state } = makeFakeVault({
+        type: 'oauth',
+        access: 'a',
+        refresh: 'r',
+        expires: Date.now() + 999_999
+      })
+      let resolveRefresh:
+        | ((tokens: { access_token: string; refresh_token: string; expires_in: number }) => void)
+        | undefined
+      const refreshAccessToken = vi.fn(
+        () =>
+          new Promise<{ access_token: string; refresh_token: string; expires_in: number }>(
+            (resolve) => {
+              resolveRefresh = resolve
+            }
+          )
+      )
       const pi = fakeFeedTarget()
       const opencode = fakeFeedTarget()
       const sync = new CredentialSync({ vault, refreshAccessToken })
@@ -596,7 +688,11 @@ describe('CredentialSync.disconnectChatgpt', () => {
       await Promise.resolve()
       expect(refreshAccessToken).toHaveBeenCalledWith('r')
       await sync.disconnectChatgpt()
-      resolveRefresh!({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 })
+      resolveRefresh!({
+        access_token: 'new-access',
+        refresh_token: 'new-refresh',
+        expires_in: 3600
+      })
       await refresh
       expect(save).not.toHaveBeenCalled()
       expect(state.current).toBeNull()
@@ -610,14 +706,26 @@ describe('CredentialSync.disconnectChatgpt', () => {
   })
 
   it('prevents an in-flight external read from adopting after disconnect', async () => {
-    const { vault, save, state } = makeFakeVault({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    const { vault, save, state } = makeFakeVault({
+      type: 'oauth',
+      access: 'a',
+      refresh: 'r',
+      expires: 1
+    })
     let resolveRead: ((snapshot: CodexEntrySnapshot) => void) | undefined
     const pi = fakeFeedTarget()
-    pi.read.mockImplementationOnce(() => new Promise<CodexEntrySnapshot>((resolve) => { resolveRead = resolve }))
+    pi.read.mockImplementationOnce(
+      () =>
+        new Promise<CodexEntrySnapshot>((resolve) => {
+          resolveRead = resolve
+        })
+    )
     const opencode = fakeFeedTarget()
     const sync = new CredentialSync({ vault })
     sync.configure({ pi: pi.target, opencode: opencode.target })
-    const reconcile = (sync as unknown as { handleExternalChange(engine: 'pi'): Promise<void> }).handleExternalChange('pi')
+    const reconcile = (
+      sync as unknown as { handleExternalChange(engine: 'pi'): Promise<void> }
+    ).handleExternalChange('pi')
     await Promise.resolve()
     await sync.disconnectChatgpt()
     resolveRead!({ access: 'new', refresh: 'new', expires: 999_999 })
@@ -843,8 +951,7 @@ describe('CredentialSync — refresh scheduler', () => {
       expires: now + 999_999
     })
     let resolveFetch:
-      | ((v: { access_token: string; refresh_token: string; expires_in: number }) => void)
-      | undefined
+      ((v: { access_token: string; refresh_token: string; expires_in: number }) => void) | undefined
     const refreshAccessToken = vi.fn(
       () =>
         new Promise<{ access_token: string; refresh_token: string; expires_in: number }>(
@@ -1433,7 +1540,8 @@ describe('CredentialSync — fs-watch resync', () => {
     try {
       await triggerUntil(
         // different + OLDER
-        () => writeRaw(piFile, 'openai-codex', { access: 'a0', refresh: 'r0', expires: now + 1000 }),
+        () =>
+          writeRaw(piFile, 'openai-codex', { access: 'a0', refresh: 'r0', expires: now + 1000 }),
         () => reconciles('pi') >= 1,
         'older-credential reconcile to run'
       )

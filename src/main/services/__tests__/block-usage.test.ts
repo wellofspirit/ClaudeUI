@@ -519,13 +519,14 @@ describe('mergeModelFamilies', () => {
 
 describe('deriveSessionIdFromPath', () => {
   it('derives the session UUID from a main session file name', async () => {
-    const { deriveSessionIdFromPath } = await import('../block-usage')
-    const p = '/home/user/.claude/projects/-home-user-repo/a1b2c3d4-0000-0000-0000-000000000000.jsonl'
+    const { deriveSessionIdFromPath } = await import('../../../core/services/block-usage')
+    const p =
+      '/home/user/.claude/projects/-home-user-repo/a1b2c3d4-0000-0000-0000-000000000000.jsonl'
     expect(deriveSessionIdFromPath(p)).toBe('a1b2c3d4-0000-0000-0000-000000000000')
   })
 
   it('derives the PARENT session UUID (not the agent file name) for a subagent file', async () => {
-    const { deriveSessionIdFromPath } = await import('../block-usage')
+    const { deriveSessionIdFromPath } = await import('../../../core/services/block-usage')
     const p =
       '/home/user/.claude/projects/-home-user-repo/a1b2c3d4-0000-0000-0000-000000000000/subagents/agent-00ff.jsonl'
     expect(deriveSessionIdFromPath(p)).toBe('a1b2c3d4-0000-0000-0000-000000000000')

@@ -380,9 +380,9 @@ const noValidatorEmitterMatch = verify.match(noValidatorEmitterRe)
 const noValidatorEmitterLit = noValidatorEmitterMatch?.[1].replace(/[$]/g, '\\$&')
 const noValidatorUpstreamed =
   !!noValidatorEmitterMatch &&
-  new RegExp(
-    `status:"killed",[\\s\\S]{1,400}?${noValidatorEmitterLit}\\([^,]+,"stopped"`
-  ).test(verify) &&
+  new RegExp(`status:"killed",[\\s\\S]{1,400}?${noValidatorEmitterLit}\\([^,]+,"stopped"`).test(
+    verify
+  ) &&
   !new RegExp(`${noValidatorEmitterLit}\\([^,]+,"killed"`).test(verify)
 const partAOk =
   verify.includes(patchAMarker) || legacyPatchedShapeRe.test(verify) || noValidatorUpstreamed
@@ -410,4 +410,6 @@ console.log('\nAll parts verified.')
 console.log('')
 console.log('What this does:')
 console.log('  A — Ensures "killed" is mapped to "stopped" before reaching SDK consumers')
-console.log('  B — Ensures TaskStop sends a notification sender call before the notified flag is set')
+console.log(
+  '  B — Ensures TaskStop sends a notification sender call before the notified flag is set'
+)

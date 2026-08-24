@@ -93,10 +93,10 @@ Anthropic API response
 | ------------------ | ------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
 | `LR4()`            | `r5e()`             | ~6485791              | Getter for `kh8` / `n5e` (cached parsed header utilization)                                   |
 | `hR4(q)`           | `zda(q)`            | ~6485817              | Parses `anthropic-ratelimit-unified-*-utilization/reset` headers → `{ five_hour, seven_day }` |
-| `pF1(q)`           | `xBn(e,t,n,r)`      | ~6488865              | Main handler: calls `hR4` + `SR4` + conditionally `BF1` (4-param in v2.1.197)                |
+| `pF1(q)`           | `xBn(e,t,n,r)`      | ~6488865              | Main handler: calls `hR4` + `SR4` + conditionally `BF1` (4-param in v2.1.197)                 |
 | `SR4(q)`           | `Jda(q)`            | ~6487750              | Full unified rate limit status parser → status object                                         |
 | `BF1(q)`           | `Q3t(q)`            | ~6486087              | Broadcaster: updates `aV`, calls `d46.forEach(cb => cb(q))`, fires telemetry                  |
-| `NJ`               | `YDe`               | (lodash isEqual)      | Deep equality — gates `BF1`                                                                    |
+| `NJ`               | `YDe`               | (lodash isEqual)      | Deep equality — gates `BF1`                                                                   |
 | `XiK(...)`         | —                   | ~11714504             | Async generator stream loop — calls `pF1` after streaming completes                           |
 
 **Name map v2.1.97 → v2.1.197:** `pF1→xBn`, `LR4→r5e`, `kh8→n5e`, `hR4→zda`, `SR4→Jda`, `BF1→Q3t`, `d46→YDe`.
@@ -238,6 +238,7 @@ Two minified names are extracted at apply time:
    ```
 
    The `apply.mjs` pattern for v2.1.197 matches the 4-param+defaults signature anchored on the `kh8` reset inside the guard:
+
    ```js
    const pf1DefRe = new RegExp(
      `function (%V%)(%V%,%V%,%V%=!1,%V%=Date\\.now\\(\\))\\{let %V%=%V%\\(\\);if\\(!%V%\\(%V%\\)\\)\\{if\\(<kh8>=\\{\\}`
@@ -252,6 +253,7 @@ Two minified names are extracted at apply time:
    ```
 
    The call-site regex was updated to allow a variable-length argument list after `.headers,` using a nested-paren-tolerant pattern (up to 2 levels deep):
+
    ```js
    const argPat = `(?:[^)(]|\\((?:[^)(]|\\([^)(]*\\))*\\))*`
    const callSiteRe = new RegExp(
@@ -455,13 +457,13 @@ Inference response headers
 
 ## Version Progression
 
-| What changed                | v2.1.97                                 | v2.1.197                                                                                              |
-| --------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `pF1` param count           | 1 (`(q)`)                               | 4 (`(e,t,n=!1,r=Date.now())`) — model, boolean flag, timestamp added                                 |
-| `pF1` scope init            | `let K=I7()` (assigns then guards)      | `let o=Eo()` (same structure, different names)                                                        |
-| `pF1` call site args        | `pF1(U1.headers)` (1 arg)               | `pF1(Hn.headers,<model>,(fg(model)\|\|Sx(model))&&...,<we>)` (4 args, nested parens)                |
-| `kh8` store name            | `kh8` / `LR4()` getter                  | `n5e` / `r5e()` getter (content patterns still unique)                                               |
-| Patch injection shape       | `,process.stdout.write(...)` appended   | Same — appended as trailing comma-expression inside `if(Hn)` guard; unchanged                        |
+| What changed          | v2.1.97                               | v2.1.197                                                                             |
+| --------------------- | ------------------------------------- | ------------------------------------------------------------------------------------ |
+| `pF1` param count     | 1 (`(q)`)                             | 4 (`(e,t,n=!1,r=Date.now())`) — model, boolean flag, timestamp added                 |
+| `pF1` scope init      | `let K=I7()` (assigns then guards)    | `let o=Eo()` (same structure, different names)                                       |
+| `pF1` call site args  | `pF1(U1.headers)` (1 arg)             | `pF1(Hn.headers,<model>,(fg(model)\|\|Sx(model))&&...,<we>)` (4 args, nested parens) |
+| `kh8` store name      | `kh8` / `LR4()` getter                | `n5e` / `r5e()` getter (content patterns still unique)                               |
+| Patch injection shape | `,process.stdout.write(...)` appended | Same — appended as trailing comma-expression inside `if(Hn)` guard; unchanged        |
 
 ## Key Functions Reference
 
@@ -481,10 +483,12 @@ Inference response headers
 ### How to re-find `pF1` when names change
 
 The function is uniquely identified by two properties:
+
 1. It is the function that resets `kh8`/`n5e` to `{}` inside its guard body
 2. It contains the string `"anthropic-ratelimit-unified-status"` (via its call to `SR4`/`Jda`)
 
 Search strategy:
+
 ```bash
 # Primary: find the status-header string (in SR4/Jda), then navigate to pF1's caller
 bundle-analyzer find cli.js "anthropic-ratelimit-unified-status" --compact

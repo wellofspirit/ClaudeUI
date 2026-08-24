@@ -9,7 +9,7 @@ Strip proxy env vars from the env handed to cli.js subprocesses (Bash tool, MCP 
 | Component            | Version               |
 | -------------------- | --------------------- |
 | At time of discovery | bundled CLI `2.1.114` |
-| Last re-anchored     | bundled CLI `2.1.198` |
+| Last re-anchored     | bundled CLI `2.1.241` |
 
 ## The Problem
 
@@ -78,18 +78,18 @@ let __cuPS = (E) => {
 
 The body grows roughly every few releases. `apply.mjs` carries one regex+rebuild per shape, tried newest-first; older shapes remain as fallbacks.
 
-| Shape    | Name (then) | What it added                                                                                                                                                                                                                      |
-| -------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| v114     | `Qk`        | 2-source merge (`process.env` + user env); scrub list = API keys only                                                                                                                                                              |
-| v118     | `uv`        | + remote-env merge gated on `CLAUDE_CODE_REMOTE` (3-source)                                                                                                                                                                        |
-| v119     | `PV`        | + `CLAUDE_BG_*` / `CLAUDE_CODE_SESSION_KIND` scrub                                                                                                                                                                                 |
-| v129     | `sy`        | + OAuth-token scrub flag, + `OTEL_*` strip loop, + unconditional `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` delete                                                                                                                      |
-| v143     | `VS`        | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH`                                                                                                                                                                |
-| v150     | `dT`        | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF`                                                                                                                                                             |
-| v163     | `wN`        | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard)                                     |
-| v170     | `ek`        | + 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`) — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH`     |
-| **v197** | **`oM`**   | **Major refactor** — flagBg detection changed from hardcoded `\|\|`-chain to `DYr.some(...)` (array), per-var deletes replaced by loop, OTEL check extended, guard before block-list loop changed — see below |
-| **v198** | **`pD`**   | **+ host-managed-provider scrub array** — a new dynamic term `a=iyn(process.env)` computes an array of env-var names to strip (`[]` unless `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` is set, else `["ANTHROPIC_CUSTOM_HEADERS", ...blockList, hostAuthEnvVar, "CLAUDE_CODE_HOST_CREDS_FILE"]`), gates the early-return guard via `!a.length`, and is drained via its own `for(let x of a)delete merged[x]` loop (placed before the BG-array delete loop). Otherwise identical to v197 — see below                     |
+| Shape    | Name (then) | What it added                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v114     | `Qk`        | 2-source merge (`process.env` + user env); scrub list = API keys only                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| v118     | `uv`        | + remote-env merge gated on `CLAUDE_CODE_REMOTE` (3-source)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| v119     | `PV`        | + `CLAUDE_BG_*` / `CLAUDE_CODE_SESSION_KIND` scrub                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| v129     | `sy`        | + OAuth-token scrub flag, + `OTEL_*` strip loop, + unconditional `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` delete                                                                                                                                                                                                                                                                                                                                                                                  |
+| v143     | `VS`        | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH`                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| v150     | `dT`        | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF`                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| v163     | `wN`        | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard)                                                                                                                                                                                                                                                                                                 |
+| v170     | `ek`        | + 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`) — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH`                                                                                                                                                                                                                                                                 |
+| **v197** | **`oM`**    | **Major refactor** — flagBg detection changed from hardcoded `\|\|`-chain to `DYr.some(...)` (array), per-var deletes replaced by loop, OTEL check extended, guard before block-list loop changed — see below                                                                                                                                                                                                                                                                                  |
+| **v198** | **`pD`**    | **+ host-managed-provider scrub array** — a new dynamic term `a=iyn(process.env)` computes an array of env-var names to strip (`[]` unless `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` is set, else `["ANTHROPIC_CUSTOM_HEADERS", ...blockList, hostAuthEnvVar, "CLAUDE_CODE_HOST_CREDS_FILE"]`), gates the early-return guard via `!a.length`, and is drained via its own `for(let x of a)delete merged[x]` loop (placed before the BG-array delete loop). Otherwise identical to v197 — see below |
 
 **v170 gotcha:** the three new detection terms read off a **module-level env-snapshot global** (`$_` in 2.1.170: `$_.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||...`), NOT `process.env` like every other term in the flag. The regex captures this global as its own group and the rebuild re-emits it by captured name. See the inline header comment in `apply.mjs` for the full v170 verbatim shape.
 
@@ -102,9 +102,11 @@ The v197 shape is a substantial refactor of the background-session detection and
 Old (v170 and earlier): a hardcoded `||`-chain of `process.env.CLAUDE_CODE_SESSION_KIND!==void 0||process.env.CLAUDE_BG_TASK_TASK_ID!==void 0||...` for each background-session variable.
 
 New (v197): a module-level array `DYr` holds all background-session var names. Detection is:
+
 ```js
 a = DYr.some((u) => process.env[u] !== void 0)
 ```
+
 The `DYr` array name (captured as `bgArray`) is used for both the detection `.some()` and the delete loop below.
 
 **b) Per-var BG deletes: individual `delete` → `for` loop**
@@ -112,6 +114,7 @@ The `DYr` array name (captured as `bgArray`) is used for both the detection `.so
 Old (v170): individual `delete <merged>.CLAUDE_CODE_SESSION_KIND, delete <merged>.CLAUDE_BG_TASK_TASK_ID, ...` for each name.
 
 New (v197): a single loop over the same `DYr` array:
+
 ```js
 for (let u of DYr) delete c[u]
 ```
@@ -131,37 +134,41 @@ New (v197): `if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c`
 The `CLAUDE_CODE_OTEL_DIAG_STDERR` delete is now part of the guard expression (comma operator), ensuring it's always deleted when this code path is reached.
 
 **Verbatim v197 shape (for reference):**
+
 ```js
-function oM(){
-  let e=Zit(),
-      t=Object.keys(e).length>0,
-      n=Object.keys(LYr).length>0,
-      r=ct(process.env.CLAUDE_CODE_REMOTE)?R2i(t?{...process.env,...e}:process.env):{},
-      o=Object.keys(r).length>0,
-      s=v$d(),
-      i=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||
-        process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||
-        process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||
-        process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||
-        Ne.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||
-        Ne.CLAUDE_BG_RV_AUTH!==void 0||
-        Ne.CLAUDE_BG_PTY_AUTH!==void 0,
-      a=!1;
-  a=DYr.some((u)=>process.env[u]!==void 0);
-  let l=Object.keys(process.env).some((u)=>u.startsWith("OTEL_")||u==="CLAUDE_CODE_OTEL_DIAG_STDERR");
-  if(!t&&!o&&!s&&!a&&!i&&!l&&!n)return process.env;
-  let c={...process.env,...LYr,...e,...r};
-  delete c.CLAUDE_CODE_OAUTH_TOKEN,
-  delete c.CLAUDE_CODE_SUBSCRIPTION_TYPE,
-  delete c.CLAUDE_CODE_RATE_LIMIT_TIER,
-  delete c.CLAUDE_BG_AUTH_SNAPSHOT_PATH,
-  delete c.CLAUDE_BG_SOCKET_TOKENS_PATH,
-  delete c.CLAUDE_BG_RV_AUTH,
-  delete c.CLAUDE_BG_PTY_AUTH;
-  for(let u of DYr)delete c[u];
-  for(let u of Object.keys(c))if(u.startsWith("OTEL_"))delete c[u];
-  if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c;
-  for(let u of k$d)delete c[u],delete c[`INPUT_${u}`];
+function oM() {
+  let e = Zit(),
+    t = Object.keys(e).length > 0,
+    n = Object.keys(LYr).length > 0,
+    r = ct(process.env.CLAUDE_CODE_REMOTE) ? R2i(t ? { ...process.env, ...e } : process.env) : {},
+    o = Object.keys(r).length > 0,
+    s = v$d(),
+    i =
+      process.env.CLAUDE_CODE_OAUTH_TOKEN !== void 0 ||
+      process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE !== void 0 ||
+      process.env.CLAUDE_CODE_RATE_LIMIT_TIER !== void 0 ||
+      process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH !== void 0 ||
+      Ne.CLAUDE_BG_SOCKET_TOKENS_PATH !== void 0 ||
+      Ne.CLAUDE_BG_RV_AUTH !== void 0 ||
+      Ne.CLAUDE_BG_PTY_AUTH !== void 0,
+    a = !1
+  a = DYr.some((u) => process.env[u] !== void 0)
+  let l = Object.keys(process.env).some(
+    (u) => u.startsWith('OTEL_') || u === 'CLAUDE_CODE_OTEL_DIAG_STDERR'
+  )
+  if (!t && !o && !s && !a && !i && !l && !n) return process.env
+  let c = { ...process.env, ...LYr, ...e, ...r }
+  ;(delete c.CLAUDE_CODE_OAUTH_TOKEN,
+    delete c.CLAUDE_CODE_SUBSCRIPTION_TYPE,
+    delete c.CLAUDE_CODE_RATE_LIMIT_TIER,
+    delete c.CLAUDE_BG_AUTH_SNAPSHOT_PATH,
+    delete c.CLAUDE_BG_SOCKET_TOKENS_PATH,
+    delete c.CLAUDE_BG_RV_AUTH,
+    delete c.CLAUDE_BG_PTY_AUTH)
+  for (let u of DYr) delete c[u]
+  for (let u of Object.keys(c)) if (u.startsWith('OTEL_')) delete c[u]
+  if ((delete c.CLAUDE_CODE_OTEL_DIAG_STDERR, !s)) return c
+  for (let u of k$d) (delete c[u], delete c[`INPUT_${u}`])
   return c
 }
 ```
@@ -170,21 +177,21 @@ The patch replaces the whole function verbatim (same strategy as all prior shape
 
 **v197 variable map:**
 
-| Captured group | Example name | Role |
-| -------------- | ------------ | ---- |
-| `H`            | `e`          | User env binding (`Zit()` result) |
-| `flagUserNotEmpty` | `t`      | `Object.keys(e).length > 0` |
-| `extraGlobal`  | `LYr`        | Module-level extra env global |
-| `flagExtraNotEmpty` | `n`     | `Object.keys(LYr).length > 0` |
-| `qRemote`      | `r`          | Remote env merge result |
-| `flagScrub`    | `s`          | `v$d()` block-list gate |
-| `flagOAuth`    | `i`          | OAuth/session token detection |
-| `envSnap`      | `Ne`         | Module-level env snapshot (reads `CLAUDE_BG_SOCKET_TOKENS_PATH` etc.) |
-| `flagBg`       | `a`          | Background-session detection |
-| `bgArray`      | `DYr`        | Module-level array of BG session var names |
-| `flagOtel`     | `l`          | OTEL flag |
-| `merged`       | `c`          | Merged env object |
-| `blockList`    | `k$d`        | Block-list array for scrub loop |
+| Captured group      | Example name | Role                                                                  |
+| ------------------- | ------------ | --------------------------------------------------------------------- |
+| `H`                 | `e`          | User env binding (`Zit()` result)                                     |
+| `flagUserNotEmpty`  | `t`          | `Object.keys(e).length > 0`                                           |
+| `extraGlobal`       | `LYr`        | Module-level extra env global                                         |
+| `flagExtraNotEmpty` | `n`          | `Object.keys(LYr).length > 0`                                         |
+| `qRemote`           | `r`          | Remote env merge result                                               |
+| `flagScrub`         | `s`          | `v$d()` block-list gate                                               |
+| `flagOAuth`         | `i`          | OAuth/session token detection                                         |
+| `envSnap`           | `Ne`         | Module-level env snapshot (reads `CLAUDE_BG_SOCKET_TOKENS_PATH` etc.) |
+| `flagBg`            | `a`          | Background-session detection                                          |
+| `bgArray`           | `DYr`        | Module-level array of BG session var names                            |
+| `flagOtel`          | `l`          | OTEL flag                                                             |
+| `merged`            | `c`          | Merged env object                                                     |
+| `blockList`         | `k$d`        | Block-list array for scrub loop                                       |
 
 ### v2.1.198 shape — `pD()` — adds host-managed-provider scrub array
 
@@ -195,13 +202,16 @@ The v198 shape is additive on top of v197 — same BG-session `.some()`/loop ref
 ```js
 function iyn(e) {
   if (!ct(e.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)) return []
-  return ['ANTHROPIC_CUSTOM_HEADERS', ...d7, e.CLAUDE_CODE_HOST_AUTH_ENV_VAR, 'CLAUDE_CODE_HOST_CREDS_FILE'].filter(
-    (t) => !!t
-  )
+  return [
+    'ANTHROPIC_CUSTOM_HEADERS',
+    ...d7,
+    e.CLAUDE_CODE_HOST_AUTH_ENV_VAR,
+    'CLAUDE_CODE_HOST_CREDS_FILE'
+  ].filter((t) => !!t)
 }
 ```
 
-`iyn` (found separately via `bundle-analyzer find cli.js "function iyn"`) returns `[]` unless the CLI is running under a host-managed-provider integration, in which case it returns a small list of env vars (an `ANTHROPIC_CUSTOM_HEADERS` literal, a spread of the same `blockList` array (`d7`/`GGd`/`k$d` depending on version) used by the pre-existing block-list loop, plus two more host-specific vars). This is orthogonal to proxy stripping — it's Anthropic's own scrub for a different sensitive-data category — but it changes the *shape* of the env-builder function we're patching, so it has to be captured and reproduced verbatim.
+`iyn` (found separately via `bundle-analyzer find cli.js "function iyn"`) returns `[]` unless the CLI is running under a host-managed-provider integration, in which case it returns a small list of env vars (an `ANTHROPIC_CUSTOM_HEADERS` literal, a spread of the same `blockList` array (`d7`/`GGd`/`k$d` depending on version) used by the pre-existing block-list loop, plus two more host-specific vars). This is orthogonal to proxy stripping — it's Anthropic's own scrub for a different sensitive-data category — but it changes the _shape_ of the env-builder function we're patching, so it has to be captured and reproduced verbatim.
 
 **b) Early-return guard gains `!hostArray.length`**
 
@@ -238,7 +248,9 @@ function pD() {
     a = iyn(process.env),
     l = !1
   l = RQr.some((d) => process.env[d] !== void 0)
-  let c = Object.keys(process.env).some((d) => d.startsWith('OTEL_') || d === 'CLAUDE_CODE_OTEL_DIAG_STDERR')
+  let c = Object.keys(process.env).some(
+    (d) => d.startsWith('OTEL_') || d === 'CLAUDE_CODE_OTEL_DIAG_STDERR'
+  )
   if (!t && !o && !s && !l && !i && !a.length && !c && !n) return process.env
   let u = { ...process.env, ...LQr, ...e, ...r }
   ;(delete u.CLAUDE_CODE_OAUTH_TOKEN,
@@ -261,23 +273,23 @@ The patch replaces the whole function verbatim, same strategy as v197: wraps eve
 
 **v198 variable map (27 capture groups total — every later group shifted by +2 vs v197's 24, due to the two new `hostArray`/`hostArrayFn` captures inserted at positions 15–16):**
 
-| Captured group      | Example name | Role                                                              |
-| -------------------- | ------------ | -------------------------------------------------------------------- |
-| `H`                  | `e`          | User env binding (`nlt()` result)                                   |
-| `flagUserNotEmpty`   | `t`          | `Object.keys(e).length > 0`                                          |
-| `extraGlobal`        | `LQr`        | Module-level extra env global                                       |
-| `flagExtraNotEmpty`  | `n`          | `Object.keys(LQr).length > 0`                                        |
-| `qRemote`            | `r`          | Remote env merge result                                              |
-| `flagScrub`          | `s`          | `jGd()` block-list gate                                              |
-| `flagOAuth`          | `i`          | OAuth/session token detection                                        |
-| `envSnap`            | `Le`         | Module-level env snapshot (reads `CLAUDE_BG_SOCKET_TOKENS_PATH` etc.) |
-| `hostArray`          | `a`          | **NEW (v198)** — host-managed-provider scrub array                  |
-| `hostArrayFn`        | `iyn`        | **NEW (v198)** — computes `hostArray`                                |
-| `flagBg`             | `l`          | Background-session detection                                        |
-| `bgArray`            | `RQr`        | Module-level array of BG session var names                          |
-| `flagOtel`           | `c`          | OTEL flag                                                            |
-| `merged`             | `u`          | Merged env object                                                    |
-| `blockList`          | `GGd`        | Block-list array for scrub loop                                     |
+| Captured group      | Example name | Role                                                                  |
+| ------------------- | ------------ | --------------------------------------------------------------------- |
+| `H`                 | `e`          | User env binding (`nlt()` result)                                     |
+| `flagUserNotEmpty`  | `t`          | `Object.keys(e).length > 0`                                           |
+| `extraGlobal`       | `LQr`        | Module-level extra env global                                         |
+| `flagExtraNotEmpty` | `n`          | `Object.keys(LQr).length > 0`                                         |
+| `qRemote`           | `r`          | Remote env merge result                                               |
+| `flagScrub`         | `s`          | `jGd()` block-list gate                                               |
+| `flagOAuth`         | `i`          | OAuth/session token detection                                         |
+| `envSnap`           | `Le`         | Module-level env snapshot (reads `CLAUDE_BG_SOCKET_TOKENS_PATH` etc.) |
+| `hostArray`         | `a`          | **NEW (v198)** — host-managed-provider scrub array                    |
+| `hostArrayFn`       | `iyn`        | **NEW (v198)** — computes `hostArray`                                 |
+| `flagBg`            | `l`          | Background-session detection                                          |
+| `bgArray`           | `RQr`        | Module-level array of BG session var names                            |
+| `flagOtel`          | `c`          | OTEL flag                                                             |
+| `merged`            | `u`          | Merged env object                                                     |
+| `blockList`         | `GGd`        | Block-list array for scrub loop                                       |
 
 ## Locating the function in a new CLI version
 
@@ -367,9 +379,16 @@ Always run `node --check cli.js` after applying.
 5. **Applied cleanly** (`Found pD() [v198 shape] at char 3458177`), `node --check` passed. Verified statically (raw slice showing every `return` wrapped in `__cuPS(...)` with all original logic — including the new host-array loop — reproduced verbatim) and dynamically: `patch/subprocess-proxy-strip/test.mjs` passed 7/7 against the rebundled `bun-claude.exe` (default mode strips `ALL_PROXY` from a real subprocess env probe; opt-in mode via `CLAUDEUI_PROXY_SUBPROCESSES=1` preserves it).
 6. **Full chain re-verified end-to-end**: `bun run ensure-cli` and `bun run update-cli --force` (fresh re-download + re-extraction) both completed all 14 patches + rebundle without error, run twice for idempotency.
 
+## Discovery Method (2.1.241 re-anchor — generic path gets anchor candidates)
+
+1. **Apply failed** through the generic path AND the whole version ladder. The generic path (added for 2.1.231) anchors on `INPUT_${` being unique — still unique in 2.1.241, but **no longer inside the env-builder**: the INPUT_ variants moved into the scrub array's own definition (`Hqo=crb.flatMap((e)=>[e,`INPUT_${e}`])`, a module initializer), so the anchor walk found a module wrapper, tripped the nested-function guard, and declined; the ladder had no v241 rung.
+2. **Located the real builder** via `delete m[h]` loops: the env-builder's tail is now `if(!a)return m;for(let h of Hqo)delete m[h];return m}` — the old `delete $[A],delete $[`INPUT_${A}`]` pair collapsed to a single delete because the array itself now carries the INPUT_ variants. The 2.1.241 builder is `function nP(){let e=kBn.of(ar().host),t=e.getAgentProxyEnv?.()??{},…}` (host-binder proxy env + `settingsColorEnv`; 3 returns: early `process.env` bail, `if(!a)return m`, final `return m`; no nested function declarations — generic-rewrite eligible).
+3. **Fix**: the generic path now tries an ordered list of anchor candidates (each must be globally unique and still pass every guard): `INPUT_${` first (works ≤2.1.231), then the auth-identity scrub pair `delete <m>.CLAUDE_CODE_SUBSCRIPTION_TYPE,delete <m>.CLAUDE_CODE_RATE_LIMIT_TIER` (inside the builder since the v150 shape, unique in 2.1.241). Find it via `bundle-analyzer find cli.js 'CLAUDE_CODE_SUBSCRIPTION_TYPE,delete' --compact`.
+4. **Verified**: `Found nP() [generic shape] at char 3709852, wrapped 3 return(s)`; `node --check` passed; live `test.mjs` default/opt-in subprocess probes pass.
+
 ## Files
 
-| File        | Purpose                                                    |
-| ----------- | ---------------------------------------------------------- |
-| `README.md` | This document                                              |
-| `apply.mjs` | Patch script (per-version shapes v114→v197, newest-first)  |
+| File        | Purpose                                                   |
+| ----------- | --------------------------------------------------------- |
+| `README.md` | This document                                             |
+| `apply.mjs` | Patch script (per-version shapes v114→v197, newest-first) |

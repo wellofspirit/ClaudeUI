@@ -9,11 +9,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const { mockGetLastUsage } = vi.hoisted(() => ({ mockGetLastUsage: vi.fn() }))
 
-vi.mock('../usage-fetcher', () => ({
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { getLastUsage: mockGetLastUsage }
 }))
 
-import { resolveUsageProvider } from '../usage-provider'
+import { resolveUsageProvider } from '../../../core/services/usage-provider'
 
 beforeEach(() => mockGetLastUsage.mockReset())
 
@@ -51,7 +51,10 @@ describe('claudeUsageProvider.getWindow', () => {
   })
 
   it('returns null when usageFetcher has an error', () => {
-    mockGetLastUsage.mockReturnValue({ error: 'no creds', fiveHour: { usedPercent: 0, resetsAt: null } })
+    mockGetLastUsage.mockReturnValue({
+      error: 'no creds',
+      fiveHour: { usedPercent: 0, resetsAt: null }
+    })
     const provider = resolveUsageProvider('claude', 'anthropic', 'subscription')!
     expect(provider.getWindow()).toBeNull()
   })

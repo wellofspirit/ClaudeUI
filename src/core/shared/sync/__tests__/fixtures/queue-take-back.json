@@ -1,0 +1,114 @@
+{
+  "name": "queue take-back with a partial race (ADR-053)",
+  "why": "Three prompts are queued while the agent runs. By the time the user presses ArrowUp one has already been consumed by the engine, so the honest outcome is 'two taken back, one already in the transcript'. Each broadcast carries the FULL item list, so this pins the replace semantics AND the steer-<itemId> synthesis that makes a re-delivered broadcast or a resync idempotent.",
+  "events": [
+    { "channel": "session:created", "args": ["rid", { "cwd": "/repo" }] },
+    { "channel": "session:user-message", "args": ["rid", { "prompt": "first turn" }] },
+    {
+      "channel": "session:status",
+      "args": [
+        "rid",
+        {
+          "state": "running",
+          "sessionId": "rid",
+          "model": "sonnet",
+          "cwd": "/repo",
+          "totalCostUsd": 0,
+          "engineId": "claude",
+          "account": null
+        }
+      ]
+    },
+    {
+      "channel": "session:queue-changed",
+      "args": [
+        "rid",
+        { "items": [{ "itemId": "i1", "text": "also fix the tests", "state": "queued" }] }
+      ]
+    },
+    {
+      "channel": "session:queue-changed",
+      "args": [
+        "rid",
+        {
+          "items": [
+            { "itemId": "i1", "text": "also fix the tests", "state": "queued" },
+            { "itemId": "i2", "text": "and update the docs", "state": "queued" }
+          ]
+        }
+      ]
+    },
+    {
+      "channel": "session:queue-changed",
+      "args": [
+        "rid",
+        {
+          "items": [
+            { "itemId": "i1", "text": "also fix the tests", "state": "queued" },
+            { "itemId": "i2", "text": "and update the docs", "state": "queued" },
+            { "itemId": "i3", "text": "then commit", "state": "queued" }
+          ]
+        }
+      ]
+    },
+    {
+      "channel": "session:queue-changed",
+      "args": [
+        "rid",
+        {
+          "items": [
+            { "itemId": "i1", "text": "also fix the tests", "state": "consumed" },
+            { "itemId": "i2", "text": "and update the docs", "state": "queued" },
+            { "itemId": "i3", "text": "then commit", "state": "queued" }
+          ]
+        }
+      ]
+    },
+    {
+      "channel": "session:queue-changed",
+      "args": [
+        "rid",
+        {
+          "items": [
+            { "itemId": "i1", "text": "also fix the tests", "state": "consumed" },
+            { "itemId": "i2", "text": "and update the docs", "state": "recalled" },
+            { "itemId": "i3", "text": "then commit", "state": "recalled" }
+          ]
+        }
+      ]
+    },
+    {
+      "channel": "session:queue-changed",
+      "args": [
+        "rid",
+        {
+          "items": [
+            { "itemId": "i1", "text": "also fix the tests", "state": "consumed" },
+            { "itemId": "i2", "text": "and update the docs", "state": "recalled" },
+            { "itemId": "i3", "text": "then commit", "state": "recalled" }
+          ]
+        }
+      ]
+    }
+  ],
+  "expectSessionIds": ["rid"],
+  "expectSession": {
+    "rid": {
+      "queue": [],
+      "messages": [
+        {
+          "id": "user-2",
+          "role": "user",
+          "content": [{ "type": "text", "text": "first turn" }],
+          "timestamp": 0
+        },
+        {
+          "id": "steer-i1",
+          "role": "user",
+          "content": [{ "type": "text", "text": "also fix the tests" }],
+          "timestamp": 0
+        }
+      ]
+    }
+  }
+}

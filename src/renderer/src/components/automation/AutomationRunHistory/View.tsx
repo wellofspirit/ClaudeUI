@@ -35,7 +35,10 @@ export function AutomationRunHistoryView({
 
   if (!run) {
     return (
-      <div data-testid="AutomationRunHistory" className="flex-1 flex items-center justify-center text-text-muted text-sm">
+      <div
+        data-testid="AutomationRunHistory"
+        className="flex-1 flex items-center justify-center text-text-muted text-sm"
+      >
         Run not found
       </div>
     )

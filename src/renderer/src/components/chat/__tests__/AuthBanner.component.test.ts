@@ -59,7 +59,14 @@ describe('Detection rewire: vendorAuth drives AuthBanner visibility logic', () =
     })
     useSessionStore.getState().setAuthState({
       status: 'success',
-      account: { email: 'user@example.com', organization: null, subscriptionType: null, tokenSource: null, apiKeySource: null, apiProvider: null },
+      account: {
+        email: 'user@example.com',
+        organization: null,
+        subscriptionType: null,
+        tokenSource: null,
+        apiKeySource: null,
+        apiProvider: null
+      },
       error: null
     })
     const { vendorAuth, authState } = useSessionStore.getState()

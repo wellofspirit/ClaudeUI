@@ -10,7 +10,7 @@ interface Props {
 
 export function PlanReviewBar({ comments }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const closePlanPanel = useSessionStore((s) => s.closePlanPanel)
   const planReview = useActiveSession((s) => s.planReview)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
@@ -27,16 +27,9 @@ export function PlanReviewBar({ comments }: Props): React.JSX.Element {
     await window.api.respondApproval(activeSessionId, planReview.approvalRequestId, 'deny', {
       feedback
     })
-    removePendingApproval(activeSessionId, planReview.approvalRequestId)
+    dismissApproval(activeSessionId, planReview.approvalRequestId)
     closePlanPanel(activeSessionId)
-  }, [
-    activeSessionId,
-    planReview,
-    comments,
-    approvalStillPending,
-    removePendingApproval,
-    closePlanPanel
-  ])
+  }, [activeSessionId, planReview, comments, approvalStillPending, dismissApproval, closePlanPanel])
 
   const sendRef = useRef(handleSend)
   sendRef.current = handleSend

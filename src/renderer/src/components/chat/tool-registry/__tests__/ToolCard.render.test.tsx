@@ -374,7 +374,10 @@ describe('ToolCard — diagram kind (custom layout)', () => {
         {...baseProps({
           kind: 'diagram',
           view: { kind: 'diagram', source: 'graph TD; A-->B', title: 'Flow' },
-          block: block('mcp__claude-ui__render_mermaid', { source: 'graph TD; A-->B', title: 'Flow' })
+          block: block('mcp__claude-ui__render_mermaid', {
+            source: 'graph TD; A-->B',
+            title: 'Flow'
+          })
         })}
       />
     )
@@ -462,7 +465,13 @@ describe('ToolCard — tool-result images strip', () => {
   ]
 
   function imageResult(): ToolResultBlock {
-    return { type: 'tool_result', toolUseId: 'tu-1', toolResult: '', isError: false, images: IMAGES }
+    return {
+      type: 'tool_result',
+      toolUseId: 'tu-1',
+      toolResult: '',
+      isError: false,
+      images: IMAGES
+    }
   }
 
   it('renders one thumb per image for a fileRead whose result text is empty', () => {

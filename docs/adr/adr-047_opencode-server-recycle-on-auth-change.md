@@ -20,7 +20,7 @@ Did you mean: ~deepseek/deepseek-v4-flash-latest?
 ```
 
 — the provider is absent from the stale process's runtime map, while the "did you mean"
-suggestion comes from the static models.dev catalog the process *does* have. (Diagnosed
+suggestion comes from the static models.dev catalog the process _does_ have. (Diagnosed
 live 2026-08-03: server spawned 22:30, openrouter key added 22:32, all openrouter models
 failed until restart; the same binary + config + auth.json worked from a fresh process.)
 

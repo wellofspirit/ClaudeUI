@@ -2,13 +2,21 @@
  * Layer 2: Component tests for useClaudeEvents hook.
  *
  * Tests the business logic layer: event → store state transitions.
- * Uses TestIpcBridge as Electron transport shim — no React rendering.
- * These tests verify that IPC events from the main process correctly
- * update the Zustand store.
+ *
+ * As of SyncCore phase 4c the hook is MOUNTED (bootTestApp + EventHarness) rather
+ * than re-implemented by a local handler table: the replicated channels are the
+ * shared reducer's, and what remains in the hook — the transient toast/banner
+ * channels, the host-local ones, and the post-apply observers — is precisely what a
+ * test has to mount to exercise.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+vi.mock('electron', async () => import('@test/stubs/electron-shim'))
+
+import { createElement } from 'react'
+import { render, cleanup } from '@testing-library/react'
+import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { useClaudeEvents } from '../useClaudeEvents'
 import { useSessionStore } from '../../stores/session-store'
 import {
   makeChatMessage,
@@ -19,183 +27,53 @@ import {
   makeTodoItem,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type {
-  ChatMessage,
-  SessionStatus,
-  PendingApproval,
-  StreamDelta,
-  TodoItem,
-  FileDiff
-} from '../../../../shared/types'
+import type { FileDiff } from '../../../../shared/types'
+import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+
+let app: TestApp
 
 /**
- * Lightweight test setup: creates a bridge, wires window.api event listeners,
- * and registers the cleanup callbacks that useClaudeEvents would register.
- *
- * We don't render React — instead we manually wire the event handlers from
- * useClaudeEvents by calling the store actions directly when events arrive.
- * This tests the business logic (event → store) without React overhead.
+ * Mounts the REAL hook (SyncCore phase 4c). The transient + host-local handlers
+ * this file asserts on live nowhere else: the replicated channels are the reducer's
+ * now, so what is left of `useClaudeEvents` is exactly the part a test has to mount
+ * to exercise.
  */
-
-let bridge: TestIpcBridge
-let cleanups: Array<() => void>
-
-function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-  return (cb: T) => {
-    const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
-    bridge.ipcRenderer.on(channel, handler)
-    const cleanup = () => {
-      bridge.ipcRenderer.removeListener(channel, handler)
-    }
-    cleanups.push(cleanup)
-    return cleanup
-  }
+function EventHarness(): null {
+  useClaudeEvents()
+  return null
 }
 
-/** Wire the same event handlers as useClaudeEvents, but without React */
-function wireEventHandlers(): void {
-  const store = useSessionStore.getState
-
-  onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
-    store().addMessage(routingId, msg)
-  })
-
-  onEvent<(routingId: string, data: StreamDelta) => void>('session:stream')((routingId, data) => {
-    if (data.type === 'thinking') {
-      store().appendStreamingThinking(routingId, data.text)
-    } else {
-      store().appendStreamingText(routingId, data.text)
-    }
-  })
-
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
-    (routingId, approval) => {
-      store().addPendingApproval(routingId, approval)
-    }
-  )
-
-  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
-    (routingId, { requestId }) => {
-      store().removePendingApproval(routingId, requestId)
-    }
-  )
-
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
-    (routingId, status) => {
-      // Rekey logic from useClaudeEvents
-      let effectiveRoutingId = routingId
-      if (status.sessionId && status.sessionId !== routingId) {
-        const s = store()
-        if (s.sessions[routingId]) {
-          s.rekeySession(routingId, status.sessionId)
-          effectiveRoutingId = status.sessionId
-        }
-      }
-
-      if (status.state === 'disconnected') {
-        store().markSdkInactive(effectiveRoutingId)
-        store().setStatus(effectiveRoutingId, { ...status, state: 'idle' })
-        store().clearPendingApprovals(effectiveRoutingId)
-        return
-      }
-      store().setStatus(effectiveRoutingId, status)
-      // Do NOT clear pending approvals on idle — background subagents outlive
-      // the parent turn's result, so a can_use_tool request may legitimately
-      // still be pending. Card removal is driven exclusively by explicit
-      // events (approval-dismiss, tool_result matching, user resolution).
-    }
-  )
-
-  onEvent<(routingId: string) => void>('session:result')((routingId) => {
-    // Todo dismissal logic from useClaudeEvents
-    const state = store()
-    const session = state.sessions[routingId]
-    if (session && session.todos.length > 0) {
-      const allDone = session.todos.every((t: TodoItem) => t.status === 'completed')
-      if (allDone) state.setTodos(routingId, [])
-    }
-  })
-
-  onEvent<(routingId: string, error: string) => void>('session:error')((routingId, error) => {
-    store().addError(routingId, error)
-  })
-
-  onEvent<
-    (
-      routingId: string,
-      data: { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] }
-    ) => void
-  >('session:tool-result')((routingId, { toolUseId, result, isError, fileDiffs }) => {
-    store().appendToolResult(routingId, toolUseId, result, isError, fileDiffs)
-    if (toolUseId) store().removePendingApprovalByToolUse(routingId, toolUseId)
-  })
-
-  onEvent<(routingId: string, data: { toolUseId: string; text: string; type?: string }) => void>(
-    'session:subagent-stream'
-  )((routingId, data) => {
-    if (data.type === 'thinking') {
-      store().appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
-    } else {
-      store().appendSubagentStreamingText(routingId, data.toolUseId, data.text)
-    }
-  })
-
-  onEvent<(routingId: string, mode: string) => void>('session:permission-mode')(
-    (routingId, mode) => {
-      store().setPermissionMode(mode as 'default' | 'acceptEdits' | 'plan' | 'auto', routingId)
-    }
-  )
-
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
-    'session:user-message'
-  )((routingId, data) => {
-    const s = store()
-    if (!s.sessions[routingId]) return
-    if (data.queued) {
-      s.setQueuedText(routingId, data.prompt)
-    } else {
-      s.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt)
-    }
-  })
-}
+// SyncCore phase 4c: the handler table this file used to carry — a copy of
+// useClaudeEvents, itself a copy of the reducer — is DELETED. `emitSync` feeds the
+// real SyncClient, whose raw-event tap folds `applyEvent` and projects the result
+// into the store, so these tests assert on the ONE interpretation that ships.
 
 // ---------------------------------------------------------------------------
 // Setup / Teardown
 // ---------------------------------------------------------------------------
 
-beforeEach(() => {
-  bridge = new TestIpcBridge()
-  cleanups = []
+beforeEach(async () => {
+  // The real harness, not a bespoke bridge: `bootTestApp` builds the full
+  // `window.api` the hook needs (`onAuthState`, `onVoiceState`, the usage fetches,
+  // `getPluginViews`, …) and installs the sync transport + replica seam.
+  app = await bootTestApp()
   resetFactoryCounter()
-
-  // Provide minimal window.api stub — the store calls window.api.saveSessionConfig()
-  // internally when sessions are created/removed. No-op in tests.
-  ;(globalThis as any).window = globalThis.window || {}
-  ;(globalThis as any).window.api = {
-    saveSessionConfig: () => {},
-    saveSlashCommands: () => {},
-    logError: () => {},
-    fetchAccountUsage: () => Promise.resolve(null),
-    fetchBlockUsage: () => Promise.resolve(null),
-    getPluginViews: () => Promise.resolve([])
-  }
-
-  // Reset store to initial state
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {}
+    customTitles: {},
+    worktreeInfoMap: {}
   })
-
-  wireEventHandlers()
+  mirrorStoreIntoReplica()
+  render(createElement(EventHarness))
 })
 
 afterEach(() => {
-  cleanups.forEach((fn) => fn())
-  bridge.reset()
+  cleanup()
+  app.teardown()
 })
 
 // ---------------------------------------------------------------------------
@@ -209,7 +87,7 @@ describe('useClaudeEvents component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       const msg = makeAssistantMessage('Hello world')
-      bridge.webContents.send('session:message', routingId, msg)
+      app.emit('session:message', routingId, msg)
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.messages).toHaveLength(1)
@@ -226,8 +104,8 @@ describe('useClaudeEvents component tests', () => {
         content: [{ type: 'text', text: 'complete response' }]
       })
 
-      bridge.webContents.send('session:message', routingId, msg1)
-      bridge.webContents.send('session:message', routingId, msg2)
+      app.emit('session:message', routingId, msg1)
+      app.emit('session:message', routingId, msg2)
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.messages).toHaveLength(1)
@@ -238,7 +116,7 @@ describe('useClaudeEvents component tests', () => {
       const msg = makeAssistantMessage('orphan message')
       // addMessage uses ensureSession which auto-creates — this is correct behavior
       // since the main process may send events before the renderer creates the session
-      bridge.webContents.send('session:message', 'nonexistent', msg)
+      app.emit('session:message', 'nonexistent', msg)
 
       // Should not crash — session may or may not be auto-created depending on store impl
       const session = useSessionStore.getState().sessions['nonexistent']
@@ -253,8 +131,8 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:stream', routingId, { type: 'text', text: 'Hello ' })
-      bridge.webContents.send('session:stream', routingId, { type: 'text', text: 'world' })
+      app.emit('session:stream', routingId, { type: 'text', text: 'Hello ' })
+      app.emit('session:stream', routingId, { type: 'text', text: 'world' })
 
       expect(useSessionStore.getState().sessions[routingId].streamingText).toBe('Hello world')
     })
@@ -263,7 +141,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:stream', routingId, {
+      app.emit('session:stream', routingId, {
         type: 'thinking',
         text: 'Let me think...'
       })
@@ -281,7 +159,7 @@ describe('useClaudeEvents component tests', () => {
       const sdkId = 'sdk-uuid-123'
       useSessionStore.getState().createNewSession(tempId, '/test')
 
-      bridge.webContents.send(
+      app.emit(
         'session:status',
         tempId,
         makeSessionStatus({
@@ -299,7 +177,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'session-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send(
+      app.emit(
         'session:status',
         routingId,
         makeSessionStatus({
@@ -312,7 +190,7 @@ describe('useClaudeEvents component tests', () => {
     })
 
     it('does not rekey when session does not exist', () => {
-      bridge.webContents.send(
+      app.emit(
         'session:status',
         'nonexistent',
         makeSessionStatus({
@@ -331,7 +209,7 @@ describe('useClaudeEvents component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       const approval = makePendingApproval({ toolName: 'Bash', input: { command: 'rm -rf /' } })
-      bridge.webContents.send('session:approval-request', routingId, approval)
+      app.emit('session:approval-request', routingId, approval)
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.pendingApprovals).toHaveLength(1)
@@ -347,12 +225,12 @@ describe('useClaudeEvents component tests', () => {
         toolName: 'dispatch:bash'
       })
       const ordinary = makePendingApproval({ requestId: 'req-2', toolName: 'Bash' })
-      bridge.webContents.send('session:approval-request', routingId, dispatched)
-      bridge.webContents.send('session:approval-request', routingId, ordinary)
+      app.emit('session:approval-request', routingId, dispatched)
+      app.emit('session:approval-request', routingId, ordinary)
       expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(2)
 
       // opencode cascade-rejected the forwarded approval — main dismisses it.
-      bridge.webContents.send('session:approval-dismiss', routingId, { requestId: 'xeng:perm-1' })
+      app.emit('session:approval-dismiss', routingId, { requestId: 'xeng:perm-1' })
 
       const remaining = useSessionStore.getState().sessions[routingId].pendingApprovals
       expect(remaining).toHaveLength(1)
@@ -365,13 +243,13 @@ describe('useClaudeEvents component tests', () => {
 
       // Add approval
       const approval = makePendingApproval()
-      bridge.webContents.send('session:approval-request', routingId, approval)
+      app.emit('session:approval-request', routingId, approval)
       expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
 
       // Status → idle. cli.js ends the parent turn while a background
       // subagent's can_use_tool request may still be pending — idle must NOT
       // infer that every approval is resolved (see useClaudeEvents.ts).
-      bridge.webContents.send(
+      app.emit(
         'session:status',
         routingId,
         makeSessionStatus({
@@ -389,9 +267,9 @@ describe('useClaudeEvents component tests', () => {
       useSessionStore.getState().markSdkActive(routingId)
 
       const approval = makePendingApproval()
-      bridge.webContents.send('session:approval-request', routingId, approval)
+      app.emit('session:approval-request', routingId, approval)
 
-      bridge.webContents.send(
+      app.emit(
         'session:status',
         routingId,
         makeSessionStatus({
@@ -410,14 +288,12 @@ describe('useClaudeEvents component tests', () => {
     it('dismisses all-completed todos when result event arrives', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore
-        .getState()
-        .setTodos(routingId, [
-          makeTodoItem('Task 1', 'completed'),
-          makeTodoItem('Task 2', 'completed')
-        ])
+      seed.plan(routingId, [
+        makeTodoItem('Task 1', 'completed'),
+        makeTodoItem('Task 2', 'completed')
+      ])
 
-      bridge.webContents.send('session:result', routingId)
+      app.emit('session:result', routingId)
 
       expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(0)
     })
@@ -425,14 +301,12 @@ describe('useClaudeEvents component tests', () => {
     it('keeps todos when not all completed on result', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore
-        .getState()
-        .setTodos(routingId, [
-          makeTodoItem('Done', 'completed'),
-          makeTodoItem('In progress', 'in_progress')
-        ])
+      seed.plan(routingId, [
+        makeTodoItem('Done', 'completed'),
+        makeTodoItem('In progress', 'in_progress')
+      ])
 
-      bridge.webContents.send('session:result', routingId)
+      app.emit('session:result', routingId)
 
       expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(2)
     })
@@ -448,10 +322,10 @@ describe('useClaudeEvents component tests', () => {
         id: 'msg-1',
         content: [makeToolUseBlock('Read', { file_path: '/foo.ts' }, 'tool-1')]
       })
-      bridge.webContents.send('session:message', routingId, msg)
+      app.emit('session:message', routingId, msg)
 
       // Tool result arrives
-      bridge.webContents.send('session:tool-result', routingId, {
+      app.emit('session:tool-result', routingId, {
         toolUseId: 'tool-1',
         result: 'file contents here',
         isError: false
@@ -474,12 +348,18 @@ describe('useClaudeEvents component tests', () => {
         id: 'msg-1',
         content: [makeToolUseBlock('apply_patch', { patchText: '*** Begin Patch ***' }, 'tool-1')]
       })
-      bridge.webContents.send('session:message', routingId, msg)
+      app.emit('session:message', routingId, msg)
 
       const fileDiffs: FileDiff[] = [
-        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+        {
+          path: 'a.ts',
+          patch: '@@ -1 +1 @@\n-old\n+new',
+          additions: 1,
+          deletions: 1,
+          changeType: 'update'
+        }
       ]
-      bridge.webContents.send('session:tool-result', routingId, {
+      app.emit('session:tool-result', routingId, {
         toolUseId: 'tool-1',
         result: 'Success. Updated the following files:\nM a.ts',
         isError: false,
@@ -498,7 +378,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:error', routingId, 'Something went wrong')
+      app.emit('session:error', routingId, 'Something went wrong')
 
       expect(useSessionStore.getState().sessions[routingId].errors).toContain(
         'Something went wrong'
@@ -511,7 +391,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:user-message', routingId, {
+      app.emit('session:user-message', routingId, {
         prompt: 'Hello Claude',
         queued: false
       })
@@ -521,18 +401,17 @@ describe('useClaudeEvents component tests', () => {
       expect(session.messages[0].role).toBe('user')
     })
 
-    it('stores queued text instead of adding message when queued', () => {
+    it('a queued send rides queue-changed, not user-message (ADR-053)', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:user-message', routingId, {
-        prompt: 'queued message',
-        queued: true
+      app.emit('session:queue-changed', routingId, {
+        items: [{ itemId: 'q1', text: 'queued message', state: 'queued' }]
       })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.messages).toHaveLength(0)
-      expect(session.queuedText).toBe('queued message')
+      expect(session.queuedItems.map((i) => i.text)).toEqual(['queued message'])
     })
   })
 
@@ -541,7 +420,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:permission-mode', routingId, 'auto')
+      app.emit('session:permission-mode', routingId, 'auto')
 
       expect(useSessionStore.getState().sessions[routingId].permissionMode).toBe('auto')
     })
@@ -552,7 +431,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:subagent-stream', routingId, {
+      app.emit('session:subagent-stream', routingId, {
         toolUseId: 'agent-1',
         type: 'text',
         text: 'working on it...'
@@ -567,7 +446,7 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:subagent-stream', routingId, {
+      app.emit('session:subagent-stream', routingId, {
         toolUseId: 'agent-1',
         type: 'thinking',
         text: 'analyzing...'
@@ -584,8 +463,8 @@ describe('useClaudeEvents component tests', () => {
       useSessionStore.getState().createNewSession('route-1', '/test1')
       useSessionStore.getState().createNewSession('route-2', '/test2')
 
-      bridge.webContents.send('session:message', 'route-1', makeAssistantMessage('for session 1'))
-      bridge.webContents.send('session:error', 'route-2', 'error for session 2')
+      app.emit('session:message', 'route-1', makeAssistantMessage('for session 1'))
+      app.emit('session:error', 'route-2', 'error for session 2')
 
       expect(useSessionStore.getState().sessions['route-1'].messages).toHaveLength(1)
       expect(useSessionStore.getState().sessions['route-1'].errors).toHaveLength(0)

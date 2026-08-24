@@ -18,7 +18,10 @@ export function WorktreesModalView({
   onClose
 }: WorktreesModalViewProps): React.JSX.Element {
   return (
-    <div data-testid="WorktreesModal" className="fixed inset-0 z-[100] flex items-center justify-center">
+    <div
+      data-testid="WorktreesModal"
+      className="fixed inset-0 z-[100] flex items-center justify-center"
+    >
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
       <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[480px] max-h-[500px] flex flex-col animate-fade-in">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">

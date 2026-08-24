@@ -15,7 +15,7 @@ import {
   buildVscodeUrl,
   validateLocalFilePath,
   type AppOrigin
-} from '../shell-security'
+} from '../../core/shell-security'
 
 describe('isAllowedExternalUrl (R2 openExternal allowlist)', () => {
   it('allows http/https/mailto', () => {
