@@ -127,14 +127,45 @@ if (!skipA) {
   //   `)L_=`, `)TT()`. Lazy spans skip the ~700-char JSON-write callback
   //   without committing to char counts; the first `})()}else X=Y(Z);` after
   //   the `<M>=(async()=>{` IIFE is the matching else.
-  const v163AnchorRe = new RegExp(
-    `(?:${V})\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\{` +
-      `[\\s\\S]*?` +
-      `(${V})=\\(async\\(\\)=>\\{` +
-      `[\\s\\S]*?` +
-      `\\}\\)\\(\\)\\}else (${V})=(${V})\\((${V})\\);`
-  )
-  const v163Match = v163AnchorRe.exec(src)
+  //   2.1.241 REGRESSION of the single-regex form: the bundle gained more
+  //   `INSTALL){` sites (3 in 2.1.241), and the unbounded `[\s\S]*?` spans let
+  //   .exec() anchor at the FIRST one (~7.5M), capture an unrelated
+  //   `l=(async()=>{` ~1M later as the "promise var", then span ~18MB to the
+  //   real else-branch — so Part A wrote `l=<promise>` at a site where `l` is
+  //   the appState GETTER, and every session died at boot with "l is not a
+  //   function ('l' is an instance of Promise)". The finder below is scoped
+  //   locally instead: locate else-branch candidates first, then require the
+  //   async-IIFE assign and the INSTALL anchor within bounded BACK-windows of
+  //   that site, and require the captured promise var to actually be awaited
+  //   in a forward window (the `if(M){await M;M=null}` join Part B relies on).
+  const elseCandRe = new RegExp(`\\}\\)\\(\\)\\}else (${V})=(${V})\\((${V})\\);`, 'g')
+  let v163Match = null
+  for (const cand of src.matchAll(elseCandRe)) {
+    const back = src.slice(Math.max(0, cand.index - 2500), cand.index)
+    if (!/[\w$]+\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\)\{/.test(back)) continue
+    const iifeAssigns = [...back.matchAll(new RegExp(`(${V})=\\(async\\(\\)=>\\{`, 'g'))]
+    if (iifeAssigns.length === 0) continue
+    const promiseVar = iifeAssigns[iifeAssigns.length - 1][1]
+    const fwd = src.slice(cand.index, cand.index + 20000)
+    if (!fwd.includes(`await ${promiseVar}`)) {
+      console.error(
+        `ERROR: v163-site candidate at char ${cand.index} captured promise var ` +
+          `"${promiseVar}" but it is never awaited downstream — refusing the capture. Aborting.`
+      )
+      process.exit(1)
+    }
+    if (v163Match) {
+      console.error('ERROR: v163 local pattern matched more than one site. Aborting.')
+      process.exit(1)
+    }
+    v163Match = {
+      index: cand.index,
+      1: promiseVar,
+      2: cand[1],
+      3: cand[2],
+      4: cand[3]
+    }
+  }
 
   if (v163Match) {
     const promiseVar = v163Match[1] // M_ — awaitable orchestration promise (sync branch)

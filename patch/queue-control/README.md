@@ -8,7 +8,7 @@ Manages the CLI's output queue mid-agent-turn: dequeue by value, and notificatio
 
 | Component          | Version              |
 | ------------------ | -------------------- |
-| Last re-anchored   | bundled CLI `2.1.197` |
+| Last re-anchored   | bundled CLI `2.1.241` |
 
 ## Background: Native Steer Mechanism
 
@@ -107,7 +107,7 @@ All minified function names are extracted **dynamically** from content patterns.
 | Queue push definition (A1)   | `function <fn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next",timestamp:` — see v2.1.197 note     |
 | Queue remove-by-predicate    | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1`                                              |
 | Extract queue text           | `<fn>(<var>.value)` — near popAllEditable                                                                 |
-| queued_command handler (A2)  | `else if(G&&<var>.attachment.type==="queued_command")yield{`                                              |
+| queued_command handler (A2)  | 2.1.241+: `case"attachment":if(<n>&&<e>.attachment.type==="queued_command"){yield{...<seo>(<e>.attachment,<e>),session_id:<e>.session_id};return}` — see v2.1.241 note. Older: `else if(G&&<var>.attachment.type==="queued_command")yield{` |
 | Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield                                                          |
 | sdk.mjs stopTask             | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}`                              |
 
@@ -132,6 +132,36 @@ function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next",timestam
 ```
 
 The `apply.mjs` `pushDefRe` now uses `priority:<A>.priority??"next",timestamp:` as its terminal anchor instead of the closing `}`. This is more specific and unique; the old pattern would have matched spuriously without the trailing field.
+
+### v2.1.241 changes
+
+**1. Queue-push guard/return shape widened**
+
+The push function became `function ne(Ze){if(!Z(Ze))return!1;return n.push({...GPf(Ze),priority:Ze.priority??"next",timestamp:...` — the admission guard now rejects with `return!1` (was bare `return;`) and the push itself became a `return` expression (enqueue reports success). `pushDefRe` admits both: `return(?:!1)?;` for the guard and an optional `return ` before the `.push(`.
+
+**2. queued_command handler (A2) moved out of submitMessage**
+
+The `else if` chain the A2 patch replaced no longer exists. The handler now lives in the outbound message-normalization switch:
+
+```js
+// function*gGy(e,t,r,{replayUserMessages:n,includePartialMessages:o}){switch(e.type){...
+case"attachment":if(n&&e.attachment.type==="queued_command"){yield{...seo(e.attachment,e),session_id:e.session_id};return}yield*WTn([e],e.session_id);return;
+```
+
+`seo(att,msg)` is the isReplay user-message builder (`{type:"user",message:{role:"user",content:att.prompt},...,isReplay:!0,...}`). A new first-choice pattern (`qcReSwitch`) matches this shape and rewrites it to: always yield the `queued_command_consumed` system notification (using the in-scope `e.session_id` — no session-id generator extraction needed — and `globalThis.crypto.randomUUID()` for uuid, precedent subagent-streaming), then keep the replay yield gated on `n` and the non-queued/replay-off fallthrough (`yield*WTn`) byte-identical. Find it via `bundle-analyzer find cli.js '"queued_command"){yield{' --compact`. The legacy else-if patterns remain as fallbacks for older bundles.
+
+**BUT the gGy site alone is NOT enough** — live testing (harness) showed the notification never fired. `gGy` serves the **SDK-hosted transport** (its only caller is the `zPr`/`S$o` query writer). The stdin stream-json loop that ClaudeUI drives consumes mid-turn queued_command attachments at a SECOND site — the true descendant of the old submitMessage else-if chain, where the yield became a **builder call**, not an object literal (which is why every legacy `yield{` pattern missed it):
+
+```js
+else if(Sr.attachment.type==="hook_system_message")yield*WTn([Sr],Vt());
+else if(C&&Sr.attachment.type==="queued_command")yield seo(Sr.attachment,Sr);
+```
+
+(`C` = replayUserMessages, from the enclosing options destructure.) A2 now patches BOTH sites in one pass — the stdin site is REQUIRED (loud abort if absent); notification unconditional, replay stays gated on `C`, session id from the `session_id:Vt()` generator the adjacent cases use (extracted from forward context). Find it via `bundle-analyzer find cli.js 'queued_command")yield ' --compact`.
+
+**3. dequeue_message (A1): the module-level `dequeueAllMatching` binding is gone**
+
+≤2.1.231 A1 captured `MODLOCAL=FACTORY.dequeueAllMatching`. In 2.1.241 the first `X=Y.dequeueAllMatching` match in the bundle is an unrelated **local holding a result array** (`let o=e.dequeueAllMatching(...)` in a drain helper) — the injected handler called a non-function at runtime (applies-but-misbinds; only the live harness catches this). The queue is an instance in the dispatch scope; A1 now reads its name off the native `cancel_async_message` sibling handler in the same else-if chain (`Zo=S.isFoldInFlight(Yn)?[]:S.dequeueAllMatching(...)`) — in-scope by construction. The match predicate no longer captures the text-rule helper by name either (`g1S` in 2.1.241 lives in a different bundle module than the dispatch scope); the three-line rule (string verbatim; else `text` blocks joined with `"\n"` — docs/protocol-cc §4.10) is inlined into the predicate instead.
 
 ## Race Condition Window
 

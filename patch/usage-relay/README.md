@@ -348,6 +348,8 @@ It becomes a thin wrapper that calls `session.getUsage()` on a timer and parses 
 
 6. **First attempt failed**: Regex `async function (${V})\\(\\)\\{[^}]*api/oauth/usage` didn't match because the function body contains `}` characters (object literals). Fixed by searching for the string index first, then scanning backwards for the enclosing function declaration.
 
+7. **2.1.241 re-anchor**: the fetcher grew an optional credentials parameter and a telemetry wrapper — `async function t5e(e){return mp("api_usage_fetch",async()=>{…_s.get("/api/oauth/usage",{…,refreshOAuth:!0,credentials:e})…})}`. The backward-scan declaration regex was widened to `async function (V)\((?:V)?\)\{` (parameter optional). The patch's zero-arg call is still correct: the API client treats a nullish per-request `credentials` as "resolve from ambient config" (client ctor: `let l=i.credentials??null;if(l)…else if(i.config!=null)…`), which is exactly what the old zero-arg fetcher did. Note `api/oauth/usage` now appears twice (a debug log line + the `_s.get` call), both inside the same fetcher — the existing clustering check covers this.
+
 ## Key Functions Reference
 
 | Name (v2.1.63) | Purpose                                                  | Char offset           |

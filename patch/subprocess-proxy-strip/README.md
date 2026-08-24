@@ -9,7 +9,7 @@ Strip proxy env vars from the env handed to cli.js subprocesses (Bash tool, MCP 
 | Component            | Version               |
 | -------------------- | --------------------- |
 | At time of discovery | bundled CLI `2.1.114` |
-| Last re-anchored     | bundled CLI `2.1.198` |
+| Last re-anchored     | bundled CLI `2.1.241` |
 
 ## The Problem
 
@@ -366,6 +366,13 @@ Always run `node --check cli.js` after applying.
 4. **Added `fnReV198`** as the first (newest) branch, placed before `fnReV197` in the `if/else` chain. Pattern uses 27 capture groups (2 more than v197's 24, for `hostArray`/`hostArrayFn`); every backreference at position ≥15 shifts by +2 vs the v197 pattern's numbering. Double-checked the rebuild's destructuring array lines up positionally with the regex's capture-group order before running.
 5. **Applied cleanly** (`Found pD() [v198 shape] at char 3458177`), `node --check` passed. Verified statically (raw slice showing every `return` wrapped in `__cuPS(...)` with all original logic — including the new host-array loop — reproduced verbatim) and dynamically: `patch/subprocess-proxy-strip/test.mjs` passed 7/7 against the rebundled `bun-claude.exe` (default mode strips `ALL_PROXY` from a real subprocess env probe; opt-in mode via `CLAUDEUI_PROXY_SUBPROCESSES=1` preserves it).
 6. **Full chain re-verified end-to-end**: `bun run ensure-cli` and `bun run update-cli --force` (fresh re-download + re-extraction) both completed all 14 patches + rebundle without error, run twice for idempotency.
+
+## Discovery Method (2.1.241 re-anchor — generic path gets anchor candidates)
+
+1. **Apply failed** through the generic path AND the whole version ladder. The generic path (added for 2.1.231) anchors on `INPUT_${` being unique — still unique in 2.1.241, but **no longer inside the env-builder**: the INPUT_ variants moved into the scrub array's own definition (`Hqo=crb.flatMap((e)=>[e,`INPUT_${e}`])`, a module initializer), so the anchor walk found a module wrapper, tripped the nested-function guard, and declined; the ladder had no v241 rung.
+2. **Located the real builder** via `delete m[h]` loops: the env-builder's tail is now `if(!a)return m;for(let h of Hqo)delete m[h];return m}` — the old `delete $[A],delete $[`INPUT_${A}`]` pair collapsed to a single delete because the array itself now carries the INPUT_ variants. The 2.1.241 builder is `function nP(){let e=kBn.of(ar().host),t=e.getAgentProxyEnv?.()??{},…}` (host-binder proxy env + `settingsColorEnv`; 3 returns: early `process.env` bail, `if(!a)return m`, final `return m`; no nested function declarations — generic-rewrite eligible).
+3. **Fix**: the generic path now tries an ordered list of anchor candidates (each must be globally unique and still pass every guard): `INPUT_${` first (works ≤2.1.231), then the auth-identity scrub pair `delete <m>.CLAUDE_CODE_SUBSCRIPTION_TYPE,delete <m>.CLAUDE_CODE_RATE_LIMIT_TIER` (inside the builder since the v150 shape, unique in 2.1.241). Find it via `bundle-analyzer find cli.js 'CLAUDE_CODE_SUBSCRIPTION_TYPE,delete' --compact`.
+4. **Verified**: `Found nP() [generic shape] at char 3709852, wrapped 3 return(s)`; `node --check` passed; live `test.mjs` default/opt-in subprocess probes pass.
 
 ## Files
 
