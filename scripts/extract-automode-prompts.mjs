@@ -31,13 +31,13 @@ const TARGETS = [
     name: 'rules',
     // Section header of the injected <permissions_template> document.
     landmark: '## Environment\\r',
-    expect: ['<user_hard_deny_rules_to_replace>', '<user_soft_deny_rules_to_replace>'],
+    expect: ['<user_hard_deny_rules_to_replace>', '<user_soft_deny_rules_to_replace>']
   },
   {
     name: 'prompt-stage2',
     landmark: 'You are a security monitor for autonomous AI coding agents.',
-    expect: ['## Classification Process', '<permissions_template>'],
-  },
+    expect: ['## Classification Process', '<permissions_template>']
+  }
 ]
 
 /** Walk from the opening backtick to its unescaped, non-nested closing backtick. */
@@ -55,7 +55,10 @@ function templateAround(src, landmark) {
   let spanStart = -1
   while (i < src.length) {
     const c = src[i]
-    if (c === '\\') { i += 2; continue }
+    if (c === '\\') {
+      i += 2
+      continue
+    }
     if (c === '$' && src[i + 1] === '{') {
       if (depth === 0) spanStart = i
       depth++
@@ -113,7 +116,7 @@ for (const t of TARGETS) {
 if (failed > 0) {
   console.error(
     `\n${failed} target(s) failed. The landmark probably changed - re-locate with:\n` +
-      `  bundle-analyzer find ${CLI} "security monitor" --compact`,
+      `  bundle-analyzer find ${CLI} "security monitor" --compact`
   )
   process.exit(1)
 }

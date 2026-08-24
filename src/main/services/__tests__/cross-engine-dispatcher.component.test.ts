@@ -170,7 +170,10 @@ function makeCtx(overrides: Partial<DispatchContext> = {}): DispatchContext & {
     emit: vi.fn(),
     addDispatchedCost: vi.fn(),
     ...overrides
-  } as DispatchContext & { emit: ReturnType<typeof vi.fn>; addDispatchedCost: ReturnType<typeof vi.fn> }
+  } as DispatchContext & {
+    emit: ReturnType<typeof vi.fn>
+    addDispatchedCost: ReturnType<typeof vi.fn>
+  }
 }
 
 function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
@@ -418,9 +421,7 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
 
     // Turn 2: continuation left in flight — its prompt() never resolves.
     let releaseSecond: (v: unknown) => void = () => {}
-    client.prompt.mockImplementationOnce(
-      () => new Promise((resolve) => (releaseSecond = resolve))
-    )
+    client.prompt.mockImplementationOnce(() => new Promise((resolve) => (releaseSecond = resolve)))
     const second = dispatcher.dispatch(
       { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
       ctx
@@ -710,11 +711,7 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
     dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-1`, 'deny', {
       feedback: 'use git clean instead'
     })
-    expect(client.replyPermission).toHaveBeenCalledWith(
-      'perm-1',
-      'reject',
-      'use git clean instead'
-    )
+    expect(client.replyPermission).toHaveBeenCalledWith('perm-1', 'reject', 'use git clean instead')
   })
 
   it("resolveApproval(deny) without feedback → 'User denied'", async () => {
@@ -838,7 +835,8 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
     client.prompt = vi.fn(
       () =>
         new Promise((r) => {
-          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
+          releasePrompt = (): void =>
+            r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
         })
     ) as typeof client.prompt
 
@@ -1216,10 +1214,14 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
       // The target calls a tool mid-turn — never resolved by the test.
       const canUseTool = target.lastCanUseTool()!
-      const approvalPromise = canUseTool('Bash', { command: 'x' }, {
-        signal: new AbortController().signal,
-        toolUseId: 'toolu_1'
-      })
+      const approvalPromise = canUseTool(
+        'Bash',
+        { command: 'x' },
+        {
+          signal: new AbortController().signal,
+          toolUseId: 'toolu_1'
+        }
+      )
       await tick()
       expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
 
@@ -1257,10 +1259,14 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
     it('canUseTool emits an xeng-prefixed approval-request on the dispatching session', async () => {
       const { dispatcher, target, ctx, pending, canUseTool } = await makeApprovingTarget()
-      const toolPromise = canUseTool('Bash', { command: 'rm -rf x' }, {
-        signal: new AbortController().signal,
-        toolUseId: 'toolu_1'
-      })
+      const toolPromise = canUseTool(
+        'Bash',
+        { command: 'rm -rf x' },
+        {
+          signal: new AbortController().signal,
+          toolUseId: 'toolu_1'
+        }
+      )
       await tick()
       const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
       expect(call).toBeTruthy()
@@ -1282,10 +1288,14 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
     it('resolveApproval(allow) resolves canUseTool with allow + the original input', async () => {
       const { dispatcher, ctx, pending, canUseTool, target } = await makeApprovingTarget()
-      const toolPromise = canUseTool('Bash', { command: 'ls' }, {
-        signal: new AbortController().signal,
-        toolUseId: 'toolu_1'
-      })
+      const toolPromise = canUseTool(
+        'Bash',
+        { command: 'ls' },
+        {
+          signal: new AbortController().signal,
+          toolUseId: 'toolu_1'
+        }
+      )
       await tick()
       const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
         requestId: string
@@ -1301,10 +1311,14 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
     it('resolveApproval(deny) with feedback resolves canUseTool with deny + the feedback message', async () => {
       const { dispatcher, ctx, pending, canUseTool, target } = await makeApprovingTarget()
-      const toolPromise = canUseTool('Bash', { command: 'rm -rf /' }, {
-        signal: new AbortController().signal,
-        toolUseId: 'toolu_1'
-      })
+      const toolPromise = canUseTool(
+        'Bash',
+        { command: 'rm -rf /' },
+        {
+          signal: new AbortController().signal,
+          toolUseId: 'toolu_1'
+        }
+      )
       await tick()
       const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
         requestId: string
@@ -1319,10 +1333,14 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
 
     it('resolveApproval(deny) without feedback → "User denied"', async () => {
       const { dispatcher, ctx, pending, canUseTool, target } = await makeApprovingTarget()
-      const toolPromise = canUseTool('Bash', { command: 'x' }, {
-        signal: new AbortController().signal,
-        toolUseId: 'toolu_1'
-      })
+      const toolPromise = canUseTool(
+        'Bash',
+        { command: 'x' },
+        {
+          signal: new AbortController().signal,
+          toolUseId: 'toolu_1'
+        }
+      )
       await tick()
       const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
         requestId: string
@@ -1334,13 +1352,17 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
       await pending
     })
 
-    it("opts.signal abort → dismisses the card and resolves canUseTool with deny (cli.js control_cancel_request)", async () => {
+    it('opts.signal abort → dismisses the card and resolves canUseTool with deny (cli.js control_cancel_request)', async () => {
       const { ctx, pending, canUseTool, target } = await makeApprovingTarget()
       const toolAbort = new AbortController()
-      const toolPromise = canUseTool('Bash', { command: 'x' }, {
-        signal: toolAbort.signal,
-        toolUseId: 'toolu_1'
-      })
+      const toolPromise = canUseTool(
+        'Bash',
+        { command: 'x' },
+        {
+          signal: toolAbort.signal,
+          toolUseId: 'toolu_1'
+        }
+      )
       await tick()
       expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
 
@@ -1425,7 +1447,11 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     expect(result.isError).toBeUndefined()
 
     const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1', type: 'text', text: 'Hello' })
+    expect(streamCall?.[1]).toMatchObject({
+      toolUseId: 'toolu_disp_1',
+      type: 'text',
+      text: 'Hello'
+    })
 
     const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
     expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1' })
@@ -1814,9 +1840,9 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
     client.prompt.mockImplementationOnce(() => new Promise(() => {}))
 
     // Stop clicked before the dispatch reached the main process.
-    expect(
-      dispatcher.stopDispatch('toolu_pre_stop', 'routing-owner', { armIfUnknown: true })
-    ).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_pre_stop', 'routing-owner', { armIfUnknown: true })).toBe(
+      true
+    )
 
     const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_pre_stop' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
@@ -1861,9 +1887,9 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
   it('an EXPIRED intent is ignored — the dispatch runs normally (injected clock)', async () => {
     let currentTime = 1_000_000
     const { dispatcher } = makeHarness({ now: () => currentTime })
-    expect(
-      dispatcher.stopDispatch('toolu_expired', 'routing-owner', { armIfUnknown: true })
-    ).toBe(true)
+    expect(dispatcher.stopDispatch('toolu_expired', 'routing-owner', { armIfUnknown: true })).toBe(
+      true
+    )
 
     currentTime += 61_000 // past the 60s TTL
 
@@ -1873,7 +1899,7 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
     expect(result.text).toBe('target answer')
   })
 
-  it("an intent armed by a DIFFERENT session does not stop the dispatch (ownership honored at consumption)", async () => {
+  it('an intent armed by a DIFFERENT session does not stop the dispatch (ownership honored at consumption)', async () => {
     const { dispatcher } = makeHarness()
     expect(
       dispatcher.stopDispatch('toolu_foreign_arm', 'routing-intruder', { armIfUnknown: true })
@@ -1946,8 +1972,9 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ status: 'completed' })
-    const usage = (notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } })
-      .usage
+    const usage = (
+      notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } }
+    ).usage
     expect(usage).toBeTruthy()
     expect(usage!.totalTokens).toBe(160) // 100 + 50 + 10
     expect(usage!.toolUses).toBe(0)
@@ -2147,8 +2174,9 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect(result.isError).toBeUndefined()
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    const usage = (notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } })
-      .usage
+    const usage = (
+      notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } }
+    ).usage
     expect(usage!.totalTokens).toBe(280)
     expect(usage!.durationMs).toBe(4200)
 
@@ -2179,7 +2207,11 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     const ctx = makeCtx({ fromEngine: 'opencode' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
     await tick()
-    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-timeout' } as SDKMessage)
+    target.push({
+      type: 'system',
+      subtype: 'init',
+      session_id: 'claude-sess-timeout'
+    } as SDKMessage)
     const result = await pending
     expect(result.isError).toBe(true)
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
@@ -2398,7 +2430,9 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
 describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
   it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
     const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 } }))
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 }
+      }))
     })
     client.prompt.mockResolvedValueOnce({
       parts: [{ type: 'text', text: 'first' }],
@@ -2420,7 +2454,9 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
 
   it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
     const { dispatcher, client } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 } }))
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 }
+      }))
     })
     client.prompt.mockResolvedValueOnce({
       parts: [{ type: 'text', text: 'the answer' }],
@@ -2530,7 +2566,11 @@ function defaultPiRequestHandler(sessionId: string): PiRequestHandler {
           type: 'response',
           command: 'get_state',
           success: true,
-          data: { sessionId, model: { id: 'gpt-5.6-luna', provider: 'openai-codex' }, isStreaming: false }
+          data: {
+            sessionId,
+            model: { id: 'gpt-5.6-luna', provider: 'openai-codex' },
+            isStreaming: false
+          }
         }
       case 'set_model':
         return { type: 'response', command: 'set_model', success: true, data: {} }
@@ -2616,7 +2656,9 @@ function makeFakePiTarget(
     },
     gateHandler: () => {
       if (!capturedGateHandler) {
-        throw new Error('gateHandler not captured yet — spawnPiTarget must resolve first (await tick())')
+        throw new Error(
+          'gateHandler not captured yet — spawnPiTarget must resolve first (await tick())'
+        )
       }
       return capturedGateHandler
     }
@@ -2635,7 +2677,12 @@ function piAssistantMessageEnd(opts: {
   const content: Record<string, unknown>[] = []
   if (opts.text !== undefined) content.push({ type: 'text', text: opts.text })
   if (opts.toolUse) {
-    content.push({ type: 'toolCall', id: opts.toolUse.id, name: opts.toolUse.name, arguments: opts.toolUse.input })
+    content.push({
+      type: 'toolCall',
+      id: opts.toolUse.id,
+      name: opts.toolUse.name,
+      arguments: opts.toolUse.input
+    })
   }
   return {
     type: 'message_end',
@@ -2660,7 +2707,11 @@ function piAssistantMessageEnd(opts: {
 }
 
 /** A pi `message_end` (role: toolResult) event. */
-function piToolResultEnd(toolCallId: string, text: string, isError = false): Record<string, unknown> {
+function piToolResultEnd(
+  toolCallId: string,
+  text: string,
+  isError = false
+): Record<string, unknown> {
   return {
     type: 'message_end',
     message: {
@@ -2745,10 +2796,14 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     expect(secondResult.sessionId).toBe('pi-target-1')
     expect(target.spawnCalls).toHaveLength(1)
     expect(
-      target.client.request.mock.calls.filter((c: unknown[]) => (c[0] as { type?: string }).type === 'set_model')
+      target.client.request.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { type?: string }).type === 'set_model'
+      )
     ).toHaveLength(1)
     expect(
-      target.client.request.mock.calls.filter((c: unknown[]) => (c[0] as { type?: string }).type === 'prompt')
+      target.client.request.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { type?: string }).type === 'prompt'
+      )
     ).toHaveLength(2)
   })
 
@@ -2803,7 +2858,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     target.pushEvent(PI_AGENT_SETTLED)
     expect((await first).sessionId).toBe('pi-target-1')
 
-    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    const second = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' },
+      ctx
+    )
     await tick()
 
     const third = await dispatcher.dispatch(
@@ -2840,7 +2898,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
   it('allowlist violation → isError, no spawn', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'] } })),
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'] }
+      })),
       spawnPiTarget: target.spawnPiTarget
     })
     const result = await dispatcher.dispatch(
@@ -2879,7 +2939,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'set_model') {
-          return { type: 'response', command: 'set_model', success: false, error: 'Model not found: bogus/nope' }
+          return {
+            type: 'response',
+            command: 'set_model',
+            success: false,
+            error: 'Model not found: bogus/nope'
+          }
         }
         return defaultPiRequestHandler('pi-target-1')(cmd)
       }
@@ -2888,7 +2953,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'bogus/nope' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
     expect(result.isError).toBe(true)
     expect(result.text).toContain('Model not found')
     expect(target.client.dispose).toHaveBeenCalled()
@@ -2898,7 +2966,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
   it('a get_state with no session id reported → isError; the half-built target is torn down', async () => {
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
-        if (cmd.type === 'get_state') return { type: 'response', command: 'get_state', success: true, data: {} }
+        if (cmd.type === 'get_state')
+          return { type: 'response', command: 'get_state', success: true, data: {} }
         return defaultPiRequestHandler('pi-target-1')(cmd)
       }
     })
@@ -2906,7 +2975,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
     expect(result.isError).toBe(true)
     expect(target.client.dispose).toHaveBeenCalled()
     expect(target.bridgeDispose).toHaveBeenCalled()
@@ -2966,7 +3038,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', toolUseId: 'toolu_dispatch_1' })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'default',
+      toolUseId: 'toolu_dispatch_1'
+    })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
@@ -3177,7 +3253,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', toolUseId: 'toolu_draining_1' })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'default',
+      toolUseId: 'toolu_draining_1'
+    })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
@@ -3207,7 +3287,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', toolUseId: 'toolu_draining_2' })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'default',
+      toolUseId: 'toolu_draining_2'
+    })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
     expect(dispatcher.stopDispatch('toolu_draining_2')).toBe(true)
@@ -3225,8 +3309,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     })
     await tick()
     const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')?.[1] as
-      | { requestId: string }
-      | undefined
+      { requestId: string } | undefined
     expect(approval).toBeTruthy()
     dispatcher.resolveApproval(approval!.requestId, 'allow')
     expect(await decisionPromise).toEqual({ behavior: 'allow' })
@@ -3286,7 +3369,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     const ctx = makeCtx({ fromEngine: 'claude' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    target.pushEvent({ type: 'extension_error', extensionPath: 'x.ts', event: 'tool_call', error: 'bridge crashed' })
+    target.pushEvent({
+      type: 'extension_error',
+      extensionPath: 'x.ts',
+      event: 'tool_call',
+      error: 'bridge crashed'
+    })
     const result = await pending
     expect(result.isError).toBe(true)
     expect(result.text).toContain('bridge crashed')
@@ -3305,7 +3393,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
     await tick()
     target.triggerExit()
     const result = await pending
@@ -3314,7 +3405,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     expect(target.bridgeDispose).toHaveBeenCalled()
   })
 
-  it('a continuation attempted WHILE the post-stop grace-period drain is still in progress is busy-rejected — never corrupted by a stale settle (see PiTargetEntry.settled\'s RACE NOTE)', async () => {
+  it("a continuation attempted WHILE the post-stop grace-period drain is still in progress is busy-rejected — never corrupted by a stale settle (see PiTargetEntry.settled's RACE NOTE)", async () => {
     // pi's `abort` is turn-scoped (the process survives), so the STOPPED
     // turn's own terminal event sequence is still in flight when
     // resolveAndRunPi gives up. Without draining it before releasing `busy`,
@@ -3349,7 +3440,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     expect(firstResult.text).toContain('stopped')
 
     // NOW a continuation is safe — entry.settled was drained by the grace wait.
-    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    const second = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' },
+      ctx
+    )
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'genuine answer' }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -3402,7 +3496,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     expect(firstResult.isError).toBe(true)
     expect(firstResult.text).toContain('stopped') // the ORIGINAL outcome, unaffected
 
-    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    const second = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' },
+      ctx
+    )
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'genuine turn two answer' }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -3452,7 +3549,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     expect(result.isError).toBeUndefined()
 
     const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1', type: 'text', text: 'Hello' })
+    expect(streamCall?.[1]).toMatchObject({
+      toolUseId: 'toolu_disp_1',
+      type: 'text',
+      text: 'Hello'
+    })
 
     const msgCalls = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')
     expect(msgCalls.length).toBeGreaterThan(0)
@@ -3479,8 +3580,14 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     })
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ taskId: 'pi-target-1', toolUseId: 'toolu_disp_1', status: 'completed' })
-    const usage = (notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } }).usage
+    expect(notif?.[1]).toMatchObject({
+      taskId: 'pi-target-1',
+      toolUseId: 'toolu_disp_1',
+      status: 'completed'
+    })
+    const usage = (
+      notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } }
+    ).usage
     expect(usage).toBeTruthy()
     expect(usage!.totalTokens).toBe(155) // 100 + 50 + 5(reasoning)
     expect(usage!.toolUses).toBe(1)
@@ -3500,7 +3607,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(PI_AGENT_SETTLED)
     const result = await pending
     expect(result.isError).toBeUndefined()
-    expect(ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))).toHaveLength(0)
+    expect(
+      ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))
+    ).toHaveLength(0)
   })
 
   it('captures cost/tokens and records a dispatched-usage row on success; folds cost into ctx.addDispatchedCost', async () => {
@@ -3565,7 +3674,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(PI_AGENT_SETTLED)
     await first
 
-    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    const second = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' },
+      ctx
+    )
     await tick()
     // Mapper state's totalCostUsd is CUMULATIVE (0.02 + 0.03 = 0.05) — the
     // per-turn delta must be ~0.03, not the raw 0.05.
@@ -3573,12 +3685,20 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(PI_AGENT_SETTLED)
     await second
 
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(1, expect.objectContaining({ costUsd: 0.02 }))
+    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ costUsd: 0.02 })
+    )
     expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
     )
-    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(1, 'pi', 'openai-codex/gpt-5.6-luna', 0.02)
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
+      1,
+      'pi',
+      'openai-codex/gpt-5.6-luna',
+      0.02
+    )
     expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
       2,
       'pi',
@@ -3597,7 +3717,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
       spawnPiTarget: target.spawnPiTarget,
       recordDispatchedUsage
     })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'the successful answer' }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -3621,7 +3744,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     )
     expect(result.isError).toBe(true)
     expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_timeout_record', totalTokens: null, costUsd: null })
+      expect.objectContaining({
+        toolUseId: 'toolu_timeout_record',
+        totalTokens: null,
+        costUsd: null
+      })
     )
 
     recordDispatchedUsage.mockClear()
@@ -3767,7 +3894,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
             type: 'response',
             command: 'get_session_stats',
             success: true,
-            data: { cost: 0.1, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+            data: {
+              cost: 0.1,
+              tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+            }
           }
         }
         return defaultPiRequestHandler('pi-target-1')(cmd)
@@ -3841,7 +3971,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
             type: 'response',
             command: 'get_session_stats',
             success: true,
-            data: { cost: 0.08, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+            data: {
+              cost: 0.08,
+              tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+            }
           }
         }
         return defaultPiRequestHandler('pi-target-1')(cmd)
@@ -3877,7 +4010,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
             type: 'response',
             command: 'get_session_stats',
             success: true,
-            data: { cost: 0.04, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+            data: {
+              cost: 0.04,
+              tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+            }
           }
         }
         return defaultPiRequestHandler('pi-target-1')(cmd)
@@ -3925,7 +4061,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
 
     expect(recordDispatchedUsage).not.toHaveBeenCalled()
     expect(
-      target.client.request.mock.calls.some((c: unknown[]) => (c[0] as { type?: string }).type === 'get_session_stats')
+      target.client.request.mock.calls.some(
+        (c: unknown[]) => (c[0] as { type?: string }).type === 'get_session_stats'
+      )
     ).toBe(false)
   })
 })
@@ -3934,7 +4072,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)'
   it('a continuation turn is rejected once cumulative cost meets the cap; target survives; no second prompt is sent', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 } })),
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
+      })),
       spawnPiTarget: target.spawnPiTarget
     })
     const ctx = makeCtx({ fromEngine: 'claude' })
@@ -3953,17 +4093,24 @@ describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)'
     expect(second.text).toContain('cost cap')
     expect(second.sessionId).toBe(firstResult.sessionId)
     expect(
-      target.client.request.mock.calls.filter((c: unknown[]) => (c[0] as { type?: string }).type === 'prompt')
+      target.client.request.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { type?: string }).type === 'prompt'
+      )
     ).toHaveLength(1)
   })
 
   it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 } })),
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
+      })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0.06 }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -3978,7 +4125,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)'
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
     await tick()
     target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 999 }))
     target.pushEvent(PI_AGENT_SETTLED)
@@ -4022,7 +4172,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', fromRoutingId: 'routing-owner' })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      autonomyMode: 'default',
+      fromRoutingId: 'routing-owner'
+    })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
@@ -4047,7 +4201,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
 })
 
 describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
-  it('explicitly overrides CLAUDEUI_PI_HOSTED_TOOLS/DISPATCH_ENABLED/SKILL_DIRS to empty string — never mere omission, since PiRpcClient spawns with {...process.env, ...opts.env} and would otherwise leak the parent shell\'s own flags through', () => {
+  it("explicitly overrides CLAUDEUI_PI_HOSTED_TOOLS/DISPATCH_ENABLED/SKILL_DIRS to empty string — never mere omission, since PiRpcClient spawns with {...process.env, ...opts.env} and would otherwise leak the parent shell's own flags through", () => {
     const env = buildPiTargetChildEnv({ url: 'http://127.0.0.1:54321', token: 'test-token' })
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')

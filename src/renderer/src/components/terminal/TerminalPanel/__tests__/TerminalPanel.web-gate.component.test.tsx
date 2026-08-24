@@ -54,26 +54,26 @@ describe('TerminalPanel — web availability gate', () => {
     app = await bootTestApp()
     const real = window.api as unknown as ClaudeAPI & WebApiOverrides
     real.platform = 'web' as ClaudeAPI['platform']
-    real.terminalAvailability = vi.fn(
-      async (): Promise<TerminalAvailability> => ({
-        allowed: true,
-        granted: true,
-        needsStepUp: false,
-        stepUp: null
-      })
-    )
+    real.terminalAvailability = vi.fn(async (): Promise<TerminalAvailability> => ({
+      allowed: true,
+      granted: true,
+      needsStepUp: false,
+      stepUp: null
+    }))
     real.terminalStepUp = vi.fn(async () => ({ ok: true }))
     real.createTerminal = vi.fn(async () => 'term-1')
-    real.onTerminalDetached = vi.fn(
-      (cb: (p: { terminalId: string; reason: string }) => void) => {
-        detachedListeners.push(cb)
-        return () => {}
-      }
-    )
+    real.onTerminalDetached = vi.fn((cb: (p: { terminalId: string; reason: string }) => void) => {
+      detachedListeners.push(cb)
+      return () => {}
+    })
     api = real
 
     useSessionStore.getState().createNewSession(ROUTE, CWD)
-    useSessionStore.setState({ activeSessionId: ROUTE, terminalGroups: {}, terminalPanelOpen: true })
+    useSessionStore.setState({
+      activeSessionId: ROUTE,
+      terminalGroups: {},
+      terminalPanelOpen: true
+    })
   })
 
   afterEach(() => {

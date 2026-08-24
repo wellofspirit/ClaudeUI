@@ -153,8 +153,7 @@ export function OAuthPasteBackFlow({
   // Claude's flow is the app's amber "you are signed out" area; the vendor
   // flows are the ordinary accent. Matches the mockup's sky/amber split.
   const tone = variant === 'code' ? 'warning' : 'accent'
-  const badge =
-    tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-accent/15 text-accent'
+  const badge = tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-accent/15 text-accent'
   const submitClass =
     tone === 'warning'
       ? 'bg-warning/80 hover:bg-warning text-bg-primary'
@@ -180,9 +179,7 @@ export function OAuthPasteBackFlow({
           1
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-medium text-text-primary">
-            Sign in with your browser
-          </div>
+          <div className="text-[12px] font-medium text-text-primary">Sign in with your browser</div>
           <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
             Opens on this device. Finish the sign-in there, then come back.
           </div>

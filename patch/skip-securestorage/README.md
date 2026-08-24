@@ -4,17 +4,17 @@ When the env var `SKIP_SECURESTORAGE` is truthy, cli.js reads and writes OAuth c
 
 > **The getter shape is PLATFORM-SPECIFIC, not version-specific** (verified on 2.1.177 — both bundles report the same `VERSION`, but the bundled cli.js differs per platform):
 >
-> | Platform bundle    | Primary backend                       | Getter body                                       |
-> | ------------------ | ------------------------------------- | ------------------------------------------------- |
-> | macOS (darwin-\*)  | `name:"keychain"`                     | `return COMPOSER(keychain,file)` (unconditional)  |
-> | Windows (win32-\*) | `name:"windows-credman"`              | `if(<gate>())return COMPOSER(credman,file);return file` |
-> | Linux (linux-\*)   | — none (verified 2.1.231)             | no composer, no facade — plaintext file backend only |
+> | Platform bundle    | Primary backend           | Getter body                                             |
+> | ------------------ | ------------------------- | ------------------------------------------------------- |
+> | macOS (darwin-\*)  | `name:"keychain"`         | `return COMPOSER(keychain,file)` (unconditional)        |
+> | Windows (win32-\*) | `name:"windows-credman"`  | `if(<gate>())return COMPOSER(credman,file);return file` |
+> | Linux (linux-\*)   | — none (verified 2.1.231) | no composer, no facade — plaintext file backend only    |
 >
 > The Windows bundle gained a **Windows Credential Manager** backend gated behind a GrowthBook flag (`tengu_windows_credman`) / `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`. The original patch matched only the macOS unconditional body, so it worked on mac and aborted on Windows (`0 store-getter matches`). The fix no longer matches the exact body — it captures the body and **prepends** a `SKIP_SECURESTORAGE` short-circuit, so it works on both. See **Anchor 2 / Before-After** below.
 >
 > Note: on a default Windows install the gate is **off**, so `pf()` already returns the bare file backend — file-based credentials happen without the patch. The patch makes it deterministic (immune to the flag flipping on remotely) and, critically, stops the build pipeline from hard-aborting.
 >
-> **Linux bundles have no secure store at all** (verified on 2.1.231; broke CI on ubuntu runners, which extract the linux-x64 bun-claude binary): the `` `${H.name}-with-${_.name}-fallback` `` template appears **nowhere**, and neither `name:"keychain"` nor `name:"windows-credman"` exists — only `name:"plaintext"`. Credentials are already file-only, i.e. the exact state this patch forces, so `apply.mjs` exits 0 as a **no-op** — but only under a triple **store-less guard** (positive evidence, never fail-open): `process.platform === 'linux'` AND `` src.includes('-fallback`') `` is false AND `name:"plaintext"` present. A renamed composer on mac/win — or a future Linux secure store, whose facade would reintroduce the template — still aborts loudly. `test.mjs` mirrors the guard: on a store-less bundle the *correct* patched state is the pristine one (marker absent).
+> **Linux bundles have no secure store at all** (verified on 2.1.231; broke CI on ubuntu runners, which extract the linux-x64 bun-claude binary): the `` `${H.name}-with-${_.name}-fallback` `` template appears **nowhere**, and neither `name:"keychain"` nor `name:"windows-credman"` exists — only `name:"plaintext"`. Credentials are already file-only, i.e. the exact state this patch forces, so `apply.mjs` exits 0 as a **no-op** — but only under a triple **store-less guard** (positive evidence, never fail-open): `process.platform === 'linux'` AND ``src.includes('-fallback`')`` is false AND `name:"plaintext"` present. A renamed composer on mac/win — or a future Linux secure store, whose facade would reintroduce the template — still aborts loudly. `test.mjs` mirrors the guard: on a store-less bundle the _correct_ patched state is the pristine one (marker absent).
 
 ## Affected Component
 
@@ -34,7 +34,7 @@ ClaudeUI's multi-account support (ADR-015) keeps a **separate `.credentials.json
 1. **The Keychain is single-item.** cli.js stores one credential under service `Claude Code-credentials` (plus a `-<sha256(configDir)[:8]>` suffix for non-default config dirs). There's no per-account file we can swap.
 2. **Cross-process Keychain reads prompt.** When any process other than the one in the item's ACL reads it (e.g. our app shelling out to `security`, or even cli.js under some conditions), macOS shows a "`security` wants to use your confidential information" trust prompt — on **every** read. See ADR-014 for how this bit us already.
 
-cli.js has **no built-in flag** to disable the Keychain. `CLAUDE_SECURESTORAGE_CONFIG_DIR` only relocates the plaintext *fallback* file; the Keychain remains primary. This patch adds the missing flag.
+cli.js has **no built-in flag** to disable the Keychain. `CLAUDE_SECURESTORAGE_CONFIG_DIR` only relocates the plaintext _fallback_ file; the Keychain remains primary. This patch adds the missing flag.
 
 ## Architecture Overview
 
@@ -50,14 +50,14 @@ p1()  ──returns──>  ev9( oM8 , lK6 )
 
 `ev9(H,_)` builds a store object where **H is primary, `_` is fallback**:
 
-| Method            | Behaviour in the facade                                                              |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| `read/readAsync`  | try `H` (keychain); if null, fall back to `_` (file)                                 |
+| Method            | Behaviour in the facade                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `read/readAsync`  | try `H` (keychain); if null, fall back to `_` (file)                                              |
 | `update(K)`       | write `H` (keychain); on success **delete the `_` file copy**; only on keychain failure write `_` |
-| `delete`          | delete both                                                                          |
-| `readAsyncStrict` | `H.readAsyncStrict?.() ?? H.readAsync()` — optional-chained                          |
-| `invalidateCache` | `H.invalidateCache?.()` — optional-chained                                           |
-| `mutate(K)`       | `VyH(q, K)` — read-modify-write helper                                               |
+| `delete`          | delete both                                                                                       |
+| `readAsyncStrict` | `H.readAsyncStrict?.() ?? H.readAsync()` — optional-chained                                       |
+| `invalidateCache` | `H.invalidateCache?.()` — optional-chained                                                        |
+| `mutate(K)`       | `VyH(q, K)` — read-modify-write helper                                                            |
 
 Because keychain `update` succeeds on a normal Mac and then **deletes** the file copy, the plaintext file usually doesn't even exist. That's why relocating only the fallback (`CLAUDE_SECURESTORAGE_CONFIG_DIR`) doesn't give us file-based storage.
 
@@ -67,12 +67,22 @@ Because keychain `update` succeeds on a normal Mac and then **deletes** the file
 
 ```js
 lK6 = {
-  name: "plaintext",
-  read()       { /* readFileSync <dir>/.credentials.json */ },
-  async readAsync() { /* readFile ... */ },
-  mutate(H)    { return VyH(lK6, H) },              // ← present!
-  async update(H) { /* mkdir + write 0600 + "Storing credentials in plaintext" */ },
-  async delete()  { /* unlink; ENOENT → ok */ }
+  name: 'plaintext',
+  read() {
+    /* readFileSync <dir>/.credentials.json */
+  },
+  async readAsync() {
+    /* readFile ... */
+  },
+  mutate(H) {
+    return VyH(lK6, H)
+  }, // ← present!
+  async update(H) {
+    /* mkdir + write 0600 + "Storing credentials in plaintext" */
+  },
+  async delete() {
+    /* unlink; ENOENT → ok */
+  }
 }
 ```
 
@@ -92,13 +102,13 @@ function VyH(H,_){return SP5(async()=>{
 
 So a bare `lK6` is a complete, working store. No consumer requires the two missing methods.
 
-| Variable | Meaning                                   |
-| -------- | ----------------------------------------- |
-| `p1`     | store getter (patched)                    |
-| `ev9`    | facade composer (`H`+`_` → fallback store) |
-| `oM8`    | keychain backend (`name:"keychain"`)      |
+| Variable | Meaning                                     |
+| -------- | ------------------------------------------- |
+| `p1`     | store getter (patched)                      |
+| `ev9`    | facade composer (`H`+`_` → fallback store)  |
+| `oM8`    | keychain backend (`name:"keychain"`)        |
 | `lK6`    | plaintext file backend (`name:"plaintext"`) |
-| `VyH`    | mutate (read-modify-write) helper         |
+| `VyH`    | mutate (read-modify-write) helper           |
 
 ## The Patch
 
@@ -124,9 +134,14 @@ The getter is the only **zero-arg** function whose **brace-free** body contains 
 
 ```js
 // old (macOS, ≤ pre-credman):
-function p1(){return ev9(oM8,lK6)}
+function p1() {
+  return ev9(oM8, lK6)
+}
 // new (v2.1.177, credman-gated):
-function pf(){if(v21())return cy$(OXq,s_6);return s_6}
+function pf() {
+  if (v21()) return cy$(OXq, s_6)
+  return s_6
+}
 ```
 
 Regex (composer interpolated; `cy$` shown escaped):
@@ -140,13 +155,20 @@ function ([\w$]+)\(\)\{([^{}]*?cy\$\(([\w$]+),([\w$]+)\)[^{}]*?)\}
 ### Before
 
 ```js
-function pf(){if(v21())return cy$(OXq,s_6);return s_6}
+function pf() {
+  if (v21()) return cy$(OXq, s_6)
+  return s_6
+}
 ```
 
 ### After
 
 ```js
-function pf(){/*PATCHED:skip-securestorage*/if(process.env.SKIP_SECURESTORAGE)return s_6;if(v21())return cy$(OXq,s_6);return s_6}
+function pf() {
+  /*PATCHED:skip-securestorage*/ if (process.env.SKIP_SECURESTORAGE) return s_6
+  if (v21()) return cy$(OXq, s_6)
+  return s_6
+}
 ```
 
 The short-circuit is **prepended** to the captured body (`$2`) — `$4` is returned directly when the flag is set; otherwise the original body runs unchanged. This is shape-agnostic: it works for the old unconditional `return COMPOSER(...)` body and the new `if(<gate>())…` body alike. When `SKIP_SECURESTORAGE` is unset/empty → byte-identical original behaviour. When truthy → the bare file backend, so all credential I/O goes to `<CLAUDE_SECURESTORAGE_CONFIG_DIR || CLAUDE_CONFIG_DIR || ~/.claude>/.credentials.json`.
@@ -201,7 +223,7 @@ bundle-analyzer find vendor/claude-cli/cli.js "CLAUDE_SECURESTORAGE_CONFIG_DIR" 
 
 - **The keychain backend (`oM8`) and the facade (`ev9`) are untouched.** Default builds (no env) use them exactly as before.
 - **The path resolver `dK6()` is untouched.** We rely on its existing `CLAUDE_SECURESTORAGE_CONFIG_DIR` support to point per-account dirs — no patch needed for that.
-- **The auth-source precedence (`B0`) is untouched.** Env tokens (`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, …) still outrank the stored credential; this patch only changes *where the stored credential lives*.
+- **The auth-source precedence (`B0`) is untouched.** Env tokens (`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, …) still outrank the stored credential; this patch only changes _where the stored credential lives_.
 
 ## Consumer-Side Integration
 
@@ -228,13 +250,13 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 
 ## Key Functions Reference
 
-| Name (v2.1.177) | Purpose                                              | Char offset |
-| --------------- | --------------------------------------------------- | ----------- |
-| `pf`            | credential store getter (patched)                   | ~2325860    |
-| `v21`           | credman gate (`tengu_windows_credman` / force-env)  | ~2325490    |
-| `cy$`           | facade composer (secure store + file fallback)      | ~2316152    |
-| `OXq`           | Windows Credential Manager backend (`name:"windows-credman"`) | ~2324132 |
-| `s_6`           | plaintext file backend (`name:"plaintext"`)         | ~2318776    |
+| Name (v2.1.177) | Purpose                                                       | Char offset |
+| --------------- | ------------------------------------------------------------- | ----------- |
+| `pf`            | credential store getter (patched)                             | ~2325860    |
+| `v21`           | credman gate (`tengu_windows_credman` / force-env)            | ~2325490    |
+| `cy$`           | facade composer (secure store + file fallback)                | ~2316152    |
+| `OXq`           | Windows Credential Manager backend (`name:"windows-credman"`) | ~2324132    |
+| `s_6`           | plaintext file backend (`name:"plaintext"`)                   | ~2318776    |
 
 (On a macOS-flavoured bundle the primary backend object is `name:"keychain"` instead of `windows-credman`; the patch captures whichever appears as the composer's first arg.)
 
@@ -246,8 +268,8 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 
 ## Files
 
-| File        | Purpose       |
-| ----------- | ------------- |
-| `README.md` | This document |
-| `apply.mjs` | Patch script  |
+| File        | Purpose                  |
+| ----------- | ------------------------ |
+| `README.md` | This document            |
+| `apply.mjs` | Patch script             |
 | `test.mjs`  | Behavioural test harness |

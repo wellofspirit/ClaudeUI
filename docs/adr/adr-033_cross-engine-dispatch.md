@@ -7,7 +7,7 @@
 ## Context
 
 ClaudeUI now runs two engines (Claude, opencode) fronting different model vendors. We want a session
-on either engine to delegate a task to an agent on the *other* engine — e.g. a Claude session asks a
+on either engine to delegate a task to an agent on the _other_ engine — e.g. a Claude session asks a
 GPT-5-backed opencode agent to review a diff — with the same UX as a native subtask: a task card in
 the dispatching chat, approvals surfacing in the dispatching session, no separate session to manage.
 
@@ -55,7 +55,7 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
    No depth counters. The tool is main-agent-only by policy; Claude-native subagents share the
    parent's MCP channel, so enforcement there is best-effort v1 (documented limitation).
 5. **Subtask-identical UX**: the target inherits the dispatcher's autonomy mode (mapped through the
-   ADR-022 `buildRuleset` for opencode; permission mode for Claude — auto-mode judge is *not*
+   ADR-022 `buildRuleset` for opencode; permission mode for Claude — auto-mode judge is _not_
    spun up for targets in v1, `full` maps to allow-all). Target approval requests are re-emitted as
    `session:approval-request` under the **dispatching** session's routing with a reserved requestId
    prefix (`xeng:`); the approve IPC handler routes that prefix to the dispatcher instead of the
@@ -134,7 +134,7 @@ matter for maintenance are folded in below.)
   unknown keys — the plugin-injected `__xeng_caller_session` (and M3's `__xeng_call_id`) are
   therefore **declared optional fields** of the opencode-side tool schema (described "internal —
   never set this yourself"), read + stripped by the handler.
-- **Collab-tool enum NOT widened (M2):** each side's `engine` enum lists only the *other* engine;
+- **Collab-tool enum NOT widened (M2):** each side's `engine` enum lists only the _other_ engine;
   same-engine dispatch is guard-rejected anyway.
 - **MCP timeout (M2):** `mcp.claudeui.timeout` = 20 min in `OPENCODE_CONFIG_CONTENT` (opencode's
   schema default is 5 s) so long Claude-target turns survive even without progress-token resets.

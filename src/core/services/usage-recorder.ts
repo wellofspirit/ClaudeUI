@@ -91,6 +91,9 @@ export function recordUsageEvent(event: UsageTurnEvent): void {
     insertUsageEvent(row)
   } catch (err) {
     // DB failures must never propagate to the caller — this is advisory recording.
-    logger.warn('UsageRecorder', `Failed to record usage event: ${err instanceof Error ? err.message : String(err)}`)
+    logger.warn(
+      'UsageRecorder',
+      `Failed to record usage event: ${err instanceof Error ? err.message : String(err)}`
+    )
   }
 }

@@ -263,12 +263,7 @@ export interface WireEntry {
 }
 
 export type PermissionMode =
-  | 'default'
-  | 'acceptEdits'
-  | 'bypassPermissions'
-  | 'auto'
-  | 'dontAsk'
-  | 'plan'
+  'default' | 'acceptEdits' | 'bypassPermissions' | 'auto' | 'dontAsk' | 'plan'
 
 export interface CanUseToolResult {
   behavior: 'allow' | 'deny'
@@ -500,11 +495,7 @@ export type SettingSource = 'user' | 'project' | 'local'
 export type PermissionRuleValue = { toolName: string; ruleContent?: string }
 export type PermissionBehavior = 'allow' | 'deny' | 'ask'
 export type PermissionUpdateDestination =
-  | 'userSettings'
-  | 'projectSettings'
-  | 'localSettings'
-  | 'session'
-  | 'cliArg'
+  'userSettings' | 'projectSettings' | 'localSettings' | 'session' | 'cliArg'
 export type PermissionUpdate =
   | {
       type: 'addRules'

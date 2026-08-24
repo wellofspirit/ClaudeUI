@@ -65,7 +65,6 @@ const VIEW_OR_CLIENT_ORIGINATED = new Set<string>([
   'autoModeDisabledBySettings'
 ])
 
-
 /**
  * Diff canonical state against the replica's, field by field.
  *
@@ -173,49 +172,44 @@ describe('E2E: SyncCore hydration parity', () => {
     emitEvent('session:user-message', ['rid-1', { prompt: 'plan the work' }])
     emitEvent('session:stream', ['rid-1', { type: 'thinking', text: 'thinking...' }])
     emitEvent('session:stream', ['rid-1', { type: 'text', text: 'On it. ' }])
-    emitEvent(
-      'session:message',
-      [
-        'rid-1',
-        {
-          id: 'a1',
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'On it.' },
-            {
-              type: 'tool_use',
-              toolUseId: 't-todo',
-              toolName: 'TodoWrite',
-              toolInput: {
-                todos: [
-                  { content: 'step one', status: 'in_progress', activeForm: 'Doing one' },
-                  { content: 'step two', status: 'pending', activeForm: 'Doing two' }
-                ]
-              }
+    emitEvent('session:message', [
+      'rid-1',
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'On it.' },
+          {
+            type: 'tool_use',
+            toolUseId: 't-todo',
+            toolName: 'TodoWrite',
+            toolInput: {
+              todos: [
+                { content: 'step one', status: 'in_progress', activeForm: 'Doing one' },
+                { content: 'step two', status: 'pending', activeForm: 'Doing two' }
+              ]
             }
-          ],
-          timestamp: 0
-        } satisfies ChatMessage
-      ])
-    emitEvent(
-      'session:tool-result',
-      ['rid-1', { toolUseId: 't-todo', result: 'ok', isError: false }])
-    emitEvent(
-      'session:status-line',
-      ['rid-1', { model: 'sonnet', totalCostUsd: 0.12 } as never])
-    emitEvent(
-      'session:metering',
-      [
-        'rid-1',
-        {
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          billingType: 'subscription',
-          tokens: { input: 10, output: 5, cacheWrite: 0, cacheRead: 0, total: 15 },
-          equivalentCostUsd: 0.12,
-          contextWindow: { used: 15, size: 200000 }
-        } as never
-      ])
+          }
+        ],
+        timestamp: 0
+      } satisfies ChatMessage
+    ])
+    emitEvent('session:tool-result', [
+      'rid-1',
+      { toolUseId: 't-todo', result: 'ok', isError: false }
+    ])
+    emitEvent('session:status-line', ['rid-1', { model: 'sonnet', totalCostUsd: 0.12 } as never])
+    emitEvent('session:metering', [
+      'rid-1',
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        billingType: 'subscription',
+        tokens: { input: 10, output: 5, cacheWrite: 0, cacheRead: 0, total: 15 },
+        equivalentCostUsd: 0.12,
+        contextWindow: { used: 15, size: 200000 }
+      } as never
+    ])
     emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })])
     emitEvent('session:result', ['rid-1', {}])
 
@@ -240,9 +234,9 @@ describe('E2E: SyncCore hydration parity', () => {
     emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })])
 
     expect(syncCore.getSnapshot().sessions['rid-1'].metering).toEqual(metering)
-    expect(
-      toSnapshot(getReplicaState(), syncCore.currentSeq()).sessions['rid-1'].metering
-    ).toEqual(metering)
+    expect(toSnapshot(getReplicaState(), syncCore.currentSeq()).sessions['rid-1'].metering).toEqual(
+      metering
+    )
     expectParity()
   })
 
@@ -270,17 +264,15 @@ describe('E2E: SyncCore hydration parity', () => {
     ])
 
     emitEvent('session:stream', ['sdk-9', { type: 'text', text: 'and done.' }])
-    emitEvent(
-      'session:message',
-      [
-        'sdk-9',
-        {
-          id: 'a1',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'Partial and done.' }],
-          timestamp: 0
-        } satisfies ChatMessage
-      ])
+    emitEvent('session:message', [
+      'sdk-9',
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Partial and done.' }],
+        timestamp: 0
+      } satisfies ChatMessage
+    ])
     emitEvent('session:status', ['sdk-9', makeStatus({ state: 'idle', sessionId: 'sdk-9' })])
 
     expect(Object.keys(syncCore.getSnapshot().sessions)).toEqual(['sdk-9'])
@@ -306,12 +298,10 @@ describe('E2E: SyncCore hydration parity', () => {
 
   it('an eviction + rehydrate cycle is masked, then clean again once warm', () => {
     emitEvent('session:created', ['rid-1', { cwd: '/project' }])
-    emitEvent(
-      'session:message',
-      [
-        'rid-1',
-        { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }
-      ])
+    emitEvent('session:message', [
+      'rid-1',
+      { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }
+    ])
     emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })])
     expectParity()
 
@@ -382,72 +372,70 @@ describe('E2E: SyncCore hydration parity', () => {
       'session:user-message',
       // Identity now rides the event (phase 4b A1) — the renderer still mints its
       // own until 4c, which is why the comparator masks user ids.
-      ['rid-1', { id: 'msg-e2e-1', timestamp: 1_700_000_000_000, prompt: 'ship it' }])
+      ['rid-1', { id: 'msg-e2e-1', timestamp: 1_700_000_000_000, prompt: 'ship it' }]
+    )
     emitEvent('session:stream', ['rid-1', { type: 'thinking', text: 'planning' }])
     emitEvent('session:stream', ['rid-1', { type: 'text', text: 'On it. ' }])
-    emitEvent(
-      'session:message',
-      [
-        'rid-1',
-        {
-          id: 'a1',
-          role: 'assistant',
-          content: [
-            { type: 'thinking', text: 'planning' },
-            { type: 'text', text: 'On it.' },
-            {
-              type: 'tool_use',
-              toolUseId: 't-todo',
-              toolName: 'TodoWrite',
-              toolInput: {
-                todos: [{ content: 'step one', status: 'in_progress', activeForm: 'Doing one' }]
-              }
-            },
-            {
-              type: 'tool_use',
-              toolUseId: 't-file',
-              toolName: 'SendUserFile',
-              toolInput: { files: ['out/report.md'], caption: 'the report', display: 'attach' }
+    emitEvent('session:message', [
+      'rid-1',
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: [
+          { type: 'thinking', text: 'planning' },
+          { type: 'text', text: 'On it.' },
+          {
+            type: 'tool_use',
+            toolUseId: 't-todo',
+            toolName: 'TodoWrite',
+            toolInput: {
+              todos: [{ content: 'step one', status: 'in_progress', activeForm: 'Doing one' }]
             }
-          ],
-          timestamp: 0,
-          // The emitter's thinking-span timing (phase 4b A2).
-          thinkingDurationMs: 1234
-        }
-      ])
-    emitEvent(
-      'session:tool-result',
-      ['rid-1', { toolUseId: 't-todo', result: 'ok', isError: false }])
-    emitEvent(
-      'session:tool-result',
-      ['rid-1', { toolUseId: 't-file', result: 'delivered', isError: false }])
+          },
+          {
+            type: 'tool_use',
+            toolUseId: 't-file',
+            toolName: 'SendUserFile',
+            toolInput: { files: ['out/report.md'], caption: 'the report', display: 'attach' }
+          }
+        ],
+        timestamp: 0,
+        // The emitter's thinking-span timing (phase 4b A2).
+        thinkingDurationMs: 1234
+      }
+    ])
+    emitEvent('session:tool-result', [
+      'rid-1',
+      { toolUseId: 't-todo', result: 'ok', isError: false }
+    ])
+    emitEvent('session:tool-result', [
+      'rid-1',
+      { toolUseId: 't-file', result: 'delivered', isError: false }
+    ])
     emitEvent('session:config-changed', ['rid-1', { model: 'opus', effort: 'high' }])
     emitEvent('session:permission-mode', ['rid-1', 'acceptEdits'])
-    emitEvent(
-      'session:status-line',
-      ['rid-1', { model: 'opus', totalCostUsd: 0.31 } as never])
-    emitEvent(
-      'session:metering',
-      [
-        'rid-1',
-        {
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          billingType: 'subscription',
-          tokens: { input: 20, output: 9, cacheWrite: 0, cacheRead: 0, total: 29 },
-          equivalentCostUsd: 0.31,
-          contextWindow: { used: 29, size: 200000 }
-        } as never
-      ])
-    emitEvent(
-      'session:queue-changed',
-      ['rid-1', { items: [{ itemId: 'q1', text: 'and then deploy', state: 'queued' }] }])
+    emitEvent('session:status-line', ['rid-1', { model: 'opus', totalCostUsd: 0.31 } as never])
+    emitEvent('session:metering', [
+      'rid-1',
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        billingType: 'subscription',
+        tokens: { input: 20, output: 9, cacheWrite: 0, cacheRead: 0, total: 29 },
+        equivalentCostUsd: 0.31,
+        contextWindow: { used: 29, size: 200000 }
+      } as never
+    ])
+    emitEvent('session:queue-changed', [
+      'rid-1',
+      { items: [{ itemId: 'q1', text: 'and then deploy', state: 'queued' }] }
+    ])
     emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })])
     // Registry config: emitted last so both replicas end on the same value (the
     // renderer also writes recents locally on a user message — 4c's problem).
-    emitEvent(
-      'config:sessions-changed',
-      [{ recentSessions: ['rid-1'], pinnedSessions: [], customTitles: { 'rid-1': 'Shipping' } }])
+    emitEvent('config:sessions-changed', [
+      { recentSessions: ['rid-1'], pinnedSessions: [], customTitles: { 'rid-1': 'Shipping' } }
+    ])
     expectParity()
 
     const live = toSnapshot(getReplicaState(), syncCore.currentSeq())

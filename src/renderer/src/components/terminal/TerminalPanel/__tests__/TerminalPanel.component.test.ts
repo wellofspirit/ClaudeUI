@@ -153,9 +153,7 @@ describe('TerminalPanel FC', () => {
   })
 
   it('selects the existing tab instead of duplicating when a slot resolves to it', async () => {
-    useSessionStore
-      .getState()
-      .addTerminalTab({ id: 'term-9', title: 'A', cwd: CWD, poolIndex: 1 })
+    useSessionStore.getState().addTerminalTab({ id: 'term-9', title: 'A', cwd: CWD, poolIndex: 1 })
     // Slot 0 is free from this surface's point of view, but the host answers
     // with a terminal this surface is already showing.
     pool.set(`${CWD}#0`, 'term-9')

@@ -62,7 +62,10 @@ beforeEach(() => {
   })
 })
 
-async function startClient(): Promise<{ client: import('../PiRpcClient').PiRpcClient; proc: ReturnType<typeof makeFakeProc> }> {
+async function startClient(): Promise<{
+  client: import('../PiRpcClient').PiRpcClient
+  proc: ReturnType<typeof makeFakeProc>
+}> {
   const { PiRpcClient } = await import('../PiRpcClient')
   const client = new PiRpcClient('/fake/pi', { cwd: '/tmp', args: ['--mode', 'rpc'] })
   await client.start()
@@ -118,10 +121,17 @@ describe('PiRpcClient — framing', () => {
     const events: unknown[] = []
     client.onEvent((ev) => events.push(ev))
 
-    const payload = JSON.stringify({ type: 'extension_error', extensionPath: 'x', event: 'y', error: 'a b' })
+    const payload = JSON.stringify({
+      type: 'extension_error',
+      extensionPath: 'x',
+      event: 'y',
+      error: 'a b'
+    })
     proc.stdout.emit('data', payload + '\n')
 
-    expect(events).toEqual([{ type: 'extension_error', extensionPath: 'x', event: 'y', error: 'a b' }])
+    expect(events).toEqual([
+      { type: 'extension_error', extensionPath: 'x', event: 'y', error: 'a b' }
+    ])
   })
 
   it('routes only non-response lines to onEvent (response lines are NOT events)', async () => {
@@ -129,7 +139,10 @@ describe('PiRpcClient — framing', () => {
     const events: unknown[] = []
     client.onEvent((ev) => events.push(ev))
 
-    proc.stdout.emit('data', JSON.stringify({ type: 'response', id: 'r1', command: 'abort', success: true }) + '\n')
+    proc.stdout.emit(
+      'data',
+      JSON.stringify({ type: 'response', id: 'r1', command: 'abort', success: true }) + '\n'
+    )
     expect(events).toEqual([])
   })
 
@@ -147,7 +160,11 @@ describe('PiRpcClient — framing', () => {
       '\n'
     proc.stdout.emit('data', chunk)
 
-    expect(events).toEqual([{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'agent_settled' }])
+    expect(events).toEqual([
+      { type: 'agent_start' },
+      { type: 'turn_start' },
+      { type: 'agent_settled' }
+    ])
   })
 })
 
@@ -162,7 +179,13 @@ describe('PiRpcClient — request/response correlation', () => {
 
     proc.stdout.emit(
       'data',
-      JSON.stringify({ type: 'response', id: written.id, command: 'get_state', success: true, data: { foo: 1 } }) + '\n'
+      JSON.stringify({
+        type: 'response',
+        id: written.id,
+        command: 'get_state',
+        success: true,
+        data: { foo: 1 }
+      }) + '\n'
     )
 
     await expect(promise).resolves.toEqual({
@@ -186,11 +209,23 @@ describe('PiRpcClient — request/response correlation', () => {
     // Respond to the SECOND request first.
     proc.stdout.emit(
       'data',
-      JSON.stringify({ type: 'response', id: id2, command: 'get_session_stats', success: true, data: { n: 2 } }) + '\n'
+      JSON.stringify({
+        type: 'response',
+        id: id2,
+        command: 'get_session_stats',
+        success: true,
+        data: { n: 2 }
+      }) + '\n'
     )
     proc.stdout.emit(
       'data',
-      JSON.stringify({ type: 'response', id: id1, command: 'get_state', success: true, data: { n: 1 } }) + '\n'
+      JSON.stringify({
+        type: 'response',
+        id: id1,
+        command: 'get_state',
+        success: true,
+        data: { n: 1 }
+      }) + '\n'
     )
 
     await expect(p2).resolves.toMatchObject({ data: { n: 2 } })
@@ -203,7 +238,13 @@ describe('PiRpcClient — request/response correlation', () => {
     const id = lastWrittenCommand(proc).id as string
     proc.stdout.emit(
       'data',
-      JSON.stringify({ type: 'response', id, command: 'set_model', success: false, error: 'Model not found' }) + '\n'
+      JSON.stringify({
+        type: 'response',
+        id,
+        command: 'set_model',
+        success: false,
+        error: 'Model not found'
+      }) + '\n'
     )
     await expect(promise).resolves.toEqual({
       type: 'response',

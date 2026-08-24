@@ -402,8 +402,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
   switch (channel) {
     case 'session:created': {
       const data = args[1] as
-        | { cwd?: string; resumeSessionId?: string; resumeSessionAt?: string }
-        | undefined
+        { cwd?: string; resumeSessionId?: string; resumeSessionAt?: string } | undefined
       const wasResident = wasResidentAtCreate.get(routingId) === true
       wasResidentAtCreate.delete(routingId)
       // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
@@ -454,8 +453,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // since S4. `args[0]` is the payload object here, not a routing id — this
       // is the one channel whose session scoping lives inside its payload.
       const payload = args[0] as
-        | { routingId?: string; sessionId?: string; projectKey?: string }
-        | undefined
+        { routingId?: string; sessionId?: string; projectKey?: string } | undefined
       const watchedId = payload?.routingId
       if (!watchedId || !payload?.sessionId || !payload?.projectKey) return
       // Evicted entries are skipped on purpose: their heavy arrays were dropped
@@ -485,7 +483,11 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       if (store.activeSessionId !== routingId || !document.hasFocus()) {
         store.setNeedsAttention(routingId, true)
       }
-      notifyIfNeeded(routingId, 'Permission required', `${approval?.toolName || 'Tool'} needs approval`)
+      notifyIfNeeded(
+        routingId,
+        'Permission required',
+        `${approval?.toolName || 'Tool'} needs approval`
+      )
       return
     }
 

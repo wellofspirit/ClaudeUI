@@ -715,9 +715,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     authcfgLanLink: () =>
       connection.invoke('authcfg:lan-link') as ReturnType<ClaudeAPI['authcfgLanLink']>,
     authcfgRotateLanKey: () =>
-      connection.invoke('authcfg:rotate-lan-key') as ReturnType<
-        ClaudeAPI['authcfgRotateLanKey']
-      >,
+      connection.invoke('authcfg:rotate-lan-key') as ReturnType<ClaudeAPI['authcfgRotateLanKey']>,
 
     detectTailscale: async () => {
       throw new Error('Not available in remote mode')

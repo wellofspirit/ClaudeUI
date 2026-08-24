@@ -628,7 +628,8 @@ export function applyEvent(
       // stored: it moves onto the sealed thinking block and the field is dropped,
       // so a snapshot carries `durationMs` exactly where a client renders it.
       const { thinkingDurationMs, ...bare } = message
-      const merged = idx < 0 ? content : mergeContentBlocks(session.messages[idx].content ?? [], content)
+      const merged =
+        idx < 0 ? content : mergeContentBlocks(session.messages[idx].content ?? [], content)
       const committed: ChatMessage = {
         ...bare,
         content: stampThinkingDuration(merged, thinkingDurationMs)

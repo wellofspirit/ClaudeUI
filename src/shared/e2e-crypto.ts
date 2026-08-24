@@ -178,7 +178,10 @@ export class E2ECrypto {
 
     // Reject replays: a captured frame carries its original seq, which is <=
     // the last one we accepted. In-order frames strictly increase.
-    const seq = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(0, false)
+    const seq = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(
+      0,
+      false
+    )
     if (seq <= this.recvSeq) {
       throw new Error(`E2E replay detected (seq ${seq} <= ${this.recvSeq})`)
     }

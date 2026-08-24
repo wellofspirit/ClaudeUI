@@ -95,7 +95,12 @@ describe('ClaudeEngineToolMap.normalize', () => {
     })
 
     it('includes output from result', () => {
-      const result = { type: 'tool_result', toolUseId: 'x', toolResult: 'hello\n', isError: false } as const
+      const result = {
+        type: 'tool_result',
+        toolUseId: 'x',
+        toolResult: 'hello\n',
+        isError: false
+      } as const
       const view = ClaudeEngineToolMap.normalize('command', { command: 'echo hello' }, result)
       expect(view).toMatchObject({ kind: 'command', command: 'echo hello', output: 'hello\n' })
     })
@@ -138,7 +143,12 @@ describe('ClaudeEngineToolMap.normalize', () => {
 
   describe('fileRead (Read)', () => {
     it('maps file_path→path and result→content', () => {
-      const result = { type: 'tool_result', toolUseId: 'x', toolResult: 'file content', isError: false } as const
+      const result = {
+        type: 'tool_result',
+        toolUseId: 'x',
+        toolResult: 'file content',
+        isError: false
+      } as const
       const view = ClaudeEngineToolMap.normalize('fileRead', { file_path: '/src/foo.ts' }, result)
       expect(view).toMatchObject({
         kind: 'fileRead',
@@ -279,9 +289,7 @@ describe('ClaudeEngineToolMap.normalize', () => {
 
     it('includes activeForm from todo item when present', () => {
       const view = ClaudeEngineToolMap.normalize('todo', {
-        todos: [
-          { content: 'Write tests', status: 'in_progress', activeForm: 'src/foo.test.ts' }
-        ]
+        todos: [{ content: 'Write tests', status: 'in_progress', activeForm: 'src/foo.test.ts' }]
       })
       expect(view).toMatchObject({
         kind: 'todo',

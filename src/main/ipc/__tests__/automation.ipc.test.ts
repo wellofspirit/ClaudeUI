@@ -187,7 +187,9 @@ describe('automation.ipc', () => {
   it('M-AU3: rejects a traversal automation id before reaching the manager', async () => {
     registerAutomationIpc()
     // Every id-bearing channel must reject `../..` and never call the manager.
-    await expect(harness.call('automation:delete', '../..')).rejects.toThrow(/invalid automation id/i)
+    await expect(harness.call('automation:delete', '../..')).rejects.toThrow(
+      /invalid automation id/i
+    )
     await expect(harness.call('automation:save', { id: '../evil' })).rejects.toThrow(
       /invalid automation id/i
     )
@@ -197,11 +199,15 @@ describe('automation.ipc', () => {
     await expect(harness.call('automation:toggle', 'a/b', true)).rejects.toThrow(
       /invalid automation id/i
     )
-    await expect(harness.call('automation:list-runs', '..')).rejects.toThrow(/invalid automation id/i)
-    await expect(
-      harness.call('automation:load-run-history', 'ok-id', '../r')
-    ).rejects.toThrow(/invalid automation id/i)
-    await expect(harness.call('automation:cancel', 'a\\b')).rejects.toThrow(/invalid automation id/i)
+    await expect(harness.call('automation:list-runs', '..')).rejects.toThrow(
+      /invalid automation id/i
+    )
+    await expect(harness.call('automation:load-run-history', 'ok-id', '../r')).rejects.toThrow(
+      /invalid automation id/i
+    )
+    await expect(harness.call('automation:cancel', 'a\\b')).rejects.toThrow(
+      /invalid automation id/i
+    )
     await expect(harness.call('automation:dismiss-run', '../..', 'r1')).rejects.toThrow(
       /invalid automation id/i
     )

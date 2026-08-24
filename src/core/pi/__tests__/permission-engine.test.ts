@@ -38,7 +38,14 @@ import {
 } from '../permission-engine'
 
 function rules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
-  return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined, ...partial }
+  return {
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined,
+    ...partial
+  }
 }
 
 const NO_SESSION_ALLOWS = new Set<string>()
@@ -181,7 +188,9 @@ describe('decide — plan mode base (M5a)', () => {
   })
 
   it('an explicit user allow rule still beats the plan-mode base deny for bash', () => {
-    expect(decide('bash', { command: 'rm -rf /tmp/x' }, ctx({ allow: ['Bash(rm -rf /tmp/x)'] }))).toBe('allow')
+    expect(
+      decide('bash', { command: 'rm -rf /tmp/x' }, ctx({ allow: ['Bash(rm -rf /tmp/x)'] }))
+    ).toBe('allow')
   })
 })
 
@@ -193,7 +202,7 @@ describe('PLAN_MODE_DENY_REASON', () => {
   })
 })
 
-describe("decide — exit_plan OUTSIDE plan mode denies in every mode (M5a addendum)", () => {
+describe('decide — exit_plan OUTSIDE plan mode denies in every mode (M5a addendum)', () => {
   // pi.registerTool() auto-activates the tool, so exit_plan is model-visible
   // from spawn in EVERY mode until the extension's session_start hook hides
   // it — the gate is the backstop: kind 'plan' outside mode 'plan' denies,
@@ -322,7 +331,11 @@ describe('isPlanSafeBashCommand (M5a — per-segment validation, deny-when-unsur
 
 describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
   it('contains exactly the three hosted LLM tools, not dispatch_agent', () => {
-    expect([...PI_AUTO_ALLOW_HOSTED_TOOLS].sort()).toEqual(['create_mockup', 'render_mermaid', 'show_mockup'])
+    expect([...PI_AUTO_ALLOW_HOSTED_TOOLS].sort()).toEqual([
+      'create_mockup',
+      'render_mermaid',
+      'show_mockup'
+    ])
   })
 
   it.each(['render_mermaid', 'create_mockup', 'show_mockup'])(
@@ -336,7 +349,11 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
   it.each(['render_mermaid', 'create_mockup', 'show_mockup'])(
     '%s is allowed even with an unrelated ask rule present',
     (toolName) => {
-      const ctx = { mode: 'default', rules: rules({ ask: ['Bash'] }), sessionAllows: NO_SESSION_ALLOWS }
+      const ctx = {
+        mode: 'default',
+        rules: rules({ ask: ['Bash'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      }
       expect(decide(toolName, {}, ctx)).toBe('allow')
     }
   )
@@ -357,9 +374,15 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
   })
 
   it('subagent (M5b) is NOT auto-allowed either — same normal "task" kind mode-base gating: ask in default, allow in full, deny in plan', () => {
-    expect(decide('subagent', {}, { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })).toBe('ask')
-    expect(decide('subagent', {}, { mode: 'full', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })).toBe('allow')
-    expect(decide('subagent', {}, { mode: 'plan', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })).toBe('deny')
+    expect(
+      decide('subagent', {}, { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })
+    ).toBe('ask')
+    expect(
+      decide('subagent', {}, { mode: 'full', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })
+    ).toBe('allow')
+    expect(
+      decide('subagent', {}, { mode: 'plan', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })
+    ).toBe('deny')
   })
 
   it('checks deny rules BEFORE the hosted-tool auto-allow short-circuit (source-order guard)', () => {
@@ -421,33 +444,57 @@ describe('decide — deny > ask > allow precedence', () => {
 
 describe('decide — Bash prefix/exact rules', () => {
   it('a prefix rule (cmd:*) matches a command starting with that prefix', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Bash(npm test:*)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Bash(npm test:*)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: 'npm test unit' }, ctx)).toBe('allow')
   })
 
   it('a prefix rule does not match an unrelated command', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Bash(npm test:*)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Bash(npm test:*)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: 'npm build' }, ctx)).toBe('ask')
   })
 
   it('an exact rule (no :*) matches only the identical command', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Bash(echo hi)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Bash(echo hi)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: 'echo hi' }, ctx)).toBe('allow')
     expect(decide('bash', { command: 'echo hi there' }, ctx)).toBe('ask')
   })
 
   it('whitespace-normalizes both the rule and the command before comparing (prefix form)', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Bash(npm  test:*)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Bash(npm  test:*)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: '  npm test   unit  ' }, ctx)).toBe('allow')
   })
 
   it('whitespace-normalizes both the rule and the command before comparing (exact form)', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Bash(echo   hi)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Bash(echo   hi)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: '  echo hi  ' }, ctx)).toBe('allow')
   })
 
   it('a bare Bash rule (no specifier) matches every command', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Bash'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Bash'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: 'anything at all' }, ctx)).toBe('allow')
   })
 })
@@ -490,38 +537,62 @@ describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) ar
   })
 
   it('Read(**) (a broad glob) is honored for read', () => {
-    const ctx = { mode: 'default', rules: rules({ deny: ['Read(**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ deny: ['Read(**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('read', { path: 'anything/at/all.ts' }, ctx)).toBe('deny')
   })
 
   it('a scoped Read(docs/**) matches only under docs/', () => {
-    const ctx = { mode: 'default', rules: rules({ deny: ['Read(docs/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ deny: ['Read(docs/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('read', { path: 'docs/readme.md' }, ctx)).toBe('deny')
     // Mode base for read is 'allow' — the deny rule not matching falls through to it.
     expect(decide('read', { path: 'src/foo.ts' }, ctx)).toBe('allow')
   })
 
   it('deny precedence: a scoped Deny Edit(src/secret/**) wins even in full (allow-everything) mode', () => {
-    const ctx = { mode: 'full', rules: rules({ deny: ['Edit(src/secret/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'full',
+      rules: rules({ deny: ['Edit(src/secret/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('edit', { path: 'src/secret/keys.ts' }, ctx)).toBe('deny')
     // A different path under the same mode falls through to full mode's allow-everything base.
     expect(decide('edit', { path: 'src/other.ts' }, ctx)).toBe('allow')
   })
 
   it('a path-bearing rule never default-allows when the input has no usable path', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     // No `path`/`file_path` on the input at all — falls through to mode base ('ask' for edit).
     expect(decide('edit', {}, ctx)).toBe('ask')
   })
 
   it('search kind (grep/find/ls) path-scoping: a rule matches the search-root `path` field', () => {
-    const ctx = { mode: 'default', rules: rules({ deny: ['Grep(secrets/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ deny: ['Grep(secrets/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('grep', { pattern: 'TODO', path: 'secrets/vault' }, ctx)).toBe('deny')
     expect(decide('grep', { pattern: 'TODO', path: 'src' }, ctx)).toBe('allow') // mode base for search is allow
   })
 
   it('a Grep(TODO)-style search-TERM specifier is attempted as a path glob and (correctly) never matches a real path — falls through, never default-allows', () => {
-    const ctx = { mode: 'default', rules: rules({ deny: ['Grep(TODO)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ deny: ['Grep(TODO)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('grep', { pattern: 'TODO', path: 'src' }, ctx)).toBe('allow') // mode base for search — deny rule didn't match
   })
 
@@ -596,7 +667,11 @@ describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) ar
   })
 
   it('no-cwd fallback: matches the RAW input path as-is (documented best-effort) when the caller omits cwd', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     // No cwd -> raw path used directly; an absolute path is compared literally
     // and does NOT match a relative-style glob (documents the limitation).
     expect(decide('edit', { path: '/repo/src/foo.ts' }, ctx)).toBe('ask')
@@ -605,7 +680,11 @@ describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) ar
   })
 
   it('legacy file_path alias is honored for edit/write/read when path is absent', () => {
-    const ctx = { mode: 'default', rules: rules({ deny: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ deny: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('edit', { file_path: 'src/foo.ts' }, ctx)).toBe('deny')
   })
 })
@@ -626,58 +705,98 @@ describe('decide — ABSOLUTE / home-dir / Windows-absolute rule specifiers', ()
   })
 
   it('`//abs/path` (Claude double-slash = absolute) matches the absolute tool path', () => {
-    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))).toBe('deny')
-    expect(decide('edit', { path: '/srv/secrets/k.pem' }, ctx({ deny: ['Edit(//srv/secrets/**)'] }, '/repo'))).toBe(
-      'deny'
-    )
+    expect(
+      decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))
+    ).toBe('deny')
+    expect(
+      decide(
+        'edit',
+        { path: '/srv/secrets/k.pem' },
+        ctx({ deny: ['Edit(//srv/secrets/**)'] }, '/repo')
+      )
+    ).toBe('deny')
   })
 
   it('`~/…` expands to the home directory', () => {
     const cwd = path.join(HOME, 'proj')
-    expect(decide('read', { path: path.join(HOME, '.ssh', 'id_rsa') }, ctx({ deny: ['Read(~/.ssh/**)'] }, cwd))).toBe(
-      'deny'
-    )
+    expect(
+      decide(
+        'read',
+        { path: path.join(HOME, '.ssh', 'id_rsa') },
+        ctx({ deny: ['Read(~/.ssh/**)'] }, cwd)
+      )
+    ).toBe('deny')
     // …and a bare `~` covers the whole home tree.
-    expect(decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~)'] }, cwd))).toBe('allow')
-    expect(decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~/**)'] }, cwd))).toBe('deny')
+    expect(
+      decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~)'] }, cwd))
+    ).toBe('allow')
+    expect(
+      decide('read', { path: path.join(HOME, 'notes.md') }, ctx({ deny: ['Read(~/**)'] }, cwd))
+    ).toBe('deny')
   })
 
   it('a Windows-absolute specifier matches regardless of separator or drive-letter case', () => {
     for (const rule of ['Edit(D:\\secrets\\**)', 'Edit(D:/secrets/**)', 'Edit(d:/secrets/**)']) {
-      expect(decide('edit', { path: 'D:\\secrets\\keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')), rule).toBe('deny')
-      expect(decide('edit', { path: 'd:/secrets/keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')), rule).toBe('deny')
+      expect(
+        decide('edit', { path: 'D:\\secrets\\keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')),
+        rule
+      ).toBe('deny')
+      expect(
+        decide('edit', { path: 'd:/secrets/keys.txt' }, ctx({ deny: [rule] }, 'D:\\repo')),
+        rule
+      ).toBe('deny')
     }
   })
 
   it('a relative tool path is resolved against cwd before the absolute comparison', () => {
     // `src/a.ts` under cwd D:\secrets IS inside the denied tree.
-    expect(decide('edit', { path: 'src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\secrets'))).toBe('deny')
+    expect(
+      decide('edit', { path: 'src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\secrets'))
+    ).toBe('deny')
   })
 
   it('an absolute specifier does NOT match a path outside it (no over-broadening)', () => {
-    expect(decide('read', { path: '/etc/hosts' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))).toBe('allow')
-    expect(decide('edit', { path: 'D:\\repo\\src\\a.ts' }, ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\repo'))).toBe(
-      'ask'
-    )
+    expect(
+      decide('read', { path: '/etc/hosts' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))
+    ).toBe('allow')
+    expect(
+      decide(
+        'edit',
+        { path: 'D:\\repo\\src\\a.ts' },
+        ctx({ deny: ['Edit(D:\\secrets\\**)'] }, 'D:\\repo')
+      )
+    ).toBe('ask')
   })
 
   it('a `..`-containing tool path is normalised before comparing (no traversal escape)', () => {
     expect(
-      decide('read', { path: '/repo/../etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }, '/repo'))
+      decide(
+        'read',
+        { path: '/repo/../etc/passwd' },
+        ctx({ deny: ['Read(//etc/passwd)'] }, '/repo')
+      )
     ).toBe('deny')
   })
 
   it('an absolute specifier still works on the no-cwd best-effort path when the input is already absolute', () => {
-    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }))).toBe('deny')
+    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(//etc/passwd)'] }))).toBe(
+      'deny'
+    )
   })
 
   it('a SINGLE leading slash is NOT treated as absolute (unchanged — Claude reads it as settings-relative)', () => {
-    expect(decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(/etc/passwd)'] }, '/repo'))).toBe('allow')
+    expect(
+      decide('read', { path: '/etc/passwd' }, ctx({ deny: ['Read(/etc/passwd)'] }, '/repo'))
+    ).toBe('allow')
   })
 
   it('ordinary relative specifiers keep their cwd-relative semantics', () => {
-    expect(decide('edit', { path: '/repo/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))).toBe('deny')
-    expect(decide('edit', { path: '/elsewhere/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))).toBe('ask')
+    expect(
+      decide('edit', { path: '/repo/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))
+    ).toBe('deny')
+    expect(
+      decide('edit', { path: '/elsewhere/src/foo.ts' }, ctx({ deny: ['Edit(src/**)'] }, '/repo'))
+    ).toBe('ask')
   })
 })
 
@@ -714,7 +833,7 @@ describe('additionalDirectories / defaultMode — deliberately deferred, must st
   })
 })
 
-describe('claudeGlobMatches — parity with opencode\'s real Wildcard.match (vendor/opencode-src/packages/core/src/util/wildcard.ts)', () => {
+describe("claudeGlobMatches — parity with opencode's real Wildcard.match (vendor/opencode-src/packages/core/src/util/wildcard.ts)", () => {
   // Independently re-derived from the vendored source (not a call into the
   // same implementation) — an oracle to catch drift if claudeGlobMatches'
   // port is ever edited out of step with what it's supposed to mirror.
@@ -726,7 +845,9 @@ describe('claudeGlobMatches — parity with opencode\'s real Wildcard.match (ven
       .replace(/\*/g, '.*')
       .replace(/\?/g, '.')
     if (escaped.endsWith(' .*')) escaped = escaped.slice(0, -3) + '( .*)?'
-    return new RegExp('^' + escaped + '$', process.platform === 'win32' ? 'si' : 's').test(normalized)
+    return new RegExp('^' + escaped + '$', process.platform === 'win32' ? 'si' : 's').test(
+      normalized
+    )
   }
 
   const cases: [string, string][] = [
@@ -741,9 +862,12 @@ describe('claudeGlobMatches — parity with opencode\'s real Wildcard.match (ven
     ['a/bb.ts', 'a/?.ts']
   ]
 
-  it.each(cases)('claudeGlobMatches(%j, %j) agrees with the independently re-derived reference', (input, pattern) => {
-    expect(claudeGlobMatches(input, pattern)).toBe(referenceWildcardMatch(input, pattern))
-  })
+  it.each(cases)(
+    'claudeGlobMatches(%j, %j) agrees with the independently re-derived reference',
+    (input, pattern) => {
+      expect(claudeGlobMatches(input, pattern)).toBe(referenceWildcardMatch(input, pattern))
+    }
+  )
 })
 
 describe('decide — sessionAllows', () => {
@@ -765,14 +889,22 @@ describe('decide — sessionAllows', () => {
   })
 
   it('sessionAllows is checked before allow rules but after deny/ask', () => {
-    const ctx = { mode: 'default', rules: rules({ deny: ['Bash'] }), sessionAllows: new Set(['bash:npm test']) }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ deny: ['Bash'] }),
+      sessionAllows: new Set(['bash:npm test'])
+    }
     expect(decide('bash', { command: 'npm test' }, ctx)).toBe('deny')
   })
 })
 
 describe('decide — unknown Claude tool names never match a pi tool', () => {
   it('an unmapped allow rule never matches (falls through to mode base)', () => {
-    const ctx = { mode: 'default', rules: rules({ allow: ['WebFetch'] }), sessionAllows: NO_SESSION_ALLOWS }
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['WebFetch'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
     expect(decide('bash', { command: 'x' }, ctx)).toBe('ask')
   })
 
@@ -801,8 +933,10 @@ describe('normalizeWhitespace', () => {
 describe('mergedClaudeRulesFor', () => {
   it('merges user + project + local scopes in order', () => {
     mockLoadClaudePermissions.mockImplementation((scope: string) => {
-      if (scope === 'user') return { allow: ['Read'], deny: [], ask: [], additionalDirectories: ['/u'] }
-      if (scope === 'project') return { allow: ['Edit'], deny: ['Bash(rm:*)'], ask: [], additionalDirectories: [] }
+      if (scope === 'user')
+        return { allow: ['Read'], deny: [], ask: [], additionalDirectories: ['/u'] }
+      if (scope === 'project')
+        return { allow: ['Edit'], deny: ['Bash(rm:*)'], ask: [], additionalDirectories: [] }
       return { allow: [], deny: [], ask: ['Write'], additionalDirectories: ['/l'] }
     })
 
@@ -825,7 +959,7 @@ describe('mergedClaudeRulesFor', () => {
     expect(mergedClaudeRulesFor('/cwd')).toEqual(rules())
   })
 
-  it('the catch-path result is a FRESH, mutable object — not `{...EMPTY_RULES}` sharing EMPTY_RULES\' frozen arrays (A9)', () => {
+  it("the catch-path result is a FRESH, mutable object — not `{...EMPTY_RULES}` sharing EMPTY_RULES' frozen arrays (A9)", () => {
     mockLoadClaudePermissions.mockImplementation(() => {
       throw new Error('disk on fire')
     })
@@ -880,64 +1014,92 @@ describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
 
 describe('decideWithSource — provenance for every rung of the ladder', () => {
   it('reports ask-rule (with the matched rule) for a USER ask, and mode-base for the same tool without one', () => {
-    const withRule = decideWithSource('bash', { command: 'git push origin main' }, {
-      mode: 'acceptEdits',
-      rules: rules({ ask: ['Bash(git push:*)'] }),
-      sessionAllows: NO_SESSION_ALLOWS
-    })
+    const withRule = decideWithSource(
+      'bash',
+      { command: 'git push origin main' },
+      {
+        mode: 'acceptEdits',
+        rules: rules({ ask: ['Bash(git push:*)'] }),
+        sessionAllows: NO_SESSION_ALLOWS
+      }
+    )
     expect(withRule).toEqual({ decision: 'ask', source: 'ask-rule', rule: 'Bash(git push:*)' })
 
     // Same decision, entirely different provenance — this is the distinction
     // opencode cannot make natively and pi can.
-    const withoutRule = decideWithSource('bash', { command: 'git push origin main' }, {
-      mode: 'acceptEdits',
-      rules: rules(),
-      sessionAllows: NO_SESSION_ALLOWS
-    })
+    const withoutRule = decideWithSource(
+      'bash',
+      { command: 'git push origin main' },
+      {
+        mode: 'acceptEdits',
+        rules: rules(),
+        sessionAllows: NO_SESSION_ALLOWS
+      }
+    )
     expect(withoutRule).toEqual({ decision: 'ask', source: 'mode-base' })
   })
 
   it('a NON-matching ask rule does not claim provenance', () => {
     expect(
-      decideWithSource('bash', { command: 'npm test' }, {
-        mode: 'acceptEdits',
-        rules: rules({ ask: ['Bash(git push:*)'] }),
-        sessionAllows: NO_SESSION_ALLOWS
-      })
+      decideWithSource(
+        'bash',
+        { command: 'npm test' },
+        {
+          mode: 'acceptEdits',
+          rules: rules({ ask: ['Bash(git push:*)'] }),
+          sessionAllows: NO_SESSION_ALLOWS
+        }
+      )
     ).toEqual({ decision: 'ask', source: 'mode-base' })
   })
 
   it('reports deny-rule / allow-rule / session-allow / hosted-auto-allow at their own rungs', () => {
     expect(
-      decideWithSource('bash', { command: 'rm -rf x' }, {
-        mode: 'full',
-        rules: rules({ deny: ['Bash(rm:*)'], ask: ['Bash'] }),
-        sessionAllows: NO_SESSION_ALLOWS
-      })
+      decideWithSource(
+        'bash',
+        { command: 'rm -rf x' },
+        {
+          mode: 'full',
+          rules: rules({ deny: ['Bash(rm:*)'], ask: ['Bash'] }),
+          sessionAllows: NO_SESSION_ALLOWS
+        }
+      )
     ).toEqual({ decision: 'deny', source: 'deny-rule', rule: 'Bash(rm:*)' })
 
     expect(
-      decideWithSource('edit', { path: 'src/x.ts' }, {
-        mode: 'default',
-        rules: rules({ allow: ['Edit(src/**)'] }),
-        sessionAllows: NO_SESSION_ALLOWS
-      })
+      decideWithSource(
+        'edit',
+        { path: 'src/x.ts' },
+        {
+          mode: 'default',
+          rules: rules({ allow: ['Edit(src/**)'] }),
+          sessionAllows: NO_SESSION_ALLOWS
+        }
+      )
     ).toEqual({ decision: 'allow', source: 'allow-rule', rule: 'Edit(src/**)' })
 
     expect(
-      decideWithSource('bash', { command: 'npm test' }, {
-        mode: 'default',
-        rules: rules(),
-        sessionAllows: new Set(['bash:npm test'])
-      })
+      decideWithSource(
+        'bash',
+        { command: 'npm test' },
+        {
+          mode: 'default',
+          rules: rules(),
+          sessionAllows: new Set(['bash:npm test'])
+        }
+      )
     ).toEqual({ decision: 'allow', source: 'session-allow' })
 
     expect(
-      decideWithSource('render_mermaid', {}, {
-        mode: 'default',
-        rules: rules(),
-        sessionAllows: NO_SESSION_ALLOWS
-      })
+      decideWithSource(
+        'render_mermaid',
+        {},
+        {
+          mode: 'default',
+          rules: rules(),
+          sessionAllows: NO_SESSION_ALLOWS
+        }
+      )
     ).toEqual({ decision: 'allow', source: 'hosted-auto-allow' })
   })
 
@@ -1022,12 +1184,16 @@ describe('withoutAllowRules — the auto-mode allow filter', () => {
 
   it('a session "allow for this session" click still allows — only stored rules are filtered', () => {
     expect(
-      decideWithSource('bash', { command: 'npm publish' }, {
-        mode: 'acceptEdits',
-        rules: withoutAllowRules(full()),
-        sessionAllows: new Set(['bash:npm publish']),
-        cwd: '/repo'
-      })
+      decideWithSource(
+        'bash',
+        { command: 'npm publish' },
+        {
+          mode: 'acceptEdits',
+          rules: withoutAllowRules(full()),
+          sessionAllows: new Set(['bash:npm publish']),
+          cwd: '/repo'
+        }
+      )
     ).toEqual({ decision: 'allow', source: 'session-allow' })
   })
 })

@@ -152,7 +152,9 @@ const CONNECTION_ID = 'conn-mic'
 const ROUTING_ID = 'rid-voice'
 
 function framesFor(connectionId: string, channel: string): unknown[][] {
-  return deliveries.filter((d) => d.connectionId === connectionId && d.channel === channel).map((d) => d.args)
+  return deliveries
+    .filter((d) => d.connectionId === connectionId && d.channel === channel)
+    .map((d) => d.args)
 }
 
 function waitFor(predicate: () => boolean): Promise<void> {
@@ -197,7 +199,11 @@ describe('remote voice capture', () => {
   })
 
   it('defaults the language rather than sending an empty one', async () => {
-    await remoteVoice.start(makeManager(voiceServer.port), makeConnection(CONNECTION_ID), ROUTING_ID)
+    await remoteVoice.start(
+      makeManager(voiceServer.port),
+      makeConnection(CONNECTION_ID),
+      ROUTING_ID
+    )
     await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
     expect(voiceServer.received[0]).toEqual({ type: 'voice_start', language: 'en' })
   })
@@ -259,7 +265,9 @@ describe('remote voice capture', () => {
 
   it('drops a stray frame from a connection with no live capture, silently', async () => {
     expect(remoteVoice.isCapturing('conn-nobody')).toBe(false)
-    expect(() => remoteVoice.feed('conn-nobody', Buffer.from([1, 2]).toString('base64'))).not.toThrow()
+    expect(() =>
+      remoteVoice.feed('conn-nobody', Buffer.from([1, 2]).toString('base64'))
+    ).not.toThrow()
     expect(deliveries).toHaveLength(0)
     expect(voiceServer.connections).toBe(0)
     // No answer of any kind — not even a log line that would confirm the guess.
@@ -387,7 +395,10 @@ describe('remote voice capture', () => {
     remoteVoice.feed(CONNECTION_ID, secretB64)
     await waitFor(() => voiceServer.received.some((m) => m.type === 'audio'))
     // …and an over-budget one, whose refusal DOES log a line.
-    remoteVoice.feed(CONNECTION_ID, Buffer.alloc(MAX_VOICE_FRAME_BYTES + 1, 0x5a).toString('base64'))
+    remoteVoice.feed(
+      CONNECTION_ID,
+      Buffer.alloc(MAX_VOICE_FRAME_BYTES + 1, 0x5a).toString('base64')
+    )
 
     const logged = [
       ...loggerMock.debug.mock.calls,
@@ -400,6 +411,9 @@ describe('remote voice capture', () => {
     expect(logged).not.toContain(secretB64)
     expect(logged).not.toContain(secret.toString('binary'))
     // The oversize refusal reports a SIZE and nothing else.
-    expect(loggerMock.warn).toHaveBeenCalledWith('RemoteVoice', expect.stringContaining('oversized'))
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      'RemoteVoice',
+      expect.stringContaining('oversized')
+    )
   })
 })

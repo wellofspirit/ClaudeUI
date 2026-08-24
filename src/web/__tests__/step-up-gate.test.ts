@@ -13,10 +13,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { createStepUpGate } from '../step-up-gate'
-import {
-  NEEDS_SETTINGS_SESSION_ERROR,
-  NEEDS_STEP_UP_ERROR
-} from '../../shared/remote-protocol'
+import { NEEDS_SETTINGS_SESSION_ERROR, NEEDS_STEP_UP_ERROR } from '../../shared/remote-protocol'
 
 /** An attempt that fails with `needs-step-up` the first `failures` times. */
 function flaky(failures: number): { attempt: () => Promise<string>; calls: () => number } {

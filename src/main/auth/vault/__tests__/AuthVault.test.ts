@@ -154,7 +154,9 @@ describe('AuthVault validation', () => {
 })
 
 describe('AuthVault lifecycle compatibility', () => {
-  function flow(overrides: Partial<import('../../../../core/auth/vault/codex-oauth').LoginFlow> = {}) {
+  function flow(
+    overrides: Partial<import('../../../../core/auth/vault/codex-oauth').LoginFlow> = {}
+  ) {
     return {
       start: vi.fn(async () => ({ authorizeUrl: 'https://example.test/auth', state: 's' })),
       waitForCallback: vi.fn(async () => ({

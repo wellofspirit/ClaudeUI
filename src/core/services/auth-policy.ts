@@ -20,11 +20,7 @@
  */
 
 import type { Capability, CommandConnection } from '../ipc/command-registry'
-import {
-  AUTH_OFF_GRANTS,
-  ENROLL_ONLY_GRANTS,
-  FULL_REMOTE_GRANTS
-} from '../ipc/command-registry'
+import { AUTH_OFF_GRANTS, ENROLL_ONLY_GRANTS, FULL_REMOTE_GRANTS } from '../ipc/command-registry'
 import {
   appendAuditLog,
   countWebauthnCredentials,
@@ -303,7 +299,9 @@ export function describeAuthSurfaceChange(
     parts.push(`step-up tier ${before.stepUpTier}→${after.stepUpTier}`)
   }
   if (before.passwordBreakGlass !== after.passwordBreakGlass) {
-    parts.push(`break-glass password ${before.passwordBreakGlass ? 'on' : 'off'}→${after.passwordBreakGlass ? 'on' : 'off'}`)
+    parts.push(
+      `break-glass password ${before.passwordBreakGlass ? 'on' : 'off'}→${after.passwordBreakGlass ? 'on' : 'off'}`
+    )
   }
   if (before.stepUpMutationIdleMinutes !== after.stepUpMutationIdleMinutes) {
     parts.push(
@@ -351,7 +349,9 @@ export function readAuthSurface(): AuthSurfaceSnapshot {
  * The tier in force right now — auth-mode `off` forces `off` (ADR-054 decision
  * 3). One reader, so a caller can never pair a raw tier with a resolved policy.
  */
-export function readEffectiveStepUpTier(ctx: AuthPolicyContext = readAuthPolicyContext()): StepUpTier {
+export function readEffectiveStepUpTier(
+  ctx: AuthPolicyContext = readAuthPolicyContext()
+): StepUpTier {
   return resolveStepUpTier(resolveAuthPolicy(ctx), ctx.stepUpTier)
 }
 

@@ -33,7 +33,10 @@ export class BashStreamGate {
   private readonly pending = new Map<string, string>()
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  constructor(private readonly emit: (key: string, value: string) => void, options: BashStreamGateOptions = {}) {
+  constructor(
+    private readonly emit: (key: string, value: string) => void,
+    options: BashStreamGateOptions = {}
+  ) {
     this.intervalMs = options.intervalMs ?? 100
   }
 

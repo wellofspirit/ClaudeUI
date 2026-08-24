@@ -666,7 +666,15 @@ describe('buildChatMessage', () => {
       partOrder: ['p1', 'p2'],
       parts: new Map([
         ['p1', { type: 'text', text: 'hello' }],
-        ['p2', { type: 'tool', toolName: 'read', callID: 'c1', state: { status: 'running', input: { path: '/foo' } } }]
+        [
+          'p2',
+          {
+            type: 'tool',
+            toolName: 'read',
+            callID: 'c1',
+            state: { status: 'running', input: { path: '/foo' } }
+          }
+        ]
       ])
     }
     const msg = buildChatMessage('msg_x', acc)
@@ -719,8 +727,24 @@ describe('buildChatMessage — raw tool names (no normalization)', () => {
       messageId: 'msg_n',
       partOrder: ['p1', 'p2'],
       parts: new Map([
-        ['p1', { type: 'tool', toolName: 'create_mockup', callID: 'c1', state: { status: 'completed', input: { html: '<div/>' } } }],
-        ['p2', { type: 'tool', toolName: 'show_mockup', callID: 'c2', state: { status: 'completed', input: { directory: 'abc12345' } } }]
+        [
+          'p1',
+          {
+            type: 'tool',
+            toolName: 'create_mockup',
+            callID: 'c1',
+            state: { status: 'completed', input: { html: '<div/>' } }
+          }
+        ],
+        [
+          'p2',
+          {
+            type: 'tool',
+            toolName: 'show_mockup',
+            callID: 'c2',
+            state: { status: 'completed', input: { directory: 'abc12345' } }
+          }
+        ]
       ])
     }
     const msg = buildChatMessage('msg_n', acc)
@@ -733,7 +757,15 @@ describe('buildChatMessage — raw tool names (no normalization)', () => {
       messageId: 'msg_o',
       partOrder: ['p1'],
       parts: new Map([
-        ['p1', { type: 'tool', toolName: 'bash', callID: 'c1', state: { status: 'completed', input: { command: 'ls' } } }]
+        [
+          'p1',
+          {
+            type: 'tool',
+            toolName: 'bash',
+            callID: 'c1',
+            state: { status: 'completed', input: { command: 'ls' } }
+          }
+        ]
       ])
     }
     const msg = buildChatMessage('msg_o', acc)
@@ -751,7 +783,9 @@ describe('extractToolResult', () => {
   })
 
   it('returns null for running tool', () => {
-    expect(extractToolResult('p1', { type: 'tool', callID: 'c1', state: { status: 'running' } })).toBeNull()
+    expect(
+      extractToolResult('p1', { type: 'tool', callID: 'c1', state: { status: 'running' } })
+    ).toBeNull()
   })
 
   it('returns result for completed tool', () => {
@@ -783,9 +817,7 @@ describe('extractToolResult', () => {
         ]
       }
     })
-    expect(res?.images).toEqual([
-      { mediaType: 'image/png', base64Data: 'LIVE', fileName: 'a.png' }
-    ])
+    expect(res?.images).toEqual([{ mediaType: 'image/png', base64Data: 'LIVE', fileName: 'a.png' }])
   })
 
   it('omits images for a tool that returned none', () => {
@@ -878,8 +910,20 @@ describe('extractToolResult', () => {
       }
     })
     expect(res?.fileDiffs).toEqual([
-      { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' },
-      { path: 'b.ts', patch: '@@ -0,0 +1 @@\n+new file', additions: 1, deletions: 0, changeType: 'add' }
+      {
+        path: 'a.ts',
+        patch: '@@ -1 +1 @@\n-old\n+new',
+        additions: 1,
+        deletions: 1,
+        changeType: 'update'
+      },
+      {
+        path: 'b.ts',
+        patch: '@@ -0,0 +1 @@\n+new file',
+        additions: 1,
+        deletions: 0,
+        changeType: 'add'
+      }
     ])
   })
 
@@ -894,12 +938,23 @@ describe('extractToolResult', () => {
         metadata: {
           diagnostics: {},
           diff: '@@ -1 +1 @@\n-old\n+new',
-          filediff: { file: '/repo/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1 }
+          filediff: {
+            file: '/repo/a.ts',
+            patch: '@@ -1 +1 @@\n-old\n+new',
+            additions: 1,
+            deletions: 1
+          }
         }
       }
     })
     expect(res?.fileDiffs).toEqual([
-      { path: '/repo/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+      {
+        path: '/repo/a.ts',
+        patch: '@@ -1 +1 @@\n-old\n+new',
+        additions: 1,
+        deletions: 1,
+        changeType: 'update'
+      }
     ])
   })
 
@@ -932,8 +987,7 @@ describe('extractToolResult', () => {
 
 describe('extractFileDiffs', () => {
   it('returns undefined when metadata is undefined', () => {
-    expect(extractFileDiffs(undefined, undefined))
-      .toBeUndefined()
+    expect(extractFileDiffs(undefined, undefined)).toBeUndefined()
   })
 
   it('apply_patch shape: skips entries with an empty/missing patch', () => {
@@ -947,7 +1001,13 @@ describe('extractFileDiffs', () => {
       undefined
     )
     expect(diffs).toEqual([
-      { path: 'b.ts', patch: '@@ -1 +0,0 @@\n-gone', additions: undefined, deletions: undefined, changeType: 'delete' }
+      {
+        path: 'b.ts',
+        patch: '@@ -1 +0,0 @@\n-gone',
+        additions: undefined,
+        deletions: undefined,
+        changeType: 'delete'
+      }
     ])
   })
 
@@ -988,7 +1048,10 @@ describe('mapEvent — question.asked', () => {
         {
           question: 'Which language?',
           header: 'Language',
-          options: [{ label: 'TypeScript', description: 'TS' }, { label: 'Python', description: 'PY' }],
+          options: [
+            { label: 'TypeScript', description: 'TS' },
+            { label: 'Python', description: 'PY' }
+          ],
           multiple: false,
           custom: true
         }
@@ -1003,7 +1066,12 @@ describe('mapEvent — question.asked', () => {
       expect(out.approval.toolUseId).toBe('call_q1')
       const input = out.approval.input as { questions: unknown[] }
       expect(input.questions).toHaveLength(1)
-      const q = (input.questions[0]) as { question: string; header: string; multiSelect: boolean; options: unknown[] }
+      const q = input.questions[0] as {
+        question: string
+        header: string
+        multiSelect: boolean
+        options: unknown[]
+      }
       expect(q.question).toBe('Which language?')
       expect(q.header).toBe('Language')
       expect(q.multiSelect).toBe(false)
@@ -1022,7 +1090,10 @@ describe('mapEvent — question.asked', () => {
         {
           question: 'Select features',
           header: 'Features',
-          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+          options: [
+            { label: 'A', description: '' },
+            { label: 'B', description: '' }
+          ],
           multiple: true
         }
       ]
@@ -1307,7 +1378,11 @@ describe('mapEvent — Phase 8d: child message.part.updated → subagent-message
         sessionID: CHILD_SESSION_ID,
         info: { id: 'child_msg_a', role: 'assistant' }
       }),
-      SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
     )
     const ev = makeEvent('message.part.updated', {
       sessionID: CHILD_SESSION_ID,
@@ -1332,7 +1407,11 @@ describe('mapEvent — Phase 8d: child message.part.updated → subagent-message
         sessionID: CHILD_SESSION_ID,
         info: { id: 'child_msg_u', role: 'user' }
       }),
-      SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
     )
     const ev = makeEvent('message.part.updated', {
       sessionID: CHILD_SESSION_ID,
@@ -1563,7 +1642,14 @@ describe('mapEvent — Phase 8e Part 2: child-event ordering (registration befor
         }
       }
     })
-    const regOut = mapEvent(regEvent, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    const regOut = mapEvent(
+      regEvent,
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
     // Registration must succeed (parent message emitted + child registered)
     expect(regOut.kind).toBe('message')
     expect(childSessions.has(CHILD_SESSION_ID)).toBe(true)
@@ -1575,13 +1661,24 @@ describe('mapEvent — Phase 8e Part 2: child-event ordering (registration befor
         sessionID: CHILD_SESSION_ID,
         info: { id: 'child_msg_8e', role: 'assistant' }
       }),
-      SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
     )
     const childMsgEvent = makeEvent('message.part.updated', {
       sessionID: CHILD_SESSION_ID,
       part: { id: 'cp_8e', messageID: 'child_msg_8e', type: 'text', text: 'child result' }
     })
-    const childOut = mapEvent(childMsgEvent, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    const childOut = mapEvent(
+      childMsgEvent,
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 },
+      childSessions
+    )
 
     // Must route to subagent-message (not ignored) — proves registration preceded the transcript event
     expect(childOut.kind).toBe('subagent-message')
@@ -1623,7 +1720,11 @@ describe('Phase 9a — child message.updated captures model + childSessionId + c
           tokens: { input: 100, output: 50 }
         }
       }),
-      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+      PARENT_SES,
+      accumulators,
+      START_TIME,
+      totalCostRef,
+      childSessions
     )
 
     const acc = accumulators.get('child_msg_9a')!
@@ -1641,9 +1742,18 @@ describe('Phase 9a — child message.updated captures model + childSessionId + c
     mapEvent(
       makeEvent('message.updated', {
         sessionID: CHILD_SES,
-        info: { id: 'child_msg_no_model', role: 'assistant', cost: 0.1, tokens: { input: 10, output: 5 } }
+        info: {
+          id: 'child_msg_no_model',
+          role: 'assistant',
+          cost: 0.1,
+          tokens: { input: 10, output: 5 }
+        }
       }),
-      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+      PARENT_SES,
+      accumulators,
+      START_TIME,
+      totalCostRef,
+      childSessions
     )
 
     const acc = accumulators.get('child_msg_no_model')!
@@ -1671,12 +1781,17 @@ describe('Phase 9a — child message.updated captures model + childSessionId + c
         info: {
           id: 'child_cost_guard',
           role: 'assistant',
-          providerID: 'openai', modelID: 'gpt-4o',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
           cost: 0.99,
           tokens: { input: 100, output: 50 }
         }
       }),
-      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+      PARENT_SES,
+      accumulators,
+      START_TIME,
+      totalCostRef,
+      childSessions
     )
     // Child event returns ignore — totalCostUsd must still be 0 (child doesn't update it)
     expect(totalCostRef.value).toBe(0)
@@ -1687,7 +1802,11 @@ describe('Phase 9a — child message.updated captures model + childSessionId + c
         sessionID: PARENT_SES,
         info: { id: 'parent_cost_9a', role: 'assistant', cost: 0.5 }
       }),
-      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+      PARENT_SES,
+      accumulators,
+      START_TIME,
+      totalCostRef,
+      childSessions
     )
 
     // Must be a cost_update (own path, cost changed)
@@ -1743,7 +1862,14 @@ describe('mapEvent — child question.asked → floating approval (hang-fix)', (
     expect(out.approval.toolUseId).toBe(CHILD_Q_CALL)
     expect(out.approval.toolUseId).not.toBe(PARENT_Q_CALL)
 
-    const input = out.approval.input as { questions: Array<{ question: string; header: string; multiSelect: boolean; options: unknown[] }> }
+    const input = out.approval.input as {
+      questions: Array<{
+        question: string
+        header: string
+        multiSelect: boolean
+        options: unknown[]
+      }>
+    }
     expect(input.questions).toHaveLength(1)
     expect(input.questions[0].question).toBe('Which approach?')
     expect(input.questions[0].header).toBe('Strategy')
@@ -1763,7 +1889,10 @@ describe('mapEvent — child question.asked → floating approval (hang-fix)', (
         {
           question: 'Pick features',
           header: 'Features',
-          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+          options: [
+            { label: 'A', description: '' },
+            { label: 'B', description: '' }
+          ],
           multiple: true
         }
       ],
@@ -1800,8 +1929,12 @@ describe('mapEvent — child question.asked → floating approval (hang-fix)', (
       sessionID: CHILD_Q_ID,
       id: 'que_child_noq'
     })
-    expect(mapEvent(noId, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind).toBe('ignore')
-    expect(mapEvent(noQ, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind).toBe('ignore')
+    expect(
+      mapEvent(noId, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind
+    ).toBe('ignore')
+    expect(mapEvent(noQ, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind).toBe(
+      'ignore'
+    )
   })
 
   it('child question.asked from UNREGISTERED session → ignore (foreign session filter)', () => {
@@ -1840,7 +1973,9 @@ describe('mapEvent — child question.asked → floating approval (hang-fix)', (
     expect(out.approval.requestId).toBe('que_own_regression')
     expect(out.approval.toolName).toBe('AskUserQuestion')
     expect(out.approval.toolUseId).toBe('call_own_q')
-    const input = out.approval.input as { questions: Array<{ question: string; header: string; multiSelect: boolean }> }
+    const input = out.approval.input as {
+      questions: Array<{ question: string; header: string; multiSelect: boolean }>
+    }
     expect(input.questions).toHaveLength(1)
     expect(input.questions[0].question).toBe('Which language?')
     expect(input.questions[0].multiSelect).toBe(false)
@@ -2021,7 +2156,12 @@ describe('mapEvent — message.updated context-token advance (free-model fix)', 
     mapEvent(
       makeEvent('message.updated', {
         sessionID: SESSION_ID,
-        info: { id: 'msg_cache', role: 'assistant', cost: 0, tokens: { input: 200, cache: { read: 50 } } }
+        info: {
+          id: 'msg_cache',
+          role: 'assistant',
+          cost: 0,
+          tokens: { input: 200, cache: { read: 50 } }
+        }
       }),
       SESSION_ID,
       accumulators,
@@ -2033,7 +2173,12 @@ describe('mapEvent — message.updated context-token advance (free-model fix)', 
     const out = mapEvent(
       makeEvent('message.updated', {
         sessionID: SESSION_ID,
-        info: { id: 'msg_cache', role: 'assistant', cost: 0, tokens: { input: 200, cache: { read: 150 } } }
+        info: {
+          id: 'msg_cache',
+          role: 'assistant',
+          cost: 0,
+          tokens: { input: 200, cache: { read: 150 } }
+        }
       }),
       SESSION_ID,
       accumulators,
@@ -2055,7 +2200,11 @@ describe('mapEvent — message.updated context-token advance (free-model fix)', 
 describe('computeStoredDurationMs', () => {
   function userMsg(id: string, createdMs?: number): StoredMessage {
     return {
-      info: { id, role: 'user', time: createdMs !== undefined ? { created: createdMs } : undefined },
+      info: {
+        id,
+        role: 'user',
+        time: createdMs !== undefined ? { created: createdMs } : undefined
+      },
       parts: []
     }
   }

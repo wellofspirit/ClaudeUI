@@ -192,12 +192,7 @@ describe('session-watcher', () => {
         expect(entry, 'no watch-update reached the ring').toBeDefined()
         const payload = entry!.args[0] as Record<string, unknown>
         // The bloat, gone: no transcript, no notifications, no status line.
-        expect(Object.keys(payload).sort()).toEqual([
-          'cwd',
-          'projectKey',
-          'routingId',
-          'sessionId'
-        ])
+        expect(Object.keys(payload).sort()).toEqual(['cwd', 'projectKey', 'routingId', 'sessionId'])
       },
       { timeout: 3000 }
     )
@@ -232,7 +227,12 @@ describe('session-watcher', () => {
           release = () =>
             resolve({
               messages: [
-                { id: 'm-1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }
+                {
+                  id: 'm-1',
+                  role: 'assistant',
+                  content: [{ type: 'text', text: 'hi' }],
+                  timestamp: 0
+                }
               ],
               taskNotifications: [],
               customTitle: null,
@@ -363,9 +363,7 @@ describe('session-watcher', () => {
     const win = makeFakeWindow()
     const missingSessionId = 'never-created-session'
 
-    expect(() =>
-      watchSession('routing-missing', missingSessionId, ctx.projectKey)
-    ).not.toThrow()
+    expect(() => watchSession('routing-missing', missingSessionId, ctx.projectKey)).not.toThrow()
 
     // No watcher was registered, so calling unwatch on it is also safe.
     expect(() => unwatchSession('routing-missing')).not.toThrow()

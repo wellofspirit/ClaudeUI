@@ -67,10 +67,7 @@ describe('the sealed-field lint brand', () => {
 })
 
 describe('the sealed set is DERIVED from the snapshot, not chosen', () => {
-  const snapshot = toSnapshot(
-    { ...emptyCanonicalState(), sessions: { r1: emptySession('r1') } },
-    0
-  )
+  const snapshot = toSnapshot({ ...emptyCanonicalState(), sessions: { r1: emptySession('r1') } }, 0)
 
   it('every sealed per-session field maps to a real wire field', () => {
     const wireKeys = new Set(Object.keys(snapshot.sessions['r1']))

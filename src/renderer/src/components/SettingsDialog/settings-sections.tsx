@@ -185,7 +185,10 @@ function GlobalPermissionsSummary(): React.JSX.Element {
   const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
 
   return (
-    <div data-testid="GlobalPermissionsSummary" className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid="GlobalPermissionsSummary"
+      className="px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="flex items-center justify-between">
         <div>
           <div className="text-text-secondary mb-0.5">Global permission rules</div>
@@ -248,7 +251,11 @@ function ModelEffortRow({
   const levels = supportedEffortLevels(modelId)
   const fallback = defaultEffort(modelId)
   return (
-    <div data-testid="ModelEffortRow" data-id={modelId} className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid="ModelEffortRow"
+      data-id={modelId}
+      className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <span>{modelLabel}</span>
         <span className="text-[10px] text-text-muted/50">{modelId}</span>
@@ -559,7 +566,9 @@ function selectedModelDisplay(
 ): ModelDisplay {
   const known = models.find((m) => m.value === value)
   if (known) return { ...known, shortName: known.displayName || known.value }
-  const label = value ? `${value}${isStaleModelValue(models, value) ? UNAVAILABLE_SUFFIX : ''}` : emptyLabel
+  const label = value
+    ? `${value}${isStaleModelValue(models, value) ? UNAVAILABLE_SUFFIX : ''}`
+    : emptyLabel
   return { value, displayName: label, shortName: label }
 }
 
@@ -696,11 +705,18 @@ function AutoModeSection({
   }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid={testid}
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         {notInstalledMessage}
       </div>
     )
@@ -786,7 +802,9 @@ function AutoModeSection({
               description={f.description}
             />
           ))}
-          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
+          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+            {footerText}
+          </div>
         </>
       )}
     </div>
@@ -883,11 +901,18 @@ function DispatchSection({
   }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid={testid}
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         {notInstalledMessage}
       </div>
     )
@@ -1069,16 +1094,17 @@ function VendorAnthropicEditableForm({
   ]
 
   return (
-    <div data-testid="VendorAnthropicEditableForm" className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4">
+    <div
+      data-testid="VendorAnthropicEditableForm"
+      className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4"
+    >
       {/* Endpoint */}
       <div className="space-y-2">
         <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
         <SettingsToggle
           label="Enable custom endpoint"
           checked={endpoint.enabled}
-          onChange={(v) =>
-            updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })
-          }
+          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
         />
         {endpoint.enabled && (
           <div className="space-y-1.5 pl-1">
@@ -1116,9 +1142,7 @@ function VendorAnthropicEditableForm({
         <SettingsToggle
           label="Enable model override"
           checked={modelOverride.enabled}
-          onChange={(v) =>
-            updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })
-          }
+          onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
         />
         {modelOverride.enabled && (
           <div className="space-y-1.5 pl-1">
@@ -1181,9 +1205,9 @@ function ModelAllowlistDialog({
   onSave: (ids: string[]) => void
   onClose: () => void
 }): React.JSX.Element {
-  const [models, setModels] = useState<import('../../../../shared/types').OpencodeCatalogModel[] | null>(
-    null
-  )
+  const [models, setModels] = useState<
+    import('../../../../shared/types').OpencodeCatalogModel[] | null
+  >(null)
   const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
   const [search, setSearch] = useState('')
   const [freeOnly, setFreeOnly] = useState(false)
@@ -1534,10 +1558,7 @@ function VendorOpencodeSection(): React.JSX.Element {
    * different dialog away.
    */
   const blockingReferences = (removedValues: string[]): string | null => {
-    const refs = findModelReferences(
-      { opencode: cfg, engines: engineConfigs },
-      removedValues
-    )
+    const refs = findModelReferences({ opencode: cfg, engines: engineConfigs }, removedValues)
     return refs.length > 0 ? formatModelReferences(refs) : null
   }
 
@@ -1703,11 +1724,21 @@ function VendorOpencodeSection(): React.JSX.Element {
   }
 
   if (installed === null || catalog === null) {
-    return <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading…</div>
+    return (
+      <div
+        data-testid="VendorOpencodeSection"
+        className="px-3 py-1.5 text-[11px] text-text-muted/60"
+      >
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+      <div
+        data-testid="VendorOpencodeSection"
+        className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed"
+      >
         opencode is not installed. Install it to add providers and authenticate them.
       </div>
     )
@@ -1718,10 +1749,11 @@ function VendorOpencodeSection(): React.JSX.Element {
     : null
 
   return (
-    <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary">
-      {oauthError && (
-        <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
-      )}
+    <div
+      data-testid="VendorOpencodeSection"
+      className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary"
+    >
+      {oauthError && <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>}
       {orphanError && (
         <div
           data-testid="VendorOpencodeSection.orphanError"
@@ -1756,106 +1788,106 @@ function VendorOpencodeSection(): React.JSX.Element {
               }`}
             >
               <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-medium text-[12px] truncate">{p.name}</span>
-                  {/* Disabled wins the badge: opencode ignores the provider
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-medium text-[12px] truncate">{p.name}</span>
+                    {/* Disabled wins the badge: opencode ignores the provider
                       entirely, so its auth state is not the useful fact. */}
-                  {p.disabled ? (
-                    <span
-                      data-testid="VendorOpencodeSection.disabledBadge"
-                      data-id={p.id}
-                      className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted"
-                    >
-                      Disabled
-                    </span>
-                  ) : isFree ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
-                      Free
-                    </span>
-                  ) : (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">
-                      Authenticated
-                    </span>
-                  )}
-                  {claim && (
-                    <span
-                      data-testid="VendorOpencodeSection.sharedBadge"
-                      data-id={p.id}
-                      title={`Credentials are vended by the shared provider "${claim.name}"`}
-                      className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent"
-                    >
-                      Shared · {claim.name}
-                    </span>
-                  )}
-                </div>
-                <div className="text-[10px] text-text-muted/60 truncate">
-                  {/* A disabled provider surfaces NO models whatever its allowlist
+                    {p.disabled ? (
+                      <span
+                        data-testid="VendorOpencodeSection.disabledBadge"
+                        data-id={p.id}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted"
+                      >
+                        Disabled
+                      </span>
+                    ) : isFree ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+                        Free
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">
+                        Authenticated
+                      </span>
+                    )}
+                    {claim && (
+                      <span
+                        data-testid="VendorOpencodeSection.sharedBadge"
+                        data-id={p.id}
+                        title={`Credentials are vended by the shared provider "${claim.name}"`}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+                      >
+                        Shared · {claim.name}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-text-muted/60 truncate">
+                    {/* A disabled provider surfaces NO models whatever its allowlist
                       says, so "showing all models" would be a plain lie — the exact
                       class of misleading label this rework exists to remove. */}
-                  {p.id} ·{' '}
-                  {p.disabled
-                    ? 'ignored by opencode while disabled'
-                    : `showing ${allowlistLabel(p.id)}`}
+                    {p.id} ·{' '}
+                    {p.disabled
+                      ? 'ignored by opencode while disabled'
+                      : `showing ${allowlistLabel(p.id)}`}
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-0.5 shrink-0">
-                <IconButton
-                  testId="VendorOpencodeSection.providerRow.models"
-                  id={p.id}
-                  label="Manage models"
-                  onClick={() => setModelDialogId(p.id)}
-                >
-                  <SlidersIcon />
-                </IconButton>
-                {p.actions.canSetCredential && (
+                <div className="flex items-center gap-0.5 shrink-0">
                   <IconButton
-                    testId="VendorOpencodeSection.providerRow.credential"
+                    testId="VendorOpencodeSection.providerRow.models"
                     id={p.id}
-                    label="Update credential"
-                    active={credentialId === p.id}
-                    onClick={() => setCredentialId(credentialId === p.id ? null : p.id)}
+                    label="Manage models"
+                    onClick={() => setModelDialogId(p.id)}
                   >
-                    <KeyIcon />
+                    <SlidersIcon />
                   </IconButton>
-                )}
-                {p.actions.canEditDeclaration && (
+                  {p.actions.canSetCredential && (
+                    <IconButton
+                      testId="VendorOpencodeSection.providerRow.credential"
+                      id={p.id}
+                      label="Update credential"
+                      active={credentialId === p.id}
+                      onClick={() => setCredentialId(credentialId === p.id ? null : p.id)}
+                    >
+                      <KeyIcon />
+                    </IconButton>
+                  )}
+                  {p.actions.canEditDeclaration && (
+                    <IconButton
+                      testId="VendorOpencodeSection.providerRow.edit"
+                      id={p.id}
+                      label="Configure provider"
+                      onClick={() => setConfigId(p.id)}
+                    >
+                      <PencilIcon />
+                    </IconButton>
+                  )}
                   <IconButton
-                    testId="VendorOpencodeSection.providerRow.edit"
+                    testId="VendorOpencodeSection.providerRow.disable"
                     id={p.id}
-                    label="Configure provider"
-                    onClick={() => setConfigId(p.id)}
+                    label={p.disabled ? 'Enable provider' : 'Disable provider (reversible)'}
+                    active={!p.disabled}
+                    disabled={busy}
+                    onClick={() => void handleToggleDisabled(p.id, !p.disabled)}
                   >
-                    <PencilIcon />
+                    <PowerIcon />
                   </IconButton>
-                )}
-                <IconButton
-                  testId="VendorOpencodeSection.providerRow.disable"
-                  id={p.id}
-                  label={p.disabled ? 'Enable provider' : 'Disable provider (reversible)'}
-                  active={!p.disabled}
-                  disabled={busy}
-                  onClick={() => void handleToggleDisabled(p.id, !p.disabled)}
-                >
-                  <PowerIcon />
-                </IconButton>
-                <IconButton
-                  testId="VendorOpencodeSection.providerRow.remove"
-                  id={p.id}
-                  // A greyed trash with no explanation reads as a broken button,
-                  // so the blocked reason IS the label here.
-                  label={
-                    p.actions.canRemove
-                      ? removeActionLabel(p.actions.removeKind)
-                      : (p.actions.blockedReason ?? 'Cannot be removed')
-                  }
-                  danger
-                  disabled={!p.actions.canRemove || busy}
-                  onClick={() => setRemoveTarget(p)}
-                >
-                  <TrashIcon />
-                </IconButton>
-              </div>
+                  <IconButton
+                    testId="VendorOpencodeSection.providerRow.remove"
+                    id={p.id}
+                    // A greyed trash with no explanation reads as a broken button,
+                    // so the blocked reason IS the label here.
+                    label={
+                      p.actions.canRemove
+                        ? removeActionLabel(p.actions.removeKind)
+                        : (p.actions.blockedReason ?? 'Cannot be removed')
+                    }
+                    danger
+                    disabled={!p.actions.canRemove || busy}
+                    onClick={() => setRemoveTarget(p)}
+                  >
+                    <TrashIcon />
+                  </IconButton>
+                </div>
               </div>
 
               {credentialId === p.id && (
@@ -1866,8 +1898,8 @@ function VendorOpencodeSection(): React.JSX.Element {
                 >
                   {claim && (
                     <div className="text-[10px] text-yellow-400/90 leading-relaxed">
-                      This credential is vended by the shared provider &quot;{claim.name}&quot;. A key
-                      set here is replaced on its next sync.
+                      This credential is vended by the shared provider &quot;{claim.name}&quot;. A
+                      key set here is replaced on its next sync.
                     </div>
                   )}
                   {canRowOauth && (
@@ -1887,9 +1919,7 @@ function VendorOpencodeSection(): React.JSX.Element {
                       data-id={p.id}
                       placeholder="Replace API key"
                       value={apiKeys[p.id] ?? ''}
-                      onChange={(e) =>
-                        setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))
-                      }
+                      onChange={(e) => setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))}
                       className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
                     />
                     <button
@@ -1966,7 +1996,12 @@ function VendorOpencodeSection(): React.JSX.Element {
                 const canOauth = p.authMethods.includes('oauth') && oauthOptions.length > 0
                 const expanded = addingId === p.id
                 return (
-                  <div key={p.id} data-testid="VendorOpencodeSection.catalogRow" data-id={p.id} className="px-1 py-0.5">
+                  <div
+                    key={p.id}
+                    data-testid="VendorOpencodeSection.catalogRow"
+                    data-id={p.id}
+                    className="px-1 py-0.5"
+                  >
                     <button
                       onClick={() => setAddingId(expanded ? null : p.id)}
                       className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
@@ -2116,8 +2151,8 @@ function VendorOpencodeSection(): React.JSX.Element {
       )}
 
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Credentials are stored in opencode&apos;s own auth.json. After adding a provider, pick
-        which of its models appear in the picker via “Manage models”.
+        Credentials are stored in opencode&apos;s own auth.json. After adding a provider, pick which
+        of its models appear in the picker via “Manage models”.
       </div>
 
       {dialogProvider && (
@@ -2223,8 +2258,8 @@ function removeConfirmBody(entry: OpencodeProviderCatalogEntry): React.ReactNode
           <br />
           <br />
           <span className="text-yellow-400">
-            Heads up: the shared provider &quot;{claim.name}&quot; still vends this credential, so it
-            will be restored on the next sync. Turn its opencode route off in Common · Providers
+            Heads up: the shared provider &quot;{claim.name}&quot; still vends this credential, so
+            it will be restored on the next sync. Turn its opencode route off in Common · Providers
             &amp; models to remove it for good.
           </span>
         </>
@@ -2259,11 +2294,18 @@ function OpencodeModelsSection(): React.JSX.Element {
   }, [])
 
   if (cfg === null || installed === null) {
-    return <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid="OpencodeModelsSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid="OpencodeModelsSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         opencode is not installed. Model settings apply to opencode sessions.
       </div>
     )
@@ -2383,7 +2425,10 @@ function PiDefaultModelSection(): React.JSX.Element {
   }
   if (!installed) {
     return (
-      <div data-testid="PiDefaultModelSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid="PiDefaultModelSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         pi is not installed. Model settings apply to pi sessions.
       </div>
     )
@@ -2406,13 +2451,18 @@ function PiDefaultModelSection(): React.JSX.Element {
     window.api
       .getEngineModels()
       .then((groups) =>
-        setModels(groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models))
+        setModels(
+          groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models)
+        )
       )
       .catch(() => {})
   }
 
   const update = (value: string): void => {
-    const next: EngineConfig = { ...cfg, piConfig: { ...cfg.piConfig, defaultModel: value || undefined } }
+    const next: EngineConfig = {
+      ...cfg,
+      piConfig: { ...cfg.piConfig, defaultModel: value || undefined }
+    }
     setCfg(next)
     window.api.saveEngineConfig('pi', next).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened pi
@@ -2497,7 +2547,13 @@ function PiDefaultModelSection(): React.JSX.Element {
           onClick={() => setManagingModels(true)}
           className="mt-1 ml-3 text-[11px] text-accent"
         >
-          Manage models ({allowlist === undefined ? 'all' : allowlist.length === 0 ? 'none' : `${allowlist.length} selected`})
+          Manage models (
+          {allowlist === undefined
+            ? 'all'
+            : allowlist.length === 0
+              ? 'none'
+              : `${allowlist.length} selected`}
+          )
         </button>
         {defaultExcluded ? (
           <div
@@ -2519,14 +2575,14 @@ function PiDefaultModelSection(): React.JSX.Element {
             data-testid="PiDefaultModelSection.unknownWarning"
             className="mt-1 text-[10px] text-warning/90"
           >
-            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the provider is
-            authenticated and the model id is spelled correctly.
+            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the
+            provider is authenticated and the model id is spelled correctly.
           </div>
         )}
       </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Applies to new pi sessions. Falls back to pi&rsquo;s own default (
-        {PI_DEFAULT_MODEL}) when unset.
+        Applies to new pi sessions. Falls back to pi&rsquo;s own default ({PI_DEFAULT_MODEL}) when
+        unset.
       </div>
       {managingModels && (
         <PiModelAllowlistDialog
@@ -2960,12 +3016,19 @@ const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$de
 const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
 /** The provider-model entry schema: $defs.ProviderConfig.properties.models.additionalProperties */
 const OPENCODE_MODEL_ENTRY_SCHEMA = (
-  (
-    (OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>
-  ).models as SchemaNode
+  ((OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>)
+    .models as SchemaNode
 ).additionalProperties as SchemaNode
 /** Model capability fields the provider editor exposes (raw opencode names). */
-const MODEL_CAP_KEYS = ['attachment', 'reasoning', 'temperature', 'tool_call', 'modalities', 'cost', 'limit']
+const MODEL_CAP_KEYS = [
+  'attachment',
+  'reasoning',
+  'temperature',
+  'tool_call',
+  'modalities',
+  'cost',
+  'limit'
+]
 
 /**
  * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
@@ -3010,8 +3073,7 @@ function ModelCapabilityEditor({
       .readOpencodeNativeRaw()
       .then(({ config }) => {
         const prov = (config.provider as Record<string, unknown> | undefined)?.[providerId] as
-          | Record<string, unknown>
-          | undefined
+          Record<string, unknown> | undefined
         const models = prov?.models as Record<string, unknown> | undefined
         const entry = (models?.[modelId] as Record<string, unknown> | undefined) ?? {}
         setOriginal(entry)
@@ -3119,7 +3181,10 @@ function OpencodeRawConfigSection(): React.JSX.Element {
 
   if (installed === null || original === null) {
     return (
-      <div data-testid="OpencodeRawConfigSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+      <div
+        data-testid="OpencodeRawConfigSection"
+        className="px-3 py-1.5 text-[13px] text-text-muted"
+      >
         Loading…
       </div>
     )
@@ -4705,7 +4770,16 @@ export const SECTIONS: Section[] = [
     id: 'claude-dispatch',
     label: 'Cross-engine dispatch',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M17 3l4 4-4 4" />
         <path d="M21 7H9a4 4 0 00-4 4v1" />
         <path d="M7 21l-4-4 4-4" />
@@ -4726,7 +4800,14 @@ export const SECTIONS: Section[] = [
     id: 'shared-providers',
     label: 'Providers & models',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      >
         <circle cx="12" cy="12" r="3" />
         <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4" />
       </svg>
@@ -4794,7 +4875,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-automode',
     label: 'Auto mode',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         <path d="M9 12l2 2 4-4" />
       </svg>
@@ -4813,7 +4903,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-models',
     label: 'Models',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <ellipse cx="12" cy="5" rx="9" ry="3" />
         <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
@@ -4832,7 +4931,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-dispatch',
     label: 'Cross-engine dispatch',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M17 3l4 4-4 4" />
         <path d="M21 7H9a4 4 0 00-4 4v1" />
         <path d="M7 21l-4-4 4-4" />
@@ -4853,7 +4961,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-config',
     label: 'Configuration',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
         <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
       </svg>
@@ -4878,7 +4995,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-agents',
     label: 'Agents',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <circle cx="12" cy="8" r="4" />
         <path d="M20 21a8 8 0 10-16 0" />
       </svg>
@@ -4896,7 +5022,16 @@ export const SECTIONS: Section[] = [
     id: 'pi-automode',
     label: 'Auto mode',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         <path d="M9 12l2 2 4-4" />
       </svg>
@@ -4915,7 +5050,16 @@ export const SECTIONS: Section[] = [
     id: 'pi-models',
     label: 'Models',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <ellipse cx="12" cy="5" rx="9" ry="3" />
         <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
@@ -4952,7 +5096,8 @@ export const SECTIONS: Section[] = [
       {
         key: 'vendorPiAuth',
         label: 'Providers & subscriptions',
-        keywords: 'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
+        keywords:
+          'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
         render: () => <PiVendors />
       }
     ]
@@ -4963,22 +5108,35 @@ export const SECTIONS: Section[] = [
 
 /** Section ids that belong to the App group (flat, directly visible) */
 const APP_SECTION_IDS = new Set([
-  'appearance', 'chat', 'session', 'autonomy', 'shared-providers', 'tool-output', 'diff', 'git',
-  'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+  'appearance',
+  'chat',
+  'session',
+  'autonomy',
+  'shared-providers',
+  'tool-output',
+  'diff',
+  'git',
+  'status-line',
+  'usage',
+  'logging',
+  'voice',
+  'remote',
+  'mockup'
 ])
 
 /** Section ids that belong to Engines > Claude */
-const ENGINE_CLAUDE_SECTION_IDS = new Set([
-  'permissions', 'sandbox', 'proxy', 'claude-dispatch'
-])
+const ENGINE_CLAUDE_SECTION_IDS = new Set(['permissions', 'sandbox', 'proxy', 'claude-dispatch'])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
+const ENGINE_OPENCODE_SECTION_IDS = new Set([
+  'opencode-automode',
+  'opencode-models',
+  'opencode-dispatch',
+  'opencode-config'
+])
 
 /** Section ids that belong to Vendors > Anthropic */
-const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
-  'vendor-anthropic', 'effortDefaults'
-])
+const VENDOR_ANTHROPIC_SECTION_IDS = new Set(['vendor-anthropic', 'effortDefaults'])
 
 /** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
 const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
@@ -5041,8 +5199,20 @@ export const SCOPES: ScopeDef[] = [
         id: 'common-app',
         label: undefined,
         sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance', 'chat', 'session', 'autonomy', 'shared-providers', 'tool-output', 'diff',
-          'git', 'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+          'appearance',
+          'chat',
+          'session',
+          'autonomy',
+          'shared-providers',
+          'tool-output',
+          'diff',
+          'git',
+          'status-line',
+          'usage',
+          'logging',
+          'voice',
+          'remote',
+          'mockup'
         ])
       }
     ]
@@ -5055,13 +5225,19 @@ export const SCOPES: ScopeDef[] = [
         id: 'claude-engine',
         label: 'Engine',
         sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, [
-          'permissions', 'sandbox', 'proxy', 'claude-dispatch'
+          'permissions',
+          'sandbox',
+          'proxy',
+          'claude-dispatch'
         ])
       },
       {
         id: 'claude-vendor',
         label: 'Vendor · Anthropic',
-        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, ['vendor-anthropic', 'effortDefaults'])
+        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, [
+          'vendor-anthropic',
+          'effortDefaults'
+        ])
       },
       {
         id: 'claude-account',
@@ -5077,7 +5253,12 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'opencode-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, [
+          'opencode-automode',
+          'opencode-models',
+          'opencode-dispatch',
+          'opencode-config'
+        ])
       },
       {
         id: 'opencode-vendor',

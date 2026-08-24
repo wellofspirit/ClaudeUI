@@ -60,10 +60,7 @@ export function setOpencodeProviderDisabled(id: string, disabled: boolean): void
  * read-modify-write: two separate writes would leave a window where the
  * declaration is gone but the veto still names it.
  */
-export async function removeOpencodeProvider(
-  id: string,
-  kind: ProviderRemoveKind
-): Promise<void> {
+export async function removeOpencodeProvider(id: string, kind: ProviderRemoveKind): Promise<void> {
   if (kind === 'credential' || kind === 'both') {
     await opencodeAuthProvider.removeVendorAuth(id)
   }

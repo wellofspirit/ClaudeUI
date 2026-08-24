@@ -45,7 +45,10 @@ export function ExitPlanModeCardView({
   }, [showFeedback])
 
   return (
-    <div data-testid="ExitPlanModeCard" className="rounded-lg border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in">
+    <div
+      data-testid="ExitPlanModeCard"
+      className="rounded-lg border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in"
+    >
       {/* Header — clickable to toggle */}
       <div
         onClick={onToggleExpanded}

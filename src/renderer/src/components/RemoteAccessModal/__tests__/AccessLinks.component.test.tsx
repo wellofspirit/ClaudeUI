@@ -91,16 +91,12 @@ function renderCard(
 ): { onSetTunnel: ReturnType<typeof vi.fn>; onSetPassword: ReturnType<typeof vi.fn> } {
   const onSetTunnel = vi.fn(over.onSetTunnel ?? (async () => {}))
   const onSetPassword = vi.fn(over.onSetPassword ?? (() => {}))
-  render(
-    <AccessLinks status={status} onSetTunnel={onSetTunnel} onSetPassword={onSetPassword} />
-  )
+  render(<AccessLinks status={status} onSetTunnel={onSetTunnel} onSetPassword={onSetPassword} />)
   return { onSetTunnel, onSetPassword }
 }
 
 function row(id: string): HTMLElement | undefined {
-  return screen
-    .queryAllByTestId('AccessLinks.row')
-    .find((el) => el.getAttribute('data-id') === id)
+  return screen.queryAllByTestId('AccessLinks.row').find((el) => el.getAttribute('data-id') === id)
 }
 
 function part(testid: string, id: string): HTMLElement | undefined {

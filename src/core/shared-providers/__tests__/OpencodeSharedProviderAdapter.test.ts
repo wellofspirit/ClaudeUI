@@ -41,10 +41,7 @@ function compiledProvider() {
   }
 }
 
-function setup(
-  current: NativeOpencodeFields = {},
-  modelAllowlist: Record<string, string[]> = {}
-) {
+function setup(current: NativeOpencodeFields = {}, modelAllowlist: Record<string, string[]> = {}) {
   const writeConfig = vi.fn<(settings: NativeOpencodeFields) => void>()
   const invalidateModelCache = vi.fn()
   const authTarget: OpencodeSharedProviderAuthTarget = {
@@ -177,7 +174,6 @@ describe('OpencodeSharedProviderAdapter', () => {
     expect(writeConfig).toHaveBeenCalledWith({ providers: { 'local-api': compiledProvider() } })
   })
 
-
   it('renames a managed provider in one update while preserving foreign providers', () => {
     const renamed = {
       ...definition,
@@ -188,7 +184,11 @@ describe('OpencodeSharedProviderAdapter', () => {
     }
     const { adapter, writeConfig, invalidateModelCache } = setup(current)
 
-    adapter.applyDefinitionRoute({ definition: renamed, previouslyManaged: true, previousDefinition: definition })
+    adapter.applyDefinitionRoute({
+      definition: renamed,
+      previouslyManaged: true,
+      previousDefinition: definition
+    })
 
     expect(writeConfig).toHaveBeenCalledWith({
       providers: { foreign: { name: 'Foreign' }, 'renamed-api': compiledProvider() }
@@ -211,7 +211,11 @@ describe('OpencodeSharedProviderAdapter', () => {
     const { adapter, writeConfig, invalidateModelCache } = setup(current)
 
     expect(() =>
-      adapter.applyDefinitionRoute({ definition: renamed, previouslyManaged: true, previousDefinition: definition })
+      adapter.applyDefinitionRoute({
+        definition: renamed,
+        previouslyManaged: true,
+        previousDefinition: definition
+      })
     ).toThrow('OpenCode provider collision: renamed-api')
     expect(writeConfig).not.toHaveBeenCalled()
     expect(invalidateModelCache).not.toHaveBeenCalled()

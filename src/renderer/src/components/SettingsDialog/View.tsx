@@ -198,9 +198,7 @@ export function SettingsDialogView({
             </div>
 
             {visibleSubgroups.length === 0 ? (
-              <div className="px-2 py-4 text-[11px] text-text-muted/50 text-center">
-                No matches
-              </div>
+              <div className="px-2 py-4 text-[11px] text-text-muted/50 text-center">No matches</div>
             ) : (
               visibleSubgroups.map((sg) => (
                 <div key={sg.id}>

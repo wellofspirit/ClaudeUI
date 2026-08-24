@@ -491,8 +491,7 @@ export class AutomationManager {
     // pre-fix every follow-up turn's cost was recorded NOWHERE. The follow-up
     // continues the same session, so its spend folds into that session's run.
     const runsForFollowUp = this.loadRuns(automationId)
-    const ownerRun =
-      runsForFollowUp.find((r) => r.sessionId === sessionId) ?? runsForFollowUp[0]
+    const ownerRun = runsForFollowUp.find((r) => r.sessionId === sessionId) ?? runsForFollowUp[0]
     if (ownerRun) this.currentRunIds.set(automationId, ownerRun.id)
 
     // Resume the session with a one-shot sdkQuery

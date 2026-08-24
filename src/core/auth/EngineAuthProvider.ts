@@ -14,7 +14,13 @@
  * (opencode). Claude does NOT implement these; they are optional and gated.
  */
 
-import type { VendorId, VendorAuthMap, VendorAuthOption, AuthFlowState, AccountsState } from '../../shared/types'
+import type {
+  VendorId,
+  VendorAuthMap,
+  VendorAuthOption,
+  AuthFlowState,
+  AccountsState
+} from '../../shared/types'
 
 export interface EngineAuthProvider {
   /** Probe all vendors for this engine. Always available. */

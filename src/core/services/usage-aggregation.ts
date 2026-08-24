@@ -17,7 +17,12 @@
  * not "improve" them — the equivalence test is the guard.
  */
 
-import type { TokenCounts, ModelTokenBreakdown, UsageBlock, EngineUsageSummary } from '../../shared/types'
+import type {
+  TokenCounts,
+  ModelTokenBreakdown,
+  UsageBlock,
+  EngineUsageSummary
+} from '../../shared/types'
 import { accountForTimestamp, type AccountLogRecord } from './usage-windows'
 import { equivalentCostUsd } from '../../shared/pricing'
 
@@ -188,11 +193,7 @@ export function mergeModelFamilies(
 /** Grace for attaching entries that slightly precede a window's derived start. */
 const WINDOW_START_GRACE_MS = 30 * MS_PER_MINUTE
 
-function findWindowFor(
-  windows: ApiWindow[],
-  ts: number,
-  account: string | null
-): ApiWindow | null {
+function findWindowFor(windows: ApiWindow[], ts: number, account: string | null): ApiWindow | null {
   const containing = windows.filter((w) => ts >= w.start && ts < w.end)
   if (containing.length > 0) {
     const matching = containing.find((w) => w.account === null || w.account === account)
@@ -219,10 +220,7 @@ function buildBlock(
 
   const tokens = emptyTokenCounts()
   let costUsd = 0
-  const modelMap = new Map<
-    string,
-    { tokens: TokenCounts; costUsd: number; requestCount: number }
-  >()
+  const modelMap = new Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>()
 
   for (const entry of entries) {
     tokens.inputTokens += entry.inputTokens
@@ -507,7 +505,13 @@ export function perEngineBreakdown(entries: AggEntry[]): EngineUsageSummary[] {
     // Engine-level accumulator
     let agg = byEngine.get(e.engineId)
     if (!agg) {
-      agg = { engineId: e.engineId, tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0, models: [] }
+      agg = {
+        engineId: e.engineId,
+        tokens: emptyTokenCounts(),
+        costUsd: 0,
+        requestCount: 0,
+        models: []
+      }
       byEngine.set(e.engineId, agg)
       byModel.set(e.engineId, new Map())
     }

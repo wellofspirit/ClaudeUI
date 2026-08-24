@@ -3,11 +3,7 @@ import { useSessionStore } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialogView, type VersionInfo } from './View'
 import { SettingsMobileView } from './MobileView'
-import {
-  firstSectionOfScope,
-  SECTION_SCOPE_MAP,
-  type SettingsScope
-} from './settings-sections'
+import { firstSectionOfScope, SECTION_SCOPE_MAP, type SettingsScope } from './settings-sections'
 import type { EngineConfig, VendorConfig } from '../../../../shared/types'
 export { SettingsToggle } from './settings-controls'
 
@@ -32,7 +28,8 @@ export function SettingsDialog({
   const [vendorConfig, setVendorConfig] = useState<VendorConfig>({})
 
   useEffect(() => {
-    const scope = initialScope ?? (initialSection ? SECTION_SCOPE_MAP.get(initialSection) : undefined)
+    const scope =
+      initialScope ?? (initialSection ? SECTION_SCOPE_MAP.get(initialSection) : undefined)
     if (!scope) return
     setActiveScope(scope)
     setActiveSectionId(initialSection || firstSectionOfScope(scope))
@@ -49,8 +46,14 @@ export function SettingsDialog({
 
   // Load engine and vendor config on mount
   useEffect(() => {
-    window.api.loadEngineConfig('claude').then(setEngineConfig).catch(() => {})
-    window.api.loadVendorConfig('anthropic').then(setVendorConfig).catch(() => {})
+    window.api
+      .loadEngineConfig('claude')
+      .then(setEngineConfig)
+      .catch(() => {})
+    window.api
+      .loadVendorConfig('anthropic')
+      .then(setVendorConfig)
+      .catch(() => {})
   }, [])
 
   // Close on Escape

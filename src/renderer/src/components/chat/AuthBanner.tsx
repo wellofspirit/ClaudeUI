@@ -1,6 +1,10 @@
 import { useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
-import { OAuthOutcomeNotice, OAuthPasteBackFlow, classifyOAuthError } from '../auth/OAuthPasteBackFlow'
+import {
+  OAuthOutcomeNotice,
+  OAuthPasteBackFlow,
+  classifyOAuthError
+} from '../auth/OAuthPasteBackFlow'
 
 /**
  * Proactive sign-in banner (ADR-014 / Phase 4). Shown when the engine auth
@@ -117,7 +121,12 @@ export function AuthBanner(): React.JSX.Element | null {
       {pasteBack && (
         <div className="px-3 pb-3 pt-0.5 border-t border-border/30">
           <div className="pt-2.5">
-            <OAuthPasteBackFlow variant="code" url={authState?.manualUrl} busy={submitting} onSubmit={handleSubmit} />
+            <OAuthPasteBackFlow
+              variant="code"
+              url={authState?.manualUrl}
+              busy={submitting}
+              onSubmit={handleSubmit}
+            />
           </div>
         </div>
       )}
@@ -127,7 +136,10 @@ export function AuthBanner(): React.JSX.Element | null {
           from "nothing happened". */}
       {isWeb && authState?.status === 'error' && authState.error && (
         <div className="px-3 pb-2.5">
-          <OAuthOutcomeNotice kind={classifyOAuthError(authState.error)} message={authState.error} />
+          <OAuthOutcomeNotice
+            kind={classifyOAuthError(authState.error)}
+            message={authState.error}
+          />
         </div>
       )}
     </div>

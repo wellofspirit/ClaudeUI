@@ -18,7 +18,9 @@ vi.mock('../../../core/services/db', () => ({
   dispatchedCostsByRouting: vi.fn(() => []),
   appendAuditLog: vi.fn()
 }))
-vi.mock('../../../core/services/session-history', () => ({ loadSessionHistory: vi.fn(async () => ({ messages: [] })) }))
+vi.mock('../../../core/services/session-history', () => ({
+  loadSessionHistory: vi.fn(async () => ({ messages: [] }))
+}))
 vi.mock('../../../core/providers/register-engines', () => ({}))
 
 const { SessionManager } = await import('../../../core/services/session-manager')

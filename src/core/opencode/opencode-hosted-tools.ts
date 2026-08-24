@@ -33,7 +33,11 @@ import type { EngineId } from '../../shared/types'
 // ERASED at compile time, so this does NOT create a runtime import cycle
 // even though cross-engine-dispatcher.ts (at runtime) imports
 // OpencodeServerManager.ts, which imports THIS module.
-import type { DispatchContext, DispatchRequest, DispatchResult } from '../services/cross-engine-dispatcher'
+import type {
+  DispatchContext,
+  DispatchRequest,
+  DispatchResult
+} from '../services/cross-engine-dispatcher'
 
 /**
  * What the dispatch tool needs to know about the CALLING opencode session.
@@ -73,14 +77,20 @@ export interface CallerSessionHandle {
 export type CallerSessionLookup = (sessionId: string) => CallerSessionHandle | undefined
 
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
-export type DispatchAgentFn = (req: DispatchRequest, ctx: DispatchContext) => Promise<DispatchResult>
+export type DispatchAgentFn = (
+  req: DispatchRequest,
+  ctx: DispatchContext
+) => Promise<DispatchResult>
 
 /**
  * Built per server creation (not module-load time) so the `model` param's
  * `.describe()` can carry the concrete model-hint resolved from the current
  * engines/claude.json (ADR-033 follow-up — see dispatch-model-hint.ts).
  */
-function buildDispatchAgentInputSchema(modelHintShort: string, piModelHintShort: string): Record<string, z.ZodTypeAny> {
+function buildDispatchAgentInputSchema(
+  modelHintShort: string,
+  piModelHintShort: string
+): Record<string, z.ZodTypeAny> {
   return {
     engine: z.enum(['claude', 'pi']).describe('Target engine to dispatch to'),
     prompt: z.string().describe('Task for the dispatched agent'),
@@ -183,7 +193,7 @@ export function createOpencodeHostedToolsServer(
     'dispatch_agent',
     {
       description:
-        'Delegate a task to an agent running on a DIFFERENT engine — Claude (Anthropic\'s models) or ' +
+        "Delegate a task to an agent running on a DIFFERENT engine — Claude (Anthropic's models) or " +
         'pi (an alternative coding-agent harness). The agent runs headless in the same working ' +
         'directory and its final answer is returned as this tool result. The result includes a ' +
         'session_id — pass it back as `session_id` to continue the same agent with its context intact ' +

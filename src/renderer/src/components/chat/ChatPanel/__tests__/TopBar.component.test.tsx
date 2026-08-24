@@ -213,9 +213,7 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
       ROUTE,
       makeStatusLine({
         totalCostUsd: 0.02,
-        modelCosts: [
-          { engineId: 'opencode', modelId: 'gpt-5.4', costUsd: 0.02, dispatched: true }
-        ]
+        modelCosts: [{ engineId: 'opencode', modelId: 'gpt-5.4', costUsd: 0.02, dispatched: true }]
       })
     )
 
@@ -848,7 +846,10 @@ describe('TopBar — terminal toggle button', () => {
     const labels = screen
       .getAllByRole('button')
       .map((b) => b.getAttribute('data-testid'))
-      .filter((id): id is string => !!id && id.startsWith('TopBar.overflowMenu') && id !== 'TopBar.overflowMenu')
+      .filter(
+        (id): id is string =>
+          !!id && id.startsWith('TopBar.overflowMenu') && id !== 'TopBar.overflowMenu'
+      )
     expect(labels[0]).toBe('TopBar.overflowMenuTerminal')
   })
 

@@ -79,7 +79,11 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import after mocks are registered.
-import { TunnelManager, assertHttpsUrl, verifyFileChecksum } from '../../../core/services/tunnel-manager'
+import {
+  TunnelManager,
+  assertHttpsUrl,
+  verifyFileChecksum
+} from '../../../core/services/tunnel-manager'
 import { createHash } from 'node:crypto'
 import { writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'

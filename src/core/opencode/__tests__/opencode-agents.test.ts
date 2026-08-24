@@ -55,13 +55,7 @@ afterEach(() => {
 // We import dynamically so OPENCODE_CONFIG_DIR is read per-call (opencodeConfigDir()
 // reads the env at call time, not import time).
 
-import {
-  listAgents,
-  readAgent,
-  saveAgent,
-  deleteAgent,
-  setAgentDisabled,
-} from '../opencode-agents'
+import { listAgents, readAgent, saveAgent, deleteAgent, setAgentDisabled } from '../opencode-agents'
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -76,14 +70,20 @@ describe('listAgents', () => {
     expect(names).toContain('title')
     expect(names).toContain('summary')
     expect(names).toContain('compaction')
-    agents.filter((a) => a.kind === 'builtin').forEach((a) => {
-      expect(a.scope).toBeNull()
-    })
+    agents
+      .filter((a) => a.kind === 'builtin')
+      .forEach((a) => {
+        expect(a.scope).toBeNull()
+      })
   })
 
   it('shows a custom *.md file as kind=custom, scope=global', () => {
     const agentsDir = path.join(configDir, 'agents')
-    writeAgentFile(agentsDir, 'my-custom-agent', `---\nmode: subagent\ndescription: A custom one\n---\nDo stuff.`)
+    writeAgentFile(
+      agentsDir,
+      'my-custom-agent',
+      `---\nmode: subagent\ndescription: A custom one\n---\nDo stuff.`
+    )
 
     const agents = listAgents()
     const custom = agents.find((a) => a.name === 'my-custom-agent')
@@ -95,7 +95,11 @@ describe('listAgents', () => {
 
   it('marks a built-in override file as overridden=true and keeps kind=builtin', () => {
     const agentsDir = path.join(configDir, 'agents')
-    writeAgentFile(agentsDir, 'build', `---\nmode: primary\ndescription: overridden build\n---\nCustom build prompt.`)
+    writeAgentFile(
+      agentsDir,
+      'build',
+      `---\nmode: primary\ndescription: overridden build\n---\nCustom build prompt.`
+    )
 
     const agents = listAgents()
     const buildAgent = agents.find((a) => a.name === 'build')
@@ -108,7 +112,11 @@ describe('listAgents', () => {
   it('falls back to the built-in default mode when an override omits mode', () => {
     // 'plan' is a built-in primary. Override only the model, omit `mode`.
     const agentsDir = path.join(configDir, 'agents')
-    writeAgentFile(agentsDir, 'plan', `---\nmodel: anthropic/claude-opus-4\n---\nCustom plan prompt.`)
+    writeAgentFile(
+      agentsDir,
+      'plan',
+      `---\nmodel: anthropic/claude-opus-4\n---\nCustom plan prompt.`
+    )
 
     const agents = listAgents()
     const planAgent = agents.find((a) => a.name === 'plan')
@@ -214,7 +222,7 @@ describe('readAgent → saveAgent round-trip', () => {
       name: 'rp-agent',
       scope: 'global',
       mode: 'all',
-      topP: 0.85,
+      topP: 0.85
     })
 
     const detail = readAgent('rp-agent', 'global')
@@ -227,7 +235,7 @@ describe('readAgent → saveAgent round-trip', () => {
       name: 'reasoning-agent',
       scope: 'global',
       mode: 'primary',
-      reasoningEffort: 'high',
+      reasoningEffort: 'high'
     })
 
     const detail = readAgent('reasoning-agent', 'global')
@@ -240,7 +248,7 @@ describe('readAgent → saveAgent round-trip', () => {
       name: 'prompt-agent',
       scope: 'global',
       mode: 'subagent',
-      prompt: 'You are a helpful assistant.',
+      prompt: 'You are a helpful assistant.'
     })
 
     const detail = readAgent('prompt-agent', 'global')
@@ -251,13 +259,13 @@ describe('readAgent → saveAgent round-trip', () => {
   it('round-trips permission present ↔ restrict=true', () => {
     const perm: Record<string, 'allow' | 'ask' | 'deny'> = {
       'Bash(**/rm)': 'deny',
-      'Read': 'allow',
+      Read: 'allow'
     }
     saveAgent({
       name: 'restricted-agent',
       scope: 'global',
       mode: 'all',
-      permission: perm,
+      permission: perm
     })
 
     const detail = readAgent('restricted-agent', 'global')
@@ -270,7 +278,7 @@ describe('readAgent → saveAgent round-trip', () => {
     saveAgent({
       name: 'free-agent',
       scope: 'global',
-      mode: 'all',
+      mode: 'all'
     })
 
     const detail = readAgent('free-agent', 'global')
@@ -288,7 +296,7 @@ describe('readAgent → saveAgent round-trip', () => {
       temperature: 0.7,
       steps: 20,
       model: 'anthropic/claude-sonnet-4-6',
-      color: '#ff5733',
+      color: '#ff5733'
     })
 
     const detail = readAgent('full-agent', 'global')
@@ -303,12 +311,15 @@ describe('readAgent → saveAgent round-trip', () => {
   it('project-scoped save/read', () => {
     const cwd = makeTmpDir()
     try {
-      saveAgent({
-        name: 'proj-agent',
-        scope: 'project',
-        mode: 'all',
-        prompt: 'Project prompt',
-      }, cwd)
+      saveAgent(
+        {
+          name: 'proj-agent',
+          scope: 'project',
+          mode: 'all',
+          prompt: 'Project prompt'
+        },
+        cwd
+      )
 
       const detail = readAgent('proj-agent', 'project', cwd)
       expect(detail).not.toBeNull()
@@ -325,7 +336,7 @@ describe('saveAgent', () => {
     saveAgent({
       name: 'plural-test',
       scope: 'global',
-      mode: 'all',
+      mode: 'all'
     })
 
     const expectedPath = path.join(configDir, 'agents', 'plural-test.md')
@@ -337,7 +348,7 @@ describe('saveAgent', () => {
       name: 'no-hidden',
       scope: 'global',
       mode: 'all',
-      hidden: false,
+      hidden: false
     })
 
     const text = fs.readFileSync(path.join(configDir, 'agents', 'no-hidden.md'), 'utf8')
@@ -350,7 +361,7 @@ describe('saveAgent', () => {
       name: 'no-disable',
       scope: 'global',
       mode: 'all',
-      disable: false,
+      disable: false
     })
 
     const text = fs.readFileSync(path.join(configDir, 'agents', 'no-disable.md'), 'utf8')
@@ -362,7 +373,7 @@ describe('saveAgent', () => {
       name: 'no-perm',
       scope: 'global',
       mode: 'all',
-      permission: {},
+      permission: {}
     })
 
     const text = fs.readFileSync(path.join(configDir, 'agents', 'no-perm.md'), 'utf8')
@@ -374,7 +385,7 @@ describe('saveAgent', () => {
       name: 'hidden-agent',
       scope: 'global',
       mode: 'all',
-      hidden: true,
+      hidden: true
     })
 
     const text = fs.readFileSync(path.join(configDir, 'agents', 'hidden-agent.md'), 'utf8')
@@ -386,7 +397,7 @@ describe('saveAgent', () => {
       name: 'disabled-agent',
       scope: 'global',
       mode: 'all',
-      disable: true,
+      disable: true
     })
 
     const text = fs.readFileSync(path.join(configDir, 'agents', 'disabled-agent.md'), 'utf8')
@@ -398,7 +409,7 @@ describe('saveAgent', () => {
       name: 'reasoning',
       scope: 'global',
       mode: 'all',
-      reasoningEffort: 'low',
+      reasoningEffort: 'low'
     })
 
     const text = fs.readFileSync(path.join(configDir, 'agents', 'reasoning.md'), 'utf8')
@@ -422,7 +433,7 @@ describe('saveAgent', () => {
       scope: 'global',
       mode: 'all',
       model: 'new/model',
-      prompt: 'new body',
+      prompt: 'new body'
     })
 
     // The singular file was updated…
@@ -496,11 +507,7 @@ describe('setAgentDisabled', () => {
 
   it('clears disable when called with false', () => {
     const agentsDir = path.join(configDir, 'agents')
-    writeAgentFile(
-      agentsDir,
-      'undisable-agent',
-      `---\nmode: all\ndisable: true\n---\nBody text.`
-    )
+    writeAgentFile(agentsDir, 'undisable-agent', `---\nmode: all\ndisable: true\n---\nBody text.`)
 
     setAgentDisabled('undisable-agent', 'global', undefined, false)
 
@@ -554,14 +561,20 @@ describe('OPENCODE_CONFIG_DIR env var', () => {
     saveAgent({
       name: 'env-test-agent',
       scope: 'global',
-      mode: 'all',
+      mode: 'all'
     })
 
     const expectedPath = path.join(configDir, 'agents', 'env-test-agent.md')
     expect(fs.existsSync(expectedPath)).toBe(true)
 
     // And nowhere else (e.g. not in actual ~/.config/opencode)
-    const defaultConfigDir = path.join(os.homedir(), '.config', 'opencode', 'agents', 'env-test-agent.md')
+    const defaultConfigDir = path.join(
+      os.homedir(),
+      '.config',
+      'opencode',
+      'agents',
+      'env-test-agent.md'
+    )
     if (fs.existsSync(defaultConfigDir)) {
       // If the file happens to exist on this dev machine, the env override is not working
       // We can't assert this but the path check above is the real guard

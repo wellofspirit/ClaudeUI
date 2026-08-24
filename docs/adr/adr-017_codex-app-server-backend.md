@@ -13,6 +13,7 @@ With the provider abstraction in place (ADR-016), a second backend — OpenAI Co
 to be wired in. The primary question was how to drive it.
 
 Codex exposes two public interfaces:
+
 - **ACP (Agent Client Protocol)** — text-oriented, minimal bidirectionality.
 - **`codex app-server`** — a richer NDJSON JSON-RPC 2.0 protocol over stdio: bidirectional
   requests, structured turn/thread/item events, streaming deltas, token usage, and per-item
@@ -71,6 +72,7 @@ failures occur when they drift. See `docs/codex/maintenance.md`.
 `src/main/codex/CodexAppServerClient.ts` wraps the spawned child's stdio with NDJSON
 JSON-RPC 2.0 semantics, reusing the `NdjsonReader`/`NdjsonWriter` transport from
 `src/main/sdk/protocol.ts`:
+
 - Frame discrimination: `id`+`method` → server request; `method` no `id` → notification;
   matches response envelope → response to our request.
 - Monotonic integer request IDs; `Map<id, Deferred>` correlation.
@@ -83,6 +85,7 @@ JSON-RPC 2.0 semantics, reusing the `NdjsonReader`/`NdjsonWriter` transport from
 `src/main/codex/CodexSession.ts` implements `ISession` for Codex:
 
 **Lifecycle:**
+
 1. Spawn `vendor/codex-cli/codex app-server` with `cwd` and expanded env (no `CODEX_HOME`
    override — see Known Gotchas below).
 2. Handshake: `request initialize` → `notify initialized` → `thread/start` (or `thread/resume`
@@ -91,11 +94,12 @@ JSON-RPC 2.0 semantics, reusing the `NdjsonReader`/`NdjsonWriter` transport from
 3. Emit `session:status` with `provider: 'codex'` and `CODEX_CAPABILITIES`.
 
 **Permission-mode → Codex policy mapping:**
-| ClaudeUI mode              | Codex `approvalPolicy` | Codex `sandbox`/`sandboxPolicy`    |
-| -------------------------- | ---------------------- | ---------------------------------- |
-| default / approval-required | `untrusted`           | `read-only` / `readOnly`           |
-| acceptEdits / auto         | `on-request`           | `workspace-write` / `workspaceWrite` |
-| bypassPermissions / full   | `never`                | `danger-full-access` / `dangerFullAccess` |
+
+| ClaudeUI mode               | Codex `approvalPolicy` | Codex `sandbox`/`sandboxPolicy`           |
+| --------------------------- | ---------------------- | ----------------------------------------- |
+| default / approval-required | `untrusted`            | `read-only` / `readOnly`                  |
+| acceptEdits / auto          | `on-request`           | `workspace-write` / `workspaceWrite`      |
+| bypassPermissions / full    | `never`                | `danger-full-access` / `dangerFullAccess` |
 
 **Turn loop:** `turn/start {threadId, input, approvalPolicy, sandboxPolicy, model?,
 reasoningEffort?}`. Effort: Codex accepts `low`/`medium`/`high`/`xhigh`; ClaudeUI's `max`
@@ -103,6 +107,7 @@ alias is omitted (Codex rejects it). ClaudeUI's `'default'` model alias is also 
 (Codex rejects it).
 
 **Notification → `ContentBlock`/`session:*` mapping** (in `mapCodexEvent.ts`):
+
 - `item/agentMessage/delta` → `session:stream {type:'text'}`
 - `item/reasoning/textDelta` / `summaryTextDelta` → `session:stream {type:'thinking'}`
 - `item/commandExecution/outputDelta` → streaming tool output
@@ -119,6 +124,7 @@ in a Deferred; `resolveApproval('allow')` → Codex decision `'accept'`;
 policy-amendment variants are a tracked follow-up (see Follow-ups below).
 
 **Capabilities (`CODEX_CAPABILITIES`, frozen):**
+
 ```ts
 { thinkingModes: false, effortLevels: true, voice: false, hostedMcp: false,
   backgroundTasks: false, subagents: false, plan: true, costUsd: false,
@@ -146,11 +152,12 @@ run `codex login` in a terminal.
 
 Codex app-server is compiled Rust — not regex-patchable like cli.js. No patch pipeline is
 built in v1. If/when a concrete need arises, the options are:
+
 - **Wire-observable behavior** → in-process JSON-RPC frame interception in
   `CodexAppServerClient` (a `(frame) => frame | null` transform list). No separate process.
 - **Non-wire behavior** → a `codex-rs` source fork + cross-platform Rust build.
 
-These are designed *then*, not now.
+These are designed _then_, not now.
 
 ### No ClaudeUI-hosted MCP in v1
 
@@ -158,7 +165,7 @@ Codex sessions start with no ClaudeUI-hosted MCP tools (mermaid, mockup). Tracke
 
 ## Known Gotchas
 
-**Never override `CODEX_HOME`.** `CODEX_HOME` *is* the directory the codex binary uses for its
+**Never override `CODEX_HOME`.** `CODEX_HOME` _is_ the directory the codex binary uses for its
 config and credentials (`auth.json`), defaulting to `~/.codex`. An early bug set
 `CODEX_HOME=$HOME`, which made codex look for credentials at `$HOME/auth.json` instead of
 `~/.codex/auth.json` → every turn failed with HTTP 401 (`Missing bearer authentication`).

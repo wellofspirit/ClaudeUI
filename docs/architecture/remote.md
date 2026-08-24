@@ -7,7 +7,7 @@ carries sync; it is not where sync is designed.
 
 **The sync architecture lives in [sync-core.md](sync-core.md)** (canonical state, the
 emission funnel, the shared reducer, replication, queue, terminal, headless), with the
-per-channel classification in [sync-channels.md](sync-channels.md) and the auth *policy*
+per-channel classification in [sync-channels.md](sync-channels.md) and the auth _policy_
 model — capabilities, step-up, grant decay, audit — in [security.md](security.md).
 
 This file used to be the "as built" counterweight to sync-core.md's target design, and
@@ -19,15 +19,15 @@ gap). What is left here is the part the rebuild did not change.
 
 ## Components
 
-| Piece | File | Role |
-| ----- | ---- | ---- |
-| Remote server | `src/core/services/remote-server.ts` | HTTP + WS listener; auth (ADR-039/042), E2E (tunnel), mockup/sent-file routes (ADR-007/043); serves the web client bundle |
-| Dispatcher | `src/core/services/remote-dispatcher.ts` | Routes WS `invoke` frames to the same handler functions as desktop IPC. What a remote client may reach is decided by CAPABILITY GRANTS in the command registry (`ipc/command-registry.ts`), not by the old `BLOCKED` denylist |
-| WS broadcaster | inside `remote-server.ts` | A plain funnel SUBSCRIBER: `addSyncSubscriber((seq, channel, args) => broadcast(...))`, registered on `start()` and dropped on `stop()`. It broadcasts the ring's own seq and never re-numbers |
-| Desktop transport | `src/main/services/sync-port.ts` + `src/renderer/src/sync/desktop-transport.ts` | The desktop renderer is client #1 over a `MessagePortMain` pair, speaking the same frames as a WS client. One channel per renderer LOAD; the subscriber is registered only once the first `sync` has been answered, in the same tick |
-| Web client | `src/web/` (`connection.ts`, `api-adapter.ts`, `main.tsx`) | Dynamically imports the renderer's own `App`/stores. `api-adapter` is a hand-maintained `ClaudeAPI` mirror (typechecked per ADR-008) for the **invoke** surface only; both clients subscribe to events through `core/shared/sync/client-registry` |
-| Auth | `src/core/services/remote-auth.ts` + `remote-server.ts` | Password + passkey admission, origin classification, throttling, constant-time compares, step-up proofs (ADR-056) |
-| Tunnel + TLS | `src/core/services/tunnel-manager.ts`, `tailscale-manager.ts` | cloudflared quick tunnel (mandatory E2E) and `tailscale serve` on a pinned HTTPS port (ADR-042) |
+| Piece             | File                                                                            | Role                                                                                                                                                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Remote server     | `src/core/services/remote-server.ts`                                            | HTTP + WS listener; auth (ADR-039/042), E2E (tunnel), mockup/sent-file routes (ADR-007/043); serves the web client bundle                                                                                                                         |
+| Dispatcher        | `src/core/services/remote-dispatcher.ts`                                        | Routes WS `invoke` frames to the same handler functions as desktop IPC. What a remote client may reach is decided by CAPABILITY GRANTS in the command registry (`ipc/command-registry.ts`), not by the old `BLOCKED` denylist                     |
+| WS broadcaster    | inside `remote-server.ts`                                                       | A plain funnel SUBSCRIBER: `addSyncSubscriber((seq, channel, args) => broadcast(...))`, registered on `start()` and dropped on `stop()`. It broadcasts the ring's own seq and never re-numbers                                                    |
+| Desktop transport | `src/main/services/sync-port.ts` + `src/renderer/src/sync/desktop-transport.ts` | The desktop renderer is client #1 over a `MessagePortMain` pair, speaking the same frames as a WS client. One channel per renderer LOAD; the subscriber is registered only once the first `sync` has been answered, in the same tick              |
+| Web client        | `src/web/` (`connection.ts`, `api-adapter.ts`, `main.tsx`)                      | Dynamically imports the renderer's own `App`/stores. `api-adapter` is a hand-maintained `ClaudeAPI` mirror (typechecked per ADR-008) for the **invoke** surface only; both clients subscribe to events through `core/shared/sync/client-registry` |
+| Auth              | `src/core/services/remote-auth.ts` + `remote-server.ts`                         | Password + passkey admission, origin classification, throttling, constant-time compares, step-up proofs (ADR-056)                                                                                                                                 |
+| Tunnel + TLS      | `src/core/services/tunnel-manager.ts`, `tailscale-manager.ts`                   | cloudflared quick tunnel (mandatory E2E) and `tailscale serve` on a pinned HTTPS port (ADR-042)                                                                                                                                                   |
 
 ## Wire protocol (`src/shared/remote-protocol.ts`)
 
@@ -96,21 +96,23 @@ client never needs.
 The transport hardening was unaffected by the SyncCore rebuild and carries forward
 unchanged: Host allowlist, per-IP throttling, funnel reject (ADR-039), the pinned
 tailscale HTTPS port and its serve reconciliation (ADR-042), E2E itself (AES-256-GCM
-+ HKDF, replay guard, per-connection session keys derived at activation), and the
-scoped mockup/sent-file tokens (ADR-007/043).
+
+- HKDF, replay guard, per-connection session keys derived at activation), and the
+  scoped mockup/sent-file tokens (ADR-007/043).
 
 **What ADR-056 moved, stated against that list.** The METHODS narrowed to password
-+ passkey (+ the enrollment link): the bearer token is gone and ambient tailnet
-identity is a username hint rather than an admission. E2E widened from
-tunnel-only to tunnel + LAN, on a persistent per-install key for the latter. And
-the two throttle budgets collapsed into ONE, in code and not merely in practice:
-the loose 10-per-60 s token budget is deleted, and every credential failure —
-password proof, passkey assertion, enrollment link, and a **channel-key
-activation whose first encrypted frame does not decrypt** — spends the strict
-5-per-5-minutes budget. The constant-time compare, the XFF keying behind serve,
-and the "refuse at connection time, before the frame" placement are untouched.
 
-The auth *policy* layer on top of it is **built** and documented in
+- passkey (+ the enrollment link): the bearer token is gone and ambient tailnet
+  identity is a username hint rather than an admission. E2E widened from
+  tunnel-only to tunnel + LAN, on a persistent per-install key for the latter. And
+  the two throttle budgets collapsed into ONE, in code and not merely in practice:
+  the loose 10-per-60 s token budget is deleted, and every credential failure —
+  password proof, passkey assertion, enrollment link, and a **channel-key
+  activation whose first encrypted frame does not decrypt** — spends the strict
+  5-per-5-minutes budget. The constant-time compare, the XFF keying behind serve,
+  and the "refuse at connection time, before the frame" placement are untouched.
+
+The auth _policy_ layer on top of it is **built** and documented in
 [security.md](security.md) / ADR-052: capability grants, passkeys and the policy modes,
 the `shell` step-up ceremony, idle grant decay, and the append-only audit log. What it
 adds to THIS layer's contract is three WS frame pairs (`auth-webauthn-start` /

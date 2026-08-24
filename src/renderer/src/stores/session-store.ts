@@ -1470,7 +1470,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       let defaultModel = stickyAvailable
         ? (sticky as string)
         : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
-      const staleDefault = defaultModel === null ? configuredDefaultModelOf(engineId, defaults) : null
+      const staleDefault =
+        defaultModel === null ? configuredDefaultModelOf(engineId, defaults) : null
       if (
         engineId === 'opencode' &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
@@ -1617,7 +1618,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (resolved === null) {
       useSessionStore
         .getState()
-        .addError(id, staleDefaultModelMessage(engineId, configuredDefaultModelOf(engineId, defaults)))
+        .addError(
+          id,
+          staleDefaultModelMessage(engineId, configuredDefaultModelOf(engineId, defaults))
+        )
     }
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
@@ -2356,7 +2360,9 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       if (!state.sessions[routingId]) return {}
       return {
-        sessions: updateSession(state.sessions, routingId, () => ({ draftAttachments: attachments }))
+        sessions: updateSession(state.sessions, routingId, () => ({
+          draftAttachments: attachments
+        }))
       }
     }),
 

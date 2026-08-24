@@ -171,10 +171,12 @@ describe('classifyDispatch', () => {
     // audit trail carries terminal lifecycle); `terminal:pool` is a `query` that
     // is still a shell read (the operator's live-shell inventory is sensitive).
     // Deriving the split from `kind` would be wrong in exactly these two cases.
-    expect(classifyDispatch({ channel: 'terminal:attach', capability: 'shell', kind: 'command' }))
-      .toBe('shell-read')
-    expect(classifyDispatch({ channel: 'terminal:pool', capability: 'shell', kind: 'query' }))
-      .toBe('shell-read')
+    expect(
+      classifyDispatch({ channel: 'terminal:attach', capability: 'shell', kind: 'command' })
+    ).toBe('shell-read')
+    expect(classifyDispatch({ channel: 'terminal:pool', capability: 'shell', kind: 'query' })).toBe(
+      'shell-read'
+    )
   })
 
   it('the read and act verb sets are disjoint', () => {
@@ -244,7 +246,12 @@ describe('classifyDispatch', () => {
 
 describe('evaluateStepUp — the tier × class × state matrix', () => {
   it('the desktop MessagePort is exempt from every cell', () => {
-    const exempt = armed({ exempt: true, armedEver: false, shellActExpiresAt: null, mutationExpiresAt: null })
+    const exempt = armed({
+      exempt: true,
+      armedEver: false,
+      shellActExpiresAt: null,
+      mutationExpiresAt: null
+    })
     for (const tier of ['strong', 'medium', 'off'] as const) {
       for (const cls of ['read', 'shell-read', 'shell-act', 'authcfg', 'mutation'] as const) {
         const d = decide(tier, cls, exempt)
@@ -401,12 +408,12 @@ describe('evaluateStepUp — the tier × class × state matrix', () => {
     it('an EXPIRED session is refused — expiry is lazy, not remembered', () => {
       // No timer clears the field; the table simply stops honouring it. A
       // deadline one millisecond in the past is a locked editor.
-      expect(
-        decide('medium', 'authcfg', armed({ settingsSessionExpiresAt: NOW - 1 })).allow
-      ).toBe(false)
-      expect(
-        decide('medium', 'authcfg', armed({ settingsSessionExpiresAt: NOW + 1 })).allow
-      ).toBe(true)
+      expect(decide('medium', 'authcfg', armed({ settingsSessionExpiresAt: NOW - 1 })).allow).toBe(
+        false
+      )
+      expect(decide('medium', 'authcfg', armed({ settingsSessionExpiresAt: NOW + 1 })).allow).toBe(
+        true
+      )
     })
 
     it('refuses with `settings-session`, never with the ambient `step-up`', () => {
@@ -471,8 +478,9 @@ describe('presenceOf / tierOf', () => {
   })
 
   it('carries the tier the connection was admitted under', () => {
-    expect(tierOf(makeRemoteConnection('webauthn', 'Phone', undefined, { stepUpTier: 'strong' })))
-      .toBe('strong')
+    expect(
+      tierOf(makeRemoteConnection('webauthn', 'Phone', undefined, { stepUpTier: 'strong' }))
+    ).toBe('strong')
   })
 
   it('the convenience predicates agree with the table they wrap', () => {
@@ -515,9 +523,7 @@ describe('window sizing', () => {
     // loop hammers the server forever. A legal setting must never be able to
     // produce that, so the ceiling is a week and every value at or above it
     // clamps well under the wrap point.
-    expect(sessionMaxAgeMs(MAX_SESSION_MAX_AGE_HOURS)).toBe(
-      MAX_SESSION_MAX_AGE_HOURS * 3_600_000
-    )
+    expect(sessionMaxAgeMs(MAX_SESSION_MAX_AGE_HOURS)).toBe(MAX_SESSION_MAX_AGE_HOURS * 3_600_000)
     expect(sessionMaxAgeMs(MAX_SESSION_MAX_AGE_HOURS)).toBeLessThan(MAX_TIMER_MS)
     // The range that used to pass validation and detonate: 597–720 hours.
     for (const hours of [597, 700, 720, 100_000]) {

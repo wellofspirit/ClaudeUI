@@ -324,7 +324,13 @@ describe('forkFromMessage', () => {
     expect(newId).toBeTruthy()
     // idx=1 ('msg_1' is the SECOND message, index 1) + engineId — threaded
     // through for pi's position-based resolver (Claude's resolver ignores both).
-    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('src-session', '/proj', 'msg_1', 'claude', 1)
+    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith(
+      'src-session',
+      '/proj',
+      'msg_1',
+      'claude',
+      1
+    )
     const branch = store().sessions[newId!]
     expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'msg_1'])
     expect(branch.forkOrigin).toEqual({ sourceSessionId: 'src-session', anchorUuid: 'anchor-1' })
@@ -382,7 +388,13 @@ describe('forkFromMessage', () => {
     ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'a1' })
 
     await store().forkFromMessage('routing-temp', 'msg_1')
-    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('real-sid', '/proj', 'msg_1', 'claude', 0)
+    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith(
+      'real-sid',
+      '/proj',
+      'msg_1',
+      'claude',
+      0
+    )
   })
 
   it('threads engineId + the message index through for pi (position-based resolution)', async () => {
@@ -1172,7 +1184,10 @@ describe('addTaskNotification', () => {
 describe('setStatus', () => {
   it('updates status fields', () => {
     store().createNewSession('r1', '/test')
-    seed.status('r1', makeSessionStatus({ state: 'running', model: claudeModel('claude-opus-4-7') }))
+    seed.status(
+      'r1',
+      makeSessionStatus({ state: 'running', model: claudeModel('claude-opus-4-7') })
+    )
     expect(store().sessions['r1'].status.state).toBe('running')
     expect(store().sessions['r1'].status.model?.modelId).toBe('claude-opus-4-7')
   })
@@ -1409,9 +1424,7 @@ describe('appendSubagentToolResult', () => {
   })
 
   it('is a no-op when session does not exist', () => {
-    expect(() =>
-      seed.subagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)
-    ).not.toThrow()
+    expect(() => seed.subagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)).not.toThrow()
   })
 })
 
@@ -2022,7 +2035,6 @@ describe('resolveClaudeCapabilities (Phase 2 replacement for capabilitiesFor)', 
     expect(caps.isAgentCapable).toBe(true)
   })
 })
-
 
 // ---------------------------------------------------------------------------
 // Model picks: capability re-seeding, welcome-screen stickiness, stale defaults

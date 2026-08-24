@@ -56,12 +56,9 @@ describe('RemoteAccessModal FC', () => {
     stopCalls = 0
 
     app.bridge.ipcMain.handle('remote:status', async () => statusQueue.shift() ?? makeStatus())
-    app.bridge.ipcMain.handle(
-      'remote:interfaces',
-      async (): Promise<NetworkInterfaceInfo[]> => [
-        { name: 'eth0', address: '192.168.1.10', priority: 0 } as NetworkInterfaceInfo
-      ]
-    )
+    app.bridge.ipcMain.handle('remote:interfaces', async (): Promise<NetworkInterfaceInfo[]> => [
+      { name: 'eth0', address: '192.168.1.10', priority: 0 } as NetworkInterfaceInfo
+    ])
     app.bridge.ipcMain.handle(
       'remote:start',
       async (_e, opts?: { host?: string; tunnel?: boolean }) => {

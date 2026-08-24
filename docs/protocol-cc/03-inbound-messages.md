@@ -317,7 +317,7 @@ Emitted exactly once per turn, last message of the turn.
 - **`usage`, `duration_ms`, `duration_api_ms` are PER-TURN.**
 - `modelUsage` entry shape (per model id key):
   `{ inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens,
-  webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
+webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
   the authoritative per-model cost (cumulative, as above).
 - **`result` records are NOT persisted to transcript JSONL** (verified across
   46 real transcripts) — cost/duration are not recoverable from a transcript;

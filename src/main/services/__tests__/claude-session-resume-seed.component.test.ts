@@ -15,9 +15,7 @@
  * everything touching disk/processes is stubbed; only construction is driven.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import {
-  subscribeWindowToSync
-} from '../../../test/helpers/sync-subscriber-window'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 import type { StatusLineData } from '../../../shared/types'
 
@@ -47,7 +45,10 @@ vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../../../core/services/ui-config', () => ({ saveSlashCommands: vi.fn(), loadEngineConfig: vi.fn(() => ({})) }))
+vi.mock('../../../core/services/ui-config', () => ({
+  saveSlashCommands: vi.fn(),
+  loadEngineConfig: vi.fn(() => ({}))
+}))
 vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])
@@ -58,9 +59,14 @@ vi.mock('../../../core/services/session-history', () => ({
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
-vi.mock('../../../core/services/voice-capture', () => ({ startRecording: vi.fn(), stopRecording: vi.fn() }))
+vi.mock('../../../core/services/voice-capture', () => ({
+  startRecording: vi.fn(),
+  stopRecording: vi.fn()
+}))
 vi.mock('../../../core/services/voice-client', () => ({ VoiceClient: class {} }))
-vi.mock('../../../core/services/context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
+vi.mock('../../../core/services/context-window', () => ({
+  getContextWindowSize: vi.fn(() => 200000)
+}))
 vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { updateFromRateLimitEvent: vi.fn(), fetch: vi.fn(async () => null) }
 }))
@@ -99,7 +105,9 @@ function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]>
       }
     }
   } as unknown as BrowserWindow
-  subscribeWindowToSync(win as unknown as { webContents: { send: (c: string, ...a: unknown[]) => void } })
+  subscribeWindowToSync(
+    win as unknown as { webContents: { send: (c: string, ...a: unknown[]) => void } }
+  )
   return { win, sent }
 }
 

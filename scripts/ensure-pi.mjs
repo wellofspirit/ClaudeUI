@@ -26,7 +26,7 @@ import {
   rmSync,
   readFileSync,
   writeFileSync,
-  renameSync,
+  renameSync
 } from 'node:fs'
 import { join, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -196,7 +196,10 @@ function extractZip(buf, destDir) {
 const TAR_BLOCK = 512
 
 function readOctal(buf, offset, len) {
-  const s = buf.subarray(offset, offset + len).toString('ascii').trim()
+  const s = buf
+    .subarray(offset, offset + len)
+    .toString('ascii')
+    .trim()
   return s ? parseInt(s, 8) : 0
 }
 
@@ -222,7 +225,10 @@ function extractTarGz(gzBuf, destDir) {
     const dataBlocks = Math.ceil(fileSize / TAR_BLOCK) * TAR_BLOCK
 
     if (typeFlag === 'L') {
-      pendingLongName = tar.subarray(pos, pos + fileSize).toString('utf8').replace(/\0/g, '')
+      pendingLongName = tar
+        .subarray(pos, pos + fileSize)
+        .toString('utf8')
+        .replace(/\0/g, '')
       pos += dataBlocks
       continue
     }
@@ -261,10 +267,12 @@ async function download(assetName, version) {
 
   const [assetBytes, sumsBytes] = await Promise.all([
     fetchBytes(`${RELEASE_BASE}/${tag}/${assetName}`),
-    fetchBytes(`${RELEASE_BASE}/${tag}/SHA256SUMS`),
+    fetchBytes(`${RELEASE_BASE}/${tag}/SHA256SUMS`)
   ])
 
-  info(`[ensure-pi] Downloaded ${(assetBytes.length / 1024 / 1024).toFixed(1)} MB, verifying SHA256 ...`)
+  info(
+    `[ensure-pi] Downloaded ${(assetBytes.length / 1024 / 1024).toFixed(1)} MB, verifying SHA256 ...`
+  )
   verifySha256(assetBytes, sumsBytes.toString('utf8'), assetName)
 
   // Extract into a temp dir, then swap into place for atomicity.
@@ -288,7 +296,7 @@ async function download(assetName, version) {
         asset: assetName,
         platform: process.platform,
         arch: process.arch,
-        downloadedAt: new Date().toISOString(),
+        downloadedAt: new Date().toISOString()
       },
       null,
       2

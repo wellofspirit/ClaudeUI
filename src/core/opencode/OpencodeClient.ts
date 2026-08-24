@@ -11,7 +11,7 @@ import type {
   OpencodeEvent,
   Command,
   RunCommandRequest,
-  Skill,
+  Skill
 } from './protocol/types'
 
 /**
@@ -53,7 +53,7 @@ export class OpencodeClient {
     const headers: Record<string, string> = {
       Authorization: this.authHeader,
       'Content-Type': 'application/json',
-      Accept: 'application/json',
+      Accept: 'application/json'
     }
 
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
@@ -80,7 +80,7 @@ export class OpencodeClient {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
+        signal: controller.signal
       })
       if (!res.ok) {
         const text = await res.text().catch(() => '')
@@ -237,7 +237,7 @@ export class OpencodeClient {
   prompt(sessionId: string, req: PromptRequest, opts?: OpencodeRequestOptions): Promise<unknown> {
     return this.post(`/session/${encodeURIComponent(sessionId)}/message`, req, {
       timeoutMs: PROMPT_TIMEOUT_MS,
-      ...opts,
+      ...opts
     })
   }
 
@@ -319,7 +319,7 @@ export class OpencodeClient {
   ): Promise<unknown> {
     return this.post(`/session/${encodeURIComponent(sessionId)}/command`, body, {
       timeoutMs: PROMPT_TIMEOUT_MS,
-      ...opts,
+      ...opts
     })
   }
 
@@ -341,9 +341,9 @@ export class OpencodeClient {
       headers: {
         Authorization: this.authHeader,
         Accept: 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache'
       },
-      signal,
+      signal
     })
 
     if (!res.ok) {

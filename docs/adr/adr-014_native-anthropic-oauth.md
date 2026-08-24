@@ -39,11 +39,11 @@ control-request subtypes (no patch required; see
 `docs/protocol-cc/07-control-outbound.md §7.5`), already surfaced on our QueryHandle
 (`src/main/sdk/query.ts`):
 
-| QueryHandle method               | control subtype                    | returns                          |
-| -------------------------------- | ---------------------------------- | -------------------------------- |
-| `claudeAuthenticate(true)`       | `claude_authenticate`              | `{ manualUrl, automaticUrl }`    |
-| `claudeOAuthWaitForCompletion()` | `claude_oauth_wait_for_completion` | `{ account }` (loopback auto)    |
-| `claudeOAuthCallback(code,state)`| `claude_oauth_callback`            | `{ account }` (manual paste)     |
+| QueryHandle method                | control subtype                    | returns                       |
+| --------------------------------- | ---------------------------------- | ----------------------------- |
+| `claudeAuthenticate(true)`        | `claude_authenticate`              | `{ manualUrl, automaticUrl }` |
+| `claudeOAuthWaitForCompletion()`  | `claude_oauth_wait_for_completion` | `{ account }` (loopback auto) |
+| `claudeOAuthCallback(code,state)` | `claude_oauth_callback`            | `{ account }` (manual paste)  |
 
 ## Decision
 
@@ -89,7 +89,7 @@ main process.
 
 5. **Inline auth card, not a modal.** The renderer's `ApiErrorBlock` gains an
    `AuthErrorBlock` variant (FloatingApproval-styled) for `errorType ===
-   'authentication'`: Log in / Dismiss → authorizing spinner (with a manual-paste
+'authentication'`: Log in / Dismiss → authorizing spinner (with a manual-paste
    fallback) → signed-in + Retry. **Only the card that initiated the login follows
    the global flow state** (a local `initiated` flag); other and newly-arrived
    error cards stay in the error state, so a retry that re-fails does not inherit
@@ -108,8 +108,8 @@ main process.
 6. **Proactive banner is scoped to "logged out", driven by the initialize
    response `account`.** `AuthBanner` shows only when cli.js's initialize response
    carries no `account.email` (broadcast as `session:auth-source` = `'none'`).
-   Note `apiKeySource` is **not** the signal: it reports the *API-key* source and
-   is legitimately `"none"` for every logged-in *subscription* (OAuth-token) user,
+   Note `apiKeySource` is **not** the signal: it reports the _API-key_ source and
+   is legitimately `"none"` for every logged-in _subscription_ (OAuth-token) user,
    so keying off it falsely flags subscribers as logged out. A logged-out cli.js
    returns an account with no email (`tokenSource:"none"`); an expired-but-cached
    login still has an email — that 401s on send and is handled by the reactive

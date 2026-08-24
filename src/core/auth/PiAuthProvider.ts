@@ -28,7 +28,12 @@ import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-at
 import type { AccountRef, AuthState, VendorAuthMap, VendorAuthOption } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { PI_API_KEY_VENDOR_IDS, PI_SUBSCRIPTION_VENDOR_IDS } from './pi-vendor-ids'
-import { credentialSync, PI_CODEX_VENDOR_ID, type CodexCredentialInput, type CodexEntrySnapshot } from './vault/CredentialSync'
+import {
+  credentialSync,
+  PI_CODEX_VENDOR_ID,
+  type CodexCredentialInput,
+  type CodexEntrySnapshot
+} from './vault/CredentialSync'
 
 /**
  * `~/.pi/agent/auth.json` — pi's own credential store. Reuses `piAgentDir()`
@@ -142,7 +147,11 @@ export class PiAuthProvider implements EngineAuthProvider {
     const out: Record<string, VendorAuthOption[]> = {}
     for (const vendorId of PI_API_KEY_VENDOR_IDS) {
       out[vendorId] = [
-        { type: 'api', label: 'API key', prompts: [{ type: 'text', key: 'key', message: 'API key', secret: true }] }
+        {
+          type: 'api',
+          label: 'API key',
+          prompts: [{ type: 'text', key: 'key', message: 'API key', secret: true }]
+        }
       ]
     }
     for (const vendorId of PI_SUBSCRIPTION_VENDOR_IDS) {
@@ -231,7 +240,8 @@ export class PiAuthProvider implements EngineAuthProvider {
     const entry = file[vendorId]
     if (!entry || entry.type !== 'oauth') return null
     const { access, refresh, expires } = entry
-    if (typeof access !== 'string' || typeof refresh !== 'string' || typeof expires !== 'number') return null
+    if (typeof access !== 'string' || typeof refresh !== 'string' || typeof expires !== 'number')
+      return null
     return { access, refresh, expires }
   }
 
@@ -248,7 +258,9 @@ export class PiAuthProvider implements EngineAuthProvider {
     _inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> {
     if (vendorId !== PI_CODEX_VENDOR_ID) {
-      throw new Error(`PiAuthProvider.oauthAuthorize: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`)
+      throw new Error(
+        `PiAuthProvider.oauthAuthorize: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`
+      )
     }
     const { authorizeUrl } = await credentialSync.beginLogin()
     return {
@@ -260,7 +272,9 @@ export class PiAuthProvider implements EngineAuthProvider {
 
   async oauthCallback(vendorId: string, _method: number, code?: string): Promise<boolean> {
     if (vendorId !== PI_CODEX_VENDOR_ID) {
-      throw new Error(`PiAuthProvider.oauthCallback: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`)
+      throw new Error(
+        `PiAuthProvider.oauthCallback: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`
+      )
     }
     // ADR-057: a non-empty `code` is the pasted callback URL / bare code from a
     // remote browser (the host loopback never fired because the redirect landed

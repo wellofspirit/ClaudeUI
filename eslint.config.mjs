@@ -194,7 +194,7 @@ export default defineConfig(
         },
         {
           selector:
-            "CallExpression[callee.name=/^(set|setState)$/] Property[key.name=/^(directories|settings|autoModeDisabledBySettings|recentSessionIds|pinnedSessionIds|customTitles|worktreeInfoMap|sessionEngines|hiddenSessionIds|hiddenProjectKeys|slashCommands|sdkSkillNames)$/]",
+            'CallExpression[callee.name=/^(set|setState)$/] Property[key.name=/^(directories|settings|autoModeDisabledBySettings|recentSessionIds|pinnedSessionIds|customTitles|worktreeInfoMap|sessionEngines|hiddenSessionIds|hiddenProjectKeys|slashCommands|sdkSkillNames)$/]',
           message:
             'This app-level field is SEALED (SyncCore phase 4c): the replica fold is its only ' +
             'writer. Route the change through stores/replica.ts (patchLocalApp / seedLocalApp). ' +

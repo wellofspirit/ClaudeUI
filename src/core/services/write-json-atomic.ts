@@ -71,7 +71,10 @@ function chmodBestEffort(filePath: string, mode: number): void {
   try {
     fs.chmodSync(filePath, mode)
   } catch (err) {
-    logger.warn('writeFileAtomic', `chmod ${mode.toString(8)} failed for ${filePath}: ${errMsg(err)}`)
+    logger.warn(
+      'writeFileAtomic',
+      `chmod ${mode.toString(8)} failed for ${filePath}: ${errMsg(err)}`
+    )
   }
 }
 
@@ -80,7 +83,10 @@ async function chmodBestEffortAsync(filePath: string, mode: number): Promise<voi
   try {
     await fsp.chmod(filePath, mode)
   } catch (err) {
-    logger.warn('writeFileAtomic', `chmod ${mode.toString(8)} failed for ${filePath}: ${errMsg(err)}`)
+    logger.warn(
+      'writeFileAtomic',
+      `chmod ${mode.toString(8)} failed for ${filePath}: ${errMsg(err)}`
+    )
   }
 }
 
@@ -97,7 +103,10 @@ export function writeFileAtomicSync(
 ): void {
   const mode = opts.mode ?? DEFAULT_MODE
   const dir = path.dirname(filePath)
-  fs.mkdirSync(dir, { recursive: true, ...(opts.dirMode !== undefined ? { mode: opts.dirMode } : {}) })
+  fs.mkdirSync(dir, {
+    recursive: true,
+    ...(opts.dirMode !== undefined ? { mode: opts.dirMode } : {})
+  })
   const temp = tempPathFor(filePath)
   try {
     fs.writeFileSync(temp, data, { mode })
@@ -131,7 +140,10 @@ export async function writeFileAtomicAsync(
 ): Promise<void> {
   const mode = opts.mode ?? DEFAULT_MODE
   const dir = path.dirname(filePath)
-  await fsp.mkdir(dir, { recursive: true, ...(opts.dirMode !== undefined ? { mode: opts.dirMode } : {}) })
+  await fsp.mkdir(dir, {
+    recursive: true,
+    ...(opts.dirMode !== undefined ? { mode: opts.dirMode } : {})
+  })
   const temp = tempPathFor(filePath)
   try {
     await fsp.writeFile(temp, data, { mode })

@@ -37,12 +37,14 @@ function routeDiagnosisText(
 const harnesses: ConfigurableHarnessId[] = ['pi', 'opencode']
 
 /** Wire protocols a custom shared provider can speak. First entry = the default. */
-const PROTOCOL_OPTIONS: { value: NonNullable<SharedProviderDefinition['protocol']>; label: string }[] =
-  [
-    { value: 'openai-completions', label: 'OpenAI completions' },
-    { value: 'openai-responses', label: 'OpenAI responses' },
-    { value: 'anthropic-messages', label: 'Anthropic messages' }
-  ]
+const PROTOCOL_OPTIONS: {
+  value: NonNullable<SharedProviderDefinition['protocol']>
+  label: string
+}[] = [
+  { value: 'openai-completions', label: 'OpenAI completions' },
+  { value: 'openai-responses', label: 'OpenAI responses' },
+  { value: 'anthropic-messages', label: 'Anthropic messages' }
+]
 const blank = (): SharedProviderDefinition => ({
   id: '',
   name: '',
@@ -460,7 +462,10 @@ function ProviderCard({
             </label>
             {route.enabled && (
               <div className="mt-1">
-                <label className="text-[10px] text-text-muted" htmlFor={`${definition.id}-${h}-default`}>
+                <label
+                  className="text-[10px] text-text-muted"
+                  htmlFor={`${definition.id}-${h}-default`}
+                >
                   Default model for {h}
                 </label>
                 <SelectMenu
@@ -477,7 +482,12 @@ function ProviderCard({
                     // selectable so the control reports what is actually saved.
                     ...(route.defaultModel &&
                     !available.some((model) => model.id === route.defaultModel)
-                      ? [{ value: route.defaultModel, label: `${route.defaultModel} (unavailable)` }]
+                      ? [
+                          {
+                            value: route.defaultModel,
+                            label: `${route.defaultModel} (unavailable)`
+                          }
+                        ]
                       : []),
                     ...available.map((m) => ({ value: m.id, label: m.name || m.id }))
                   ]}
@@ -599,7 +609,9 @@ function ProviderForm({
         ))}
       </div>
       <div className="space-y-1.5">
-        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Models</div>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">
+          Models
+        </div>
         {draft.models.map((m, i) => (
           <div key={i} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-1.5">
             <input

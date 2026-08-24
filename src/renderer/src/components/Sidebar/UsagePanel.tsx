@@ -133,7 +133,10 @@ export function UsagePanel({
   }
 
   return (
-    <div data-testid="UsagePanel" className="absolute bottom-full left-0 mb-1 w-[220px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50">
+    <div
+      data-testid="UsagePanel"
+      className="absolute bottom-full left-0 mb-1 w-[220px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50"
+    >
       {usage?.error ? (
         <div className="text-[10px] text-red-400">{usage.error}</div>
       ) : usage ? (

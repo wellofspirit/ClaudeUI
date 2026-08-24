@@ -180,10 +180,7 @@ export interface PiToolCallContent {
   arguments: Record<string, unknown>
 }
 
-export type PiAssistantContentBlock =
-  | PiTextContent
-  | PiThinkingContent
-  | PiToolCallContent
+export type PiAssistantContentBlock = PiTextContent | PiThinkingContent | PiToolCallContent
 
 // ---------------------------------------------------------------------------
 // Messages (rpc.md "Types" + session-format.md "Base/Extended Message Types")
@@ -259,10 +256,7 @@ export interface PiBashExecutionMessage {
 
 /** AgentMessage union — custom/branchSummary/compactionSummary omitted (not consumed in M1). */
 export type PiAgentMessage =
-  | PiUserMessage
-  | PiAssistantMessage
-  | PiToolResultMessage
-  | PiBashExecutionMessage
+  PiUserMessage | PiAssistantMessage | PiToolResultMessage | PiBashExecutionMessage
 
 // ---------------------------------------------------------------------------
 // Events (rpc.md "Events" — verified sequence in docs/protocol-pi/README.md)
@@ -308,9 +302,18 @@ export type PiEvent =
   | { type: 'turn_start' }
   | { type: 'turn_end'; message: PiAgentMessage; toolResults: PiToolResultMessage[] }
   | { type: 'message_start'; message: PiAgentMessage }
-  | { type: 'message_update'; message: PiAgentMessage; assistantMessageEvent: PiAssistantMessageEvent }
+  | {
+      type: 'message_update'
+      message: PiAgentMessage
+      assistantMessageEvent: PiAssistantMessageEvent
+    }
   | { type: 'message_end'; message: PiAgentMessage }
-  | { type: 'tool_execution_start'; toolCallId: string; toolName: string; args: Record<string, unknown> }
+  | {
+      type: 'tool_execution_start'
+      toolCallId: string
+      toolName: string
+      args: Record<string, unknown>
+    }
   | {
       type: 'tool_execution_update'
       toolCallId: string
@@ -318,7 +321,13 @@ export type PiEvent =
       args: Record<string, unknown>
       partialResult: PiToolExecutionPartialResult
     }
-  | { type: 'tool_execution_end'; toolCallId: string; toolName: string; result: unknown; isError: boolean }
+  | {
+      type: 'tool_execution_end'
+      toolCallId: string
+      toolName: string
+      result: unknown
+      isError: boolean
+    }
   | { type: 'queue_update'; steering: string[]; followUp: string[] }
   | { type: 'compaction_start'; reason: 'manual' | 'threshold' | 'overflow' }
   | {
@@ -329,7 +338,13 @@ export type PiEvent =
       willRetry: boolean
       errorMessage?: string
     }
-  | { type: 'auto_retry_start'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+  | {
+      type: 'auto_retry_start'
+      attempt: number
+      maxAttempts: number
+      delayMs: number
+      errorMessage: string
+    }
   | { type: 'auto_retry_end'; success: boolean; attempt: number; finalError?: string }
   | { type: 'extension_error'; extensionPath: string; event: string; error: string }
   // Extension UI dialog request (M2 — the ClaudeUI approval bridge). Typed loosely;

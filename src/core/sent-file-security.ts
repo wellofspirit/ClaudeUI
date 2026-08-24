@@ -25,8 +25,7 @@ import { validateLocalFilePath } from './shell-security'
 export const MAX_PREVIEW_BYTES = 10 * 1024 * 1024
 
 export type PreviewCheck =
-  | { ok: true; path: string; mime: string; size: number }
-  | { ok: false; error: string }
+  { ok: true; path: string; mime: string; size: number } | { ok: false; error: string }
 
 /**
  * Whether `rawPath` may be read for an inline image preview.

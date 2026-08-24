@@ -17,9 +17,18 @@ import { EngineAuthRegistry } from '../EngineAuthRegistry'
 // Build a fake opencode provider (implements all optional per-vendor methods)
 // ---------------------------------------------------------------------------
 
-function makeOpencodeProvider(): EngineAuthProvider & Required<Pick<EngineAuthProvider,
-  'listVendorAuthOptions' | 'listVendorCredentialIds' | 'setVendorApiKey' | 'oauthAuthorize' | 'oauthCallback' | 'removeVendorAuth'
->> {
+function makeOpencodeProvider(): EngineAuthProvider &
+  Required<
+    Pick<
+      EngineAuthProvider,
+      | 'listVendorAuthOptions'
+      | 'listVendorCredentialIds'
+      | 'setVendorApiKey'
+      | 'oauthAuthorize'
+      | 'oauthCallback'
+      | 'removeVendorAuth'
+    >
+  > {
   const probeResult: VendorAuthMap = {
     openai: { authState: 'unauthenticated', billingType: 'unknown' }
   }
@@ -46,7 +55,9 @@ function makeOpencodeProvider(): EngineAuthProvider & Required<Pick<EngineAuthPr
 // Claude provider — only implements the base interface (no per-vendor methods)
 function makeClaudeProvider(): EngineAuthProvider {
   return {
-    probe: vi.fn().mockResolvedValue({ anthropic: { authState: 'authenticated', billingType: 'subscription' } })
+    probe: vi
+      .fn()
+      .mockResolvedValue({ anthropic: { authState: 'authenticated', billingType: 'subscription' } })
     // signIn, submitCode, cancelSignIn, addAccount, switchAccount, deleteAccount intentionally omitted
     // per-vendor methods NOT defined
   }
@@ -184,7 +195,13 @@ describe('vendor-auth IPC routing — opencode provider', () => {
   })
 
   it('vendor-auth:oauth-callback routes to opencode with correct args', async () => {
-    const ok = await dispatchVendorAuthOauthCallback(registry, 'opencode', 'anthropic', 0, 'code123')
+    const ok = await dispatchVendorAuthOauthCallback(
+      registry,
+      'opencode',
+      'anthropic',
+      0,
+      'code123'
+    )
     expect(opencodeProvider.oauthCallback).toHaveBeenCalledWith('anthropic', 0, 'code123')
     expect(ok).toBe(true)
   })

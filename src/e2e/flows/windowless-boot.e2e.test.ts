@@ -132,9 +132,7 @@ vi.mock('../../core/services/ui-config', () => ({
 }))
 
 vi.mock('../../core/services/session-history', () => ({
-  listDirectories: vi.fn(async () => [
-    { path: '/tmp/proj', name: 'proj', sessions: [] }
-  ]),
+  listDirectories: vi.fn(async () => [{ path: '/tmp/proj', name: 'proj', sessions: [] }]),
   loadSessionHistory: vi.fn(async () => ({ messages: [], taskNotifications: [] })),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
@@ -502,9 +500,9 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     // sendPrompt mints the user message into the event (phase 4b), so the client
     // learns its own message from the stream like every other client.
     await waitFor(() => eventsOn('session:user-message').length > 0)
-    expect(
-      (eventsOn('session:user-message')[0].args[1] as { prompt: string }).prompt
-    ).toBe('first turn')
+    expect((eventsOn('session:user-message')[0].args[1] as { prompt: string }).prompt).toBe(
+      'first turn'
+    )
 
     // The engine is live: run() reached `this.activeQuery = q`.
     await waitFor(() => engines.length === 1)
@@ -515,9 +513,7 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     // them. Asserted first, because "no watch ⇒ no frames" is the property the
     // lane exists for — the ring stays free of tokens.
     engine.emit(delta({ type: 'thinking_delta', thinking: 'weighing it up' }))
-    await waitFor(
-      () => syncCore.getCanonicalState().sessions[ROUTING_ID].streamingThinking !== ''
-    )
+    await waitFor(() => syncCore.getCanonicalState().sessions[ROUTING_ID].streamingThinking !== '')
     expect(streamFrames()).toEqual([])
     // Canonical folded it all the same — one interpretation, so the snapshot a
     // reconnect would get already agrees with what a watching client sees.
@@ -577,9 +573,7 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
       ROUTING_ID
     )
     expect(result).toEqual({ recalled: ['also update the tests'], notRecalled: 0 })
-    expect(engines[0].dequeueMessage.mock.calls.map((c) => c[0])).toEqual([
-      'also update the tests'
-    ])
+    expect(engines[0].dequeueMessage.mock.calls.map((c) => c[0])).toEqual(['also update the tests'])
 
     // Every client converges on the same queue, including the taken-back item's
     // terminal state.

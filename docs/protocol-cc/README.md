@@ -21,21 +21,21 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 
 ## Table of contents
 
-| #   | Doc                                          | What                                                           |
-| --- | -------------------------------------------- | -------------------------------------------------------------- |
-| 01  | [Transport](01-transport.md)                 | Spawn, stdio, ndjson, env, startup/teardown, signals, wire log |
-| 02  | [CLI flags](02-cli-flags.md)                 | Every `--flag` cli.js accepts — effect, default, interactions  |
-| 03  | [Inbound messages](03-inbound-messages.md)   | Every stream-json `type` cli.js emits to us                    |
-| 04  | [System subtypes](04-system-subtypes.md)     | Every `system/<subtype>` variant and its fields                |
-| 05  | [Stream events](05-stream-events.md)         | `stream_event` deltas — every event.type and delta.type        |
-| 06  | [Outbound messages](06-outbound-messages.md) | Every stream-json `type` cli.js accepts from us on stdin       |
-| 07  | [Control outbound](07-control-outbound.md)   | Every control_request subtype we send cli.js                   |
-| 08  | [Control inbound](08-control-inbound.md)     | Every control_request subtype cli.js sends us                  |
-| 09  | [Initialize](09-initialize.md)               | Deep dive on the initialize request/response                   |
-| 10  | [MCP hosting](10-mcp-hosting.md)             | `mcp_message` wire protocol + server lifecycle                 |
-| 11  | [Cancellation](11-cancellation.md)           | Three-tier cancellation + timeouts                             |
-| 12  | [Maintenance](12-maintenance.md)             | How to keep the manual and harness in sync                     |
-| 13  | [Context window](13-context-window.md)       | How cli.js resolves model context windows + ClaudeUI's mirror  |
+| #   | Doc                                                | What                                                           |
+| --- | -------------------------------------------------- | -------------------------------------------------------------- |
+| 01  | [Transport](01-transport.md)                       | Spawn, stdio, ndjson, env, startup/teardown, signals, wire log |
+| 02  | [CLI flags](02-cli-flags.md)                       | Every `--flag` cli.js accepts — effect, default, interactions  |
+| 03  | [Inbound messages](03-inbound-messages.md)         | Every stream-json `type` cli.js emits to us                    |
+| 04  | [System subtypes](04-system-subtypes.md)           | Every `system/<subtype>` variant and its fields                |
+| 05  | [Stream events](05-stream-events.md)               | `stream_event` deltas — every event.type and delta.type        |
+| 06  | [Outbound messages](06-outbound-messages.md)       | Every stream-json `type` cli.js accepts from us on stdin       |
+| 07  | [Control outbound](07-control-outbound.md)         | Every control_request subtype we send cli.js                   |
+| 08  | [Control inbound](08-control-inbound.md)           | Every control_request subtype cli.js sends us                  |
+| 09  | [Initialize](09-initialize.md)                     | Deep dive on the initialize request/response                   |
+| 10  | [MCP hosting](10-mcp-hosting.md)                   | `mcp_message` wire protocol + server lifecycle                 |
+| 11  | [Cancellation](11-cancellation.md)                 | Three-tier cancellation + timeouts                             |
+| 12  | [Maintenance](12-maintenance.md)                   | How to keep the manual and harness in sync                     |
+| 13  | [Context window](13-context-window.md)             | How cli.js resolves model context windows + ClaudeUI's mirror  |
 | 14  | [Auto mode classifier](14-auto-mode-classifier.md) | `permissionMode: "auto"` — two-stage LLM permission classifier |
 
 ---

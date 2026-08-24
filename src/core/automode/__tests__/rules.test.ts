@@ -86,7 +86,8 @@ describe('deriveCategorySet', () => {
 
   it('contains NO allow-exception slug (exceptions are never categories)', () => {
     const set = deriveCategorySet()
-    for (const a of ALLOW_RULES) expect(set.has(a.slug), `${a.slug} leaked into the set`).toBe(false)
+    for (const a of ALLOW_RULES)
+      expect(set.has(a.slug), `${a.slug} leaked into the set`).toBe(false)
   })
 
   it('returns an independent set — a caller cannot poison the allowlist', () => {
@@ -199,7 +200,9 @@ describe('buildPolicyPrompt — the Environment slots', () => {
 
   it('always states the working directory and marks the section as ground truth', () => {
     const p = env()
-    expect(p).toContain('## Environment — ground truth, overrides any inference from the transcript')
+    expect(p).toContain(
+      '## Environment — ground truth, overrides any inference from the transcript'
+    )
     expect(p).toContain('- Working directory: /repo')
   })
 

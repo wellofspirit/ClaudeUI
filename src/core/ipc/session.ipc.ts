@@ -213,8 +213,7 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
       const msg = message as Record<string, unknown>
       if (msg.type === 'assistant') {
         const betaMessage = msg.message as
-          | { content?: Array<{ type: string; text?: string }> }
-          | undefined
+          { content?: Array<{ type: string; text?: string }> } | undefined
         if (betaMessage?.content) {
           for (const block of betaMessage.content) {
             if (block.type === 'text' && block.text) result += block.text
@@ -274,7 +273,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
       // are accurate from the first model-fetch, before any chat session opens.
       const acc = init?.account as Record<string, unknown> | undefined
       if (acc) {
-        const loggedIn = !!(acc.email)
+        const loggedIn = !!acc.email
         updateClaudeAuthSource(loggedIn ? 'authenticated' : 'none', {
           email: (acc.email as string | null) ?? null,
           organization: (acc.organization as string | null) ?? null,
@@ -489,22 +488,18 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       forkSession?: boolean,
       engineId?: EngineId
     ) => {
-      await prepareAndCreateSession(
-        manager,
-        getHostWindow(),
-        {
-          routingId,
-          cwd,
-          effort,
-          resumeSessionId,
-          permissionMode,
-          model,
-          thinkingMode,
-          resumeSessionAt,
-          forkSession,
-          engineId
-        }
-      )
+      await prepareAndCreateSession(manager, getHostWindow(), {
+        routingId,
+        cwd,
+        effort,
+        resumeSessionId,
+        permissionMode,
+        model,
+        thinkingMode,
+        resumeSessionAt,
+        forkSession,
+        engineId
+      })
     }
   })
 
@@ -667,8 +662,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, value: string) =>
-      dequeueMessage(manager, routingId, value)
+    handler: async (routingId: string, value: string) => dequeueMessage(manager, routingId, value)
   })
 
   handleIpc({
@@ -685,8 +679,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, mode: string) =>
-      setPermissionMode(manager, routingId, mode)
+    handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
   // Voice input handlers (Claude-only: capabilities.voice)
@@ -952,8 +945,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'chat',
     kind: 'query',
     sessionIdArg: 0,
-    handler: (routingId: string) =>
-      getPlanContent(manager, routingId)
+    handler: (routingId: string) => getPlanContent(manager, routingId)
   })
 
   handleIpc({
@@ -961,8 +953,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'chat',
     kind: 'query',
     sessionIdArg: 0,
-    handler: (routingId: string) =>
-      getSessionLogPath(manager, routingId)
+    handler: (routingId: string) => getSessionLogPath(manager, routingId)
   })
 
   handleIpc({
@@ -1087,8 +1078,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'config:save-settings',
     capability: 'config',
     kind: 'command',
-    handler: (incomingSettings: UISettings) =>
-      saveUiSettings(manager, incomingSettings)
+    handler: (incomingSettings: UISettings) => saveUiSettings(manager, incomingSettings)
   })
   handleIpc({
     channel: 'config:load-sessions',
@@ -1100,8 +1090,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'config:save-sessions',
     capability: 'config',
     kind: 'command',
-    handler: (config: UISessionConfig) =>
-      saveSessions(config)
+    handler: (config: UISessionConfig) => saveSessions(config)
   })
   handleIpc({
     channel: 'config:load-slash-commands',
@@ -1221,8 +1210,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'claude:set-cleanup-period',
     capability: 'config',
     kind: 'command',
-    handler: async (days: number) =>
-      setCleanupPeriod(manager, days)
+    handler: async (days: number) => setCleanupPeriod(manager, days)
   })
 
   // MCP server management (Claude-only: capabilities.hostedMcp AND method presence —
@@ -1332,12 +1320,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'git',
     kind: 'query',
     handler: safeHandler(
-      async (
-        cwd: string,
-        filePath: string,
-        staged: boolean,
-        ignoreWhitespace: boolean
-      ) => {
+      async (cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) => {
         const svc = gitServiceManager.get(cwd)
         try {
           return await svc.getFilePatch(filePath, staged, ignoreWhitespace)

@@ -520,7 +520,8 @@ describe('mergeModelFamilies', () => {
 describe('deriveSessionIdFromPath', () => {
   it('derives the session UUID from a main session file name', async () => {
     const { deriveSessionIdFromPath } = await import('../../../core/services/block-usage')
-    const p = '/home/user/.claude/projects/-home-user-repo/a1b2c3d4-0000-0000-0000-000000000000.jsonl'
+    const p =
+      '/home/user/.claude/projects/-home-user-repo/a1b2c3d4-0000-0000-0000-000000000000.jsonl'
     expect(deriveSessionIdFromPath(p)).toBe('a1b2c3d4-0000-0000-0000-000000000000')
   })
 

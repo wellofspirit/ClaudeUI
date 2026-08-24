@@ -153,7 +153,10 @@ export class PiJudge {
   private disposed = false
 
   private readonly locateBinary: () => string | null
-  private readonly createClient: (bin: string, opts: { cwd: string; args: string[] }) => PiJudgeClient
+  private readonly createClient: (
+    bin: string,
+    opts: { cwd: string; args: string[] }
+  ) => PiJudgeClient
   private readonly timeoutMs: number
 
   constructor(private readonly opts: PiJudgeOptions) {
@@ -281,7 +284,11 @@ export class PiJudge {
     const model = this.opts.resolveModel()
     if (model) {
       try {
-        await client.request({ type: 'set_model', provider: model.vendorId, modelId: model.modelId })
+        await client.request({
+          type: 'set_model',
+          provider: model.vendorId,
+          modelId: model.modelId
+        })
       } catch (err) {
         logger.debug(
           'PiJudge',

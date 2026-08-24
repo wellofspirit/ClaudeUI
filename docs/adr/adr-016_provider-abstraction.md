@@ -39,7 +39,7 @@ check `capabilities.X` rather than `instanceof`.
 
 ```ts
 interface ISession {
-  readonly provider: ProviderId        // 'claude' | 'codex'
+  readonly provider: ProviderId // 'claude' | 'codex'
   readonly routingId: string
   readonly cwd: string
   readonly capabilities: SessionCapabilities
@@ -59,6 +59,7 @@ interface ISession {
 
 **`BaseSession` (`BaseSession.ts`)** — abstract class implementing `ISession`. Owns the
 provider-neutral plumbing shared across all backends:
+
 - Static `extraWindows` set + `addExtraWindow`/`removeExtraWindow`/`getExtraWindows` (remote
   client broadcast — lifted verbatim from the former private `ClaudeSession` statics).
 - Instance fields: `routingId` (mutable for rekey), `win`, `cwd`, `messageHistory`,

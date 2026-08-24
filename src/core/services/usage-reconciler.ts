@@ -133,7 +133,10 @@ class UsageReconciler {
       insertUsageEvents(rows)
       logger.debug('UsageReconciler', `Claude reconcile: ${rows.length} entries upserted`)
     } catch (err) {
-      logger.warn('UsageReconciler', `Claude reconcile failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(
+        'UsageReconciler',
+        `Claude reconcile failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
 
@@ -177,7 +180,10 @@ class UsageReconciler {
         logger.debug('UsageReconciler', `opencode reconcile: ${rows.length} messages upserted`)
       }
     } catch (err) {
-      logger.debug('UsageReconciler', `opencode reconcile skipped: ${err instanceof Error ? err.message : String(err)}`)
+      logger.debug(
+        'UsageReconciler',
+        `opencode reconcile skipped: ${err instanceof Error ? err.message : String(err)}`
+      )
     } finally {
       if (acquired) opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
     }
@@ -203,7 +209,12 @@ class UsageReconciler {
     const modelID = (info.modelID as string | undefined) ?? 'unknown'
 
     const tokens = info.tokens as
-      | { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }
+      | {
+          input?: number
+          output?: number
+          reasoning?: number
+          cache?: { read?: number; write?: number }
+        }
       | undefined
     const input = tokens?.input ?? 0
     // Reasoning tokens are billed as OUTPUT tokens by every provider opencode

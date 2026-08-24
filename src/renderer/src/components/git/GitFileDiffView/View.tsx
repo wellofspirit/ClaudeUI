@@ -62,7 +62,10 @@ export function GitFileDiffViewView({
   if (!gitSelectedFile) {
     const hasFiles = (gitStatus?.files.length ?? 0) > 0
     return (
-      <div data-testid="GitFileDiffView" className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+      <div
+        data-testid="GitFileDiffView"
+        className="flex-1 flex items-center justify-center text-[12px] text-text-muted"
+      >
         {hasFiles ? 'Select a file to view diff' : '\u2728 All clean \u2014 nothing to diff!'}
       </div>
     )
@@ -70,7 +73,10 @@ export function GitFileDiffViewView({
 
   if (!gitFileDiff) {
     return (
-      <div data-testid="GitFileDiffView" className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+      <div
+        data-testid="GitFileDiffView"
+        className="flex-1 flex items-center justify-center text-[12px] text-text-muted"
+      >
         Loading diff...
       </div>
     )
@@ -78,7 +84,10 @@ export function GitFileDiffViewView({
 
   if (!gitFileDiff.patch) {
     return (
-      <div data-testid="GitFileDiffView" className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+      <div
+        data-testid="GitFileDiffView"
+        className="flex-1 flex items-center justify-center text-[12px] text-text-muted"
+      >
         No changes in this view
       </div>
     )

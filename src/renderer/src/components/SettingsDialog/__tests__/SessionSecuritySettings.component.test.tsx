@@ -55,7 +55,10 @@ function renderPane(config: Partial<RemoteConfig> = {}): {
 } {
   const onConfigChange = vi.fn()
   render(
-    <SessionSecuritySettings config={{ ...baseConfig, ...config }} onConfigChange={onConfigChange} />
+    <SessionSecuritySettings
+      config={{ ...baseConfig, ...config }}
+      onConfigChange={onConfigChange}
+    />
   )
   return { onConfigChange }
 }
@@ -207,9 +210,9 @@ describe('SessionSecuritySettings', () => {
         'medium',
         'off'
       ])
-      expect(selectMenuOptionValues(screen.getByTestId('SessionSecuritySettings.authMode'))).toEqual(
-        ['auto', 'passkey-always', 'off']
-      )
+      expect(
+        selectMenuOptionValues(screen.getByTestId('SessionSecuritySettings.authMode'))
+      ).toEqual(['auto', 'passkey-always', 'off'])
     })
 
     it('WEB: never offers "No authentication"', async () => {
@@ -565,9 +568,7 @@ describe('SessionSecuritySettings', () => {
           vi.advanceTimersByTime(3_000)
         })
         expect(screen.getByTestId('SessionSecuritySettings')).toHaveAttribute('data-state', 'view')
-        expect(screen.getByTestId('SessionSecuritySettings.notice')).toHaveTextContent(
-          /timed out/i
-        )
+        expect(screen.getByTestId('SessionSecuritySettings.notice')).toHaveTextContent(/timed out/i)
       } finally {
         vi.useRealTimers()
       }

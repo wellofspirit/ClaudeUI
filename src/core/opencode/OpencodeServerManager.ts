@@ -230,7 +230,9 @@ function spawnServer(
       if (!resolved) {
         resolved = true
         child.kill()
-        reject(new Error(`opencode serve did not print port within 15s (cwd: ${cwd})${stderrTail()}`))
+        reject(
+          new Error(`opencode serve did not print port within 15s (cwd: ${cwd})${stderrTail()}`)
+        )
       }
     }, 15_000)
 

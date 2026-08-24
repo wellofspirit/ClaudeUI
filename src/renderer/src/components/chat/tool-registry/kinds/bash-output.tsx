@@ -62,7 +62,11 @@ export function LiveBashOutput({
   )
 }
 
-export function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
+export function BackgroundBashOutput({
+  toolUseId
+}: {
+  toolUseId: string
+}): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
   const watchBg = useSessionStore((s) => s.watchBackgroundOutput)

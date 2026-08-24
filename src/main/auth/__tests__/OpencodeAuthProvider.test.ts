@@ -103,7 +103,10 @@ const SAMPLE_CONFIG_PROVIDERS = {
 
 const SAMPLE_PROVIDER_AUTH: Record<string, Array<{ type: string; label: string }>> = {
   opencode: [{ type: 'oauth', label: 'opencode (free)' }],
-  anthropic: [{ type: 'oauth', label: 'Claude Pro/Max' }, { type: 'api', label: 'API key' }],
+  anthropic: [
+    { type: 'oauth', label: 'Claude Pro/Max' },
+    { type: 'api', label: 'API key' }
+  ],
   openai: [{ type: 'api', label: 'OpenAI API key' }],
   'github-copilot': [{ type: 'oauth', label: 'GitHub Copilot' }]
 }
@@ -182,7 +185,14 @@ describe('OpencodeAuthProvider — probe()', () => {
     mockGetConfigProviders.mockResolvedValue({
       providers: [
         ...SAMPLE_CONFIG_PROVIDERS.providers,
-        { id: 'github-copilot', name: 'GitHub Copilot', source: 'config', env: [], options: {}, models: {} }
+        {
+          id: 'github-copilot',
+          name: 'GitHub Copilot',
+          source: 'config',
+          env: [],
+          options: {},
+          models: {}
+        }
       ]
     })
     const provider = makeProvider()

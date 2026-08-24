@@ -235,7 +235,9 @@ describe('analyzeRedirects', () => {
     }
 
     it('emits nothing rather than a summary it cannot make honestly (target cap)', () => {
-      const many = Array.from({ length: MAX_REDIRECT_TARGETS + 1 }, (_, i) => `> f${i}.log`).join(' ')
+      const many = Array.from({ length: MAX_REDIRECT_TARGETS + 1 }, (_, i) => `> f${i}.log`).join(
+        ' '
+      )
       expect(posix(`bun test ${many}`)).toBeNull()
       const atCap = Array.from({ length: MAX_REDIRECT_TARGETS }, (_, i) => `> f${i}.log`).join(' ')
       expect(posix(`bun test ${atCap}`)?.targets).toHaveLength(MAX_REDIRECT_TARGETS)
@@ -303,9 +305,9 @@ describe('analyzeRedirects', () => {
     })
 
     it('accepts temp dirs and the user\u2019s additionalDirectories as roots', () => {
-      expect(
-        posix('bun test > /tmp/agent/run.log', { tempDirs: ['/tmp/agent'] })?.allInScope
-      ).toBe(true)
+      expect(posix('bun test > /tmp/agent/run.log', { tempDirs: ['/tmp/agent'] })?.allInScope).toBe(
+        true
+      )
       expect(
         posix('bun test > /srv/notes/out.log', { additionalDirectories: ['/srv/notes'] })
           ?.allInScope
@@ -392,8 +394,9 @@ describe('analyzeRedirects', () => {
     it('does NOT fold `/d/x` on a POSIX host (where /d is a real directory)', () => {
       // Same string, different platform: on Linux this is an absolute path that
       // has nothing to do with a drive letter.
-      expect(analyzeRedirects('bun test > /d/x/out.log', { cwd: '/repo' }, 'linux')?.outOfScope)
-        .toEqual(['/d/x/out.log'])
+      expect(
+        analyzeRedirects('bun test > /d/x/out.log', { cwd: '/repo' }, 'linux')?.outOfScope
+      ).toEqual(['/d/x/out.log'])
     })
 
     it('finds protected components through backslashes', () => {
@@ -402,11 +405,15 @@ describe('analyzeRedirects', () => {
   })
 
   it('ignores empty/blank scope roots rather than treating them as "everything"', () => {
-    const r = analyzeRedirects('bun test > out.log', { cwd: '/repo', tempDirs: ['', '   '] }, 'linux')
-    expect(r?.allInScope).toBe(true)
-    expect(analyzeRedirects('echo x > /etc/p', { cwd: '/repo', tempDirs: [''] }, 'linux')?.allInScope).toBe(
-      false
+    const r = analyzeRedirects(
+      'bun test > out.log',
+      { cwd: '/repo', tempDirs: ['', '   '] },
+      'linux'
     )
+    expect(r?.allInScope).toBe(true)
+    expect(
+      analyzeRedirects('echo x > /etc/p', { cwd: '/repo', tempDirs: [''] }, 'linux')?.allInScope
+    ).toBe(false)
   })
 })
 

@@ -4,7 +4,12 @@
 import { describe, it, expect } from 'vitest'
 import { mapPiEvent, createPiMapperState, buildPiChatMessage } from '../event-mapper'
 import type { PiMapperState } from '../event-mapper'
-import type { PiAssistantMessage, PiEvent, PiToolResultMessage, PiUserMessage } from '../pi-protocol'
+import type {
+  PiAssistantMessage,
+  PiEvent,
+  PiToolResultMessage,
+  PiUserMessage
+} from '../pi-protocol'
 
 function assistantMsg(overrides: Partial<PiAssistantMessage> = {}): PiAssistantMessage {
   return {
@@ -101,7 +106,10 @@ describe('mapPiEvent — full happy turn', () => {
       {
         type: 'message_update',
         message: partialWithToolCall,
-        assistantMessageEvent: { type: 'toolcall_end', toolCall: { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls' } } }
+        assistantMessageEvent: {
+          type: 'toolcall_end',
+          toolCall: { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls' } }
+        }
       },
       state
     )
@@ -150,7 +158,9 @@ describe('mapPiEvent — full happy turn', () => {
 
     // 5. message_end (toolResult)
     out = mapPiEvent({ type: 'message_end', message: toolResultMsg() }, state)
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_1', result: 'ok', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_1', result: 'ok', isError: false }
+    ])
 
     // 6. agent_settled — reports the accumulated cost + sessionId
     out = mapPiEvent({ type: 'agent_settled' }, state)
@@ -194,7 +204,12 @@ describe('mapPiEvent — abort', () => {
     const out = mapPiEvent({ type: 'message_end', message: aborted }, state)
     expect(out[0]).toEqual({
       kind: 'message',
-      message: { id: messageId, role: 'assistant', content: [{ type: 'text', text: 'partial output' }], timestamp: expect.any(Number) }
+      message: {
+        id: messageId,
+        role: 'assistant',
+        content: [{ type: 'text', text: 'partial output' }],
+        timestamp: expect.any(Number)
+      }
     })
     expect(out[1].kind).toBe('usage')
 
@@ -291,7 +306,7 @@ describe('mapPiEvent — turn error surfacing (M-PI2)', () => {
 })
 
 describe('mapPiEvent — compaction_end', () => {
-  it('with a result: emits a compact_separator message using the summary\'s first line', () => {
+  it("with a result: emits a compact_separator message using the summary's first line", () => {
     const state = createPiMapperState()
     const out = mapPiEvent(
       {
@@ -347,7 +362,13 @@ describe('mapPiEvent — usage extraction incl. reasoning tokens', () => {
     const usageOutput = out.find((o) => o.kind === 'usage')
     expect(usageOutput).toBeDefined()
     if (usageOutput?.kind === 'usage') {
-      expect(usageOutput.tokens).toEqual({ input: 100, output: 20, cacheRead: 5, cacheWrite: 0, reasoning: 15 })
+      expect(usageOutput.tokens).toEqual({
+        input: 100,
+        output: 20,
+        cacheRead: 5,
+        cacheWrite: 0,
+        reasoning: 15
+      })
       expect(usageOutput.costUsd).toBeCloseTo(0.03)
     }
   })
@@ -375,7 +396,10 @@ describe('mapPiEvent — malformed/unknown event', () => {
     const state = createPiMapperState()
     expect(mapPiEvent({ type: 'agent_start' }, state)).toEqual([{ kind: 'ignore' }])
     expect(
-      mapPiEvent({ type: 'tool_execution_start', toolCallId: 'x', toolName: 'bash', args: {} }, state)
+      mapPiEvent(
+        { type: 'tool_execution_start', toolCallId: 'x', toolName: 'bash', args: {} },
+        state
+      )
     ).toEqual([{ kind: 'ignore' }])
     expect(mapPiEvent({ type: 'queue_update', steering: [], followUp: [] }, state)).toEqual([
       { kind: 'ignore' }
@@ -441,7 +465,9 @@ describe('mapPiEvent — tool_execution_update (M2b live bash output streaming)'
       },
       state
     )
-    expect(out).toEqual([{ kind: 'bash_output', toolUseId: 'call_1', output: 'partial output so far...' }])
+    expect(out).toEqual([
+      { kind: 'bash_output', toolUseId: 'call_1', output: 'partial output so far...' }
+    ])
   })
 
   it('bash with no text content blocks (e.g. only an image): maps to bash_output with an empty string, not ignore', () => {
@@ -500,11 +526,16 @@ describe('mapPiEvent — tool_execution_update (M5b in-pi subagents: cuiSubagent
         toolCallId: 'outer_call_1',
         toolName: 'subagent',
         args: {},
-        partialResult: { content: [{ type: 'text', text: '[echoer] running' }], details: { cuiSubagent: validCuiSubagent() } }
+        partialResult: {
+          content: [{ type: 'text', text: '[echoer] running' }],
+          details: { cuiSubagent: validCuiSubagent() }
+        }
       },
       state
     )
-    expect(out).toEqual([{ kind: 'subagent_update', toolUseId: 'outer_call_1', payload: validCuiSubagent() }])
+    expect(out).toEqual([
+      { kind: 'subagent_update', toolUseId: 'outer_call_1', payload: validCuiSubagent() }
+    ])
   })
 
   it('missing details entirely -> ignore (never crashes)', () => {
@@ -619,7 +650,18 @@ describe('mapPiEvent — tool_execution_update (M5b in-pi subagents: cuiSubagent
       {
         kind: 'subagent_update',
         toolUseId: 'outer_call_8',
-        payload: { v: 1, agents: [{ agent: 'echoer', model: 'anthropic/claude-haiku-4-5', status: 'running', newMessages: payload.agents[0].newMessages, usage: undefined }] }
+        payload: {
+          v: 1,
+          agents: [
+            {
+              agent: 'echoer',
+              model: 'anthropic/claude-haiku-4-5',
+              status: 'running',
+              newMessages: payload.agents[0].newMessages,
+              usage: undefined
+            }
+          ]
+        }
       }
     ])
   })
@@ -645,7 +687,14 @@ describe('mapPiEvent — message_end (toolResult, subagent): final result cuiSub
     const state = createPiMapperState()
     const payload = {
       v: 1,
-      agents: [{ agent: 'echoer', status: 'done', newMessages: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 } }]
+      agents: [
+        {
+          agent: 'echoer',
+          status: 'done',
+          newMessages: [],
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
+        }
+      ]
     }
     const out = mapPiEvent(
       {
@@ -670,11 +719,17 @@ describe('mapPiEvent — message_end (toolResult, subagent): final result cuiSub
     const out = mapPiEvent(
       {
         type: 'message_end',
-        message: toolResultMsg({ toolCallId: 'outer_call_10', toolName: 'subagent', content: [{ type: 'text', text: 'done' }] })
+        message: toolResultMsg({
+          toolCallId: 'outer_call_10',
+          toolName: 'subagent',
+          content: [{ type: 'text', text: 'done' }]
+        })
       },
       state
     )
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'outer_call_10', result: 'done', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'outer_call_10', result: 'done', isError: false }
+    ])
   })
 
   it('a non-subagent toolResult (e.g. bash) is UNCHANGED — never checks for cuiSubagent', () => {
@@ -682,20 +737,35 @@ describe('mapPiEvent — message_end (toolResult, subagent): final result cuiSub
     const out = mapPiEvent(
       {
         type: 'message_end',
-        message: toolResultMsg({ toolCallId: 'call_bash', toolName: 'bash', content: [{ type: 'text', text: 'ok' }] })
+        message: toolResultMsg({
+          toolCallId: 'call_bash',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'ok' }]
+        })
       },
       state
     )
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_bash', result: 'ok', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_bash', result: 'ok', isError: false }
+    ])
   })
 })
 
 describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDiffs (M2)', () => {
-  const UNIFIED_DIFF = ['--- a/foo.ts', '+++ b/foo.ts', '@@ -1,2 +1,2 @@', '-old line', '+new line', '+another new line'].join(
-    '\n'
-  )
+  const UNIFIED_DIFF = [
+    '--- a/foo.ts',
+    '+++ b/foo.ts',
+    '@@ -1,2 +1,2 @@',
+    '-old line',
+    '+new line',
+    '+another new line'
+  ].join('\n')
 
-  function editToolCall(id: string, path: string, edits: Array<{ oldText: string; newText: string }>) {
+  function editToolCall(
+    id: string,
+    path: string,
+    edits: Array<{ oldText: string; newText: string }>
+  ) {
     return { type: 'toolCall' as const, id, name: 'edit', arguments: { path, edits } }
   }
 
@@ -705,7 +775,9 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       {
         type: 'message_end',
         message: assistantMsg({
-          content: [editToolCall('call_1', '/src/foo.ts', [{ oldText: 'old line', newText: 'new line' }])],
+          content: [
+            editToolCall('call_1', '/src/foo.ts', [{ oldText: 'old line', newText: 'new line' }])
+          ],
           stopReason: 'toolUse'
         })
       },
@@ -731,7 +803,15 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
         toolUseId: 'call_1',
         result: 'Successfully replaced 1 block(s) in /src/foo.ts.',
         isError: false,
-        fileDiffs: [{ path: '/src/foo.ts', patch: UNIFIED_DIFF, changeType: 'update', additions: 2, deletions: 1 }]
+        fileDiffs: [
+          {
+            path: '/src/foo.ts',
+            patch: UNIFIED_DIFF,
+            changeType: 'update',
+            additions: 2,
+            deletions: 1
+          }
+        ]
       }
     ])
   })
@@ -769,7 +849,15 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
 
     expect(out[0].kind).toBe('tool_result')
     if (out[0].kind === 'tool_result') {
-      expect(out[0].fileDiffs).toEqual([{ path: '/src/bar.ts', patch: UNIFIED_DIFF, changeType: 'update', additions: 2, deletions: 1 }])
+      expect(out[0].fileDiffs).toEqual([
+        {
+          path: '/src/bar.ts',
+          patch: UNIFIED_DIFF,
+          changeType: 'update',
+          additions: 2,
+          deletions: 1
+        }
+      ])
     }
   })
 
@@ -780,11 +868,15 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       {
         type: 'message_update',
         message: assistantMsg({
-          content: [editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])]
+          content: [
+            editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])
+          ]
         }),
         assistantMessageEvent: {
           type: 'toolcall_end',
-          toolCall: editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])
+          toolCall: editToolCall('call_interim', '/src/interim.ts', [
+            { oldText: 'x', newText: 'y' }
+          ])
         }
       },
       state
@@ -805,7 +897,15 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
 
     expect(out[0].kind).toBe('tool_result')
     if (out[0].kind === 'tool_result') {
-      expect(out[0].fileDiffs).toEqual([{ path: '/src/interim.ts', patch: UNIFIED_DIFF, changeType: 'update', additions: 2, deletions: 1 }])
+      expect(out[0].fileDiffs).toEqual([
+        {
+          path: '/src/interim.ts',
+          patch: UNIFIED_DIFF,
+          changeType: 'update',
+          additions: 2,
+          deletions: 1
+        }
+      ])
     }
   })
 
@@ -823,7 +923,9 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       },
       state
     )
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_orphan', result: 'ok', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_orphan', result: 'ok', isError: false }
+    ])
   })
 
   it('recorded path but no details on the toolResult → no fileDiffs', () => {
@@ -832,7 +934,9 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       {
         type: 'message_end',
         message: assistantMsg({
-          content: [editToolCall('call_nodetails', '/src/nodetails.ts', [{ oldText: 'x', newText: 'y' }])],
+          content: [
+            editToolCall('call_nodetails', '/src/nodetails.ts', [{ oldText: 'x', newText: 'y' }])
+          ],
           stopReason: 'toolUse'
         })
       },
@@ -841,11 +945,17 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
     const out = mapPiEvent(
       {
         type: 'message_end',
-        message: toolResultMsg({ toolCallId: 'call_nodetails', toolName: 'edit', content: [{ type: 'text', text: 'ok' }] })
+        message: toolResultMsg({
+          toolCallId: 'call_nodetails',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok' }]
+        })
       },
       state
     )
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_nodetails', result: 'ok', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_nodetails', result: 'ok', isError: false }
+    ])
   })
 
   it('recorded path but details.patch is empty/absent → no fileDiffs', () => {
@@ -872,7 +982,9 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       },
       state
     )
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_emptypatch', result: 'ok', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_emptypatch', result: 'ok', isError: false }
+    ])
   })
 
   it('the path entry is consumed: a second toolResult for the same toolCallId gets no fileDiffs', () => {
@@ -914,16 +1026,25 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       },
       state
     )
-    expect(second).toEqual([{ kind: 'tool_result', toolUseId: 'call_once', result: 'ok again', isError: false }])
+    expect(second).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_once', result: 'ok again', isError: false }
+    ])
   })
 
-  it('write tool_use path is recorded, but write never produces fileDiffs (pi\'s write.execute() always returns details: undefined)', () => {
+  it("write tool_use path is recorded, but write never produces fileDiffs (pi's write.execute() always returns details: undefined)", () => {
     const state = createPiMapperState()
     mapPiEvent(
       {
         type: 'message_end',
         message: assistantMsg({
-          content: [{ type: 'toolCall', id: 'call_write', name: 'write', arguments: { path: '/src/new.ts', content: 'hi' } }],
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_write',
+              name: 'write',
+              arguments: { path: '/src/new.ts', content: 'hi' }
+            }
+          ],
           stopReason: 'toolUse'
         })
       },
@@ -942,7 +1063,12 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       state
     )
     expect(out).toEqual([
-      { kind: 'tool_result', toolUseId: 'call_write', result: 'Successfully wrote 2 bytes to /src/new.ts', isError: false }
+      {
+        kind: 'tool_result',
+        toolUseId: 'call_write',
+        result: 'Successfully wrote 2 bytes to /src/new.ts',
+        isError: false
+      }
     ])
   })
 
@@ -952,7 +1078,14 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
       {
         type: 'message_end',
         message: assistantMsg({
-          content: [{ type: 'toolCall', id: 'call_bash_path', name: 'bash', arguments: { command: 'ls', path: '/decoy.ts' } }],
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call_bash_path',
+              name: 'bash',
+              arguments: { command: 'ls', path: '/decoy.ts' }
+            }
+          ],
           stopReason: 'toolUse'
         })
       },
@@ -972,7 +1105,9 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
     )
     // bash is never recorded as an edit/write path, so even a details.patch present
     // here (defensive/unrealistic for bash) must not fabricate fileDiffs.
-    expect(out).toEqual([{ kind: 'tool_result', toolUseId: 'call_bash_path', result: 'ok', isError: false }])
+    expect(out).toEqual([
+      { kind: 'tool_result', toolUseId: 'call_bash_path', result: 'ok', isError: false }
+    ])
   })
 })
 
@@ -980,7 +1115,13 @@ describe('mapPiEvent — tool_execution_end (untouched — final result comes vi
   it('still maps to ignore regardless of toolName', () => {
     const state = createPiMapperState()
     const out = mapPiEvent(
-      { type: 'tool_execution_end', toolCallId: 'call_1', toolName: 'bash', result: {}, isError: false },
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'call_1',
+        toolName: 'bash',
+        result: {},
+        isError: false
+      },
       state
     )
     expect(out).toEqual([{ kind: 'ignore' }])
@@ -999,7 +1140,9 @@ describe('mapPiEvent — defensive fallback when message_start was missed', () =
       state
     )
     expect(state.currentMessageId).toBeTruthy()
-    expect(out).toEqual([{ kind: 'stream', streamType: 'text', delta: 'x', messageId: state.currentMessageId }])
+    expect(out).toEqual([
+      { kind: 'stream', streamType: 'text', delta: 'x', messageId: state.currentMessageId }
+    ])
   })
 })
 

@@ -580,7 +580,8 @@ export function Sidebar({
     const inMemoryByPk: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
-      const sessionEngineId = (sessionEngines[rid]?.engineId ?? 'claude') as import('../../../../shared/types').EngineId
+      const sessionEngineId = (sessionEngines[rid]?.engineId ??
+        'claude') as import('../../../../shared/types').EngineId
       const pk = cwdToProjectKey(data.cwd)
       const info: SessionInfo = {
         sessionId: rid,

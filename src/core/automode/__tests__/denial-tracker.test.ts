@@ -131,7 +131,10 @@ describe('AutoModeDenialTracker — total cap', () => {
 describe('formatAutoModeDenyReason', () => {
   it('prefixes the matched rule name when the judge reason does not name it', () => {
     expect(
-      formatAutoModeDenyReason({ reason: 'force-push would drop pushed commits', category: 'git_destructive' })
+      formatAutoModeDenyReason({
+        reason: 'force-push would drop pushed commits',
+        category: 'git_destructive'
+      })
     ).toBe('Auto mode blocked: [Git Destructive] force-push would drop pushed commits')
   })
 
@@ -146,7 +149,10 @@ describe('formatAutoModeDenyReason', () => {
 
   it('matches the rule name case-insensitively (the model is copying prose, not an id)', () => {
     expect(
-      formatAutoModeDenyReason({ reason: 'this is git destructive work', category: 'git_destructive' })
+      formatAutoModeDenyReason({
+        reason: 'this is git destructive work',
+        category: 'git_destructive'
+      })
     ).toBe('Auto mode blocked: this is git destructive work')
   })
 

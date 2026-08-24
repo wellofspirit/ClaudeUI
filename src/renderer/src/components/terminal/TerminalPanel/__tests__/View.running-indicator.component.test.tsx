@@ -77,7 +77,13 @@ describe('TerminalPanelView — detached-but-running indicator', () => {
   it('shows neither empty state while a tab is open, badge or not', () => {
     render(
       <TerminalPanelView
-        {...props({ visibleTabs: [TAB], allTabs: [TAB], activeId: TAB.id, nextSlot: 1, nextSlotRunning: true })}
+        {...props({
+          visibleTabs: [TAB],
+          allTabs: [TAB],
+          activeId: TAB.id,
+          nextSlot: 1,
+          nextSlotRunning: true
+        })}
       />
     )
 

@@ -154,7 +154,9 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
     // The phone comes back with the cursor it went away with.
     const second = await connect()
     await second.client.send({ type: 'sync', lastSeq: cursor, epoch })
-    await waitFor(() => second.frames.some((f) => f.type === 'sync-catchup' || f.type === 'sync-full'))
+    await waitFor(() =>
+      second.frames.some((f) => f.type === 'sync-catchup' || f.type === 'sync-full')
+    )
 
     const answer = second.frames.find(
       (f) => f.type === 'sync-catchup' || f.type === 'sync-full'
@@ -185,7 +187,9 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
     // A client that syncs and never watches receives no deltas — the whole point
     // of a subscription-scoped lane.
     emitEvent('session:stream', [ROUTING_ID, { type: 'text', text: 'y' }])
-    await waitFor(() => syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText.endsWith('y'))
+    await waitFor(() =>
+      syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText.endsWith('y')
+    )
     expect(frames.filter((f) => f.type === 'stream')).toHaveLength(0)
 
     // Watch: the replay lands immediately. It states EVERY stream of the session
@@ -198,9 +202,7 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
       [`${ROUTING_ID}/text`, 0],
       [`${ROUTING_ID}/thinking`, 0]
     ])
-    expect(replay[0].chunk).toBe(
-      syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText
-    )
+    expect(replay[0].chunk).toBe(syncCore.getCanonicalState().sessions[ROUTING_ID].streamingText)
 
     // Fold it the way the replica does: snapshot + replay ⇒ canonical's value.
     const replica = fromSnapshot(full.state)

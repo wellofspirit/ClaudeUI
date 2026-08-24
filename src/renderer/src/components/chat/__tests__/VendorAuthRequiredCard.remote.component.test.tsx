@@ -109,9 +109,7 @@ describe('VendorAuthRequiredCard on desktop — unchanged (platform pin)', () =>
     // Hold the loopback open so the card stays in its waiting state.
     let release: (v: boolean) => void = () => {}
     installApi('darwin', {
-      vendorAuthOauthCallback: vi.fn(
-        () => new Promise<boolean>((resolve) => (release = resolve))
-      )
+      vendorAuthOauthCallback: vi.fn(() => new Promise<boolean>((resolve) => (release = resolve)))
     })
     mountCard()
     render(<VendorAuthRequiredCard />)

@@ -73,7 +73,7 @@ const BUILTIN_AGENTS: Record<string, { mode: OpencodeAgentMode; hidden?: boolean
   explore: { mode: 'subagent' },
   title: { mode: 'subagent', hidden: true },
   summary: { mode: 'subagent', hidden: true },
-  compaction: { mode: 'subagent', hidden: true },
+  compaction: { mode: 'subagent', hidden: true }
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ export function agentsDirs(cwd?: string): { global: string; project: string | nu
   const configDir = opencodeConfigDir()
   return {
     global: path.join(configDir, 'agents'),
-    project: cwd ? path.join(cwd, '.opencode', 'agents') : null,
+    project: cwd ? path.join(cwd, '.opencode', 'agents') : null
   }
 }
 
@@ -111,7 +111,7 @@ function candidateDirs(baseDir: string): string[] {
 function baseDirs(cwd?: string): { global: string; project: string | null } {
   return {
     global: opencodeConfigDir(),
-    project: cwd ? path.join(cwd, '.opencode') : null,
+    project: cwd ? path.join(cwd, '.opencode') : null
   }
 }
 
@@ -195,8 +195,7 @@ function frontmatterToSummaryFields(
   disabled?: boolean
   hidden?: boolean
 } {
-  const mode =
-    (data.mode as OpencodeAgentMode | undefined) ?? BUILTIN_AGENTS[name]?.mode ?? 'all'
+  const mode = (data.mode as OpencodeAgentMode | undefined) ?? BUILTIN_AGENTS[name]?.mode ?? 'all'
   const model = typeof data.model === 'string' && data.model ? data.model : undefined
   const color = typeof data.color === 'string' && data.color ? data.color : undefined
   const disabled = data.disable === true ? true : undefined
@@ -219,8 +218,7 @@ function parsedToDetail(
 
   const description =
     typeof data.description === 'string' && data.description ? data.description : undefined
-  const temperature =
-    typeof data.temperature === 'number' ? data.temperature : undefined
+  const temperature = typeof data.temperature === 'number' ? data.temperature : undefined
   const topP = typeof data.top_p === 'number' ? data.top_p : undefined
   const steps = typeof data.steps === 'number' ? data.steps : undefined
 
@@ -253,7 +251,7 @@ function parsedToDetail(
     steps,
     reasoningEffort,
     restrict,
-    permission: restrict ? permission : undefined,
+    permission: restrict ? permission : undefined
   }
 }
 
@@ -349,7 +347,7 @@ export function listAgents(cwd?: string): OpencodeAgentSummary[] {
           color,
           overridden: isBuiltin ? true : undefined,
           disabled,
-          hidden,
+          hidden
         })
       }
     }
@@ -367,7 +365,7 @@ export function listAgents(cwd?: string): OpencodeAgentSummary[] {
         kind: 'builtin',
         mode: def.mode,
         scope: null,
-        hidden: def.hidden,
+        hidden: def.hidden
       })
     }
   }
@@ -423,7 +421,7 @@ export function readAgent(
       mode: builtin.mode,
       scope: null,
       hidden: builtin.hidden,
-      restrict: false,
+      restrict: false
     }
   }
 
@@ -455,7 +453,7 @@ export function saveAgent(input: OpencodeAgentInput, cwd?: string): void {
 
   const existing = readAgentFile(input.name, [
     path.join(baseDir, 'agent'),
-    path.join(baseDir, 'agents'),
+    path.join(baseDir, 'agents')
   ])
   const targetPath = existing
     ? existing.filePath

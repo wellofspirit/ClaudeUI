@@ -74,13 +74,17 @@ export class AutoModeDenialTracker {
       )
     }
     if (this.consecutive >= CONSECUTIVE_DENIAL_CAP) {
-      return this.cap(`Auto mode blocked ${this.consecutive} actions in a row — asking you instead.`)
+      return this.cap(
+        `Auto mode blocked ${this.consecutive} actions in a row — asking you instead.`
+      )
     }
     // NOT reset by `cap()`: past the session total, every further block hands
     // over. Twenty blocks is auto mode telling the user it is the wrong mode
     // for this task (existing behaviour, kept).
     if (this.total >= TOTAL_DENIAL_CAP) {
-      return this.cap(`Auto mode has blocked ${this.total} actions this session — asking you instead.`)
+      return this.cap(
+        `Auto mode has blocked ${this.total} actions this session — asking you instead.`
+      )
     }
     return null
   }
@@ -115,6 +119,7 @@ export class AutoModeDenialTracker {
 export function formatAutoModeDenyReason(result: { reason?: string; category?: string }): string {
   const base = result.reason?.trim() || 'flagged as potentially unsafe'
   const rule = result.category ? ruleNameForCategory(result.category) : undefined
-  const named = rule && !base.toLowerCase().includes(rule.toLowerCase()) ? `[${rule}] ${base}` : base
+  const named =
+    rule && !base.toLowerCase().includes(rule.toLowerCase()) ? `[${rule}] ${base}` : base
   return `Auto mode blocked: ${named}`
 }

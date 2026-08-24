@@ -259,9 +259,7 @@ describe('authSurfaceChanged', () => {
     // Enrolling the first credential moves `null` from `password` to
     // `passkey-always` without anyone writing the column — live sockets must
     // still be re-admitted.
-    expect(
-      authSurfaceChanged(base, { ...base, effectiveAuthPolicy: 'passkey-always' })
-    ).toBe(true)
+    expect(authSurfaceChanged(base, { ...base, effectiveAuthPolicy: 'passkey-always' })).toBe(true)
   })
 
   it('catches a BREAK-GLASS flip (the gap the first round left unaudited)', () => {
@@ -389,14 +387,14 @@ describe('passwordStepUpAllowed', () => {
   })
 
   it('allows it on a non-capable origin regardless of the toggle', () => {
-    expect(passwordStepUpAllowed({ ...base, passwordBreakGlass: false, capableOrigin: false })).toBe(
-      true
-    )
+    expect(
+      passwordStepUpAllowed({ ...base, passwordBreakGlass: false, capableOrigin: false })
+    ).toBe(true)
   })
 
   it('is unconditional under the password policy (nothing to prefer over it)', () => {
-    expect(
-      passwordStepUpAllowed({ ...base, policy: 'password', passwordBreakGlass: false })
-    ).toBe(true)
+    expect(passwordStepUpAllowed({ ...base, policy: 'password', passwordBreakGlass: false })).toBe(
+      true
+    )
   })
 })

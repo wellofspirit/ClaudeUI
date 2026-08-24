@@ -57,7 +57,10 @@ export function SettingsSlider({
 }): React.JSX.Element {
   const pct = ((value - min) / (max - min)) * 100
   return (
-    <div data-testid={testid ?? 'SettingsSlider'} className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid={testid ?? 'SettingsSlider'}
+      className="px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="flex items-center justify-between mb-1">
         <span>{label}</span>
         <span className="text-[11px] text-text-muted tabular-nums">
@@ -94,7 +97,10 @@ export function SettingsSelect<T extends string>({
   testid?: string
 }): React.JSX.Element {
   return (
-    <div data-testid={testid ?? 'SettingsSelect'} className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid={testid ?? 'SettingsSelect'}
+      className="px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="mb-1">{label}</div>
       <div className="flex items-center gap-1 bg-bg-primary/50 rounded-md p-0.5">
         {options.map((opt) => (
@@ -163,7 +169,11 @@ export function ChatRetentionSetting(): React.JSX.Element {
   }, [])
 
   if (days === null) {
-    return <div data-testid="ChatRetentionSetting" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid="ChatRetentionSetting" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
 
   const autoDelete = !isOff(days)
@@ -335,7 +345,10 @@ export function SettingsTextarea({
   testid?: string
 }): React.JSX.Element {
   return (
-    <div data-testid={testid ?? 'SettingsTextarea'} className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid={testid ?? 'SettingsTextarea'}
+      className="px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="mb-1 flex items-center gap-1">
         {label}
         {tooltip && <InfoTooltip text={tooltip} />}
@@ -390,7 +403,10 @@ export function SandboxListSetting({
   }
 
   return (
-    <div data-testid={testid ?? 'SandboxListSetting'} className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid={testid ?? 'SandboxListSetting'}
+      className="px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className={`mb-1.5 flex items-center gap-1 ${labelColor}`}>
         {label}
         {tooltip && <InfoTooltip text={tooltip} />}

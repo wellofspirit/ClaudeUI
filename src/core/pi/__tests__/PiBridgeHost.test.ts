@@ -32,7 +32,12 @@ vi.mock('../../services/logger', () => ({
 }))
 
 import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from '../PiBridgeHost'
-import type { GateDecision, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from '../PiBridgeHost'
+import type {
+  GateDecision,
+  PiHostedToolPayload,
+  PiHostedToolResult,
+  PiToolCallPayload
+} from '../PiBridgeHost'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
 import { PI_SUBAGENT_EXTENSION_SOURCE, PI_SUBAGENT_VERSION } from '../pi-subagent-source'
 
@@ -117,7 +122,10 @@ describe('PiBridgeHost', () => {
 
     const res = await fetch(`${url}/tool-call`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${sameLengthWrongToken}`, 'content-type': 'application/json' },
+      headers: {
+        authorization: `Bearer ${sameLengthWrongToken}`,
+        'content-type': 'application/json'
+      },
       body: JSON.stringify({ toolCallId: 'c1', toolName: 'bash', input: {} })
     })
     expect(res.status).toBe(401)
@@ -195,7 +203,11 @@ describe('PiBridgeHost', () => {
     // and break JSON.parse.
     const marker = '中'
     const bodyBuf = Buffer.from(
-      JSON.stringify({ toolCallId: 'c-multibyte', toolName: 'bash', input: { command: `echo ${marker} done` } }),
+      JSON.stringify({
+        toolCallId: 'c-multibyte',
+        toolName: 'bash',
+        input: { command: `echo ${marker} done` }
+      }),
       'utf-8'
     )
     const markerByteIdx = bodyBuf.indexOf(Buffer.from(marker, 'utf-8'))
@@ -204,32 +216,34 @@ describe('PiBridgeHost', () => {
     const chunk1 = bodyBuf.subarray(0, splitAt)
     const chunk2 = bodyBuf.subarray(splitAt)
 
-    const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const parsed = new URL(url)
-      const req = http.request(
-        {
-          hostname: parsed.hostname,
-          port: Number(parsed.port),
-          path: '/tool-call',
-          method: 'POST',
-          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
-        },
-        (res) => {
-          let data = ''
-          res.on('data', (chunk: Buffer) => (data += chunk.toString('utf-8')))
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
-        }
-      )
-      req.on('error', reject)
-      // Delay between writes so the OS delivers them as SEPARATE reads
-      // (synchronous back-to-back writes risk being coalesced into one).
-      req.write(chunk1, () => {
-        setTimeout(() => {
-          req.write(chunk2)
-          req.end()
-        }, 20)
-      })
-    })
+    const { status, body } = await new Promise<{ status: number; body: string }>(
+      (resolve, reject) => {
+        const parsed = new URL(url)
+        const req = http.request(
+          {
+            hostname: parsed.hostname,
+            port: Number(parsed.port),
+            path: '/tool-call',
+            method: 'POST',
+            headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+          },
+          (res) => {
+            let data = ''
+            res.on('data', (chunk: Buffer) => (data += chunk.toString('utf-8')))
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
+          }
+        )
+        req.on('error', reject)
+        // Delay between writes so the OS delivers them as SEPARATE reads
+        // (synchronous back-to-back writes risk being coalesced into one).
+        req.write(chunk1, () => {
+          setTimeout(() => {
+            req.write(chunk2)
+            req.end()
+          }, 20)
+        })
+      }
+    )
 
     expect(status).toBe(200)
     expect(JSON.parse(body)).toEqual({ behavior: 'allow' })
@@ -482,7 +496,15 @@ describe('writeBridgeExtension (A2 — content-verify against tampering/preplant
   })
 
   function extensionFilePath(): string {
-    return join(scratchRoot, '.claude', 'ui', 'pi-ext', 'claudeui-pi-bridge', PI_BRIDGE_VERSION, 'claudeui-bridge.ts')
+    return join(
+      scratchRoot,
+      '.claude',
+      'ui',
+      'pi-ext',
+      'claudeui-pi-bridge',
+      PI_BRIDGE_VERSION,
+      'claudeui-bridge.ts'
+    )
   }
 
   it('writes the file under ~/.claude/ui/pi-ext (per-user, NOT os.tmpdir()) when absent', () => {
@@ -530,7 +552,15 @@ describe('writeSubagentExtension (M5b; audit-residual A — per-user base dir, S
   })
 
   function extensionFilePath(): string {
-    return join(scratchRoot, '.claude', 'ui', 'pi-ext', 'claudeui-pi-subagent', PI_SUBAGENT_VERSION, 'claudeui-subagent.ts')
+    return join(
+      scratchRoot,
+      '.claude',
+      'ui',
+      'pi-ext',
+      'claudeui-pi-subagent',
+      PI_SUBAGENT_VERSION,
+      'claudeui-subagent.ts'
+    )
   }
 
   it('writes the file under ~/.claude/ui/pi-ext (per-user, NOT os.tmpdir()) when absent — a SEPARATE dir from writeBridgeExtension', () => {

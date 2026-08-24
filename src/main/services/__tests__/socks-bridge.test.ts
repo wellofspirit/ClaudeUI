@@ -25,7 +25,12 @@ vi.mock('../../../core/services/logger', () => ({
   }
 }))
 
-import { startSocksBridge, stopSocksBridge, getBridgePort, socks5Connect } from '../../../core/services/socks-bridge'
+import {
+  startSocksBridge,
+  stopSocksBridge,
+  getBridgePort,
+  socks5Connect
+} from '../../../core/services/socks-bridge'
 
 // ---------------------------------------------------------------------------
 // Minimal SOCKS5 server for tests
@@ -85,7 +90,9 @@ async function startFakeSocks5Server(opts: FakeSocks5Opts = {}): Promise<FakeSoc
         // Reply success: [VER, REP=0, RSV, ATYP=1, BND.ADDR=0.0.0.0, BND.PORT=0].
         // Optionally coalesce the first tunnel bytes into the same write.
         const reply = Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-        socket.write(opts.connectReplyTrailer ? Buffer.concat([reply, opts.connectReplyTrailer]) : reply)
+        socket.write(
+          opts.connectReplyTrailer ? Buffer.concat([reply, opts.connectReplyTrailer]) : reply
+        )
         phase = 'tunnel'
         return
       }

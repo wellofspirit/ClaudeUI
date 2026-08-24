@@ -179,9 +179,10 @@ describe('remote channel parity (R5)', () => {
     const declared = remoteDeclarations()
     const missing = [...invoked].filter((c) => !declared.has(c)).sort()
     // Surfacing the list makes a regression immediately actionable.
-    expect(missing, `api-adapter invokes these with no remote handler: ${missing.join(', ')}`).toEqual(
-      []
-    )
+    expect(
+      missing,
+      `api-adapter invokes these with no remote handler: ${missing.join(', ')}`
+    ).toEqual([])
   })
 
   it('no invoked channel declares a capability remote connections lack', () => {
@@ -260,7 +261,9 @@ describe('remote channel parity (R5)', () => {
     // from the remote UI. `git`, `config` and `chat` are all in AUTH_OFF_GRANTS,
     // so an ordinary authenticated connection reaches every one of them.
     const declared = remoteDeclarations()
-    const missing = Object.keys(S1B_SWEEP).filter((c) => !declared.has(c)).sort()
+    const missing = Object.keys(S1B_SWEEP)
+      .filter((c) => !declared.has(c))
+      .sort()
     expect(missing, `S1b channels with no remote registration: ${missing.join(', ')}`).toEqual([])
     const ungranted = Object.keys(S1B_SWEEP)
       .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))

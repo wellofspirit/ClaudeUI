@@ -8,7 +8,7 @@
 
 The V2 multi-engine model (ADR-018) needs a concrete second engine. We **pivot from Codex to
 opencode**: opencode is a meta-harness that runs OpenAI/Anthropic/Google/local models, so it
-*subsumes* access to OpenAI's coding models while being a better harness, and exposes a documented
+_subsumes_ access to OpenAI's coding models while being a better harness, and exposes a documented
 HTTP+SSE server with an official SDK. The direct `codex app-server` backend (ADR-017) becomes a
 **dormant fallback** — insurance if OpenAI ever de-supports opencode. Integration surface verified
 against opencode v1.17.x.

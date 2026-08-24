@@ -143,11 +143,7 @@ function SectionAccordion({
         <ChevronIcon open={open} />
       </button>
       {open && (
-        <div
-          data-testid="SettingsMobileView.sectionContent"
-          data-id={section.id}
-          className="pb-2"
-        >
+        <div data-testid="SettingsMobileView.sectionContent" data-id={section.id} className="pb-2">
           {section.items.map((item) => (
             <div key={item.key}>
               {item.render(
@@ -391,7 +387,11 @@ export function SettingsMobileView({
               </div>
             ) : (
               hits.map(({ scope, section }) => (
-                <div key={section.id} data-testid="SettingsMobileView.searchHit" data-id={section.id}>
+                <div
+                  key={section.id}
+                  data-testid="SettingsMobileView.searchHit"
+                  data-id={section.id}
+                >
                   <div className="px-3 pt-2.5 pb-0.5 text-[10px] uppercase tracking-wider text-text-muted/60">
                     {SCOPE_LABEL[scope]}
                   </div>

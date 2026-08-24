@@ -223,7 +223,21 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
       if (!currentExcluded.includes(cmd)) {
         const nextSandbox = sandboxSettings
           ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
-          : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: [cmd] }
+          : {
+              enabled: false,
+              autoAllowBashIfSandboxed: false,
+              allowUnsandboxedCommands: false,
+              network: {
+                restrictNetwork: false,
+                allowLocalBinding: false,
+                allowedDomains: [],
+                allowManagedDomainsOnly: false,
+                allowAllUnixSockets: false,
+                allowUnixSockets: []
+              },
+              filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+              excludedCommands: [cmd]
+            }
         const nextConfig = { ...engineConfig, sandbox: nextSandbox }
         setEngineConfig(nextConfig)
         window.api.saveEngineConfig('claude', nextConfig).catch(() => {})
@@ -297,7 +311,10 @@ export function FloatingApproval(): React.JSX.Element | null {
   if (unmatched.length === 0) return null
 
   return (
-    <div data-testid="FloatingApproval" className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto">
+    <div
+      data-testid="FloatingApproval"
+      className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto"
+    >
       {unmatched.map((approval) =>
         approval.toolName === 'AskUserQuestion' ? (
           <FloatingQuestionCard key={approval.requestId} approval={approval} />

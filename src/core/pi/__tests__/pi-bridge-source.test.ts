@@ -20,7 +20,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION).toBe('5')
   })
 
-  it('contains no import statements (zero module-resolution surface for pi\'s jiti loader)', () => {
+  it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
     expect(/(^|\s)import(\s|\{)/.test(PI_BRIDGE_EXTENSION_SOURCE)).toBe(false)
   })
 
@@ -74,7 +74,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     // (separate) bridge gate. This is the actual independence property: the
     // early return must not be reachable before the skill-dirs block runs.
     const skillEnvIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('CLAUDEUI_PI_SKILL_DIRS')
-    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('if (!bridgeUrl || !bridgeToken) return')
+    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf(
+      'if (!bridgeUrl || !bridgeToken) return'
+    )
     expect(skillEnvIdx).toBeGreaterThan(-1)
     expect(earlyReturnIdx).toBeGreaterThan(-1)
     expect(skillEnvIdx).toBeLessThan(earlyReturnIdx)
@@ -86,7 +88,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/process\.platform === 'win32' \? ';' : ':'/)
   })
 
-  it('is syntactically valid JavaScript (bonus tripwire beyond the spec\'s minimum set)', () => {
+  it("is syntactically valid JavaScript (bonus tripwire beyond the spec's minimum set)", () => {
     // The real proof is the gated integration test spawning the real binary;
     // this only catches a typo that would break EVERY spawn outright. Strip
     // the ESM `export default` (new Function can't parse module syntax) and
@@ -117,7 +119,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
 
   it('gates hosted tools independently of the bridge URL/token early return (same independence rule as M3 skills)', () => {
     const hostedEnvIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('CLAUDEUI_PI_HOSTED_TOOLS')
-    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('if (!bridgeUrl || !bridgeToken) return')
+    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf(
+      'if (!bridgeUrl || !bridgeToken) return'
+    )
     expect(hostedEnvIdx).toBeGreaterThan(-1)
     expect(earlyReturnIdx).toBeGreaterThan(-1)
     expect(hostedEnvIdx).toBeLessThan(earlyReturnIdx)
@@ -125,7 +129,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
 
   it('nests dispatch_agent behind its OWN second gate, inside the hosted-tools block', () => {
     const hostedGateIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf("CLAUDEUI_PI_HOSTED_TOOLS === '1'")
-    const dispatchGateIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf("CLAUDEUI_PI_DISPATCH_ENABLED === '1'")
+    const dispatchGateIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf(
+      "CLAUDEUI_PI_DISPATCH_ENABLED === '1'"
+    )
     const dispatchNameIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf("name: 'dispatch_agent'")
     expect(hostedGateIdx).toBeGreaterThan(-1)
     expect(dispatchGateIdx).toBeGreaterThan(-1)
@@ -289,7 +295,10 @@ function withEnv<T>(vars: Partial<Record<BridgeEnvVar, string | undefined>>, fn:
   return result
 }
 
-const BRIDGE_CREDS = { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9', CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }
+const BRIDGE_CREDS = {
+  CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9',
+  CLAUDEUI_PI_BRIDGE_TOKEN: 'tok'
+}
 
 describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (executed in-process)', () => {
   it('registers NEITHER approvals nor hosted tools when bridge creds are absent (existing M2a behavior unaffected)', () => {
@@ -310,7 +319,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
 
   it('registers the approval hook but NO hosted tools when CLAUDEUI_PI_HOSTED_TOOLS is unset', () => {
     withEnv(
-      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: undefined, CLAUDEUI_PI_DISPATCH_ENABLED: undefined },
+      {
+        ...BRIDGE_CREDS,
+        CLAUDEUI_PI_HOSTED_TOOLS: undefined,
+        CLAUDEUI_PI_DISPATCH_ENABLED: undefined
+      },
       () => {
         const { tools, events } = runExtension()
         expect(tools.size).toBe(0)
@@ -361,36 +374,50 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
   })
 
   it('registers the three hosted tools (not dispatch_agent) when CLAUDEUI_PI_HOSTED_TOOLS=1 but CLAUDEUI_PI_DISPATCH_ENABLED is unset', () => {
-    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: undefined }, () => {
-      const { tools } = runExtension()
-      expect([...tools.keys()].sort()).toEqual(['create_mockup', 'render_mermaid', 'show_mockup'])
-    })
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: undefined },
+      () => {
+        const { tools } = runExtension()
+        expect([...tools.keys()].sort()).toEqual(['create_mockup', 'render_mermaid', 'show_mockup'])
+      }
+    )
   })
 
   it('registers all four tools (including dispatch_agent) when both hosted-tools env vars are set', () => {
-    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' }, () => {
-      const { tools } = runExtension()
-      expect([...tools.keys()].sort()).toEqual(['create_mockup', 'dispatch_agent', 'render_mermaid', 'show_mockup'])
-    })
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const { tools } = runExtension()
+        expect([...tools.keys()].sort()).toEqual([
+          'create_mockup',
+          'dispatch_agent',
+          'render_mermaid',
+          'show_mockup'
+        ])
+      }
+    )
   })
 
   it('parameters are PLAIN JSON-schema object literals — no typebox Type.Object() involved (the load-bearing wire finding)', () => {
-    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' }, () => {
-      const { tools } = runExtension()
-      expect(tools.get('render_mermaid')!.parameters).toEqual({
-        type: 'object',
-        properties: {
-          source: { type: 'string', description: expect.any(String) },
-          title: { type: 'string', description: expect.any(String) }
-        },
-        required: ['source']
-      })
-      expect(tools.get('dispatch_agent')!.parameters).toMatchObject({
-        type: 'object',
-        properties: { engine: { type: 'string', enum: ['claude', 'opencode'] } },
-        required: ['engine', 'prompt']
-      })
-    })
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const { tools } = runExtension()
+        expect(tools.get('render_mermaid')!.parameters).toEqual({
+          type: 'object',
+          properties: {
+            source: { type: 'string', description: expect.any(String) },
+            title: { type: 'string', description: expect.any(String) }
+          },
+          required: ['source']
+        })
+        expect(tools.get('dispatch_agent')!.parameters).toMatchObject({
+          type: 'object',
+          properties: { engine: { type: 'string', enum: ['claude', 'opencode'] } },
+          required: ['engine', 'prompt']
+        })
+      }
+    )
   })
 })
 
@@ -401,7 +428,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — execute()/fetch contract (executed in-p
     globalThis.fetch = originalFetch
   })
 
-  it("render_mermaid.execute() POSTs to <bridgeUrl>/hosted-tool with {toolName, input, toolCallId} and returns the parsed {content} verbatim", async () => {
+  it('render_mermaid.execute() POSTs to <bridgeUrl>/hosted-tool with {toolName, input, toolCallId} and returns the parsed {content} verbatim', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = []
     globalThis.fetch = (async (url: string, init: RequestInit) => {
       calls.push({ url, init })
@@ -434,15 +461,25 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — execute()/fetch contract (executed in-p
     const calls: Array<{ url: string; init: RequestInit }> = []
     globalThis.fetch = (async (url: string, init: RequestInit) => {
       calls.push({ url, init })
-      return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: 'ok' }] }) } as Response
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: [{ type: 'text', text: 'ok' }] })
+      } as Response
     }) as typeof fetch
 
-    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' }, async () => {
-      const { tools } = runExtension()
-      await tools.get('dispatch_agent')!.execute('call-2', { engine: 'opencode', prompt: 'x' })
+    await withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      async () => {
+        const { tools } = runExtension()
+        await tools.get('dispatch_agent')!.execute('call-2', { engine: 'opencode', prompt: 'x' })
 
-      expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ toolName: 'dispatch_agent', toolCallId: 'call-2' })
-    })
+        expect(JSON.parse(String(calls[0].init.body))).toMatchObject({
+          toolName: 'dispatch_agent',
+          toolCallId: 'call-2'
+        })
+      }
+    )
   })
 
   it('fails closed with an isError result on a network error (fetch rejects)', async () => {
@@ -526,7 +563,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — tool_call gate hook (executed in-proces
     }) as typeof fetch
 
     await withEnv(BRIDGE_CREDS, async () => {
-      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: { command: 'ls' } })
+      const result = await getToolCallHook()({
+        toolCallId: 'c1',
+        toolName: 'bash',
+        input: { command: 'ls' }
+      })
       expect(result?.block).toBe(true)
     })
   })
@@ -563,7 +604,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — tool_call gate hook (executed in-proces
     })) as unknown as typeof fetch
 
     await withEnv(BRIDGE_CREDS, async () => {
-      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: { command: 'ls' } })
+      const result = await getToolCallHook()({
+        toolCallId: 'c1',
+        toolName: 'bash',
+        input: { command: 'ls' }
+      })
       expect(result).toBeUndefined()
     })
   })
@@ -623,7 +668,14 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — plan mode (M5a, executed in-process)', 
 
   it('cui-plan-enter drops edit/write from the active set, adds exit_plan, and keeps everything else', async () => {
     await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
-      const { commands, activeTools } = runExtension(['read', 'bash', 'edit', 'write', 'grep', 'render_mermaid'])
+      const { commands, activeTools } = runExtension([
+        'read',
+        'bash',
+        'edit',
+        'write',
+        'grep',
+        'render_mermaid'
+      ])
       await commands.get('cui-plan-enter')!.handler()
       const active = activeTools()
       expect(active).toEqual(
@@ -694,7 +746,12 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — plan mode (M5a, executed in-process)', 
 
   it('exit_plan.execute() is a no-op restore-wise if somehow called while already out of plan state (defensive)', async () => {
     await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
-      const { tools, events, activeTools, setActiveToolsCalls } = runExtension(['read', 'bash', 'edit', 'write'])
+      const { tools, events, activeTools, setActiveToolsCalls } = runExtension([
+        'read',
+        'bash',
+        'edit',
+        'write'
+      ])
       // session_start hides the auto-activated exit_plan; never entered plan
       // mode after that — execute() should not blow up or call setActiveTools.
       await events.get('session_start')!()

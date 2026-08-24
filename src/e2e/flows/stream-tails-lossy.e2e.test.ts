@@ -161,10 +161,7 @@ describe('E2E: the tails are lossy and off the ring (phase 5 S2)', () => {
     // THE assertion. Pre-S2 this is `sync-full`: the tails flushed the ring.
     expect(answer.type).toBe('sync-catchup')
     const catchup = answer as WsSyncCatchup
-    expect(catchup.events.map((e) => e.channel)).toEqual([
-      'session:tool-result',
-      'session:result'
-    ])
+    expect(catchup.events.map((e) => e.channel)).toEqual(['session:tool-result', 'session:result'])
     // The structural fact underneath it: not one tail chunk took a seq.
     expect(syncCore.currentSeq() - cursor).toBe(2)
 

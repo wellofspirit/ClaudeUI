@@ -234,9 +234,7 @@ if (src.includes(patchF2Marker)) {
 
     src = src.slice(0, idx) + newStr + src.slice(idx + pfStr.length)
     patchCount++
-    console.log(
-      `Applied at char ${idx}. msg=${msgVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}`
-    )
+    console.log(`Applied at char ${idx}. msg=${msgVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}`)
   }
 }
 
@@ -445,7 +443,9 @@ if (src.includes(patchBMarker)) {
     msgVar = m[1]
     idx = src.indexOf(matchStr)
     isNtCallback = true
-    console.log(`Found sync loop body (v197+ nt-callback pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
+    console.log(
+      `Found sync loop body (v197+ nt-callback pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`
+    )
   } else {
     console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
     process.exit(1)
@@ -832,7 +832,7 @@ if (src.includes(patchEMarker)) {
     if (sigCandidates.length === 0) {
       console.error(
         'ERROR: No `async function(...toolUseContext:VAR,...)` signature found ' +
-        'in the 15KB prefix before the BVe anchor. Cannot determine toolUseContext binding.'
+          'in the 15KB prefix before the BVe anchor. Cannot determine toolUseContext binding.'
       )
       process.exit(1)
     }
@@ -840,12 +840,14 @@ if (src.includes(patchEMarker)) {
       const summary = sigCandidates.map((c) => `${c.fn}(toolUseContext:${c.ctxVar})`).join(', ')
       console.error(
         `ERROR: ${sigCandidates.length} async functions with toolUseContext found in the 15KB prefix. ` +
-        `Ambiguous — cannot determine which encloses the anchor. Candidates: ${summary}`
+          `Ambiguous — cannot determine which encloses the anchor. Candidates: ${summary}`
       )
       process.exit(1)
     }
     const toolUseCtxVar = sigCandidates[0].ctxVar
-    console.log(`  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`)
+    console.log(
+      `  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`
+    )
 
     // Extract the shouldNotifyOwner gate. It must NOT be hardcoded: in
     // v2.1.197–v2.1.207 the defaulted alias was `p` (`shouldNotifyOwner:d}){let p=d??(()=>!0)`),
@@ -876,7 +878,9 @@ if (src.includes(patchEMarker)) {
     // Patch E must forward ONLY stream_events; on older builds (v2.1.197–2.1.207,
     // no onRunSettled param) it must keep forwarding assistant/user as well.
     const hasNativeRelay = notifyMatches[0][0].includes('onRunSettled:')
-    console.log(`  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`)
+    console.log(
+      `  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`
+    )
 
     console.log(
       `Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, ` +
@@ -911,7 +915,9 @@ if (src.includes(patchEMarker)) {
 
     src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
     patchCount++
-    console.log('Applied (v197+ BVe path). stream_events skipped from h[], background agents get stdout.')
+    console.log(
+      'Applied (v197+ BVe path). stream_events skipped from h[], background agents get stdout.'
+    )
   } else {
     // ---- Fallback: v2.1.41–v2.1.196 legacy re-background for-await loops ----
     //
@@ -952,7 +958,9 @@ if (src.includes(patchEMarker)) {
     }
 
     if (legacyMatches.length === 0) {
-      console.error('ERROR: Cannot locate async for-await loops (tried BVe anchor and legacy patterns).')
+      console.error(
+        'ERROR: Cannot locate async for-await loops (tried BVe anchor and legacy patterns).'
+      )
       console.error('The background agent loop structure may have changed.')
       process.exit(1)
     }
@@ -961,8 +969,7 @@ if (src.includes(patchEMarker)) {
 
     // Extract parent message var and description var from the Task tool's call() signature.
     const callSigRe = new RegExp(
-      `async call\\(\\{[^}]*description:(${V})[^}]*\\},` +
-        `(${V}),(${V}),(${V}),(${V})\\)\\{`
+      `async call\\(\\{[^}]*description:(${V})[^}]*\\},` + `(${V}),(${V}),(${V}),(${V})\\)\\{`
     )
     const callSigMatch = src.match(callSigRe)
     if (!callSigMatch) {
@@ -1035,7 +1042,9 @@ if (src.includes(patchGMarker)) {
   )
   const iu8Match = iu8SigRe.exec(src)
   if (!iu8Match) {
-    console.log('iu8() not found — merged into BVe() in v2.1.197+. Patch E covers this path. Skipping.')
+    console.log(
+      'iu8() not found — merged into BVe() in v2.1.197+. Patch E covers this path. Skipping.'
+    )
     patchGApplicable = false
   } else {
     // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)

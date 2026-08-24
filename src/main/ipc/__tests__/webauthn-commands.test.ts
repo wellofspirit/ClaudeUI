@@ -56,13 +56,19 @@ import {
   webauthnRename,
   webauthnRevoke
 } from '../../../core/ipc/webauthn-commands'
-import { WebauthnService, type WebauthnCredentialStore } from '../../../core/services/webauthn-service'
+import {
+  WebauthnService,
+  type WebauthnCredentialStore
+} from '../../../core/services/webauthn-service'
 import { VirtualAuthenticator } from '../../../test/helpers/webauthn-authenticator'
 
 const TAILNET = { rpId: 'box.tail1234.ts.net', origin: 'https://box.tail1234.ts.net' }
 
 beforeEach(() => {
-  configRef.current = { authPolicy: storedPolicyRef.current, passwordBreakGlass: breakGlassRef.current }
+  configRef.current = {
+    authPolicy: storedPolicyRef.current,
+    passwordBreakGlass: breakGlassRef.current
+  }
   credentialCountRef.current = 0
   storedPolicyRef.current = null
   breakGlassRef.current = true
@@ -208,9 +214,9 @@ describe('passkey channel declarations', () => {
 describe('origin requirement', () => {
   it('refuses register-options on a connection with no WebAuthn origin', async () => {
     const service = new WebauthnService(memoryStore())
-    await expect(
-      webauthnRegisterOptions(conn({ webauthnOrigin: null }), service)
-    ).rejects.toThrow('passkey-unavailable')
+    await expect(webauthnRegisterOptions(conn({ webauthnOrigin: null }), service)).rejects.toThrow(
+      'passkey-unavailable'
+    )
   })
 
   it('refuses register-verify the same way, before touching the payload', async () => {
@@ -376,7 +382,10 @@ describe('webauthn:revoke — the lockout guard', () => {
 // ---------------------------------------------------------------------------
 
 describe('AUTO effective-policy flip on a credential change', () => {
-  function hostSpy(): { mintEnrollToken: ReturnType<typeof vi.fn>; disconnectAuthSurfaceClients: ReturnType<typeof vi.fn> } {
+  function hostSpy(): {
+    mintEnrollToken: ReturnType<typeof vi.fn>
+    disconnectAuthSurfaceClients: ReturnType<typeof vi.fn>
+  } {
     return { mintEnrollToken: vi.fn(), disconnectAuthSurfaceClients: vi.fn() }
   }
 
@@ -480,9 +489,9 @@ describe('AUTO effective-policy flip on a credential change', () => {
   it('tolerates a null host (remote access disabled) without losing the audit row', async () => {
     setPolicy({ authPolicy: null })
     const service = liveService(1)
-    await expect(
-      webauthnRevoke(hostConnection(), 'cred-0', null, service)
-    ).resolves.toEqual({ ok: true })
+    await expect(webauthnRevoke(hostConnection(), 'cred-0', null, service)).resolves.toEqual({
+      ok: true
+    })
     expect(policyRows()).toHaveLength(1)
   })
 })

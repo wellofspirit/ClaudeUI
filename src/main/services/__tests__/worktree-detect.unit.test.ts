@@ -55,7 +55,9 @@ describe('detectEnteredWorktree', () => {
 
   it('parses a Windows backslash path', () => {
     expect(
-      detectEnteredWorktree('Created worktree at D:\\project\\worktrees\\my-branch on branch my-branch.')
+      detectEnteredWorktree(
+        'Created worktree at D:\\project\\worktrees\\my-branch on branch my-branch.'
+      )
     ).toEqual({ worktreePath: 'D:\\project\\worktrees\\my-branch', worktreeBranch: 'my-branch' })
   })
 
@@ -64,9 +66,10 @@ describe('detectEnteredWorktree', () => {
       worktreePath: '/a/b',
       worktreeBranch: 'feat'
     })
-    expect(
-      detectEnteredWorktree('{"worktreePath": "/a/b", "worktreeBranch": "feat"}')
-    ).toEqual({ worktreePath: '/a/b', worktreeBranch: 'feat' })
+    expect(detectEnteredWorktree('{"worktreePath": "/a/b", "worktreeBranch": "feat"}')).toEqual({
+      worktreePath: '/a/b',
+      worktreeBranch: 'feat'
+    })
   })
 
   it('returns null when either half is missing', () => {

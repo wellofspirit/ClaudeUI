@@ -249,7 +249,10 @@ export class SharedProviderService {
       const failures: unknown[] = []
       const centralFailure = results[0].status === 'rejected' ? results[0].reason : undefined
       if (centralFailure) failures.push(centralFailure)
-      for (const [route, result] of [['pi', results[1]], ['opencode', results[2]]] as const) {
+      for (const [route, result] of [
+        ['pi', results[1]],
+        ['opencode', results[2]]
+      ] as const) {
         if (result.status === 'fulfilled' && !centralFailure) this.clearError(id, route)
         else {
           const error = result.status === 'rejected' ? result.reason : centralFailure
@@ -257,7 +260,8 @@ export class SharedProviderService {
           if (result.status === 'rejected') failures.push(error)
         }
       }
-      if (failures.length) throw new AggregateError(failures, `Failed to disconnect shared provider ${id}`)
+      if (failures.length)
+        throw new AggregateError(failures, `Failed to disconnect shared provider ${id}`)
     })
   }
 
@@ -320,7 +324,9 @@ export class SharedProviderService {
         this.applyDefault(
           definition,
           route,
-          definition.routes[route].enabled ? definition : withRoute(definition, route, { enabled: true })
+          definition.routes[route].enabled
+            ? definition
+            : withRoute(definition, route, { enabled: true })
         )
       } catch (error) {
         failed = true

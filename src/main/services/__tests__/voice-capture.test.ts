@@ -182,7 +182,8 @@ describe('voice-capture', () => {
   })
 
   it('stop() calls native stopRecording() only when a session is active', async () => {
-    const { startRecording, stopRecording, isRecording } = await import('../../../core/services/voice-capture')
+    const { startRecording, stopRecording, isRecording } =
+      await import('../../../core/services/voice-capture')
 
     // No active session — stop() must not throw and must not call the native.
     stopRecording()
@@ -213,7 +214,8 @@ describe('voice-capture', () => {
     // No candidate path satisfies existsSync -> loadNativeModule() returns null.
     existsSyncImpl = () => false
 
-    const { startRecording, isVoiceCaptureAvailable } = await import('../../../core/services/voice-capture')
+    const { startRecording, isVoiceCaptureAvailable } =
+      await import('../../../core/services/voice-capture')
 
     expect(isVoiceCaptureAvailable()).toBe(false)
     expect(startRecording(vi.fn())).toBe(false)

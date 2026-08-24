@@ -227,7 +227,11 @@ describe('ClaudeSession background bash', () => {
     })
 
     it('relays session:task-started with taskId/toolUseId/taskType (async-agent Stop-button fix)', () => {
-      session.handleTaskStarted({ task_id: 'task-42', tool_use_id: 'tu-42', task_type: 'local_agent' })
+      session.handleTaskStarted({
+        task_id: 'task-42',
+        tool_use_id: 'tu-42',
+        task_type: 'local_agent'
+      })
 
       expect(session.sent).toHaveLength(1)
       expect(session.sent[0]).toEqual({

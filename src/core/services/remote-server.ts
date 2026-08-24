@@ -3509,9 +3509,7 @@ export class RemoteServer {
       // transport cannot pair a settings refusal with the ambient code the
       // client's generic gate would silently retry (ADR-054 §6 amendment).
       throw new Error(
-        decision.refusal === 'settings-session'
-          ? NEEDS_SETTINGS_SESSION_ERROR
-          : NEEDS_STEP_UP_ERROR
+        decision.refusal === 'settings-session' ? NEEDS_SETTINGS_SESSION_ERROR : NEEDS_STEP_UP_ERROR
       )
     }
     for (const target of decision.refresh) {
@@ -3927,7 +3925,9 @@ export class RemoteServer {
       `Presence armed for ${client.ip} via ${via} (tier ${client.stepUpTier}` +
         (windows
           ? `, ${
-              withShell ? `shell acts ${policy.shellGrantIdleMinutes}m, ` : 'no shell (toggle off), '
+              withShell
+                ? `shell acts ${policy.shellGrantIdleMinutes}m, `
+                : 'no shell (toggle off), '
             }mutations ${client.policyCtx.stepUpMutationIdleMinutes}m)`
           : ', capability waiver only — no freshness windows)')
     )
@@ -4076,7 +4076,10 @@ export class RemoteServer {
     try {
       terminalService.write(client.connection, msg.termId, base64ToText(msg.dataB64))
     } catch (err) {
-      logger.warn('remote-server', `term-input dropped: ${err instanceof Error ? err.message : err}`)
+      logger.warn(
+        'remote-server',
+        `term-input dropped: ${err instanceof Error ? err.message : err}`
+      )
     }
   }
 

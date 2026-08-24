@@ -15,7 +15,7 @@ on mobile (terminal was considered and dropped — see Decision 5).
 Two platform constraints shape everything below:
 
 - **Soft-keyboard viewport mechanics.** `interactive-widget=resizes-content`
-  (156df4d) makes Android Chromium shrink the *layout* viewport under the keyboard, so
+  (156df4d) makes Android Chromium shrink the _layout_ viewport under the keyboard, so
   bottom-pinned flex footers and `fixed inset-0` overlays track the visible area. **iOS
   ignores the keyword**: the keyboard overlays the bottom of an unshrunk layout viewport,
   and only the browser's scroll-into-view keeps a focused input visible.
@@ -36,7 +36,7 @@ Two platform constraints shape everything below:
 2. **Mobile right-panel surfaces are content-slot takeovers.** `MobileTaskView` set the
    pattern; `MobileGitView` follows it: when `isMobile && rightPanel === '<x>'`, the
    ChatPanel slot is replaced wholesale by a fullscreen component with a back-button header
-   that drives the *same* store action as the desktop panel's close. Panel state never
+   that drives the _same_ store action as the desktop panel's close. Panel state never
    forks between layouts. `plan` and `mockup` remain desktop-only and should adopt this
    same pattern when they get mobile surfaces.
 
@@ -45,7 +45,7 @@ Two platform constraints shape everything below:
    (prev/next over `filterAndSortFiles` order, stage/unstage, two-tap discard, full-height
    GitFileDiffView). There is deliberately **no local navigation state**:
    `gitSelectedFile === null` ⇒ list, non-null ⇒ diff, so GitFileTree's existing tap
-   handler *is* the router and mobile/desktop can't disagree. Selection-as-navigation has
+   handler _is_ the router and mobile/desktop can't disagree. Selection-as-navigation has
    consequences that must hold for every future selection writer:
    - mount does NOT auto-select the first file (unlike GitPanel) and clears stale
      selections — mobile always lands on the list;
@@ -99,7 +99,7 @@ side) closed the gap this ADR's Context named. The owner-ratified rulings, recor
 because each generalizes a decision above:
 
 1. **The presentation-fork rule is the pattern for every dialog.** `const View = isMobile
-   ? MobileView : DesktopView` with the container (state, channels, mutations) shared
+? MobileView : DesktopView` with the container (state, channels, mutations) shared
    verbatim — PermissionsDialog's shape, now carried by SettingsDialog, McpDialog,
    SkillsDialog and TerminalPanel. The desktop View files stay byte-identical; every fork
    carries a two-direction fork-guard test.

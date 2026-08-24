@@ -2,7 +2,11 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import { findForkAnchorUuid, findPiForkAnchorEntryId, PI_FORK_CLONE_LATEST_SENTINEL } from '../../../core/services/fork-anchor'
+import {
+  findForkAnchorUuid,
+  findPiForkAnchorEntryId,
+  PI_FORK_CLONE_LATEST_SENTINEL
+} from '../../../core/services/fork-anchor'
 
 // Minimal JSONL line builders mirroring the cli.js transcript shape.
 const userLine = (uuid: string, text: string): Record<string, unknown> => ({

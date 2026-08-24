@@ -104,10 +104,8 @@ function passwordProvider(): PasswordAuthProvider {
   return {
     params: () => ({ saltHex: SALT_HEX, kdf: { ...KDF } }),
     verify: (proofHex: string) =>
-      nodeCrypto
-        .createHash('sha256')
-        .update(Buffer.from(proofHex, 'hex'))
-        .digest('hex') === STORED.hash
+      nodeCrypto.createHash('sha256').update(Buffer.from(proofHex, 'hex')).digest('hex') ===
+      STORED.hash
   }
 }
 
@@ -170,16 +168,15 @@ function webClient(opts: { e2eKeyHex?: string }): {
   states: Array<{ state: ConnectionState; error?: string }>
   reach: (state: ConnectionState, timeoutMs?: number) => Promise<string | undefined>
 } {
-  const conn = new RemoteConnection(
-    `http://127.0.0.1:${port}/remote`,
-    {},
-    opts.e2eKeyHex
-  )
+  const conn = new RemoteConnection(`http://127.0.0.1:${port}/remote`, {}, opts.e2eKeyHex)
   opened.push(conn)
   const states: Array<{ state: ConnectionState; error?: string }> = []
   conn.setStateHandler((state, error) => states.push({ state, error }))
 
-  const reach = async (target: ConnectionState, timeoutMs = 10_000): Promise<string | undefined> => {
+  const reach = async (
+    target: ConnectionState,
+    timeoutMs = 10_000
+  ): Promise<string | undefined> => {
     const deadline = Date.now() + timeoutMs
     for (;;) {
       const hit = states.find((s) => s.state === target)

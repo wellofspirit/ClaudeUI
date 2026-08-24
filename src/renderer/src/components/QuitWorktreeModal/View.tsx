@@ -21,7 +21,10 @@ export function QuitWorktreeModalView({
   onRemoveAll
 }: QuitWorktreeModalViewProps): React.JSX.Element {
   return (
-    <div data-testid="QuitWorktreeModal" className="fixed inset-0 z-[200] flex items-center justify-center">
+    <div
+      data-testid="QuitWorktreeModal"
+      className="fixed inset-0 z-[200] flex items-center justify-center"
+    >
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
       <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[420px] p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-3">Active worktrees</h3>

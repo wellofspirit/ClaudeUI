@@ -43,8 +43,8 @@ export class ErrorBoundary extends Component<Props, State> {
           <div className="max-w-md text-center">
             <h1 className="mb-2 text-lg font-semibold text-text-primary">Something went wrong</h1>
             <p className="mb-4 text-sm text-text-secondary">
-              The interface hit an unexpected error. Reloading usually recovers it; the details
-              have been written to the log.
+              The interface hit an unexpected error. Reloading usually recovers it; the details have
+              been written to the log.
             </p>
             <pre className="mb-4 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-bg-secondary p-2 text-left text-[11px] text-text-muted">
               {this.state.error.message}

@@ -125,12 +125,7 @@ export class ChallengeStore {
    * matching BOTH the kind and the connection; either way the record is gone
    * afterwards, so one challenge buys exactly one verify attempt.
    */
-  consume(
-    challenge: string,
-    kind: ChallengeKind,
-    connectionId: string,
-    now = Date.now()
-  ): boolean {
+  consume(challenge: string, kind: ChallengeKind, connectionId: string, now = Date.now()): boolean {
     this.sweep(now)
     const record = this.records.get(challenge)
     if (!record) return false
@@ -285,8 +280,7 @@ export type WebauthnAuthResult =
   | { ok: false; reason: WebauthnFailure }
 
 export type WebauthnRegisterResult =
-  | { ok: true; credId: string; backedUp: boolean }
-  | { ok: false; reason: WebauthnFailure }
+  { ok: true; credId: string; backedUp: boolean } | { ok: false; reason: WebauthnFailure }
 
 /**
  * Ceremony orchestration. Stateless apart from {@link ChallengeStore}, so the
@@ -520,8 +514,11 @@ export class WebauthnService {
  */
 export function normalizeNickname(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null
-  // eslint-disable-next-line no-control-regex
-  const cleaned = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64)
+  const cleaned = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 64)
   return cleaned === '' ? null : cleaned
 }
 

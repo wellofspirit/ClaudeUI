@@ -25,7 +25,7 @@ implemented model lives in `src/shared/types.ts` and `src/shared/model-capabilit
 - **Engine** — the harness running the agent loop (`EngineId = 'claude' | 'opencode'`; `'codex'`
   reserved/dormant). Owns session protocol, tool set, permission system, config plane, persistence,
   slash commands, skills, MCP wiring. **Rename `ProviderId` → `EngineId`** app-wide ("provider"
-  collides with opencode's term for *vendor*).
+  collides with opencode's term for _vendor_).
 - **Vendor** — the model maker (`VendorId`, open-ended: anthropic/openai/google/local/…). Owns the
   model list, model capabilities, token accounting. Engine→Vendor is 1:1 for Claude, 1:N for opencode.
 - **Account** — credential + metering identity per (engine × vendor); a derived `AccountRef`
@@ -41,7 +41,7 @@ implemented model lives in `src/shared/types.ts` and `src/shared/model-capabilit
 
 - `EngineCapabilities` (vendor-independent: voice, hostedMcp, backgroundTasks, subagents, plan,
   fork, steer/queue, slashCommands, skills, sideQuestion, `autonomyModes`, `auth{canDriveLogin,
-  multiAccount}`).
+multiAccount}`).
 - `ModelCapabilities` (per model: `reasoning` as **two independent axes** `{ thinking?, effort? }`
   — a model may expose both, as Claude does — plus vision, toolCalling, contextWindow…).
 - `ResolvedCapabilities = resolve(engine, model)` — a field merge plus AND-of-both for

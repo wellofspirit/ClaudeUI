@@ -166,11 +166,13 @@ describe('McpHost.ensureStarted', () => {
     const received: Array<Record<string, unknown>> = []
     let transport: { onmessage?: (m: unknown) => void; send: (m: unknown) => Promise<void> }
     const instance = {
-      connect: vi.fn(async (t: { onmessage?: (m: unknown) => void; start?: () => Promise<void> }) => {
-        transport = t as typeof transport
-        t.onmessage = (m) => received.push(m as Record<string, unknown>)
-        await t.start?.()
-      })
+      connect: vi.fn(
+        async (t: { onmessage?: (m: unknown) => void; start?: () => Promise<void> }) => {
+          transport = t as typeof transport
+          t.onmessage = (m) => received.push(m as Record<string, unknown>)
+          await t.start?.()
+        }
+      )
     } as unknown as SdkMcpServer['instance']
     const host = new McpHost({ srv: { type: 'sdk', name: 'srv', tools: [], instance } })
 

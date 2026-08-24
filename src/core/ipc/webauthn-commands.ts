@@ -77,8 +77,7 @@ async function withCredentialSurfaceReaction<T>(
 
 /** Result envelope for `webauthn:register-verify`. */
 export type RegisterVerifyResult =
-  | { ok: true; credId: string; backedUp: boolean }
-  | { ok: false; error: string }
+  { ok: true; credId: string; backedUp: boolean } | { ok: false; error: string }
 
 /**
  * The origin binding a ceremony must run against. Throws rather than falling
@@ -173,7 +172,9 @@ export async function webauthnRevoke(
   // Revoking the LAST credential under AUTO is the loosening twin of enrolling
   // the first: `passkey-always` → `legacy`, so every client admitted under the
   // stricter rules is re-admitted under the looser ones.
-  return await withCredentialSurfaceReaction(connection, host, () => ({ ok: service.revoke(credId) }))
+  return await withCredentialSurfaceReaction(connection, host, () => ({
+    ok: service.revoke(credId)
+  }))
 }
 
 export function mintEnrollToken(host: RemoteAuthSurfaceHost | null): {

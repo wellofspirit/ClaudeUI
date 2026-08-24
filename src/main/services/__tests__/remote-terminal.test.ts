@@ -21,7 +21,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Module from 'node:module'
 import * as crypto from 'node:crypto'
-import { connectRemoteClient, ephemeralPort, type RemoteClient } from '../../../test/helpers/ws-test-client'
+import {
+  connectRemoteClient,
+  ephemeralPort,
+  type RemoteClient
+} from '../../../test/helpers/ws-test-client'
 import { createPtyStub } from '../../../test/stubs/pty-stub'
 import type { WsServerMessage } from '../../../shared/remote-protocol'
 import type { RemoteConfigRow } from '../../../core/services/db'
@@ -249,7 +253,6 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
 
     port = await ephemeralPort()
     await server.start(port, '127.0.0.1')
-
   })
 
   afterEach(async () => {
@@ -567,8 +570,7 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     return desktopSink.mock.calls
       .filter(
         ([channel, payload]) =>
-          channel === 'terminal:data' &&
-          (payload as { terminalId: string }).terminalId === termId
+          channel === 'terminal:data' && (payload as { terminalId: string }).terminalId === termId
       )
       .map(([, payload]) => {
         const p = payload as { data: string; replay?: boolean }
@@ -712,11 +714,14 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     // …and it is the SAME budget the auth handshake uses: a brand-new socket
     // from this key is now refused before it can even present a credential.
     await expect(
-      connectRemoteClient({ url: `ws://127.0.0.1:${port}/`, pwProof: PROOF, handshakeTimeoutMs: 2000 })
-        .then((c) => {
-          clients.push(c)
-          return c.ready
-        })
+      connectRemoteClient({
+        url: `ws://127.0.0.1:${port}/`,
+        pwProof: PROOF,
+        handshakeTimeoutMs: 2000
+      }).then((c) => {
+        clients.push(c)
+        return c.ready
+      })
     ).rejects.toThrow()
   })
 

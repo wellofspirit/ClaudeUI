@@ -372,10 +372,7 @@ describe('computeTurnSpanDurationMs', () => {
   })
 
   it('includes the trailing turn (no following user prompt) through EOF', () => {
-    const lines = [
-      userLine('2026-01-01T00:00:00.000Z'),
-      assistantLine('2026-01-01T00:00:04.000Z')
-    ]
+    const lines = [userLine('2026-01-01T00:00:00.000Z'), assistantLine('2026-01-01T00:00:04.000Z')]
     expect(computeTurnSpanDurationMs(lines)).toBe(4000)
   })
 
@@ -500,7 +497,14 @@ describe('computeTokenMetrics — modelCosts (Slice B)', () => {
 
   it('omits synthetic/unknown models from the breakdown', async () => {
     const file = writeTranscript([
-      { type: 'assistant', message: { id: 'msg_1', model: '<synthetic>', usage: { input_tokens: 100, output_tokens: 0 } } }
+      {
+        type: 'assistant',
+        message: {
+          id: 'msg_1',
+          model: '<synthetic>',
+          usage: { input_tokens: 100, output_tokens: 0 }
+        }
+      }
     ])
     const m = await computeTokenMetrics(file)
     fs.unlinkSync(file)

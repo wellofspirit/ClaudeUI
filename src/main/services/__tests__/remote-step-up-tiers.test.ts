@@ -249,7 +249,9 @@ async function rawConnect(port: number): Promise<RawClient> {
         const found = frames.find((f) => f.type === type)
         if (found) return found as never
         if (Date.now() > deadline) {
-          throw new Error(`Timed out waiting for ${type}; saw [${frames.map((f) => f.type).join(', ')}]`)
+          throw new Error(
+            `Timed out waiting for ${type}; saw [${frames.map((f) => f.type).join(', ')}]`
+          )
         }
         await new Promise((r) => setTimeout(r, 5))
       }
@@ -341,7 +343,10 @@ const congest = (bytes: number): void => {
  * client that ships. The starting state comes from `getSnapshot()` for the same
  * reason: that is the `sync-full` a real client hydrated from.
  */
-function makeReplicaFold(client: RawClient, routingId: string): {
+function makeReplicaFold(
+  client: RawClient,
+  routingId: string
+): {
   streams: StreamFrame[]
   results: StreamApplyResult[]
   text: () => string
@@ -402,10 +407,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
    * absolute cut — its persisted setting floors at one HOUR, so asserting the
    * timer any other way would mean an hour of wall clock.
    */
-  async function boot(
-    over: Partial<RemoteConfigRow> = {},
-    maxAgeMs?: number
-  ): Promise<void> {
+  async function boot(over: Partial<RemoteConfigRow> = {}, maxAgeMs?: number): Promise<void> {
     remoteConfigRef.current = makeConfigRow(over)
     server = new RemoteServer(
       dispatcher,
@@ -457,7 +459,6 @@ describe('ADR-054 step-up tiers over the socket', () => {
     expect(await c.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
     return c
   }
-
 
   /** Run a password step-up and return the response frame. */
   async function stepUp(client: RawClient): Promise<Record<string, unknown>> {
@@ -753,7 +754,11 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
       // Input is DROPPED silently (an error would be an oracle for which
       // terminals exist) — the pty never sees it.
-      c.send({ type: 'term-input', termId: id, dataB64: Buffer.from('rm -rf /\n').toString('base64') })
+      c.send({
+        type: 'term-input',
+        termId: id,
+        dataB64: Buffer.from('rm -rf /\n').toString('base64')
+      })
       await flushPtyBatch()
       expect(ptyStub.spawned[0].writes.length).toBe(writesBefore)
 
@@ -783,9 +788,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       advance(600)
       // The handler itself fails (no git repo in the stub graph) — what matters
       // is that the failure is the HANDLER's and not the step-up gate's.
-      await expect(invoke(c, 'git:commit', '/tmp/nope', 'msg')).rejects.not.toThrow(
-        'needs-step-up'
-      )
+      await expect(invoke(c, 'git:commit', '/tmp/nope', 'msg')).rejects.not.toThrow('needs-step-up')
     })
   })
 
@@ -958,10 +961,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // Switching sessions is one call. The previous id must STOP being watched,
       // or a phone that visits ten sessions ends up receiving all ten.
       await invoke(c, 'stream:watch', { sessionIds: [OTHER] })
-      expect(streamsOf(c).map((f) => f.streamId)).toEqual([
-        `${OTHER}/text`,
-        `${OTHER}/thinking`
-      ])
+      expect(streamsOf(c).map((f) => f.streamId)).toEqual([`${OTHER}/text`, `${OTHER}/thinking`])
       c.frames.length = 0
       emitEvent('session:stream', [RID, { type: 'text', text: 'ignored' }])
       emitEvent('session:stream', [OTHER, { type: 'text', text: 'kept' }])
@@ -1368,9 +1368,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       const c = await adminLocked()
       expect(await unlock(c)).toMatchObject({ ok: true })
       configWrites.length = 0
-      await expect(
-        invoke(c, 'authcfg:apply', { authMode: 'password' })
-      ).rejects.toThrow(/Unknown remote auth policy/)
+      await expect(invoke(c, 'authcfg:apply', { authMode: 'password' })).rejects.toThrow(
+        /Unknown remote auth policy/
+      )
       expect(configWrites).toEqual([])
     })
 
@@ -1516,9 +1516,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       const bystander = await connectWithPassword()
 
       auditRows.length = 0
-      await expect(
-        invoke(actor, 'authcfg:apply', { stepUpTier: 'medium' })
-      ).resolves.toMatchObject({ ok: true })
+      await expect(invoke(actor, 'authcfg:apply', { stepUpTier: 'medium' })).resolves.toMatchObject(
+        { ok: true }
+      )
 
       await new Promise((r) => setTimeout(r, 200))
       expect(bystander.ws.readyState).toBe(WebSocket.OPEN)
@@ -1557,9 +1557,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       const bystander = await connectWithPassword()
 
       auditRows.length = 0
-      await expect(invoke(actor, 'authcfg:apply', { auditRetentionDays: 90 })).resolves.toMatchObject(
-        { ok: true }
-      )
+      await expect(
+        invoke(actor, 'authcfg:apply', { auditRetentionDays: 90 })
+      ).resolves.toMatchObject({ ok: true })
       await new Promise((r) => setTimeout(r, 200))
       expect(bystander.ws.readyState).toBe(WebSocket.OPEN)
       expect(auditChannels()).toContain('auth:settings-change')

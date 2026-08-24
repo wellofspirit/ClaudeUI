@@ -94,7 +94,10 @@ describe('reducer — session registry', () => {
     ['session:stream', ['rid', { type: 'text', text: 'hi' }]],
     ['session:subagent-stream', ['rid', { type: 'text', toolUseId: 't1', text: 'hi' }]],
     ['session:subagent-message', ['rid', { toolUseId: 't1', message: assistant('m1', []) }]],
-    ['session:subagent-message-batch', ['rid', { toolUseId: 't1', messages: [assistant('m1', [])] }]],
+    [
+      'session:subagent-message-batch',
+      ['rid', { toolUseId: 't1', messages: [assistant('m1', [])] }]
+    ],
     ['session:approval-request', ['rid', { requestId: 'r1', toolUseId: 't1' }]],
     ['session:task-started', ['rid', { toolUseId: 't1', taskId: 'a', taskType: 'b' }]],
     ['session:task-progress', ['rid', { toolUseId: 't1' }]],
@@ -127,11 +130,15 @@ describe('reducer — session registry', () => {
     // delta for a dead id parked `thinkingOpen` that a same-id respawn inherited
     // — its first real thinking output would be blanked by the next text delta.
     const aux = emptyAux()
-    applyEvent(emptyCanonicalState(), {
-      channel: 'session:stream',
-      args: ['rid', { type: 'thinking', text: 'hmm' }],
-      seq: 1
-    }, aux)
+    applyEvent(
+      emptyCanonicalState(),
+      {
+        channel: 'session:stream',
+        args: ['rid', { type: 'thinking', text: 'hmm' }],
+        seq: 1
+      },
+      aux
+    )
     expect(aux.thinkingOpen['rid']).toBeUndefined()
   })
 
@@ -1166,7 +1173,11 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
       created(),
       ['session:user-message', 'rid', { id: 'msg-1', timestamp: 9, prompt: 'hi' }],
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'yo' }])],
-      ['session:queue-changed', 'rid', { items: [{ itemId: 'i1', text: 'later', state: 'queued' }] }],
+      [
+        'session:queue-changed',
+        'rid',
+        { items: [{ itemId: 'i1', text: 'later', state: 'queued' }] }
+      ],
       ['session:metering', 'rid', { tokens: { total: 3 } } as never],
       ['session:config-changed', 'rid', { model: 'opus', effort: 'high' }],
       ['session:slash-commands', 'rid', [{ name: '/foo' }]],
@@ -1188,7 +1199,7 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
     expect(strip(restored)).toEqual(strip(live))
   })
 
-  it('fills defaults for an older host\'s snapshot (absent optional fields)', () => {
+  it("fills defaults for an older host's snapshot (absent optional fields)", () => {
     const restored = fromSnapshot({
       seq: 1,
       sessions: {
@@ -1240,10 +1251,16 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
     const aux = auxFromCanonical(restored)
     expect(aux.thinkingOpen['rid']).toBe(true)
 
-    const sealed = fold([['session:stream', 'rid', { type: 'text', text: 'answer' }]], restored, aux)
+    const sealed = fold(
+      [['session:stream', 'rid', { type: 'text', text: 'answer' }]],
+      restored,
+      aux
+    )
     expect(sealed.sessions['rid'].streamingThinking).toBe('')
     // And an idle session restores with no open span at all.
-    expect(auxFromCanonical(fromSnapshot(toSnapshot(fold([created()]), 1))).thinkingOpen).toEqual({})
+    expect(auxFromCanonical(fromSnapshot(toSnapshot(fold([created()]), 1))).thinkingOpen).toEqual(
+      {}
+    )
   })
 })
 

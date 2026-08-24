@@ -33,6 +33,7 @@ without a fresh connect/spawn:
 4. a failed connect for a turn (the turn errored before a connection existed).
 
 Renderer-side rules (unchanged, now written down):
+
 - `disconnected` clears `sdkActive` and is stored as `idle`; adapters may keep reporting
   `disconnected` from their status getter until the next successful connect (PiSession /
   OpencodeSession use a persistent flag; ClaudeSession uses a one-shot broadcast — both
@@ -40,8 +41,9 @@ Renderer-side rules (unchanged, now written down):
 - The renderer must never infer disconnection from anything else.
 
 Adapter-side corollaries learned in 5d0c118:
+
 - **Release by spawn identity, never by key alone, on loss paths.** After a death, a
-  key-only ref release can decrement a *replacement* server another session already
+  key-only ref release can decrement a _replacement_ server another session already
   acquired (`OpencodeServerManager.releaseIfCurrent`).
 - **Shared-process managers need an unexpected-exit fan-out** (`subscribeExit`) so sessions
   with no active stream still learn about death; deliberate kills must not fan out

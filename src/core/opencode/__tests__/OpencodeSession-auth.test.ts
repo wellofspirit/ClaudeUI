@@ -85,11 +85,25 @@ const {
   const MockOpencodeClient = vi.fn()
 
   return {
-    mockAcquire, mockRelease, mockCreateSession, mockPromptAsync, mockAbortSession,
-    mockPatchSession, mockReplyPermission, mockReplyQuestion, mockRejectQuestion,
-    mockSubscribeEvents, mockLoadClaudePermissions, mockSaveClaudePermissions,
-    mockLoadEngineConfig, mockPrompt, mockDeleteSession, mockListCommands, mockListSkills,
-    mockRunCommand, MockOpencodeClient
+    mockAcquire,
+    mockRelease,
+    mockCreateSession,
+    mockPromptAsync,
+    mockAbortSession,
+    mockPatchSession,
+    mockReplyPermission,
+    mockReplyQuestion,
+    mockRejectQuestion,
+    mockSubscribeEvents,
+    mockLoadClaudePermissions,
+    mockSaveClaudePermissions,
+    mockLoadEngineConfig,
+    mockPrompt,
+    mockDeleteSession,
+    mockListCommands,
+    mockListSkills,
+    mockRunCommand,
+    MockOpencodeClient
   }
 })
 
@@ -148,7 +162,13 @@ function setupMocks(): void {
   mockListSkills.mockReset()
   mockRunCommand.mockReset()
 
-  mockLoadClaudePermissions.mockReturnValue({ allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined })
+  mockLoadClaudePermissions.mockReturnValue({
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined
+  })
   mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
   mockDeleteSession.mockResolvedValue(undefined)
   mockReplyQuestion.mockResolvedValue(undefined)

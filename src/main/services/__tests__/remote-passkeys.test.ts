@@ -201,7 +201,13 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
 function fetchAuthInfo(port: number, host: string): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: '127.0.0.1', port, path: '/remote/auth-info', method: 'GET', headers: { Host: host } },
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/remote/auth-info',
+        method: 'GET',
+        headers: { Host: host }
+      },
       (res) => {
         let body = ''
         res.setEncoding('utf-8')
@@ -284,7 +290,9 @@ async function rawConnect(
         const found = frames.find((f) => f.type === type)
         if (found) return found as never
         if (Date.now() > deadline) {
-          throw new Error(`Timed out waiting for ${type}; saw [${frames.map((f) => f.type).join(', ')}]`)
+          throw new Error(
+            `Timed out waiting for ${type}; saw [${frames.map((f) => f.type).join(', ')}]`
+          )
         }
         await new Promise((r) => setTimeout(r, 5))
       }
@@ -626,9 +634,7 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     const good = await connect()
     await ceremony(good, device)
 
-    const okRow = auditRows.find(
-      (r) => r.channel === 'auth:webauthn-assert' && r.outcome === 'ok'
-    )!
+    const okRow = auditRows.find((r) => r.channel === 'auth:webauthn-assert' && r.outcome === 'ok')!
     expect(okRow).toMatchObject({ method: 'webauthn', label: 'Named device', capability: 'admin' })
 
     // A forged assertion is audited as an error and closes the socket.
@@ -1024,7 +1030,9 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
       ok: true,
       method: 'enroll-token'
     })
-    expect(auditRows.some((r) => r.channel === 'auth:enroll-token' && r.outcome === 'ok')).toBe(true)
+    expect(auditRows.some((r) => r.channel === 'auth:enroll-token' && r.outcome === 'ok')).toBe(
+      true
+    )
 
     // `enroll` and nothing else.
     await expect(invoke(client, 'webauthn:register-options')).resolves.toBeTruthy()
@@ -1207,10 +1215,7 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     auditRows.filter((r) => r.channel === 'auth:policy-change')
 
   /** Register one credential over an authenticated socket, as a client does. */
-  async function registerOver(
-    client: RawClient,
-    nickname: string
-  ): Promise<VirtualAuthenticator> {
+  async function registerOver(client: RawClient, nickname: string): Promise<VirtualAuthenticator> {
     const options = (await invoke(client, 'webauthn:register-options')) as { challenge: string }
     const device = new VirtualAuthenticator()
     const result = await invoke(client, 'webauthn:register-verify', {

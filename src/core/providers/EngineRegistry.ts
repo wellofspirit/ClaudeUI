@@ -13,10 +13,7 @@ class EngineRegistry {
     this.factories.set(engineId, factory)
   }
 
-  createSession(
-    engineId: EngineId,
-    ...args: Parameters<EngineSessionFactory>
-  ): ISession {
+  createSession(engineId: EngineId, ...args: Parameters<EngineSessionFactory>): ISession {
     const factory = this.factories.get(engineId)
     if (!factory) {
       throw new Error(

@@ -273,7 +273,12 @@ describe('migration framework — user_version guard', () => {
           notnull: number
           dflt_value: string | null
         }>
-      ).filter((c) => c.name.startsWith('step_up') || c.name.startsWith('session_max') || c.name.startsWith('audit_'))
+      ).filter(
+        (c) =>
+          c.name.startsWith('step_up') ||
+          c.name.startsWith('session_max') ||
+          c.name.startsWith('audit_')
+      )
 
       expect(columns.map((c) => c.name).sort()).toEqual([
         'audit_retention_days',
@@ -346,14 +351,16 @@ describe('migration framework — user_version guard', () => {
           db,
           MIGRATIONS.filter((m) => m.version <= 11)
         )
-        db.prepare(
-          `INSERT INTO remote_config (id, auth_policy, updated_at) VALUES (1, ?, 1)`
-        ).run(policy)
+        db.prepare(`INSERT INTO remote_config (id, auth_policy, updated_at) VALUES (1, ?, 1)`).run(
+          policy
+        )
         runMigrations(db)
         expect(
-          (db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
-            auth_policy: string
-          }).auth_policy,
+          (
+            db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
+              auth_policy: string
+            }
+          ).auth_policy,
           policy
         ).toBe(policy)
       } finally {
@@ -372,9 +379,11 @@ describe('migration framework — user_version guard', () => {
       db.prepare('INSERT INTO remote_config (id, updated_at) VALUES (1, 1)').run()
       runMigrations(db)
       expect(
-        (db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
-          auth_policy: string | null
-        }).auth_policy
+        (
+          db.prepare('SELECT auth_policy FROM remote_config WHERE id = 1').get() as {
+            auth_policy: string | null
+          }
+        ).auth_policy
       ).toBeNull()
     } finally {
       db.close()

@@ -128,11 +128,14 @@ describe('RemoteDispatcher', () => {
       'remote:force-reserve'
     ] as const
 
-    it.each(HISTORICALLY_BLOCKED)('pins "%s" to a capability remote is never granted', (channel) => {
-      const pinned = PINNED_CAPABILITIES[channel]
-      expect(pinned).toBeDefined()
-      expect(AUTH_OFF_GRANTS.has(pinned)).toBe(false)
-    })
+    it.each(HISTORICALLY_BLOCKED)(
+      'pins "%s" to a capability remote is never granted',
+      (channel) => {
+        const pinned = PINNED_CAPABILITIES[channel]
+        expect(pinned).toBeDefined()
+        expect(AUTH_OFF_GRANTS.has(pinned)).toBe(false)
+      }
+    )
 
     it.each(HISTORICALLY_BLOCKED)(
       'refuses to dispatch "%s" even when it is registered for remote',

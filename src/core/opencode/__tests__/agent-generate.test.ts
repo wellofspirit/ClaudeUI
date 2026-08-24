@@ -16,7 +16,7 @@ const {
   mockPrompt,
   mockPatchSession,
   mockDeleteSession,
-  mockResolveModel,
+  mockResolveModel
 } = vi.hoisted(() => {
   const mockCreateSession = vi.fn()
   const mockPrompt = vi.fn()
@@ -34,19 +34,19 @@ const {
     mockPrompt,
     mockPatchSession,
     mockDeleteSession,
-    mockResolveModel,
+    mockResolveModel
   }
 })
 
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
     acquire: mockAcquire,
-    release: mockRelease,
-  },
+    release: mockRelease
+  }
 }))
 
 vi.mock('../OpencodeClient', () => ({
-  OpencodeClient: MockOpencodeClient,
+  OpencodeClient: MockOpencodeClient
 }))
 
 // Keep the model-discovery dependency hermetic — no transient server spawn.
@@ -60,11 +60,11 @@ vi.mock('../model-discovery', () => ({
     return slash < 0
       ? { providerID: 'opencode', modelID: model }
       : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
-  },
+  }
 }))
 
 vi.mock('../../services/persisted-sessions-dir', () => ({
-  PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions',
+  PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
 // ─── Import SUT after mocks ───────────────────────────────────────────────────
@@ -76,14 +76,14 @@ import { generateAgent } from '../agent-generate'
 const VALID_RESPONSE = {
   identifier: 'code-reviewer',
   whenToUse: 'Use this agent when reviewing code changes.',
-  systemPrompt: 'You are a senior code reviewer.',
+  systemPrompt: 'You are a senior code reviewer.'
 }
 
 const VALID_JSON_TEXT = JSON.stringify(VALID_RESPONSE)
 
 function makePartResponse(text: string) {
   return {
-    parts: [{ type: 'text', text }],
+    parts: [{ type: 'text', text }]
   }
 }
 
@@ -91,7 +91,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockAcquire.mockResolvedValue({
     baseUrl: 'http://localhost:5173',
-    authHeader: 'Bearer test-token',
+    authHeader: 'Bearer test-token'
   })
   mockRelease.mockResolvedValue(undefined)
   mockCreateSession.mockResolvedValue({ id: 'session-abc-123' })
@@ -105,7 +105,7 @@ beforeEach(() => {
       createSession: mockCreateSession,
       prompt: mockPrompt,
       patchSession: mockPatchSession,
-      deleteSession: mockDeleteSession,
+      deleteSession: mockDeleteSession
     }
   })
 })
@@ -150,8 +150,8 @@ describe('generateAgent', () => {
     mockPrompt.mockResolvedValue({
       parts: [
         { type: 'text', text: part1 },
-        { type: 'text', text: part2 },
-      ],
+        { type: 'text', text: part2 }
+      ]
     })
 
     const result = await generateAgent('Review agent')
@@ -163,8 +163,8 @@ describe('generateAgent', () => {
     mockPrompt.mockResolvedValue({
       parts: [
         { type: 'tool_use', text: 'ignored' },
-        { type: 'text', text: VALID_JSON_TEXT },
-      ],
+        { type: 'text', text: VALID_JSON_TEXT }
+      ]
     })
 
     const result = await generateAgent('Review agent')
@@ -257,9 +257,9 @@ describe('generateAgent', () => {
         parts: expect.arrayContaining([
           expect.objectContaining({
             type: 'text',
-            text: expect.stringContaining('My custom description'),
-          }),
-        ]),
+            text: expect.stringContaining('My custom description')
+          })
+        ])
       })
     )
   })
@@ -275,7 +275,7 @@ describe('generateAgent', () => {
       permission: [{ permission: '*', pattern: '*', action: 'deny' }],
       // Sealed too: the deny-all alone loses to instance-global "always"
       // approvals under last-match-wins (ADR-037 P2).
-      permissionHermetic: true,
+      permissionHermetic: true
     })
     // Ordering matters: a tool-call permission.asked between patch and prompt is
     // exactly the hang we prevent — the deny ruleset must land first.
@@ -293,7 +293,7 @@ describe('generateAgent', () => {
     expect(mockPrompt).toHaveBeenCalledWith(
       'session-abc-123',
       expect.objectContaining({
-        model: { providerID: 'anthropic', modelID: 'claude-sonnet-4' },
+        model: { providerID: 'anthropic', modelID: 'claude-sonnet-4' }
       })
     )
   })

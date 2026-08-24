@@ -51,7 +51,10 @@ describe('claudeUsageProvider.getWindow', () => {
   })
 
   it('returns null when usageFetcher has an error', () => {
-    mockGetLastUsage.mockReturnValue({ error: 'no creds', fiveHour: { usedPercent: 0, resetsAt: null } })
+    mockGetLastUsage.mockReturnValue({
+      error: 'no creds',
+      fiveHour: { usedPercent: 0, resetsAt: null }
+    })
     const provider = resolveUsageProvider('claude', 'anthropic', 'subscription')!
     expect(provider.getWindow()).toBeNull()
   })

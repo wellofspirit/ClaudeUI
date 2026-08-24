@@ -242,8 +242,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // A single-model session's breakdown is redundant with the headline Cost
   // figure — only show it when there's actually more than one line, or a
   // dispatched (cross-engine, Slice C) row is present.
-  const showCostBreakdown =
-    rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
+  const showCostBreakdown = rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
   const sortedModelCosts = showCostBreakdown
     ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
     : []

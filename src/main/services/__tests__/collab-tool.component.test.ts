@@ -97,7 +97,12 @@ describe('createCollabServer', () => {
     )
 
     expect(dispatchSpy).toHaveBeenCalledWith(
-      { engine: 'opencode', prompt: 'review the diff', model: 'openai/gpt-5', sessionId: undefined },
+      {
+        engine: 'opencode',
+        prompt: 'review the diff',
+        model: 'openai/gpt-5',
+        sessionId: undefined
+      },
       {
         fromEngine: 'claude',
         fromRoutingId: 'routing-1',
@@ -203,10 +208,7 @@ describe('createCollabServer', () => {
       isError: true
     })
     const server = createCollabServer(makeCtx())
-    const result = await server.tools[0].handler(
-      { engine: 'opencode', prompt: 'x' },
-      makeExtra()
-    )
+    const result = await server.tools[0].handler({ engine: 'opencode', prompt: 'x' }, makeExtra())
     expect(result.isError).toBe(true)
     const text = (result.content[0] as { text: string }).text
     expect(text).toBe('something broke')
@@ -216,10 +218,7 @@ describe('createCollabServer', () => {
     // No spy — exercise the genuine singleton. loadEngineConfig is mocked to {}
     // so model resolution fails before any server work.
     const server = createCollabServer(makeCtx())
-    const result = await server.tools[0].handler(
-      { engine: 'opencode', prompt: 'x' },
-      makeExtra()
-    )
+    const result = await server.tools[0].handler({ engine: 'opencode', prompt: 'x' }, makeExtra())
     expect(result.isError).toBe(true)
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('dispatch.defaultModel')
@@ -253,7 +252,12 @@ describe('createCollabServer', () => {
     )
 
     expect(dispatchSpy).toHaveBeenCalledWith(
-      { engine: 'pi', prompt: 'do a thing', model: 'openai-codex/gpt-5.6-luna', sessionId: undefined },
+      {
+        engine: 'pi',
+        prompt: 'do a thing',
+        model: 'openai-codex/gpt-5.6-luna',
+        sessionId: undefined
+      },
       {
         fromEngine: 'claude',
         fromRoutingId: 'routing-1',
@@ -274,7 +278,10 @@ describe('createCollabServer', () => {
 describe('createCollabServer — dispatch_agent model hint (ADR-033 follow-up)', () => {
   it('bakes the configured allowlist into both the tool description and the model param describe()', () => {
     vi.mocked(loadEngineConfig).mockReturnValueOnce({
-      dispatch: { allowedModels: ['openai/gpt-5', 'google/gemini-pro'], defaultModel: 'openai/gpt-5' }
+      dispatch: {
+        allowedModels: ['openai/gpt-5', 'google/gemini-pro'],
+        defaultModel: 'openai/gpt-5'
+      }
     })
     const server = createCollabServer(makeCtx())
     const description = server.tools[0].description
@@ -331,7 +338,10 @@ describe('createCollabServer — dispatch_agent model hint (ADR-033 follow-up)',
     vi.mocked(loadEngineConfig)
       .mockReturnValueOnce({ dispatch: { defaultModel: 'openai/gpt-5' } })
       .mockReturnValueOnce({
-        dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'], defaultModel: 'openai-codex/gpt-5.6-luna' }
+        dispatch: {
+          allowedModels: ['openai-codex/gpt-5.6-luna'],
+          defaultModel: 'openai-codex/gpt-5.6-luna'
+        }
       })
     const server = createCollabServer(makeCtx())
     const description = server.tools[0].description

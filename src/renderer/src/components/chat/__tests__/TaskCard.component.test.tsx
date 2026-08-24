@@ -249,7 +249,11 @@ describe('TaskCard — inline task approval', () => {
   })
 
   it('renders Allow/Deny when an approval is pending for the task tool', () => {
-    const approval = makePendingApproval({ requestId: 'per-1', toolUseId: 'call_task_1', toolName: 'task' })
+    const approval = makePendingApproval({
+      requestId: 'per-1',
+      toolUseId: 'call_task_1',
+      toolName: 'task'
+    })
     seed.approvalRequest(ROUTE, approval)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
@@ -265,7 +269,11 @@ describe('TaskCard — inline task approval', () => {
   })
 
   it('Allow → respondApproval IPC with allow + clears the pending approval', async () => {
-    const approval = makePendingApproval({ requestId: 'per-2', toolUseId: 'call_task_1', toolName: 'task' })
+    const approval = makePendingApproval({
+      requestId: 'per-2',
+      toolUseId: 'call_task_1',
+      toolName: 'task'
+    })
     seed.approvalRequest(ROUTE, approval)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
@@ -279,7 +287,11 @@ describe('TaskCard — inline task approval', () => {
   })
 
   it('Deny → respondApproval IPC with deny', async () => {
-    const approval = makePendingApproval({ requestId: 'per-3', toolUseId: 'call_task_1', toolName: 'task' })
+    const approval = makePendingApproval({
+      requestId: 'per-3',
+      toolUseId: 'call_task_1',
+      toolName: 'task'
+    })
     seed.approvalRequest(ROUTE, approval)
 
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
@@ -391,7 +403,12 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     render(
       <TaskCard
         block={ocBlock}
-        view={{ kind: 'task', description: 'Dispatch: claude', prompt: 'review', subagent: 'claude · haiku' }}
+        view={{
+          kind: 'task',
+          description: 'Dispatch: claude',
+          prompt: 'review',
+          subagent: 'claude · haiku'
+        }}
       />
     )
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
@@ -407,7 +424,12 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     render(
       <TaskCard
         block={piBlock}
-        view={{ kind: 'task', description: 'Dispatch: claude', prompt: 'review', subagent: 'claude · sonnet' }}
+        view={{
+          kind: 'task',
+          description: 'Dispatch: claude',
+          prompt: 'review',
+          subagent: 'claude · sonnet'
+        }}
       />
     )
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()

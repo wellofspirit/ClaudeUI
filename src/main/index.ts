@@ -148,8 +148,7 @@ const headlessWindow =
 // Playwright can screenshot it) — that one is a harness affordance, this one is a
 // deployment mode. No window means no window chrome, no tray, no menu decisions,
 // no plugins and no log-viewer window: `createWindow()` is simply never called.
-const noWindowMode =
-  process.env.CLAUDEUI_NO_WINDOW === '1' || process.argv.includes('--no-window')
+const noWindowMode = process.env.CLAUDEUI_NO_WINDOW === '1' || process.argv.includes('--no-window')
 
 if (headlessWindow) {
   // Chromium's occlusion tracker treats an off-screen window as occluded and

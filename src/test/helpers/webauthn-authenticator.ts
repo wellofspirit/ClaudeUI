@@ -21,10 +21,7 @@
 
 import * as crypto from 'node:crypto'
 import { isoCBOR } from '@simplewebauthn/server/helpers'
-import type {
-  AuthenticationResponseJSON,
-  RegistrationResponseJSON
-} from '@simplewebauthn/server'
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server'
 
 /** Authenticator-data flag bits we care about. */
 const FLAG_UP = 0x01 // user present
@@ -111,18 +108,23 @@ export class VirtualAuthenticator {
   }
 
   private authData(rpId: string, includeAttested: boolean): Buffer {
-    const parts = [sha256(Buffer.from(rpId, 'utf-8')), Buffer.from([this.flags(includeAttested)]), u32(this.signCount)]
+    const parts = [
+      sha256(Buffer.from(rpId, 'utf-8')),
+      Buffer.from([this.flags(includeAttested)]),
+      u32(this.signCount)
+    ]
     if (includeAttested) {
       parts.push(this.aaguid, u16(this.credIdBytes.length), this.credIdBytes, this.cosePublicKey)
     }
     return Buffer.concat(parts)
   }
 
-  private clientDataJSON(type: 'webauthn.create' | 'webauthn.get', challenge: string, origin: string): Buffer {
-    return Buffer.from(
-      JSON.stringify({ type, challenge, origin, crossOrigin: false }),
-      'utf-8'
-    )
+  private clientDataJSON(
+    type: 'webauthn.create' | 'webauthn.get',
+    challenge: string,
+    origin: string
+  ): Buffer {
+    return Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin: false }), 'utf-8')
   }
 
   /** Produce a `RegistrationResponseJSON` for a `fmt: 'none'` attestation. */

@@ -44,7 +44,8 @@ vi.mock('../../services/ui-config', () => ({
 }))
 vi.mock('../../services/logger', () => ({ logger: { info: vi.fn(), warn: vi.fn() } }))
 
-const { removeOpencodeProvider, setOpencodeProviderDisabled } = await import('../provider-management')
+const { removeOpencodeProvider, setOpencodeProviderDisabled } =
+  await import('../provider-management')
 
 beforeEach(() => {
   vi.clearAllMocks()

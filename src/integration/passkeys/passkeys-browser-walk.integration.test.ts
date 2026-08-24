@@ -825,7 +825,9 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       await hasTestId(breakGlassPage.page, 'EnrollPrompt'),
       'a password connection under a passkey mode must be offered inline self-enroll'
     ).toBe(true)
-    note('step 4a: inline self-enroll offered — `password` method on a server-declared capable origin')
+    note(
+      'step 4a: inline self-enroll offered — `password` method on a server-declared capable origin'
+    )
 
     // 4b. `localhost` is the OTHER WebAuthn-capable origin
     // (`resolveWebauthnOrigin`), and a direct loopback request carries no serve
@@ -1043,7 +1045,9 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     expect(afterApply.stepUpTier).toBe('strong')
     expect(afterApply.sessionMaxAgeHours, 'the dials are web-editable now').toBe(5)
     const shotTier = await shot(loginPage!.page, '12-settings-session-apply')
-    note(`step 7a: unlock ceremony → one authcfg:apply (tier + dial) from the BROWSER → ${shotTier}`)
+    note(
+      `step 7a: unlock ceremony → one authcfg:apply (tier + dial) from the BROWSER → ${shotTier}`
+    )
 
     // Closing the editor is the operator's action, not only the TTL's.
     await evalOnPage(loginPage!, (api) => api.authcfgEnd())
@@ -1103,7 +1107,9 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     // knows what a step-up is; the gate on the invoke path is what raised it.
     await waitForTestId(loginPage!.page, 'StepUpOverlay', 60_000)
     const shotPrompt = await shot(loginPage!.page, '13-generic-step-up-prompt')
-    note(`step 7b: a chat/config mutation past the idle window raised the generic prompt → ${shotPrompt}`)
+    note(
+      `step 7b: a chat/config mutation past the idle window raised the generic prompt → ${shotPrompt}`
+    )
     await loginPage!.page.locator('[data-testid="StepUpPrompt.passkey"]').click()
     // …and the ORIGINAL call completes, once, behind it. Note what this also
     // proves about the gate's shape: the first attempt is REFUSED immediately
@@ -1134,7 +1140,9 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     // …and the socket is cut on its own budget, sync stream included.
     await waitForTestId(loginPage!.page, 'SessionExpiredNotice', 120_000)
     const shotExpired = await shot(loginPage!.page, '14-session-expired-notice')
-    note(`step 7c: the 4010 cut landed as an EXPLAINED sign-in, not a failure overlay → ${shotExpired}`)
+    note(
+      `step 7c: the 4010 cut landed as an EXPLAINED sign-in, not a failure overlay → ${shotExpired}`
+    )
     // A reconnect, never a credential rejection: the recovery is the ordinary
     // one-tap screen with the notice above it.
     await waitForTestId(loginPage!.page, 'PasskeyLogin', 30_000)

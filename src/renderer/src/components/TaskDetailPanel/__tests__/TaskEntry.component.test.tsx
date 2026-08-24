@@ -94,7 +94,10 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
               ...session.subagentStreamingThinking,
               [TOOL_USE_ID]: 'pondering'
             },
-            subagentStreamingText: { ...session.subagentStreamingText, [TOOL_USE_ID]: 'final answer' }
+            subagentStreamingText: {
+              ...session.subagentStreamingText,
+              [TOOL_USE_ID]: 'final answer'
+            }
           }
         }
       }

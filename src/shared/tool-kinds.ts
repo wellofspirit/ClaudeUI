@@ -40,7 +40,14 @@ export type ToolView =
   // `files` is set when the engine's tool result carries real per-file unified
   // diffs (opencode apply_patch/edit — see FileDiff). When present, the body
   // renders one diff card per file instead of the single before/after pair.
-  | { kind: 'fileEdit'; path: string; before: string; after: string; language?: string; files?: FileDiff[] }
+  | {
+      kind: 'fileEdit'
+      path: string
+      before: string
+      after: string
+      language?: string
+      files?: FileDiff[]
+    }
   | { kind: 'fileWrite'; path: string; content: string; language?: string }
   | { kind: 'fileRead'; path: string; content: string; language?: string; truncated?: boolean }
   // search/web render through the generic body (JSON dump of block.toolInput +
@@ -48,7 +55,14 @@ export type ToolView =
   // polish (§9) but unused by the current generic renderer.
   | { kind: 'search'; query: string }
   | { kind: 'web'; target: string }
-  | { kind: 'task'; description: string; prompt: string; subagent?: string; model?: string; background?: boolean }
+  | {
+      kind: 'task'
+      description: string
+      prompt: string
+      subagent?: string
+      model?: string
+      background?: boolean
+    }
   | { kind: 'todo'; items: { status: string; text: string; activeForm?: string }[] }
   | { kind: 'plan'; plan: string }
   | { kind: 'question'; questions: AskUserQuestion[] }
@@ -74,7 +88,11 @@ export type ToolView =
  */
 export interface EngineToolMap {
   kindOf(toolName: string): ToolKind
-  normalize(kind: ToolKind, input: Record<string, unknown> | undefined, result?: ToolResultBlock): ToolView
+  normalize(
+    kind: ToolKind,
+    input: Record<string, unknown> | undefined,
+    result?: ToolResultBlock
+  ): ToolView
   displayName(toolName: string): string
   hidden: ReadonlySet<string>
 }

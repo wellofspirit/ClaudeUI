@@ -20,9 +20,7 @@ function onDisk(sessionId: string, cwd = '/p'): DirectoryGroup[] {
       cwd,
       projectKey: 'pk',
       folderName: 'p',
-      sessions: [
-        { sessionId, cwd, projectKey: 'pk', title: 't', timestamp: 0, lastActivityAt: 0 }
-      ]
+      sessions: [{ sessionId, cwd, projectKey: 'pk', title: 't', timestamp: 0, lastActivityAt: 0 }]
     }
   ]
 }
@@ -194,7 +192,11 @@ describe('evict cold sessions on switch, re-hydrate on reselect (Opus B)', () =>
     seed.message('fresh', makeChatMessage({ id: 'f1' }))
     store().createNewSession('active', '/p')
     seed.message('active', makeChatMessage({ id: 'a1' }))
-    useSessionStore.setState({ directories: [], recentSessionIds: ['active'], activeSessionId: 'active' })
+    useSessionStore.setState({
+      directories: [],
+      recentSessionIds: ['active'],
+      activeSessionId: 'active'
+    })
 
     store().switchSession('active')
     // 'fresh' has no on-disk transcript → must keep its messages.

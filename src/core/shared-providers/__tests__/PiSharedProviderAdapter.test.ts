@@ -141,8 +141,13 @@ describe('PiSharedProviderAdapter', () => {
   it('renames a managed provider atomically while preserving foreign and unknown fields', () => {
     adapter().applyDefinition(provider)
     const current = readModels()
-    ;(current.providers as Record<string, Record<string, unknown>>)['private-api'].extension = 'keep'
-    ;((current.providers as Record<string, Record<string, unknown>>)['private-api'].models as Array<Record<string, unknown>>)[0].limit = 42
+    ;(current.providers as Record<string, Record<string, unknown>>)['private-api'].extension =
+      'keep'
+    ;(
+      (current.providers as Record<string, Record<string, unknown>>)['private-api'].models as Array<
+        Record<string, unknown>
+      >
+    )[0].limit = 42
     ;(current.providers as Record<string, unknown>).foreign = { foreign: true }
     current.rootExtra = 'keep'
     writeFileSync(modelsPath, JSON.stringify(current))
@@ -186,7 +191,9 @@ describe('PiSharedProviderAdapter', () => {
 
     writeFileSync(
       modelsPath,
-      JSON.stringify({ providers: { 'private-api': { ...compiledProvider(), baseUrl: 'changed' } } })
+      JSON.stringify({
+        providers: { 'private-api': { ...compiledProvider(), baseUrl: 'changed' } }
+      })
     )
     expect(() => adapter().applyDefinition(renamed, true, provider)).toThrow(
       'Pi provider changed outside ClaudeUI: private-api'
@@ -210,9 +217,9 @@ describe('PiSharedProviderAdapter', () => {
       models: [{ id: 'unavailable', harnessOverrides: { pi: { available: false } } }]
     }
     adapter().applyDefinition(unavailable)
-    expect((readModels().providers as Record<string, { models: unknown[] }>)['private-api'].models).toEqual(
-      []
-    )
+    expect(
+      (readModels().providers as Record<string, { models: unknown[] }>)['private-api'].models
+    ).toEqual([])
   })
   it('keeps ChatGPT catalog-backed and delegates credentials to openai-codex', async () => {
     const chatgpt: SharedProviderDefinition = {

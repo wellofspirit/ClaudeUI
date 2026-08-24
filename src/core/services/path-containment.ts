@@ -25,12 +25,7 @@ import * as path from 'path'
  */
 export function isPathInside(root: string, candidate: string): boolean {
   const rel = path.relative(path.resolve(root), path.resolve(candidate))
-  return (
-    rel !== '' &&
-    rel !== '..' &&
-    !rel.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(rel)
-  )
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
 }
 
 /**

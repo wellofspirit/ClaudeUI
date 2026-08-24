@@ -60,7 +60,11 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
     const iframeWidth = DEVICE_WIDTHS[device]
 
     return (
-      <div data-testid="MockupPanel" style={style} className="h-full flex flex-col bg-bg-primary border-l border-border">
+      <div
+        data-testid="MockupPanel"
+        style={style}
+        className="h-full flex flex-col bg-bg-primary border-l border-border"
+      >
         {/* Header */}
         <div className="shrink-0 flex items-center gap-2 px-3 h-11 border-b border-border">
           <svg

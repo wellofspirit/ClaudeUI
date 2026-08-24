@@ -128,7 +128,9 @@ vi.mock('../../../core/services/logger', () => ({
 
 import type { Automation, AutomationRun } from '../../../shared/types'
 
-type AutomationManagerT = InstanceType<typeof import('../../../core/services/automation-manager').AutomationManager>
+type AutomationManagerT = InstanceType<
+  typeof import('../../../core/services/automation-manager').AutomationManager
+>
 
 async function freshManager(): Promise<{
   mgr: AutomationManagerT

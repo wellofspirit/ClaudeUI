@@ -477,30 +477,30 @@ During app shutdown (`before-quit`):
 
 These events fire for every active Claude session. All handlers receive a single object with `{ routingId: string, sessionId: string | null, ...eventData }` (see ADR-005).
 
-| Event                          | Data                                           | Description                               |
-| ------------------------------ | ---------------------------------------------- | ----------------------------------------- |
-| `session:message`              | `ChatMessage`                                  | Assistant or user message (upserts by ID) |
-| `session:stream`               | `{ type: 'text' \| 'thinking', text: string }` | Streaming text delta                      |
-| `session:status`               | `{ state: string, ... }`                       | Session state change (active, idle, etc.) |
-| `session:result`               | `{ costUsd, durationMs, ... }`                 | Turn completed with cost info             |
-| `session:error`                | `string`                                       | Error message                             |
-| `session:approval-request`     | `PendingApproval`                              | Tool use requires user approval           |
-| `session:tool-result`          | `{ toolUseId, result, isError }`               | Tool execution result                     |
-| `session:task-progress`        | `{ toolUseId, content }`                       | Background task progress update           |
-| `session:task-notification`    | `TaskNotification`                             | Background task completed/failed          |
-| `session:subagent-message`     | `{ toolUseId, message }`                       | Subagent sent a message                   |
-| `session:subagent-stream`      | `{ toolUseId, type, text }`                    | Subagent streaming delta                  |
-| `session:subagent-tool-result` | `{ toolUseId, ... }`                           | Subagent tool result                      |
-| `session:background-output`    | `{ toolUseId, tail, totalSize, done }`         | Background task output chunk              |
-| `session:permission-mode`      | `string`                                       | Permission mode changed                   |
-| `session:slash-commands`       | `SlashCommandInfo[]`                           | Available slash commands updated          |
-| `session:skills`               | `string[]`                                     | Available skill names updated             |
-| `session:mcp-servers`          | `McpServerInfo[]`                              | MCP server status updated                 |
-| `session:status-line`          | `StatusLineData`                               | Status line metrics updated               |
-| `session:teammate-detected`    | `TeammateInfo`                                 | New teammate/subagent detected            |
-| `session:team-created`         | `{ teamName }`                                 | Team created                              |
-| `session:team-deleted`         | `{}`                                           | Team deleted                              |
-| `session:sandbox-violation`    | `string`                                       | Sandbox violation detected                |
+| Event                          | Data                                           | Description                                               |
+| ------------------------------ | ---------------------------------------------- | --------------------------------------------------------- |
+| `session:message`              | `ChatMessage`                                  | Assistant or user message (upserts by ID)                 |
+| `session:stream`               | `{ type: 'text' \| 'thinking', text: string }` | Streaming text delta                                      |
+| `session:status`               | `{ state: string, ... }`                       | Session state change (active, idle, etc.)                 |
+| `session:result`               | `{ costUsd, durationMs, ... }`                 | Turn completed with cost info                             |
+| `session:error`                | `string`                                       | Error message                                             |
+| `session:approval-request`     | `PendingApproval`                              | Tool use requires user approval                           |
+| `session:tool-result`          | `{ toolUseId, result, isError }`               | Tool execution result                                     |
+| `session:task-progress`        | `{ toolUseId, content }`                       | Background task progress update                           |
+| `session:task-notification`    | `TaskNotification`                             | Background task completed/failed                          |
+| `session:subagent-message`     | `{ toolUseId, message }`                       | Subagent sent a message                                   |
+| `session:subagent-stream`      | `{ toolUseId, type, text }`                    | Subagent streaming delta                                  |
+| `session:subagent-tool-result` | `{ toolUseId, ... }`                           | Subagent tool result                                      |
+| `session:background-output`    | `{ toolUseId, tail, totalSize, done }`         | Background task output chunk                              |
+| `session:permission-mode`      | `string`                                       | Permission mode changed                                   |
+| `session:slash-commands`       | `SlashCommandInfo[]`                           | Available slash commands updated                          |
+| `session:skills`               | `string[]`                                     | Available skill names updated                             |
+| `session:mcp-servers`          | `McpServerInfo[]`                              | MCP server status updated                                 |
+| `session:status-line`          | `StatusLineData`                               | Status line metrics updated                               |
+| `session:teammate-detected`    | `TeammateInfo`                                 | New teammate/subagent detected                            |
+| `session:team-created`         | `{ teamName }`                                 | Team created                                              |
+| `session:team-deleted`         | `{}`                                           | Team deleted                                              |
+| `session:sandbox-violation`    | `string`                                       | Sandbox violation detected                                |
 | `session:queue-changed`        | `{ items: QueuedItem[] }`                      | Queue of record changed (ADR-053) — full list, idempotent |
 
 **Example — listening to all assistant messages:**

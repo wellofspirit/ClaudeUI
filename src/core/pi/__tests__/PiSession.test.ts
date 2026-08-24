@@ -157,7 +157,12 @@ const {
               }
             }
             case 'new_session':
-              return { type: 'response', command: 'new_session', success: true, data: { cancelled: false } }
+              return {
+                type: 'response',
+                command: 'new_session',
+                success: true,
+                data: { cancelled: false }
+              }
             default:
               return { type: 'response', command: cmd.type, success: true }
           }
@@ -181,7 +186,9 @@ const {
       const startErr = ephemeralStartError.value
       ephemeralStartError.value = null
       const inst = {
-        start: startErr ? vi.fn().mockRejectedValue(startErr) : vi.fn().mockResolvedValue(undefined),
+        start: startErr
+          ? vi.fn().mockRejectedValue(startErr)
+          : vi.fn().mockResolvedValue(undefined),
         request: vi.fn().mockResolvedValue({ success: true }),
         dispose: vi.fn(),
         onEvent: vi.fn().mockReturnValue(() => {}),
@@ -201,7 +208,9 @@ const {
     }
   })
 
-  const mockBridgeHostStart = vi.fn().mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
+  const mockBridgeHostStart = vi
+    .fn()
+    .mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
   const mockBridgeHostDispose = vi.fn()
   // Mutable holder so tests can read the LATEST captured handler(s) after each
   // spawn (a fresh PiBridgeHost is constructed per doStart() call).
@@ -233,14 +242,16 @@ const {
     .fn()
     .mockResolvedValue({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
   const mockCreateMermaidServer = vi.fn().mockImplementation(() => ({
-    tools: [{ name: 'render_mermaid', description: '', inputSchema: {}, handler: mockMermaidHandler }]
+    tools: [
+      { name: 'render_mermaid', description: '', inputSchema: {}, handler: mockMermaidHandler }
+    ]
   }))
-  const mockCreateMockupHandler = vi
-    .fn()
-    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup created successfully.\nDirectory: abc123' }] })
-  const mockShowMockupHandler = vi
-    .fn()
-    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }] })
+  const mockCreateMockupHandler = vi.fn().mockResolvedValue({
+    content: [{ type: 'text', text: 'Mockup created successfully.\nDirectory: abc123' }]
+  })
+  const mockShowMockupHandler = vi.fn().mockResolvedValue({
+    content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }]
+  })
   const mockCreateMockupServer = vi.fn().mockImplementation(() => ({
     tools: [
       { name: 'create_mockup', description: '', inputSchema: {}, handler: mockCreateMockupHandler },
@@ -360,7 +371,11 @@ vi.mock('../../services/mermaid-tool', () => ({ createMermaidServer: mockCreateM
 vi.mock('../../services/mockup-tool', () => ({ createMockupServer: mockCreateMockupServer }))
 // Cross-engine dispatch (M4b).
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: mockDispatch, disposeFor: mockDisposeFor, stopDispatch: mockStopDispatch },
+  crossEngineDispatcher: {
+    dispatch: mockDispatch,
+    disposeFor: mockDisposeFor,
+    stopDispatch: mockStopDispatch
+  },
   crossEngineDispatchAvailable: mockCrossEngineDispatchAvailable
 }))
 vi.mock('../PiBridgeHost', () => ({
@@ -395,7 +410,24 @@ function defaultRequestImpl(cmd: { type: string }): Promise<unknown> {
         type: 'response',
         command: 'get_state',
         success: true,
-        data: { model: { id: 'unknown', name: 'unknown', api: 'unknown', provider: 'unknown', baseUrl: '', reasoning: false, input: [], contextWindow: 0, maxTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, thinkingLevel: 'medium', isStreaming: false, sessionId: 'pi-sess-1', sessionFile: '/tmp/s.jsonl' }
+        data: {
+          model: {
+            id: 'unknown',
+            name: 'unknown',
+            api: 'unknown',
+            provider: 'unknown',
+            baseUrl: '',
+            reasoning: false,
+            input: [],
+            contextWindow: 0,
+            maxTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+          },
+          thinkingLevel: 'medium',
+          isStreaming: false,
+          sessionId: 'pi-sess-1',
+          sessionFile: '/tmp/s.jsonl'
+        }
       })
     case 'get_session_stats':
       return Promise.resolve({
@@ -474,7 +506,9 @@ beforeEach(() => {
   mockLoadPiSessionHistory.mockReset().mockResolvedValue([])
   mockFindPiSessionFile.mockReset().mockReturnValue(null)
   mockRecordUsageEvent.mockClear()
-  mockBridgeHostStart.mockClear().mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
+  mockBridgeHostStart
+    .mockClear()
+    .mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
   mockBridgeHostDispose.mockClear()
   MockPiBridgeHost.mockClear()
   mockWriteBridgeExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
@@ -494,14 +528,16 @@ beforeEach(() => {
   mockPiAuthProbe.mockReset().mockResolvedValue({})
   mockBuildPiAccountRef.mockReset().mockReturnValue(null)
   mockCreateMermaidServer.mockClear()
-  mockMermaidHandler.mockReset().mockResolvedValue({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
+  mockMermaidHandler
+    .mockReset()
+    .mockResolvedValue({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
   mockCreateMockupServer.mockClear()
-  mockCreateMockupHandler
-    .mockReset()
-    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup created successfully.\nDirectory: abc123' }] })
-  mockShowMockupHandler
-    .mockReset()
-    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }] })
+  mockCreateMockupHandler.mockReset().mockResolvedValue({
+    content: [{ type: 'text', text: 'Mockup created successfully.\nDirectory: abc123' }]
+  })
+  mockShowMockupHandler.mockReset().mockResolvedValue({
+    content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }]
+  })
   mockDispatch.mockReset()
   mockDisposeFor.mockClear()
   mockStopDispatch.mockReset().mockReturnValue(true)
@@ -509,8 +545,13 @@ beforeEach(() => {
 })
 
 /** Call the LAST captured bridge gate handler (the fake PiBridgeHost's constructor arg) directly — bypasses real HTTP, exactly mirroring what the real extension's fetch would send. */
-async function gate(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<{ behavior: string; reason?: string; updatedInput?: Record<string, unknown> }> {
-  if (!bridgeCaptured.handler) throw new Error('no bridge handler captured — was doStart() ever awaited?')
+async function gate(
+  toolCallId: string,
+  toolName: string,
+  input: Record<string, unknown>
+): Promise<{ behavior: string; reason?: string; updatedInput?: Record<string, unknown> }> {
+  if (!bridgeCaptured.handler)
+    throw new Error('no bridge handler captured — was doStart() ever awaited?')
   return bridgeCaptured.handler({ toolCallId, toolName, input }) as Promise<{
     behavior: string
     reason?: string
@@ -543,10 +584,16 @@ async function hostedTool(
  * 'allow' for a PI_HOSTED_TOOL_NAMES member); this is the "happy path" half
  * of that contract for the three always-allowed tools.
  */
-async function grantAutoAllow(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<void> {
+async function grantAutoAllow(
+  toolCallId: string,
+  toolName: string,
+  input: Record<string, unknown>
+): Promise<void> {
   const decision = await gate(toolCallId, toolName, input)
   if (decision.behavior !== 'allow') {
-    throw new Error(`grantAutoAllow: expected an auto-allow for "${toolName}", got ${JSON.stringify(decision)}`)
+    throw new Error(
+      `grantAutoAllow: expected an auto-allow for "${toolName}", got ${JSON.stringify(decision)}`
+    )
   }
 }
 
@@ -570,7 +617,10 @@ async function grantViaApproval(
     const approvals = sentPayloads(win, 'session:approval-request') as Array<{ toolUseId: string }>
     expect(approvals.some((a) => a.toolUseId === toolCallId)).toBe(true)
   })
-  const approvals = sentPayloads(win, 'session:approval-request') as Array<{ requestId: string; toolUseId: string }>
+  const approvals = sentPayloads(win, 'session:approval-request') as Array<{
+    requestId: string
+    toolUseId: string
+  }>
   const approval = approvals.find((a) => a.toolUseId === toolCallId)!
   session.resolveApproval(approval.requestId, 'allow')
   await pending
@@ -579,7 +629,9 @@ async function grantViaApproval(
 describe('PiSession.run — sends a prompt', () => {
   it('spawns the process and sends {type:"prompt", message} on the first run()', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-1', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-1', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
 
     await session.run('hello')
 
@@ -596,7 +648,14 @@ describe('PiSession.run — sends a prompt', () => {
     // — `subagents` is likewise a static-true engine capability.
     expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', {
       cwd: '/cwd',
-      args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts', '-e', '/fake/tmp/claudeui-subagent.ts'],
+      args: [
+        '--mode',
+        'rpc',
+        '-e',
+        '/fake/tmp/claudeui-bridge.ts',
+        '-e',
+        '/fake/tmp/claudeui-subagent.ts'
+      ],
       env: {
         CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
         CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
@@ -609,7 +668,11 @@ describe('PiSession.run — sends a prompt', () => {
     })
     expect(MockPiBridgeHost).toHaveBeenCalledTimes(1)
     // set_model called (opts.model was present)
-    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_model', provider: 'anthropic', modelId: 'claude-sonnet-4-6' })
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'set_model',
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-6'
+    })
     // the prompt itself, no streamingBehavior on a fresh (non-busy) turn
     expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: 'hello' })
   })
@@ -659,11 +722,41 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
 
     handler({
       type: 'message_start',
-      message: { role: 'assistant', content: [], api: 'a', provider: 'anthropic', model: 'claude-sonnet-4-6', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: 1 }
+      message: {
+        role: 'assistant',
+        content: [],
+        api: 'a',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
+        stopReason: 'stop',
+        timestamp: 1
+      }
     })
     handler({
       type: 'message_update',
-      message: { role: 'assistant', content: [{ type: 'text', text: 'Hi' }], api: 'a', provider: 'anthropic', model: 'claude-sonnet-4-6', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: 1 },
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hi' }],
+        api: 'a',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
+        stopReason: 'stop',
+        timestamp: 1
+      },
       assistantMessageEvent: { type: 'text_delta', delta: 'Hi' }
     })
 
@@ -677,7 +770,13 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
       api: 'a',
       provider: 'anthropic',
       model: 'claude-sonnet-4-6',
-      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 } },
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 }
+      },
       stopReason: 'stop' as const,
       timestamp: 2
     }
@@ -685,16 +784,31 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
 
     expect(sentChannels(win)).toContain('session:message')
     const [msgPayload] = sentPayloads(win, 'session:message').slice(-1) as [{ content: unknown }]
-    expect(msgPayload).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: 'Hi there' }] })
+    expect(msgPayload).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hi there' }]
+    })
 
     // usage → recordUsageEvent, engineId 'pi'
     expect(mockRecordUsageEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ engineId: 'pi', vendorId: 'anthropic', modelId: 'claude-sonnet-4-6', engineCostUsd: 0.003 })
+      expect.objectContaining({
+        engineId: 'pi',
+        vendorId: 'anthropic',
+        modelId: 'claude-sonnet-4-6',
+        engineCostUsd: 0.003
+      })
     )
 
     handler({
       type: 'message_end',
-      message: { role: 'toolResult', toolCallId: 'call_1', toolName: 'bash', content: [{ type: 'text', text: 'ok' }], isError: false, timestamp: 3 }
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_1',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'ok' }],
+        isError: false,
+        timestamp: 3
+      }
     })
     expect(sentChannels(win)).toContain('session:tool-result')
     const [toolPayload] = sentPayloads(win, 'session:tool-result')
@@ -702,7 +816,9 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
 
     handler({ type: 'agent_settled' })
     expect(sentChannels(win)).toContain('session:result')
-    const [resultPayload] = sentPayloads(win, 'session:result').slice(-1) as [{ totalCostUsd: number }]
+    const [resultPayload] = sentPayloads(win, 'session:result').slice(-1) as [
+      { totalCostUsd: number }
+    ]
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
 
@@ -723,7 +839,13 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
         api: 'a',
         provider: 'anthropic',
         model: 'claude-sonnet-4-6',
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
         stopReason: 'stop',
         timestamp: 1
       })
@@ -740,7 +862,10 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
       })
 
       vi.setSystemTime(11_800)
-      handler({ type: 'message_end', message: message([{ type: 'text', text: 'answer' }]) } as never)
+      handler({
+        type: 'message_end',
+        message: message([{ type: 'text', text: 'answer' }])
+      } as never)
 
       const [sealed] = sentPayloads(win, 'session:message').slice(-1) as [
         { thinkingDurationMs?: number }
@@ -800,7 +925,11 @@ describe('PiSession.interrupt — propagates into an in-flight dispatch_agent tu
     await grantViaApproval(win, session, 'call_di_1', { engine: 'opencode', prompt: 'x' })
     // Fire the hosted-tool call but do NOT await it yet — dispatch() is still
     // pending (mockDispatch's promise above never resolves on its own).
-    const hostedToolPromise = hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_di_1')
+    const hostedToolPromise = hostedTool(
+      'dispatch_agent',
+      { engine: 'opencode', prompt: 'x' },
+      'call_di_1'
+    )
     await vi.waitFor(() => expect(mockDispatch).toHaveBeenCalledTimes(1))
 
     await session.interrupt()
@@ -850,7 +979,11 @@ describe('PiSession.interrupt — propagates into an in-flight dispatch_agent tu
     await session.run('hi')
 
     await grantViaApproval(win, session, 'call_di_4', { engine: 'opencode', prompt: 'x' })
-    const hostedToolPromise = hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_di_4')
+    const hostedToolPromise = hostedTool(
+      'dispatch_agent',
+      { engine: 'opencode', prompt: 'x' },
+      'call_di_4'
+    )
     await vi.waitFor(() => expect(mockDispatch).toHaveBeenCalledTimes(1))
 
     await session.interrupt()
@@ -909,8 +1042,16 @@ describe('PiSession.setModel', () => {
 
     await session.setModel('openai-codex/gpt-5.6-luna')
 
-    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_model', provider: 'openai-codex', modelId: 'gpt-5.6-luna' })
-    expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'set_model',
+      provider: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
+    expect(session.status.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
   })
 
   it('surfaces a set_model failure as session:error and never keeps the bogus value in status.model', async () => {
@@ -919,7 +1060,12 @@ describe('PiSession.setModel', () => {
     await session.run('hi')
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'set_model'
-        ? Promise.resolve({ type: 'response', command: 'set_model', success: false, error: 'Model not found' })
+        ? Promise.resolve({
+            type: 'response',
+            command: 'set_model',
+            success: false,
+            error: 'Model not found'
+          })
         : defaultRequestImpl(cmd)
     )
 
@@ -928,23 +1074,39 @@ describe('PiSession.setModel', () => {
     // defaultRequestImpl's get_state reports the 'unknown' placeholder →
     // adoption declines → reverts to the pre-switch value (the ctor default),
     // NOT the failed 'bogus/nope'.
-    expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+    expect(session.status.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
   })
 
   it('a failed set_model adopts the engine-reported model from a fresh get_state', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-sm1', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-sm1', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
     await session.run('hi') // spawn-time set_model succeeds via defaultRequestImpl
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'set_model') {
-        return Promise.resolve({ type: 'response', command: 'set_model', success: false, error: 'Model not found: bogus/nope' })
+        return Promise.resolve({
+          type: 'response',
+          command: 'set_model',
+          success: false,
+          error: 'Model not found: bogus/nope'
+        })
       }
       if (cmd.type === 'get_state') {
         return Promise.resolve({
           type: 'response',
           command: 'get_state',
           success: true,
-          data: { model: { id: 'gpt-5.6-luna', provider: 'openai-codex' }, thinkingLevel: 'medium', isStreaming: false, sessionId: 'pi-sess-1' }
+          data: {
+            model: { id: 'gpt-5.6-luna', provider: 'openai-codex' },
+            thinkingLevel: 'medium',
+            isStreaming: false,
+            sessionId: 'pi-sess-1'
+          }
         })
       }
       return defaultRequestImpl(cmd)
@@ -954,16 +1116,27 @@ describe('PiSession.setModel', () => {
 
     expect(sentChannels(win)).toContain('session:error')
     // status.model reports what pi is ACTUALLY running (engine-reported), not the failed value.
-    expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+    expect(session.status.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
   })
 
   it('a failed set_model whose re-sync get_state ALSO fails reverts to the pre-switch model', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-sm2', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-sm2', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
     await session.run('hi')
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'set_model') {
-        return Promise.resolve({ type: 'response', command: 'set_model', success: false, error: 'Model not found' })
+        return Promise.resolve({
+          type: 'response',
+          command: 'set_model',
+          success: false,
+          error: 'Model not found'
+        })
       }
       if (cmd.type === 'get_state') {
         return Promise.reject(new Error('process wedged'))
@@ -973,7 +1146,11 @@ describe('PiSession.setModel', () => {
 
     await session.setModel('bogus/nope')
 
-    expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'anthropic', modelId: 'claude-sonnet-4-6' })
+    expect(session.status.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      modelId: 'claude-sonnet-4-6'
+    })
   })
 
   it('a pre-spawn setModel updates the pending spawn request (doStart applies the LATEST choice)', async () => {
@@ -983,12 +1160,16 @@ describe('PiSession.setModel', () => {
 
     await session.run('hi')
 
-    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_model', provider: 'anthropic', modelId: 'claude-sonnet-4-6' })
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'set_model',
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-6'
+    })
   })
 })
 
 describe('PiSession — spawn-time model honesty (FIX 3)', () => {
-  it('a no-requested-model spawn adopts pi\'s own reported model into status.model (no set_model sent)', async () => {
+  it("a no-requested-model spawn adopts pi's own reported model into status.model (no set_model sent)", async () => {
     // The resume/default case: pi restored the session's model from its
     // model_change entries (or its settings default); _model must report THAT,
     // not the local PI_DEFAULT_MODEL fallback that never reached the wire.
@@ -998,7 +1179,12 @@ describe('PiSession — spawn-time model honesty (FIX 3)', () => {
           type: 'response',
           command: 'get_state',
           success: true,
-          data: { model: { id: 'claude-sonnet-4-6', provider: 'anthropic' }, thinkingLevel: 'medium', isStreaming: false, sessionId: 'pi-sess-r' }
+          data: {
+            model: { id: 'claude-sonnet-4-6', provider: 'anthropic' },
+            thinkingLevel: 'medium',
+            isStreaming: false,
+            sessionId: 'pi-sess-r'
+          }
         })
       }
       return defaultRequestImpl(cmd)
@@ -1006,10 +1192,16 @@ describe('PiSession — spawn-time model honesty (FIX 3)', () => {
     mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_resume-adopt.jsonl')
 
     const win = new MockWindow()
-    const session = new PiSession('resume-adopt', win as never, '/cwd', { resumeSessionId: 'resume-adopt' })
+    const session = new PiSession('resume-adopt', win as never, '/cwd', {
+      resumeSessionId: 'resume-adopt'
+    })
     await session.run(null)
     await vi.waitFor(() => {
-      expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'anthropic', modelId: 'claude-sonnet-4-6' })
+      expect(session.status.model).toEqual({
+        engineId: 'pi',
+        vendorId: 'anthropic',
+        modelId: 'claude-sonnet-4-6'
+      })
     })
 
     expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_model' }))
@@ -1020,20 +1212,34 @@ describe('PiSession — spawn-time model honesty (FIX 3)', () => {
     const win = new MockWindow()
     const session = new PiSession('rid-unknown', win as never, '/cwd', {})
     await session.run('hi')
-    expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+    expect(session.status.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
   })
 
   it('a failed SPAWN-TIME set_model re-syncs status.model from the engine state', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'set_model') {
-        return Promise.resolve({ type: 'response', command: 'set_model', success: false, error: 'Model not found: openai/gpt-5.5' })
+        return Promise.resolve({
+          type: 'response',
+          command: 'set_model',
+          success: false,
+          error: 'Model not found: openai/gpt-5.5'
+        })
       }
       if (cmd.type === 'get_state') {
         return Promise.resolve({
           type: 'response',
           command: 'get_state',
           success: true,
-          data: { model: { id: 'gpt-5.6-luna', provider: 'openai-codex' }, thinkingLevel: 'medium', isStreaming: false, sessionId: 'pi-sess-1' }
+          data: {
+            model: { id: 'gpt-5.6-luna', provider: 'openai-codex' },
+            thinkingLevel: 'medium',
+            isStreaming: false,
+            sessionId: 'pi-sess-1'
+          }
         })
       }
       return defaultRequestImpl(cmd)
@@ -1045,7 +1251,11 @@ describe('PiSession — spawn-time model honesty (FIX 3)', () => {
 
     expect(sentChannels(win)).toContain('session:error')
     // The engine-reported model, not the failed 'openai/gpt-5.5'.
-    expect(session.status.model).toEqual({ engineId: 'pi', vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' })
+    expect(session.status.model).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
   })
 })
 
@@ -1061,7 +1271,7 @@ describe('PiSession.setEffort (M2b)', () => {
     expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'high' })
   })
 
-  it('surfaces a success:false response as session:error (mirrors setModel\'s failure shape)', async () => {
+  it("surfaces a success:false response as session:error (mirrors setModel's failure shape)", async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-effort-2', win as never, '/cwd', {})
     await session.run('hi')
@@ -1088,7 +1298,9 @@ describe('PiSession.setEffort (M2b)', () => {
     const session = new PiSession('rid-effort-3', win as never, '/cwd', {})
     await session.run('hi')
     mockRequest.mockImplementation((cmd: { type: string }) =>
-      cmd.type === 'set_thinking_level' ? Promise.reject(new Error('process wedged')) : defaultRequestImpl(cmd)
+      cmd.type === 'set_thinking_level'
+        ? Promise.reject(new Error('process wedged'))
+        : defaultRequestImpl(cmd)
     )
 
     session.setEffort('low')
@@ -1114,7 +1326,9 @@ describe('PiSession.setEffort (M2b)', () => {
       }
     ])
     const win = new MockWindow()
-    const session = new PiSession('rid-effort-4', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-effort-4', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
 
     session.setEffort('low') // no client yet — recorded only, no RPC sent
     expect(mockRequest).not.toHaveBeenCalled()
@@ -1210,7 +1424,12 @@ describe('PiSession.resolveCapsForModel — xhigh/max reach the resolved capabil
     })
     await new Promise((r) => setImmediate(r))
 
-    expect(session.status.capabilities.reasoning.effort?.levels).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(session.status.capabilities.reasoning.effort?.levels).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh'
+    ])
   })
 })
 
@@ -1264,7 +1483,9 @@ describe('PiSession — spawn-time effort (EngineSpawnOptions.effort, M2b)', () 
 
     await session.run('hi')
 
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_thinking_level' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set_thinking_level' })
+    )
   })
 
   it('does NOT send set_thinking_level at spawn when no effort was requested', async () => {
@@ -1289,7 +1510,9 @@ describe('PiSession — spawn-time effort (EngineSpawnOptions.effort, M2b)', () 
 
     await session.run('hi')
 
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_thinking_level' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set_thinking_level' })
+    )
   })
 })
 
@@ -1313,14 +1536,19 @@ describe('PiSession resume', () => {
           type: 'response',
           command: 'get_session_stats',
           success: true,
-          data: { cost: 1.25, tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 } }
+          data: {
+            cost: 1.25,
+            tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 }
+          }
         })
       }
       return defaultRequestImpl(cmd)
     })
 
     const win = new MockWindow()
-    const session = new PiSession('resume-sess', win as never, '/cwd', { resumeSessionId: 'resume-sess' })
+    const session = new PiSession('resume-sess', win as never, '/cwd', {
+      resumeSessionId: 'resume-sess'
+    })
     await session.run(null)
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
@@ -1340,7 +1568,9 @@ describe('PiSession resume', () => {
       { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
     ])
     const win = new MockWindow()
-    const session = new PiSession('resume-sess-2', win as never, '/cwd', { resumeSessionId: 'resume-sess-2' })
+    const session = new PiSession('resume-sess-2', win as never, '/cwd', {
+      resumeSessionId: 'resume-sess-2'
+    })
     await session.run(null)
     await new Promise((r) => setImmediate(r))
     const firstCount = sentPayloads(win, 'session:message').length
@@ -1355,13 +1585,29 @@ describe('PiSession resume', () => {
 
 describe('PiSession fork (M5c)', () => {
   /** A minimal, always-valid get_state payload — callers override `sessionId`/`model` per case. */
-  function stateResponse(sessionId: string): { type: 'response'; command: 'get_state'; success: true; data: unknown } {
+  function stateResponse(sessionId: string): {
+    type: 'response'
+    command: 'get_state'
+    success: true
+    data: unknown
+  } {
     return {
       type: 'response',
       command: 'get_state',
       success: true,
       data: {
-        model: { id: 'unknown', name: 'unknown', api: 'unknown', provider: 'unknown', baseUrl: '', reasoning: false, input: [], contextWindow: 0, maxTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        model: {
+          id: 'unknown',
+          name: 'unknown',
+          api: 'unknown',
+          provider: 'unknown',
+          baseUrl: '',
+          reasoning: false,
+          input: [],
+          contextWindow: 0,
+          maxTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        },
         thinkingLevel: 'medium',
         isStreaming: false,
         sessionId
@@ -1375,12 +1621,19 @@ describe('PiSession fork (M5c)', () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       calls.push(cmd.type)
       if (cmd.type === 'fork') {
-        return Promise.resolve({ type: 'response', command: 'fork', success: true, data: { text: 'second question', cancelled: false } })
+        return Promise.resolve({
+          type: 'response',
+          command: 'fork',
+          success: true,
+          data: { text: 'second question', cancelled: false }
+        })
       }
       if (cmd.type === 'get_state') {
         getStateCount++
         // 1st get_state = the resumed SOURCE; 2nd (post-fork) = the NEW file.
-        return Promise.resolve(stateResponse(getStateCount === 1 ? 'source-sess-id' : 'forked-sess-id'))
+        return Promise.resolve(
+          stateResponse(getStateCount === 1 ? 'source-sess-id' : 'forked-sess-id')
+        )
       }
       return defaultRequestImpl(cmd)
     })
@@ -1403,7 +1656,11 @@ describe('PiSession fork (M5c)', () => {
     // set_model happens AFTER fork — source-safety: configuring the session
     // never mutates the resumed source (fork has already switched to a NEW file by then).
     expect(setModelIdx).toBeGreaterThan(forkIdx)
-    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_model', provider: 'anthropic', modelId: 'claude-sonnet-4-6' })
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'set_model',
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-6'
+    })
     // Adopts the POST-fork sessionId, not the source's.
     expect(session.getSessionId()).toBe('forked-sess-id')
   })
@@ -1414,11 +1671,18 @@ describe('PiSession fork (M5c)', () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       calls.push(cmd.type)
       if (cmd.type === 'clone') {
-        return Promise.resolve({ type: 'response', command: 'clone', success: true, data: { cancelled: false } })
+        return Promise.resolve({
+          type: 'response',
+          command: 'clone',
+          success: true,
+          data: { cancelled: false }
+        })
       }
       if (cmd.type === 'get_state') {
         getStateCount++
-        return Promise.resolve(stateResponse(getStateCount === 1 ? 'source-sess-id' : 'cloned-sess-id'))
+        return Promise.resolve(
+          stateResponse(getStateCount === 1 ? 'source-sess-id' : 'cloned-sess-id')
+        )
       }
       return defaultRequestImpl(cmd)
     })
@@ -1440,7 +1704,12 @@ describe('PiSession fork (M5c)', () => {
   it('a clone failure (success:false) surfaces session:error and does NOT proceed to set_model on the source', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'clone') {
-        return Promise.resolve({ type: 'response', command: 'clone', success: false, error: 'disk full' })
+        return Promise.resolve({
+          type: 'response',
+          command: 'clone',
+          success: false,
+          error: 'disk full'
+        })
       }
       return defaultRequestImpl(cmd)
     })
@@ -1466,7 +1735,12 @@ describe('PiSession fork (M5c)', () => {
   it('a clone cancelled by an extension (success:true, data.cancelled:true) is treated as a failure, same as success:false', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'clone') {
-        return Promise.resolve({ type: 'response', command: 'clone', success: true, data: { cancelled: true } })
+        return Promise.resolve({
+          type: 'response',
+          command: 'clone',
+          success: true,
+          data: { cancelled: true }
+        })
       }
       return defaultRequestImpl(cmd)
     })
@@ -1488,7 +1762,12 @@ describe('PiSession fork (M5c)', () => {
   it('a fork failure (success:false) surfaces session:error and does NOT proceed to set_model', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'fork') {
-        return Promise.resolve({ type: 'response', command: 'fork', success: false, error: 'entry not found' })
+        return Promise.resolve({
+          type: 'response',
+          command: 'fork',
+          success: false,
+          error: 'entry not found'
+        })
       }
       return defaultRequestImpl(cmd)
     })
@@ -1522,7 +1801,7 @@ describe('PiSession fork (M5c)', () => {
     expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'fork' }))
   })
 
-  it('forkSession is ignored without a resumeSessionAt (mirrors ClaudeSession\'s identical guard) — no clone/fork sent', async () => {
+  it("forkSession is ignored without a resumeSessionAt (mirrors ClaudeSession's identical guard) — no clone/fork sent", async () => {
     mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_resume-plain2.jsonl')
 
     const win = new MockWindow()
@@ -1536,10 +1815,15 @@ describe('PiSession fork (M5c)', () => {
     expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'fork' }))
   })
 
-  it('a fork (entryId branch) skips replayStoredHistory — the renderer already has the truncated view from the store\'s optimistic seed', async () => {
+  it("a fork (entryId branch) skips replayStoredHistory — the renderer already has the truncated view from the store's optimistic seed", async () => {
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'fork') {
-        return Promise.resolve({ type: 'response', command: 'fork', success: true, data: { text: 'q', cancelled: false } })
+        return Promise.resolve({
+          type: 'response',
+          command: 'fork',
+          success: true,
+          data: { text: 'q', cancelled: false }
+        })
       }
       return defaultRequestImpl(cmd)
     })
@@ -1591,7 +1875,11 @@ describe('PiSession — busy path uses streamingBehavior steer (M2b)', () => {
     session.enqueuePrompt('second')
     await session.run('second')
 
-    expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: 'second', streamingBehavior: 'steer' })
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'prompt',
+      message: 'second',
+      streamingBehavior: 'steer'
+    })
     // Delivery ack: the queued item transitions to `consumed` (ADR-053 —
     // replaces the old session:steer-consumed emit).
     expect(consumedQueueTexts(win)).toEqual(['second'])
@@ -1637,7 +1925,10 @@ describe('PiSession — queue of record (ADR-053)', () => {
       win,
       handler: lastEventHandler(),
       promptMessages: () =>
-        sent.filter((c) => c.type === 'prompt').map((c) => c.message as string).slice(1)
+        sent
+          .filter((c) => c.type === 'prompt')
+          .map((c) => c.message as string)
+          .slice(1)
     }
   }
 
@@ -1741,7 +2032,13 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
   it('a deny decision (matching deny rule) resolves immediately with the matched rule in the reason', async () => {
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'project'
-        ? { allow: [], deny: ['Bash(rm:*)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: [],
+            deny: ['Bash(rm:*)'],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     const win = new MockWindow()
@@ -1768,7 +2065,10 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
         toolUseId: string
         toolName: string
         input: Record<string, unknown>
-        suggestions: Array<{ destination: string; rules: Array<{ toolName: string; ruleContent?: string }> }>
+        suggestions: Array<{
+          destination: string
+          rules: Array<{ toolName: string; ruleContent?: string }>
+        }>
       }
     ]
     expect(approval.toolUseId).toBe('call_3')
@@ -1776,9 +2076,24 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     expect(approval.input).toEqual({ command: 'npm install' })
     expect(approval.requestId).toEqual(expect.any(String))
     expect(approval.suggestions).toEqual([
-      { type: 'addRules', behavior: 'allow', destination: 'userSettings', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }] },
-      { type: 'addRules', behavior: 'allow', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }] },
-      { type: 'addRules', behavior: 'allow', destination: 'localSettings', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }] }
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'userSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }]
+      },
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }]
+      },
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'localSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }]
+      }
     ])
   })
 
@@ -1789,7 +2104,9 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 
     const pending = gate('call_4', 'edit', { path: 'x.ts' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
 
     session.resolveApproval(approval.requestId, 'allow')
     await expect(pending).resolves.toEqual({ behavior: 'allow' })
@@ -1806,7 +2123,9 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 
     const pending = gate('call_6', 'edit', { path: 'x.ts' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
 
     session.resolveApproval(approval.requestId, 'deny', { feedback: 'not right now' })
     await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'not right now' })
@@ -1819,7 +2138,9 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 
     const pending = gate('call_6b', 'edit', { path: 'x.ts' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
 
     session.resolveApproval(approval.requestId, 'deny')
     await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'User denied' })
@@ -1832,7 +2153,9 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 
     const first = gate('call_7', 'bash', { command: 'npm test' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
 
     session.resolveApproval(approval.requestId, 'allowForSession')
     await expect(first).resolves.toEqual({ behavior: 'allow' })
@@ -1845,7 +2168,9 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 
     // A DIFFERENT bash command is still gated normally (session-allow is scoped to the exact command).
     void gate('call_9', 'bash', { command: 'npm run build' })
-    await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore + 1))
+    await vi.waitFor(() =>
+      expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore + 1)
+    )
   })
 
   it('updatedPermissions on an allow resolution persists via saveClaudePermissions with the expected rule strings', async () => {
@@ -1890,7 +2215,13 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     // the call above — a second call must NOT see it yet.
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'project'
-        ? { allow: [], deny: ['Bash(echo hi:*)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: [],
+            deny: ['Bash(echo hi:*)'],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     expect(await gate('call_12', 'bash', { command: 'echo hi' })).toEqual({ behavior: 'allow' })
@@ -1912,14 +2243,22 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     // Populate the cache with empty rules.
     void gate('call_14', 'bash', { command: 'npm test' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
 
     // The store now has an allow rule for this exact command (simulating what
     // saveClaudePermissions would persist), returned from the NEXT load —
     // proving persistAllowRules' cache invalidation, not just the store write.
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'project'
-        ? { allow: ['Bash(npm test:*)'], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: ['Bash(npm test:*)'],
+            deny: [],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     session.resolveApproval(approval.requestId, 'allow', undefined, [
@@ -1933,7 +2272,9 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 
     // A DIFFERENT (but prefix-covered) command is allowed WITHOUT a new approval-request.
     const requestCountBefore = sentPayloads(win, 'session:approval-request').length
-    expect(await gate('call_15', 'bash', { command: 'npm test unit' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_15', 'bash', { command: 'npm test unit' })).toEqual({
+      behavior: 'allow'
+    })
     expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore)
   })
 })
@@ -1967,7 +2308,12 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
   /** Append a synthetic assistant tool CALL to the retained history — the
    *  transcript slimmer renders these (and their `{"outcome":…}` annotation)
    *  for the judge, which is how a recorded outcome becomes observable. */
-  function pushToolCall(session: PiSession, toolUseId: string, toolName: string, input: Record<string, unknown>): void {
+  function pushToolCall(
+    session: PiSession,
+    toolUseId: string,
+    toolName: string,
+    input: Record<string, unknown>
+  ): void {
     session.getMessages().push({
       id: `synthetic-${toolUseId}`,
       role: 'assistant',
@@ -2006,7 +2352,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
-  it('a BLOCK records `automode-blocked`, which reaches the judge as the retry\'s outcome annotation', async () => {
+  it("a BLOCK records `automode-blocked`, which reaches the judge as the retry's outcome annotation", async () => {
     enableAutoMode()
     judgeScript.replies = ['<block>yes</block><reason>nope</reason>', '<block>no</block>']
     const win = new MockWindow()
@@ -2033,7 +2379,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
     const pending = gate('call_a5', 'bash', { command: 'npm publish' })
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
     session.resolveApproval(approval.requestId, 'deny')
     await pending
 
@@ -2049,7 +2397,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     enableAutoMode()
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'project'
-        ? { allow: [], deny: [], ask: ['Bash(git push:*)'], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: [],
+            deny: [],
+            ask: ['Bash(git push:*)'],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     const win = new MockWindow()
@@ -2070,7 +2424,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     judgeScript.replies = ['<block>no</block>']
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'project'
-        ? { allow: [], deny: [], ask: ['Bash(git push:*)'], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: [],
+            deny: [],
+            ask: ['Bash(git push:*)'],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     const win = new MockWindow()
@@ -2287,7 +2647,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
   it('the deny sent to pi names the matched rule even when the judge reason omits it', async () => {
     enableAutoMode()
-    judgeScript.replies = ['<block>yes</block><category>Git Destructive</category><reason>would drop pushed commits</reason>']
+    judgeScript.replies = [
+      '<block>yes</block><category>Git Destructive</category><reason>would drop pushed commits</reason>'
+    ]
     const win = new MockWindow()
     const session = await autoSession('rid-auto-deny-rule-name', win)
 
@@ -2302,7 +2664,12 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 
   it('an ALLOW between blocks resets the consecutive counter', async () => {
     enableAutoMode()
-    judgeScript.replies = ['<block>yes</block>', '<block>no</block>', '<block>yes</block>', '<block>yes</block>']
+    judgeScript.replies = [
+      '<block>yes</block>',
+      '<block>no</block>',
+      '<block>yes</block>',
+      '<block>yes</block>'
+    ]
     const win = new MockWindow()
     const session = await autoSession('rid-auto-caps-reset', win)
 
@@ -2334,7 +2701,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     release()
 
     await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string }
+    ]
     session.resolveApproval(approval.requestId, 'deny')
     await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'User denied' })
     session.dispose()
@@ -2358,7 +2727,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     judgeScript.replies = ['<block>no</block>']
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'project'
-        ? { allow: [], deny: ['Bash(rm:*)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: [],
+            deny: ['Bash(rm:*)'],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     const win = new MockWindow()
@@ -2372,12 +2747,14 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
-  it('auto mode DISABLED keeps `auto`\'s historical allow-everything base (no judge, no prompt)', async () => {
+  it("auto mode DISABLED keeps `auto`'s historical allow-everything base (no judge, no prompt)", async () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
     const win = new MockWindow()
     const session = await autoSession('rid-auto-off', win)
 
-    expect(await gate('call_g1', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_g1', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({
+      behavior: 'allow'
+    })
     expect(judgeInstances).toHaveLength(0)
     session.dispose()
   })
@@ -2409,7 +2786,11 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     await gate('call_i1', 'bash', { command: 'npm test' })
 
     expect(judgeInstances[0].request).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'set_model', provider: 'openai-codex', modelId: 'gpt-5.4-mini' })
+      expect.objectContaining({
+        type: 'set_model',
+        provider: 'openai-codex',
+        modelId: 'gpt-5.4-mini'
+      })
     )
     session.dispose()
   })
@@ -2495,19 +2876,31 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
                   name: 'session-name',
                   description: 'Set or clear session name',
                   source: 'extension',
-                  sourceInfo: { path: '/home/user/.pi/agent/extensions/session.ts', source: 'cli', scope: 'user' }
+                  sourceInfo: {
+                    path: '/home/user/.pi/agent/extensions/session.ts',
+                    source: 'cli',
+                    scope: 'user'
+                  }
                 },
                 {
                   name: 'fix-tests',
                   description: 'Fix failing tests',
                   source: 'prompt',
-                  sourceInfo: { path: '/proj/.pi/agent/prompts/fix-tests.md', source: 'cli', scope: 'project' }
+                  sourceInfo: {
+                    path: '/proj/.pi/agent/prompts/fix-tests.md',
+                    source: 'cli',
+                    scope: 'project'
+                  }
                 },
                 {
                   name: 'skill:brave-search',
                   description: 'Web search via Brave API',
                   source: 'skill',
-                  sourceInfo: { path: '/home/user/.pi/agent/skills/brave-search/SKILL.md', source: 'cli', scope: 'user' }
+                  sourceInfo: {
+                    path: '/home/user/.pi/agent/skills/brave-search/SKILL.md',
+                    source: 'cli',
+                    scope: 'user'
+                  }
                 },
                 {
                   name: 'some-ephemeral-command',
@@ -2542,7 +2935,12 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
   it('a get_commands failure (success:false) never blocks the session — no slash-commands/skills emission, no crash', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'get_commands'
-        ? Promise.resolve({ type: 'response', command: 'get_commands', success: false, error: 'not supported' })
+        ? Promise.resolve({
+            type: 'response',
+            command: 'get_commands',
+            success: false,
+            error: 'not supported'
+          })
         : defaultRequestImpl(cmd)
     )
     const win = new MockWindow()
@@ -2606,7 +3004,7 @@ describe('PiSession — live bash output streaming (M2b)', () => {
     expect(payload.totalBytes).toBe(Buffer.byteLength('line1\nline2', 'utf-8'))
   })
 
-  it('an accumulated-empty bash_output never reaches session:bash-output (session-level guard, mirrors opencode\'s call-site check)', async () => {
+  it("an accumulated-empty bash_output never reaches session:bash-output (session-level guard, mirrors opencode's call-site check)", async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-bash-2', win as never, '/cwd', {})
     await session.run('hi')
@@ -2756,7 +3154,9 @@ describe('PiSession.status.account (M3 auth)', () => {
       label: 'API key'
     })
     const win = new MockWindow()
-    const session = new PiSession('rid-account-1', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-account-1', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
     expect(session.status.account).toEqual({
       engineId: 'pi',
       vendorId: 'anthropic',
@@ -2867,7 +3267,7 @@ describe('PiSession — plan mode (M5a)', () => {
     expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['acceptEdits'])
   })
 
-  it("switching between two NON-plan modes sends neither plan command", async () => {
+  it('switching between two NON-plan modes sends neither plan command', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-plan-neither-1', win as never, '/cwd', {})
     await session.run('hi')
@@ -2876,11 +3276,15 @@ describe('PiSession — plan mode (M5a)', () => {
     await session.setPermissionMode('acceptEdits')
     await session.setPermissionMode('full')
 
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/cui-plan-enter' })
+    )
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/cui-plan-exit' })
+    )
   })
 
-  it("setting the SAME mode twice does NOT re-send /cui-plan-enter", async () => {
+  it('setting the SAME mode twice does NOT re-send /cui-plan-enter', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-plan-noop-1', win as never, '/cwd', {})
     await session.run('hi')
@@ -2889,10 +3293,12 @@ describe('PiSession — plan mode (M5a)', () => {
 
     await session.setPermissionMode('plan')
 
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/cui-plan-enter' })
+    )
   })
 
-  it("setting the SAME non-plan mode twice sends nothing plan-related either", async () => {
+  it('setting the SAME non-plan mode twice sends nothing plan-related either', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-plan-noop-2', win as never, '/cwd', {})
     await session.run('hi')
@@ -2901,13 +3307,19 @@ describe('PiSession — plan mode (M5a)', () => {
 
     await session.setPermissionMode('acceptEdits')
 
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/cui-plan-exit' })
+    )
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/cui-plan-enter' })
+    )
   })
 
   it('doStart() re-sends /cui-plan-enter on spawn when constructed with permissionMode: "plan"', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-plan-respawn-1', win as never, '/cwd', { permissionMode: 'plan' })
+    const session = new PiSession('rid-plan-respawn-1', win as never, '/cwd', {
+      permissionMode: 'plan'
+    })
     await session.run('hi')
 
     expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: '/cui-plan-enter' })
@@ -2915,10 +3327,14 @@ describe('PiSession — plan mode (M5a)', () => {
 
   it('doStart() does NOT send /cui-plan-enter on spawn for any other starting mode', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-plan-respawn-2', win as never, '/cwd', { permissionMode: 'default' })
+    const session = new PiSession('rid-plan-respawn-2', win as never, '/cwd', {
+      permissionMode: 'default'
+    })
     await session.run('hi')
 
-    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/cui-plan-enter' })
+    )
   })
 
   it('a mutating-kind tool call in plan mode denies immediately with PLAN_MODE_DENY_REASON', async () => {
@@ -2989,7 +3405,10 @@ describe('PiSession — plan mode (M5a)', () => {
 
       const decision = await gate(`call_plan_outside_${mode}`, 'exit_plan', { plan: '1. Do X' })
 
-      expect(decision).toEqual({ behavior: 'deny', reason: 'exit_plan is only available in plan mode' })
+      expect(decision).toEqual({
+        behavior: 'deny',
+        reason: 'exit_plan is only available in plan mode'
+      })
       expect(sentChannels(win)).not.toContain('session:approval-request')
     }
   )
@@ -3003,7 +3422,9 @@ describe('PiSession — plan mode (M5a)', () => {
 
       const pending = gate('call_plan_6', 'exit_plan', { plan: '1. Do X' })
       await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+        { requestId: string }
+      ]
 
       mockRequest.mockClear()
       session.resolveApproval(approval.requestId, 'allow')
@@ -3012,7 +3433,9 @@ describe('PiSession — plan mode (M5a)', () => {
       expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['default'])
       // Does NOT send /cui-plan-exit — the extension's own exit_plan.execute()
       // already restored the tool set locally (see resolveApproval's doc comment).
-      expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+      expect(mockRequest).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: '/cui-plan-exit' })
+      )
     })
 
     it("a FOLLOW-UP setPermissionMode('acceptEdits') after the allow broadcast does not ALSO send /cui-plan-exit (prevMode is already 'default', not 'plan')", async () => {
@@ -3023,14 +3446,18 @@ describe('PiSession — plan mode (M5a)', () => {
 
       const pending = gate('call_plan_7', 'exit_plan', { plan: '1. Do X' })
       await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+        { requestId: string }
+      ]
       session.resolveApproval(approval.requestId, 'allow')
       await pending
 
       mockRequest.mockClear()
       await session.setPermissionMode('acceptEdits') // mirrors ExitPlanModeCard's handleContinueAutoEdit
 
-      expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+      expect(mockRequest).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: '/cui-plan-exit' })
+      )
       expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['acceptEdits'])
     })
 
@@ -3042,7 +3469,9 @@ describe('PiSession — plan mode (M5a)', () => {
 
       const pending = gate('call_plan_8', 'exit_plan', { plan: '1. Do X' })
       await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+        { requestId: string }
+      ]
 
       session.resolveApproval(approval.requestId, 'deny', { feedback: 'add error handling' })
 
@@ -3059,7 +3488,9 @@ describe('PiSession — plan mode (M5a)', () => {
 
       const pending = gate('call_plan_9', 'exit_plan', { plan: '1. Do X' })
       await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
-      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+        { requestId: string }
+      ]
 
       session.resolveApproval(approval.requestId, 'deny')
 
@@ -3075,9 +3506,16 @@ describe('PiSession.handleHostedTool — render_mermaid (M4a)', () => {
     await session.run('hi')
 
     await grantAutoAllow('call_m1', 'render_mermaid', { source: 'graph TD; A-->B', title: 'Flow' })
-    const result = await hostedTool('render_mermaid', { source: 'graph TD; A-->B', title: 'Flow' }, 'call_m1')
+    const result = await hostedTool(
+      'render_mermaid',
+      { source: 'graph TD; A-->B', title: 'Flow' },
+      'call_m1'
+    )
 
-    expect(mockMermaidHandler).toHaveBeenCalledWith({ source: 'graph TD; A-->B', title: 'Flow' }, undefined)
+    expect(mockMermaidHandler).toHaveBeenCalledWith(
+      { source: 'graph TD; A-->B', title: 'Flow' },
+      undefined
+    )
     expect(result).toEqual({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
   })
 
@@ -3117,10 +3555,17 @@ describe('PiSession.handleHostedTool — create_mockup / show_mockup (M4a)', () 
     await session.run('hi')
 
     await grantAutoAllow('call_mk1', 'create_mockup', { html: '<div>hi</div>', title: 'My UI' })
-    const result = await hostedTool('create_mockup', { html: '<div>hi</div>', title: 'My UI' }, 'call_mk1')
+    const result = await hostedTool(
+      'create_mockup',
+      { html: '<div>hi</div>', title: 'My UI' },
+      'call_mk1'
+    )
 
     expect(mockCreateMockupServer).toHaveBeenCalledWith('/cwd')
-    expect(mockCreateMockupHandler).toHaveBeenCalledWith({ html: '<div>hi</div>', title: 'My UI' }, undefined)
+    expect(mockCreateMockupHandler).toHaveBeenCalledWith(
+      { html: '<div>hi</div>', title: 'My UI' },
+      undefined
+    )
     expect(result.content[0].text).toContain('Mockup created successfully')
   })
 
@@ -3193,7 +3638,10 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     await session.setPermissionMode('acceptEdits')
     await session.run('hi')
 
-    await grantViaApproval(win, session, 'call_dispatch_1', { engine: 'opencode', prompt: 'what is the answer' })
+    await grantViaApproval(win, session, 'call_dispatch_1', {
+      engine: 'opencode',
+      prompt: 'what is the answer'
+    })
     const result = await hostedTool(
       'dispatch_agent',
       { engine: 'opencode', prompt: 'what is the answer' },
@@ -3222,7 +3670,12 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-2', win as never, '/cwd', {})
     await session.run('hi')
 
-    const input = { engine: 'opencode', prompt: 'continue', model: 'openai/gpt-5', session_id: 'prev-sess' }
+    const input = {
+      engine: 'opencode',
+      prompt: 'continue',
+      model: 'openai/gpt-5',
+      session_id: 'prev-sess'
+    }
     await grantViaApproval(win, session, 'call_dispatch_2', input)
     await hostedTool('dispatch_agent', input, 'call_dispatch_2')
 
@@ -3239,7 +3692,11 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     await session.run('hi')
 
     await grantViaApproval(win, session, 'call_dispatch_3', { engine: 'claude', prompt: 'x' })
-    const result = await hostedTool('dispatch_agent', { engine: 'claude', prompt: 'x' }, 'call_dispatch_3')
+    const result = await hostedTool(
+      'dispatch_agent',
+      { engine: 'claude', prompt: 'x' },
+      'call_dispatch_3'
+    )
 
     expect(result.content[0].text).toBe('Dispatch failed: boom')
     expect(result.isError).toBe(true)
@@ -3277,17 +3734,27 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     await session.run('hi')
 
     await grantViaApproval(win, session, 'call_dispatch_6', { engine: 'pi', prompt: 'x' })
-    const result = await hostedTool('dispatch_agent', { engine: 'pi', prompt: 'x' }, 'call_dispatch_6')
+    const result = await hostedTool(
+      'dispatch_agent',
+      { engine: 'pi', prompt: 'x' },
+      'call_dispatch_6'
+    )
 
     expect(result.isError).toBe(true)
     expect(mockDispatch).not.toHaveBeenCalled()
   })
 
   it("emit forwards to this.send (the dispatching session's own routing) — passing ctx.emit through calls window.webContents.send", async () => {
-    mockDispatch.mockImplementation(async (_req, ctx: { emit: (channel: string, data: unknown) => void }) => {
-      ctx.emit('session:task-notification', { taskId: 'x', toolUseId: 'call_dispatch_7', status: 'completed' })
-      return { text: 'done', sessionId: 'oc-sess-2' }
-    })
+    mockDispatch.mockImplementation(
+      async (_req, ctx: { emit: (channel: string, data: unknown) => void }) => {
+        ctx.emit('session:task-notification', {
+          taskId: 'x',
+          toolUseId: 'call_dispatch_7',
+          status: 'completed'
+        })
+        return { text: 'done', sessionId: 'oc-sess-2' }
+      }
+    )
     const win = new MockWindow()
     const session = new PiSession('rid-dispatch-7', win as never, '/cwd', {})
     await session.run('hi')
@@ -3312,7 +3779,7 @@ describe('PiSession — hosted-tool one-shot grants (A1 security fix)', () => {
     expect(mockCreateMermaidServer).not.toHaveBeenCalled()
   })
 
-  it("gate-allow (auto-allow path, render_mermaid) then execute succeeds; a SECOND execute with the SAME toolCallId is fail-closed (one-shot, consumed)", async () => {
+  it('gate-allow (auto-allow path, render_mermaid) then execute succeeds; a SECOND execute with the SAME toolCallId is fail-closed (one-shot, consumed)', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-grant-2', win as never, '/cwd', {})
     await session.run('hi')
@@ -3337,7 +3804,11 @@ describe('PiSession — hosted-tool one-shot grants (A1 security fix)', () => {
 
     await grantAutoAllow('call_g2', 'render_mermaid', { source: 'x' })
 
-    const result = await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_g2')
+    const result = await hostedTool(
+      'dispatch_agent',
+      { engine: 'opencode', prompt: 'x' },
+      'call_g2'
+    )
 
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('not approved')
@@ -3351,7 +3822,11 @@ describe('PiSession — hosted-tool one-shot grants (A1 security fix)', () => {
     await session.run('hi') // default mode — dispatch_agent (kind 'task') always asks
 
     await grantViaApproval(win, session, 'call_g3', { engine: 'opencode', prompt: 'x' })
-    const result = await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_g3')
+    const result = await hostedTool(
+      'dispatch_agent',
+      { engine: 'opencode', prompt: 'x' },
+      'call_g3'
+    )
 
     expect(mockDispatch).toHaveBeenCalledTimes(1)
     expect(result.isError).toBeFalsy()
@@ -3400,7 +3875,12 @@ describe('PiSession.run — steer failure must not flip isProcessing while the o
           })
         }
         // The steer (second prompt) is rejected at the APPLICATION level.
-        return Promise.resolve({ type: 'response', command: 'prompt', success: false, error: 'steer rejected' })
+        return Promise.resolve({
+          type: 'response',
+          command: 'prompt',
+          success: false,
+          error: 'steer rejected'
+        })
       }
       return defaultRequestImpl(cmd)
     })
@@ -3457,7 +3937,12 @@ describe('PiSession.run — steer failure must not flip isProcessing while the o
     const session = new PiSession('rid-a3-3', win as never, '/cwd', {})
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'prompt'
-        ? Promise.resolve({ type: 'response', command: 'prompt', success: false, error: 'rejected' })
+        ? Promise.resolve({
+            type: 'response',
+            command: 'prompt',
+            success: false,
+            error: 'rejected'
+          })
         : defaultRequestImpl(cmd)
     )
 
@@ -3472,7 +3957,9 @@ describe('PiSession.run — steer failure must not flip isProcessing while the o
 describe('PiSession.doStart — cleanup on a post-assignment failure (A4 leak fix)', () => {
   it('get_state rejecting after client/bridgeHost are assigned disposes BOTH and lets the NEXT run() respawn fresh', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) =>
-      cmd.type === 'get_state' ? Promise.reject(new Error('get_state wedged')) : defaultRequestImpl(cmd)
+      cmd.type === 'get_state'
+        ? Promise.reject(new Error('get_state wedged'))
+        : defaultRequestImpl(cmd)
     )
     const win = new MockWindow()
     const session = new PiSession('rid-a4-1', win as never, '/cwd', {})
@@ -3494,7 +3981,9 @@ describe('PiSession.doStart — cleanup on a post-assignment failure (A4 leak fi
 })
 
 describe('PiSession — crash path (onExit handler, A5 — previously zero coverage)', () => {
-  async function spawnAndGetOnExit(routingId: string): Promise<{ win: MockWindow; session: PiSession; onExit: () => void }> {
+  async function spawnAndGetOnExit(
+    routingId: string
+  ): Promise<{ win: MockWindow; session: PiSession; onExit: () => void }> {
     const win = new MockWindow()
     const session = new PiSession(routingId, win as never, '/cwd', {})
     await session.run('hi')
@@ -3556,7 +4045,13 @@ describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
   it('resolves accountId via piAuthProvider.buildPiAccountRef(output.provider) when the mock returns an entry', async () => {
     mockBuildPiAccountRef.mockImplementation((vendorId: string) =>
       vendorId === 'anthropic'
-        ? { engineId: 'pi', vendorId: 'anthropic', billingType: 'apiKey', authState: 'authenticated', accountId: 'acct-123' }
+        ? {
+            engineId: 'pi',
+            vendorId: 'anthropic',
+            billingType: 'apiKey',
+            authState: 'authenticated',
+            accountId: 'acct-123'
+          }
         : null
     )
     const win = new MockWindow()
@@ -3572,13 +4067,21 @@ describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
         api: 'a',
         provider: 'anthropic',
         model: 'claude-sonnet-4-6',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
         stopReason: 'stop',
         timestamp: 1
       }
     })
 
-    expect(mockRecordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'acct-123', accountUuid: null }))
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acct-123', accountUuid: null })
+    )
   })
 
   it('accountId is null when buildPiAccountRef has no entry for the provider', async () => {
@@ -3596,23 +4099,40 @@ describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
         api: 'a',
         provider: 'some-unknown-provider',
         model: 'm',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
         stopReason: 'stop',
         timestamp: 1
       }
     })
 
-    expect(mockRecordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ accountId: null, accountUuid: null }))
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: null, accountUuid: null })
+    )
   })
 })
 
 describe('PiSession — in-pi subagents (M5b) — env gating at spawn', () => {
   it('sets CLAUDEUI_PI_SUBAGENTS=1 + CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL and adds a SECOND -e flag by default (subagents is a static-true engine capability)', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-subagents-env-1', win as never, '/cwd', { model: 'openai-codex/gpt-5.6-luna' })
+    const session = new PiSession('rid-subagents-env-1', win as never, '/cwd', {
+      model: 'openai-codex/gpt-5.6-luna'
+    })
     await session.run('hi')
     const opts = lastSpawnOpts()
-    expect(opts.args).toEqual(['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts', '-e', '/fake/tmp/claudeui-subagent.ts'])
+    expect(opts.args).toEqual([
+      '--mode',
+      'rpc',
+      '-e',
+      '/fake/tmp/claudeui-bridge.ts',
+      '-e',
+      '/fake/tmp/claudeui-subagent.ts'
+    ])
     expect(opts.env.CLAUDEUI_PI_SUBAGENTS).toBe('1')
     expect(opts.env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('openai-codex/gpt-5.6-luna')
     expect(mockWriteSubagentExtension).toHaveBeenCalledTimes(1)
@@ -3620,21 +4140,30 @@ describe('PiSession — in-pi subagents (M5b) — env gating at spawn', () => {
 
   it('CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is a spawn-time snapshot — a later setModel() does not retarget the already-spawned extension', async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-subagents-env-2', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-subagents-env-2', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
     await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('anthropic/claude-sonnet-4-6')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe(
+      'anthropic/claude-sonnet-4-6'
+    )
 
     await session.setModel('openai-codex/gpt-5.6-luna')
     // Same (already-spawned) process — no second PiRpcClient construction,
     // so the env captured at spawn time is untouched.
     expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('anthropic/claude-sonnet-4-6')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe(
+      'anthropic/claude-sonnet-4-6'
+    )
   })
 })
 
 describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () => {
   /** A single valid cuiSubagent tool_execution_update event, mirroring exactly what pi-subagent-source.ts's onUpdate() call produces. */
-  function subagentUpdateEvent(toolCallId: string, agentOverrides: Record<string, unknown> = {}): PiEvent {
+  function subagentUpdateEvent(
+    toolCallId: string,
+    agentOverrides: Record<string, unknown> = {}
+  ): PiEvent {
     return {
       type: 'tool_execution_update',
       toolCallId,
@@ -3677,7 +4206,7 @@ describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () 
     expect(messages[0].message.content).toEqual([{ type: 'text', text: 'hi' }])
   })
 
-  it('a toolResult newMessage -> session:subagent-tool-result with {toolUseId, toolResultToolUseId, result, isError} — byte-matches forwardPiTargetMessage\'s shape', async () => {
+  it("a toolResult newMessage -> session:subagent-tool-result with {toolUseId, toolResultToolUseId, result, isError} — byte-matches forwardPiTargetMessage's shape", async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-subagent-msg-2', win as never, '/cwd', {})
     await session.run('hi')
@@ -3685,7 +4214,13 @@ describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () 
     lastEventHandler()(
       subagentUpdateEvent('outer-call-2', {
         newMessages: [
-          { role: 'toolResult', toolCallId: 'child-tc-1', toolName: 'read', content: [{ type: 'text', text: 'file body' }], isError: false }
+          {
+            role: 'toolResult',
+            toolCallId: 'child-tc-1',
+            toolName: 'read',
+            content: [{ type: 'text', text: 'file body' }],
+            isError: false
+          }
         ]
       })
     )
@@ -3713,7 +4248,13 @@ describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () 
     lastEventHandler()(
       subagentUpdateEvent('outer-call-3', {
         newMessages: [
-          { role: 'toolResult', toolCallId: 'child-tc-2', toolName: 'bash', content: [{ type: 'text', text: 'boom' }], isError: true }
+          {
+            role: 'toolResult',
+            toolCallId: 'child-tc-2',
+            toolName: 'bash',
+            content: [{ type: 'text', text: 'boom' }],
+            isError: true
+          }
         ]
       })
     )
@@ -3743,7 +4284,12 @@ describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () 
         toolCallId: 'outer-call-5',
         toolName: 'subagent',
         args: {},
-        partialResult: { content: [], details: { cuiSubagent: { v: 1, agents: [{ agent: 'x', status: 'bogus', newMessages: [] }] } } }
+        partialResult: {
+          content: [],
+          details: {
+            cuiSubagent: { v: 1, agents: [{ agent: 'x', status: 'bogus', newMessages: [] }] }
+          }
+        }
       })
     ).not.toThrow()
     expect(sentPayloads(win, 'session:subagent-message')).toHaveLength(0)
@@ -3799,9 +4345,11 @@ describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
     })
   })
 
-  it('falls back to the PARENT session\'s model when the agent payload carries no model', async () => {
+  it("falls back to the PARENT session's model when the agent payload carries no model", async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-subagent-usage-2', win as never, '/cwd', { model: 'anthropic/claude-opus-4-8' })
+    const session = new PiSession('rid-subagent-usage-2', win as never, '/cwd', {
+      model: 'anthropic/claude-opus-4-8'
+    })
     await session.run('hi')
     mockRecordUsageEvent.mockClear()
 
@@ -3855,7 +4403,7 @@ describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
     expect(mockRecordUsageEvent).not.toHaveBeenCalled()
   })
 
-  it('does NOT touch the parent session\'s own totalCostUsd (subagent spend is its own accounting row, mirrors opencode\'s child-message attribution posture)', async () => {
+  it("does NOT touch the parent session's own totalCostUsd (subagent spend is its own accounting row, mirrors opencode's child-message attribution posture)", async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-subagent-usage-5', win as never, '/cwd', {})
     await session.run('hi')
@@ -3929,9 +4477,11 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     expect(mockEphemeralInstances).toHaveLength(0)
   })
 
-  it('builds a transcript-fed framing prompt (context + do-not-continue instruction + question) and returns the ephemeral\'s get_last_assistant_text', async () => {
+  it("builds a transcript-fed framing prompt (context + do-not-continue instruction + question) and returns the ephemeral's get_last_assistant_text", async () => {
     const win = new MockWindow()
-    const session = new PiSession('rid-btw-happy', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    const session = new PiSession('rid-btw-happy', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
     await session.run('why is the build failing?')
     pushMessage(session, 'assistant', 'I am rerunning the type checker to see the exact error.')
 
@@ -3940,7 +4490,10 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
 
     eph.request.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'get_last_assistant_text') {
-        return Promise.resolve({ success: true, data: { text: 'No, just double-checking the error output.' } })
+        return Promise.resolve({
+          success: true,
+          data: { text: 'No, just double-checking the error output.' }
+        })
       }
       return Promise.resolve({ success: true })
     })
@@ -3988,7 +4541,9 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     expect(eph.opts.env).toBeUndefined()
 
     // Prompt content: context (both turns) + the question + the framing.
-    const promptCall = eph.request.mock.calls.find((c) => (c[0] as { type: string }).type === 'prompt')
+    const promptCall = eph.request.mock.calls.find(
+      (c) => (c[0] as { type: string }).type === 'prompt'
+    )
     expect(promptCall).toBeDefined()
     const message = (promptCall![0] as { message: string }).message
     expect(message).toContain('why is the build failing?')
@@ -4024,7 +4579,9 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     const askPromise = session.askSideQuestion('why?')
     const eph = lastEphemeralClient()
     eph.request.mockImplementation((cmd: { type: string }) =>
-      cmd.type === 'get_last_assistant_text' ? Promise.reject(new Error('boom')) : Promise.resolve({ success: true })
+      cmd.type === 'get_last_assistant_text'
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve({ success: true })
     )
 
     await new Promise((r) => setImmediate(r))
@@ -4113,7 +4670,9 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     settleCb({ type: 'agent_settled' })
     await askPromise
 
-    const promptCall = eph.request.mock.calls.find((c) => (c[0] as { type: string }).type === 'prompt')!
+    const promptCall = eph.request.mock.calls.find(
+      (c) => (c[0] as { type: string }).type === 'prompt'
+    )!
     const message = (promptCall[0] as { message: string }).message
     const context = message.split('Conversation so far:\n\n')[1].split('\n\n---\n')[0]
 
@@ -4143,7 +4702,9 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
     settleCb({ type: 'agent_settled' })
     await askPromise
 
-    const promptCall = eph.request.mock.calls.find((c) => (c[0] as { type: string }).type === 'prompt')!
+    const promptCall = eph.request.mock.calls.find(
+      (c) => (c[0] as { type: string }).type === 'prompt'
+    )!
     const message = (promptCall[0] as { message: string }).message
     const context = message.split('Conversation so far:\n\n')[1].split('\n\n---\n')[0]
 

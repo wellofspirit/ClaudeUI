@@ -82,10 +82,7 @@ describe('sync-host delivery', () => {
 
     emitEvent('session:created', ['rid', { cwd: '/x' }])
 
-    expect(sink).toHaveBeenCalledWith(expect.any(Number), 'session:created', [
-      'rid',
-      { cwd: '/x' }
-    ])
+    expect(sink).toHaveBeenCalledWith(expect.any(Number), 'session:created', ['rid', { cwd: '/x' }])
   })
 
   it('a host-local channel reaches the window and NO subscriber', () => {

@@ -145,10 +145,7 @@ export function emitSync(channel: string, args: unknown[]): void {
  * state no event carries: a session created but not yet spawned, or a transcript
  * loaded from disk. Creates the entry when it does not exist.
  */
-export function seedSession(
-  routingId: string,
-  patch: Partial<CanonicalSessionState> = {}
-): void {
+export function seedSession(routingId: string, patch: Partial<CanonicalSessionState> = {}): void {
   client() // ensure the replica is folding before anything is projected
   patchLocalSession(routingId, patch, { create: true })
 }
@@ -227,8 +224,7 @@ export const seed = {
   conversationCleared: (routingId: string, permissionMode?: string) =>
     emitSync('session:conversation-cleared', [routingId, { permissionMode }]),
 
-  directories: (directories: unknown[]) =>
-    emitSync('session:directories-changed', [directories]),
+  directories: (directories: unknown[]) => emitSync('session:directories-changed', [directories]),
 
   created: (routingId: string, data: { cwd?: string; resumeSessionId?: string } = {}) =>
     emitSync('session:created', [routingId, data]),
@@ -272,10 +268,7 @@ export const seed = {
     fileDiffs?: FileDiff[],
     images?: ToolResultImage[]
   ) =>
-    emitSync('session:tool-result', [
-      routingId,
-      { toolUseId, result, isError, fileDiffs, images }
-    ]),
+    emitSync('session:tool-result', [routingId, { toolUseId, result, isError, fileDiffs, images }]),
 
   retract: (routingId: string, messageIds: string[]) =>
     emitSync('session:messages-retracted', [routingId, { messageIds }]),

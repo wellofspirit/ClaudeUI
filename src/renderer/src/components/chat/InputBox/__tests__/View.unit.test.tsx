@@ -295,7 +295,9 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     const onVoiceStart = vi.fn()
     const onVoiceStop = vi.fn()
     render(
-      <InputBoxView {...makeProps({ voiceEnabled: true, onVoiceStart, onVoiceStop, ...overrides })} />
+      <InputBoxView
+        {...makeProps({ voiceEnabled: true, onVoiceStart, onVoiceStop, ...overrides })}
+      />
     )
     return { button: screen.getByTestId('InputBox.voice'), onVoiceStart, onVoiceStop }
   }

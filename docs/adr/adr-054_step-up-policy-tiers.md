@@ -8,9 +8,9 @@
 
 ADR-052 conflated two questions in one knob: **how a connection gets in** (the ceremony at login) and **how fresh its presence proof must stay afterwards** (step-up, decay). Live use immediately surfaced the seams:
 
-- A fresh passkey login followed by a terminal open demanded a *second* ceremony seconds after the first — the login already proved presence; re-proving it gates nothing (owner live-test, 2026-08-15).
+- A fresh passkey login followed by a terminal open demanded a _second_ ceremony seconds after the first — the login already proved presence; re-proving it gates nothing (owner live-test, 2026-08-15).
 - Under the `off` master switch, the terminal still demanded a passkey/password — while unauthenticated model-mediated execution stood wide open. Incoherent by the design's own "honesty about authority" posture.
-- A UI hint query (`terminal:pool`, re-asked on window focus) silently slid the shell grant's decay deadline — ambient *reads* were feeding a timer that exists to prove *acting* presence (found in adversarial review; fixed in d1c6e4e ahead of this ADR).
+- A UI hint query (`terminal:pool`, re-asked on window focus) silently slid the shell grant's decay deadline — ambient _reads_ were feeding a timer that exists to prove _acting_ presence (found in adversarial review; fixed in d1c6e4e ahead of this ADR).
 - The owner also wants a stronger posture available ("nothing stays alive forever") without paying for it on every surface, and a coherent story for the headless deployment (no desktop = no "desktop-only" trust anchor).
 
 ## Decision
@@ -22,17 +22,17 @@ Two independent axes, both persisted in `remote_config`:
 
 ### 1. The tiers
 
-| Tier | Semantics |
-| --- | --- |
+| Tier     | Semantics                                                                                                                                                                                                                                                                                                                                                               |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `strong` | Reads and the sync stream are free. Every **mutating** command requires a presence proof no older than its idle window: `shell` acts 10 min, all other mutations 60 min (both configurable). The session itself has an absolute max-age, default **4 h** (configurable): at expiry the connection is cut — stream included — and reconnecting requires a full ceremony. |
-| `medium` | Today's shipped behavior, named: step-up gates exactly two areas — the **terminal** (with decay) and the **remote-settings surface** (Decision 6). Everything else rides connection auth for the connection's lifetime. |
-| `off` | Nothing is gated post-login; an authenticated session lives until disconnect. |
+| `medium` | Today's shipped behavior, named: step-up gates exactly two areas — the **terminal** (with decay) and the **remote-settings surface** (Decision 6). Everything else rides connection auth for the connection's lifetime.                                                                                                                                                 |
+| `off`    | Nothing is gated post-login; an authenticated session lives until disconnect.                                                                                                                                                                                                                                                                                           |
 
 The dispatch layer decides "mutating" by the registry's declared `kind` (`command` = mutating, `query` = read) — ADR-051's CQRS split becomes security-load-bearing, and `kind` declarations are pinned by tests accordingly.
 
 ### 2. Arm-on-auth (kills the double ceremony)
 
-A login that *is* a presence proof arms the relevant grants at accept: a **passkey ceremony** (handshake assertion or the enroll→webauthn upgrade) arms everything its tier would later step-up-gate, fresh. Weaker logins arm nothing and meet the step-up as their **first** presence proof: token (bookmark possession), ambient tailnet identity (network admission), tunnel (fragment possession). The **password never arms at login** — its proof is client-cacheable, so it authenticates the browser, not the human (ADR-052's recorded caveat); it remains the step-up *fallback* where passkeys are unavailable.
+A login that _is_ a presence proof arms the relevant grants at accept: a **passkey ceremony** (handshake assertion or the enroll→webauthn upgrade) arms everything its tier would later step-up-gate, fresh. Weaker logins arm nothing and meet the step-up as their **first** presence proof: token (bookmark possession), ambient tailnet identity (network admission), tunnel (fragment possession). The **password never arms at login** — its proof is client-cacheable, so it authenticates the browser, not the human (ADR-052's recorded caveat); it remains the step-up _fallback_ where passkeys are unavailable.
 
 ### 3. Auth-mode `off` implies tier `off`
 
@@ -46,7 +46,7 @@ This does not weaken Decision 3 in substance: under auth-MODE `off` a connection
 
 Owner-designed, borrowing the strong-tier principle into the terminal itself:
 
-- **Reads stay free after decay**: an attached view keeps streaming (a `logcat` session runs indefinitely), `terminal:pool` answers, re-`attach`/`detach` to *watch* costs nothing, and `resize` is classified read (display geometry; writes SIGWINCH but cannot execute).
+- **Reads stay free after decay**: an attached view keeps streaming (a `logcat` session runs indefinitely), `terminal:pool` answers, re-`attach`/`detach` to _watch_ costs nothing, and `resize` is classified read (display geometry; writes SIGWINCH but cannot execute).
 - **Acts demand freshness**: `terminal:create`, input (`terminal:write` / `term-input` frames), `terminal:kill`, `terminal:kill-by-cwd` require the grant within its decay window; the keystroke after an idle gap is what prompts.
 - **First access ever still requires one arming proof** per connection (scrollback is sensitive): a connection that has never stepped up (and wasn't armed by a passkey login) cannot attach or read terminals at all. One proof unlocks reads for the connection's lifetime and acts for the decay window.
 - **Queries never slide the decay deadline** (landed d1c6e4e): only `command`-kind dispatches and input frames refresh it.
@@ -58,7 +58,7 @@ Owner-designed, borrowing the strong-tier principle into the terminal itself:
 
 ### 6. The host anchor (replaces "desktop-only", ready for headless)
 
-"Desktop-only" was standing in for *"a surface that requires being on the host"* — which the headless deployment (no desktop) forces us to name properly:
+"Desktop-only" was standing in for _"a surface that requires being on the host"_ — which the headless deployment (no desktop) forces us to name properly:
 
 - **Auth-disabling operations** — the `off` master switch and anything else that disables authentication — are **host-anchor only, forever**: the desktop renderer today; the server's own console/config file (reached via SSH) on headless. Never the web, even behind a fresh ceremony: a stolen stepped-up session must not be able to turn auth off, on either form factor.
 - **Routine remote-access settings** — step-up tier selection, password rotation, credential list/rename/revoke, auth-mode changes **among the non-off modes** — become web-reachable behind a **fresh passkey step-up** (strong-tier freshness for this area regardless of tier). This is what makes headless administrable day-to-day without SSH.
@@ -66,7 +66,7 @@ Owner-designed, borrowing the strong-tier principle into the terminal itself:
 
 **Which factor may administer the settings area (owner-RATIFIED during implementation).** The decision text above says "behind a fresh **passkey** step-up". As built, the settings area accepts either factor the ordinary step-up accepts: **a password step-up may administer the settings area.** Two reasons, and the owner ratified both:
 
-- The break-glass password is the owner's own secret and already carries `admin` + `enroll` under the passkey modes (ADR-052's grant bundles). Refusing it *here* while accepting it for the terminal would be a distinction with no threat behind it.
+- The break-glass password is the owner's own secret and already carries `admin` + `enroll` under the passkey modes (ADR-052's grant bundles). Refusing it _here_ while accepting it for the terminal would be a distinction with no threat behind it.
 - It is what makes the surface recoverable. On a plain-LAN IP or a tunnel hostname no passkey ceremony is possible at all, and a passkey-only settings area would be unreachable from exactly the transports an operator falls back to when something is wrong.
 
 What the password may **never** reach is the `off` switch — that is host-anchor only on every transport and behind no ceremony at all. The line is not "which factor", it is "which operation".
@@ -75,9 +75,9 @@ What the password may **never** reach is the `off` switch — that is host-ancho
 
 **The read verb.** `authcfg:get` (a `query`, `admin`, no freshness demand) was added during implementation because the decision is unimplementable without it: a settings pane cannot administer a surface it cannot render, and demanding a ceremony before the tier can be DISPLAYED would put the ceremony in front of its own explanation. It answers the same sanitized object `remote:get-config` does — one sanitizer, so no field can be exposed on one transport and forgotten on the other.
 
-**Amendment (2026-08-16, owner-directed): the settings session replaces the mutation window for this area.** The as-shipped gating (each `authcfg` mutation checks the 60-minute mutation window) left administering as a long-lived *ambient* capability — invisible while held, wide open to accidental exposure, and it forced the timing dials to stay desktop-only as a compensating restriction. Replaced by an explicit, bounded **settings-editing session**:
+**Amendment (2026-08-16, owner-directed): the settings session replaces the mutation window for this area.** The as-shipped gating (each `authcfg` mutation checks the 60-minute mutation window) left administering as a long-lived _ambient_ capability — invisible while held, wide open to accidental exposure, and it forced the timing dials to stay desktop-only as a compensating restriction. Replaced by an explicit, bounded **settings-editing session**:
 
-- The pane is **read-only by default** (a clean view state — the knob sprawl collapses into a summary). One "Edit settings" action; on the web it runs the standard step-up ceremony carrying a `settings` intent; on success the server marks *that connection* as holding a live settings session, **TTL 5 minutes** — server-side connection state, deliberately not a wire token (the connection is already authenticated and the ceremony just ran on it; a bearer string adds leakable surface without adding proof).
+- The pane is **read-only by default** (a clean view state — the knob sprawl collapses into a summary). One "Edit settings" action; on the web it runs the standard step-up ceremony carrying a `settings` intent; on success the server marks _that connection_ as holding a live settings session, **TTL 5 minutes** — server-side connection state, deliberately not a wire token (the connection is already authenticated and the ceremony just ran on it; a bearer string adds leakable surface without adding proof).
 - Every `authcfg` **mutation requires the live session** (the mutation-window check for this class is retired). Save applies the edited set as **one batch** (`authcfg:apply`) — validated together, one audit row whose `detail` carries the diff, one 4009 re-admission sweep (except-actor, actor re-snapshots in place). Save, Cancel, pane close, disconnect, or TTL expiry **revokes the session immediately** — no residue.
 - **Every auth-settings change is gated, regardless of direction** — tier upgrades included. Deliberateness is the property; direction special-casing added nothing.
 - The **timing dials (re-check idle, session max-age) and retention become web-editable** inside a session — the ambient-exposure argument that kept them desktop-only is void once administering is a bounded mode.

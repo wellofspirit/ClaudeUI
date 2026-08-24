@@ -361,7 +361,11 @@ function hostDelivery(
   delivery: Delivery & { cls: string }
 ): void {
   if (delivery.cls === 'host-local') {
-    sendToWindow((delivery.window as HostWindowHandle | undefined) ?? getHostWindow(), channel, args)
+    sendToWindow(
+      (delivery.window as HostWindowHandle | undefined) ?? getHostWindow(),
+      channel,
+      args
+    )
     return
   }
   // Main-side observers run BEFORE the fan-out: their own emissions are queued by
@@ -452,9 +456,7 @@ export function emitEvent(channel: string, args: unknown[], win?: HostWindowHand
 function observeWorktreeEntry(channel: string, args: unknown[]): void {
   if (channel !== 'session:tool-result') return
   const routingId = args[0]
-  const data = args[1] as
-    | { toolUseId?: string; result?: string; isError?: boolean }
-    | undefined
+  const data = args[1] as { toolUseId?: string; result?: string; isError?: boolean } | undefined
   if (typeof routingId !== 'string' || !data?.toolUseId || !data.result || data.isError) return
   const state = syncCore.getCanonicalState()
   if (state.worktreeInfoMap[routingId]) return

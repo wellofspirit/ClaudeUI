@@ -29,14 +29,7 @@ export function PlanReviewBar({ comments }: Props): React.JSX.Element {
     })
     dismissApproval(activeSessionId, planReview.approvalRequestId)
     closePlanPanel(activeSessionId)
-  }, [
-    activeSessionId,
-    planReview,
-    comments,
-    approvalStillPending,
-    dismissApproval,
-    closePlanPanel
-  ])
+  }, [activeSessionId, planReview, comments, approvalStillPending, dismissApproval, closePlanPanel])
 
   const sendRef = useRef(handleSend)
   sendRef.current = handleSend

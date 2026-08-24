@@ -12,11 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import {
-  useSessionStore,
-  useActiveSession,
-  type PerSessionState
-} from '../session-store'
+import { useSessionStore, useActiveSession, type PerSessionState } from '../session-store'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -386,7 +382,10 @@ describe('addPendingApproval / clearPendingApprovals', () => {
     store().createNewSession('r1', '/p')
     seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-1' }))
     seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-2' }))
-    seed.status('r1', { ...useSessionStore.getState().sessions['r1'].status, state: 'disconnected' })
+    seed.status('r1', {
+      ...useSessionStore.getState().sessions['r1'].status,
+      state: 'disconnected'
+    })
     expect(store().sessions['r1'].pendingApprovals).toEqual([])
   })
 
@@ -395,21 +394,18 @@ describe('addPendingApproval / clearPendingApprovals', () => {
     store().createNewSession('r2', '/p2', false)
     seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-1' }))
     seed.approvalRequest('r2', makePendingApproval({ requestId: 'req-2' }))
-    seed.status('r1', { ...useSessionStore.getState().sessions['r1'].status, state: 'disconnected' })
+    seed.status('r1', {
+      ...useSessionStore.getState().sessions['r1'].status,
+      state: 'disconnected'
+    })
     expect(store().sessions['r1'].pendingApprovals).toEqual([])
     expect(store().sessions['r2'].pendingApprovals).toHaveLength(1)
   })
 
   it('removePendingApprovalByToolUse removes only the approval with the matching tool_use_id', () => {
     store().createNewSession('r1', '/p')
-    seed.approvalRequest(
-      'r1',
-      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' })
-    )
-    seed.approvalRequest(
-      'r1',
-      makePendingApproval({ requestId: 'req-2', toolUseId: 'toolu_b' })
-    )
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' }))
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-2', toolUseId: 'toolu_b' }))
     // An older-style approval with no toolUseId should be unaffected.
     seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-3' }))
 
@@ -420,10 +416,7 @@ describe('addPendingApproval / clearPendingApprovals', () => {
 
   it('removePendingApprovalByToolUse is a no-op when no approval carries that id', () => {
     store().createNewSession('r1', '/p')
-    seed.approvalRequest(
-      'r1',
-      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' })
-    )
+    seed.approvalRequest('r1', makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' }))
     seed.toolResult('r1', 'toolu_unknown', '')
     expect(store().sessions['r1'].pendingApprovals.map((a) => a.requestId)).toEqual(['req-1'])
   })
@@ -829,13 +822,29 @@ describe('setStatus cwd follow-through', () => {
     store().createNewSession('r1', '/original')
     // The status carries a stable sessionId, so the reducer ALSO rekeys — the
     // entry moves to 'sdk-id' in the same fold (SyncCore phase 4c).
-    seed.status('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/worktree/branch' }))
+    seed.status(
+      'r1',
+      makeSessionStatus({
+        state: 'idle',
+        sessionId: 'sdk-id',
+        model: claudeModel('claude-sonnet-4-6'),
+        cwd: '/worktree/branch'
+      })
+    )
     expect(store().sessions['sdk-id'].cwd).toBe('/worktree/branch')
   })
 
   it('leaves cwd untouched when status.cwd matches current', () => {
     store().createNewSession('r1', '/same')
-    seed.status('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/same' }))
+    seed.status(
+      'r1',
+      makeSessionStatus({
+        state: 'idle',
+        sessionId: 'sdk-id',
+        model: claudeModel('claude-sonnet-4-6'),
+        cwd: '/same'
+      })
+    )
     expect(store().sessions['sdk-id'].cwd).toBe('/same')
   })
 

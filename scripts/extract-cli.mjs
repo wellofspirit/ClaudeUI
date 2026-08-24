@@ -192,7 +192,12 @@ async function resolveBinary(arg) {
   const isMovingTag = version === 'latest' || version === 'stable'
   const { key, binName } = detectPlatform()
   const cachedBinPath = (v) =>
-    join(ROOT, '.cache', 'claude-cli', `claude-${v}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`)
+    join(
+      ROOT,
+      '.cache',
+      'claude-cli',
+      `claude-${v}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`
+    )
 
   // Offline cache short-circuit (pinned versions only). Previously resolveBinary
   // always fetched manifest.json to learn the expected checksum, so every

@@ -41,7 +41,10 @@ export function MockupConsoleDrawer({
   ].sort((a, b) => a.entry.id - b.entry.id)
 
   return (
-    <div data-testid="MockupConsoleDrawer" className="shrink-0 border-t border-border bg-bg-primary/50">
+    <div
+      data-testid="MockupConsoleDrawer"
+      className="shrink-0 border-t border-border bg-bg-primary/50"
+    >
       <div className="flex items-center gap-2 px-3 h-8">
         <button
           data-testid="MockupConsoleDrawer.toggle"

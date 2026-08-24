@@ -183,10 +183,7 @@ function ClaudeCard({
       <div className="p-3">
         {activeTab === 'block' && <CurrentBlockPanel block={currentBlock} />}
         {activeTab === 'timeline' && (
-          <TimelinePanel
-            currentBlock={currentBlock}
-            todaySnapshots={todaySnapshots}
-          />
+          <TimelinePanel currentBlock={currentBlock} todaySnapshots={todaySnapshots} />
         )}
         {activeTab === 'recent' && <RecentBlocksPanel recentBlocks={recentBlocks} />}
       </div>
@@ -304,9 +301,7 @@ function TimelinePanel({
   todaySnapshots: UsageSnapshot[]
 }): React.JSX.Element {
   if (!currentBlock || todaySnapshots.length < 2) {
-    return (
-      <div className="text-text-muted text-[11px]">Not enough data yet</div>
-    )
+    return <div className="text-text-muted text-[11px]">Not enough data yet</div>
   }
 
   return (
@@ -320,9 +315,7 @@ function TimelinePanel({
 
 function RecentBlocksPanel({ recentBlocks }: { recentBlocks: UsageBlock[] }): React.JSX.Element {
   if (recentBlocks.length === 0) {
-    return (
-      <div className="text-text-muted text-[11px]">No recent blocks</div>
-    )
+    return <div className="text-text-muted text-[11px]">No recent blocks</div>
   }
 
   return (
@@ -421,9 +414,8 @@ function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.El
 
       {/* Footnote */}
       <p className="text-[9px] text-text-muted mt-2">
-        Cost reported by opencode; when the engine reports $0 (subscription/pooled
-        billing), estimated list-price cost is shown. No 5-hour window —
-        pay-per-token.
+        Cost reported by opencode; when the engine reports $0 (subscription/pooled billing),
+        estimated list-price cost is shown. No 5-hour window — pay-per-token.
       </p>
     </div>
   )
@@ -461,7 +453,10 @@ function OpencodeModelRow({
 
 function DelegatedUsageSection({ rows }: { rows: DispatchedUsageSummary[] }): React.JSX.Element {
   return (
-    <div data-testid="DelegatedUsage" className="bg-bg-secondary rounded-xl border border-border/50 p-3">
+    <div
+      data-testid="DelegatedUsage"
+      className="bg-bg-secondary rounded-xl border border-border/50 p-3"
+    >
       <div className="flex items-center gap-2 mb-3">
         <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
           Delegated
@@ -504,8 +499,8 @@ function DelegatedUsageSection({ rows }: { rows: DispatchedUsageSummary[] }): Re
       </table>
 
       <p className="text-[9px] text-text-muted mt-2">
-        Tasks this conversation delegated to the OTHER engine via dispatch_agent — attributed to
-        the dispatching session, cost/tokens from the target&apos;s own turn result.
+        Tasks this conversation delegated to the OTHER engine via dispatch_agent — attributed to the
+        dispatching session, cost/tokens from the target&apos;s own turn result.
       </p>
     </div>
   )

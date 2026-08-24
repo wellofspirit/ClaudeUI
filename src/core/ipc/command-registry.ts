@@ -103,12 +103,7 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
  * different axis entirely: WHICH WIRE a channel is served on (`ipcMain.handle`
  * vs the WebSocket), not who is on the far end of it.
  */
-export type IdentityMethod =
-  | 'password'
-  | 'webauthn'
-  | 'enroll-token'
-  | 'none'
-  | 'host'
+export type IdentityMethod = 'password' | 'webauthn' | 'enroll-token' | 'none' | 'host'
 
 export interface ConnectionIdentity {
   method: IdentityMethod

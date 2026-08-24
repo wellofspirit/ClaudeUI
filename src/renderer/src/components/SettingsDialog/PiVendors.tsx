@@ -161,12 +161,10 @@ export function PiVendors(): React.JSX.Element {
       setProbeMap(probe)
       setOptions(opts)
       setManagedPiIds(
-        new Set(
-          [
-            CODEX_VENDOR_ID,
-            ...sharedProviders.map((provider) => provider.routes.pi.providerId ?? provider.id)
-          ]
-        )
+        new Set([
+          CODEX_VENDOR_ID,
+          ...sharedProviders.map((provider) => provider.routes.pi.providerId ?? provider.id)
+        ])
       )
     })
   }
@@ -201,9 +199,7 @@ export function PiVendors(): React.JSX.Element {
   const addableIds = Object.keys(options)
     .filter(
       (id) =>
-        !managedPiIds.has(id) &&
-        !probeMap[id] &&
-        (options[id] ?? []).some((o) => o.type === 'api')
+        !managedPiIds.has(id) && !probeMap[id] && (options[id] ?? []).some((o) => o.type === 'api')
     )
     .sort()
 

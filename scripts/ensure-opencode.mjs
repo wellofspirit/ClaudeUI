@@ -44,7 +44,7 @@ import {
   openSync,
   writeSync,
   closeSync,
-  renameSync,
+  renameSync
 } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -141,7 +141,7 @@ function writeVersionFile(extra) {
         version: getPinnedVersion(),
         platform: process.platform,
         arch: process.arch,
-        ...extra,
+        ...extra
       },
       null,
       2
@@ -163,7 +163,10 @@ function writeVersionFile(extra) {
 const TAR_BLOCK = 512
 
 function readOctal(buf, offset, len) {
-  const s = buf.subarray(offset, offset + len).toString('ascii').trim()
+  const s = buf
+    .subarray(offset, offset + len)
+    .toString('ascii')
+    .trim()
   return s ? parseInt(s, 8) : 0
 }
 
@@ -216,7 +219,7 @@ function walkTar(tar, targetSuffix) {
 
   while (pos + TAR_BLOCK <= tar.length) {
     const header = tar.subarray(pos, pos + TAR_BLOCK)
-    if (header.every((b) => b === 0)) break  // end-of-archive sentinel
+    if (header.every((b) => b === 0)) break // end-of-archive sentinel
 
     pos += TAR_BLOCK
 
@@ -309,7 +312,7 @@ async function download(pkgName, version) {
     writeVersionFile({
       source: 'release',
       package: pkgName,
-      downloadedAt: new Date().toISOString(),
+      downloadedAt: new Date().toISOString()
     })
 
     console.log(
@@ -377,7 +380,7 @@ function gitOut(args, cwd) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: ['ignore', 'pipe', 'inherit']
   }).trim()
 }
 
@@ -398,8 +401,9 @@ function distDirName() {
  * pinned standalone bun in `.cache/` and use it only for this build.
  */
 function ensureBun(forkDir) {
-  const required = JSON.parse(readFileSync(join(forkDir, 'package.json'), 'utf8'))
-    .packageManager?.split('@')[1]
+  const required = JSON.parse(
+    readFileSync(join(forkDir, 'package.json'), 'utf8')
+  ).packageManager?.split('@')[1]
   if (!required) throw new Error('fork root package.json has no packageManager field')
 
   const localOk = (() => {
@@ -445,7 +449,7 @@ function ensureBun(forkDir) {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`,
+        `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`
       ],
       { stdio: 'inherit' }
     )
@@ -519,7 +523,9 @@ async function buildFork(version, fork) {
     execFileSync(bun, ['install'], { cwd: FORK_DIR, stdio: 'inherit' })
   })
 
-  info(`[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`)
+  info(
+    `[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`
+  )
   const pkgDir = join(FORK_DIR, 'packages', 'opencode')
   execFileSync(bun, ['run', 'script/build.ts', '--single', '--skip-install'], {
     cwd: pkgDir,
@@ -527,7 +533,7 @@ async function buildFork(version, fork) {
     // Pin the version instead of letting their script derive one from the npm
     // registry / current branch name (which would produce a 0.0.0-claudeui-*
     // preview version and break every version comparison downstream).
-    env: { ...process.env, OPENCODE_VERSION: version },
+    env: { ...process.env, OPENCODE_VERSION: version }
   })
 
   const binName = binaryName()
@@ -547,9 +553,9 @@ async function buildFork(version, fork) {
       repo: fork.repo,
       branch: fork.branch,
       commit,
-      ...(fork.tag ? { forkedFrom: fork.tag } : {}),
+      ...(fork.tag ? { forkedFrom: fork.tag } : {})
     },
-    builtAt: new Date().toISOString(),
+    builtAt: new Date().toISOString()
   })
 
   console.log(

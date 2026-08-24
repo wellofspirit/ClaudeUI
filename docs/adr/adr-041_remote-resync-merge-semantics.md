@@ -14,7 +14,7 @@ snapshot is literally the **desktop renderer's** Zustand state (`window.__getRem
 
 The web client used to apply every sync-full wholesale: replace the `sessions` map, adopt the
 desktop's `activeSessionId`. On a phone this is the common path, not the edge case — mobile
-browsers discard backgrounded pages, so *every* app switch produced a full re-hydration that
+browsers discard backgrounded pages, so _every_ app switch produced a full re-hydration that
 teleported the client to whatever the desktop was showing. With the desktop on the welcome screen
 (`activeSessionId: null`) the phone fell back to its localStorage `lastSelectedEngineId` plus a
 first-in-catalog model ("opencode / Qwen 3.8 max"). Both cases were **routing bugs, not cosmetic**:
@@ -38,7 +38,7 @@ client passes `isResync = true` from the second sync-full onward (a `hasHydrated
   value when it resolves in the merged map; otherwise it falls back to the snapshot's (a stale
   pointer rendering `EMPTY_SESSION_STATE` is worse than following the desktop).
 - Server-authoritative collections (`directories`, `recentSessionIds`, pins, custom titles,
-  settings) are still adopted wholesale on every sync — the merge protects *view/navigation*
+  settings) are still adopted wholesale on every sync — the merge protects _view/navigation_
   state, not data the desktop owns.
 
 ## Consequences

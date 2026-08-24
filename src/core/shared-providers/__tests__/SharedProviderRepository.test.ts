@@ -75,9 +75,9 @@ describe('SharedProviderRepository nested validation', () => {
         models: [{ id: 'm', harnessOverrides: { pi: { enabled: 'yes' as never } } }]
       })
     ).toThrow(/models/)
-    expect(() =>
-      repo.save({ ...provider, models: [{ id: 'm', contextWindow: -1 }] })
-    ).toThrow(/models/)
+    expect(() => repo.save({ ...provider, models: [{ id: 'm', contextWindow: -1 }] })).toThrow(
+      /models/
+    )
     expect(() =>
       repo.save({
         ...provider,

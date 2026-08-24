@@ -15,6 +15,7 @@ agent. It's ClaudeUI's **third engine** (after `claude` and `opencode`), behind 
 **Architecturally pi is "Claude-shaped," not "opencode-shaped":** no server — one
 `pi --mode rpc` child process per session, LF-framed JSONL over stdio. Two things pi lacks that
 shaped every decision:
+
 - **No native permission system** → a ClaudeUI-owned TypeScript extension loaded per-spawn via `-e`
   (`src/core/pi/pi-bridge-source.ts`) whose `tool_call` hook POSTs decisions to a per-session
   loopback `PiBridgeHost`; a pure `permission-engine.ts` decides.
@@ -32,23 +33,23 @@ Code home: `src/core/pi/`. Auth: `src/core/auth/PiAuthProvider.ts`. Sidebar/hist
 Branch `pi` = `pre-release` + 27 commits, pushed to `origin/pi`. Each was built via the ADR-026
 workflow (Opus specs+reviews, Sonnet implements, gates + real-app drive before commit).
 
-| Commit | Milestone | Delivers |
-|---|---|---|
-| `71b3e1f` | M0 | `scripts/ensure-pi.mjs` (vendored binary, SHA256-verified) + `docs/protocol-pi/README.md` wire notes |
-| `f4fb7b2` | M1 | `src/main/pi/` skeleton: `PiRpcClient`, pure `event-mapper` (`mapPiEvent`), `PiSession`, `model-discovery`, `pi-session-list`; the 5 compile-enforced engine tables |
-| `f62aa10` | M2a | approval bridge: `-e` extension → `PiBridgeHost` → `permission-engine` over shared `~/.claude` rules; autonomy ask/autoEdit/full |
-| `0481757` | M2b | steer, thinking-levels→effort picker, slash/skills (`get_commands`), live bash streaming |
-| `cb2d004` | M3 | `PiAuthProvider`, Settings `pi` scope + `PiVendors`, shared skills via `resources_discover`, configurable default model |
-| `6301637` | M4a+b | hosted `render_mermaid`/`create_mockup`/`show_mockup` + pi as dispatch **source** |
-| `e54f2ac` | M4c | pi as dispatch **target** (headless `PiRpcClient` + per-target `PiBridgeHost`, two-stage approval, recursion impossible) |
-| `0e51393` | docs | ADR-035, architecture.md, ADR-026 pi-wire constraint, CLAUDE.md |
-| `771be7e` | audit fixes | SECURITY: one-shot `/hosted-tool` grants (token-only POST can no longer bypass dispatch_agent's ask), content-verified bridge file, timing-safe token; steer/doStart/exit lifecycle fixes; usage accountId; crash-path + hook-harness tests |
-| `acd3228` | audit fixes | dispatch target: failed/stopped-turn spend counts toward cap, `draining` closes the late-ask orphan race, env recursion guard overrides (not omits) the enable flags |
-| `8596223` | audit fixes | InputBox fallback ModelInfo carries explicit flags (empty-catalog pi session no longer leaks Claude pickers), pi default-model fallback branch; direct capability/store/settings test suites |
-| `5615437` | M5a | plan mode: bridge-extension `setActiveTools` switching + `exit_plan` (hidden outside plan mode), `'plan'` autonomy with per-segment read-only bash allowlist, ExitPlanModeCard/Shift+Tab wired for pi; `plan:true` |
-| `8f5a38a` | M5b | in-pi subagents: second `-e` extension porting pi's subagent example (user-level agent .md defs, child pi processes, delta streaming via onUpdate details → session:subagent-*/TaskCard, per-agent usage rows); fixed the example's upstream Windows bunfs-path bug; `subagents:true` |
-| `85a2b96` | M5c | sideQuestion (`/btw`): transcript-fed ephemeral `pi --mode rpc --no-session --no-tools` observer (context-aware, tool-disabled); `sideQuestion:true` |
-| `9515d00` | M5c | fork/forkFromMessage: engine-aware `resolveForkAnchor` (position-based for pi) + `fork`/`clone` RPC choreography (source byte-unchanged, gated-verified); `fork`/`forkFromMessage:true` |
+| Commit    | Milestone   | Delivers                                                                                                                                                                                                                                                                              |
+| --------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `71b3e1f` | M0          | `scripts/ensure-pi.mjs` (vendored binary, SHA256-verified) + `docs/protocol-pi/README.md` wire notes                                                                                                                                                                                  |
+| `f4fb7b2` | M1          | `src/main/pi/` skeleton: `PiRpcClient`, pure `event-mapper` (`mapPiEvent`), `PiSession`, `model-discovery`, `pi-session-list`; the 5 compile-enforced engine tables                                                                                                                   |
+| `f62aa10` | M2a         | approval bridge: `-e` extension → `PiBridgeHost` → `permission-engine` over shared `~/.claude` rules; autonomy ask/autoEdit/full                                                                                                                                                      |
+| `0481757` | M2b         | steer, thinking-levels→effort picker, slash/skills (`get_commands`), live bash streaming                                                                                                                                                                                              |
+| `cb2d004` | M3          | `PiAuthProvider`, Settings `pi` scope + `PiVendors`, shared skills via `resources_discover`, configurable default model                                                                                                                                                               |
+| `6301637` | M4a+b       | hosted `render_mermaid`/`create_mockup`/`show_mockup` + pi as dispatch **source**                                                                                                                                                                                                     |
+| `e54f2ac` | M4c         | pi as dispatch **target** (headless `PiRpcClient` + per-target `PiBridgeHost`, two-stage approval, recursion impossible)                                                                                                                                                              |
+| `0e51393` | docs        | ADR-035, architecture.md, ADR-026 pi-wire constraint, CLAUDE.md                                                                                                                                                                                                                       |
+| `771be7e` | audit fixes | SECURITY: one-shot `/hosted-tool` grants (token-only POST can no longer bypass dispatch_agent's ask), content-verified bridge file, timing-safe token; steer/doStart/exit lifecycle fixes; usage accountId; crash-path + hook-harness tests                                           |
+| `acd3228` | audit fixes | dispatch target: failed/stopped-turn spend counts toward cap, `draining` closes the late-ask orphan race, env recursion guard overrides (not omits) the enable flags                                                                                                                  |
+| `8596223` | audit fixes | InputBox fallback ModelInfo carries explicit flags (empty-catalog pi session no longer leaks Claude pickers), pi default-model fallback branch; direct capability/store/settings test suites                                                                                          |
+| `5615437` | M5a         | plan mode: bridge-extension `setActiveTools` switching + `exit_plan` (hidden outside plan mode), `'plan'` autonomy with per-segment read-only bash allowlist, ExitPlanModeCard/Shift+Tab wired for pi; `plan:true`                                                                    |
+| `8f5a38a` | M5b         | in-pi subagents: second `-e` extension porting pi's subagent example (user-level agent .md defs, child pi processes, delta streaming via onUpdate details → session:subagent-*/TaskCard, per-agent usage rows); fixed the example's upstream Windows bunfs-path bug; `subagents:true` |
+| `85a2b96` | M5c         | sideQuestion (`/btw`): transcript-fed ephemeral `pi --mode rpc --no-session --no-tools` observer (context-aware, tool-disabled); `sideQuestion:true`                                                                                                                                  |
+| `9515d00` | M5c         | fork/forkFromMessage: engine-aware `resolveForkAnchor` (position-based for pi) + `fork`/`clone` RPC choreography (source byte-unchanged, gated-verified); `fork`/`forkFromMessage:true`                                                                                               |
 
 Full parity with opencode: chat/tools/sessions/usage, interactive approvals honoring the **same
 `~/.claude` permission rules** as Claude/opencode, auth, shared skills, hosted mermaid/mockup,
@@ -68,19 +69,22 @@ As of the M5c/M6 work only **five** capability flags remain `false` in `PI_ENGIN
 shipped. The buckets below are kept for the rationale/history:
 
 ### Bucket A — N/A to pi (correctly false forever; don't "fix")
+
 None of these leak into the pi Settings scope (sandbox/proxy live only in the claude scope's section
 list — capability gating is belt-and-braces on top; there is no backgroundTasks settings section at
-all; voice is a common-scope section whose *behavior* is capability-gated per session). Flipping
+all; voice is a common-scope section whose _behavior_ is capability-gated per session). Flipping
 them = inventing a feature pi doesn't have.
-- **`sandbox`, `proxy`** — Claude cli.js *launch params*. pi runs tools directly; its isolation
+
+- **`sandbox`, `proxy`** — Claude cli.js _launch params_. pi runs tools directly; its isolation
   story is running pi itself in a container. No per-launch flag exists.
 - **`backgroundTasks`** — Claude's detached-bash (`BashOutput`/`KillShell` streaming to a file).
   pi's `bash` has only `timeout` + `abort_bash`. No registry to surface.
-- **`voice`** — Claude streams audio to a transcription server *inside cli.js*. pi has none.
-- **`auth.multiAccount`** — pi's `auth.json` holds one credential *per provider* (many providers OK,
+- **`voice`** — Claude streams audio to a transcription server _inside cli.js_. pi has none.
+- **`auth.multiAccount`** — pi's `auth.json` holds one credential _per provider_ (many providers OK,
   but not two ChatGPT accounts to swap). Same as opencode.
 
 ### Bucket B — real pi capabilities (BOTH now SHIPPED)
+
 - **`fork` / `forkFromMessage`** — ✅ SHIPPED (M5c, `9515d00`): engine-aware, UX-identical to Claude
   (assistant-bubble Fork button, ADR-010). Mechanism: `resolveForkAnchor` dispatches by engine; pi
   resolves by POSITION (no persisted renderer id) → the entry id of the next user message to drop,
@@ -98,6 +102,7 @@ them = inventing a feature pi doesn't have.
   ("Probed for M5a").
 
 ### Bucket C — limited by pi's design (workaround or pi-upstream)
+
 - **`auth.canDriveLogin`** — ✅ SHIPPED for `openai-codex` (M6, ADR-036): rather than driving pi's
   TUI `/login`, ClaudeUI runs the Codex OAuth flow itself in a ClaudeUI-owned **auth vault** and
   feeds BOTH pi's and opencode's native stores from one login (sole proactive refresher + fs-watch
@@ -127,6 +132,7 @@ Everything in Bucket A: leave alone.
 permission rules (`5e01935`), M6 unified auth vault (`d079489`/`2925eab`/`0f52f2c`, ADR-036), rich
 edit diffs (`f3e08c8`), effort xhigh/max from thinkingLevelMap (`9a40f12`), and the three audit
 residuals (`a9c4c52`). So these earlier "known residuals" are now CLOSED:
+
 - ~~Bridge-file TOCTOU~~ → the `-e` files moved from `os.tmpdir()` to per-user `~/.claude/ui/pi-ext/`
   (a9c4c52); the world-writable preplant window is gone.
 - ~~rule evaluator subset~~ → path-glob rules now evaluated via a faithful port of opencode's
@@ -145,6 +151,7 @@ planned.
 
 **Verified wire facts** (probed against the real binary — trust, don't re-derive; full list in
 `docs/protocol-pi/README.md`):
+
 - Framing: split stdout on `\n` only, strip trailing `\r`, NEVER Node `readline`. stdout is pure
   protocol; stderr is logging.
 - `agent_settled` is the **only** reliable turn-complete signal (`agent_end` may be followed by
@@ -159,6 +166,7 @@ planned.
   continuation, unlike the Claude target which tears down).
 
 **Gotchas that bit me:**
+
 - `InputBox` derives reasoning pickers via `claudeModelCapabilities()` for EVERY engine — non-claude
   ModelInfo MUST set `supportsEffort`/`supportedEffortLevels`/`supportsAdaptiveThinking` explicitly
   or Claude's pickers leak onto pi sessions. This now includes the synthetic empty-catalog
@@ -198,7 +206,7 @@ planned.
   `_electron` driver script in `.cache/verify/` (gitignored). Gotchas learned the hard way:
   sidebar `DirectoryItem`s are collapsed by default (click the group before asserting session rows);
   **never use a live-response needle that can self-match the user's own prompt bubble** (use a
-  model-*computed* sentinel like a math answer); assert idle via `InputBox.cancel` count 0; and the
+  model-_computed_ sentinel like a math answer); assert idle via `InputBox.cancel` count 0; and the
   Electron instance can hold a build lock — a transient build exit 9 usually means "close the prior
   driven app first."
 - **⚠️ Real-app dispatch drives can attach to the live conversation session** (most-recent ClaudeUI
@@ -219,7 +227,7 @@ are in the scratchpad (`scratchpad/specs/m*.md`) — pattern them for the next m
 - **`docs/protocol-pi/README.md`** — verified wire facts (transport, events, sessions, auth,
   extensions). Version-exact protocol docs ship in `vendor/pi-cli/docs/*.md`.
 - Source questions: **shallow-clone the pinned tag** (`git clone --depth 1 --branch v0.82.1
-  https://github.com/earendil-works/pi`) — there is deliberately NO vendored pi source clone.
+https://github.com/earendil-works/pi`) — there is deliberately NO vendored pi source clone.
 - Auto-memory `project-pi-engine-integration` (loads each session) — the one-line status + gotchas.
 - opencode is the structural template throughout: when unsure how pi should do X, read how
   `src/core/opencode/` does it (ADR-019/022/024/033).

@@ -239,7 +239,10 @@ vi.mock('../../../core/services/logger', () => ({
 
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
-import { registerRemoteHandlers, registerRemoteVersionInfo } from '../../../core/ipc/remote-handlers'
+import {
+  registerRemoteHandlers,
+  registerRemoteVersionInfo
+} from '../../../core/ipc/remote-handlers'
 import {
   CommandRegistry,
   commandRegistry,
@@ -414,7 +417,10 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('routes ordinary approval responses to the session', async () => {
-    await dispatcher.handle(makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'), remoteConn)
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'),
+      remoteConn
+    )
     expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-1', 'allow', undefined, undefined)
     expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
   })
@@ -431,7 +437,10 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('falls through to the session stopTask when the id is not a known dispatch', async () => {
-    const res = await dispatcher.handle(makeRequest('session:stop-task', 'rid-1', 'toolu_ordinary_1'), remoteConn)
+    const res = await dispatcher.handle(
+      makeRequest('session:stop-task', 'rid-1', 'toolu_ordinary_1'),
+      remoteConn
+    )
     expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_ordinary_1', 'rid-1')
     expect(sessionStub.stopTask).toHaveBeenCalledWith('toolu_ordinary_1')
     expect(res).toEqual({ success: true })
@@ -547,9 +556,9 @@ describe('registerRemoteHandlers', () => {
 
   it('session:send rejects when routingId not found', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    await expect(dispatcher.handle(makeRequest('session:send', 'missing', 'x'), remoteConn)).rejects.toThrow(
-      /No session for routingId/
-    )
+    await expect(
+      dispatcher.handle(makeRequest('session:send', 'missing', 'x'), remoteConn)
+    ).rejects.toThrow(/No session for routingId/)
   })
 
   it('session:cancel dispatches to manager.cancel', async () => {
@@ -615,7 +624,10 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('persists the rules and hot-reloads sessions for a user-scope write', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined), remoteConn)
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'user', PERMS, undefined),
+        remoteConn
+      )
       expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
         'user',
         PERMS,
@@ -625,12 +637,18 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('notifies user-scope writes even when a cwd is supplied (rules are global)', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'), remoteConn)
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'),
+        remoteConn
+      )
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
 
     it('scopes a project-scope write to sessions on that cwd', async () => {
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'), remoteConn)
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'),
+        remoteConn
+      )
       expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
         'project',
         PERMS,
@@ -642,21 +660,30 @@ describe('registerRemoteHandlers', () => {
       sessionManagerStub.forEach.mockImplementationOnce((cb: (s: any) => void) =>
         cb({ ...sessionStub, cwd: '/repo-a' })
       )
-      await dispatcher.handle(makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'), remoteConn)
+      await dispatcher.handle(
+        makeRequest('claude:save-permissions', 'project', PERMS, '/repo-a'),
+        remoteConn
+      )
       expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('survives a session whose notifySettingsChanged rejects', async () => {
       sessionStub.notifySettingsChanged.mockRejectedValueOnce(new Error('child is gone'))
       await expect(
-        dispatcher.handle(makeRequest('claude:save-permissions', 'user', PERMS, undefined), remoteConn)
+        dispatcher.handle(
+          makeRequest('claude:save-permissions', 'user', PERMS, undefined),
+          remoteConn
+        )
       ).resolves.toBeUndefined()
     })
   })
 
   it('claude:workspace-trust reports the trust flag for a cwd', async () => {
     claudeSettingsSpies.isWorkspaceTrusted.mockReturnValueOnce(false)
-    const res = await dispatcher.handle(makeRequest('claude:workspace-trust', '/repo-a'), remoteConn)
+    const res = await dispatcher.handle(
+      makeRequest('claude:workspace-trust', '/repo-a'),
+      remoteConn
+    )
     expect(claudeSettingsSpies.isWorkspaceTrusted).toHaveBeenCalledWith('/repo-a')
     expect(res).toBe(false)
   })
@@ -675,13 +702,19 @@ describe('registerRemoteHandlers', () => {
 
   it('session:stop-task returns error shape when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('session:stop-task', 'ghost', 'tool-1'), remoteConn)
+    const res = await dispatcher.handle(
+      makeRequest('session:stop-task', 'ghost', 'tool-1'),
+      remoteConn
+    )
     expect(res).toEqual({ success: false, error: 'No active session' })
   })
 
   it('session:dequeue-message returns {removed:0} when session missing', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    const res = await dispatcher.handle(makeRequest('session:dequeue-message', 'ghost', 'val'), remoteConn)
+    const res = await dispatcher.handle(
+      makeRequest('session:dequeue-message', 'ghost', 'val'),
+      remoteConn
+    )
     expect(res).toEqual({ removed: 0 })
   })
 
@@ -695,19 +728,28 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('session:set-thinking-mode routes to session.setThinkingMode', async () => {
-      await dispatcher.handle(makeRequest('session:set-thinking-mode', 'rid-1', 'think'), remoteConn)
+      await dispatcher.handle(
+        makeRequest('session:set-thinking-mode', 'rid-1', 'think'),
+        remoteConn
+      )
       expect(sessionStub.setThinkingMode).toHaveBeenCalledWith('think')
     })
 
     it('session:ask-side-question returns the session answer', async () => {
-      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'rid-1', 'q?'), remoteConn)
+      const res = await dispatcher.handle(
+        makeRequest('session:ask-side-question', 'rid-1', 'q?'),
+        remoteConn
+      )
       expect(sessionStub.askSideQuestion).toHaveBeenCalledWith('q?')
       expect(res).toBe('answer')
     })
 
     it('session:ask-side-question returns null when session missing', async () => {
       sessionManagerStub.get.mockReturnValueOnce(undefined)
-      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'ghost', 'q?'), remoteConn)
+      const res = await dispatcher.handle(
+        makeRequest('session:ask-side-question', 'ghost', 'q?'),
+        remoteConn
+      )
       expect(res).toBeNull()
     })
 
@@ -911,9 +953,9 @@ describe('registerRemoteHandlers', () => {
 
     it('git service is released even when the operation throws', async () => {
       gitSvcStub.push.mockRejectedValueOnce(new Error('remote rejected'))
-      await expect(dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)).rejects.toThrow(
-        'remote rejected'
-      )
+      await expect(
+        dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)
+      ).rejects.toThrow('remote rejected')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
     })
 
@@ -923,9 +965,15 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('engine:is-installed reports claude=true, opencode/pi from the binary probes', async () => {
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)).toBe(true)
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)).toBe(false)
-      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(false)
+      expect(
+        await dispatcher.handle(makeRequest('engine:is-installed', 'claude'), remoteConn)
+      ).toBe(true)
+      expect(
+        await dispatcher.handle(makeRequest('engine:is-installed', 'opencode'), remoteConn)
+      ).toBe(false)
+      expect(await dispatcher.handle(makeRequest('engine:is-installed', 'pi'), remoteConn)).toBe(
+        false
+      )
     })
 
     it('registers the account mutations (S4 / ADR-057 — config, not admin)', () => {
@@ -1006,15 +1054,17 @@ describe('registerRemoteHandlers', () => {
 
       expect(resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
       expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
-      const resolvedModel = await (
-        resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>
-      ).mock.results[0].value
+      const resolvedModel = await (resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>)
+        .mock.results[0].value
       // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
       expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
     })
 
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
-      await dispatcher.handle(makeRequest('session:create', 'rid-broadcast', '/tmp/proj'), remoteConn)
+      await dispatcher.handle(
+        makeRequest('session:create', 'rid-broadcast', '/tmp/proj'),
+        remoteConn
+      )
 
       expect(win.webContents.send).toHaveBeenCalledWith(
         'session:created',
@@ -1283,7 +1333,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'usage:fetch',
   'usage:fetch-block',
   'usage:fetch-dispatched',
-  'usage:set-account-filter',
+  'usage:set-account-filter'
 ] as const
 
 /**
@@ -1693,7 +1743,10 @@ describe('remote surface parity (phase 1 port)', () => {
     const spy = vi.fn()
     setAutomationManager({ delete: spy } as unknown as Parameters<typeof setAutomationManager>[0])
     await expect(
-      dispatcher.handle(makeRequest('automation:delete', '../..'), makeRemoteConnection('password', null))
+      dispatcher.handle(
+        makeRequest('automation:delete', '../..'),
+        makeRemoteConnection('password', null)
+      )
     ).rejects.toThrow(/Invalid automation id/)
     expect(spy).not.toHaveBeenCalled()
   })
@@ -1808,9 +1861,12 @@ describe('remote surface parity (phase 1 port)', () => {
     // live in their own namespace, and `authcfg:apply` refuses an `off` auth-mode
     // with a typed error (asserted in authcfg-commands.test.ts).
     expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([])
-    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('authcfg:')).sort()).toEqual(
-      [...AUTHCFG_CHANNELS].sort()
-    )
+    expect(
+      commandRegistry
+        .channels('remote')
+        .filter((c) => c.startsWith('authcfg:'))
+        .sort()
+    ).toEqual([...AUTHCFG_CHANNELS].sort())
   })
 
   it('declares the terminal KINDS the gates depend on', () => {

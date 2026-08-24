@@ -747,8 +747,7 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
 export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   const db = getDb()
   const row = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(sessionId) as
-    | SessionMetaRow
-    | undefined
+    SessionMetaRow | undefined
   return row ? rowToMeta(row) : undefined
 }
 
@@ -803,8 +802,7 @@ export function allSessionMeta(): Record<string, SessionMeta> {
 export function renameSessionMeta(oldId: string, newId: string, fallback?: SessionMeta): void {
   const db = getDb()
   const existing = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(oldId) as
-    | SessionMetaRow
-    | undefined
+    SessionMetaRow | undefined
 
   if (existing) {
     db.prepare(
@@ -1070,8 +1068,7 @@ export function insertUsageEvents(events: UsageEventRow[]): void {
 export function getUsageEventByMessageId(messageId: string): UsageEventRow | undefined {
   const db = getDb()
   const row = db.prepare('SELECT * FROM usage_event WHERE message_id = ?').get(messageId) as
-    | UsageEventDbRow
-    | undefined
+    UsageEventDbRow | undefined
   return row ? rowToUsageEvent(row) : undefined
 }
 
@@ -1730,8 +1727,7 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
 
 function getRemoteConfigDbRow(db: Db): RemoteConfigDbRow | undefined {
   return db.prepare('SELECT * FROM remote_config WHERE id = 1').get() as
-    | RemoteConfigDbRow
-    | undefined
+    RemoteConfigDbRow | undefined
 }
 
 /** Read the singleton remote-server config row, or null if never written. */
@@ -2010,7 +2006,8 @@ function rowToWebauthnCredential(row: WebauthnCredentialDbRow): WebauthnCredenti
       const parsed: unknown = JSON.parse(row.transports)
       // A hand-edited / corrupt column must not crash the auth path; it is
       // opaque metadata we only ever echo back to the browser.
-      if (Array.isArray(parsed)) transports = parsed.filter((t): t is string => typeof t === 'string')
+      if (Array.isArray(parsed))
+        transports = parsed.filter((t): t is string => typeof t === 'string')
     } catch {
       transports = null
     }
@@ -2073,8 +2070,7 @@ export function listWebauthnCredentials(): WebauthnCredentialRow[] {
 export function getWebauthnCredential(credId: string): WebauthnCredentialRow | null {
   const db = getDb()
   const row = db.prepare('SELECT * FROM webauthn_credential WHERE cred_id = ?').get(credId) as
-    | WebauthnCredentialDbRow
-    | undefined
+    WebauthnCredentialDbRow | undefined
   return row ? rowToWebauthnCredential(row) : null
 }
 
@@ -2086,8 +2082,7 @@ export function getWebauthnCredential(credId: string): WebauthnCredentialRow | n
 export function countWebauthnCredentials(): number {
   const db = getDb()
   const row = db.prepare('SELECT COUNT(*) AS n FROM webauthn_credential').get() as
-    | { n: number }
-    | undefined
+    { n: number } | undefined
   return Number(row?.n ?? 0)
 }
 
@@ -2218,7 +2213,9 @@ function rowToAuditLog(row: AuditLogDbRow): AuditLogRow {
  * keeps compiling unchanged and lands a NULL, which is exactly the value a
  * command row should carry.
  */
-export function appendAuditLog(entry: Omit<AuditLogRow, 'id' | 'detail'> & { detail?: string | null }): void {
+export function appendAuditLog(
+  entry: Omit<AuditLogRow, 'id' | 'detail'> & { detail?: string | null }
+): void {
   const db = getDb()
   db.prepare(
     `INSERT INTO audit_log (

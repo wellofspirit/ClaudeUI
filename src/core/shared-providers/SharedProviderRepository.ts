@@ -174,7 +174,8 @@ function isRoute(value: unknown): boolean {
 
 function isModel(value: SharedProviderModel): boolean {
   if (!value || typeof value.id !== 'string' || !value.id.trim()) return false
-  if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim())) return false
+  if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim()))
+    return false
   if (value.reasoning !== undefined && typeof value.reasoning !== 'boolean') return false
   if (value.vision !== undefined && typeof value.vision !== 'boolean') return false
   if (!isPositiveInteger(value.contextWindow) || !isPositiveInteger(value.maxTokens)) return false

@@ -254,9 +254,7 @@ Patch diff of a task's state changes.
   "type": "system",
   "subtype": "task_updated",
   "task_id": "...",
-  "patch": {
-    /* fields that changed — subset of task shape */
-  },
+  "patch": {/* fields that changed — subset of task shape */},
   "session_id": "...",
   "uuid": "..."
 }
@@ -335,9 +333,7 @@ API error triggered automatic retry inside the streaming layer.
   "max_retries": 5,
   "retry_delay_ms": 1500,
   "error_status": 529, // HTTP status, null if non-HTTP
-  "error": {
-    /* normalized via U9K() */
-  },
+  "error": {/* normalized via U9K() */},
   "session_id": "...",
   "uuid": "..."
 }
@@ -750,11 +746,7 @@ Fire-and-forget push of the **full** slash-command list after a mid-session chan
 {
   "type": "system",
   "subtype": "commands_changed",
-  "commands": [
-    {
-      /* same command shape as initialize's supportedCommands */
-    }
-  ],
+  "commands": [{/* same command shape as initialize's supportedCommands */}],
   "session_id": "...",
   "uuid": "..."
 }

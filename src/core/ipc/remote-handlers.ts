@@ -272,8 +272,7 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
       const msg = message as Record<string, unknown>
       if (msg.type === 'assistant') {
         const betaMessage = msg.message as
-          | { content?: Array<{ type: string; text?: string }> }
-          | undefined
+          { content?: Array<{ type: string; text?: string }> } | undefined
         if (betaMessage?.content) {
           for (const block of betaMessage.content) {
             if (block.type === 'text' && block.text) result += block.text
@@ -345,22 +344,18 @@ export function registerRemoteHandlers(
       forkSession?: boolean,
       engineId?: EngineId
     ) => {
-      await prepareAndCreateSession(
-        manager,
-        getHostWindow(),
-        {
-          routingId,
-          cwd,
-          effort,
-          resumeSessionId,
-          permissionMode,
-          model,
-          thinkingMode,
-          resumeSessionAt,
-          forkSession,
-          engineId
-        }
-      )
+      await prepareAndCreateSession(manager, getHostWindow(), {
+        routingId,
+        cwd,
+        effort,
+        resumeSessionId,
+        permissionMode,
+        model,
+        thinkingMode,
+        resumeSessionAt,
+        forkSession,
+        engineId
+      })
     }
   })
 
@@ -382,7 +377,13 @@ export function registerRemoteHandlers(
     channel: 'session:resolve-fork-anchor',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, cwd: string, messageId: string, engineId: EngineId, messageIndex: number) => {
+    handler: async (
+      sessionId: string,
+      cwd: string,
+      messageId: string,
+      engineId: EngineId,
+      messageIndex: number
+    ) => {
       return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
     }
   })
@@ -460,7 +461,8 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string, toolUseId: string) => unwatchBackground(manager, routingId, toolUseId)
+    handler: async (routingId: string, toolUseId: string) =>
+      unwatchBackground(manager, routingId, toolUseId)
   })
 
   handleRemote({
@@ -515,8 +517,7 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, value: string) =>
-      dequeueMessage(manager, routingId, value)
+    handler: async (routingId: string, value: string) => dequeueMessage(manager, routingId, value)
   })
 
   handleRemote({
@@ -524,8 +525,7 @@ export function registerRemoteHandlers(
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, mode: string) =>
-      setPermissionMode(manager, routingId, mode)
+    handler: async (routingId: string, mode: string) => setPermissionMode(manager, routingId, mode)
   })
 
   handleRemote({
@@ -541,8 +541,7 @@ export function registerRemoteHandlers(
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, effort: string) =>
-      setEffort(manager, routingId, effort)
+    handler: async (routingId: string, effort: string) => setEffort(manager, routingId, effort)
   })
 
   handleRemote({
@@ -550,8 +549,7 @@ export function registerRemoteHandlers(
     capability: 'session-config',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, mode: string) =>
-      setThinkingMode(manager, routingId, mode)
+    handler: async (routingId: string, mode: string) => setThinkingMode(manager, routingId, mode)
   })
 
   handleRemote({
@@ -659,8 +657,7 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string) =>
-      getPlanContent(manager, routingId)
+    handler: async (routingId: string) => getPlanContent(manager, routingId)
   })
 
   handleRemote({
@@ -668,8 +665,7 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string) =>
-      getSessionLogPath(manager, routingId)
+    handler: async (routingId: string) => getSessionLogPath(manager, routingId)
   })
 
   handleRemote({
@@ -694,8 +690,7 @@ export function registerRemoteHandlers(
     channel: 'session:load-opencode-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string) =>
-      loadOpencodeSessionHistory(sessionId)
+    handler: async (sessionId: string) => loadOpencodeSessionHistory(sessionId)
   })
   handleRemote({
     channel: 'session:list-pi',
@@ -707,8 +702,7 @@ export function registerRemoteHandlers(
     channel: 'session:load-pi-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string) =>
-      loadPiSessionHistory(sessionId)
+    handler: async (sessionId: string) => loadPiSessionHistory(sessionId)
   })
 
   // Live transcript watching (drives the remote client's live history view).
@@ -760,15 +754,13 @@ export function registerRemoteHandlers(
     channel: 'session:generate-title',
     capability: 'chat',
     kind: 'command',
-    handler: async (conversationText: string) =>
-      generateTitle(conversationText)
+    handler: async (conversationText: string) => generateTitle(conversationText)
   })
   handleRemote({
     channel: 'session:generate-commit-message',
     capability: 'chat',
     kind: 'command',
-    handler: async (diff: string) =>
-      generateCommitMessage(diff)
+    handler: async (diff: string) => generateCommitMessage(diff)
   })
 
   handleRemote({
@@ -852,8 +844,7 @@ export function registerRemoteHandlers(
     channel: 'config:save-settings',
     capability: 'config',
     kind: 'command',
-    handler: async (settings: UISettings) =>
-      saveUiSettings(manager, settings)
+    handler: async (settings: UISettings) => saveUiSettings(manager, settings)
   })
   handleRemote({
     channel: 'config:load-sessions',
@@ -865,8 +856,7 @@ export function registerRemoteHandlers(
     channel: 'config:save-sessions',
     capability: 'config',
     kind: 'command',
-    handler: async (config: UISessionConfig) =>
-      saveSessions(config)
+    handler: async (config: UISessionConfig) => saveSessions(config)
   })
   handleRemote({
     channel: 'config:load-slash-commands',
@@ -890,8 +880,7 @@ export function registerRemoteHandlers(
     channel: 'shared-provider:models',
     capability: 'config',
     kind: 'query',
-    handler: async (id: string) =>
-      sharedProviderService.listProviderModels(id)
+    handler: async (id: string) => sharedProviderService.listProviderModels(id)
   })
   handleRemote({
     channel: 'config:scan-custom-commands',
@@ -903,8 +892,7 @@ export function registerRemoteHandlers(
     channel: 'config:load-skill-details',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) =>
-      loadSkillDetails(manager, cwd)
+    handler: async (cwd: string) => loadSkillDetails(manager, cwd)
   })
 
   // Claude permissions — full parity with the desktop handler (same
@@ -942,8 +930,7 @@ export function registerRemoteHandlers(
     channel: 'claude:set-cleanup-period',
     capability: 'config',
     kind: 'command',
-    handler: async (days: number) =>
-      setCleanupPeriod(manager, days)
+    handler: async (days: number) => setCleanupPeriod(manager, days)
   })
 
   // MCP config (read-only)
@@ -1062,15 +1049,13 @@ export function registerRemoteHandlers(
     channel: 'git:checkout',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, branch: string) =>
-      withGit(cwd, (s) => s.checkout(branch))
+    handler: async (cwd: string, branch: string) => withGit(cwd, (s) => s.checkout(branch))
   })
   handleRemote({
     channel: 'git:create-branch',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, name: string) =>
-      withGit(cwd, (s) => s.createBranch(name))
+    handler: async (cwd: string, name: string) => withGit(cwd, (s) => s.createBranch(name))
   })
   handleRemote({
     channel: 'git:file-patch',
@@ -1090,22 +1075,19 @@ export function registerRemoteHandlers(
     channel: 'git:stage-file',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, filePath: string) =>
-      withGit(cwd, (s) => s.stageFile(filePath))
+    handler: async (cwd: string, filePath: string) => withGit(cwd, (s) => s.stageFile(filePath))
   })
   handleRemote({
     channel: 'git:unstage-file',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, filePath: string) =>
-      withGit(cwd, (s) => s.unstageFile(filePath))
+    handler: async (cwd: string, filePath: string) => withGit(cwd, (s) => s.unstageFile(filePath))
   })
   handleRemote({
     channel: 'git:discard-file',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, filePath: string) =>
-      withGit(cwd, (s) => s.discardFile(filePath))
+    handler: async (cwd: string, filePath: string) => withGit(cwd, (s) => s.discardFile(filePath))
   })
   handleRemote({
     channel: 'git:stage-all',
@@ -1123,8 +1105,7 @@ export function registerRemoteHandlers(
     channel: 'git:commit',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, message: string) =>
-      withGit(cwd, (s) => s.commit(message))
+    handler: async (cwd: string, message: string) => withGit(cwd, (s) => s.commit(message))
   })
   handleRemote({
     channel: 'git:push',
@@ -1136,8 +1117,7 @@ export function registerRemoteHandlers(
     channel: 'git:push-with-upstream',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, branch: string) =>
-      withGit(cwd, (s) => s.pushWithUpstream(branch))
+    handler: async (cwd: string, branch: string) => withGit(cwd, (s) => s.pushWithUpstream(branch))
   })
   handleRemote({
     channel: 'git:pull',

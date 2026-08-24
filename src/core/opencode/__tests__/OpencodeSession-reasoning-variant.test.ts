@@ -16,7 +16,9 @@ import { EventEmitter } from 'node:events'
 
 class MockWindow extends EventEmitter {
   webContents = { send: vi.fn() }
-  isDestroyed(): boolean { return false }
+  isDestroyed(): boolean {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +67,25 @@ const {
   const MockOpencodeClient = vi.fn()
 
   return {
-    mockAcquire, mockRelease, mockCreateSession, mockPromptAsync, mockAbortSession,
-    mockPatchSession, mockReplyPermission, mockReplyQuestion, mockRejectQuestion,
-    mockSubscribeEvents, mockLoadClaudePermissions, mockSaveClaudePermissions,
-    mockLoadEngineConfig, mockPrompt, mockDeleteSession, mockListCommands,
-    mockListSkills, mockRunCommand, MockOpencodeClient
+    mockAcquire,
+    mockRelease,
+    mockCreateSession,
+    mockPromptAsync,
+    mockAbortSession,
+    mockPatchSession,
+    mockReplyPermission,
+    mockReplyQuestion,
+    mockRejectQuestion,
+    mockSubscribeEvents,
+    mockLoadClaudePermissions,
+    mockSaveClaudePermissions,
+    mockLoadEngineConfig,
+    mockPrompt,
+    mockDeleteSession,
+    mockListCommands,
+    mockListSkills,
+    mockRunCommand,
+    MockOpencodeClient
   }
 })
 
@@ -146,7 +162,11 @@ function setupMocks(): void {
   mockRunCommand.mockReset()
 
   mockLoadClaudePermissions.mockReturnValue({
-    allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined
   })
   mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
   mockDeleteSession.mockResolvedValue(undefined)
@@ -196,7 +216,10 @@ function setupMocks(): void {
 
 function makeSession(model = 'minimax/minimax-01'): OpencodeSession {
   const win = new MockWindow() as unknown as HostWindowHandle
-  return new OpencodeSession('r-variant-1', win, '/tmp/test-cwd', { permissionMode: 'default', model })
+  return new OpencodeSession('r-variant-1', win, '/tmp/test-cwd', {
+    permissionMode: 'default',
+    model
+  })
 }
 
 // ---------------------------------------------------------------------------

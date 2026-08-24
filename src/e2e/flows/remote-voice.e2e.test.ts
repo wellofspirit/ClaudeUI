@@ -64,13 +64,16 @@ vi.mock('../../core/services/claude-session', () => ({
 
 import { RemoteServer } from '../../core/services/remote-server'
 import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
-import { registerCommand, commandRegistry, type CommandConnection } from '../../core/ipc/command-registry'
+import {
+  registerCommand,
+  commandRegistry,
+  type CommandConnection
+} from '../../core/ipc/command-registry'
 import { STREAM_WATCH_COMMAND } from '../../core/ipc/stream-watch'
 import { remoteVoice } from '../../core/services/remote-voice'
 import { emitEvent, syncCore } from '../../core/services/sync-host'
 import type { SessionManager } from '../../core/services/session-manager'
 import type { WsServerMessage, StreamEventFrame } from '../../shared/remote-protocol'
-
 
 const ROUTING_ID = 'rid-voice-e2e'
 const CWD = '/tmp/voice'
@@ -285,7 +288,9 @@ describe('E2E: remote voice input (phase 5 S3)', () => {
     // Not answered either: no error frame a prober could read as "no capture here".
     expect(stranger.frames.some((f) => f.type === 'stream-ev')).toBe(false)
     // And the socket is still perfectly usable.
-    await expect(stranger.client.invoke('stream:watch', { sessionIds: [] })).resolves.toBeUndefined()
+    await expect(
+      stranger.client.invoke('stream:watch', { sessionIds: [] })
+    ).resolves.toBeUndefined()
 
     await stranger.client.close()
   })

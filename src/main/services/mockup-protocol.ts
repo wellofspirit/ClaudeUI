@@ -2,7 +2,10 @@ import { protocol } from 'electron'
 import * as fs from 'fs'
 import { join, resolve, extname, sep } from 'path'
 import { MOCKUP_ASSET_SCHEME, MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
-import { getMockupSecuritySettings, type MockupSecuritySettings } from '../../core/services/mockup-settings'
+import {
+  getMockupSecuritySettings,
+  type MockupSecuritySettings
+} from '../../core/services/mockup-settings'
 import { isPathInside } from '../../core/services/path-containment'
 
 export { MOCKUP_ASSET_SCHEME }

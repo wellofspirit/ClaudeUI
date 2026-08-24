@@ -47,9 +47,9 @@ describe('TodoWidget', () => {
 
   it('renders counts correctly and expands on click', () => {
     seed.plan(ROUTE, [
-        makeTodo({ content: 'A', status: 'completed' }),
-        makeTodo({ content: 'B', status: 'pending' })
-      ])
+      makeTodo({ content: 'A', status: 'completed' }),
+      makeTodo({ content: 'B', status: 'pending' })
+    ])
 
     const { getByText, container } = render(<TodoWidget />)
     expect(getByText('1/2')).toBeInTheDocument()

@@ -18,9 +18,7 @@ import {
   makePendingApproval,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type {
-  PermissionMode,
-} from '../../shared/types'
+import type { PermissionMode } from '../../shared/types'
 
 let app: TestApp
 let permissionModeCalls: Array<{ routingId: string; mode: PermissionMode }>

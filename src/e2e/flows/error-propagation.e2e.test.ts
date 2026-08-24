@@ -96,7 +96,10 @@ describe('E2E: error propagation', () => {
 
     app.emit('session:error', routingId, 'persistent error')
     // Simulate status going back to idle
-    seed.status(routingId, makeSessionStatus({ state: 'idle', sessionId: routingId, model: null, cwd: null }))
+    seed.status(
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId, model: null, cwd: null })
+    )
     expect(useSessionStore.getState().sessions[routingId].errors).toEqual(['persistent error'])
   })
 })
@@ -129,8 +132,14 @@ describe('E2E: warning propagation (model_refusal_fallback / model_fallback)', (
     const routingId = 'r1'
     const store = useSessionStore.getState()
     store.createNewSession(routingId, '/test')
-    seed.message(routingId, makeChatMessage({ id: 'msg_refused', content: [{ type: 'text', text: 'partial' }] }))
-    seed.message(routingId, makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] }))
+    seed.message(
+      routingId,
+      makeChatMessage({ id: 'msg_refused', content: [{ type: 'text', text: 'partial' }] })
+    )
+    seed.message(
+      routingId,
+      makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] })
+    )
     seed.streamText(routingId, 'refused partial stream')
 
     app.emit('session:messages-retracted', routingId, { messageIds: ['msg_refused'] })

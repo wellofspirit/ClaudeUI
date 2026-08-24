@@ -15,10 +15,7 @@
  */
 
 import fs from 'fs'
-import {
-  resolveOpencodeAuthJsonPath,
-  readOpencodeCredentialTypes
-} from '../opencode/auth-store'
+import { resolveOpencodeAuthJsonPath, readOpencodeCredentialTypes } from '../opencode/auth-store'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
@@ -78,7 +75,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       try {
         const [configResp, authCatalog] = await Promise.all([
           client.getConfigProviders().catch(() => ({ providers: [] })),
-          client.getProviderAuth().catch(() => ({} as Record<string, unknown[]>))
+          client.getProviderAuth().catch(() => ({}) as Record<string, unknown[]>)
         ])
 
         const map: VendorAuthMap = {}
@@ -353,7 +350,12 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       if (!entry || typeof entry !== 'object') return null
       const e = entry as Record<string, unknown>
       if (e.type !== 'oauth') return null
-      if (typeof e.access !== 'string' || typeof e.refresh !== 'string' || typeof e.expires !== 'number') return null
+      if (
+        typeof e.access !== 'string' ||
+        typeof e.refresh !== 'string' ||
+        typeof e.expires !== 'number'
+      )
+        return null
       const accountId = typeof e.accountId === 'string' ? e.accountId : undefined
       return { access: e.access, refresh: e.refresh, expires: e.expires, accountId }
     } catch {

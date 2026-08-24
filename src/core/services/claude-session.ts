@@ -733,10 +733,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
             'claude-ui-mockup': mockupMcpServer as never,
             // Deliberately NOT in allowedTools and NOT auto-allowed in
             // canUseTool — dispatch_agent must hit the normal approval path.
-            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<
-              string,
-              never
-            >)
+            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<string, never>)
           },
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
@@ -872,8 +869,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         .initializationResult()
         .then((init) => {
           const account = (init as Record<string, unknown>)?.account as
-            | Record<string, unknown>
-            | undefined
+            Record<string, unknown> | undefined
           // `account.email` present = logged in (subscription or API key). A
           // logged-out cli.js returns an account with no email (tokenSource
           // "none"); an expired-but-cached login still has an email — that 401s
@@ -1819,7 +1815,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // session cannot do.
     if (!this.win) {
       stopRecording()
-      this.send('voice:error', 'Voice input needs the desktop window (this app is running windowless).')
+      this.send(
+        'voice:error',
+        'Voice input needs the desktop window (this app is running windowless).'
+      )
       return
     }
     const win = this.win

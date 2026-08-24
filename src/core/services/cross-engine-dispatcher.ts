@@ -53,7 +53,11 @@ import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiB
 import { mapPiEvent, createPiMapperState } from '../pi/event-mapper'
 import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
 import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
-import type { PiGetStateData, PiGetLastAssistantTextData, PiGetSessionStatsData } from '../pi/pi-protocol'
+import type {
+  PiGetStateData,
+  PiGetLastAssistantTextData,
+  PiGetSessionStatsData
+} from '../pi/pi-protocol'
 import { engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
@@ -735,7 +739,10 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
     case 'plan':
       return { permissionMode: 'default', allowDangerouslySkipPermissions: false }
     default:
-      return { permissionMode: autonomyMode as PermissionMode, allowDangerouslySkipPermissions: false }
+      return {
+        permissionMode: autonomyMode as PermissionMode,
+        allowDangerouslySkipPermissions: false
+      }
   }
 }
 
@@ -966,11 +973,7 @@ export class CrossEngineDispatcher {
    * yet (see the pendingStops field doc); `dispatchInner` consumes the intent
    * at registration and aborts the turn immediately.
    */
-  stopDispatch(
-    toolUseId: string,
-    routingId?: string,
-    opts?: { armIfUnknown?: boolean }
-  ): boolean {
+  stopDispatch(toolUseId: string, routingId?: string, opts?: { armIfUnknown?: boolean }): boolean {
     const active = this.activeByToolUseId.get(toolUseId)
     if (!active) {
       // Not necessarily an error (most stop-task calls target native tasks) —
@@ -1187,7 +1190,11 @@ export class CrossEngineDispatcher {
     let entry: OpencodeTargetEntry
     if (req.sessionId) {
       const existing = this.targets.get(req.sessionId)
-      if (!existing || existing.kind !== 'opencode' || existing.fromRoutingId !== ctx.fromRoutingId) {
+      if (
+        !existing ||
+        existing.kind !== 'opencode' ||
+        existing.fromRoutingId !== ctx.fromRoutingId
+      ) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
             'Start a fresh dispatch without session_id.'
@@ -1213,7 +1220,10 @@ export class CrossEngineDispatcher {
       // alive — raising dispatch.maxCostUsd or starting a fresh dispatch both
       // recover. A brand-new target (the `else` branch below) always starts
       // at cumulativeCostUsd 0, so no check is needed there.
-      if (dispatchCfg?.maxCostUsd !== undefined && existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd) {
+      if (
+        dispatchCfg?.maxCostUsd !== undefined &&
+        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
+      ) {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
@@ -1371,7 +1381,12 @@ export class CrossEngineDispatcher {
         this.dismissPendingForTarget(entry.sessionId)
         const detail =
           turnError.data?.message || turnError.name || 'the dispatched agent reported an error'
-        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${detail}`)
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId,
+          'failed',
+          `Dispatched turn failed: ${detail}`
+        )
         // opencode RESOLVES the prompt with real `info.tokens`/`info.cost` even
         // when the turn reports an error (the turn ran, it just didn't finish
         // cleanly) — capture that spend instead of fabricating nulls, and fold
@@ -1380,7 +1395,9 @@ export class CrossEngineDispatcher {
         // that never count toward maxCostUsd or the dispatching session's cost.
         const errInfoTokens = resp?.info?.tokens
         const errTotalTokens = errInfoTokens
-          ? (errInfoTokens.input ?? 0) + (errInfoTokens.output ?? 0) + (errInfoTokens.reasoning ?? 0)
+          ? (errInfoTokens.input ?? 0) +
+            (errInfoTokens.output ?? 0) +
+            (errInfoTokens.reasoning ?? 0)
           : 0
         const errTurnCostUsd = resp?.info?.cost ?? 0
         this.safeRecordUsage({
@@ -1424,7 +1441,8 @@ export class CrossEngineDispatcher {
       entry.cumulativeCostUsd += turnCostUsd
       let outText = finalText
       if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-        outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+        outText +=
+          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
 
       // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
@@ -1707,7 +1725,10 @@ export class CrossEngineDispatcher {
       // cumulative cost has met/exceeded the configured cap (same semantics
       // as the opencode direction above). A brand-new target always starts at
       // cumulativeCostUsd 0.
-      if (dispatchCfg?.maxCostUsd !== undefined && existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd) {
+      if (
+        dispatchCfg?.maxCostUsd !== undefined &&
+        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
+      ) {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
@@ -1875,8 +1896,7 @@ export class CrossEngineDispatcher {
       // DB record, and Slice C fold-in below all consume the same delta.
       // Math.max(0, …) guards against a pathological backwards total.
       const usageFields = result.usage as
-        | { input_tokens?: number; output_tokens?: number }
-        | undefined
+        { input_tokens?: number; output_tokens?: number } | undefined
       const totalTokens = usageFields
         ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
         : 0
@@ -1937,7 +1957,8 @@ export class CrossEngineDispatcher {
       entry.cumulativeCostUsd += turnCostUsd
       let outText = finalText
       if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-        outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+        outText +=
+          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
 
       // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
@@ -2179,7 +2200,11 @@ export class CrossEngineDispatcher {
    * actually spent by the time the caller reads it. Returns the turn's own
    * delta (>= 0) for the caller to fold into a usage row.
    */
-  private accountPiNonSuccessCost(entry: PiTargetEntry, ctx: DispatchContext, model: string): number {
+  private accountPiNonSuccessCost(
+    entry: PiTargetEntry,
+    ctx: DispatchContext,
+    model: string
+  ): number {
     const turnCostUsd = Math.max(0, entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd)
     entry.lastReportedTotalCostUsd = entry.mapperState.totalCostUsd
     entry.cumulativeCostUsd += turnCostUsd
@@ -2298,7 +2323,10 @@ export class CrossEngineDispatcher {
           req.sessionId
         )
       }
-      if (dispatchCfg?.maxCostUsd !== undefined && existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd) {
+      if (
+        dispatchCfg?.maxCostUsd !== undefined &&
+        existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd
+      ) {
         return errorResult(
           `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
             `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
@@ -2508,7 +2536,8 @@ export class CrossEngineDispatcher {
       entry.cumulativeCostUsd += turnCostUsd
       let outText = finalText
       if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-        outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+        outText +=
+          '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
 
       // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
@@ -2793,7 +2822,10 @@ export class CrossEngineDispatcher {
    * NOT consult (rules are empty here), so its practical value would be
    * limited to a future INTERACTIVE pi session, not this or a future dispatch.
    */
-  private gatePiTargetToolCall(entry: PiTargetEntry, payload: PiToolCallPayload): Promise<GateDecision> {
+  private gatePiTargetToolCall(
+    entry: PiTargetEntry,
+    payload: PiToolCallPayload
+  ): Promise<GateDecision> {
     // See PiTargetEntry.draining's doc comment — a late 'ask' from an already
     // stopped/timed-out/aborted turn must never register a pending approval.
     if (entry.draining) {

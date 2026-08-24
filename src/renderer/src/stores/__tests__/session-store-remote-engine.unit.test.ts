@@ -20,7 +20,11 @@ import { hydrateReplica } from '@renderer/stores/replica'
 
 const store = () => useSessionStore.getState()
 const ROUTE = 'r-engine-1'
-const OPENCODE_MODEL: ModelRef = { engineId: 'opencode', vendorId: 'openai', modelId: 'openai/gpt-5' }
+const OPENCODE_MODEL: ModelRef = {
+  engineId: 'opencode',
+  vendorId: 'openai',
+  modelId: 'openai/gpt-5'
+}
 
 beforeEach(() => {
   // The replica is a module singleton holding canonical state: resetting only the
@@ -114,7 +118,9 @@ describe('hydrateReplica — engine identity round-trip (H15)', () => {
 
 describe('applyExternalSessionConfig — sessionEngines preservation (H15)', () => {
   it('leaves the existing map intact when the payload omits sessionEngines', () => {
-    useSessionStore.setState({ sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } } })
+    useSessionStore.setState({
+      sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } }
+    })
     mirrorStoreIntoReplica()
 
     // File-watcher payload (sessions.json) — carries lists but NOT sessionEngines.
@@ -127,7 +133,9 @@ describe('applyExternalSessionConfig — sessionEngines preservation (H15)', () 
   })
 
   it('overwrites sessionEngines only when the key is genuinely present', () => {
-    useSessionStore.setState({ sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } } })
+    useSessionStore.setState({
+      sessionEngines: { s1: { engineId: 'opencode', model: OPENCODE_MODEL } }
+    })
     mirrorStoreIntoReplica()
     seed.sessionsConfig({ sessionEngines: { s2: { engineId: 'pi' } } })
     expect(store().sessionEngines).toEqual({ s2: { engineId: 'pi' } })

@@ -403,11 +403,9 @@ function resolveActiveSessionId(
 ): string | null {
   const local = useSessionStore.getState().activeSessionId
   return (
-    [
-      isResync ? local : null,
-      snapshot.activeSessionId,
-      ...(snapshot.recentSessionIds ?? [])
-    ].find((id): id is string => !!id && !!next.sessions[id]) ?? null
+    [isResync ? local : null, snapshot.activeSessionId, ...(snapshot.recentSessionIds ?? [])].find(
+      (id): id is string => !!id && !!next.sessions[id]
+    ) ?? null
   )
 }
 
@@ -654,7 +652,8 @@ function buildPatch(
     patch.pinnedSessionIds = next.pinnedSessionIds
   }
   if (force || prev.customTitles !== next.customTitles) patch.customTitles = next.customTitles
-  if (force || prev.sessionEngines !== next.sessionEngines) patch.sessionEngines = next.sessionEngines
+  if (force || prev.sessionEngines !== next.sessionEngines)
+    patch.sessionEngines = next.sessionEngines
   if (force || prev.hiddenSessions !== next.hiddenSessions) {
     patch.hiddenSessionIds = next.hiddenSessions
   }
@@ -670,7 +669,10 @@ function buildPatch(
     patch.autoModeDisabledBySettings = next.autoModeDisabledBySettings
   }
   if (force || prev.settings !== next.settings) {
-    const settings: AppSettings = { ...DEFAULT_SETTINGS, ...(next.settings as Partial<AppSettings>) }
+    const settings: AppSettings = {
+      ...DEFAULT_SETTINGS,
+      ...(next.settings as Partial<AppSettings>)
+    }
     patch.settings = settings
     // Derived, not replicated: the web client never runs `hydrateConfigFromDisk`,
     // so the fields that hydration derives from settings must be derived here too

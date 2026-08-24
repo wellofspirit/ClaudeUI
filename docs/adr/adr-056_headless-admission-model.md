@@ -2,15 +2,15 @@
 
 **Status:** **Implemented** (owner-ratified 2026-08-17 design session; landed as headless-arc series S1a). **Amended 2026-08-18** — the LAN channel falls back to pure-JS AES-GCM where a browser withholds Web Crypto; see [Amendment](#amendment--2026-08-18-the-lan-channel-needs-a-cipher-a-browser-will-actually-run) at the end. Normative as-built record: [security.md](../architecture/security.md); handshake/transport detail in [remote.md](../architecture/remote.md).
 **Relates to:** ADR-042 (pinned HTTPS port — unchanged), ADR-051 (the command registry this rides on), ADR-055 (the no-compatibility-lane precedent).
-**Supersedes in part:** ADR-039 — its **token mode** is retired outright, and its "confidentiality is delegated to the transport" caveat is narrowed by LAN E2E. Its transport hardening (Host allowlist, throttling, funnel reject, the identity-header trust predicate) carries forward unchanged, as does the tailnet-identity *evaluation* — demoted to a username hint.
+**Supersedes in part:** ADR-039 — its **token mode** is retired outright, and its "confidentiality is delegated to the transport" caveat is narrowed by LAN E2E. Its transport hardening (Host allowlist, throttling, funnel reject, the identity-header trust predicate) carries forward unchanged, as does the tailnet-identity _evaluation_ — demoted to a username hint.
 **Supersedes in part:** ADR-052 — its **`passkeyTailnetExempt`** setting and the ambient tailnet admission it exempted from, its `legacy` policy mode, and the grant carve-out that withheld `enroll` from a password login. Its passkey layer, `enroll` capability, enrollment flow and audit contract stand.
-**Cross-reference:** ADR-054 — the **host anchor is unchanged**. Auth-DISABLING operations stay host-anchor only (desktop renderer, or the server's own console/config on a headless box), `remote:set-config` keeps its structural no-remote-registration guarantee, and the settings-editing session is untouched. This ADR only changes *who gets in and holding what*, plus which key their channel uses.
+**Cross-reference:** ADR-054 — the **host anchor is unchanged**. Auth-DISABLING operations stay host-anchor only (desktop renderer, or the server's own console/config on a headless box), `remote:set-config` keeps its structural no-remote-registration guarantee, and the settings-editing session is untouched. This ADR only changes _who gets in and holding what_, plus which key their channel uses.
 
 ## Context
 
 The headless target forced a question the desktop deployment let us dodge: **what, exactly, does a URL prove?**
 
-As built, a `/remote` link could carry a 256-bit access token in its fragment, and holding it authenticated the socket. That made a bookmark a credential. Alongside it, `tailscale serve` supplied an *ambient* admission — the owner's own browser was authenticated from the upgrade headers, before any client frame — which made a network fact stand in for a person. Both were reasonable for "scan a QR from the couch". Neither survives contact with a box that has no desktop to anchor the first device to, and both had already produced real defects:
+As built, a `/remote` link could carry a 256-bit access token in its fragment, and holding it authenticated the socket. That made a bookmark a credential. Alongside it, `tailscale serve` supplied an _ambient_ admission — the owner's own browser was authenticated from the upgrade headers, before any client frame — which made a network fact stand in for a person. Both were reasonable for "scan a QR from the couch". Neither survives contact with a box that has no desktop to anchor the first device to, and both had already produced real defects:
 
 - `grantsFor` and `ceremonyRequiredForAuth` were two functions restating one admission rule for the `token` / `tailnet-identity` arms. They drifted within a week, and the result was a connection the server ACCEPTED and then refused on every single invoke.
 - The ambient accept raced the enrollment link at exactly the origin where enrollment must happen, so the first device could never spend its token. That needed a whole flag (`?intent=enroll`) to break.
@@ -27,13 +27,13 @@ The owner's ruling collapses all of it into one sentence.
 
 A URL fragment may carry a **channel key** (`#k=`), which opens an encrypted pipe and buys nothing else. What a connection may DO is decided by the credential it presents inside that pipe. The enrollment link is the one exception, and it is bounded to match: single-use, short TTL, `enroll` and nothing else.
 
-| Origin | Channel | Identity |
-| --- | --- | --- |
-| Tailnet HTTPS (`tailscale serve`) | TLS; **no fragment secret at all** | Passkey ceremony per policy; break-glass password |
-| Cloudflared tunnel | E2E, **ephemeral** key (dies with the tunnel) | Password **required**, inside the ciphertext |
-| LAN direct | E2E, **persistent** key (DB-stored, rotatable) | Password **required**, inside the ciphertext |
-| localhost dev | none needed (local + secure context) | As tailnet |
-| Desktop renderer (MessagePort) | the port IS the trust | none |
+| Origin                            | Channel                                        | Identity                                          |
+| --------------------------------- | ---------------------------------------------- | ------------------------------------------------- |
+| Tailnet HTTPS (`tailscale serve`) | TLS; **no fragment secret at all**             | Passkey ceremony per policy; break-glass password |
+| Cloudflared tunnel                | E2E, **ephemeral** key (dies with the tunnel)  | Password **required**, inside the ciphertext      |
+| LAN direct                        | E2E, **persistent** key (DB-stored, rotatable) | Password **required**, inside the ciphertext      |
+| localhost dev                     | none needed (local + secure context)           | As tailnet                                        |
+| Desktop renderer (MessagePort)    | the port IS the trust                          | none                                              |
 
 ### 2. The handshake ORDER inverts on E2E origins
 
@@ -42,7 +42,7 @@ A URL fragment may carry a **channel key** (`#k=`), which opens an encrypted pip
 Consequences, all deliberate:
 
 - **A plaintext socket on a LAN origin is refused** (close 4004). This is the same rule rather than an extra one: on an E2E origin nothing is read in the clear, so a plaintext first frame is a socket that never proved the channel.
-- **A channel with no identity is refused with a typed `password-required`**, rendered as *"provision a password on the host to use this link"*. It spends no failure budget — nothing the caller did was wrong. Starting a tunnel with no password provisioned stays allowed; the status surface carries the same warning.
+- **A channel with no identity is refused with a typed `password-required`**, rendered as _"provision a password on the host to use this link"_. It spends no failure budget — nothing the caller did was wrong. Starting a tunnel with no password provisioned stays allowed; the status surface carries the same warning.
 - **The ack is the client's proof its key was right.** A stale `#k=` decrypts nothing, so the client sends no credential and the socket dies on the pre-auth clock. (The web client times its own activation out at 10 s and says the link is out of date, rather than looping a backoff.)
 - **A wrong key spends the per-IP failure budget.** The wrong-key client is observable server-side — its first encrypted frame fails to decrypt on a pre-auth socket — and that is where the charge lands. The charge bounds online probing and socket churn — against 256 bits an offline oracle is academic either way, but `#k=` must not be the one secret whose online probing is free. The budget is now **single**: with the token retired, everything that can fail (password proof, passkey assertion, enrollment link, channel activation) is either user-chosen or worth guessing, so the strict 5-per-5-minutes budget applies to all of it, and the loose token budget is deleted rather than left unreachable.
 - **The expected key is read AT ACTIVATION, never at socket-open.** The pre-auth window is up to 10 s, so a snapshot would let a socket opened just before a rotation activate against the retired key.
@@ -63,17 +63,17 @@ The tunnel arm is deliberately unconditional on the run state rather than on whi
 
 ### 4. The grant collapse — three outcomes, keyed on the method alone
 
-| Method | Bundle |
-| --- | --- |
-| `webauthn`, `password` | `FULL_REMOTE_GRANTS` (base five + `admin` + `enroll`), under every policy |
-| `enroll-token` | `ENROLL_ONLY_GRANTS` |
-| `none` (only under `off`) | `AUTH_OFF_GRANTS` (base five; never `admin`/`enroll`) |
+| Method                    | Bundle                                                                    |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `webauthn`, `password`    | `FULL_REMOTE_GRANTS` (base five + `admin` + `enroll`), under every policy |
+| `enroll-token`            | `ENROLL_ONLY_GRANTS`                                                      |
+| `none` (only under `off`) | `AUTH_OFF_GRANTS` (base five; never `admin`/`enroll`)                     |
 
 `PASSKEY_REMOTE_GRANTS` → `FULL_REMOTE_GRANTS`, `LEGACY_REMOTE_GRANTS` → `AUTH_OFF_GRANTS`; the members are unchanged. The auth-off set stays without `admin`/`enroll`, so enrolling a credential while authentication is disabled is impossible and the settings session stays unreachable.
 
 **The policy is no longer an input**, which is the fix: the two arms that re-decided admission inside `grantsFor` are gone, so `EMPTY_GRANTS` — a connection the server accepted that holds nothing — is not a state that can be spelled. Admission is decided once, at the handshake.
 
-**The password now gets `enroll`.** Withholding it was already theatre once the same connection held `admin`: `webauthn:mint-enroll-token` is an `admin` verb, so an admin-holding password client could always mint its own enrollment link and use it. The property that actually protects a fresh install — *the first device requires the anchor* — survives via the **policy default** rather than grant surgery: with zero credentials **and** no password provisioned, nothing can connect except an enrollment link, and `/remote/auth-info` legitimately advertises an empty method list. A password that exists was provisioned by somebody already on the host.
+**The password now gets `enroll`.** Withholding it was already theatre once the same connection held `admin`: `webauthn:mint-enroll-token` is an `admin` verb, so an admin-holding password client could always mint its own enrollment link and use it. The property that actually protects a fresh install — _the first device requires the anchor_ — survives via the **policy default** rather than grant surgery: with zero credentials **and** no password provisioned, nothing can connect except an enrollment link, and `/remote/auth-info` legitimately advertises an empty method list. A password that exists was provisioned by somebody already on the host.
 
 **Policy modes.** `legacy` is retired; the surviving stored values are NULL (AUTO), `passkey-always` and `off`. AUTO resolves: ≥1 credential ⇒ `passkey-always`, else `password` — an **effective-only** value the operator cannot pin, because pinning it would mean "keep accepting a password after I enrol a passkey", which is what `passwordBreakGlass` already says.
 
@@ -83,7 +83,7 @@ A 32-byte hex key in `remote_config.lan_e2e_key`, generated lazily on the first 
 
 Two verbs, on BOTH transports (a headless box has no desktop pane to read a link from), both **settings-session gated**:
 
-- `authcfg:lan-link` — `query`, `admin`. A `query` would classify `read` and be free like `authcfg:get`, so its membership of `AUTHCFG_CHANNELS` *is* the gate: what gates a verb in this namespace is what it DISCLOSES, not its kind. Returns the full link, with ip:port from live listener state.
+- `authcfg:lan-link` — `query`, `admin`. A `query` would classify `read` and be free like `authcfg:get`, so its membership of `AUTHCFG_CHANNELS` _is_ the gate: what gates a verb in this namespace is what it DISCLOSES, not its kind. Returns the full link, with ip:port from live listener state.
 - `authcfg:rotate-lan-key` — `command`, `admin`. Returns the NEW link, so the actor's UI renders it immediately.
 
 **The never-strand contract, ratified.** `E2ECrypto.init` derives a connection's AES key at `e2e-activate` and never re-reads the stored value, so **established channels survive a rotation, nobody is disconnected, and only NEW handshakes need the new key.** It audits as `auth:settings-change` with **no 4009 sweep** — the admission rules for existing identities did not move, and sweeping would disconnect every live client to tell them something that does not apply to them. The recovery anchor for someone holding the retired link is the host: the desktop pane, or the console on a headless box. Neither verb joins `authcfg:apply`'s batch, on the same reasoning as `authcfg:set-password`: a channel key is not a config field.
@@ -119,7 +119,7 @@ Two verbs, on BOTH transports (a headless box has no desktop pane to read a link
 
 Found by owner live-test from a real phone, one day after the arc landed:
 **tunnel + password worked, LAN + password did not.** Typing the password
-returned *"This link is not valid — get a new one from the host."* — and, worse
+returned _"This link is not valid — get a new one from the host."_ — and, worse
 than the failure, that copy is an instruction, so the next thing the owner did
 was rotate a key that was never the problem.
 
@@ -195,7 +195,7 @@ no non-extractable anything to hold, and the alternative is no channel.
 
 ### Interim fixes, superseded by this amendment
 
-Between the live-test and the ruling, the client was made to *diagnose* the dead
+Between the live-test and the ruling, the client was made to _diagnose_ the dead
 end honestly rather than blame the link (a bootstrap refusal before the password
 form, a typed `WebCryptoUnavailableError`, and a caveat on the desktop LAN row).
 All of that is **reverted**: the link works, so a warning about it would be the

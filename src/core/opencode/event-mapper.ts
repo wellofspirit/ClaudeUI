@@ -1,5 +1,10 @@
 import { v4 as uuid } from 'uuid'
-import type { OpencodeEvent, QuestionInfo, StoredMessage, StoredMessagePart } from './protocol/types'
+import type {
+  OpencodeEvent,
+  QuestionInfo,
+  StoredMessage,
+  StoredMessagePart
+} from './protocol/types'
 import type {
   ChatMessage,
   ContentBlock,
@@ -130,16 +135,33 @@ export type MapperOutput =
    *  `always` auto-approves matching ones). The consumer must retract the stale
    *  approval card for `requestId` — clicking it later would 404 forever. */
   | { kind: 'approval-resolved'; requestId: string }
-  | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
+  | {
+      kind: 'result'
+      result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & {
+        sessionId: string | null
+      }
+    }
   /** Emitted when cost changes OR when a token-snapshot context advance is detected (input+cacheRead
    *  increased on an assistant message). The latter fires even when cost=0 (free models), so that
    *  lastContextLength / buildStatusLine can reflect a real "context used %" instead of showing "–". */
-  | { kind: 'cost_update'; totalCostUsd: number; messageId: string; tokens?: MessageTokens; engineCostUsd?: number }
+  | {
+      kind: 'cost_update'
+      totalCostUsd: number
+      messageId: string
+      tokens?: MessageTokens
+      engineCostUsd?: number
+    }
   | { kind: 'error'; message: string }
   | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'subagent-stream'; toolUseId: string; streamType: 'text' | 'thinking'; delta: string }
   | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage }
-  | { kind: 'subagent-tool-result'; toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
+  | {
+      kind: 'subagent-tool-result'
+      toolUseId: string
+      toolResultToolUseId: string
+      result: string
+      isError: boolean
+    }
   | { kind: 'task-notification'; notification: import('../../shared/types').TaskNotification }
   | { kind: 'todos'; items: TodoItem[] }
   | { kind: 'ignore' }
@@ -284,7 +306,8 @@ function handleOwnEvent(
         // this registration is in place. (opencode/packages/opencode/src/tool/task.ts
         // lines 178–259 are the authoritative reference.)
         if (partType === 'tool' && (part.tool as string) === 'task') {
-          const childSessionId = (state?.metadata as Record<string, unknown> | undefined)?.sessionId as string | undefined
+          const childSessionId = (state?.metadata as Record<string, unknown> | undefined)
+            ?.sessionId as string | undefined
           const callId = part.callID as string | undefined
           if (childSessionId && callId) {
             childSessions.set(childSessionId, callId)
@@ -327,8 +350,7 @@ function handleOwnEvent(
       // to `metadata` (populated for built-in tools) then {}.
       const metadata = props.metadata as Record<string, unknown> | undefined
       const toolInput = findToolInput(accumulators, tool?.messageID, tool?.callID)
-      const input =
-        toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
+      const input = toolInput ?? (metadata && Object.keys(metadata).length > 0 ? metadata : {})
 
       const approval: PendingApproval = {
         requestId: id,
@@ -588,7 +610,9 @@ function handleChildEvent(
       const info = props.info as Record<string, unknown> | undefined
       if (!info) return { kind: 'ignore' }
 
-      const infoId = (info.id as string | undefined) ?? (props.messageID ?? props.messageId) as string | undefined
+      const infoId =
+        (info.id as string | undefined) ??
+        ((props.messageID ?? props.messageId) as string | undefined)
       if (!infoId) return { kind: 'ignore' }
 
       const acc = ensureAccumulator(accumulators, infoId)

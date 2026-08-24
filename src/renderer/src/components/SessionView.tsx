@@ -227,7 +227,8 @@ export function SessionView(): React.JSX.Element {
     const handler = (event: Event): void => {
       const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
       setMobileSettings({
-        scope: detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
+        scope:
+          detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
         section: detail?.section
       })
       setSidebarCollapsed(true)
@@ -253,7 +254,10 @@ export function SessionView(): React.JSX.Element {
         // box); the only negative gate is Claude's launch-time model info reporting
         // that no available model supports it. Non-Claude engines' 'auto' is a local
         // full-autonomy mode with no account gate, so it's always available there.
-        const autoAvailable = autoModeAvailableForEngine(session?.selectedEngineId, state.availableModels)
+        const autoAvailable = autoModeAvailableForEngine(
+          session?.selectedEngineId,
+          state.availableModels
+        )
         const next = nextPermissionMode(permissionMode, { canPlan, autoAvailable })
         state.changePermissionMode(activeSessionId, next)
       }

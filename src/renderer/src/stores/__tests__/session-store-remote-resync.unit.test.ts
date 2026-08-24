@@ -125,7 +125,10 @@ describe('hydrateReplica — first hydration (isResync falsy)', () => {
     store().createNewSession('local-stale', '/stale')
     useSessionStore.setState({ activeSessionId: 'local-stale' })
 
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
     hydrateReplica(snapshot)
 
     expect(store().activeSessionId).toBe('desktop-active')
@@ -164,7 +167,10 @@ describe('hydrateReplica — re-sync (isResync=true)', () => {
 
     // The desktop snapshot has no idea 'X' exists — it's only in the snapshot
     // via a different active session.
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
     hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('X')
@@ -183,7 +189,10 @@ describe('hydrateReplica — re-sync (isResync=true)', () => {
     useSessionStore.setState({ activeSessionId: 'X', sessions: {} })
     mirrorStoreIntoReplica()
 
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
     hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('desktop-active')
@@ -194,7 +203,10 @@ describe('hydrateReplica — re-sync (isResync=true)', () => {
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
     mirrorStoreIntoReplica()
 
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
     hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('desktop-active')
@@ -276,7 +288,10 @@ describe('hydrateReplica — queue of record (ADR-053)', () => {
 
     // ...and a reconnecting client applies it.
     hydrateReplica(
-      makeSnapshot({ X: { ...baseSnapshotSession('X'), queue: produced.sessions['X'].queue } }, 'X'),
+      makeSnapshot(
+        { X: { ...baseSnapshotSession('X'), queue: produced.sessions['X'].queue } },
+        'X'
+      ),
       true
     )
 

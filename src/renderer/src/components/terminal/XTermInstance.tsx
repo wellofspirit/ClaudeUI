@@ -237,5 +237,12 @@ export function XTermInstance({
     }
   }, [theme])
 
-  return <div data-testid="XTermInstance" ref={containerRef} className="h-full w-full" style={{ padding: '4px 8px' }} />
+  return (
+    <div
+      data-testid="XTermInstance"
+      ref={containerRef}
+      className="h-full w-full"
+      style={{ padding: '4px 8px' }}
+    />
+  )
 }

@@ -372,7 +372,14 @@ describe('reconcileOpencode', () => {
 
   it('does not overwrite a live opencode row already present (dedup)', async () => {
     insertUsageEvent(
-      liveRow({ id: 'oc_live', engineId: 'opencode', vendorId: 'openai', messageId: 'msg_oc_dup', inputTokens: 42, source: 'live' })
+      liveRow({
+        id: 'oc_live',
+        engineId: 'opencode',
+        vendorId: 'openai',
+        messageId: 'msg_oc_dup',
+        inputTokens: 42,
+        source: 'live'
+      })
     )
     mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
     mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_1' }])
@@ -419,7 +426,14 @@ describe('reconcileAll', () => {
     mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_x' }])
     mockListMessages.mockResolvedValue([
       {
-        info: { id: 'msg_both_oc', role: 'assistant', providerID: 'openai', modelID: 'gpt-4o', cost: 0.01, tokens: { input: 1, output: 1 } }
+        info: {
+          id: 'msg_both_oc',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+          cost: 0.01,
+          tokens: { input: 1, output: 1 }
+        }
       }
     ])
 

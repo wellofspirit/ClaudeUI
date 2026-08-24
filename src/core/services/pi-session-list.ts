@@ -166,9 +166,7 @@ function resolveTitle(
  * listPiSessionsGlobal tests). Returns null on any failure (unreadable / no
  * header / non-session header) — same contract as readPiSessionFile.
  */
-function readPiSessionListRow(
-  filePath: string
-): { header: PiSessionHeader; title: string } | null {
+function readPiSessionListRow(filePath: string): { header: PiSessionHeader; title: string } | null {
   let raw: string
   try {
     raw = fs.readFileSync(filePath, 'utf-8')
@@ -346,7 +344,9 @@ export function convertPiEntryMessage(
   return null
 }
 
-function convertPiTextOrImageContent(content: string | Array<PiTextContent | PiImageContent>): ContentBlock[] {
+function convertPiTextOrImageContent(
+  content: string | Array<PiTextContent | PiImageContent>
+): ContentBlock[] {
   if (typeof content === 'string') {
     return content ? [{ type: 'text', text: content }] : []
   }

@@ -7,12 +7,12 @@ const AUTH = 'Basic dGVzdDp0ZXN0'
 function mockFetch(status: number, body: unknown, headers?: Record<string, string>) {
   const responseHeaders = new Headers({
     'Content-Type': 'application/json',
-    ...headers,
+    ...headers
   })
   return vi.fn().mockResolvedValue(
     new Response(typeof body === 'string' ? body : JSON.stringify(body), {
       status,
-      headers: responseHeaders,
+      headers: responseHeaders
     })
   )
 }
@@ -35,7 +35,7 @@ describe('OpencodeClient', () => {
         `${BASE_URL}/config/providers`,
         expect.objectContaining({
           method: 'GET',
-          headers: expect.objectContaining({ Authorization: AUTH }),
+          headers: expect.objectContaining({ Authorization: AUTH })
         })
       )
     })
@@ -68,7 +68,7 @@ describe('OpencodeClient', () => {
         `${BASE_URL}/auth/openai`,
         expect.objectContaining({
           method: 'PUT',
-          body: JSON.stringify(credentials),
+          body: JSON.stringify(credentials)
         })
       )
     })
@@ -93,7 +93,7 @@ describe('OpencodeClient', () => {
         `${BASE_URL}/session`,
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ title: 'My Session' }),
+          body: JSON.stringify({ title: 'My Session' })
         })
       )
     })
@@ -131,7 +131,7 @@ describe('OpencodeClient', () => {
         `${BASE_URL}/session/ses_1/fork`,
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ messageID: 'msg_1' }),
+          body: JSON.stringify({ messageID: 'msg_1' })
         })
       )
     })
@@ -168,7 +168,12 @@ describe('OpencodeClient', () => {
     it('sends GET /command with auth header', async () => {
       const commands = [
         { name: 'init', description: 'Initialize project', template: '/init' },
-        { name: 'review', description: 'Code review', template: '/review $ARGUMENTS', subtask: true }
+        {
+          name: 'review',
+          description: 'Code review',
+          template: '/review $ARGUMENTS',
+          subtask: true
+        }
       ]
       const mock = mockFetch(200, commands)
       vi.stubGlobal('fetch', mock)
@@ -217,7 +222,9 @@ describe('OpencodeClient', () => {
       const mock = mockFetch(400, 'Available commands: init, review')
       vi.stubGlobal('fetch', mock)
 
-      await expect(client.runCommand('ses_1', { command: 'nonexistent', arguments: '' })).rejects.toThrow('400')
+      await expect(
+        client.runCommand('ses_1', { command: 'nonexistent', arguments: '' })
+      ).rejects.toThrow('400')
     })
   })
 
@@ -297,7 +304,12 @@ describe('OpencodeClient', () => {
   describe('listSkills', () => {
     it('sends GET /skill with auth header', async () => {
       const skills = [
-        { name: 'my-skill', description: 'Does something', location: '/home/user/.claude/skills/my-skill/SKILL.md', content: '# My Skill\nContent here.' }
+        {
+          name: 'my-skill',
+          description: 'Does something',
+          location: '/home/user/.claude/skills/my-skill/SKILL.md',
+          content: '# My Skill\nContent here.'
+        }
       ]
       const mock = mockFetch(200, skills)
       vi.stubGlobal('fetch', mock)

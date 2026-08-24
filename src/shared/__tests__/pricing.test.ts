@@ -30,32 +30,56 @@ function oneMTok(overrides: Partial<TokenCostInput> = {}): TokenCostInput {
 
 describe('equivalentCostUsd — anthropic pricing', () => {
   it('sonnet: input rate = $3/MTok', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(3.0)
   })
 
   it('sonnet: output rate = $15/MTok', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({ outputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({ outputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(15.0)
   })
 
   it('opus-4-8: input rate = $5/MTok (new cheaper tier)', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-opus-4-8', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-opus-4-8',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(5.0)
   })
 
   it('opus-4 (classic): input rate = $15/MTok', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-opus-4', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-opus-4',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(15.0)
   })
 
   it('haiku-4: input rate = $1/MTok', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-haiku-4-5', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-haiku-4-5',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(1.0)
   })
 
   it('haiku-3: input rate = $0.8/MTok', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-haiku-3-5', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-haiku-3-5',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(0.8)
   })
 
@@ -72,48 +96,68 @@ describe('equivalentCostUsd — anthropic pricing', () => {
 describe('equivalentCostUsd — cache-split billing (5m vs 1h TTL)', () => {
   it('all 5m cache writes billed at cacheWritePerMTok (1.25× input for sonnet)', () => {
     // 1 MTok cache write, all 5m (cacheWrite1h = 0)
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({
-      cacheWriteTokens: 1_000_000,
-      cacheWrite1hTokens: 0
-    }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({
+        cacheWriteTokens: 1_000_000,
+        cacheWrite1hTokens: 0
+      })
+    )
     // sonnet: cacheWritePerMTok = 3.75
     expect(cost).toBeCloseTo(3.75)
   })
 
   it('all 1h cache writes billed at cacheWrite1hPerMTok (2× input for sonnet)', () => {
     // 1 MTok total cache write, all 1h
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({
-      cacheWriteTokens: 1_000_000,
-      cacheWrite1hTokens: 1_000_000
-    }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({
+        cacheWriteTokens: 1_000_000,
+        cacheWrite1hTokens: 1_000_000
+      })
+    )
     // sonnet: cacheWrite1hPerMTok = 6
     expect(cost).toBeCloseTo(6.0)
   })
 
   it('mixed cache writes: 400k 1h + 600k 5m', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({
-      cacheWriteTokens: 1_000_000,
-      cacheWrite1hTokens: 400_000
-    }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({
+        cacheWriteTokens: 1_000_000,
+        cacheWrite1hTokens: 400_000
+      })
+    )
     // 600k at 3.75/MTok + 400k at 6/MTok
-    const expected = (0.6 * 3.75) + (0.4 * 6.0)
+    const expected = 0.6 * 3.75 + 0.4 * 6.0
     expect(cost).toBeCloseTo(expected)
   })
 
   it('cacheWrite1h clamped to cacheWrite when larger (guards malformed data)', () => {
     // cacheWrite1h > cacheWrite — should clamp to cacheWrite (all 1h)
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({
-      cacheWriteTokens: 500_000,
-      cacheWrite1hTokens: 1_000_000 // malformed: exceeds total
-    }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({
+        cacheWriteTokens: 500_000,
+        cacheWrite1hTokens: 1_000_000 // malformed: exceeds total
+      })
+    )
     // Clamped: 500k at 1h rate (6/MTok)
     expect(cost).toBeCloseTo(0.5 * 6.0)
   })
 
   it('cache read billed at cacheReadPerMTok (0.3/MTok for sonnet)', () => {
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({
-      cacheReadTokens: 1_000_000
-    }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({
+        cacheReadTokens: 1_000_000
+      })
+    )
     expect(cost).toBeCloseTo(0.3)
   })
 
@@ -209,7 +253,11 @@ describe('equivalentCostUsd — openai pricing', () => {
 
 describe('equivalentCostUsd — google pricing', () => {
   it('gemini-2.0-flash: input rate = $0.1/MTok', () => {
-    const cost = equivalentCostUsd('google', 'gemini-2.0-flash', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'google',
+      'gemini-2.0-flash',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(0.1)
   })
 
@@ -219,7 +267,11 @@ describe('equivalentCostUsd — google pricing', () => {
   })
 
   it('gemini-2.5-flash: input rate = $0.15/MTok', () => {
-    const cost = equivalentCostUsd('google', 'gemini-2.5-flash', oneMTok({ inputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'google',
+      'gemini-2.5-flash',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(0.15)
   })
 })
@@ -247,8 +299,16 @@ describe('equivalentCostUsd — cross-vendor isolation', () => {
 
 describe('equivalentCostUsd — case insensitivity', () => {
   it('model id is matched case-insensitively', () => {
-    const lower = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({ inputTokens: 1_000_000 }))
-    const upper = equivalentCostUsd('anthropic', 'CLAUDE-SONNET-4-6', oneMTok({ inputTokens: 1_000_000 }))
+    const lower = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
+    const upper = equivalentCostUsd(
+      'anthropic',
+      'CLAUDE-SONNET-4-6',
+      oneMTok({ inputTokens: 1_000_000 })
+    )
     expect(lower).not.toBeNull()
     expect(lower).toBeCloseTo(upper!)
   })
@@ -267,48 +327,142 @@ describe('registerSupplementalPricing', () => {
   it('resolves a previously-unknown opencode model after registration', () => {
     // Use a vendor+model that has no match in the built-in table
     registerSupplementalPricing([])
-    expect(equivalentCostUsd('mistral', 'mistral-large-3', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeNull()
+    expect(
+      equivalentCostUsd('mistral', 'mistral-large-3', {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheWrite1hTokens: 0,
+        cacheReadTokens: 0
+      })
+    ).toBeNull()
 
     const entries: PricingEntry[] = [
-      { vendorId: 'mistral', match: 'mistral-large-3', pricing: { inputPerMTok: 5, outputPerMTok: 20, cacheWritePerMTok: 5, cacheWrite1hPerMTok: 5, cacheReadPerMTok: 1.25 } }
+      {
+        vendorId: 'mistral',
+        match: 'mistral-large-3',
+        pricing: {
+          inputPerMTok: 5,
+          outputPerMTok: 20,
+          cacheWritePerMTok: 5,
+          cacheWrite1hPerMTok: 5,
+          cacheReadPerMTok: 1.25
+        }
+      }
     ]
     registerSupplementalPricing(entries)
 
-    const cost = equivalentCostUsd('mistral', 'mistral-large-3', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })
+    const cost = equivalentCostUsd('mistral', 'mistral-large-3', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
     expect(cost).toBeCloseTo(5.0)
   })
 
   it('built-in entries remain authoritative — supplemental does NOT override anthropic sonnet', () => {
     // Register a wrong rate for sonnet
     const entries: PricingEntry[] = [
-      { vendorId: 'anthropic', match: 'sonnet', pricing: { inputPerMTok: 999, outputPerMTok: 999, cacheWritePerMTok: 999, cacheWrite1hPerMTok: 999, cacheReadPerMTok: 999 } }
+      {
+        vendorId: 'anthropic',
+        match: 'sonnet',
+        pricing: {
+          inputPerMTok: 999,
+          outputPerMTok: 999,
+          cacheWritePerMTok: 999,
+          cacheWrite1hPerMTok: 999,
+          cacheReadPerMTok: 999
+        }
+      }
     ]
     registerSupplementalPricing(entries)
 
     // Should still use the built-in $3/MTok rate
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })
+    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
     expect(cost).toBeCloseTo(3.0)
   })
 
   it('replace-all semantics — second call replaces the first batch', () => {
     registerSupplementalPricing([
-      { vendorId: 'custom', match: 'model-v1', pricing: { inputPerMTok: 1, outputPerMTok: 2, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1, cacheReadPerMTok: 0.5 } }
+      {
+        vendorId: 'custom',
+        match: 'model-v1',
+        pricing: {
+          inputPerMTok: 1,
+          outputPerMTok: 2,
+          cacheWritePerMTok: 1,
+          cacheWrite1hPerMTok: 1,
+          cacheReadPerMTok: 0.5
+        }
+      }
     ])
     // Replace with a different entry — model-v1 should be gone
     registerSupplementalPricing([
-      { vendorId: 'custom', match: 'model-v2', pricing: { inputPerMTok: 2, outputPerMTok: 4, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 1 } }
+      {
+        vendorId: 'custom',
+        match: 'model-v2',
+        pricing: {
+          inputPerMTok: 2,
+          outputPerMTok: 4,
+          cacheWritePerMTok: 2,
+          cacheWrite1hPerMTok: 2,
+          cacheReadPerMTok: 1
+        }
+      }
     ])
 
-    expect(equivalentCostUsd('custom', 'model-v1', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeNull()
-    expect(equivalentCostUsd('custom', 'model-v2', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeCloseTo(2.0)
+    expect(
+      equivalentCostUsd('custom', 'model-v1', {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheWrite1hTokens: 0,
+        cacheReadTokens: 0
+      })
+    ).toBeNull()
+    expect(
+      equivalentCostUsd('custom', 'model-v2', {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheWrite1hTokens: 0,
+        cacheReadTokens: 0
+      })
+    ).toBeCloseTo(2.0)
   })
 
   it('empty registration clears supplemental table', () => {
     registerSupplementalPricing([
-      { vendorId: 'custom', match: 'ephemeral', pricing: { inputPerMTok: 10, outputPerMTok: 10, cacheWritePerMTok: 10, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 10 } }
+      {
+        vendorId: 'custom',
+        match: 'ephemeral',
+        pricing: {
+          inputPerMTok: 10,
+          outputPerMTok: 10,
+          cacheWritePerMTok: 10,
+          cacheWrite1hPerMTok: 10,
+          cacheReadPerMTok: 10
+        }
+      }
     ])
     registerSupplementalPricing([])
-    expect(equivalentCostUsd('custom', 'ephemeral', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeNull()
+    expect(
+      equivalentCostUsd('custom', 'ephemeral', {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheWrite1hTokens: 0,
+        cacheReadTokens: 0
+      })
+    ).toBeNull()
   })
 
   // ---------------------------------------------------------------------------
@@ -317,13 +471,39 @@ describe('registerSupplementalPricing', () => {
   // ---------------------------------------------------------------------------
 
   it('supplemental: shorter model id does NOT shadow a longer variant (exact match)', () => {
-    const oneMInput = { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 }
+    const oneMInput = {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    }
     // Both ids share the prefix "claude-haiku-4-5". With substring `includes`,
     // a lookup for the dated variant would match the base entry first
     // ("…20251001".includes("claude-haiku-4-5") === true) → WRONG pricing.
     registerSupplementalPricing([
-      { vendorId: 'opencode', match: 'claude-haiku-4-5', pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1, cacheReadPerMTok: 0.1 } },
-      { vendorId: 'opencode', match: 'claude-haiku-4-5-20251001', pricing: { inputPerMTok: 2, outputPerMTok: 10, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.2 } }
+      {
+        vendorId: 'opencode',
+        match: 'claude-haiku-4-5',
+        pricing: {
+          inputPerMTok: 1,
+          outputPerMTok: 5,
+          cacheWritePerMTok: 1,
+          cacheWrite1hPerMTok: 1,
+          cacheReadPerMTok: 0.1
+        }
+      },
+      {
+        vendorId: 'opencode',
+        match: 'claude-haiku-4-5-20251001',
+        pricing: {
+          inputPerMTok: 2,
+          outputPerMTok: 10,
+          cacheWritePerMTok: 2,
+          cacheWrite1hPerMTok: 2,
+          cacheReadPerMTok: 0.2
+        }
+      }
     ])
 
     // Each id must resolve to ITS OWN pricing, not the shorter id's.
@@ -332,12 +512,38 @@ describe('registerSupplementalPricing', () => {
   })
 
   it('supplemental: exact match is order-independent (longer entry registered first)', () => {
-    const oneMInput = { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 }
+    const oneMInput = {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    }
     // Reverse insertion order vs the test above — with `includes` the result
     // would depend on order; with `===` it must not.
     registerSupplementalPricing([
-      { vendorId: 'opencode', match: 'glm-4.6-air', pricing: { inputPerMTok: 3, outputPerMTok: 12, cacheWritePerMTok: 3, cacheWrite1hPerMTok: 3, cacheReadPerMTok: 0.3 } },
-      { vendorId: 'opencode', match: 'glm-4.6', pricing: { inputPerMTok: 6, outputPerMTok: 24, cacheWritePerMTok: 6, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.6 } }
+      {
+        vendorId: 'opencode',
+        match: 'glm-4.6-air',
+        pricing: {
+          inputPerMTok: 3,
+          outputPerMTok: 12,
+          cacheWritePerMTok: 3,
+          cacheWrite1hPerMTok: 3,
+          cacheReadPerMTok: 0.3
+        }
+      },
+      {
+        vendorId: 'opencode',
+        match: 'glm-4.6',
+        pricing: {
+          inputPerMTok: 6,
+          outputPerMTok: 24,
+          cacheWritePerMTok: 6,
+          cacheWrite1hPerMTok: 6,
+          cacheReadPerMTok: 0.6
+        }
+      }
     ])
 
     expect(equivalentCostUsd('opencode', 'glm-4.6', oneMInput)).toBeCloseTo(6.0)
@@ -345,10 +551,26 @@ describe('registerSupplementalPricing', () => {
   })
 
   it('supplemental: a model id that is a SUPERSTRING of a registered id does not match (exact only)', () => {
-    const oneMInput = { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 }
+    const oneMInput = {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    }
     // Only the base id is registered; a longer unregistered variant must miss.
     registerSupplementalPricing([
-      { vendorId: 'opencode', match: 'gpt-5', pricing: { inputPerMTok: 8, outputPerMTok: 32, cacheWritePerMTok: 8, cacheWrite1hPerMTok: 8, cacheReadPerMTok: 0.8 } }
+      {
+        vendorId: 'opencode',
+        match: 'gpt-5',
+        pricing: {
+          inputPerMTok: 8,
+          outputPerMTok: 32,
+          cacheWritePerMTok: 8,
+          cacheWrite1hPerMTok: 8,
+          cacheReadPerMTok: 0.8
+        }
+      }
     ])
     expect(equivalentCostUsd('opencode', 'gpt-5', oneMInput)).toBeCloseTo(8.0)
     // "gpt-5-codex" is NOT registered → null (not the gpt-5 pricing)
@@ -393,7 +615,17 @@ describe('equivalentCostUsd — vendor-agnostic fallback for unrecognized vendor
 
   it('custom vendorId + exact supplemental modelId (registered under a different vendor) resolves via fallback', () => {
     registerSupplementalPricing([
-      { vendorId: 'opencode', match: 'zen/glm-4.6', pricing: { inputPerMTok: 2, outputPerMTok: 8, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.2 } }
+      {
+        vendorId: 'opencode',
+        match: 'zen/glm-4.6',
+        pricing: {
+          inputPerMTok: 2,
+          outputPerMTok: 8,
+          cacheWritePerMTok: 2,
+          cacheWrite1hPerMTok: 2,
+          cacheReadPerMTok: 0.2
+        }
+      }
     ])
     const cost = equivalentCostUsd('acme-corp-gateway', 'zen/glm-4.6', {
       inputTokens: 1_000_000,
@@ -466,7 +698,11 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
 
   it('agrees with equivalentCostUsd for the same model (one table, not two)', () => {
     const sonnet = ANTHROPIC_MODEL_PRICING.find((e) => e.match === 'sonnet')!
-    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', oneMTok({ outputTokens: 1_000_000 }))
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-sonnet-4-6',
+      oneMTok({ outputTokens: 1_000_000 })
+    )
     expect(cost).toBeCloseTo(sonnet.pricing.outputPerMTok)
   })
 })

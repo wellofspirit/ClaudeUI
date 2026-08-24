@@ -79,11 +79,9 @@ describe('createSdkMcpServer — SdkToolExtra threading (ADR-033 Slice A)', () =
     clients.push(client)
 
     const controller = new AbortController()
-    const callPromise = client.callTool(
-      { name: 'slow_tool', arguments: {} },
-      undefined,
-      { signal: controller.signal }
-    )
+    const callPromise = client.callTool({ name: 'slow_tool', arguments: {} }, undefined, {
+      signal: controller.signal
+    })
 
     // Let the request reach the server (and the handler start awaiting) before
     // cancelling — otherwise we could abort before the abort-listener is wired.
@@ -110,11 +108,9 @@ describe('createSdkMcpServer — SdkToolExtra threading (ADR-033 Slice A)', () =
     clients.push(client)
 
     const progressEvents: Array<{ progress: number; total?: number; message?: string }> = []
-    const result = (await client.callTool(
-      { name: 'progress_tool', arguments: {} },
-      undefined,
-      { onprogress: (p) => progressEvents.push(p) }
-    )) as CallToolResult
+    const result = (await client.callTool({ name: 'progress_tool', arguments: {} }, undefined, {
+      onprogress: (p) => progressEvents.push(p)
+    })) as CallToolResult
 
     expect(result.isError).toBeFalsy()
     expect(progressEvents).toHaveLength(1)

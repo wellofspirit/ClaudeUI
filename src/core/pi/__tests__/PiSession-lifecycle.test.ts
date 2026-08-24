@@ -191,10 +191,16 @@ vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: vi.fn() }))
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../../services/mermaid-tool', () => ({ createMermaidServer: vi.fn(() => ({ tools: [] })) }))
+vi.mock('../../services/mermaid-tool', () => ({
+  createMermaidServer: vi.fn(() => ({ tools: [] }))
+}))
 vi.mock('../../services/mockup-tool', () => ({ createMockupServer: vi.fn(() => ({ tools: [] })) }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: vi.fn(), disposeFor: mockDisposeFor, stopDispatch: mockStopDispatch },
+  crossEngineDispatcher: {
+    dispatch: vi.fn(),
+    disposeFor: mockDisposeFor,
+    stopDispatch: mockStopDispatch
+  },
   crossEngineDispatchAvailable: vi.fn().mockReturnValue(false)
 }))
 vi.mock('../PiBridgeHost', () => ({
@@ -203,7 +209,10 @@ vi.mock('../PiBridgeHost', () => ({
   writeSubagentExtension: vi.fn().mockReturnValue('/fake/tmp/subagent.ts')
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
-  piAuthProvider: { probe: vi.fn().mockResolvedValue({}), buildPiAccountRef: vi.fn().mockReturnValue(null) }
+  piAuthProvider: {
+    probe: vi.fn().mockResolvedValue({}),
+    buildPiAccountRef: vi.fn().mockReturnValue(null)
+  }
 }))
 vi.mock('node:fs', () => ({ existsSync: vi.fn().mockReturnValue(false) }))
 vi.mock('node:os', () => ({

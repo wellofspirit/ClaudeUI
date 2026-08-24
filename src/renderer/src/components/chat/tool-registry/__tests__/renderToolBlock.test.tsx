@@ -195,7 +195,13 @@ describe('renderToolBlock dispatch (via MessageBubble)', () => {
           ...state.sessions,
           'test-session': {
             ...state.sessions['test-session'],
-            status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null, engineId: 'pi' })
+            status: makeSessionStatus({
+              state: 'idle',
+              sessionId: null,
+              model: null,
+              cwd: null,
+              engineId: 'pi'
+            })
           }
         }
       }))

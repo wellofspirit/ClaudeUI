@@ -29,7 +29,11 @@ import {
   streamFrameFrom,
   streamFrameToEmission
 } from '../../../core/shared/sync/stream'
-import { emptyCanonicalState, emptySession, type CanonicalState } from '../../../core/shared/sync/state'
+import {
+  emptyCanonicalState,
+  emptySession,
+  type CanonicalState
+} from '../../../core/shared/sync/state'
 import { STREAM_WATCH_COMMAND } from '../../../core/ipc/stream-watch'
 import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
 
@@ -100,9 +104,7 @@ describe('emission funnel (item 2)', () => {
     // itself as. 4a allowed the accessor and banned only hand-rolled loops over
     // it; 4c bans the identifier outright, everywhere, including the adapter.
     const offenders = MAIN_SOURCES.filter((rel) =>
-      /getExtraWindows|addExtraWindow|removeExtraWindow|addExtraSink|extraSinks/.test(
-        readCode(rel)
-      )
+      /getExtraWindows|addExtraWindow|removeExtraWindow|addExtraSink|extraSinks/.test(readCode(rel))
     )
     expect(
       offenders,
@@ -235,7 +237,9 @@ describe('emission funnel (item 2)', () => {
     expect(src).not.toMatch(/this\.win\.webContents\.send\(/)
     // 4c: a session emission names no window at all — every channel it emits is
     // replicated or volatile, so the per-session `win` is not a delivery target.
-    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, this\.trackThinkingSpan\(channel, data\)\]\)/)
+    expect(src).toMatch(
+      /emitEvent\(channel, \[this\.routingId, this\.trackThinkingSpan\(channel, data\)\]\)/
+    )
   })
 })
 
@@ -498,12 +502,10 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
       expect(spec.canonical, `${channel} lost its canonical backing`).toBe(true)
       // And the streamId helper covers it — a channel on the lane with no frame
       // translation would be silently dropped by `SyncCore.process`.
-      const frame = streamFrameFrom(
-        stateWithSession('rid'),
-        emptyAux(),
-        channel,
-        ['rid', { type: 'text', text: 'hi', toolUseId: 'tu-1' }]
-      )
+      const frame = streamFrameFrom(stateWithSession('rid'), emptyAux(), channel, [
+        'rid',
+        { type: 'text', text: 'hi', toolUseId: 'tu-1' }
+      ])
       expect(frame, `${channel} has no streamId translation`).not.toBeNull()
       expect(sessionIdOfStream(frame!.streamId)).toBe('rid')
     }
@@ -597,35 +599,41 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     // these channels before the split. They still do — through an OBSERVER on the
     // lane, not a connection — and both go through the same `streamFrameToEmission`,
     // so there is one answer to "what did the emitter send".
-    expect(streamFrameToEmission({
-      type: 'stream',
-      streamId: 'rid/thinking',
-      turnId: 0,
-      offset: 0,
-      chunk: 'weighing'
-    })).toEqual({
+    expect(
+      streamFrameToEmission({
+        type: 'stream',
+        streamId: 'rid/thinking',
+        turnId: 0,
+        offset: 0,
+        chunk: 'weighing'
+      })
+    ).toEqual({
       channel: 'session:stream',
       routingId: 'rid',
       data: { type: 'thinking', text: 'weighing' }
     })
-    expect(streamFrameToEmission({
-      type: 'stream',
-      streamId: 'rid/sub/tu-1/text',
-      turnId: 0,
-      offset: 0,
-      chunk: 'out'
-    })).toEqual({
+    expect(
+      streamFrameToEmission({
+        type: 'stream',
+        streamId: 'rid/sub/tu-1/text',
+        turnId: 0,
+        offset: 0,
+        chunk: 'out'
+      })
+    ).toEqual({
       channel: 'session:subagent-stream',
       routingId: 'rid',
       data: { type: 'text', toolUseId: 'tu-1', text: 'out' }
     })
-    expect(streamFrameToEmission({
-      type: 'stream',
-      streamId: 'bogus',
-      turnId: 0,
-      offset: 0,
-      chunk: 'x'
-    })).toBeNull()
+    expect(
+      streamFrameToEmission({
+        type: 'stream',
+        streamId: 'bogus',
+        turnId: 0,
+        offset: 0,
+        chunk: 'x'
+      })
+    ).toBeNull()
 
     // Both consumers import it rather than hand-rolling the reconstruction.
     for (const rel of [

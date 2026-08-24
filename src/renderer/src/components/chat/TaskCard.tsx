@@ -283,7 +283,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   )
 
   return (
-    <div data-testid="TaskCard" className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
+    <div
+      data-testid="TaskCard"
+      className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}
+    >
       {/* Header — always visible, clickable to expand/collapse */}
       <button
         data-testid="TaskCard.expand"

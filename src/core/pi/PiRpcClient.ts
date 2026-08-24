@@ -38,7 +38,9 @@ export class PiRpcClient {
   private stdoutBuffer = ''
   private readonly pending = new Map<string, PendingRequest>()
   private readonly eventHandlers: Array<(ev: PiEvent) => void> = []
-  private readonly exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
+  private readonly exitHandlers: Array<
+    (code: number | null, signal: NodeJS.Signals | null) => void
+  > = []
   private exited = false
 
   constructor(
@@ -102,7 +104,10 @@ export class PiRpcClient {
    * arrives. Resolves (does NOT reject) on `success: false` — callers decide
    * what an application-level failure means.
    */
-  request<T = unknown>(cmd: PiRpcCommand, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<PiRpcResponse<T>> {
+  request<T = unknown>(
+    cmd: PiRpcCommand,
+    timeoutMs = DEFAULT_TIMEOUT_MS
+  ): Promise<PiRpcResponse<T>> {
     if (!this.proc || this.exited) {
       return Promise.reject(new Error('PiRpcClient: process is not running'))
     }
@@ -112,7 +117,11 @@ export class PiRpcClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error(`PiRpcClient: request "${outgoing.type}" (id=${id}) timed out after ${timeoutMs}ms`))
+        reject(
+          new Error(
+            `PiRpcClient: request "${outgoing.type}" (id=${id}) timed out after ${timeoutMs}ms`
+          )
+        )
       }, timeoutMs)
 
       this.pending.set(id, {
@@ -218,7 +227,10 @@ export class PiRpcClient {
   private handleResponse(response: PiRpcResponse): void {
     const id = response.id
     if (!id) {
-      logger.warn('PiRpcClient', `Response with no id (command=${response.command}) — cannot correlate`)
+      logger.warn(
+        'PiRpcClient',
+        `Response with no id (command=${response.command}) — cannot correlate`
+      )
       return
     }
     const pending = this.pending.get(id)

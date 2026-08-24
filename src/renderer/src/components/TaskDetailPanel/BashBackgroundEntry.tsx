@@ -132,7 +132,11 @@ export function BashBackgroundEntry({
   const hasMore = bgOutput ? bgOutput.totalSize > prependedContent.length + tailLen : false
 
   return (
-    <div data-testid="BashBackgroundEntry" data-id={toolUseId} className="flex flex-col min-h-0 h-full overflow-hidden">
+    <div
+      data-testid="BashBackgroundEntry"
+      data-id={toolUseId}
+      className="flex flex-col min-h-0 h-full overflow-hidden"
+    >
       <button
         data-testid="BashBackgroundEntry.toggle"
         onClick={() => setExpanded(!expanded)}

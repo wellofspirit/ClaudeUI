@@ -26,7 +26,12 @@ let cachedGroups: EngineModelGroup[] | null = null
 
 /** Cached per-model capability input (the subset opencodeModelCapabilities consumes). */
 type OpencodeModelCapInput = {
-  capabilities?: { attachment?: boolean; toolcall?: boolean; reasoning?: boolean; input?: { image?: boolean } }
+  capabilities?: {
+    attachment?: boolean
+    toolcall?: boolean
+    reasoning?: boolean
+    input?: { image?: boolean }
+  }
   limit?: { context?: number; output?: number }
   cost?: { cache?: { read: number; write: number } }
 }
@@ -115,7 +120,7 @@ async function fetchCatalogSnapshot(): Promise<CatalogSnapshot> {
     const [providerList, configResp, authCatalog] = await Promise.all([
       client.getProviders(),
       client.getConfigProviders().catch(() => ({ providers: [] })),
-      client.getProviderAuth().catch(() => ({} as Record<string, AuthOption[]>))
+      client.getProviderAuth().catch(() => ({}) as Record<string, AuthOption[]>)
     ])
     const snapshot: CatalogSnapshot = {
       all: providerList.all ?? [],
@@ -470,7 +475,10 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
     }
   } catch (err) {
-    logger.warn('opencode', `Model discovery failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`)
+    logger.warn(
+      'opencode',
+      `Model discovery failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
+    )
     return []
   }
 }
@@ -531,7 +539,10 @@ export function getOpencodeModelContextWindow(providerID: string, modelID: strin
  * resolveOpencodeCapabilities so a session's vision/toolCalling/contextWindow
  * reflect the actual model.
  */
-export function getOpencodeModelCapabilities(providerID: string, modelID: string): OpencodeModelCapInput | undefined {
+export function getOpencodeModelCapabilities(
+  providerID: string,
+  modelID: string
+): OpencodeModelCapInput | undefined {
   return modelCapsCache.get(`${providerID}/${modelID}`)
 }
 

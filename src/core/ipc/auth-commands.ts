@@ -58,10 +58,7 @@ import type {
   VendorAuthMap,
   VendorAuthOption
 } from '../../shared/types'
-import type {
-  ConfigurableHarnessId,
-  SharedProviderDefinition
-} from '../../shared/shared-provider'
+import type { ConfigurableHarnessId, SharedProviderDefinition } from '../../shared/shared-provider'
 
 /**
  * The desktop-auth capabilities this family needs, injected from the boot seam
@@ -84,9 +81,7 @@ function isRemote(connection: CommandConnection): boolean {
  * dependencies explicitly (see the module header) rather than closing over
  * module state.
  */
-export function authCommands(
-  deps: AuthCommandDeps
-): Array<Omit<CommandRegistration, 'transport'>> {
+export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistration, 'transport'>> {
   const claude = (): EngineAuthProvider => deps.requireEngineAuth('claude')
 
   return [
@@ -181,15 +176,13 @@ export function authCommands(
       channel: 'vendor-auth:list-keys',
       capability: 'config',
       kind: 'query',
-      handler: safeHandler(
-        async (engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
-          const provider = deps.requireEngineAuth(engineId)
-          if (!provider.listVendorCredentialIds) {
-            throw new Error(`Engine "${engineId}" does not support listVendorCredentialIds`)
-          }
-          return provider.listVendorCredentialIds()
+      handler: safeHandler(async (engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
+        const provider = deps.requireEngineAuth(engineId)
+        if (!provider.listVendorCredentialIds) {
+          throw new Error(`Engine "${engineId}" does not support listVendorCredentialIds`)
         }
-      )
+        return provider.listVendorCredentialIds()
+      })
     },
     {
       channel: 'vendor-auth:set-key',
@@ -306,9 +299,8 @@ export function authCommands(
       channel: 'shared-provider:set-route',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(
-        async (id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
-          sharedProviderService.setRouteEnabled(id, harness, enabled)
+      handler: safeHandler(async (id: string, harness: ConfigurableHarnessId, enabled: boolean) =>
+        sharedProviderService.setRouteEnabled(id, harness, enabled)
       )
     },
     {
@@ -335,9 +327,8 @@ export function authCommands(
       channel: 'shared-provider:set-default',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(
-        async (id: string, harness: ConfigurableHarnessId, modelId?: string) =>
-          sharedProviderService.setRouteDefaultModel(id, harness, modelId)
+      handler: safeHandler(async (id: string, harness: ConfigurableHarnessId, modelId?: string) =>
+        sharedProviderService.setRouteDefaultModel(id, harness, modelId)
       )
     }
   ]

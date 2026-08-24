@@ -19,13 +19,7 @@ import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
 import { SyncClient } from '../../core/shared/sync/sync-client'
 import { resetSyncClientForTests, onSyncEvent } from '../../core/shared/sync/client-registry'
-import {
-  installSyncSeam,
-  resetSyncSeam,
-  emitSync,
-  nextSeq,
-  advanceSeqTo
-} from './replica-seed'
+import { installSyncSeam, resetSyncSeam, emitSync, nextSeq, advanceSeqTo } from './replica-seed'
 import { channelSpec } from '../../core/shared/sync/channels'
 import {
   startReplica,
@@ -359,8 +353,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     // Passkeys — mirrors the preload split: the four management verbs are real
     // desktop channels, the two ceremony verbs are not registered there at all.
     webauthnCredentials: () => ipcRenderer.invoke('webauthn:credentials'),
-    webauthnRename: (credId, nickname) =>
-      ipcRenderer.invoke('webauthn:rename', credId, nickname),
+    webauthnRename: (credId, nickname) => ipcRenderer.invoke('webauthn:rename', credId, nickname),
     webauthnRevoke: (credId) => ipcRenderer.invoke('webauthn:revoke', credId),
     webauthnMintEnrollToken: () => ipcRenderer.invoke('webauthn:mint-enroll-token'),
     webauthnRegisterOptions: async () => {

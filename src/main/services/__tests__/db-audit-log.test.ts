@@ -32,9 +32,9 @@ function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
 }
 
-function entry(over: Partial<Parameters<typeof appendAuditLog>[0]> = {}): Parameters<
-  typeof appendAuditLog
->[0] {
+function entry(
+  over: Partial<Parameters<typeof appendAuditLog>[0]> = {}
+): Parameters<typeof appendAuditLog>[0] {
   return {
     ts: 1000,
     connectionId: 'conn-1',
@@ -165,7 +165,11 @@ describe('retention (ADR-054 decision 5)', () => {
     row(now - 1 * MS_PER_DAY, 'yesterday')
 
     expect(pruneAuditLog(now)).toBe(2)
-    expect(listAuditLog().map((r) => r.channel).sort()).toEqual(['just-inside', 'yesterday'])
+    expect(
+      listAuditLog()
+        .map((r) => r.channel)
+        .sort()
+    ).toEqual(['just-inside', 'yesterday'])
     // Idempotent on the same clock.
     expect(pruneAuditLog(now)).toBe(0)
   })
@@ -195,10 +199,11 @@ describe('retention (ADR-054 decision 5)', () => {
     row(cutoff + 1, 'one-ms-inside')
 
     expect(pruneAuditLog(now)).toBe(1)
-    expect(listAuditLog().map((r) => r.channel).sort()).toEqual([
-      'exactly-at-cutoff',
-      'one-ms-inside'
-    ])
+    expect(
+      listAuditLog()
+        .map((r) => r.channel)
+        .sort()
+    ).toEqual(['exactly-at-cutoff', 'one-ms-inside'])
   })
 
   it('purges auth rows on the SAME window as command rows (uniform, by decision)', () => {

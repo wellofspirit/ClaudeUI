@@ -42,7 +42,11 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import AFTER mocks are registered.
-import { watchSubagent, unwatchSubagent, unwatchAllSubagents } from '../../../core/services/subagent-watcher'
+import {
+  watchSubagent,
+  unwatchSubagent,
+  unwatchAllSubagents
+} from '../../../core/services/subagent-watcher'
 
 // ---------------------------------------------------------------------------
 // Helpers

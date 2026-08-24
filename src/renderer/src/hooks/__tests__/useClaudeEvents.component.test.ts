@@ -27,9 +27,7 @@ import {
   makeTodoItem,
   resetFactoryCounter
 } from '@test/factories/messages'
-import type {
-  FileDiff,
-} from '../../../../shared/types'
+import type { FileDiff } from '../../../../shared/types'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let app: TestApp
@@ -161,10 +159,14 @@ describe('useClaudeEvents component tests', () => {
       const sdkId = 'sdk-uuid-123'
       useSessionStore.getState().createNewSession(tempId, '/test')
 
-      app.emit('session:status', tempId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        tempId,
+        makeSessionStatus({
           state: 'running',
           sessionId: sdkId
-        }))
+        })
+      )
 
       const state = useSessionStore.getState()
       expect(state.sessions[sdkId]).toBeDefined()
@@ -175,19 +177,27 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'session-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'running',
           sessionId: routingId
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId]).toBeDefined()
     })
 
     it('does not rekey when session does not exist', () => {
-      app.emit('session:status', 'nonexistent', makeSessionStatus({
+      app.emit(
+        'session:status',
+        'nonexistent',
+        makeSessionStatus({
           state: 'running',
           sessionId: 'new-id'
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions['new-id']).toBeUndefined()
     })
@@ -239,10 +249,14 @@ describe('useClaudeEvents component tests', () => {
       // Status → idle. cli.js ends the parent turn while a background
       // subagent's can_use_tool request may still be pending — idle must NOT
       // infer that every approval is resolved (see useClaudeEvents.ts).
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'idle',
           sessionId: routingId
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
     })
@@ -255,10 +269,14 @@ describe('useClaudeEvents component tests', () => {
       const approval = makePendingApproval()
       app.emit('session:approval-request', routingId, approval)
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'disconnected' as 'idle', // cast for test
           sessionId: routingId
-        }))
+        })
+      )
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.pendingApprovals).toHaveLength(0)
@@ -271,9 +289,9 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
       seed.plan(routingId, [
-          makeTodoItem('Task 1', 'completed'),
-          makeTodoItem('Task 2', 'completed')
-        ])
+        makeTodoItem('Task 1', 'completed'),
+        makeTodoItem('Task 2', 'completed')
+      ])
 
       app.emit('session:result', routingId)
 
@@ -284,9 +302,9 @@ describe('useClaudeEvents component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
       seed.plan(routingId, [
-          makeTodoItem('Done', 'completed'),
-          makeTodoItem('In progress', 'in_progress')
-        ])
+        makeTodoItem('Done', 'completed'),
+        makeTodoItem('In progress', 'in_progress')
+      ])
 
       app.emit('session:result', routingId)
 
@@ -333,7 +351,13 @@ describe('useClaudeEvents component tests', () => {
       app.emit('session:message', routingId, msg)
 
       const fileDiffs: FileDiff[] = [
-        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+        {
+          path: 'a.ts',
+          patch: '@@ -1 +1 @@\n-old\n+new',
+          additions: 1,
+          deletions: 1,
+          changeType: 'update'
+        }
       ]
       app.emit('session:tool-result', routingId, {
         toolUseId: 'tool-1',

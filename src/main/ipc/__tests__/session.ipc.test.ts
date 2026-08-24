@@ -500,7 +500,12 @@ describe('session.ipc', () => {
 
     it('still routes ordinary requestIds to the session (dispatcher untouched)', async () => {
       await harness.call('session:approval-response', 'rid-1', 'req-9', 'deny')
-      expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-9', 'deny', undefined, undefined)
+      expect(sessionStub.resolveApproval).toHaveBeenCalledWith(
+        'req-9',
+        'deny',
+        undefined,
+        undefined
+      )
       expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
     })
 

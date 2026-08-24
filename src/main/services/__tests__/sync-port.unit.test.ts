@@ -64,7 +64,12 @@ vi.mock('electron', () => ({
 }))
 
 import { attachSyncPort, SYNC_PORT_CHANNEL } from '../sync-port'
-import { syncCore, emitEvent, syncSubscriberCount, clearSyncSubscribersForTests } from '../../../core/services/sync-host'
+import {
+  syncCore,
+  emitEvent,
+  syncSubscriberCount,
+  clearSyncSubscribersForTests
+} from '../../../core/services/sync-host'
 
 interface FakeWin {
   loadHandlers: Array<() => void>

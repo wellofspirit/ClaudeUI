@@ -351,7 +351,11 @@ describe('SharedProviderService', () => {
     definition.models.push({ id: 'two' })
     failSave(new Error('disk full'))
     await expect(service.saveDefinition(definition)).rejects.toThrow('disk full')
-    expect(pi.applyDefinition).toHaveBeenLastCalledWith(expect.objectContaining({ models: [{ id: 'one' }] }), true, expect.anything())
+    expect(pi.applyDefinition).toHaveBeenLastCalledWith(
+      expect.objectContaining({ models: [{ id: 'one' }] }),
+      true,
+      expect.anything()
+    )
     expect(records.get('local-api')!.models).toEqual([{ id: 'one' }])
   })
 
@@ -396,7 +400,6 @@ describe('SharedProviderService', () => {
     expect(status.routes.pi.error).toBeUndefined()
     expect(status.routes.opencode.error).toBeUndefined()
   })
-
 
   it('syncAll reconciles every persisted custom provider', async () => {
     const other = custom()

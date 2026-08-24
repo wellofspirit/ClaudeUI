@@ -66,7 +66,11 @@ import {
   authcfgSetPassword,
   type AuthcfgHost
 } from '../../../core/ipc/authcfg-commands'
-import { hostConnection, makeRemoteConnection, type CommandConnection } from '../../../core/ipc/command-registry'
+import {
+  hostConnection,
+  makeRemoteConnection,
+  type CommandConnection
+} from '../../../core/ipc/command-registry'
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
   LAN_LINK_UNAVAILABLE_ERROR,
@@ -220,9 +224,9 @@ describe('the LAN channel link (ADR-056 item C)', () => {
     // `tailscale serve` mode binds loopback ONLY, so there is no LAN channel and
     // no key was ever generated. The settings pane has to explain the absence
     // rather than render a failure, hence the typed error.
-    await expect(
-      authcfgLanLink(unlockedConn(), makeHost({ lanLink: () => null }))
-    ).rejects.toThrow(LAN_LINK_UNAVAILABLE_ERROR)
+    await expect(authcfgLanLink(unlockedConn(), makeHost({ lanLink: () => null }))).rejects.toThrow(
+      LAN_LINK_UNAVAILABLE_ERROR
+    )
   })
 
   it('rotation returns the NEW link, audits, and sweeps NOBODY', async () => {
@@ -338,9 +342,9 @@ describe('authcfgApply — the batch', () => {
 
   it('audits RETENTION separately — it is not an admission rule', async () => {
     const host = makeHost()
-    await expect(authcfgApply(unlockedConn(), { auditRetentionDays: 90 }, host)).resolves.toMatchObject(
-      { ok: true }
-    )
+    await expect(
+      authcfgApply(unlockedConn(), { auditRetentionDays: 90 }, host)
+    ).resolves.toMatchObject({ ok: true })
     expect(auditRows.filter((r) => r.channel === 'auth:policy-change')).toEqual([])
     expect(host.disconnects).toEqual([])
     expect(auditRows.find((r) => r.channel === 'auth:settings-change')!.detail).toMatch(
@@ -431,7 +435,7 @@ describe('authcfgSetPassword', () => {
 })
 
 describe('authcfgGet — the READ half', () => {
-  it('answers a LOCKED editor: the pane\'s default state IS the read', async () => {
+  it("answers a LOCKED editor: the pane's default state IS the read", async () => {
     // Deliberately NOT behind the freshness backstop the four writes share. A
     // pane that had to run a ceremony before it could render the tier would put
     // the ceremony in front of its own explanation — and reads are free on every

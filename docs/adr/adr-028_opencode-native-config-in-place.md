@@ -13,7 +13,7 @@ consumes natively — it reads/writes the engine's own files (`settings.json`/`.
 **hosted-MCP injection**) applied at spawn. Claude complies (`claude-settings.ts` edits
 `~/.claude/settings.json` in place).
 
-The opencode implementation had **drifted** from this: *all* opencode config — `model`,
+The opencode implementation had **drifted** from this: _all_ opencode config — `model`,
 `small_model`, providers, disabled/enabled providers, and the agent model/temperature overrides —
 was stored in ClaudeUI's **private** `~/.claude/ui/engines/opencode.json` and injected
 **ephemerally** via the `OPENCODE_CONFIG_CONTENT` spawn env var (a shortcut taken in the V2
@@ -58,7 +58,7 @@ user config got swept into that channel by convenience, even though it is neithe
 ## Consequences
 
 - A standalone `opencode` launch now sees ClaudeUI-configured model/providers/agent overrides.
-- **Precedence flips** (intended): opencode's global config is *lower* precedence than the user's
+- **Precedence flips** (intended): opencode's global config is _lower_ precedence than the user's
   **project** `opencode.json`, which now wins over ClaudeUI's defaults — the correct user-defaults
   semantic, vs the prior "env injection always wins."
 - ClaudeUI now **writes the user's opencode config file** (merge-only, comment-safe, installed-gated) —

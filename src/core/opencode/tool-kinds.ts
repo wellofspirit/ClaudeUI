@@ -4,14 +4,20 @@
  */
 export function opencodeToolKind(toolName: string): string {
   switch (toolName) {
-    case 'bash': return 'bash'
-    case 'read': return 'read'
+    case 'bash':
+      return 'bash'
+    case 'read':
+      return 'read'
     case 'edit':
-    case 'write': return 'edit'
+    case 'write':
+      return 'edit'
     case 'glob':
     case 'grep':
-    case 'list': return 'search'
-    case 'task': return 'task'
-    default: return 'other'
+    case 'list':
+      return 'search'
+    case 'task':
+      return 'task'
+    default:
+      return 'other'
   }
 }

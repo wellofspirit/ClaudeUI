@@ -103,10 +103,7 @@ describe('SharedProviders', () => {
     // card's text content, which is what this used to assert).
     expect(selectMenuValue(pickers[0])).toBe('gpt-5')
     expect(pickers[0]).toHaveTextContent('GPT-5')
-    expect(selectMenuOptionLabels(pickers[0])).toEqual([
-      'No default from this provider',
-      'GPT-5'
-    ])
+    expect(selectMenuOptionLabels(pickers[0])).toEqual(['No default from this provider', 'GPT-5'])
     chooseSelectMenuOption(pickers[0], 'gpt-5')
     await waitFor(() =>
       expect(api.setSharedProviderDefaultModel).toHaveBeenCalledWith('chatgpt', 'pi', 'gpt-5')
@@ -120,11 +117,7 @@ describe('SharedProviders', () => {
     )
     chooseSelectMenuOption(screen.getAllByTestId('SharedProviderCard.defaultModel')[1], 'gpt-5')
     await waitFor(() =>
-      expect(api.setSharedProviderDefaultModel).toHaveBeenCalledWith(
-        'chatgpt',
-        'opencode',
-        'gpt-5'
-      )
+      expect(api.setSharedProviderDefaultModel).toHaveBeenCalledWith('chatgpt', 'opencode', 'gpt-5')
     )
   })
   it('toggles a route and reports sync failure inline', async () => {
@@ -224,7 +217,7 @@ describe('SharedProviders', () => {
         '[data-testid="SharedProviderCard.routeDiagnosis"][data-harness="opencode"]'
       )
 
-    it("explains a provider disabled in opencode, and says where to fix it", async () => {
+    it('explains a provider disabled in opencode, and says where to fix it', async () => {
       api.getSharedProviderStatuses.mockResolvedValue([withDiagnosis('provider-disabled')])
       render(<SharedProviders />)
       await waitFor(() => expect(diagnosisNode()).not.toBeNull())

@@ -124,15 +124,14 @@ describe('patchOpencodeNativeRaw', () => {
   it('allows provider leaf patches (provider is NOT excluded — capability editing needs it)', () => {
     writeConfig('opencode.json', `{ "provider": { "ec2": { "models": { "q": {} } } } }`)
     expect(() =>
-      patchOpencodeNativeRaw([{ path: ['provider', 'ec2', 'models', 'q', 'reasoning'], value: true }])
+      patchOpencodeNativeRaw([
+        { path: ['provider', 'ec2', 'models', 'q', 'reasoning'], value: true }
+      ])
     ).not.toThrow()
   })
 
   it('rejects a schema-invalid result and writes nothing', () => {
-    const p = writeConfig(
-      'opencode.json',
-      `{ "provider": { "ec2": { "models": { "q": {} } } } }`
-    )
+    const p = writeConfig('opencode.json', `{ "provider": { "ec2": { "models": { "q": {} } } } }`)
     const before = fs.readFileSync(p, 'utf8')
     expect(() =>
       patchOpencodeNativeRaw([
@@ -153,7 +152,9 @@ describe('patchOpencodeNativeRaw', () => {
     )
     const mtimeBefore = fs.statSync(p).mtimeMs
     const before = fs.readFileSync(p, 'utf8')
-    patchOpencodeNativeRaw([{ path: ['provider', 'ec2', 'models', 'q', 'attachment'], value: true }])
+    patchOpencodeNativeRaw([
+      { path: ['provider', 'ec2', 'models', 'q', 'attachment'], value: true }
+    ])
     expect(fs.readFileSync(p, 'utf8')).toBe(before)
     // Byte no-op → not rewritten (mtime unchanged).
     expect(fs.statSync(p).mtimeMs).toBe(mtimeBefore)

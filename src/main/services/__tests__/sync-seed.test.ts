@@ -34,7 +34,11 @@ const {
   listPiSessionsGlobal: vi.fn()
 }))
 
-vi.mock('../../../core/services/ui-config', () => ({ loadSettings, loadSessionConfig, loadSlashCommands }))
+vi.mock('../../../core/services/ui-config', () => ({
+  loadSettings,
+  loadSessionConfig,
+  loadSlashCommands
+}))
 vi.mock('../../../core/services/claude-settings', () => ({ loadClaudePermissions }))
 vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
@@ -63,9 +67,7 @@ const CLAUDE_SESSION = {
   lastActivityAt: 1,
   engineId: 'claude' as const
 }
-const DIRS = [
-  { cwd: '/repo', projectKey: '-repo', folderName: 'repo', sessions: [CLAUDE_SESSION] }
-]
+const DIRS = [{ cwd: '/repo', projectKey: '-repo', folderName: 'repo', sessions: [CLAUDE_SESSION] }]
 
 const OPENCODE_SESSION = {
   sessionId: 'oc-1',
@@ -259,9 +261,10 @@ describe('refreshCanonicalDirectories', () => {
 
       // The booked emit still lands, so nothing was lost by skipping the walks.
       await vi.advanceTimersByTimeAsync(6_000)
-      expect(
-        syncCore.getSnapshot().directories[0].sessions.map((x) => x.sessionId)
-      ).toEqual(['cl-1', 'cl-2'])
+      expect(syncCore.getSnapshot().directories[0].sessions.map((x) => x.sessionId)).toEqual([
+        'cl-1',
+        'cl-2'
+      ])
     } finally {
       vi.useRealTimers()
     }
@@ -286,9 +289,10 @@ describe('refreshCanonicalDirectories', () => {
 
       await vi.advanceTimersByTimeAsync(6_000)
       expect(syncCore.currentSeq()).toBeGreaterThan(afterFirst) // …then emitted
-      expect(
-        syncCore.getSnapshot().directories[0].sessions.map((x) => x.sessionId)
-      ).toEqual(['cl-1', 'cl-2'])
+      expect(syncCore.getSnapshot().directories[0].sessions.map((x) => x.sessionId)).toEqual([
+        'cl-1',
+        'cl-2'
+      ])
     } finally {
       vi.useRealTimers()
     }
@@ -308,9 +312,10 @@ describe('refreshCanonicalDirectories', () => {
     listDirectories
       // Call 1: the SLOW walk, holding the older listing.
       .mockImplementationOnce(
-        () => new Promise((resolve) => {
-          releaseStale = () => resolve(STALE)
-        })
+        () =>
+          new Promise((resolve) => {
+            releaseStale = () => resolve(STALE)
+          })
       )
       // Every later walk sees the world as it now is.
       .mockImplementation(async () => FRESH)

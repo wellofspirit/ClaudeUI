@@ -14,7 +14,15 @@
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock, FileDiff, ToolResultImage } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
-import type { PiAgentMessage, PiAssistantContentBlock, PiAssistantMessage, PiEvent, PiImageContent, PiTextContent, PiToolExecutionPartialResult } from './pi-protocol'
+import type {
+  PiAgentMessage,
+  PiAssistantContentBlock,
+  PiAssistantMessage,
+  PiEvent,
+  PiImageContent,
+  PiTextContent,
+  PiToolExecutionPartialResult
+} from './pi-protocol'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -49,7 +57,13 @@ export interface PiMapperState {
 }
 
 export function createPiMapperState(): PiMapperState {
-  return { currentMessageId: null, startTimeMs: 0, totalCostUsd: 0, sessionId: null, pendingEditPaths: new Map() }
+  return {
+    currentMessageId: null,
+    startTimeMs: 0,
+    totalCostUsd: 0,
+    sessionId: null,
+    pendingEditPaths: new Map()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +92,14 @@ export interface PiSubagentAgentUpdate {
   model?: string
   status: 'running' | 'done' | 'error'
   newMessages: PiAgentMessage[]
-  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number }
+  usage?: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    cost: number
+    turns: number
+  }
 }
 
 export interface PiSubagentUpdatePayload {
@@ -98,7 +119,14 @@ export type PiMapperOutput =
       /** Images the tool returned (pi `image` content blocks). Omitted when none. */
       images?: ToolResultImage[]
     }
-  | { kind: 'usage'; provider: string; modelId: string; tokens: PiUsageTokens; costUsd: number; messageId: string }
+  | {
+      kind: 'usage'
+      provider: string
+      modelId: string
+      tokens: PiUsageTokens
+      costUsd: number
+      messageId: string
+    }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
   | { kind: 'bash_output'; toolUseId: string; output: string }
@@ -135,7 +163,10 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       const { message, assistantMessageEvent } = ev as Extract<PiEvent, { type: 'message_update' }>
       const messageId = ensureMessageId(state)
 
-      if (assistantMessageEvent.type === 'text_delta' || assistantMessageEvent.type === 'thinking_delta') {
+      if (
+        assistantMessageEvent.type === 'text_delta' ||
+        assistantMessageEvent.type === 'thinking_delta'
+      ) {
         const delta = assistantMessageEvent.delta ?? ''
         if (!delta) return [{ kind: 'ignore' }]
         return [
@@ -341,7 +372,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         return [{ kind: 'subagent_update', toolUseId: toolCallId, payload }]
       }
       if (toolName !== 'bash') return [{ kind: 'ignore' }]
-      return [{ kind: 'bash_output', toolUseId: toolCallId, output: extractPartialResultText(partialResult) }]
+      return [
+        {
+          kind: 'bash_output',
+          toolUseId: toolCallId,
+          output: extractPartialResultText(partialResult)
+        }
+      ]
     }
 
     // agent_start/agent_end, turn_start/turn_end, tool_execution_start/end
@@ -403,7 +440,8 @@ function recordPiEditToolPaths(state: PiMapperState, content: PiAssistantContent
 function buildPiEditFileDiffs(
   toolName: string,
   path: string | undefined,
-  details: { diff?: string; patch?: string; firstChangedLine?: number; [key: string]: unknown } | undefined
+  details:
+    { diff?: string; patch?: string; firstChangedLine?: number; [key: string]: unknown } | undefined
 ): FileDiff[] | undefined {
   if (!path) return undefined
   const patch = details?.patch
@@ -417,7 +455,9 @@ function buildPiEditFileDiffs(
     else if (line.startsWith('-')) deletions++
   }
 
-  return [{ path, patch, changeType: toolName === 'write' ? 'add' : 'update', additions, deletions }]
+  return [
+    { path, patch, changeType: toolName === 'write' ? 'add' : 'update', additions, deletions }
+  ]
 }
 
 /**
@@ -503,9 +543,14 @@ function parseCuiSubagentPayload(value: unknown): PiSubagentUpdatePayload | null
   return { v: 1, agents }
 }
 
-function isPiSubagentUsage(
-  value: unknown
-): value is { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number } {
+function isPiSubagentUsage(value: unknown): value is {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  cost: number
+  turns: number
+} {
   if (!value || typeof value !== 'object') return false
   const u = value as Record<string, unknown>
   return (
@@ -523,7 +568,10 @@ function isPiSubagentUsage(
  * text → text, thinking → thinking (NOTE: wire field is `thinking`, not `text`),
  * toolCall → tool_use { toolUseId: id, toolName: name, toolInput: arguments }.
  */
-export function buildPiChatMessage(messageId: string, content: PiAssistantContentBlock[]): ChatMessage {
+export function buildPiChatMessage(
+  messageId: string,
+  content: PiAssistantContentBlock[]
+): ChatMessage {
   const blocks: ContentBlock[] = content.map((block): ContentBlock => {
     if (block.type === 'text') return { type: 'text', text: block.text }
     if (block.type === 'thinking') return { type: 'thinking', text: block.thinking }

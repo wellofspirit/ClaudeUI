@@ -41,7 +41,6 @@ function EventHarness(): null {
 // `applyEvent` and projects the result into the store (boot-test-app §5), so these
 // flows now exercise the real interpretation instead of a third one.
 
-
 beforeEach(async () => {
   resetFactoryCounter()
   app = await bootTestApp()

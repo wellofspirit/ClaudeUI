@@ -12,9 +12,9 @@ const GONE = ['openai/gpt-5.5', 'openai/gpt-5.6-luna']
 
 describe('findModelReferences', () => {
   it('finds nothing when nothing is being removed', () => {
-    expect(
-      findModelReferences({ opencode: { model: 'openai/gpt-5.5' }, engines: {} }, [])
-    ).toEqual([])
+    expect(findModelReferences({ opencode: { model: 'openai/gpt-5.5' }, engines: {} }, [])).toEqual(
+      []
+    )
   })
 
   it('finds nothing when the removed models are unreferenced', () => {

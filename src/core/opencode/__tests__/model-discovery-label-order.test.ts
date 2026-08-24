@@ -98,9 +98,7 @@ describe('model-discovery — label order (model primary, provider sub)', () => 
 
   it('description is "<modelName> · <providerName>" (not inverted)', async () => {
     const groups = await discoverOpencodeModels()
-    const model = groups
-      .flatMap((g) => g.models)
-      .find((m) => m.value === 'opencode/mimo-v2.5')!
+    const model = groups.flatMap((g) => g.models).find((m) => m.value === 'opencode/mimo-v2.5')!
     expect(model).toBeDefined()
     // The primary (split[0]) must be the model name; the sub (split[1]) the provider.
     expect(model.description.split('·')[0].trim()).toBe('MiMo V2.5 Free')

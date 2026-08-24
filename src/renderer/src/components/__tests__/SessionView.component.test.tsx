@@ -98,7 +98,11 @@ vi.mock('../../hooks/useTerminalColdCleanup', () => ({ useTerminalColdCleanup: (
 // its internal entry-classification logic.
 vi.mock('../TaskDetailPanel/View', () => ({
   TaskDetailPanelView: (props: { variant?: string; style?: React.CSSProperties }) => (
-    <div data-testid="TaskDetailPanel" data-variant={props.variant ?? 'panel'} style={props.style} />
+    <div
+      data-testid="TaskDetailPanel"
+      data-variant={props.variant ?? 'panel'}
+      style={props.style}
+    />
   )
 }))
 

@@ -271,7 +271,9 @@ describe('SSE block parsing', () => {
     const stream = new ReadableStream({
       start(c) {
         c.enqueue(
-          new TextEncoder().encode('data: {"id":"e1","type":"server.connected","properties":{}}\n\n')
+          new TextEncoder().encode(
+            'data: {"id":"e1","type":"server.connected","properties":{}}\n\n'
+          )
         )
         c.close()
       }

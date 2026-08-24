@@ -79,7 +79,10 @@ import {
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
-import { crossEngineDispatcher, crossEngineDispatchAvailable } from '../services/cross-engine-dispatcher'
+import {
+  crossEngineDispatcher,
+  crossEngineDispatchAvailable
+} from '../services/cross-engine-dispatcher'
 // Permission ruleset helper — extracted to permission-ruleset.ts so
 // cross-engine-dispatcher.ts can depend on it without importing THIS module
 // (which would cycle back now that this file imports crossEngineDispatcher
@@ -149,7 +152,7 @@ const DENY_ALL_TOOLS_RULESET: PermissionRule[] = [{ permission: '*', pattern: '*
  */
 const SEALED_THROWAWAY_PATCH = {
   permission: DENY_ALL_TOOLS_RULESET,
-  permissionHermetic: true,
+  permissionHermetic: true
 } as const
 
 export class OpencodeSession extends BaseSession {
@@ -353,7 +356,13 @@ export class OpencodeSession extends BaseSession {
     // Warm the auth provider cache asynchronously so account is populated on
     // the next status emit (e.g. when run() begins). A cross-vendor model switch
     // re-reads from the cached map, so this only needs to warm once per session.
-    opencodeAuthProvider.warmCache().then(() => { this.sendStatus(); this.sendStatusLine() }).catch(() => {})
+    opencodeAuthProvider
+      .warmCache()
+      .then(() => {
+        this.sendStatus()
+        this.sendStatusLine()
+      })
+      .catch(() => {})
   }
 
   get willQueue(): boolean {
@@ -572,7 +581,10 @@ export class OpencodeSession extends BaseSession {
       // previous turn's end (ADR-053) — then it consumes the forwarded item.
       this.onPromptDelivered(prompt)
     } catch (err) {
-      logger.error('OpencodeSession', `run() error: ${err instanceof Error ? err.message : String(err)}`)
+      logger.error(
+        'OpencodeSession',
+        `run() error: ${err instanceof Error ? err.message : String(err)}`
+      )
       this.isProcessing = false
       // A turn that failed before a connection exists (acquire rejected) is a
       // disconnect for the renderer's sdkActive/green-dot contract — 'idle'
@@ -679,7 +691,10 @@ export class OpencodeSession extends BaseSession {
     if (!this.client) return
     try {
       const storedMessages = await this.client.listMessages(sessionId)
-      logger.info('OpencodeSession', `Replaying ${storedMessages.length} stored messages for ${sessionId}`)
+      logger.info(
+        'OpencodeSession',
+        `Replaying ${storedMessages.length} stored messages for ${sessionId}`
+      )
 
       // Reconstruct the active-duration baseline from history BEFORE any new
       // turn runs (run() sets startTimeMs / accumulates further turns after
@@ -842,11 +857,17 @@ export class OpencodeSession extends BaseSession {
       // no opencode session needed.
       const [commands, skills] = await Promise.all([
         this.client.listCommands().catch((err) => {
-          logger.warn('OpencodeSession', `listCommands failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(
+            'OpencodeSession',
+            `listCommands failed: ${err instanceof Error ? err.message : String(err)}`
+          )
           return []
         }),
         this.client.listSkills().catch((err) => {
-          logger.warn('OpencodeSession', `listSkills failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(
+            'OpencodeSession',
+            `listSkills failed: ${err instanceof Error ? err.message : String(err)}`
+          )
           return []
         })
       ])
@@ -892,7 +913,10 @@ export class OpencodeSession extends BaseSession {
       // catalog is warm, then recompute + re-emit so image-capable models enable paste.
       await discoverOpencodeModels().catch(() => [])
       const nextCaps = this.resolveCapsForModel()
-      if (nextCaps.vision !== this._capabilities.vision || nextCaps.contextWindow !== this._capabilities.contextWindow) {
+      if (
+        nextCaps.vision !== this._capabilities.vision ||
+        nextCaps.contextWindow !== this._capabilities.contextWindow
+      ) {
         this._capabilities = nextCaps
         this.sendStatus()
         this.sendStatusLine()
@@ -922,7 +946,11 @@ export class OpencodeSession extends BaseSession {
     // Build file parts once — they ride along with BOTH the runCommand and the
     // promptAsync path so attachments are never dropped on a slash command.
     const fileParts: Array<{ type: 'file'; mime: string; url: string }> = (attachments ?? []).map(
-      (att) => ({ type: 'file', mime: att.mediaType, url: `data:${att.mediaType};base64,${att.base64Data}` })
+      (att) => ({
+        type: 'file',
+        mime: att.mediaType,
+        url: `data:${att.mediaType};base64,${att.base64Data}`
+      })
     )
 
     // Slash command routing — only when we have a live connection + session
@@ -953,10 +981,9 @@ export class OpencodeSession extends BaseSession {
     }
 
     // Default path: send via promptAsync (model sees literal prompt text)
-    const parts: Array<{ type: 'text'; text: string } | { type: 'file'; mime: string; url: string }> = [
-      { type: 'text', text: prompt },
-      ...fileParts
-    ]
+    const parts: Array<
+      { type: 'text'; text: string } | { type: 'file'; mime: string; url: string }
+    > = [{ type: 'text', text: prompt }, ...fileParts]
     await this.client!.promptAsync(this.openSessionId!, {
       model: { providerID: parsed.providerID, modelID: parsed.modelID },
       agent: this.agent ?? undefined,
@@ -971,7 +998,10 @@ export class OpencodeSession extends BaseSession {
     // Fire and forget — runs in background
     this.consumeEvents().catch((err) => {
       if (!this.sseAbort?.signal.aborted) {
-        logger.error('OpencodeSession', `SSE consumer error: ${err instanceof Error ? err.message : String(err)}`)
+        logger.error(
+          'OpencodeSession',
+          `SSE consumer error: ${err instanceof Error ? err.message : String(err)}`
+        )
       }
     })
   }
@@ -998,14 +1028,24 @@ export class OpencodeSession extends BaseSession {
         if (signal.aborted) break
         if (!this.openSessionId) continue
 
-        const output = mapEvent(ev, this.openSessionId, this.accumulators, this.startTimeMs, totalCostRef, this.childSessions)
+        const output = mapEvent(
+          ev,
+          this.openSessionId,
+          this.accumulators,
+          this.startTimeMs,
+          totalCostRef,
+          this.childSessions
+        )
         this.liveTotalCostUsd = totalCostRef.value
 
         this.dispatchMapperOutput(output)
       }
     } catch (err) {
       if (!signal.aborted) {
-        logger.error('OpencodeSession', `SSE stream error: ${err instanceof Error ? err.message : String(err)}`)
+        logger.error(
+          'OpencodeSession',
+          `SSE stream error: ${err instanceof Error ? err.message : String(err)}`
+        )
       }
     } finally {
       // The event stream ended. opencode holds this subscription open for the
@@ -1183,7 +1223,10 @@ export class OpencodeSession extends BaseSession {
 
       case 'auth-required':
         this.isProcessing = false
-        this.send('session:vendor-auth-required', { vendorId: output.vendorId, message: output.message })
+        this.send('session:vendor-auth-required', {
+          vendorId: output.vendorId,
+          message: output.message
+        })
         this.sendStatus()
         this.resetInactivityTimer()
         break
@@ -1258,7 +1301,10 @@ export class OpencodeSession extends BaseSession {
       try {
         await this.client.abortSession(this.openSessionId)
       } catch (err) {
-        logger.warn('OpencodeSession', `abort failed: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(
+          'OpencodeSession',
+          `abort failed: ${err instanceof Error ? err.message : String(err)}`
+        )
       }
     }
   }
@@ -1345,12 +1391,18 @@ export class OpencodeSession extends BaseSession {
           return raw ? [raw] : []
         })
         this.client.replyQuestion(requestId, mapped).catch((err) => {
-          logger.warn('OpencodeSession', `replyQuestion failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(
+            'OpencodeSession',
+            `replyQuestion failed: ${err instanceof Error ? err.message : String(err)}`
+          )
         })
       } else {
         // deny or allow without answers → reject the question
         this.client.rejectQuestion(requestId).catch((err) => {
-          logger.warn('OpencodeSession', `rejectQuestion failed: ${err instanceof Error ? err.message : String(err)}`)
+          logger.warn(
+            'OpencodeSession',
+            `rejectQuestion failed: ${err instanceof Error ? err.message : String(err)}`
+          )
         })
       }
       return
@@ -1380,7 +1432,10 @@ export class OpencodeSession extends BaseSession {
       ? this.client.replyPermission(requestId, reply, message)
       : this.client.replyPermission(requestId, reply)
     replied.catch((err) => {
-      logger.warn('OpencodeSession', `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(
+        'OpencodeSession',
+        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     })
 
     // Persist the rule to the shared store so it recompiles onto opencode next
@@ -1526,7 +1581,9 @@ export class OpencodeSession extends BaseSession {
       // no tools, a visible error instead of a silent fail-open.
       const detail = err instanceof Error ? err.message : String(err)
       logger.error('OpencodeSession', `patchSession failed (refusing to run ungated): ${detail}`)
-      throw new Error(`Could not apply permission mode "${mode}" to the opencode session: ${detail}`)
+      throw new Error(
+        `Could not apply permission mode "${mode}" to the opencode session: ${detail}`
+      )
     }
   }
 
@@ -1790,7 +1847,7 @@ export class OpencodeSession extends BaseSession {
       target: { baseUrl: conn.baseUrl, authHeader: conn.authHeader },
       model: { providerID: parsed.providerID, modelID: parsed.modelID },
       fallback,
-      probe: this.judgeEndpointProbe,
+      probe: this.judgeEndpointProbe
     })
   }
 
@@ -1901,7 +1958,10 @@ export class OpencodeSession extends BaseSession {
       ? this.client?.replyPermission(requestId, reply, message)
       : this.client?.replyPermission(requestId, reply)
     replied?.catch((err) => {
-      logger.warn('OpencodeSession', `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(
+        'OpencodeSession',
+        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     })
   }
 
@@ -1914,7 +1974,10 @@ export class OpencodeSession extends BaseSession {
    *  mutated: the caller's approval object is also the one the SSE consumer
    *  keeps, and this is a presentation detail of THIS send. */
   private fallbackToHuman(approval: PendingApproval, decisionReason?: string): void {
-    this.send('session:approval-request', decisionReason ? { ...approval, decisionReason } : approval)
+    this.send(
+      'session:approval-request',
+      decisionReason ? { ...approval, decisionReason } : approval
+    )
   }
 
   /**
@@ -2043,7 +2106,10 @@ export class OpencodeSession extends BaseSession {
         // Child (subagent) message — attribute to the CHILD's own model + session.
         // If model info is absent, skip: never record a child under the parent model.
         if (!acc.model) {
-          logger.debug('OpencodeSession', `Child accumulator ${messageId} has no model info — skipping metering`)
+          logger.debug(
+            'OpencodeSession',
+            `Child accumulator ${messageId} has no model info — skipping metering`
+          )
           continue
         }
         const childAccount = opencodeAuthProvider.buildAccountRef(acc.model.providerID)
@@ -2074,7 +2140,12 @@ export class OpencodeSession extends BaseSession {
    * Returns { input, output, cacheWrite, cacheRead }.
    * Extracted from sendMetering for reuse in buildStatusLine (DRY).
    */
-  private sumSessionTokens(): { input: number; output: number; cacheWrite: number; cacheRead: number } {
+  private sumSessionTokens(): {
+    input: number
+    output: number
+    cacheWrite: number
+    cacheRead: number
+  } {
     let input = 0
     let output = 0
     let cacheWrite = 0
@@ -2156,7 +2227,13 @@ export class OpencodeSession extends BaseSession {
         engineId: 'opencode',
         vendorId: parsed.providerID,
         billingType: account?.billingType ?? 'unknown',
-        tokens: { input, output, cacheWrite, cacheRead, total: input + output + cacheWrite + cacheRead },
+        tokens: {
+          input,
+          output,
+          cacheWrite,
+          cacheRead,
+          total: input + output + cacheWrite + cacheRead
+        },
         equivalentCostUsd: equiv,
         engineReportedCostUsd: this.totalCostUsd,
         contextWindow: { used: this.lastContextLength, size: ctx }

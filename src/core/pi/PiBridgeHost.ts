@@ -118,7 +118,10 @@ export class PiBridgeHost {
           reject(err)
           return
         }
-        logger.warn('PiBridgeHost', `server error after start: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(
+          'PiBridgeHost',
+          `server error after start: ${err instanceof Error ? err.message : String(err)}`
+        )
       })
 
       server.listen(0, '127.0.0.1', () => {

@@ -4,12 +4,7 @@ import * as os from 'os'
 import { logger } from './logger'
 import { emitEvent } from './sync-host'
 import { writeFileAtomicSync } from './write-json-atomic'
-import {
-  allSessionMeta,
-  setSessionMeta,
-  deleteSessionMeta,
-  importSessionEnginesOnce
-} from './db'
+import { allSessionMeta, setSessionMeta, deleteSessionMeta, importSessionEnginesOnce } from './db'
 import { assertSafeIdSegment, isPathInside } from './path-containment'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -37,7 +32,10 @@ export interface UISessionConfig {
    */
   sessionEngines?: Record<
     string,
-    { engineId: import('../../shared/types').EngineId; model?: import('../../shared/types').ModelRef }
+    {
+      engineId: import('../../shared/types').EngineId
+      model?: import('../../shared/types').ModelRef
+    }
   >
   hiddenSessions?: string[]
   hiddenProjects?: string[]
@@ -187,7 +185,8 @@ export function loadSessionConfig(): UISessionConfig {
   // --- One-time import: sessionEngines from sessions.json → DB ---
   // Handle legacy sessionProviders → sessionEngines normalisation first so the
   // import sees a consistent shape.
-  let fileSessionEngines: Record<string, { engineId: string; model?: import('../../shared/types').ModelRef }> | undefined
+  let fileSessionEngines:
+    Record<string, { engineId: string; model?: import('../../shared/types').ModelRef }> | undefined
 
   if (raw.sessionProviders && !raw.sessionEngines) {
     const legacy = raw.sessionProviders as Record<string, unknown>

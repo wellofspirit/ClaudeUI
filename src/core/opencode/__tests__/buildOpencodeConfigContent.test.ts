@@ -25,9 +25,10 @@ function parse(
   bridgedMcp?: Record<string, OpencodeMcpEntry>,
   pluginPath?: string | null
 ): Record<string, unknown> {
-  return JSON.parse(
-    buildOpencodeConfigContent(PORT, TOKEN, bridgedMcp, pluginPath)
-  ) as Record<string, unknown>
+  return JSON.parse(buildOpencodeConfigContent(PORT, TOKEN, bridgedMcp, pluginPath)) as Record<
+    string,
+    unknown
+  >
 }
 
 describe('buildOpencodeConfigContent', () => {

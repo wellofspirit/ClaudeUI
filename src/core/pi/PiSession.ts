@@ -45,7 +45,13 @@ import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-
 import { PI_FORK_CLONE_LATEST_SENTINEL } from '../services/fork-anchor'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from './PiBridgeHost'
-import type { GateDecision, PiHostedToolHandler, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from './PiBridgeHost'
+import type {
+  GateDecision,
+  PiHostedToolHandler,
+  PiHostedToolPayload,
+  PiHostedToolResult,
+  PiToolCallPayload
+} from './PiBridgeHost'
 // Hosted tools (M4a) — the SAME in-process MCP tool factories Claude/opencode
 // use (mermaid-tool.ts/mockup-tool.ts); handleHostedTool below extracts
 // `.tools[].handler` and calls it directly, exactly like
@@ -57,7 +63,10 @@ import { createMockupServer } from '../services/mockup-tool'
 // gatePiTargetToolCall). CALLED, never modified — mirrors collab-tool.ts's
 // Claude-side DispatchContext construction, NOT via MCP (pi has no MCP
 // client of its own).
-import { crossEngineDispatcher, crossEngineDispatchAvailable } from '../services/cross-engine-dispatcher'
+import {
+  crossEngineDispatcher,
+  crossEngineDispatchAvailable
+} from '../services/cross-engine-dispatcher'
 import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import {
   decideWithSource,
@@ -99,7 +108,10 @@ import {
 import { PiJudge } from './pi-judge'
 import { loadEngineConfig } from '../services/ui-config'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-import { suggestionDestinationToScope, suggestionRuleToClaudeString } from '../opencode/permission-compiler'
+import {
+  suggestionDestinationToScope,
+  suggestionRuleToClaudeString
+} from '../opencode/permission-compiler'
 // Reused AS-IS (not copied/forked — ADR-026 additive-only on shared seams):
 // pure key/value dedup+throttle gate, no opencode-specific assumption baked
 // in (verified — takes a caller-supplied emit callback and ambient
@@ -122,8 +134,7 @@ function unknownHostedTool(toolName: string): PiHostedToolResult {
  * null is easy to conflate with "no verdict yet".
  */
 type AutoModeOutcome =
-  | { kind: 'decided'; decision: GateDecision }
-  | { kind: 'human'; reason?: string }
+  { kind: 'decided'; decision: GateDecision } | { kind: 'human'; reason?: string }
 
 /** The reasonless handoff — no cap fired, the card just asks as usual. */
 const ASK_HUMAN: AutoModeOutcome = { kind: 'human' }
@@ -240,7 +251,8 @@ export class PiSession extends BaseSession {
   get capabilities(): ResolvedCapabilities {
     return {
       ...this._capabilities,
-      crossEngineDispatch: this._capabilities.crossEngineDispatch && crossEngineDispatchAvailable('pi')
+      crossEngineDispatch:
+        this._capabilities.crossEngineDispatch && crossEngineDispatchAvailable('pi')
     }
   }
 
@@ -548,7 +560,9 @@ export class PiSession extends BaseSession {
       const model = resp.success ? resp.data?.model : undefined
       if (!model || model.id === 'unknown') return false
       this._model = `${model.provider}/${model.id}`
-      this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
+      this._capabilities = await this.resolveCapsForModel(this._model).catch(
+        () => this._capabilities
+      )
       return true
     } catch {
       return false
@@ -603,7 +617,9 @@ export class PiSession extends BaseSession {
     if (!bin) {
       throw new Error(
         'pi binary not found — run `bun run ensure-pi` to vendor it ' +
-          '(vendor/pi-cli/pi' + (process.platform === 'win32' ? '.exe' : '') + ' is missing).'
+          '(vendor/pi-cli/pi' +
+          (process.platform === 'win32' ? '.exe' : '') +
+          ' is missing).'
       )
     }
 
@@ -626,7 +642,10 @@ export class PiSession extends BaseSession {
     // hostedGrants below), a session with hostedMcp off should never expose a
     // working /hosted-tool route at all, matching what the bridge extension
     // itself is told to register (CLAUDEUI_PI_HOSTED_TOOLS below).
-    const bridgeHost = new PiBridgeHost(this.gateToolCall, this.capabilities.hostedMcp ? this.handleHostedTool : undefined)
+    const bridgeHost = new PiBridgeHost(
+      this.gateToolCall,
+      this.capabilities.hostedMcp ? this.handleHostedTool : undefined
+    )
     let bridge: { url: string; token: string }
     try {
       bridge = await bridgeHost.start()
@@ -766,7 +785,9 @@ export class PiSession extends BaseSession {
         const engineModel = stateResp.data.model
         if (!this.requestedModel && engineModel && engineModel.id !== 'unknown') {
           this._model = `${engineModel.provider}/${engineModel.id}`
-          this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
+          this._capabilities = await this.resolveCapsForModel(this._model).catch(
+            () => this._capabilities
+          )
           this.sendStatus()
         }
       }
@@ -856,7 +877,10 @@ export class PiSession extends BaseSession {
         })
         applied = setResp.success
         if (!setResp.success) {
-          this.send('session:error', setResp.error ?? `Failed to set model "${this.requestedModel}"`)
+          this.send(
+            'session:error',
+            setResp.error ?? `Failed to set model "${this.requestedModel}"`
+          )
         }
       } catch (err) {
         this.send('session:error', err instanceof Error ? err.message : String(err))
@@ -882,7 +906,9 @@ export class PiSession extends BaseSession {
     // can still be stale for the just-applied model at this exact point.
     if (this.requestedEffort) {
       const effort = this.requestedEffort
-      this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
+      this._capabilities = await this.resolveCapsForModel(this._model).catch(
+        () => this._capabilities
+      )
       this.sendStatus()
       if (this._capabilities.reasoning.effort != null) {
         this.setEffort(effort)
@@ -926,7 +952,10 @@ export class PiSession extends BaseSession {
 
         // EXACT contract as OpencodeSession.eagerConnect (names get the '/'
         // prefix; renderer slash menu is engine-neutral).
-        const slashCommands = persistent.map((c) => ({ name: '/' + c.name, description: c.description }))
+        const slashCommands = persistent.map((c) => ({
+          name: '/' + c.name,
+          description: c.description
+        }))
         this.send('session:slash-commands', slashCommands)
 
         // session:skills — name list only, `skill:` prefix stripped (same
@@ -996,7 +1025,9 @@ export class PiSession extends BaseSession {
       // Seed the durable cost base from pi's own tally so totalCostUsd
       // continues from the prior total instead of restarting at 0.
       if (this.client) {
-        const statsResp = await this.client.request<PiGetSessionStatsData>({ type: 'get_session_stats' })
+        const statsResp = await this.client.request<PiGetSessionStatsData>({
+          type: 'get_session_stats'
+        })
         if (statsResp.success && statsResp.data) {
           this.costBaseUsd = statsResp.data.cost
           this.sumInputTokens = statsResp.data.tokens.input
@@ -1050,7 +1081,10 @@ export class PiSession extends BaseSession {
     // will surface them via session:error.
     if (prompt === null) {
       this.ensureStarted().catch((err) => {
-        logger.warn('PiSession', `eager ensureStarted failed: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(
+          'PiSession',
+          `eager ensureStarted failed: ${err instanceof Error ? err.message : String(err)}`
+        )
       })
       this.resetInactivityTimer()
       return
@@ -1424,7 +1458,9 @@ export class PiSession extends BaseSession {
    * RECENT messages").
    */
   private buildTranscriptContext(): string {
-    const candidates = this.messageHistory.filter((m) => m.role === 'user' || m.role === 'assistant')
+    const candidates = this.messageHistory.filter(
+      (m) => m.role === 'user' || m.role === 'assistant'
+    )
     const recent = candidates.slice(-SIDE_QUESTION_MAX_MESSAGES)
     const joined = recent.map((m) => formatSideQuestionContextLine(m)).join('\n\n')
     return joined.length > SIDE_QUESTION_MAX_CONTEXT_CHARS
@@ -1556,7 +1592,11 @@ export class PiSession extends BaseSession {
           // session runs, but never let a failure here abort the ask.
           try {
             const ref = engineMeta('pi').decodeModelValue(this._model)
-            await client.request({ type: 'set_model', provider: ref.vendorId, modelId: ref.modelId })
+            await client.request({
+              type: 'set_model',
+              provider: ref.vendorId,
+              modelId: ref.modelId
+            })
           } catch {
             // best-effort — the ephemeral just runs with pi's own default model.
           }
@@ -1887,7 +1927,10 @@ export class PiSession extends BaseSession {
       }
       if (byScope.size > 0) this.cachedRules = null
     } catch (err) {
-      logger.warn('PiSession', `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(
+        'PiSession',
+        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
 
@@ -2100,7 +2143,10 @@ export class PiSession extends BaseSession {
     // Checked before the fast path: an ask the user wrote on `read` must still
     // reach them. Zero judge calls on a match.
     if (verdict.source === 'ask-rule') {
-      logger.info('PiSession', `auto-mode → human: user ask rule matches ${toolName} (${verdict.rule})`)
+      logger.info(
+        'PiSession',
+        `auto-mode → human: user ask rule matches ${toolName} (${verdict.rule})`
+      )
       return ASK_HUMAN
     }
 
@@ -2229,7 +2275,9 @@ export class PiSession extends BaseSession {
     const grantedName = this.hostedGrants.get(toolCallId)
     if (grantedName === undefined || grantedName !== toolName) {
       return {
-        content: [{ type: 'text', text: 'hosted tool call was not approved through the tool gate' }],
+        content: [
+          { type: 'text', text: 'hosted tool call was not approved through the tool gate' }
+        ],
         isError: true
       }
     }
@@ -2325,7 +2373,8 @@ export class PiSession extends BaseSession {
       cwd: this.cwd,
       autonomyMode: this.getAutonomyMode(),
       emit: (channel, data) => this.send(channel, data),
-      addDispatchedCost: (engineId, modelId, costUsd) => this.addDispatchedCost(engineId, modelId, costUsd),
+      addDispatchedCost: (engineId, modelId, costUsd) =>
+        this.addDispatchedCost(engineId, modelId, costUsd),
       toolUseId: toolCallId
     }
 
@@ -2355,7 +2404,11 @@ export class PiSession extends BaseSession {
       const ref = engineMeta('pi').decodeModelValue(model)
       let applied = false
       try {
-        const resp = await this.client.request({ type: 'set_model', provider: ref.vendorId, modelId: ref.modelId })
+        const resp = await this.client.request({
+          type: 'set_model',
+          provider: ref.vendorId,
+          modelId: ref.modelId
+        })
         applied = resp.success
         if (!resp.success) {
           this.send('session:error', resp.error ?? `Failed to set model "${model}"`)
@@ -2432,7 +2485,10 @@ export class PiSession extends BaseSession {
         logger.warn('PiSession', `${command} rejected: ${resp.error ?? 'unknown error'}`)
       }
     } catch (err) {
-      logger.warn('PiSession', `${command} failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(
+        'PiSession',
+        `${command} failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
 
@@ -2485,7 +2541,9 @@ export class PiSession extends BaseSession {
   private buildStatusLine(): StatusLineData {
     const ctx = this._capabilities.contextWindow
     const usedPercentage =
-      ctx > 0 && this.lastContextLength > 0 ? Math.round((this.lastContextLength / ctx) * 100) : null
+      ctx > 0 && this.lastContextLength > 0
+        ? Math.round((this.lastContextLength / ctx) * 100)
+        : null
     const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = this.sumCacheReadTokens + this.sumCacheWriteTokens
     const totalTokens = this.sumInputTokens + this.sumOutputTokens + cachedTokens
@@ -2500,7 +2558,8 @@ export class PiSession extends BaseSession {
       contextWindowSize: ctx,
       usedPercentage,
       remainingPercentage,
-      turnStartedAtMs: this.isProcessing && this.mapperState.startTimeMs > 0 ? this.mapperState.startTimeMs : null,
+      turnStartedAtMs:
+        this.isProcessing && this.mapperState.startTimeMs > 0 ? this.mapperState.startTimeMs : null,
       modelCosts: this.dispatchedCostEntries()
     }
   }

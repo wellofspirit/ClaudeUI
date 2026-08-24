@@ -81,7 +81,12 @@ const EXTRA_EVENTS: PoolEvent[] = [
     {
       routingId: 'watched-1',
       messages: [
-        { id: 'w1', role: 'assistant', content: [{ type: 'text', text: 'from disk' }], timestamp: 0 }
+        {
+          id: 'w1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'from disk' }],
+          timestamp: 0
+        }
       ],
       taskNotifications: [],
       statusLine: { model: 'sonnet', totalCostUsd: 0.4 }
@@ -222,7 +227,11 @@ function mulberry32(seed: number): () => number {
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, val) => {
     if (val && typeof val === 'object' && !Array.isArray(val)) {
-      return Object.fromEntries(Object.entries(val as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      return Object.fromEntries(
+        Object.entries(val as Record<string, unknown>).sort(([a], [b]) =>
+          a < b ? -1 : a > b ? 1 : 0
+        )
+      )
     }
     return val
   })
@@ -244,7 +253,10 @@ function comparable(state: CanonicalState): string {
 }
 
 /** The client's restore path: snapshot → canonical + the aux it must resume from. */
-function restore(snapshot: FullStateSnapshot): { state: CanonicalState; aux: ReturnType<typeof auxFromCanonical> } {
+function restore(snapshot: FullStateSnapshot): {
+  state: CanonicalState
+  aux: ReturnType<typeof auxFromCanonical>
+} {
   const state = fromSnapshot(snapshot)
   return { state, aux: auxFromCanonical(state) }
 }
@@ -384,7 +396,11 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
     // reconnecting client through NOTHING the ring carries.
     core.emit('session:stream', ['rid', { type: 'thinking', text: 'the options' }], ALL)
     core.emit('session:stream', ['rid', { type: 'text', text: 'here you go' }], ALL)
-    core.emit('session:subagent-stream', ['rid', { toolUseId: 'tu-1', type: 'text', text: 'sub' }], ALL)
+    core.emit(
+      'session:subagent-stream',
+      ['rid', { toolUseId: 'tu-1', type: 'text', text: 'sub' }],
+      ALL
+    )
 
     const { state: restored, aux } = restore(snapshot)
     // Catchup alone leaves it at the snapshot's value — stated, not assumed.
@@ -438,7 +454,10 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
     core.emit('session:created', ['rid', { cwd: '/repo' }], ALL)
     core.emit(
       'session:message',
-      ['rid', { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }],
+      [
+        'rid',
+        { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }
+      ],
       ALL
     )
 

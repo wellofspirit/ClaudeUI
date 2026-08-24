@@ -23,7 +23,7 @@ the sealed `status.capabilities` (fixed in the same commit), the attach menu hid
 pasted images were dropped — three layers of quiet accommodation compounding into a
 "paste is broken" report with the actual cause (a stale config string) nowhere in
 sight. A substitute model differs in capabilities, cost, and behavior; for the
-auto-mode judge it silently changes *which model holds the security keys*.
+auto-mode judge it silently changes _which model holds the security keys_.
 
 ## Decision
 

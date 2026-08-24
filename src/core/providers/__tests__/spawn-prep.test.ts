@@ -60,7 +60,14 @@ describe('claudeSpawnPrep', () => {
       modelOverride: { enabled: true, model: 'foo' }
     })
     const engineConfig = {
-      proxy: { enabled: true, hostname: 'h', port: 8080, type: 'http' as const, username: '', password: '' }
+      proxy: {
+        enabled: true,
+        hostname: 'h',
+        port: 8080,
+        type: 'http' as const,
+        username: '',
+        password: ''
+      }
     }
 
     const result = await claudeSpawnPrep('claude-sonnet-4-6', engineConfig)
@@ -105,7 +112,9 @@ describe('opencodeSpawnPrep', () => {
 
     const result = await opencodeSpawnPrep('opencode/some-model', {})
 
-    expect(modelDiscoveryMocks.resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
+    expect(modelDiscoveryMocks.resolveOpencodeSpawnModel).toHaveBeenCalledWith(
+      'opencode/some-model'
+    )
     expect(result).toEqual({ resolvedModel: 'opencode/resolved-model' })
   })
 })

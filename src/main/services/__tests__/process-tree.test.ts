@@ -34,11 +34,9 @@ describe('killProcessTree', () => {
 
     // taskkill reaps the LIVE tree…
     expect(spawn).toHaveBeenCalledTimes(1)
-    expect(spawn).toHaveBeenCalledWith(
-      'taskkill',
-      ['/pid', '4321', '/T', '/F'],
-      { stdio: 'ignore' }
-    )
+    expect(spawn).toHaveBeenCalledWith('taskkill', ['/pid', '4321', '/T', '/F'], {
+      stdio: 'ignore'
+    })
     // …and child.kill() never fires on the happy path (pre-fix it ran BEFORE
     // taskkill, orphaning the tree — this is the guard assertion).
     expect(child.kill).not.toHaveBeenCalled()

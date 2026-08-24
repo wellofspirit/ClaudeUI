@@ -13,7 +13,7 @@ resolves the parked promise, which unblocks the engine's tool call.
 
 The renderer historically wiped its card list whenever the session went `idle`
 (`clearPendingApprovals` in `useClaudeEvents`' `onStatus`). That was a stale-card safety net built
-on an invariant that used to hold: *a turn cannot end while an approval is legitimately pending*.
+on an invariant that used to hold: _a turn cannot end while an approval is legitimately pending_.
 
 claude-code broke that invariant. cli.js ends the parent turn — emits `result`, ClaudeUI
 broadcasts `session:status` `idle` — while background subagents (`Agent` tool,
@@ -45,7 +45,7 @@ the session of 2026-07-27).
   Turn boundaries do not bound approval lifetimes.
 
 **Corollary — the emission duty.** Removing the idle wipe is only sound if every session
-implementation emits `session:approval-dismiss` at *every* point it resolves a pending approval
+implementation emits `session:approval-dismiss` at _every_ point it resolves a pending approval
 without a renderer click. For `ClaudeSession` that is: the per-request abort listener
 (`control_cancel_request` → signal), `cancel()`'s deny-all loop, `interrupt()`'s deny-all loop,
 and an echo after normal resolution (so remote/multi-window views that never saw the local click

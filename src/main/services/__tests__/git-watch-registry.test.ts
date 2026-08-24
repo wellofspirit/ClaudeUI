@@ -149,9 +149,7 @@ describe('GitWatchRegistry — the union drives the poller', () => {
 
   it('every watcher keeps receiving after another joins (one callback per cwd)', () => {
     registry.setWatch('desktop', [CWD])
-    const theOnlyCallback = svcFor(CWD).startPolling.mock.calls[0][0] as (
-      s: GitStatusData
-    ) => void
+    const theOnlyCallback = svcFor(CWD).startPolling.mock.calls[0][0] as (s: GitStatusData) => void
     registry.setWatch('phone', [CWD])
 
     expect(svcFor(CWD).startPolling).toHaveBeenCalledTimes(1)

@@ -50,7 +50,9 @@ describe('PI_SUBAGENT_EXTENSION_SOURCE — string tripwires', () => {
   })
 
   it('is inert (returns early) when CLAUDEUI_PI_SUBAGENTS is not "1"', () => {
-    expect(PI_SUBAGENT_EXTENSION_SOURCE).toMatch(/if \(process\.env\.CLAUDEUI_PI_SUBAGENTS !== '1'\) return/)
+    expect(PI_SUBAGENT_EXTENSION_SOURCE).toMatch(
+      /if \(process\.env\.CLAUDEUI_PI_SUBAGENTS !== '1'\) return/
+    )
   })
 
   it('does not register when zero agents are discovered', () => {
@@ -58,7 +60,9 @@ describe('PI_SUBAGENT_EXTENSION_SOURCE — string tripwires', () => {
   })
 
   it('imports ONLY node: builtins — no npm deps, no relative imports (tripwire)', () => {
-    const importLines = PI_SUBAGENT_EXTENSION_SOURCE.split('\n').filter((l) => /^\s*import\s/.test(l))
+    const importLines = PI_SUBAGENT_EXTENSION_SOURCE.split('\n').filter((l) =>
+      /^\s*import\s/.test(l)
+    )
     expect(importLines.length).toBeGreaterThan(0)
     for (const line of importLines) {
       expect(line).toMatch(/from 'node:[a-z_]+';?$/)
@@ -113,7 +117,8 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...actual,
     default: actual,
-    existsSync: (p: unknown) => (fsCtl.existsTrueFor.has(String(p)) ? true : actual.existsSync(p as never))
+    existsSync: (p: unknown) =>
+      fsCtl.existsTrueFor.has(String(p)) ? true : actual.existsSync(p as never)
   }
 })
 
@@ -144,7 +149,11 @@ interface FakeToolDef {
     params: Record<string, unknown>,
     signal: AbortSignal | undefined,
     onUpdate: ((partial: { content: unknown; details: unknown }) => void) | undefined
-  ) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown; isError?: boolean }>
+  ) => Promise<{
+    content: Array<{ type: string; text: string }>
+    details?: unknown
+    isError?: boolean
+  }>
 }
 
 interface FakePi {
@@ -183,14 +192,22 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
   }
 }
 
-function writeAgentFixture(dir: string, filename: string, frontmatter: Record<string, string>, body: string): void {
+function writeAgentFixture(
+  dir: string,
+  filename: string,
+  frontmatter: Record<string, string>,
+  body: string
+): void {
   const fm = Object.entries(frontmatter)
     .map(([k, v]) => `${k}: ${v}`)
     .join('\n')
   writeFileSync(join(dir, filename), `---\n${fm}\n---\n${body}\n`, 'utf-8')
 }
 
-function assistantMsg(text: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function assistantMsg(
+  text: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     role: 'assistant',
     content: [{ type: 'text', text }],
@@ -210,7 +227,10 @@ function assistantMsg(text: string, overrides: Record<string, unknown> = {}): Re
   }
 }
 
-function toolResultMsg(text: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function toolResultMsg(
+  text: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     role: 'toolResult',
     toolCallId: 'child-call-1',
@@ -238,7 +258,12 @@ afterEach(() => {
 describe('discovery', () => {
   it('CLAUDEUI_PI_SUBAGENTS unset → registers nothing at all (fully inert)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-'))
-    writeAgentFixture(dir, 'echoer.md', { name: 'echoer', description: 'Echoes the task' }, 'You echo tasks.')
+    writeAgentFixture(
+      dir,
+      'echoer.md',
+      { name: 'echoer', description: 'Echoes the task' },
+      'You echo tasks.'
+    )
     withEnv({ CLAUDEUI_PI_SUBAGENTS: undefined, CLAUDEUI_PI_AGENTS_DIR: dir }, () => {
       const { pi, tools } = makeFakePi()
       factory(pi)
@@ -256,11 +281,17 @@ describe('discovery', () => {
   })
 
   it('a nonexistent agents dir behaves like zero agents (no throw)', () => {
-    withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: join(tmpdir(), 'does-not-exist-' + Date.now()) }, () => {
-      const { pi, tools } = makeFakePi()
-      expect(() => factory(pi)).not.toThrow()
-      expect(tools.has('subagent')).toBe(false)
-    })
+    withEnv(
+      {
+        CLAUDEUI_PI_SUBAGENTS: '1',
+        CLAUDEUI_PI_AGENTS_DIR: join(tmpdir(), 'does-not-exist-' + Date.now())
+      },
+      () => {
+        const { pi, tools } = makeFakePi()
+        expect(() => factory(pi)).not.toThrow()
+        expect(tools.has('subagent')).toBe(false)
+      }
+    )
   })
 
   it('discovers agents and lists them (name + description) in the tool description', () => {
@@ -269,7 +300,12 @@ describe('discovery', () => {
     writeAgentFixture(
       dir,
       'planner.md',
-      { name: 'planner', description: 'Makes plans', model: 'anthropic/claude-sonnet-5', tools: 'read, grep' },
+      {
+        name: 'planner',
+        description: 'Makes plans',
+        model: 'anthropic/claude-sonnet-5',
+        tools: 'read, grep'
+      },
       'Body B'
     )
     withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir }, () => {
@@ -285,7 +321,12 @@ describe('discovery', () => {
 
   it('an agent .md with missing optional fields (no model, no tools) is still discovered', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-bare-'))
-    writeAgentFixture(dir, 'bare.md', { name: 'bare', description: 'A bare agent' }, 'Bare system prompt.')
+    writeAgentFixture(
+      dir,
+      'bare.md',
+      { name: 'bare', description: 'A bare agent' },
+      'Bare system prompt.'
+    )
     withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir }, () => {
       const { pi, tools } = makeFakePi()
       factory(pi)
@@ -355,9 +396,16 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
       const tool = tools.get('subagent')!
 
       const updates: Array<{ content: unknown; details: unknown }> = []
-      const onUpdate = vi.fn((partial: { content: unknown; details: unknown }) => updates.push(partial))
+      const onUpdate = vi.fn((partial: { content: unknown; details: unknown }) =>
+        updates.push(partial)
+      )
 
-      const execPromise = tool.execute('call-1', { agent: 'echoer', task: 'say hi' }, undefined, onUpdate)
+      const execPromise = tool.execute(
+        'call-1',
+        { agent: 'echoer', task: 'say hi' },
+        undefined,
+        onUpdate
+      )
 
       // spawn() runs synchronously inside execute()'s pre-await portion.
       expect(mockSpawn).toHaveBeenCalledTimes(1)
@@ -368,23 +416,31 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
       expect(capturedArgs).toContain('Task: say hi')
 
       const assistant1 = assistantMsg('thinking...')
-      fakeProc.stdout.emit('data', Buffer.from(jsonLine({ type: 'message_end', message: assistant1 })))
+      fakeProc.stdout.emit(
+        'data',
+        Buffer.from(jsonLine({ type: 'message_end', message: assistant1 }))
+      )
 
       // First update: exactly ONE new message (the assistant one), status running.
       expect(updates).toHaveLength(1)
-      const firstAgents = (updates[0].details as { cuiSubagent: { agents: Array<Record<string, unknown>> } })
-        .cuiSubagent.agents
+      const firstAgents = (
+        updates[0].details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      ).cuiSubagent.agents
       expect(firstAgents).toHaveLength(1)
       expect(firstAgents[0].status).toBe('running')
       expect(firstAgents[0].newMessages).toEqual([assistant1])
 
       const toolResult1 = toolResultMsg('file contents')
-      fakeProc.stdout.emit('data', Buffer.from(jsonLine({ type: 'tool_result_end', message: toolResult1 })))
+      fakeProc.stdout.emit(
+        'data',
+        Buffer.from(jsonLine({ type: 'tool_result_end', message: toolResult1 }))
+      )
 
       // Second update: DELTA — only the tool result, NOT the assistant message again.
       expect(updates).toHaveLength(2)
-      const secondAgents = (updates[1].details as { cuiSubagent: { agents: Array<Record<string, unknown>> } })
-        .cuiSubagent.agents
+      const secondAgents = (
+        updates[1].details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      ).cuiSubagent.agents
       expect(secondAgents[0].newMessages).toEqual([toolResult1])
       expect(secondAgents[0].newMessages).not.toEqual(
         expect.arrayContaining([expect.objectContaining({ role: 'assistant' })])
@@ -399,10 +455,14 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
           cost: { input: 0.002, output: 0.004, cacheRead: 0, cacheWrite: 0, total: 0.006 }
         }
       })
-      fakeProc.stdout.emit('data', Buffer.from(jsonLine({ type: 'message_end', message: assistant2 })))
+      fakeProc.stdout.emit(
+        'data',
+        Buffer.from(jsonLine({ type: 'message_end', message: assistant2 }))
+      )
       expect(updates).toHaveLength(3)
-      const thirdAgents = (updates[2].details as { cuiSubagent: { agents: Array<Record<string, unknown>> } })
-        .cuiSubagent.agents
+      const thirdAgents = (
+        updates[2].details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      ).cuiSubagent.agents
       expect(thirdAgents[0].newMessages).toEqual([assistant2])
 
       fakeProc.emit('close', 0)
@@ -410,8 +470,9 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
 
       expect(result.isError).toBeFalsy()
       expect(result.content[0].text).toContain('final answer')
-      const finalAgents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }).cuiSubagent
-        .agents
+      const finalAgents = (
+        result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      ).cuiSubagent.agents
       expect(finalAgents).toHaveLength(1)
       expect(finalAgents[0].status).toBe('done')
       // Final return's newMessages are empty — everything was already
@@ -431,11 +492,16 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
       const { pi, tools } = makeFakePi()
       factory(pi)
       const tool = tools.get('subagent')!
-      const result = await tool.execute('call-2', { agent: 'ghost', task: 'x' }, undefined, undefined)
+      const result = await tool.execute(
+        'call-2',
+        { agent: 'ghost', task: 'x' },
+        undefined,
+        undefined
+      )
       expect(mockSpawn).not.toHaveBeenCalled()
       expect(result.isError).toBe(true)
-      const agents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }).cuiSubagent
-        .agents
+      const agents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } })
+        .cuiSubagent.agents
       expect(agents[0]).toMatchObject({ agent: 'ghost', status: 'error' })
     })
   })
@@ -460,7 +526,12 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
       factory(pi)
       const result = await tools
         .get('subagent')!
-        .execute('call-4', { agent: 'echoer', task: 'x', tasks: [{ agent: 'echoer', task: 'y' }] }, undefined, undefined)
+        .execute(
+          'call-4',
+          { agent: 'echoer', task: 'x', tasks: [{ agent: 'echoer', task: 'y' }] },
+          undefined,
+          undefined
+        )
       expect(result.isError).toBe(true)
       expect(mockSpawn).not.toHaveBeenCalled()
     })
@@ -477,11 +548,17 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
     })
 
     await withEnv(
-      { CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir, CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: undefined },
+      {
+        CLAUDEUI_PI_SUBAGENTS: '1',
+        CLAUDEUI_PI_AGENTS_DIR: dir,
+        CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: undefined
+      },
       async () => {
         const { pi, tools } = makeFakePi()
         factory(pi)
-        const execPromise = tools.get('subagent')!.execute('call-5', { agent: 'bare', task: 'x' }, undefined, undefined)
+        const execPromise = tools
+          .get('subagent')!
+          .execute('call-5', { agent: 'bare', task: 'x' }, undefined, undefined)
         expect(capturedArgs).not.toContain('--model')
         expect(capturedArgs).not.toContain('--tools')
         // No systemPrompt body (empty) -> no --append-system-prompt either.
@@ -503,11 +580,17 @@ describe('single-task flow — delta-correct cuiSubagent streaming', () => {
     })
 
     await withEnv(
-      { CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir, CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: 'openai/gpt-5' },
+      {
+        CLAUDEUI_PI_SUBAGENTS: '1',
+        CLAUDEUI_PI_AGENTS_DIR: dir,
+        CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: 'openai/gpt-5'
+      },
       async () => {
         const { pi, tools } = makeFakePi()
         factory(pi)
-        const execPromise = tools.get('subagent')!.execute('call-6', { agent: 'bare', task: 'x' }, undefined, undefined)
+        const execPromise = tools
+          .get('subagent')!
+          .execute('call-6', { agent: 'bare', task: 'x' }, undefined, undefined)
         expect(capturedArgs).toContain('--model')
         expect(capturedArgs).toContain('openai/gpt-5')
         fakeProc.emit('close', 0)
@@ -521,7 +604,12 @@ describe('parallel tasks — interleaving', () => {
   it('two agents update independently — each newMessages delta stays scoped to its OWN slot', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-parallel-'))
     writeAgentFixture(dir, 'scout.md', { name: 'scout', description: 'Scout' }, 'Scout body')
-    writeAgentFixture(dir, 'planner.md', { name: 'planner', description: 'Planner' }, 'Planner body')
+    writeAgentFixture(
+      dir,
+      'planner.md',
+      { name: 'planner', description: 'Planner' },
+      'Planner body'
+    )
 
     const procs: FakeChildProcess[] = []
     mockSpawn.mockImplementation(() => {
@@ -533,12 +621,21 @@ describe('parallel tasks — interleaving', () => {
     await withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir }, async () => {
       const { pi, tools } = makeFakePi()
       factory(pi)
-      const updates: Array<{ details: { cuiSubagent: { agents: Array<Record<string, unknown>> } } }> = []
-      const onUpdate = vi.fn((partial: unknown) => updates.push(partial as (typeof updates)[number]))
+      const updates: Array<{
+        details: { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      }> = []
+      const onUpdate = vi.fn((partial: unknown) =>
+        updates.push(partial as (typeof updates)[number])
+      )
 
       const execPromise = tools.get('subagent')!.execute(
         'call-7',
-        { tasks: [{ agent: 'scout', task: 'find X' }, { agent: 'planner', task: 'plan Y' }] },
+        {
+          tasks: [
+            { agent: 'scout', task: 'find X' },
+            { agent: 'planner', task: 'plan Y' }
+          ]
+        },
         undefined,
         onUpdate
       )
@@ -549,14 +646,20 @@ describe('parallel tasks — interleaving', () => {
       // planner reports first — its slot (index 1) should carry the delta,
       // scout's slot (index 0) must stay empty.
       const plannerMsg = assistantMsg('planner thinking')
-      plannerProc.stdout.emit('data', Buffer.from(jsonLine({ type: 'message_end', message: plannerMsg })))
+      plannerProc.stdout.emit(
+        'data',
+        Buffer.from(jsonLine({ type: 'message_end', message: plannerMsg }))
+      )
       expect(updates.length).toBeGreaterThan(0)
       let lastAgents = updates[updates.length - 1].details.cuiSubagent.agents
       expect(lastAgents[0].newMessages).toEqual([]) // scout: nothing yet
       expect(lastAgents[1].newMessages).toEqual([plannerMsg]) // planner: its own delta
 
       const scoutMsg = assistantMsg('scout thinking')
-      scoutProc.stdout.emit('data', Buffer.from(jsonLine({ type: 'message_end', message: scoutMsg })))
+      scoutProc.stdout.emit(
+        'data',
+        Buffer.from(jsonLine({ type: 'message_end', message: scoutMsg }))
+      )
       lastAgents = updates[updates.length - 1].details.cuiSubagent.agents
       expect(lastAgents[0].newMessages).toEqual([scoutMsg]) // scout's own delta now
       expect(lastAgents[1].newMessages).toEqual([]) // planner's delta already flushed
@@ -565,8 +668,10 @@ describe('parallel tasks — interleaving', () => {
       plannerProc.emit('close', 0)
       const result = await execPromise
 
-      const finalAgents = result.details && (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } })
-        .cuiSubagent.agents
+      const finalAgents =
+        result.details &&
+        (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }).cuiSubagent
+          .agents
       expect(finalAgents).toHaveLength(2)
       expect(finalAgents![0]).toMatchObject({ agent: 'scout', status: 'done' })
       expect(finalAgents![1]).toMatchObject({ agent: 'planner', status: 'done' })
@@ -598,7 +703,10 @@ describe('abort', () => {
       controller.abort()
 
       if (process.platform === 'win32') {
-        expect(mockSpawn).toHaveBeenCalledWith('taskkill', expect.arrayContaining(['/pid', '4242', '/T', '/F']))
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'taskkill',
+          expect.arrayContaining(['/pid', '4242', '/T', '/F'])
+        )
       } else {
         expect(fakeProc.killed).toBe(true)
       }
@@ -607,7 +715,8 @@ describe('abort', () => {
       // settle — killing it doesn't synthesize a 'close' event.
       fakeProc.emit('close', 1)
       const result = await execPromise
-      const agents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }).cuiSubagent.agents
+      const agents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } })
+        .cuiSubagent.agents
       expect(agents[0].status).toBe('error')
     })
   })
@@ -623,7 +732,12 @@ const isProdSubagentTmpDir = (n: string): boolean => /^pi-subagent-[A-Za-z0-9]{6
 describe('final result shape + temp-prompt-file cleanup', () => {
   it('an agent WITH a non-empty systemPrompt body writes a temp prompt file and cleans it up on completion', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-cleanup-'))
-    writeAgentFixture(dir, 'echoer.md', { name: 'echoer', description: 'Echoes' }, 'You are an echo agent.')
+    writeAgentFixture(
+      dir,
+      'echoer.md',
+      { name: 'echoer', description: 'Echoes' },
+      'You are an echo agent.'
+    )
 
     const before = new Set(readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n)))
 
@@ -637,7 +751,9 @@ describe('final result shape + temp-prompt-file cleanup', () => {
     await withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir }, async () => {
       const { pi, tools } = makeFakePi()
       factory(pi)
-      const execPromise = tools.get('subagent')!.execute('call-9', { agent: 'echoer', task: 'x' }, undefined, undefined)
+      const execPromise = tools
+        .get('subagent')!
+        .execute('call-9', { agent: 'echoer', task: 'x' }, undefined, undefined)
 
       expect(capturedArgs).toContain('--append-system-prompt')
       // A NEW pi-subagent-* tmpdir must exist WHILE the child is "running" —
@@ -650,8 +766,9 @@ describe('final result shape + temp-prompt-file cleanup', () => {
       const result = await execPromise
 
       expect(result.content[0].text).toBeTruthy()
-      const finalAgents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }).cuiSubagent
-        .agents
+      const finalAgents = (
+        result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      ).cuiSubagent.agents
       expect(finalAgents[0].status).toBe('done')
 
       // Cleanup: no leftover pi-subagent-* dirs beyond what existed before this test.
@@ -664,7 +781,12 @@ describe('final result shape + temp-prompt-file cleanup', () => {
 
   it('a FAILED child (non-zero exit) resolves the agent as error and STILL cleans up its temp prompt file', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pi-subagent-agents-cleanup-fail-'))
-    writeAgentFixture(dir, 'echoer.md', { name: 'echoer', description: 'Echoes' }, 'Non-empty system prompt.')
+    writeAgentFixture(
+      dir,
+      'echoer.md',
+      { name: 'echoer', description: 'Echoes' },
+      'Non-empty system prompt.'
+    )
 
     const before = new Set(readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n)))
     const fakeProc = new FakeChildProcess()
@@ -673,13 +795,16 @@ describe('final result shape + temp-prompt-file cleanup', () => {
     await withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir }, async () => {
       const { pi, tools } = makeFakePi()
       factory(pi)
-      const execPromise = tools.get('subagent')!.execute('call-10', { agent: 'echoer', task: 'x' }, undefined, undefined)
+      const execPromise = tools
+        .get('subagent')!
+        .execute('call-10', { agent: 'echoer', task: 'x' }, undefined, undefined)
 
       fakeProc.emit('close', 1)
       const result = await execPromise
       expect(result.isError).toBe(true)
-      const finalAgents = (result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }).cuiSubagent
-        .agents
+      const finalAgents = (
+        result.details as { cuiSubagent: { agents: Array<Record<string, unknown>> } }
+      ).cuiSubagent.agents
       expect(finalAgents[0].status).toBe('error')
 
       const after = readdirSync(tmpdir()).filter((n) => isProdSubagentTmpDir(n) && !before.has(n))
@@ -722,7 +847,9 @@ describe('getPiInvocation — bun-virtual script detection (review fix, probed a
       await withEnv({ CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_AGENTS_DIR: dir }, async () => {
         const { pi, tools } = makeFakePi()
         factory(pi)
-        const execPromise = tools.get('subagent')!.execute('call-invoke', { agent: 'echoer', task: 'x' }, undefined, undefined)
+        const execPromise = tools
+          .get('subagent')!
+          .execute('call-invoke', { agent: 'echoer', task: 'x' }, undefined, undefined)
         fakeProc.emit('close', 0)
         await execPromise
       })
@@ -777,7 +904,8 @@ describe('getPiInvocation — bun-virtual script detection (review fix, probed a
     const script = join(scriptDir, 'cli.js')
     writeFileSync(script, '// fake pi entry\n', 'utf-8')
     try {
-      const exec = process.platform === 'win32' ? 'C:\\Program Files\\nodejs\\node.exe' : '/usr/bin/node'
+      const exec =
+        process.platform === 'win32' ? 'C:\\Program Files\\nodejs\\node.exe' : '/usr/bin/node'
       const { command, args } = await runWithProcessIdentity(script, exec, [])
       expect(command).toBe(exec)
       expect(args[0]).toBe(script)

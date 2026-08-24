@@ -98,7 +98,10 @@ function makeStream(): MediaStream {
   return { getTracks: () => [track] } as unknown as MediaStream
 }
 
-function makeEnv(overrides: Partial<CaptureEnv> = {}, gum?: () => Promise<MediaStream>): CaptureEnv {
+function makeEnv(
+  overrides: Partial<CaptureEnv> = {},
+  gum?: () => Promise<MediaStream>
+): CaptureEnv {
   return {
     isSecureContext: true,
     mediaDevices: { getUserMedia: vi.fn(gum ?? (async () => makeStream())) },
@@ -250,7 +253,9 @@ describe('BrowserVoiceCapture', () => {
     // The context honoured 16 kHz, so 160 input samples are 160 output samples,
     // i.e. 320 bytes.
     pushBlock(160, 1)
-    const bytes = Uint8Array.from(atob(sendAudio.mock.calls[0][0] as string), (c) => c.charCodeAt(0))
+    const bytes = Uint8Array.from(atob(sendAudio.mock.calls[0][0] as string), (c) =>
+      c.charCodeAt(0)
+    )
     expect(bytes.length).toBe(320)
     // Full positive scale, little-endian: 0x7fff.
     expect([bytes[0], bytes[1]]).toEqual([0xff, 0x7f])

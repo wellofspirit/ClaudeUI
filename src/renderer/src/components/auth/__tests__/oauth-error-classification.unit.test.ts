@@ -17,8 +17,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { classifyOAuthError } from '../OAuthPasteBackFlow'
 
-const read = (...parts: string[]): string =>
-  readFileSync(join(process.cwd(), ...parts), 'utf8')
+const read = (...parts: string[]): string => readFileSync(join(process.cwd(), ...parts), 'utf8')
 
 describe('the CSRF/state rejection', () => {
   const CSRF_MESSAGE = 'Invalid state - potential CSRF attack'

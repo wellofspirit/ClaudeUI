@@ -10,13 +10,13 @@
 instance start from five independent sources, checking `disabled_providers` at
 each one:
 
-| Source | Evidence | Can ClaudeUI delete it? |
-|---|---|---|
-| `provider` declarations in config | `1420-1515`, re-merged `1583-1590`; openai-compatible loaders autoload on `source === 'config'` (`479`, `958`) | Only in the ONE global file it writes |
-| env vars | `1517-1528`, `source: 'env'` | No — not our environment |
-| auth.json `type: 'api'` | `1531-1541`, `source: 'api'` | Yes |
-| plugin auth loader, gated on a stored credential | `1544-1562`, stamps `source: 'custom'` | Yes |
-| `custom()` loaders autoloading from ambient state | zen `198`, bedrock `338/362`, vertex `517/554`, cloudflare `835` | No — nothing exists to delete |
+| Source                                            | Evidence                                                                                                       | Can ClaudeUI delete it?               |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `provider` declarations in config                 | `1420-1515`, re-merged `1583-1590`; openai-compatible loaders autoload on `source === 'config'` (`479`, `958`) | Only in the ONE global file it writes |
+| env vars                                          | `1517-1528`, `source: 'env'`                                                                                   | No — not our environment              |
+| auth.json `type: 'api'`                           | `1531-1541`, `source: 'api'`                                                                                   | Yes                                   |
+| plugin auth loader, gated on a stored credential  | `1544-1562`, stamps `source: 'custom'`                                                                         | Yes                                   |
+| `custom()` loaders autoloading from ambient state | zen `198`, bedrock `338/362`, vertex `517/554`, cloudflare `835`                                               | No — nothing exists to delete         |
 
 `disabled_providers` is therefore the only user-facing veto that works against
 every derivation, and the provider manager wrote it for every "Remove".
@@ -53,14 +53,14 @@ disabled, so opencode ignored it with nothing in the UI saying so.
 Availability is resolved by a pure function (`main/opencode/provider-actions.ts`)
 carried on each catalog entry, so the row never re-derives it:
 
-| Class | Disable | Remove |
-|---|---|---|
-| has auth.json entry | ✓ | ✓ `credential` |
-| declared in the file we write | ✓ | ✓ `declaration` |
-| both | ✓ | ✓ `both` |
-| declared in the other global file / project / MDM | ✓ | ✗ blocked, reason names the file |
-| env-derived | ✓ | ✗ blocked, reason names the variable |
-| credential-free autoload (zen, bedrock, vertex) | ✓ | ✗ blocked |
+| Class                                             | Disable | Remove                               |
+| ------------------------------------------------- | ------- | ------------------------------------ |
+| has auth.json entry                               | ✓       | ✓ `credential`                       |
+| declared in the file we write                     | ✓       | ✓ `declaration`                      |
+| both                                              | ✓       | ✓ `both`                             |
+| declared in the other global file / project / MDM | ✓       | ✗ blocked, reason names the file     |
+| env-derived                                       | ✓       | ✗ blocked, reason names the variable |
+| credential-free autoload (zen, bedrock, vertex)   | ✓       | ✗ blocked                            |
 
 A blocked trash icon is **rendered disabled with the reason as its tooltip**, not
 hidden: "you cannot remove this" is information the user needs.

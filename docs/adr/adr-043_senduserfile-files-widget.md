@@ -82,7 +82,7 @@ mockup-preview precedent:
   session's `sentFiles` (resolved against the session cwd). One source of truth,
   no parallel ledger to drift.
 
-  *Superseded in mechanism by SyncCore phase 4b (ADR-051), not in intent:* the
+  _Superseded in mechanism by SyncCore phase 4b (ADR-051), not in intent:_ the
   snapshot is now `SyncCore.getSnapshot()` — canonical state in the main process,
   read in-process — instead of `EventLog.getFullState()`'s `executeJavaScript`
   round-trip into the renderer store. The allowlist is still derived from the
@@ -91,6 +91,7 @@ mockup-preview precedent:
   route no longer depends on a live, responsive `BrowserWindow`. ADR-043's "the
   renderer store is the single source of truth; main stays a pure relay" framing is
   the part ADR-051 inverts.
+
 - `validateLocalFilePath` still applies on top, plus the existing Host allowlist,
   security headers, and constant-time token compare. Responses stream with a
   correct Content-Type, `nosniff`, and `Content-Disposition: attachment` unless

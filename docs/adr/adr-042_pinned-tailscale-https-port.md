@@ -7,13 +7,13 @@ settings live in the app DB, not Claude settings.json)
 ## Context
 
 TLS mode fronts the loopback listener with `tailscale serve`. The original port policy walked a
-candidate list (443 → 8443 → 10000), skipping any HTTPS port whose serve entry looked *foreign* —
-where "ours" meant *the entry's proxy target string equals `http://127.0.0.1:<current localPort>`*.
+candidate list (443 → 8443 → 10000), skipping any HTTPS port whose serve entry looked _foreign_ —
+where "ours" meant _the entry's proxy target string equals `http://127.0.0.1:<current localPort>`_.
 
 That ownership test is only as stable as the local port. With the local listener on a random port
 (the default), every run binds a new loopback port, so a serve entry leaked by a previous run —
 `stop()` tears serve down **fire-and-forget** (`remote-server.ts`), and at app quit the CLI call
-often doesn't land; a force-kill never even attempts it — points at a *dead, different* port. The
+often doesn't land; a force-kill never even attempts it — points at a _dead, different_ port. The
 next launch classifies our own stale 443 entry as foreign, silently falls back to 8443, and the
 user's bookmark (`https://<node>.ts.net`) breaks. Observed in production on 2026-07-30: 443 →
 dead `127.0.0.1:64032` (stale), live app on 8443. Left alone, leaked entries eventually occupy all
@@ -62,7 +62,7 @@ Three coupled changes:
 - One accepted stale window: after a force-kill, the dead serve entry lingers until the next app
   launch reconciles it (a browser hitting the bookmark meanwhile gets a connection error). Nothing
   but the app can clean this up; accepted explicitly.
-- Two profiles/instances pinning the same port on one node now *conflict visibly* (banner +
+- Two profiles/instances pinning the same port on one node now _conflict visibly_ (banner +
   force-steal) instead of silently spreading across 8443/10000. This is intended.
 - `TailscaleHttpsPort`'s closed union type is gone; the port is a validated number.
 

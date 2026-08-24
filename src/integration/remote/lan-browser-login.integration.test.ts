@@ -343,7 +343,7 @@ describe.skipIf(SKIP)('E2E (gated): LAN link password sign-in from a real browse
   afterAll(async () => {
     await browser?.close().catch(() => {})
     await core?.remoteServer.stop().catch(() => {})
-    
+
     if (priorHome.HOME === undefined) delete process.env.HOME
     else process.env.HOME = priorHome.HOME
     if (priorHome.USERPROFILE === undefined) delete process.env.USERPROFILE

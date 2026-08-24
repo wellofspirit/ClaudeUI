@@ -29,7 +29,10 @@ const base: ProviderActionInput = {
   declaredElsewhereGlobal: false
 }
 
-const input = (over: Partial<ProviderActionInput> = {}): ProviderActionInput => ({ ...base, ...over })
+const input = (over: Partial<ProviderActionInput> = {}): ProviderActionInput => ({
+  ...base,
+  ...over
+})
 
 describe('resolveProviderActions — removable classes', () => {
   it('offers credential removal for a provider whose only listing source is auth.json', () => {

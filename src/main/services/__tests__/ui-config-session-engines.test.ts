@@ -50,9 +50,8 @@ async function fresh(): Promise<{
   // setup file installed is not on THIS instance of it. Install it again, right
   // where the fresh `db` is imported: the two are one act.
   const driverSeam = await import('../../../core/services/sqlite-driver')
-  const { betterSqlite3Driver } = await import(
-    '../../../core/services/sqlite/better-sqlite3-driver'
-  )
+  const { betterSqlite3Driver } =
+    await import('../../../core/services/sqlite/better-sqlite3-driver')
   driverSeam.setSqliteDriver(betterSqlite3Driver())
   const db = await import('../../../core/services/db')
   const ui = await import('../../../core/services/ui-config')

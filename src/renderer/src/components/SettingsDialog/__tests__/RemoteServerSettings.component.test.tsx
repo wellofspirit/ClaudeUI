@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RemoteServerSettings } from '../RemoteServerSettings'
-import {
-  selectMenuValue,
-  selectMenuOptionLabels
-} from '../../../../../test/helpers/select-menu'
+import { selectMenuValue, selectMenuOptionLabels } from '../../../../../test/helpers/select-menu'
 import type { RemoteConfig, NetworkInterfaceInfo } from '../../../../../shared/types'
 
 const baseConfig: RemoteConfig = {
@@ -248,9 +245,7 @@ describe('RemoteServerSettings', () => {
       await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 1 }))
       // The bind-interface picker is meaningless in TLS mode.
       await waitFor(() =>
-        expect(
-          screen.getByTestId('RemoteServerSettings.bindHost.trigger')
-        ).toBeDisabled()
+        expect(screen.getByTestId('RemoteServerSettings.bindHost.trigger')).toBeDisabled()
       )
       expect(screen.getByTestId('RemoteServerSettings.bindHostTlsHint')).toBeInTheDocument()
     })

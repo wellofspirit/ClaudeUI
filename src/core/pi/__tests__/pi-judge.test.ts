@@ -33,7 +33,11 @@ interface FakeClient extends PiJudgeClient {
 }
 
 /** A fake pi RPC child: records every command, settles the agent on `prompt`. */
-function makeFake(bin: string, opts: { cwd: string; args: string[] }, cfg: FakeOptions): FakeClient {
+function makeFake(
+  bin: string,
+  opts: { cwd: string; args: string[] },
+  cfg: FakeOptions
+): FakeClient {
   const eventHandlers: Array<(ev: PiEvent) => void> = []
   const exitHandlers: Array<() => void> = []
   const replies = [...(cfg.replies ?? ['<block>no</block>'])]
@@ -96,7 +100,13 @@ function makeFake(bin: string, opts: { cwd: string; args: string[] }, cfg: FakeO
   return fake
 }
 
-function makeJudge(cfg: FakeOptions = {}, model: { vendorId: string; modelId: string } | null = { vendorId: 'openai-codex', modelId: 'gpt-5.4-mini' }) {
+function makeJudge(
+  cfg: FakeOptions = {},
+  model: { vendorId: string; modelId: string } | null = {
+    vendorId: 'openai-codex',
+    modelId: 'gpt-5.4-mini'
+  }
+) {
   const spawned: FakeClient[] = []
   const judge = new PiJudge({
     cwd: '/cwd',
@@ -126,7 +136,15 @@ describe('PiJudge — spawn shape', () => {
     // means no tool is ever registered; `--no-context-files` keeps the repo's
     // own AGENTS.md/CLAUDE.md — writable by the agent under judgement — out of
     // the judge's system prompt (pi appends them to --system-prompt otherwise).
-    expect(spawned[0].args).toEqual(expect.arrayContaining(['--no-tools', '--no-session', '--no-context-files', '--no-skills', '--no-extensions']))
+    expect(spawned[0].args).toEqual(
+      expect.arrayContaining([
+        '--no-tools',
+        '--no-session',
+        '--no-context-files',
+        '--no-skills',
+        '--no-extensions'
+      ])
+    )
   })
 
   it('applies the resolved judge model, best-effort (a set_model failure never fails the call)', async () => {
@@ -142,7 +160,9 @@ describe('PiJudge — spawn shape', () => {
         const fake = makeFake(bin, opts, {})
         const inner = fake.request
         fake.request = ((cmd: PiRpcCommand) =>
-          cmd.type === 'set_model' ? Promise.reject(new Error('nope')) : inner(cmd)) as PiJudgeClient['request']
+          cmd.type === 'set_model'
+            ? Promise.reject(new Error('nope'))
+            : inner(cmd)) as PiJudgeClient['request']
         return fake
       }
     })
@@ -231,7 +251,11 @@ describe('PiJudge — failure handling (fail to the human, never a fabricated ve
       resolveModel: () => null,
       locateBinary: () => '/fake/pi',
       createClient: (bin, opts) => {
-        const fake = makeFake(bin, opts, first ? { rejectPrompt: true } : { replies: ['<block>no</block>'] })
+        const fake = makeFake(
+          bin,
+          opts,
+          first ? { rejectPrompt: true } : { replies: ['<block>no</block>'] }
+        )
         first = false
         spawned.push(fake)
         return fake
@@ -312,7 +336,7 @@ describe('PiJudge — concurrency', () => {
 })
 
 describe('PiJudge — advisory request fields', () => {
-  it('ignores maxTokens/stopSequences (pi\'s prompt RPC exposes neither) without failing', async () => {
+  it("ignores maxTokens/stopSequences (pi's prompt RPC exposes neither) without failing", async () => {
     const { judge, spawned } = makeJudge()
     await expect(
       judge.transport({ ...REQ, maxTokens: 64, stopSequences: ['</block>'] })

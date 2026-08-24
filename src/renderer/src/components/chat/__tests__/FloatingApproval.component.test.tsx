@@ -101,7 +101,9 @@ beforeEach(() => {
   // Reset sandbox exclusions (mutated by sandbox escape tests)
   const currentSandbox = useSessionStore.getState().engineConfig.sandbox
   if (currentSandbox) {
-    useSessionStore.getState().setEngineConfig({ sandbox: { ...currentSandbox, excludedCommands: [] } })
+    useSessionStore
+      .getState()
+      .setEngineConfig({ sandbox: { ...currentSandbox, excludedCommands: [] } })
   }
 })
 
@@ -144,7 +146,21 @@ async function simulateApprovalResponse(
     if (!currentExcluded.includes(cmd)) {
       const nextSandbox = sandboxSettings
         ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
-        : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: [cmd] }
+        : {
+            enabled: false,
+            autoAllowBashIfSandboxed: false,
+            allowUnsandboxedCommands: false,
+            network: {
+              restrictNetwork: false,
+              allowLocalBinding: false,
+              allowedDomains: [],
+              allowManagedDomainsOnly: false,
+              allowAllUnixSockets: false,
+              allowUnixSockets: []
+            },
+            filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+            excludedCommands: [cmd]
+          }
       setEngineConfig({ ...engineConfig, sandbox: nextSandbox })
     }
   }
@@ -309,7 +325,21 @@ describe('FloatingApproval approval response flow', () => {
       ...store.engineConfig,
       sandbox: existing
         ? { ...existing, excludedCommands: ['dangerous-cmd'] }
-        : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: ['dangerous-cmd'] }
+        : {
+            enabled: false,
+            autoAllowBashIfSandboxed: false,
+            allowUnsandboxedCommands: false,
+            network: {
+              restrictNetwork: false,
+              allowLocalBinding: false,
+              allowedDomains: [],
+              allowManagedDomainsOnly: false,
+              allowAllUnixSockets: false,
+              allowUnixSockets: []
+            },
+            filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+            excludedCommands: ['dangerous-cmd']
+          }
     })
 
     setup({
@@ -320,7 +350,9 @@ describe('FloatingApproval approval response flow', () => {
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
     const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect((sandbox?.excludedCommands ?? []).filter((c: string) => c === 'dangerous-cmd')).toHaveLength(1)
+    expect(
+      (sandbox?.excludedCommands ?? []).filter((c: string) => c === 'dangerous-cmd')
+    ).toHaveLength(1)
   })
 
   it('does not modify sandbox exclusions for non-sandbox-escape approvals', async () => {
@@ -576,7 +608,10 @@ describe('FloatingApproval — AskUserQuestion floating card (child question)', 
           {
             question: 'Pick one',
             header: 'Choice',
-            options: [{ label: 'Option A', description: '' }, { label: 'Option B', description: '' }],
+            options: [
+              { label: 'Option A', description: '' },
+              { label: 'Option B', description: '' }
+            ],
             multiSelect: false
           }
         ]

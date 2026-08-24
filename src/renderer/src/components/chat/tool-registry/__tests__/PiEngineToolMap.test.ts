@@ -52,15 +52,23 @@ describe('PiEngineToolMap.kindOf', () => {
     expect(PiEngineToolMap.hidden.size).toBe(0)
   })
 
-  it.each(cases)("single-source guard: main's piToolKind(%s) agrees with the renderer's kindOf", (name, kind) => {
-    expect(piToolKind(name)).toBe(kind)
-    expect(piToolKind(name)).toBe(PiEngineToolMap.kindOf(name))
-  })
+  it.each(cases)(
+    "single-source guard: main's piToolKind(%s) agrees with the renderer's kindOf",
+    (name, kind) => {
+      expect(piToolKind(name)).toBe(kind)
+      expect(piToolKind(name)).toBe(PiEngineToolMap.kindOf(name))
+    }
+  )
 })
 
 describe('PiEngineToolMap.normalize', () => {
   it('command: maps command + result output', () => {
-    const result = { type: 'tool_result', toolUseId: 'x', toolResult: 'total 0', isError: false } as const
+    const result = {
+      type: 'tool_result',
+      toolUseId: 'x',
+      toolResult: 'total 0',
+      isError: false
+    } as const
     const view = PiEngineToolMap.normalize('command', { command: 'ls -la' }, result)
     expect(view).toMatchObject({ kind: 'command', command: 'ls -la', output: 'total 0' })
   })
@@ -107,7 +115,15 @@ describe('PiEngineToolMap.normalize', () => {
   })
 
   it('fileEdit: M2 — result.fileDiffs (from event-mapper.ts) is surfaced AS `files`, mirroring OpencodeEngineToolMap', () => {
-    const fileDiffs = [{ path: '/src/a.ts', patch: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-foo\n+bar', changeType: 'update' as const, additions: 1, deletions: 1 }]
+    const fileDiffs = [
+      {
+        path: '/src/a.ts',
+        patch: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-foo\n+bar',
+        changeType: 'update' as const,
+        additions: 1,
+        deletions: 1
+      }
+    ]
     const result = {
       type: 'tool_result' as const,
       toolUseId: 'x',
@@ -124,7 +140,15 @@ describe('PiEngineToolMap.normalize', () => {
   })
 
   it('fileEdit: M2 — a multi-edit call ALSO surfaces `files` when the result carries fileDiffs (no more forced generic view)', () => {
-    const fileDiffs = [{ path: '/src/a.ts', patch: 'unified diff text', changeType: 'update' as const, additions: 2, deletions: 1 }]
+    const fileDiffs = [
+      {
+        path: '/src/a.ts',
+        patch: 'unified diff text',
+        changeType: 'update' as const,
+        additions: 2,
+        deletions: 1
+      }
+    ]
     const result = {
       type: 'tool_result' as const,
       toolUseId: 'x',
@@ -143,7 +167,13 @@ describe('PiEngineToolMap.normalize', () => {
       },
       result
     )
-    expect(view).toMatchObject({ kind: 'fileEdit', path: '/src/a.ts', before: '', after: '', files: fileDiffs })
+    expect(view).toMatchObject({
+      kind: 'fileEdit',
+      path: '/src/a.ts',
+      before: '',
+      after: '',
+      files: fileDiffs
+    })
   })
 
   it('fileEdit: an empty fileDiffs array on the result -> no files (defensive, mirrors OpencodeEngineToolMap)', () => {
@@ -160,19 +190,35 @@ describe('PiEngineToolMap.normalize', () => {
     }
   })
 
-  it('fileWrite: maps pi\'s path/content → path/content', () => {
-    const view = PiEngineToolMap.normalize('fileWrite', { path: '/src/new.ts', content: 'export const x = 1' })
-    expect(view).toMatchObject({ kind: 'fileWrite', path: '/src/new.ts', content: 'export const x = 1' })
+  it("fileWrite: maps pi's path/content → path/content", () => {
+    const view = PiEngineToolMap.normalize('fileWrite', {
+      path: '/src/new.ts',
+      content: 'export const x = 1'
+    })
+    expect(view).toMatchObject({
+      kind: 'fileWrite',
+      path: '/src/new.ts',
+      content: 'export const x = 1'
+    })
   })
 
-  it('fileRead: maps pi\'s path → path and result → content', () => {
-    const result = { type: 'tool_result', toolUseId: 'x', toolResult: 'file contents', isError: false } as const
+  it("fileRead: maps pi's path → path and result → content", () => {
+    const result = {
+      type: 'tool_result',
+      toolUseId: 'x',
+      toolResult: 'file contents',
+      isError: false
+    } as const
     const view = PiEngineToolMap.normalize('fileRead', { path: '/src/a.ts' }, result)
     expect(view).toMatchObject({ kind: 'fileRead', path: '/src/a.ts', content: 'file contents' })
   })
 
   it('search: grep/find map pattern → query', () => {
-    const view = PiEngineToolMap.normalize('search', { pattern: 'TODO', path: '/src', ignoreCase: true })
+    const view = PiEngineToolMap.normalize('search', {
+      pattern: 'TODO',
+      path: '/src',
+      ignoreCase: true
+    })
     expect(view).toMatchObject({ kind: 'search', query: 'TODO' })
   })
 
@@ -187,8 +233,14 @@ describe('PiEngineToolMap.normalize', () => {
   })
 
   it('mcp / unknown: pass input through', () => {
-    expect(PiEngineToolMap.normalize('mcp', { a: 1 })).toMatchObject({ kind: 'mcp', input: { a: 1 } })
-    expect(PiEngineToolMap.normalize('unknown', { b: 2 })).toMatchObject({ kind: 'unknown', input: { b: 2 } })
+    expect(PiEngineToolMap.normalize('mcp', { a: 1 })).toMatchObject({
+      kind: 'mcp',
+      input: { a: 1 }
+    })
+    expect(PiEngineToolMap.normalize('unknown', { b: 2 })).toMatchObject({
+      kind: 'unknown',
+      input: { b: 2 }
+    })
   })
 
   it('plan: exit_plan maps its plan field straight through (M5a)', () => {
@@ -217,10 +269,15 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     const result = {
       type: 'tool_result' as const,
       toolUseId: 'x',
-      toolResult: 'Mockup created successfully.\nDirectory: abc123\nPath: .claude/ui/mockups/abc123',
+      toolResult:
+        'Mockup created successfully.\nDirectory: abc123\nPath: .claude/ui/mockups/abc123',
       isError: false
     }
-    const view = PiEngineToolMap.normalize('mockup', { html: '<div>hi</div>', title: 'My UI' }, result)
+    const view = PiEngineToolMap.normalize(
+      'mockup',
+      { html: '<div>hi</div>', title: 'My UI' },
+      result
+    )
     expect(view).toEqual({ kind: 'mockup', directory: 'abc123', title: 'My UI' })
   })
 
@@ -235,7 +292,11 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
   })
 
   it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / "<engine> · <model>"', () => {
-    const view = PiEngineToolMap.normalize('task', { engine: 'opencode', prompt: 'do X', model: 'openai/gpt-5' })
+    const view = PiEngineToolMap.normalize('task', {
+      engine: 'opencode',
+      prompt: 'do X',
+      model: 'openai/gpt-5'
+    })
     expect(view).toEqual({
       kind: 'task',
       description: 'Dispatch: opencode',
@@ -246,7 +307,12 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
 
   it('task: dispatch_agent without a model -> subagent is just the engine name', () => {
     const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
-    expect(view).toEqual({ kind: 'task', description: 'Dispatch: claude', prompt: 'do X', subagent: 'claude' })
+    expect(view).toEqual({
+      kind: 'task',
+      description: 'Dispatch: claude',
+      prompt: 'do X',
+      subagent: 'claude'
+    })
   })
 
   it('task: no engine field (defensive fallback, unreachable for pi today) -> generic view', () => {
@@ -256,7 +322,12 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
 
   it('task: subagent single mode ({agent, task}) -> "Subagent: <agent>" / subagent field is the bare agent name', () => {
     const view = PiEngineToolMap.normalize('task', { agent: 'echoer', task: 'say hi' })
-    expect(view).toEqual({ kind: 'task', description: 'Subagent: echoer', prompt: 'say hi', subagent: 'echoer' })
+    expect(view).toEqual({
+      kind: 'task',
+      description: 'Subagent: echoer',
+      prompt: 'say hi',
+      subagent: 'echoer'
+    })
   })
 
   it('task: subagent parallel mode ({tasks: [...]}) -> "Subagents: a, b" / prompt lists each [agent] task', () => {
@@ -274,17 +345,27 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     })
   })
 
-  it('task: subagent takes precedence over the generic fallback but dispatch_agent\'s `engine` field is checked FIRST (never confused with subagent input)', () => {
+  it("task: subagent takes precedence over the generic fallback but dispatch_agent's `engine` field is checked FIRST (never confused with subagent input)", () => {
     // dispatch_agent's shape never carries `agent`/`tasks` -- this just proves
     // the two branches don't cross-contaminate for a pathological input that
     // (unrealistically) carried both.
-    const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', agent: 'echoer', task: 'y' })
-    expect(view).toEqual({ kind: 'task', description: 'Dispatch: claude', prompt: 'x', subagent: 'claude' })
+    const view = PiEngineToolMap.normalize('task', {
+      engine: 'claude',
+      prompt: 'x',
+      agent: 'echoer',
+      task: 'y'
+    })
+    expect(view).toEqual({
+      kind: 'task',
+      description: 'Dispatch: claude',
+      prompt: 'x',
+      subagent: 'claude'
+    })
   })
 })
 
 describe('PiEngineToolMap.displayName', () => {
-  it('prettifies pi\'s lowercase built-in tool names', () => {
+  it("prettifies pi's lowercase built-in tool names", () => {
     expect(PiEngineToolMap.displayName('bash')).toBe('Bash')
     expect(PiEngineToolMap.displayName('read')).toBe('Read')
     expect(PiEngineToolMap.displayName('write')).toBe('Write')

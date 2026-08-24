@@ -127,10 +127,7 @@ export const AUTHCFG_CHANNELS: ReadonlySet<string> = new Set([
  * is stated once, here, instead of being inferred from a `kind` declaration two
  * files away.
  */
-export const AUTHCFG_FREE_CHANNELS: ReadonlySet<string> = new Set([
-  'authcfg:get',
-  'authcfg:end'
-])
+export const AUTHCFG_FREE_CHANNELS: ReadonlySet<string> = new Set(['authcfg:get', 'authcfg:end'])
 
 /**
  * How long an unlocked settings editor stays open (ADR-054 §6 amendment).

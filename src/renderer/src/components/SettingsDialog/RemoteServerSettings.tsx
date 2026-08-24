@@ -390,7 +390,6 @@ export function RemoteServerSettings(): React.JSX.Element {
               and access ends after the terminal re-check window in the security section below. You
               can watch any remote shell live from this app.
             </div>
-
           </div>
         </>
       )}

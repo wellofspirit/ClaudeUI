@@ -132,9 +132,7 @@ describe('useGitWatcher', () => {
     // The set becomes exactly the new cwd. Dropping /repo-a from the union is
     // what stops its poller — stated as one fact, not as a stop plus a start.
     expect(stated().at(-1)).toEqual(['/repo-b'])
-    expect(stated().some((set) => set.includes('/repo-a') && set.includes('/repo-b'))).toBe(
-      false
-    )
+    expect(stated().some((set) => set.includes('/repo-a') && set.includes('/repo-b'))).toBe(false)
   })
 
   it('states an EMPTY set when the cwd is not a git repo', async () => {

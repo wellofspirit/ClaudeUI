@@ -9,7 +9,11 @@ import { describe, it, expect } from 'vitest'
 import { convertStoredMessage } from '../event-mapper'
 import type { StoredMessage } from '../protocol/types'
 
-function msg(role: 'user' | 'assistant' | 'system', parts: StoredMessage['parts'], id = 'm1'): StoredMessage {
+function msg(
+  role: 'user' | 'assistant' | 'system',
+  parts: StoredMessage['parts'],
+  id = 'm1'
+): StoredMessage {
   return { info: { id, role, time: { created: 1000 } }, parts }
 }
 
@@ -51,7 +55,12 @@ describe('convertStoredMessage', () => {
       ])
     )
     const result = r!.content.find((b) => b.type === 'tool_result')
-    expect(result).toEqual({ type: 'tool_result', toolUseId: 'c2', toolResult: 'boom', isError: true })
+    expect(result).toEqual({
+      type: 'tool_result',
+      toolUseId: 'c2',
+      toolResult: 'boom',
+      isError: true
+    })
   })
 
   it('a running tool part yields only tool_use (no tool_result)', () => {
@@ -72,14 +81,19 @@ describe('convertStoredMessage', () => {
   })
 
   it('returns null when there is no renderable content', () => {
-    expect(convertStoredMessage(msg('assistant', [{ type: 'step-start' }, { type: 'file' }]))).toBeNull()
+    expect(
+      convertStoredMessage(msg('assistant', [{ type: 'step-start' }, { type: 'file' }]))
+    ).toBeNull()
     expect(convertStoredMessage(msg('assistant', []))).toBeNull()
     expect(convertStoredMessage(msg('assistant', [{ type: 'text', text: '' }]))).toBeNull()
   })
 
   it('returns null when info.id is missing', () => {
     expect(
-      convertStoredMessage({ info: { role: 'assistant' } as never, parts: [{ type: 'text', text: 'x' }] })
+      convertStoredMessage({
+        info: { role: 'assistant' } as never,
+        parts: [{ type: 'text', text: 'x' }]
+      })
     ).toBeNull()
   })
 
@@ -96,7 +110,13 @@ describe('convertStoredMessage', () => {
             output: 'Success. Updated the following files:\nM a.ts',
             metadata: {
               files: [
-                { relativePath: 'a.ts', type: 'update', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1 }
+                {
+                  relativePath: 'a.ts',
+                  type: 'update',
+                  patch: '@@ -1 +1 @@\n-old\n+new',
+                  additions: 1,
+                  deletions: 1
+                }
               ]
             }
           }
@@ -107,7 +127,15 @@ describe('convertStoredMessage', () => {
     expect(result).toMatchObject({
       type: 'tool_result',
       toolUseId: 'c5',
-      fileDiffs: [{ path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }]
+      fileDiffs: [
+        {
+          path: 'a.ts',
+          patch: '@@ -1 +1 @@\n-old\n+new',
+          additions: 1,
+          deletions: 1,
+          changeType: 'update'
+        }
+      ]
     })
   })
 
@@ -118,7 +146,12 @@ describe('convertStoredMessage', () => {
           type: 'tool',
           tool: 'bash',
           callID: 'c6',
-          state: { status: 'completed', input: { command: 'ls' }, output: 'a\nb', metadata: { output: 'a\nb' } }
+          state: {
+            status: 'completed',
+            input: { command: 'ls' },
+            output: 'a\nb',
+            metadata: { output: 'a\nb' }
+          }
         }
       ])
     )
@@ -131,7 +164,12 @@ describe('convertStoredMessage', () => {
       msg('assistant', [
         { type: 'text', text: 'before' },
         { type: 'step-start' },
-        { type: 'tool', tool: 'read', callID: 'c4', state: { status: 'completed', input: {}, output: 'x' } },
+        {
+          type: 'tool',
+          tool: 'read',
+          callID: 'c4',
+          state: { status: 'completed', input: {}, output: 'x' }
+        },
         { type: 'text', text: 'after' }
       ])
     )
@@ -183,7 +221,12 @@ describe('convertStoredMessage — user attachment file parts', () => {
       ])
     )
     expect(r!.content).toEqual([
-      { type: 'document', mediaType: 'application/pdf', base64Data: 'PDFDATA', fileName: 'spec.pdf' }
+      {
+        type: 'document',
+        mediaType: 'application/pdf',
+        base64Data: 'PDFDATA',
+        fileName: 'spec.pdf'
+      }
     ])
   })
 
@@ -210,7 +253,12 @@ describe('convertStoredMessage — user attachment file parts', () => {
     const r = convertStoredMessage(
       msg('user', [
         { type: 'text', text: 'see @src' },
-        { type: 'file', mime: 'application/x-directory', url: 'file:///d:/repo/src', filename: 'src' }
+        {
+          type: 'file',
+          mime: 'application/x-directory',
+          url: 'file:///d:/repo/src',
+          filename: 'src'
+        }
       ])
     )
     expect(r!.content).toEqual([{ type: 'text', text: 'see @src' }])
@@ -292,7 +340,12 @@ describe('convertStoredMessage — tool-result images', () => {
             input: { filePath: '/x.png' },
             output: 'Image read successfully',
             attachments: [
-              { type: 'file', mime: 'image/png', url: 'data:image/png;base64,SHOT', filename: 'x.png' }
+              {
+                type: 'file',
+                mime: 'image/png',
+                url: 'data:image/png;base64,SHOT',
+                filename: 'x.png'
+              }
             ]
           }
         }
@@ -341,7 +394,12 @@ describe('convertStoredMessage — tool-result images', () => {
   it('omits images when the tool returned none', () => {
     const r = convertStoredMessage(
       msg('assistant', [
-        { type: 'tool', tool: 'bash', callID: 'c-none', state: { status: 'completed', output: 'x' } }
+        {
+          type: 'tool',
+          tool: 'bash',
+          callID: 'c-none',
+          state: { status: 'completed', output: 'x' }
+        }
       ])
     )
     const result = r!.content.find((b) => b.type === 'tool_result')!

@@ -11,12 +11,7 @@ import { logger } from './logger'
 // ---------------------------------------------------------------------------
 
 export type TunnelState =
-  | 'stopped'
-  | 'starting'
-  | 'downloading'
-  | 'connected'
-  | 'error'
-  | 'restarting'
+  'stopped' | 'starting' | 'downloading' | 'connected' | 'error' | 'restarting'
 
 export interface TunnelStatus {
   state: TunnelState

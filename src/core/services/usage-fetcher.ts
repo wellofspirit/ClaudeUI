@@ -793,9 +793,7 @@ export class UsageFetcher {
 
     const parseWindow = (key: string): RateWindow | null => {
       const w = windowSource[key] as
-        | { utilization?: number | null; resets_at?: string | null }
-        | undefined
-        | null
+        { utilization?: number | null; resets_at?: string | null } | undefined | null
       if (!w || typeof w.utilization !== 'number') return null
       return {
         usedPercent: w.utilization,

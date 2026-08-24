@@ -207,9 +207,7 @@ export async function dumpSurface(wp: WalkPage, name: string): Promise<string> {
   const testIds = await wp.page
     .$$eval('[data-testid]', (els) => els.map((e) => e.getAttribute('data-testid') ?? ''))
     .catch(() => [] as string[])
-  const text = await wp.page
-    .evaluate(() => document.body?.innerText ?? '')
-    .catch(() => '(no body)')
+  const text = await wp.page.evaluate(() => document.body?.innerText ?? '').catch(() => '(no body)')
   const report = [
     `url=${wp.page.url()}`,
     `testids=${JSON.stringify([...new Set(testIds)].slice(0, 40))}`,

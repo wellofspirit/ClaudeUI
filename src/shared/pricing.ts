@@ -481,11 +481,7 @@ const GOOGLE_PRICING: PricingEntry[] = [
 // Aggregate pricing table
 // ---------------------------------------------------------------------------
 
-const PRICING_TABLE: PricingEntry[] = [
-  ...ANTHROPIC_PRICING,
-  ...OPENAI_PRICING,
-  ...GOOGLE_PRICING
-]
+const PRICING_TABLE: PricingEntry[] = [...ANTHROPIC_PRICING, ...OPENAI_PRICING, ...GOOGLE_PRICING]
 
 // ---------------------------------------------------------------------------
 // Supplemental pricing (registered at runtime by main — pure; no I/O here)
@@ -590,7 +586,8 @@ export function equivalentCostUsd(
   const p = findPricing(vendorId, modelId)
   if (!p) return null
 
-  const { inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cacheReadTokens } = tokens
+  const { inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cacheReadTokens } =
+    tokens
 
   // Clamp: the 1h subset cannot exceed the total cache-write tokens.
   const cache1h = Math.min(Math.max(cacheWrite1hTokens, 0), cacheWriteTokens)
@@ -604,4 +601,3 @@ export function equivalentCostUsd(
     (cacheReadTokens / 1_000_000) * p.cacheReadPerMTok
   )
 }
-

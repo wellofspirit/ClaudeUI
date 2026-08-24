@@ -37,12 +37,7 @@ export type PermissionDecision = 'allow' | 'ask' | 'deny'
  * we simply report what it matched.
  */
 export type PermissionDecisionSource =
-  | 'deny-rule'
-  | 'hosted-auto-allow'
-  | 'ask-rule'
-  | 'session-allow'
-  | 'allow-rule'
-  | 'mode-base'
+  'deny-rule' | 'hosted-auto-allow' | 'ask-rule' | 'session-allow' | 'allow-rule' | 'mode-base'
 
 export interface PermissionVerdict {
   decision: PermissionDecision
@@ -287,7 +282,12 @@ export function claudeGlobMatches(input: string, pattern: string): boolean {
 }
 
 /** Path-bearing pi kinds — the only ones a path-glob specifier can meaningfully match against. */
-const PATH_BEARING_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>(['fileEdit', 'fileWrite', 'fileRead', 'search'])
+const PATH_BEARING_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>([
+  'fileEdit',
+  'fileWrite',
+  'fileRead',
+  'search'
+])
 
 /**
  * Extract the path argument pi's tool_call input carries for a path-bearing
@@ -357,7 +357,9 @@ function toAbsolutePath(rawPath: string, cwd: string): string {
   const normalizedRaw = flavor === path.win32 ? rawPath : rawPath.replaceAll('\\', '/')
   // `normalize` rather than `resolve` for the already-absolute case: identical
   // result, minus any chance of consulting the HOST process's cwd.
-  return flavor.isAbsolute(normalizedRaw) ? flavor.normalize(normalizedRaw) : flavor.resolve(cwd, normalizedRaw)
+  return flavor.isAbsolute(normalizedRaw)
+    ? flavor.normalize(normalizedRaw)
+    : flavor.resolve(cwd, normalizedRaw)
 }
 
 function resolveMatchPath(rawPath: string, cwd: string | undefined): string {
@@ -507,7 +509,11 @@ export function sessionAllowKey(toolName: string, input: Record<string, unknown>
  *    everything else (fileEdit/fileWrite/task/unknown/…) denies outright
  *  - any other/unrecognised mode string -> treat as default (fail toward asking, not allowing)
  */
-function modeBaseDecision(mode: string, kind: ToolKind, input: Record<string, unknown>): 'allow' | 'ask' | 'deny' {
+function modeBaseDecision(
+  mode: string,
+  kind: ToolKind,
+  input: Record<string, unknown>
+): 'allow' | 'ask' | 'deny' {
   if (kind === 'plan' && mode !== 'plan') return 'deny'
   switch (mode) {
     case 'bypassPermissions':
@@ -545,7 +551,8 @@ function modeBaseDecision(mode: string, kind: ToolKind, input: Record<string, un
  * "Denied by permission rule: …" reason (PiSession.gateToolCallInner checks
  * that first) — this is only the mode-base fallback.
  */
-export const PLAN_MODE_DENY_REASON = 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+export const PLAN_MODE_DENY_REASON =
+  'Plan mode is read-only — present a plan and call exit_plan to proceed'
 
 /**
  * Denial reason for an exit_plan call OUTSIDE plan mode (M5a addendum) —
@@ -782,10 +789,14 @@ export function isPlanSafeBashCommand(command: string): boolean {
  * its own beyond exit_plan (an explicit user ask/deny RULE still overrides
  * this, checked earlier in decide()).
  */
-function planModeBaseDecision(kind: ToolKind, input: Record<string, unknown>): 'allow' | 'ask' | 'deny' {
+function planModeBaseDecision(
+  kind: ToolKind,
+  input: Record<string, unknown>
+): 'allow' | 'ask' | 'deny' {
   if (kind === 'fileRead' || kind === 'search') return 'allow'
   if (kind === 'plan') return 'ask'
-  if (kind === 'command') return isPlanSafeBashCommand(String(input.command ?? '')) ? 'allow' : 'deny'
+  if (kind === 'command')
+    return isPlanSafeBashCommand(String(input.command ?? '')) ? 'allow' : 'deny'
   return 'deny'
 }
 

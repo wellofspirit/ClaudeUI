@@ -102,7 +102,9 @@ Strictest applies when content matches more than one; an exception clearing one 
 3. CONFIDENTIAL DATA — the project's or organization's own work product. Scoped by repo visibility: unrestricted within a private repo; in a public repo only that repo's own work is publishable, and content ported in from elsewhere is not its own work.`
 
 function renderEnvironment(env: EnvironmentInfo): string {
-  const lines: string[] = ['## Environment — ground truth, overrides any inference from the transcript']
+  const lines: string[] = [
+    '## Environment — ground truth, overrides any inference from the transcript'
+  ]
   lines.push(`- Working directory: ${env.cwd}`)
   if (env.platform) lines.push(`- Platform: ${env.platform}`)
   lines.push(
@@ -114,7 +116,9 @@ function renderEnvironment(env: EnvironmentInfo): string {
     `- Repository visibility: ${env.repoVisibility ?? 'unknown — assume PRIVATE for confidentiality, assume PUBLIC for secret exposure (each direction takes the safer reading).'}`
   )
   if (env.additionalDirectories?.length)
-    lines.push(`- Additional user-granted directories (count as local): ${env.additionalDirectories.join(', ')}`)
+    lines.push(
+      `- Additional user-granted directories (count as local): ${env.additionalDirectories.join(', ')}`
+    )
   lines.push(
     env.trustedDomains?.length
       ? `- Trusted external domains/services: ${env.trustedDomains.join(', ')}`
@@ -135,9 +139,9 @@ function renderEnvironment(env: EnvironmentInfo): string {
 
 function renderRules(): string {
   const hard = HARD_RULES.map((r) => `### ${r.name}\n${r.text}`).join('\n\n')
-  const soft = SOFT_RULES.map((r) => `### ${r.name}${r.adversarial ? ' *(adversarial pattern)*' : ''}\n${r.text}`).join(
-    '\n\n'
-  )
+  const soft = SOFT_RULES.map(
+    (r) => `### ${r.name}${r.adversarial ? ' *(adversarial pattern)*' : ''}\n${r.text}`
+  ).join('\n\n')
   const allow = ALLOW_RULES.map((r) => `### ${r.name}\n${r.text}`).join('\n\n')
   return [
     `## HARD BLOCK — exactly one rule; nothing clears it\n\n${hard}`,

@@ -60,7 +60,14 @@ describe('createOpencodeHostedToolsServer', () => {
 
   it('create_mockup writes files under <cwd>/.claude/ui/mockups', async () => {
     const server = createOpencodeHostedToolsServer(tmp)
-    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<unknown> }> })._registeredTools
+    const tools = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (args: Record<string, unknown>) => Promise<unknown> }
+        >
+      }
+    )._registeredTools
 
     const result = (await tools['create_mockup'].handler({ html: '<h1>Hello</h1>' })) as {
       content: Array<{ type: string; text: string }>
@@ -90,7 +97,14 @@ describe('createOpencodeHostedToolsServer', () => {
     await writeFile(join(mockupDir, 'index.html'), '<html></html>', 'utf-8')
 
     const server = createOpencodeHostedToolsServer(tmp)
-    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<unknown> }> })._registeredTools
+    const tools = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (args: Record<string, unknown>) => Promise<unknown> }
+        >
+      }
+    )._registeredTools
 
     const result = (await tools['show_mockup'].handler({ directory: id })) as {
       content: Array<{ type: string; text: string }>
@@ -104,11 +118,29 @@ describe('createOpencodeHostedToolsServer', () => {
     try {
       const serverA = createOpencodeHostedToolsServer(tmp)
       const serverB = createOpencodeHostedToolsServer(tmp2)
-      const toolsA = (serverA as unknown as { _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<unknown> }> })._registeredTools
-      const toolsB = (serverB as unknown as { _registeredTools: Record<string, { handler: (args: Record<string, unknown>) => Promise<unknown> }> })._registeredTools
+      const toolsA = (
+        serverA as unknown as {
+          _registeredTools: Record<
+            string,
+            { handler: (args: Record<string, unknown>) => Promise<unknown> }
+          >
+        }
+      )._registeredTools
+      const toolsB = (
+        serverB as unknown as {
+          _registeredTools: Record<
+            string,
+            { handler: (args: Record<string, unknown>) => Promise<unknown> }
+          >
+        }
+      )._registeredTools
 
-      const resultA = (await toolsA['create_mockup'].handler({ html: '<p>A</p>' })) as { content: Array<{ type: string; text: string }> }
-      const resultB = (await toolsB['create_mockup'].handler({ html: '<p>B</p>' })) as { content: Array<{ type: string; text: string }> }
+      const resultA = (await toolsA['create_mockup'].handler({ html: '<p>A</p>' })) as {
+        content: Array<{ type: string; text: string }>
+      }
+      const resultB = (await toolsB['create_mockup'].handler({ html: '<p>B</p>' })) as {
+        content: Array<{ type: string; text: string }>
+      }
 
       const idA = /Directory:\s*(\S+)/.exec(resultA.content[0].text)![1]
       const idB = /Directory:\s*(\S+)/.exec(resultB.content[0].text)![1]
@@ -135,12 +167,18 @@ function makeExtra(): { signal: AbortSignal; sendNotification: ReturnType<typeof
 
 function getDispatchTool(
   tmp: string,
-  deps: { lookupCallerSession?: (id: string) => CallerSessionHandle | undefined; dispatch?: DispatchAgentFn }
+  deps: {
+    lookupCallerSession?: (id: string) => CallerSessionHandle | undefined
+    dispatch?: DispatchAgentFn
+  }
 ): { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> } {
   const server = createOpencodeHostedToolsServer(tmp, deps)
   return (
     server as unknown as {
-      _registeredTools: Record<string, { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }>
+      _registeredTools: Record<
+        string,
+        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+      >
     }
   )._registeredTools['dispatch_agent']
 }
@@ -185,7 +223,10 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
   it('happy path: strips the internal arg, dispatches with fromRoutingId = caller id, appends session_id', async () => {
     const emit = vi.fn()
     const addDispatchedCost = vi.fn()
-    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'the review', sessionId: 'claude-42' }))
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({
+      text: 'the review',
+      sessionId: 'claude-42'
+    }))
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: (id) => {
         expect(id).toBe('ses_caller')
@@ -278,7 +319,12 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
 
   it("the engine param's schema accepts 'pi' and rejects an unlisted engine value", () => {
     const def = getDispatchToolDef(tmp)
-    const engineSchema = (def.inputSchema.shape as unknown as Record<string, { safeParse: (v: unknown) => { success: boolean } }>).engine
+    const engineSchema = (
+      def.inputSchema.shape as unknown as Record<
+        string,
+        { safeParse: (v: unknown) => { success: boolean } }
+      >
+    ).engine
     expect(engineSchema.safeParse('pi').success).toBe(true)
     expect(engineSchema.safeParse('claude').success).toBe(true)
     expect(engineSchema.safeParse('opencode').success).toBe(false)
@@ -287,9 +333,17 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
   it("accepts engine: 'pi' and delegates to the dispatcher (ADR-033 M4c)", async () => {
     const emit = vi.fn()
     const addDispatchedCost = vi.fn()
-    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'pi says hi', sessionId: 'pi-sess-1' }))
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({
+      text: 'pi says hi',
+      sessionId: 'pi-sess-1'
+    }))
     const tool = getDispatchTool(tmp, {
-      lookupCallerSession: () => ({ cwd: '/proj', autonomyMode: 'default', emit, addDispatchedCost }),
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        autonomyMode: 'default',
+        emit,
+        addDispatchedCost
+      }),
       dispatch
     })
     const result = (await tool.handler(
@@ -304,8 +358,17 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
 
     expect(dispatch).toHaveBeenCalledWith(
-      { engine: 'pi', prompt: 'do a thing', model: 'openai-codex/gpt-5.6-luna', sessionId: undefined },
-      expect.objectContaining({ fromEngine: 'opencode', fromRoutingId: 'ses_caller', toolUseId: 'call_99' })
+      {
+        engine: 'pi',
+        prompt: 'do a thing',
+        model: 'openai-codex/gpt-5.6-luna',
+        sessionId: undefined
+      },
+      expect.objectContaining({
+        fromEngine: 'opencode',
+        fromRoutingId: 'ses_caller',
+        toolUseId: 'call_99'
+      })
     )
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toContain('pi says hi')
@@ -361,9 +424,14 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     // pi's (loadEngineConfig('pi')) — see createOpencodeHostedToolsServer's
     // call order.
     vi.mocked(loadEngineConfig)
-      .mockReturnValueOnce({ dispatch: { allowedModels: ['sonnet', 'haiku'], defaultModel: 'sonnet' } })
       .mockReturnValueOnce({
-        dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'], defaultModel: 'openai-codex/gpt-5.6-luna' }
+        dispatch: { allowedModels: ['sonnet', 'haiku'], defaultModel: 'sonnet' }
+      })
+      .mockReturnValueOnce({
+        dispatch: {
+          allowedModels: ['openai-codex/gpt-5.6-luna'],
+          defaultModel: 'openai-codex/gpt-5.6-luna'
+        }
       })
     const def = getDispatchToolDef(tmp)
     expect(def.description).toContain('sonnet') // Claude hint survives

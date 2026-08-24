@@ -42,8 +42,7 @@ export const ISSUER = 'https://auth.openai.com'
 export const DEFAULT_OAUTH_PORT = 1455
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
 
-const PKCE_ALPHABET =
-  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
+const PKCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -221,7 +220,10 @@ function accountIdFromClaims(claims: JwtClaims): string | undefined {
 }
 
 /** id_token preferred, access_token fallback; claim priority: chatgpt_account_id → the auth-namespace claim → organizations[0].id. */
-export function extractAccountId(tokens: { id_token?: string; access_token?: string }): string | undefined {
+export function extractAccountId(tokens: {
+  id_token?: string
+  access_token?: string
+}): string | undefined {
   if (tokens.id_token) {
     const claims = parseJwtClaims(tokens.id_token)
     const accountId = claims && accountIdFromClaims(claims)
@@ -235,7 +237,10 @@ export function extractAccountId(tokens: { id_token?: string; access_token?: str
 }
 
 /** Same id_token-preferred/access_token-fallback priority as extractAccountId, for the `email` claim. */
-export function extractEmail(tokens: { id_token?: string; access_token?: string }): string | undefined {
+export function extractEmail(tokens: {
+  id_token?: string
+  access_token?: string
+}): string | undefined {
   if (tokens.id_token) {
     const claims = parseJwtClaims(tokens.id_token)
     if (claims?.email) return claims.email
@@ -450,7 +455,8 @@ export class CodexLoginFlow implements LoginFlow {
   private boundPort: number | undefined
   private pkce: PkceCodes | undefined
   private state: string | undefined
-  private pending: { resolve: (cred: VaultCredential) => void; reject: (err: Error) => void } | undefined
+  private pending:
+    { resolve: (cred: VaultCredential) => void; reject: (err: Error) => void } | undefined
   private pendingPromise: Promise<VaultCredential> | undefined
   private timeoutHandle: NodeJS.Timeout | undefined
 
@@ -497,10 +503,16 @@ export class CodexLoginFlow implements LoginFlow {
     }
 
     this.timeoutHandle = setTimeout(() => {
-      void this.terminate({ ok: false, err: new Error('OAuth callback timeout - authorization took too long') })
+      void this.terminate({
+        ok: false,
+        err: new Error('OAuth callback timeout - authorization took too long')
+      })
     }, this.timeoutMs)
 
-    return { authorizeUrl: buildAuthorizeUrl(this.redirectUri, this.pkce, this.state), state: this.state }
+    return {
+      authorizeUrl: buildAuthorizeUrl(this.redirectUri, this.pkce, this.state),
+      state: this.state
+    }
   }
 
   waitForCallback(): Promise<VaultCredential> {

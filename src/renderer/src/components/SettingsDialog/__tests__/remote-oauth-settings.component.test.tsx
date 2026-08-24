@@ -24,7 +24,14 @@ vi.mock('electron', async () => await import('../../../../../test/stubs/electron
 function renderSection(id: string): void {
   const section = SECTIONS.find((s) => s.id === id)!
   render(
-    section.items[0].render({} as never, () => {}, {} as never, () => {}, {} as never, () => {})
+    section.items[0].render(
+      {} as never,
+      () => {},
+      {} as never,
+      () => {},
+      {} as never,
+      () => {}
+    )
   )
 }
 
@@ -208,7 +215,12 @@ describe('Settings › opencode providers — OAuth', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
     })
-    expect(window.api.vendorAuthOauthCallback).toHaveBeenCalledWith('opencode', 'anthropic', 0, 'k9')
+    expect(window.api.vendorAuthOauthCallback).toHaveBeenCalledWith(
+      'opencode',
+      'anthropic',
+      0,
+      'k9'
+    )
   })
 
   it('on desktop: the legacy instructions + code box, no shared flow (platform pin)', async () => {

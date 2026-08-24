@@ -287,9 +287,7 @@ async function foldSubagentCosts(
     return
   }
 
-  const agentFiles = files
-    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
-    .sort()
+  const agentFiles = files.filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl')).sort()
 
   for (const f of agentFiles) {
     await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
@@ -1445,10 +1443,7 @@ export function loadBackgroundOutput(
         }
       }
     } else {
-      logger.warn(
-        'SessionHistory',
-        `Rejected out-of-root background outputFile: ${outputFile}`
-      )
+      logger.warn('SessionHistory', `Rejected out-of-root background outputFile: ${outputFile}`)
     }
   }
 

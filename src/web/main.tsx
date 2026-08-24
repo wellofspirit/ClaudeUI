@@ -62,8 +62,9 @@ const api = createWebSocketApi(connection)
 // key itself. Handed to the renderer through the same `window` surface the
 // tokens use — the terminal components are shared with the desktop build, which
 // has no gate and must not import one.
-;(window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }).__STEP_UP_REQUEST__ =
-  (channel) => stepUpGate.request(channel)
+;(
+  window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }
+).__STEP_UP_REQUEST__ = (channel) => stepUpGate.request(channel)
 // SyncCore phase 4c: install the transport's SyncClient in the shared registry
 // BEFORE React mounts, so every replicated-channel listener in the renderer
 // subscribes to it. The desktop entry does the same with its MessagePort client —
@@ -281,7 +282,9 @@ function RemoteApp(): React.JSX.Element {
     // overlay on a screen whose button will keep failing the same way.
     if (state === 'failed' && pwParams.current) {
       const params = pwParams.current
-      setPhase((prev) => (prev.kind === 'passkey' ? { kind: 'password', params, error: err } : prev))
+      setPhase((prev) =>
+        prev.kind === 'passkey' ? { kind: 'password', params, error: err } : prev
+      )
     }
     if (state === 'auth-rejected') {
       setPhase((prev) => {

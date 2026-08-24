@@ -39,7 +39,10 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn(), error: vi.fn() }
 }))
 
-import { loadCleanupPeriodDays, saveCleanupPeriodDays } from '../../../core/services/claude-settings'
+import {
+  loadCleanupPeriodDays,
+  saveCleanupPeriodDays
+} from '../../../core/services/claude-settings'
 
 const SETTINGS_PATH = path.join(hoisted.TEST_HOME, '.claude', 'settings.json')
 

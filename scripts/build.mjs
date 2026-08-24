@@ -26,12 +26,27 @@ if (args.includes('-h') || args.includes('--help')) {
   console.log(
     'usage: node scripts/build.mjs <target> [-v]\n\n' +
       'targets: ' +
-      ['build', 'build:mac', 'build:win', 'build:linux', 'build:unpack', 'build:web', 'ensure-cli', 'update-cli', 'ensure-opencode', 'update-opencode', 'ensure-pi', 'update-pi'].join(', ')
+      [
+        'build',
+        'build:mac',
+        'build:win',
+        'build:linux',
+        'build:unpack',
+        'build:web',
+        'ensure-cli',
+        'update-cli',
+        'ensure-opencode',
+        'update-opencode',
+        'ensure-pi',
+        'update-pi'
+      ].join(', ')
   )
   process.exit(0)
 }
 if (!target) {
-  console.error('usage: node scripts/build.mjs <target> [-v]\n       (run with -h for the target list)')
+  console.error(
+    'usage: node scripts/build.mjs <target> [-v]\n       (run with -h for the target list)'
+  )
   process.exit(2)
 }
 
@@ -46,7 +61,8 @@ const LL = quiet ? ['--logLevel', 'warn'] : []
 // file set FORCE_COLOR=0 so log captures stay free of escape codes.
 const forceColor = process.env.FORCE_COLOR
 const useColor =
-  !!process.stdout.isTTY || (forceColor !== undefined && forceColor !== '0' && forceColor !== 'false')
+  !!process.stdout.isTTY ||
+  (forceColor !== undefined && forceColor !== '0' && forceColor !== 'false')
 const C = useColor
   ? {
       green: (s) => `\x1b[32m${s}\x1b[0m`,
@@ -95,35 +111,81 @@ const ensurePi = (update) => [
 ]
 
 const TARGETS = {
-  build: [...typecheck, ...ensureCli(false), ...ensureOpencode(false), ...ensurePi(false), ...electronViteBuild],
-  'build:mac': [...ensureCli(false), ...ensureOpencode(false), ...ensurePi(false), ...electronViteBuild, ...webBuild, {
-    label: 'electron-builder --mac --dir',
-    steps: [
-      [
-        'bunx',
-        ['electron-builder', '--mac', '--dir'],
-        { env: { ...CHILD_ENV, CSC_IDENTITY_AUTO_DISCOVERY: 'false' } }
+  build: [
+    ...typecheck,
+    ...ensureCli(false),
+    ...ensureOpencode(false),
+    ...ensurePi(false),
+    ...electronViteBuild
+  ],
+  'build:mac': [
+    ...ensureCli(false),
+    ...ensureOpencode(false),
+    ...ensurePi(false),
+    ...electronViteBuild,
+    ...webBuild,
+    {
+      label: 'electron-builder --mac --dir',
+      steps: [
+        [
+          'bunx',
+          ['electron-builder', '--mac', '--dir'],
+          { env: { ...CHILD_ENV, CSC_IDENTITY_AUTO_DISCOVERY: 'false' } }
+        ]
       ]
-    ]
-  }, {
-    label: 'codesign',
-    steps: [['sh', ['-c', 'codesign --force --deep --sign "${MAC_SIGN_IDENTITY:--}" dist/mac-arm64/ClaudeUI.app']]]
-  }, {
-    label: 'xattr -cr',
-    steps: [['sh', ['-c', 'xattr -cr dist/mac-arm64/ClaudeUI.app']]]
-  }],
-  'build:win': [...typecheck, ...ensureCli(false), ...ensureOpencode(false), ...ensurePi(false), ...electronViteBuild, ...webBuild, {
-    label: 'electron-builder --win --dir',
-    steps: [['bunx', ['electron-builder', '--win', '--dir']]]
-  }],
-  'build:linux': [...ensureCli(false), ...ensureOpencode(false), ...ensurePi(false), ...electronViteBuild, ...webBuild, {
-    label: 'electron-builder --linux',
-    steps: [['bunx', ['electron-builder', '--linux']]]
-  }],
-  'build:unpack': [...typecheck, ...ensureCli(false), ...ensureOpencode(false), ...ensurePi(false), ...electronViteBuild, ...webBuild, {
-    label: 'electron-builder --dir',
-    steps: [['bunx', ['electron-builder', '--dir']]]
-  }],
+    },
+    {
+      label: 'codesign',
+      steps: [
+        [
+          'sh',
+          [
+            '-c',
+            'codesign --force --deep --sign "${MAC_SIGN_IDENTITY:--}" dist/mac-arm64/ClaudeUI.app'
+          ]
+        ]
+      ]
+    },
+    {
+      label: 'xattr -cr',
+      steps: [['sh', ['-c', 'xattr -cr dist/mac-arm64/ClaudeUI.app']]]
+    }
+  ],
+  'build:win': [
+    ...typecheck,
+    ...ensureCli(false),
+    ...ensureOpencode(false),
+    ...ensurePi(false),
+    ...electronViteBuild,
+    ...webBuild,
+    {
+      label: 'electron-builder --win --dir',
+      steps: [['bunx', ['electron-builder', '--win', '--dir']]]
+    }
+  ],
+  'build:linux': [
+    ...ensureCli(false),
+    ...ensureOpencode(false),
+    ...ensurePi(false),
+    ...electronViteBuild,
+    ...webBuild,
+    {
+      label: 'electron-builder --linux',
+      steps: [['bunx', ['electron-builder', '--linux']]]
+    }
+  ],
+  'build:unpack': [
+    ...typecheck,
+    ...ensureCli(false),
+    ...ensureOpencode(false),
+    ...ensurePi(false),
+    ...electronViteBuild,
+    ...webBuild,
+    {
+      label: 'electron-builder --dir',
+      steps: [['bunx', ['electron-builder', '--dir']]]
+    }
+  ],
   'build:web': [...webBuild],
   'ensure-cli': [...ensureCli(false)],
   'update-cli': [...ensureCli(true)],
@@ -178,4 +240,6 @@ for (let i = 0; i < stages.length; i++) {
   }
 }
 
-console.log(`\n${target} ${C.green('✓')} (${stages.length} stages, ${((Date.now() - started) / 1000).toFixed(1)}s)`)
+console.log(
+  `\n${target} ${C.green('✓')} (${stages.length} stages, ${((Date.now() - started) / 1000).toFixed(1)}s)`
+)

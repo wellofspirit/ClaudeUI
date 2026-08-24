@@ -16,7 +16,10 @@ import { TerminalTab } from '../TerminalTab'
 
 const TAB: TerminalTabModel = { id: 'term-1', title: 'Terminal', cwd: '/d/repo', poolIndex: 0 }
 
-function renderTab(onClose = vi.fn(), onSelect = vi.fn()): { onClose: typeof onClose; onSelect: typeof onSelect } {
+function renderTab(
+  onClose = vi.fn(),
+  onSelect = vi.fn()
+): { onClose: typeof onClose; onSelect: typeof onSelect } {
   render(<TerminalTab tab={TAB} active onSelect={onSelect} onClose={onClose} />)
   return { onClose, onSelect }
 }

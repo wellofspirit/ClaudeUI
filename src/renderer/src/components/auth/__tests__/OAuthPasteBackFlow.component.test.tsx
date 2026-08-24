@@ -27,7 +27,9 @@ afterEach(cleanup)
 
 describe('OAuthPasteBackFlow — the two variants', () => {
   it('the url variant explains the failed page and offers the address-bar paste', () => {
-    render(<OAuthPasteBackFlow variant="url" url="https://auth.example/authorize" onSubmit={vi.fn()} />)
+    render(
+      <OAuthPasteBackFlow variant="url" url="https://auth.example/authorize" onSubmit={vi.fn()} />
+    )
     const flow = screen.getByTestId('OAuthPasteBackFlow')
     expect(flow).toHaveAttribute('data-variant', 'url')
     expect(flow).toHaveTextContent('Sign in with your browser')
@@ -54,7 +56,9 @@ describe('OAuthPasteBackFlow — the two variants', () => {
 
 describe('OAuthPasteBackFlow — step 1 opens on the CLIENT', () => {
   it('the button opens the authorize url in a new tab from the user gesture', () => {
-    render(<OAuthPasteBackFlow variant="url" url="https://auth.example/a?state=s" onSubmit={vi.fn()} />)
+    render(
+      <OAuthPasteBackFlow variant="url" url="https://auth.example/a?state=s" onSubmit={vi.fn()} />
+    )
     fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.open'))
     expect(window.open).toHaveBeenCalledWith(
       'https://auth.example/a?state=s',
@@ -163,7 +167,9 @@ describe('classifyOAuthError — the mockup outcome mapping', () => {
 
 describe('OAuthOutcomeNotice — copy per kind', () => {
   it('renders the mockup copy for the two classified kinds and the raw text otherwise', () => {
-    const { rerender } = render(<OAuthOutcomeNotice kind="state-mismatch" message="Invalid state" />)
+    const { rerender } = render(
+      <OAuthOutcomeNotice kind="state-mismatch" message="Invalid state" />
+    )
     expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent(STATE_MISMATCH_COPY)
     expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveAttribute('data-kind', 'state-mismatch')
 

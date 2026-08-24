@@ -25,7 +25,12 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import after the mock is registered.
-import { createWorktree, removeWorktree, listWorktrees, getWorktreeStatus } from '../../../core/services/worktree'
+import {
+  createWorktree,
+  removeWorktree,
+  listWorktrees,
+  getWorktreeStatus
+} from '../../../core/services/worktree'
 
 // ---------------------------------------------------------------------------
 // createWorktree

@@ -19,7 +19,7 @@ A permission subtlety surfaced in design (verified at source): opencode autonomy
 subagent the child session **inherits the parent's `deny` rules** (opencode-native
 `deriveSubagentSessionPermission`, surfaced via `event-mapper.ts`); the auto-mode classifier already
 judges subagent `permission.asked` (routed through the parent's mode in `OpencodeSession`). So per-agent
-permissions are **not** the primary control — they are a self-imposed *restrictive floor* (what built-in
+permissions are **not** the primary control — they are a self-imposed _restrictive floor_ (what built-in
 `explore` is).
 
 ## Decision
@@ -41,7 +41,7 @@ permissions are **not** the primary control — they are a self-imposed *restric
   **no permission-engine change is needed** for this phase (auto-mode already covers subagents — verified).
 - **AI-assisted authoring** ("Generate with AI"): port opencode's agent-architect meta-prompt into the
   repo and run a **one-off stateless opencode prompt** (the ADR-023 judge transport: `createSession →
-  prompt → deleteSession`, model = session model) → parse `{identifier, whenToUse, systemPrompt}` →
+prompt → deleteSession`, model = session model) → parse `{identifier, whenToUse, systemPrompt}` →
   prefill the editor for review/edit. Fail-soft to manual authoring (opencode exposes no generate API —
   CLI-only — so we replicate the prompt, we do not call a new endpoint).
 - **UI = drill-in inside the SettingsDialog** opencode → Agents section (list → editor with a back link +

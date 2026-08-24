@@ -119,7 +119,9 @@ describe('PtyManager multi-attach', () => {
     manager.attach(id, 'late')
     // The replay lands SYNCHRONOUSLY inside attach(), so no live chunk can
     // interleave ahead of the history it belongs after.
-    expect(sink.received).toEqual([{ connectionId: 'late', termId: id, data: '$ ls\r\nfile1 file2\r\n' }])
+    expect(sink.received).toEqual([
+      { connectionId: 'late', termId: id, data: '$ ls\r\nfile1 file2\r\n' }
+    ])
 
     ptyStub.spawned[0].emitData('more\r\n')
     await flushPtyBatch()

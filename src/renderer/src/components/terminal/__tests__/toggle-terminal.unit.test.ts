@@ -56,7 +56,9 @@ describe('isTerminalToggleShortcut', () => {
       isTerminalToggleShortcut(key({ key: '`', code: 'Backquote', metaKey: true, shiftKey: true }))
     ).toBe(false)
     expect(
-      isTerminalToggleShortcut(key({ key: 'Dead', code: 'Backquote', altKey: true, shiftKey: true }))
+      isTerminalToggleShortcut(
+        key({ key: 'Dead', code: 'Backquote', altKey: true, shiftKey: true })
+      )
     ).toBe(false)
   })
 

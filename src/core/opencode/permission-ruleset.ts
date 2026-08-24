@@ -109,6 +109,12 @@ export function buildRuleset(mode: string): PermissionRule[] {
       // `full` like `default` (never less safe than Claude) until the classifier
       // lands, at which point `full` switches risky tools to classifier-decided.
       // See ADR-022.
-      return [allowAll, ...guards, rule('edit', 'ask'), rule('bash', 'ask'), rule('webfetch', 'ask')]
+      return [
+        allowAll,
+        ...guards,
+        rule('edit', 'ask'),
+        rule('bash', 'ask'),
+        rule('webfetch', 'ask')
+      ]
   }
 }

@@ -53,7 +53,13 @@ function writeSubagentTranscript(lines: object[]): void {
 
 /** A `type:'user'` transcript line with array content. */
 function userLine(content: unknown[], uuid = 'u1'): object {
-  return { type: 'user', userType: 'external', message: { role: 'user', content }, uuid, timestamp: TS }
+  return {
+    type: 'user',
+    userType: 'external',
+    message: { role: 'user', content },
+    uuid,
+    timestamp: TS
+  }
 }
 
 function imageBlock(mediaType: string, data: string): object {
@@ -74,7 +80,9 @@ afterEach(() => {
 
 describe('loadSessionHistory — user attachment rehydration', () => {
   it('emits the image block before the text block (image + text)', async () => {
-    writeTranscript([userLine([imageBlock('image/png', 'AAAA'), { type: 'text', text: 'look at this' }])])
+    writeTranscript([
+      userLine([imageBlock('image/png', 'AAAA'), { type: 'text', text: 'look at this' }])
+    ])
 
     const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages).toHaveLength(1)
@@ -165,9 +173,7 @@ describe('loadSessionHistory — user attachment rehydration', () => {
   })
 
   it('still routes a cli-command text block to a cli_command message (attachments do not reorder it)', async () => {
-    writeTranscript([
-      userLine([{ type: 'text', text: '<command-name>/clear</command-name>' }])
-    ])
+    writeTranscript([userLine([{ type: 'text', text: '<command-name>/clear</command-name>' }])])
 
     const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(messages).toHaveLength(1)
@@ -248,7 +254,13 @@ describe('loadSubagentHistory — user attachment rehydration', () => {
 
   it('still emits plain string content unchanged', async () => {
     writeSubagentTranscript([
-      { type: 'user', userType: 'external', message: { role: 'user', content: 'plain' }, uuid: 's1', timestamp: TS }
+      {
+        type: 'user',
+        userType: 'external',
+        message: { role: 'user', content: 'plain' },
+        uuid: 's1',
+        timestamp: TS
+      }
     ])
 
     const messages = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)

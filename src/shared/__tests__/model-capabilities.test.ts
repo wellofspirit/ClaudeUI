@@ -629,7 +629,10 @@ describe('piModelCapabilities', () => {
   })
 
   it('M3: reasoning:false ignores any effortLevels passed — no effort picker regardless', () => {
-    const caps = piModelCapabilities({ reasoning: false, effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    const caps = piModelCapabilities({
+      reasoning: false,
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    })
     expect(caps.reasoning).toEqual({})
   })
 })
@@ -644,12 +647,12 @@ describe('resolvePiCapabilitiesFromModel', () => {
 
   // M6c: pi now drives ONE vendor's login (openai-codex, via ClaudeUI's own
   // auth vault — CredentialSync/AuthVault) — was permanently false pre-M6c.
-  it('auth.canDriveLogin is true (M6c: openai-codex is driven via the auth vault; pi\'s other subscription vendors stay undriven)', () => {
+  it("auth.canDriveLogin is true (M6c: openai-codex is driven via the auth vault; pi's other subscription vendors stay undriven)", () => {
     expect(PI_ENGINE_CAPABILITIES.auth.canDriveLogin).toBe(true)
     expect(PI_ENGINE_CAPABILITIES.auth.multiAccount).toBe(false)
   })
 
-  it('sideQuestion is true (/btw wired via PiSession.askSideQuestion\'s transcript-fed ephemeral pi process)', () => {
+  it("sideQuestion is true (/btw wired via PiSession.askSideQuestion's transcript-fed ephemeral pi process)", () => {
     expect(PI_ENGINE_CAPABILITIES.sideQuestion).toBe(true)
     expect(resolvePiCapabilitiesFromModel().sideQuestion).toBe(true)
   })

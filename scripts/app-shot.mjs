@@ -62,7 +62,14 @@ const settle = parseInt(arg('settle', '3000'), 10)
 // `text=...` and `[title="..."]`; keys use Playwright key names.
 const actions = []
 for (let i = 0; i < args.length; i++) {
-  const kind = args[i] === '--click' ? 'click' : args[i] === '--press' ? 'press' : args[i] === '--type' ? 'type' : null
+  const kind =
+    args[i] === '--click'
+      ? 'click'
+      : args[i] === '--press'
+        ? 'press'
+        : args[i] === '--type'
+          ? 'type'
+          : null
   if (kind && args[i + 1]) actions.push({ kind, value: args[i + 1] })
 }
 // Collect every --assert-testid <id> (repeatable). Presence is asserted after the

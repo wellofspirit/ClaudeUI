@@ -113,9 +113,18 @@ vi.mock('../../../core/services/session-history', () => ({
   loadBackgroundOutput: vi.fn(() => ''),
   resolveForkAnchor: vi.fn(async () => ({ anchorUuid: null }))
 }))
-vi.mock('../../../core/services/session-watcher', () => ({ watchSession: vi.fn(), unwatchSession: vi.fn() }))
+vi.mock('../../../core/services/session-watcher', () => ({
+  watchSession: vi.fn(),
+  unwatchSession: vi.fn()
+}))
 vi.mock('../../../core/services/claude-settings', () => ({
-  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined })),
+  loadClaudePermissions: vi.fn(() => ({
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined
+  })),
   saveClaudePermissions: vi.fn(),
   loadCleanupPeriodDays: vi.fn(() => undefined),
   saveCleanupPeriodDays: vi.fn()
@@ -128,7 +137,9 @@ vi.mock('../../../core/services/claude-mcp', () => ({
   writeDisabledMcpServers: vi.fn()
 }))
 vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
-vi.mock('../../../core/services/custom-command-scanner', () => ({ scanCustomCommands: vi.fn(async () => []) }))
+vi.mock('../../../core/services/custom-command-scanner', () => ({
+  scanCustomCommands: vi.fn(async () => [])
+}))
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
   deleteProjectFiles: vi.fn(async () => {})
@@ -138,18 +149,34 @@ vi.mock('../../../core/services/socks-bridge', () => ({
   stopSocksBridge: vi.fn(async () => {})
 }))
 vi.mock('../../../core/services/usage-fetcher', () => ({
-  usageFetcher: { setWindow: vi.fn(), setSessionGetter: vi.fn(), setIntervalSecs: vi.fn(), startPolling: vi.fn(), fetch: vi.fn(async () => ({})) }
+  usageFetcher: {
+    setWindow: vi.fn(),
+    setSessionGetter: vi.fn(),
+    setIntervalSecs: vi.fn(),
+    startPolling: vi.fn(),
+    fetch: vi.fn(async () => ({}))
+  }
 }))
 vi.mock('../../services/service-session', () => ({
   serviceSession: { getUsage: vi.fn(async () => ({})) }
 }))
 vi.mock('../../../core/services/block-usage', () => ({
-  blockUsageService: { setWindow: vi.fn(), setDebounceSecs: vi.fn(), recalculate: vi.fn(async () => ({})), startWatching: vi.fn(), getData: vi.fn(() => null) }
+  blockUsageService: {
+    setWindow: vi.fn(),
+    setDebounceSecs: vi.fn(),
+    recalculate: vi.fn(async () => ({})),
+    startWatching: vi.fn(),
+    getData: vi.fn(() => null)
+  }
 }))
-vi.mock('../../../core/services/persisted-sessions-dir', () => ({ PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions' }))
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
+  PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
+}))
 vi.mock('../../../core/services/session-manager', () => ({
   SessionManager: class {
-    constructor() { /* no-op */ }
+    constructor() {
+      /* no-op */
+    }
     create = sessionManagerSpies.create
     rekey = sessionManagerSpies.rekey
     get = sessionManagerSpies.get
@@ -163,16 +190,24 @@ vi.mock('../../../core/services/claude-session', () => {
   const extraWindows = new Set<unknown>()
   return {
     ClaudeSession: class {
-      static addExtraWindow(w: unknown): void { extraWindows.add(w) }
-      static removeExtraWindow(w: unknown): void { extraWindows.delete(w) }
-      static getExtraWindows(): Set<unknown> { return extraWindows }
+      static addExtraWindow(w: unknown): void {
+        extraWindows.add(w)
+      }
+      static removeExtraWindow(w: unknown): void {
+        extraWindows.delete(w)
+      }
+      static getExtraWindows(): Set<unknown> {
+        return extraWindows
+      }
     },
     getSdkExecutableOpts: vi.fn(() => ({}))
   }
 })
 vi.mock('../../../core/sdk', () => ({
   query: vi.fn(() => {
-    async function* empty(): AsyncGenerator<unknown> { /* noop */ }
+    async function* empty(): AsyncGenerator<unknown> {
+      /* noop */
+    }
     const gen: unknown = empty()
     ;(gen as Record<string, unknown>).supportedModels = async () => []
     return gen
@@ -182,10 +217,26 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), applyFilter: vi.fn() }
 }))
-vi.mock('../../services/auth-manager', () => ({ authManager: { getState: vi.fn(() => ({})), init: vi.fn() } }))
-vi.mock('../../services/account-manager', () => ({ accountManager: { getAccounts: vi.fn(() => ({})), setMultiAccountEnabled: vi.fn(), addAccount: vi.fn(), switchAccount: vi.fn(), deleteAccount: vi.fn(), init: vi.fn() } }))
-vi.mock('../../../core/services/mockup-settings', () => ({ invalidateMockupSecuritySettings: vi.fn() }))
-vi.mock('../../../core/sdk/proxy', () => ({ setProxyEnv: vi.fn(async () => {}), setProxyAllSubprocesses: vi.fn() }))
+vi.mock('../../services/auth-manager', () => ({
+  authManager: { getState: vi.fn(() => ({})), init: vi.fn() }
+}))
+vi.mock('../../services/account-manager', () => ({
+  accountManager: {
+    getAccounts: vi.fn(() => ({})),
+    setMultiAccountEnabled: vi.fn(),
+    addAccount: vi.fn(),
+    switchAccount: vi.fn(),
+    deleteAccount: vi.fn(),
+    init: vi.fn()
+  }
+}))
+vi.mock('../../../core/services/mockup-settings', () => ({
+  invalidateMockupSecuritySettings: vi.fn()
+}))
+vi.mock('../../../core/sdk/proxy', () => ({
+  setProxyEnv: vi.fn(async () => {}),
+  setProxyAllSubprocesses: vi.fn()
+}))
 vi.mock('../../../core/sdk/endpoint-env', () => ({ setEndpointEnv: vi.fn() }))
 vi.mock('../../../core/sdk/model-env', () => ({ setModelEnv: vi.fn() }))
 
@@ -244,7 +295,14 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
       enabled: true,
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
-      network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] },
+      network: {
+        restrictNetwork: false,
+        allowLocalBinding: false,
+        allowedDomains: [],
+        allowManagedDomainsOnly: false,
+        allowAllUnixSockets: false,
+        allowUnixSockets: []
+      },
       filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
       excludedCommands: []
     }
@@ -290,7 +348,15 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
     // Explicitly pass a model string; engineId defaults to 'claude'
-    await harness.call('session:create', 'routing-5', '/tmp/cwd', undefined, undefined, undefined, 'claude-sonnet-4-6')
+    await harness.call(
+      'session:create',
+      'routing-5',
+      '/tmp/cwd',
+      undefined,
+      undefined,
+      undefined,
+      'claude-sonnet-4-6'
+    )
 
     // claudeModel('claude-sonnet-4-6').vendorId === 'anthropic'
     expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
@@ -301,8 +367,17 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
     await harness.call(
-      'session:create', 'routing-6', '/tmp/cwd',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'opencode'
+      'session:create',
+      'routing-6',
+      '/tmp/cwd',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'opencode'
     )
 
     // opencode path skips vendor config — loadVendorConfig should NOT be called
@@ -314,8 +389,16 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
     await expect(
       harness.call(
-        'session:create', 'routing-unknown', '/tmp/cwd',
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        'session:create',
+        'routing-unknown',
+        '/tmp/cwd',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
         'gemini' as unknown as EngineId
       )
     ).rejects.toThrow(/No spawn-prep registered for engine "gemini"/)
@@ -338,8 +421,16 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
 
     await expect(
       harness.call(
-        'session:create', 'routing-stale-model', '/tmp/cwd',
-        undefined, undefined, undefined, 'openai/gpt-5.5', undefined, undefined, undefined,
+        'session:create',
+        'routing-stale-model',
+        '/tmp/cwd',
+        undefined,
+        undefined,
+        undefined,
+        'openai/gpt-5.5',
+        undefined,
+        undefined,
+        undefined,
         'opencode'
       )
     ).rejects.toThrow(/openai\/gpt-5\.5/)

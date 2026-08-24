@@ -1195,11 +1195,23 @@ interface SessionAPI {
   /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
   patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
-  readOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<OpencodeAgentDetail | null>
+  readOpencodeAgent(
+    name: string,
+    scope: OpencodeAgentScope,
+    cwd?: string
+  ): Promise<OpencodeAgentDetail | null>
   saveOpencodeAgent(input: OpencodeAgentInput, cwd?: string): Promise<void>
   deleteOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<void>
-  setOpencodeAgentDisabled(name: string, scope: OpencodeAgentScope, cwd: string | undefined, disabled: boolean): Promise<void>
-  generateOpencodeAgent(description: string, cwd?: string): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
+  setOpencodeAgentDisabled(
+    name: string,
+    scope: OpencodeAgentScope,
+    cwd: string | undefined,
+    disabled: boolean
+  ): Promise<void>
+  generateOpencodeAgent(
+    description: string,
+    cwd?: string
+  ): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
   logError(source: string, message: string): void
 }
 
@@ -1399,9 +1411,7 @@ interface TerminalAPI {
    * The server dropped this client's attachment (toggle turned off, grant
    * decayed, or the socket fell too far behind). Never fires on desktop.
    */
-  onTerminalDetached(
-    cb: (data: { terminalId: string; reason: string }) => void
-  ): () => void
+  onTerminalDetached(cb: (data: { terminalId: string; reason: string }) => void): () => void
 }
 
 interface AutomationAPI {
@@ -1925,13 +1935,7 @@ interface WebauthnAPI {
  * `tailscale-manager.ts` imports it, so the two can never drift.
  */
 export type RemoteTlsDetection =
-  | 'ok'
-  | 'not-installed'
-  | 'daemon-down'
-  | 'logged-out'
-  | 'https-disabled'
-  | 'no-operator'
-  | 'error'
+  'ok' | 'not-installed' | 'daemon-down' | 'logged-out' | 'https-disabled' | 'no-operator' | 'error'
 
 /** Outcome of probing the local `tailscale` CLI (`TailscaleManager.detect()`). */
 export type TailscaleDetection =
@@ -1964,12 +1968,7 @@ export type TailscaleDetection =
     }
 
 export type TunnelState =
-  | 'stopped'
-  | 'starting'
-  | 'downloading'
-  | 'connected'
-  | 'error'
-  | 'restarting'
+  'stopped' | 'starting' | 'downloading' | 'connected' | 'error' | 'restarting'
 
 /**
  * Auth methods the remote server ADVERTISES or ACCEPTS (ADR-056 collapsed the
@@ -1993,11 +1992,7 @@ export type TunnelState =
  * was a link that carried authority, which is exactly what that ADR retires.
  */
 export type RemoteAuthMethod =
-  | 'password'
-  | 'tailnet-identity'
-  | 'webauthn'
-  | 'enroll-token'
-  | 'none'
+  'password' | 'tailnet-identity' | 'webauthn' | 'enroll-token' | 'none'
 
 /**
  * Remote authentication POLICY (ADR-052 decision 3, ADR-056 §grant collapse /
@@ -2658,12 +2653,7 @@ export interface SkillInfo {
 
 export type McpServerScope = 'user' | 'project' | 'local' | 'claudeai' | 'managed'
 export type McpServerConnectionStatus =
-  | 'connected'
-  | 'failed'
-  | 'needs-auth'
-  | 'pending'
-  | 'disabled'
-  | 'not_started'
+  'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_started'
 export type McpServerTransport = 'stdio' | 'sse' | 'http'
 
 export interface McpServerToolInfo {

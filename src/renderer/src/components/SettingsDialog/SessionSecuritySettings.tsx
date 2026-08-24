@@ -119,10 +119,7 @@ type NumericField = keyof typeof BOUNDS
  * the gate reads its own deadline, so the editor stops working exactly when the
  * server says it does, whatever the pill last showed.
  */
-type Mode =
-  | { kind: 'view' }
-  | { kind: 'unlocking' }
-  | { kind: 'edit'; expiresAt: number | null }
+type Mode = { kind: 'view' } | { kind: 'unlocking' } | { kind: 'edit'; expiresAt: number | null }
 
 /** Local edits, kept OUTSIDE {@link Mode} — see the re-lock path. */
 type Draft = SettingsDraft & { password?: string }
@@ -152,7 +149,14 @@ function formatCountdown(msLeft: number): string {
 /** The mockup's padlock, at two sizes. */
 function LockIcon({ size = 13 }: { size?: number }): React.JSX.Element {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+    >
       <path d="M12 11c1.7 0 3-1.3 3-3V6a3 3 0 0 0-6 0v2c0 1.7 1.3 3 3 3z" />
       <path d="M5 11h14v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-9z" />
     </svg>
@@ -621,9 +625,8 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
         className="shrink-0 flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[10px] text-accent"
       >
         <LockIcon size={11} />
-        Editing · <span className="tabular-nums font-semibold">
-          {formatCountdown(mode.expiresAt - now)}
-        </span>
+        Editing ·{' '}
+        <span className="tabular-nums font-semibold">{formatCountdown(mode.expiresAt - now)}</span>
       </span>
     ) : null,
     <>

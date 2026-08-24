@@ -229,9 +229,7 @@ export function sessionIdOfStream(streamId: string): string | null {
  * Returns null for a payload that names no scope — a malformed emission, which is
  * dropped rather than broadcast.
  */
-export type LaneScope =
-  | { kind: 'session'; id: string }
-  | { kind: 'automation'; id: string }
+export type LaneScope = { kind: 'session'; id: string } | { kind: 'automation'; id: string }
 
 export function streamEventScopeOf(frame: StreamEventFrame): LaneScope | null {
   if (frame.channel === 'automation:stream-event') {
@@ -325,7 +323,9 @@ function writeStream(
 ): Partial<CanonicalSessionState> {
   if (p.toolUseId) {
     return p.kind === 'thinking'
-      ? { subagentStreamingThinking: { ...session.subagentStreamingThinking, [p.toolUseId]: value } }
+      ? {
+          subagentStreamingThinking: { ...session.subagentStreamingThinking, [p.toolUseId]: value }
+        }
       : { subagentStreamingText: { ...session.subagentStreamingText, [p.toolUseId]: value } }
   }
   return p.kind === 'thinking' ? { streamingThinking: value } : { streamingText: value }

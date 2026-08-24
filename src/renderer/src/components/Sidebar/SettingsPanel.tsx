@@ -71,7 +71,8 @@ export function SettingsPanel(): React.JSX.Element {
     const handler = (event: Event): void => {
       const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
       setSettingsTarget({
-        scope: detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
+        scope:
+          detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
         section: detail?.section
       })
       setDialogOpen(true)

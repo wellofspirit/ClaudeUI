@@ -437,10 +437,7 @@ async function waitUntil(pred: () => boolean, timeoutMs = 2000): Promise<void> {
  * exact failure mode a socket ws-lib still tracks produces — then fails as an
  * assertion instead of hanging the whole file until vitest's own timeout.
  */
-async function stopWithin(
-  server: RemoteServer,
-  ms: number
-): Promise<'resolved' | 'still pending'> {
+async function stopWithin(server: RemoteServer, ms: number): Promise<'resolved' | 'still pending'> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
@@ -807,48 +804,44 @@ describe('RemoteServer — remote git watching end-to-end', () => {
     await repo.cleanup()
   })
 
-  it(
-    'pushes a real git:status-update frame to an authenticated client after git:watch',
-    async () => {
-      await server.start(port, '127.0.0.1')
-      const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
-      await client.ready
+  it('pushes a real git:status-update frame to an authenticated client after git:watch', async () => {
+    await server.start(port, '127.0.0.1')
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
 
-      // Collect RAW frames: the assertion is about what actually crosses the
-      // socket, not about a helper's parsed convenience view.
-      const frames: WsEvent[] = []
-      client.onMessage((msg) => {
-        if (msg.type === 'event' && msg.channel === 'git:status-update') frames.push(msg)
-      })
+    // Collect RAW frames: the assertion is about what actually crosses the
+    // socket, not about a helper's parsed convenience view.
+    const frames: WsEvent[] = []
+    client.onMessage((msg) => {
+      if (msg.type === 'event' && msg.channel === 'git:status-update') frames.push(msg)
+    })
 
-      await client.invoke('git:watch', { cwds: [repo.path] })
-      expect(gitWatchRegistry.watchersOf(repo.path)).toHaveLength(1)
+    await client.invoke('git:watch', { cwds: [repo.path] })
+    expect(gitWatchRegistry.watchersOf(repo.path)).toHaveLength(1)
 
-      // No 5s wait: the poller's FIRST poll always emits (the fingerprint-reset
-      // invariant in GitService.stopPolling()). Generous ceiling only because a
-      // real `git status` on Windows costs a few hundred ms.
-      await waitUntil(() => frames.length > 0, 20000)
-      expect(frames).toHaveLength(1)
+    // No 5s wait: the poller's FIRST poll always emits (the fingerprint-reset
+    // invariant in GitService.stopPolling()). Generous ceiling only because a
+    // real `git status` on Windows costs a few hundred ms.
+    await waitUntil(() => frames.length > 0, 20000)
+    expect(frames).toHaveLength(1)
 
-      const payload = frames[0].args[0] as { cwd: string; status: GitStatusData }
-      expect(payload.cwd).toBe(repo.path)
-      expect(payload.status.branch).toBe('main')
-      expect(payload.status.files.length).toBeGreaterThan(0)
-      expect(payload.status.files.some((f) => f.path === 'tracked.txt')).toBe(true)
-      expect(payload.status.linesAdded).toBeGreaterThan(0)
+    const payload = frames[0].args[0] as { cwd: string; status: GitStatusData }
+    expect(payload.cwd).toBe(repo.path)
+    expect(payload.status.branch).toBe('main')
+    expect(payload.status.files.length).toBeGreaterThan(0)
+    expect(payload.status.files.some((f) => f.path === 'tracked.txt')).toBe(true)
+    expect(payload.status.linesAdded).toBeGreaterThan(0)
 
-      // An empty set removes the only watcher, so the poller is stopped and the
-      // GitService released.
-      await client.invoke('git:watch', { cwds: [] })
-      expect(gitWatchRegistry.watchersOf(repo.path)).toEqual([])
+    // An empty set removes the only watcher, so the poller is stopped and the
+    // GitService released.
+    await client.invoke('git:watch', { cwds: [] })
+    expect(gitWatchRegistry.watchersOf(repo.path)).toEqual([])
 
-      const framesAfterStop = frames.length
-      client.close()
-      await waitForTerminal(client.ws)
-      expect(frames).toHaveLength(framesAfterStop)
-    },
-    40000
-  )
+    const framesAfterStop = frames.length
+    client.close()
+    await waitForTerminal(client.ws)
+    expect(frames).toHaveLength(framesAfterStop)
+  }, 40000)
 })
 
 describe('RemoteServer — mockup HTTP route', () => {
@@ -1169,22 +1162,20 @@ describe('RemoteServer — /sent-file route', () => {
     syncCore.resetCanonicalForTests()
     emitEvent('session:created', [SESSION, { cwd }])
     if (files.length === 0) return
-    emitEvent(
-      'session:message',
-      [
-        SESSION,
-        {
-          id: 'm-send',
-          role: 'assistant',
-          timestamp: 0,
-          content: files.map((f, i) => ({
-            type: 'tool_use',
-            toolUseId: `tu-${i}`,
-            toolName: 'SendUserFile',
-            toolInput: { files: [f.path], display: 'attach' }
-          }))
-        }
-      ])
+    emitEvent('session:message', [
+      SESSION,
+      {
+        id: 'm-send',
+        role: 'assistant',
+        timestamp: 0,
+        content: files.map((f, i) => ({
+          type: 'tool_use',
+          toolUseId: `tu-${i}`,
+          toolName: 'SendUserFile',
+          toolInput: { files: [f.path], display: 'attach' }
+        }))
+      }
+    ])
   }
 
   /** Pull the file token from a WS full-sync (its only authenticated home). */
@@ -1794,35 +1785,34 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
   it('serves state built from the event stream, with no renderer involved', async () => {
     await server.start(port, '127.0.0.1')
     emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
-    emitEvent(
-      'session:message',
-      [
-        'canon-1',
-        {
-          id: 'a1',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'from canonical' }],
-          timestamp: 0
-        }
-      ])
-    emitEvent(
-      'session:metering',
-      [
-        'canon-1',
-        {
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          billingType: 'subscription',
-          tokens: { input: 7, output: 3, cacheWrite: 0, cacheRead: 0, total: 10 },
-          equivalentCostUsd: 0.05,
-          contextWindow: { used: 10, size: 200000 }
-        }
-      ])
+    emitEvent('session:message', [
+      'canon-1',
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'from canonical' }],
+        timestamp: 0
+      }
+    ])
+    emitEvent('session:metering', [
+      'canon-1',
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        billingType: 'subscription',
+        tokens: { input: 7, output: 3, cacheWrite: 0, cacheRead: 0, total: 10 },
+        equivalentCostUsd: 0.05,
+        contextWindow: { used: 10, size: 200000 }
+      }
+    ])
 
     const msg = await firstSyncFull()
     const state = msg.state as {
       seq: number
-      sessions: Record<string, { messages: Array<{ id: string }>; metering?: { equivalentCostUsd: number } }>
+      sessions: Record<
+        string,
+        { messages: Array<{ id: string }>; metering?: { equivalentCostUsd: number } }
+      >
       activeSessionId: string | null
     }
     expect(state.sessions['canon-1'].messages.map((m) => m.id)).toEqual(['a1'])
@@ -2248,7 +2238,9 @@ describe('RemoteServer — password auth (Phase 2)', () => {
     // remote-passkeys.test.ts, which can run a ceremony.
     const secondPwWs = new WebSocket(`ws://127.0.0.1:${port}/`)
     await new Promise<void>((resolve, reject) => {
-      secondPwWs.once('open', () => secondPwWs.send(JSON.stringify({ type: 'auth', pwProof: proof })))
+      secondPwWs.once('open', () =>
+        secondPwWs.send(JSON.stringify({ type: 'auth', pwProof: proof }))
+      )
       secondPwWs.once('message', () => resolve())
       secondPwWs.once('error', reject)
     })
@@ -3454,8 +3446,7 @@ describe('RemoteServer — the LAN channel key (ADR-056)', () => {
   })
 
   /** The key the running server would measure a LAN activation against. */
-  const lanKey = (): string | null =>
-    (server as unknown as { lanE2eKey: string | null }).lanE2eKey
+  const lanKey = (): string | null => (server as unknown as { lanE2eKey: string | null }).lanE2eKey
 
   it('mints NO KEY on a loopback bind, but still offers the localhost URL', async () => {
     // Review F6: `getStatus().lanUrl` and `start()`'s return disagreed here, and
@@ -3693,9 +3684,9 @@ describe('classifyConnectionOrigin (ADR-056)', () => {
     // The identity headers outrank a tunnel key on the same peer. (Unreachable in
     // production — `start()` makes TLS mode and the tunnel mutually exclusive —
     // but the ORDER must be the safe one if that ever changes.)
-    expect(
-      classify(serveHeaders, '127.0.0.1', { tlsActive: true, tunnelActive: true })
-    ).toBe('tailnet-serve')
+    expect(classify(serveHeaders, '127.0.0.1', { tlsActive: true, tunnelActive: true })).toBe(
+      'tailnet-serve'
+    )
   })
 
   it('is NOT a serve forward without the marker, or with TLS mode off', () => {

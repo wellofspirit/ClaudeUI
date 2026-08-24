@@ -63,7 +63,11 @@ describe('downsampleToPcm16', () => {
 
   it('passes 16 kHz input through sample-for-sample', () => {
     const input = Float32Array.from([0, 0.5, -0.5, 1])
-    const { samples } = downsampleToPcm16(input, VOICE_SAMPLE_RATE, initialDownsampleState(VOICE_SAMPLE_RATE))
+    const { samples } = downsampleToPcm16(
+      input,
+      VOICE_SAMPLE_RATE,
+      initialDownsampleState(VOICE_SAMPLE_RATE)
+    )
     expect(Array.from(samples)).toEqual([0, 16384, -16384, 32767])
   })
 
@@ -77,7 +81,11 @@ describe('downsampleToPcm16', () => {
 
   it('clips rather than wraps, and treats NaN as silence', () => {
     const input = Float32Array.from([5, -5, Number.NaN, 0])
-    const { samples } = downsampleToPcm16(input, VOICE_SAMPLE_RATE, initialDownsampleState(VOICE_SAMPLE_RATE))
+    const { samples } = downsampleToPcm16(
+      input,
+      VOICE_SAMPLE_RATE,
+      initialDownsampleState(VOICE_SAMPLE_RATE)
+    )
     expect(Array.from(samples)).toEqual([32767, -32768, 0, 0])
   })
 

@@ -164,7 +164,16 @@ function fixture(): ParsedEntry[] {
     entry(BASE + 2 * MS_PER_HOUR, 'claude-opus-4-8', 500, 300, 50, 0, 0.05, 'm3'),
     // gap > 5h → new block
     entry(BASE + 8 * MS_PER_HOUR, 'claude-opus-4-8', 800, 400, 0, 0, 0.06, 'm4'),
-    entry(BASE + 8 * MS_PER_HOUR + 20 * MS_PER_MINUTE, 'claude-haiku-4-5', 300, 100, 0, 0, 0.0005, 'm5'),
+    entry(
+      BASE + 8 * MS_PER_HOUR + 20 * MS_PER_MINUTE,
+      'claude-haiku-4-5',
+      300,
+      100,
+      0,
+      0,
+      0.0005,
+      'm5'
+    ),
     // generic model name (folds into a specific via mergeModelFamilies)
     entry(BASE + 8 * MS_PER_HOUR + 40 * MS_PER_MINUTE, 'claude-sonnet', 400, 200, 0, 0, 0.006, 'm6')
   ]
@@ -228,8 +237,22 @@ describe('SQL-sourced blocks == old JSONL blocks (same fixtures)', () => {
     upsertClaudeEntries(f)
     const back = claudeEntriesFromDb(0).sort((a, b) => a.timestamp - b.timestamp)
     const orig = [...f].sort((a, b) => a.timestamp - b.timestamp)
-    expect(back.map((e) => [e.inputTokens, e.outputTokens, e.cacheCreationTokens, e.cacheReadTokens, e.costUsd])).toEqual(
-      orig.map((e) => [e.inputTokens, e.outputTokens, e.cacheCreationTokens, e.cacheReadTokens, e.costUsd])
+    expect(
+      back.map((e) => [
+        e.inputTokens,
+        e.outputTokens,
+        e.cacheCreationTokens,
+        e.cacheReadTokens,
+        e.costUsd
+      ])
+    ).toEqual(
+      orig.map((e) => [
+        e.inputTokens,
+        e.outputTokens,
+        e.cacheCreationTokens,
+        e.cacheReadTokens,
+        e.costUsd
+      ])
     )
   })
 })
@@ -292,7 +315,10 @@ interface DailyHistoryEntry {
 
 /** OLD daily: bucket ParsedEntry by local day, merge families. (peakApi/blockCount ignored here.) */
 function dailyOld(entries: ParsedEntry[]): DailyHistoryEntry[] {
-  const buckets = new Map<string, { tokens: number; cost: number; models: Record<string, number> }>()
+  const buckets = new Map<
+    string,
+    { tokens: number; cost: number; models: Record<string, number> }
+  >()
   for (const e of entries) {
     const day = dateStrFromTimestamp(e.timestamp)
     let b = buckets.get(day)
@@ -352,7 +378,8 @@ function dailySql(entries: ParsedEntry[], now: number): DailyHistoryEntry[] {
     b.outputTokens += r.outputTokens
     b.cacheWriteTokens += r.cacheWriteTokens
     b.cacheReadTokens += r.cacheReadTokens
-    b.costUsd += (r.engineId === 'claude' ? r.engineCostUsd : r.equivCostUsd ?? r.engineCostUsd) ?? 0
+    b.costUsd +=
+      (r.engineId === 'claude' ? r.engineCostUsd : (r.equivCostUsd ?? r.engineCostUsd)) ?? 0
     b.requestCount += 1
   }
   upsertDailyUsage([...buckets.values()])
@@ -431,9 +458,7 @@ describe('WLS projection preserved across the SQL block-token round-trip', () =>
   const NOW = BASE + 90 * MS_PER_MINUTE
 
   function activeBlockTokens(entries: ParsedEntry[], fromDb: boolean): number {
-    const src = fromDb
-      ? (upsertClaudeEntries(entries), claudeEntriesFromDb(0))
-      : entries
+    const src = fromDb ? (upsertClaudeEntries(entries), claudeEntriesFromDb(0)) : entries
     const blocks = groupEntriesIntoBlocks(oldEntriesToAgg(src), [], [], NOW)
     const active = blocks.find((b) => b.isActive) ?? blocks[blocks.length - 1]
     return aggTotalTokens(active.tokens)
@@ -526,7 +551,16 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
     // Build a set of block entries
     const blockEntries: ParsedEntry[] = [
       entry(BASE, 'claude-sonnet-4-6', 10_000, 5_000, 2_000, 1_000, 0.12, 'e1'),
-      entry(BASE + 30 * MS_PER_MINUTE, 'claude-sonnet-4-6', 20_000, 8_000, 4_000, 1_500, 0.24, 'e2'),
+      entry(
+        BASE + 30 * MS_PER_MINUTE,
+        'claude-sonnet-4-6',
+        20_000,
+        8_000,
+        4_000,
+        1_500,
+        0.24,
+        'e2'
+      ),
       entry(BASE + 60 * MS_PER_MINUTE, 'claude-opus-4-8', 5_000, 3_000, 500, 0, 0.5, 'e3')
     ]
 
@@ -543,8 +577,16 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
     // Build in-memory samples (what the ring buffer would hold)
     const inMemorySamples: ProjectionSample[] = [
       { timestamp: BASE, tokens: cumAt(BASE), apiPercent: 5 },
-      { timestamp: BASE + 30 * MS_PER_MINUTE, tokens: cumAt(BASE + 30 * MS_PER_MINUTE), apiPercent: 11 },
-      { timestamp: BASE + 60 * MS_PER_MINUTE, tokens: cumAt(BASE + 60 * MS_PER_MINUTE), apiPercent: 16 }
+      {
+        timestamp: BASE + 30 * MS_PER_MINUTE,
+        tokens: cumAt(BASE + 30 * MS_PER_MINUTE),
+        apiPercent: 11
+      },
+      {
+        timestamp: BASE + 60 * MS_PER_MINUTE,
+        tokens: cumAt(BASE + 60 * MS_PER_MINUTE),
+        apiPercent: 16
+      }
     ]
 
     // Write matching window samples to the DB
@@ -636,18 +678,40 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
     // Entries: 2 huge prior-block entries + 3 current-block entries.
     const priorBlockEntries: ParsedEntry[] = [
       entry(PRIOR_START, 'claude-opus-4-8', 500_000, 200_000, 0, 0, 5.0, 'prior1'),
-      entry(PRIOR_START + 30 * MS_PER_MINUTE, 'claude-opus-4-8', 400_000, 150_000, 0, 0, 4.0, 'prior2')
+      entry(
+        PRIOR_START + 30 * MS_PER_MINUTE,
+        'claude-opus-4-8',
+        400_000,
+        150_000,
+        0,
+        0,
+        4.0,
+        'prior2'
+      )
     ]
     const currentBlockEntries: ParsedEntry[] = [
       entry(CURRENT_START, 'claude-sonnet-4-6', 10_000, 5_000, 0, 0, 0.1, 'cur1'),
-      entry(CURRENT_START + 20 * MS_PER_MINUTE, 'claude-sonnet-4-6', 15_000, 7_000, 0, 0, 0.15, 'cur2'),
+      entry(
+        CURRENT_START + 20 * MS_PER_MINUTE,
+        'claude-sonnet-4-6',
+        15_000,
+        7_000,
+        0,
+        0,
+        0.15,
+        'cur2'
+      ),
       entry(CURRENT_START + 40 * MS_PER_MINUTE, 'claude-opus-4-8', 8_000, 4_000, 0, 0, 0.2, 'cur3')
     ]
     // viewEntries = the FULL scan (both blocks), exactly as block-usage passes it.
     const viewEntries = [...priorBlockEntries, ...currentBlockEntries]
 
     // Window samples (current block only)
-    const sampleTimes = [CURRENT_START, CURRENT_START + 20 * MS_PER_MINUTE, CURRENT_START + 40 * MS_PER_MINUTE]
+    const sampleTimes = [
+      CURRENT_START,
+      CURRENT_START + 20 * MS_PER_MINUTE,
+      CURRENT_START + 40 * MS_PER_MINUTE
+    ]
     const apiPercents = [5, 10, 15]
     for (let i = 0; i < 3; i++) {
       recordWindowSample({
@@ -662,15 +726,19 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
     const now = CURRENT_START + 90 * MS_PER_MINUTE
 
     // Expected (SCOPED): cumTokensAt over current-block entries only.
-    const scopedSamples = buildProjectionSamplesFromDb(ACCOUNT_UUID, WINDOW_END_9A, CURRENT_START, viewEntries)
+    const scopedSamples = buildProjectionSamplesFromDb(
+      ACCOUNT_UUID,
+      WINDOW_END_9A,
+      CURRENT_START,
+      viewEntries
+    )
     // The first scoped sample's tokens must be the FIRST current entry only (15_000),
     // NOT current + prior (which would be 15_000 + 1_250_000).
     expect(scopedSamples[0].tokens).toBe(15_000)
-    const currentBlockTokens =
-      currentBlockEntries.reduce(
-        (acc, e) => acc + e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens,
-        0
-      )
+    const currentBlockTokens = currentBlockEntries.reduce(
+      (acc, e) => acc + e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens,
+      0
+    )
     const scopedProj = computeProjectionWLS(scopedSamples, currentBlockTokens, 0.45, now)
     expect(scopedProj).not.toBeNull()
 

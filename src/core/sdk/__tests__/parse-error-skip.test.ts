@@ -76,8 +76,7 @@ describe('query() — malformed stream-json line (H16)', () => {
       })() as AsyncIterable<SDKMessage>,
       options: {
         pathToClaudeCodeExecutable: '/fake/cli.js',
-        spawnClaudeCodeProcess: () =>
-          child as unknown as import('node:child_process').ChildProcess
+        spawnClaudeCodeProcess: () => child as unknown as import('node:child_process').ChildProcess
       }
     })
     handles.push(q)
@@ -109,9 +108,7 @@ describe('query() — malformed stream-json line (H16)', () => {
     expect(iterationError).toBeNull()
     expect(received.map((m) => (m as { type: string }).type)).toEqual(['assistant', 'assistant'])
     expect(
-      received.map(
-        (m) => ((m as { message?: { content?: string } }).message ?? {}).content
-      )
+      received.map((m) => ((m as { message?: { content?: string } }).message ?? {}).content)
     ).toEqual(['first', 'second'])
   })
 })

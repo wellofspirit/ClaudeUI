@@ -109,7 +109,10 @@ const WEBFETCH_HOST_TERMINATORS = ['', '/*', ':*', '#*'] as const
  *   shape for another while implying a guarantee we cannot keep.
  * - File/other: globs and exact paths pass through (both use glob matching).
  */
-export function translateSpecifierPatterns(category: string, specifier: string | undefined): string[] {
+export function translateSpecifierPatterns(
+  category: string,
+  specifier: string | undefined
+): string[] {
   if (!specifier) return ['*']
   if (category === 'bash') {
     const prefix = specifier.match(/^(.+):\*$/)
@@ -250,7 +253,10 @@ export function suggestOpencodeAllowRule(
 }
 
 /** Render a suggestion rule → a Claude rule string (`Tool(specifier)` / `Tool`). */
-export function suggestionRuleToClaudeString(rule: { toolName: string; ruleContent?: string }): string {
+export function suggestionRuleToClaudeString(rule: {
+  toolName: string
+  ruleContent?: string
+}): string {
   return rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : rule.toolName
 }
 

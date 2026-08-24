@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { useShallow } from 'zustand/react/shallow'
 import type { EngineId } from '../../../../shared/types'
-import { OAuthOutcomeNotice, OAuthPasteBackFlow, classifyOAuthError } from '../auth/OAuthPasteBackFlow'
+import {
+  OAuthOutcomeNotice,
+  OAuthPasteBackFlow,
+  classifyOAuthError
+} from '../auth/OAuthPasteBackFlow'
 
 /**
  * Interactive re-login card for opencode vendor auth failures (401 mid-turn).
@@ -122,7 +126,10 @@ export function VendorAuthRequiredCard(): React.JSX.Element | null {
   }
 
   return (
-    <div data-testid="VendorAuthRequiredCard" className="absolute top-12 left-0 right-0 z-20 pointer-events-none">
+    <div
+      data-testid="VendorAuthRequiredCard"
+      className="absolute top-12 left-0 right-0 z-20 pointer-events-none"
+    >
       <div className="pointer-events-auto px-4 pt-2">
         <div className="max-w-[740px] mx-auto">
           <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2.5 text-[13px]">

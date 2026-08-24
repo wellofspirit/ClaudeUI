@@ -636,7 +636,10 @@ export class CredentialSync {
     try {
       tokens = await this.refreshAccessTokenFn(cred.refresh)
     } catch (err) {
-      if (this.isCurrent(generation) && (await this.isStillCurrentCredential(generation, refreshedIdentity)))
+      if (
+        this.isCurrent(generation) &&
+        (await this.isStillCurrentCredential(generation, refreshedIdentity))
+      )
         this.handleRefreshError(err)
       return
     }
@@ -893,11 +896,10 @@ export class CredentialSync {
     try {
       return this.getEnabledRoutes()
     } catch (err) {
-      logger.warn(
-        'CredentialSync',
-        `getEnabledRoutes failed, failing closed: ${errMessage(err)}`
-      )
-      return this.hasConfiguredRoutePolicy ? { pi: false, opencode: false } : { pi: true, opencode: true }
+      logger.warn('CredentialSync', `getEnabledRoutes failed, failing closed: ${errMessage(err)}`)
+      return this.hasConfiguredRoutePolicy
+        ? { pi: false, opencode: false }
+        : { pi: true, opencode: true }
     }
   }
 
@@ -919,7 +921,9 @@ export class CredentialSync {
     if (!vaultCred) return
     const routes = this.routes()
     await Promise.allSettled([
-      routes.pi ? undefined : this.removeManagedCopy('pi', this.piTarget, PI_CODEX_VENDOR_ID, vaultCred.refresh),
+      routes.pi
+        ? undefined
+        : this.removeManagedCopy('pi', this.piTarget, PI_CODEX_VENDOR_ID, vaultCred.refresh),
       routes.opencode
         ? undefined
         : this.removeManagedCopy(
@@ -943,7 +947,10 @@ export class CredentialSync {
     try {
       entry = await target.readOauthEntry(vendorId)
     } catch (err) {
-      logger.warn('CredentialSync', `removeDisabledCopies: readOauthEntry(${label}) failed — preserving: ${errMessage(err)}`)
+      logger.warn(
+        'CredentialSync',
+        `removeDisabledCopies: readOauthEntry(${label}) failed — preserving: ${errMessage(err)}`
+      )
       return
     }
     if (!entry) return // nothing to remove

@@ -32,10 +32,7 @@ import http from 'node:http'
 
 /** Make a minimal McpServer with no tools registered (enough for initialize). */
 function makeBlankServer(): McpServer {
-  return new McpServer(
-    { name: 'test-server', version: '1.0.0' },
-    { capabilities: { tools: {} } }
-  )
+  return new McpServer({ name: 'test-server', version: '1.0.0' }, { capabilities: { tools: {} } })
 }
 
 /** Low-level HTTP POST helper — avoids fetch (unavailable in Node <18 vitest). */
@@ -56,7 +53,7 @@ function httpPost(
         headers: {
           'Content-Type': 'application/json',
           // StreamableHTTPServerTransport requires Accept including text/event-stream
-          'Accept': 'application/json, text/event-stream',
+          Accept: 'application/json, text/event-stream',
           'Content-Length': Buffer.byteLength(bodyStr),
           ...headers
         }
@@ -113,11 +110,7 @@ describe('startMcpHttpHost', () => {
     const host = await startMcpHttpHost(makeBlankServer())
     hosts.push(host)
 
-    const { status, body } = await httpPost(
-      `http://127.0.0.1:${host.port}/mcp`,
-      {},
-      MCP_INITIALIZE
-    )
+    const { status, body } = await httpPost(`http://127.0.0.1:${host.port}/mcp`, {}, MCP_INITIALIZE)
     expect(status).toBe(401)
     const parsed = JSON.parse(body) as { error: string }
     expect(parsed.error).toBe('Unauthorized')

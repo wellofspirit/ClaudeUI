@@ -44,7 +44,6 @@ vi.mock('../../../core/services/logger', () => ({
 
 import { watchSession, unwatchSession } from '../../../core/services/session-watcher'
 
-
 describe('session-watcher fs.watch error handling (M-CL5)', () => {
   beforeEach(() => {
     created.length = 0

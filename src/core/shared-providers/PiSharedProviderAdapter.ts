@@ -82,7 +82,9 @@ export class PiSharedProviderAdapter {
       if (existing !== undefined) {
         throw new Error(`Pi provider collision: ${providerId}`)
       }
-      if (!sameManagedProvider(providers[previousProviderId], compileProvider(previousDefinition))) {
+      if (
+        !sameManagedProvider(providers[previousProviderId], compileProvider(previousDefinition))
+      ) {
         throw new Error(`Pi provider changed outside ClaudeUI: ${previousProviderId}`)
       }
       const { [previousProviderId]: _, ...remainingProviders } = providers
@@ -121,7 +123,8 @@ export class PiSharedProviderAdapter {
     const file = this.readModelsFile()
     if (!isRecord(file.providers)) return
     const providerId = nativeProviderId(previousDefinition)
-    if (!sameManagedProvider(file.providers[providerId], compileProvider(previousDefinition))) return
+    if (!sameManagedProvider(file.providers[providerId], compileProvider(previousDefinition)))
+      return
 
     const { [providerId]: _, ...providers } = file.providers
     file.providers = providers

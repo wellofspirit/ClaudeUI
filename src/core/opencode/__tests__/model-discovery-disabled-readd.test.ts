@@ -227,7 +227,7 @@ describe('model-discovery — disabled provider re-add (Add provider list)', () 
     expect(catalog.find((p) => p.id === 'openai')).toBeDefined()
   })
 
-  it('carries a declared provider\'s display name onto its disabled entry', async () => {
+  it("carries a declared provider's display name onto its disabled entry", async () => {
     // GET /provider omits disabled ids, so the catalog cannot supply a name. The
     // declaration can — falling back to the bare id only when it has none.
     setupMocks(['mine'], ['mine'])

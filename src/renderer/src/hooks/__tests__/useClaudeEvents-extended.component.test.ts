@@ -24,7 +24,7 @@ import type {
   PluginViewWithOwner,
   VoiceState,
   WorktreeInfo,
-  FileDiff,
+  FileDiff
 } from '../../../../shared/types'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -302,7 +302,9 @@ describe('useClaudeEvents extended component tests', () => {
 
       const toolMsg = makeChatMessage({
         id: 'sub-msg-1',
-        content: [makeToolUseBlock('apply_patch', { patchText: '*** Begin Patch ***' }, 'sub-tool-1')]
+        content: [
+          makeToolUseBlock('apply_patch', { patchText: '*** Begin Patch ***' }, 'sub-tool-1')
+        ]
       })
       app.emit('session:subagent-message', routingId, {
         toolUseId: 'agent-1',
@@ -310,7 +312,13 @@ describe('useClaudeEvents extended component tests', () => {
       })
 
       const fileDiffs: FileDiff[] = [
-        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+        {
+          path: 'a.ts',
+          patch: '@@ -1 +1 @@\n-old\n+new',
+          additions: 1,
+          deletions: 1,
+          changeType: 'update'
+        }
       ]
       app.emit('session:subagent-tool-result', routingId, {
         toolUseId: 'agent-1',
@@ -681,9 +689,9 @@ describe('useClaudeEvents extended component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
       seed.plan(routingId, [
-          makeTodoItem('Done 1', 'completed'),
-          makeTodoItem('Done 2', 'completed')
-        ])
+        makeTodoItem('Done 1', 'completed'),
+        makeTodoItem('Done 2', 'completed')
+      ])
 
       app.emit('session:watch-update', {
         routingId,
@@ -733,9 +741,10 @@ describe('useClaudeEvents extended component tests', () => {
       notify(routingId)
 
       await vi.waitFor(() => {
-        expect(
-          useSessionStore.getState().sessions[routingId].messages[0].content[0]
-        ).toEqual({ type: 'text', text: 'from disk' })
+        expect(useSessionStore.getState().sessions[routingId].messages[0].content[0]).toEqual({
+          type: 'text',
+          text: 'from disk'
+        })
       })
       // One read for the whole burst: the file read is not incremental, so a
       // catchup replaying N notifies costs one refetch that heals all of them.
@@ -747,9 +756,10 @@ describe('useClaudeEvents extended component tests', () => {
       stubHistory([makeAssistantMessage('grown')])
       notify(routingId)
       await vi.waitFor(() => {
-        expect(
-          useSessionStore.getState().sessions[routingId].messages[0].content[0]
-        ).toEqual({ type: 'text', text: 'grown' })
+        expect(useSessionStore.getState().sessions[routingId].messages[0].content[0]).toEqual({
+          type: 'text',
+          text: 'grown'
+        })
       })
     })
 
@@ -767,9 +777,10 @@ describe('useClaudeEvents extended component tests', () => {
         await new Promise((r) => setTimeout(r, 100))
       }
       expect(load).toHaveBeenCalled()
-      expect(
-        useSessionStore.getState().sessions[routingId].messages[0].content[0]
-      ).toEqual({ type: 'text', text: 'from disk' })
+      expect(useSessionStore.getState().sessions[routingId].messages[0].content[0]).toEqual({
+        type: 'text',
+        text: 'from disk'
+      })
     })
 
     it('retries ONCE when the refetch fails, then gives up', async () => {
@@ -793,9 +804,10 @@ describe('useClaudeEvents extended component tests', () => {
 
       notify(routingId)
       await vi.waitFor(() => {
-        expect(
-          useSessionStore.getState().sessions[routingId].messages[0].content[0]
-        ).toEqual({ type: 'text', text: 'from disk' })
+        expect(useSessionStore.getState().sessions[routingId].messages[0].content[0]).toEqual({
+          type: 'text',
+          text: 'from disk'
+        })
       })
       expect(load).toHaveBeenCalledTimes(2)
     })
@@ -887,10 +899,7 @@ describe('useClaudeEvents extended component tests', () => {
     it('keeps todos when not all completed on watch update', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-      seed.plan(routingId, [
-          makeTodoItem('Done', 'completed'),
-          makeTodoItem('Pending', 'pending')
-        ])
+      seed.plan(routingId, [makeTodoItem('Done', 'completed'), makeTodoItem('Pending', 'pending')])
 
       app.emit('session:watch-update', {
         routingId,
@@ -1283,10 +1292,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
       useSessionStore.getState().setNeedsAttention(routingId, true)
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'running',
           sessionId: routingId
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
     })
@@ -1296,10 +1309,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
       useSessionStore.getState().setNeedsAttention(routingId, true)
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'idle',
           sessionId: routingId
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
     })
@@ -1319,11 +1336,15 @@ describe('useClaudeEvents extended component tests', () => {
         createdAt: Date.now()
       })
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'idle',
           sessionId: routingId,
           cwd: '/project/app'
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).toBeNull()
       expect(useSessionStore.getState().worktreeInfoMap[routingId]).toBeUndefined()
@@ -1342,11 +1363,15 @@ describe('useClaudeEvents extended component tests', () => {
         createdAt: Date.now()
       })
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'running',
           sessionId: routingId,
           cwd: '/project/worktrees/feat'
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
     })
@@ -1364,16 +1389,18 @@ describe('useClaudeEvents extended component tests', () => {
         createdAt: Date.now()
       })
 
-      app.emit('session:status', routingId, makeSessionStatus({
+      app.emit(
+        'session:status',
+        routingId,
+        makeSessionStatus({
           state: 'running',
           sessionId: routingId
-        }))
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
     })
   })
-
-
 
   describe('multi-session isolation', () => {
     it('bash output for one session does not affect another', () => {

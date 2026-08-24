@@ -18,7 +18,7 @@ import { describe, it, expect } from 'vitest'
 import plugin from '../../../../resources/opencode/claudeui-xeng-plugin'
 
 describe('claudeui-xeng-plugin', () => {
-  it('exports { id, server } — id required by opencode\'s resolvePluginId', () => {
+  it("exports { id, server } — id required by opencode's resolvePluginId", () => {
     expect(plugin.id).toBe('claudeui-xeng')
     expect(typeof plugin.server).toBe('function')
   })
@@ -38,10 +38,13 @@ describe('claudeui-xeng-plugin', () => {
     })
   })
 
-  it('leaves other tools\' args completely untouched', async () => {
+  it("leaves other tools' args completely untouched", async () => {
     const hooks = await plugin.server()
     const output = { args: { path: '/etc/passwd' } }
-    await hooks['tool.execute.before']({ tool: 'read', sessionID: 'ses_abc123', callID: 'call_2' }, output)
+    await hooks['tool.execute.before'](
+      { tool: 'read', sessionID: 'ses_abc123', callID: 'call_2' },
+      output
+    )
     expect(output.args).toEqual({ path: '/etc/passwd' })
     expect(output.args).not.toHaveProperty('__xeng_caller_session')
     expect(output.args).not.toHaveProperty('__xeng_call_id')
@@ -50,7 +53,10 @@ describe('claudeui-xeng-plugin', () => {
   it('sets __xeng_caller_session but omits __xeng_call_id when callID is absent', async () => {
     const hooks = await plugin.server()
     const output = { args: { engine: 'claude', prompt: 'x' } }
-    await hooks['tool.execute.before']({ tool: 'claudeui_dispatch_agent', sessionID: 'ses_abc123' }, output)
+    await hooks['tool.execute.before'](
+      { tool: 'claudeui_dispatch_agent', sessionID: 'ses_abc123' },
+      output
+    )
     expect(output.args).toMatchObject({ __xeng_caller_session: 'ses_abc123' })
     expect(output.args).not.toHaveProperty('__xeng_call_id')
   })

@@ -63,10 +63,12 @@ describe('SentFilesWidget', () => {
   })
 
   it('renders the count and one row per file, newest first', () => {
-    seedSession(ROUTE, { sentFiles: [
+    seedSession(ROUTE, {
+      sentFiles: [
         makeFile({ path: 'a/old.txt', toolUseId: 'tu-a' }),
         makeFile({ path: 'b/new.txt', toolUseId: 'tu-b' })
-      ] })
+      ]
+    })
 
     const { getByTestId, getAllByTestId } = render(<SentFilesWidget />)
     expect(getByTestId('SentFilesWidget')).toBeInTheDocument()
@@ -81,10 +83,12 @@ describe('SentFilesWidget', () => {
   })
 
   it('expands each row individually', () => {
-    seedSession(ROUTE, { sentFiles: [
+    seedSession(ROUTE, {
+      sentFiles: [
         makeFile({ path: 'one.txt', toolUseId: 'tu-1', caption: 'first caption' }),
         makeFile({ path: 'two.txt', toolUseId: 'tu-2', caption: 'second caption' })
-      ] })
+      ]
+    })
 
     const { getAllByTestId, container } = render(<SentFilesWidget />)
     expect(container.textContent).not.toContain('first caption')
@@ -143,7 +147,9 @@ describe('SentFilesWidget', () => {
   })
 
   it('shows the tool error on an errored row', () => {
-    seedSession(ROUTE, { sentFiles: [makeFile({ path: 'nope.txt', error: 'File not found: nope.txt' })] })
+    seedSession(ROUTE, {
+      sentFiles: [makeFile({ path: 'nope.txt', error: 'File not found: nope.txt' })]
+    })
 
     const { getByTestId, container } = render(<SentFilesWidget />)
     fireEvent.click(getByTestId('SentFilesWidget.row'))
@@ -242,16 +248,18 @@ describe('SentFilesWidget', () => {
 
   it('pages the viewer across every sent file that has a loaded preview', async () => {
     setPreview(
-      vi
-        .fn()
-        .mockImplementation((_session: string, path: string) =>
-          Promise.resolve({ src: `data:image/png;base64,${path.endsWith('a.png') ? 'AAAA' : 'BBBB'}` })
-        )
+      vi.fn().mockImplementation((_session: string, path: string) =>
+        Promise.resolve({
+          src: `data:image/png;base64,${path.endsWith('a.png') ? 'AAAA' : 'BBBB'}`
+        })
+      )
     )
-    seedSession(ROUTE, { sentFiles: [
+    seedSession(ROUTE, {
+      sentFiles: [
         makeFile({ path: 'a.png', toolUseId: 'tu-a' }),
         makeFile({ path: 'b.png', toolUseId: 'tu-b' })
-      ] })
+      ]
+    })
 
     const { getAllByTestId, getByTestId } = render(<SentFilesWidget />)
     // Rows render newest-first, so the gallery is [b.png, a.png].

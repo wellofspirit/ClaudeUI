@@ -46,7 +46,9 @@ describe('query stdout drain on close (M-CL1)', () => {
 
     // The child exits FIRST; its final `result` is still in the pipe.
     child.emit('exit', 0, null)
-    child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', total_cost_usd: 1 }) + '\n')
+    child.stdout.write(
+      JSON.stringify({ type: 'result', subtype: 'success', total_cost_usd: 1 }) + '\n'
+    )
     child.stdout.end()
 
     // Real ordering: stdout 'data' + 'end' drain, THEN the process 'close'.

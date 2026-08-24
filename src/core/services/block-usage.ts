@@ -1431,8 +1431,7 @@ export class BlockUsageService {
           // billed at 2× input). Older transcripts may lack the breakdown —
           // treated as all-5m, matching the pre-split behavior.
           const cacheBreakdown = usage.cache_creation as
-            | { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }
-            | undefined
+            { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } | undefined
           const cache1h = (cacheBreakdown?.ephemeral_1h_input_tokens as number) || 0
 
           // Calculate cost from tokens using model pricing (not from JSONL costUSD)

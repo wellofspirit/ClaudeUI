@@ -33,7 +33,12 @@ const MENU_ITEM_DANGER =
  * Shift-click on the × stays as the shortcut for anyone who learned it; the
  * menu is what teaches it.
  */
-export function TerminalTab({ tab, active, onSelect, onClose }: TerminalTabProps): React.JSX.Element {
+export function TerminalTab({
+  tab,
+  active,
+  onSelect,
+  onClose
+}: TerminalTabProps): React.JSX.Element {
   const menu = useContextMenu()
   const [confirmingKill, setConfirmingKill] = useState(false)
 

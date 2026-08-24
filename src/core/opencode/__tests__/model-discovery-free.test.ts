@@ -51,7 +51,12 @@ vi.mock('../../services/ui-config', () => ({
 
 import { discoverOpencodeModels, invalidateOpencodeModelCache } from '../model-discovery'
 
-function model(id: string, name: string, providerID: string, extra: Record<string, unknown> = {}): unknown {
+function model(
+  id: string,
+  name: string,
+  providerID: string,
+  extra: Record<string, unknown> = {}
+): unknown {
   return {
     id,
     providerID,
@@ -80,11 +85,15 @@ const PROVIDERS_WITH_COSTS = {
       env: [],
       options: {},
       models: {
-        'free-model': model('free-model', 'Free Model', 'opencode', { cost: { input: 0, output: 0 } }),
+        'free-model': model('free-model', 'Free Model', 'opencode', {
+          cost: { input: 0, output: 0 }
+        }),
         'half-priced-model': model('half-priced-model', 'Half Priced Model', 'opencode', {
           cost: { input: 0, output: 5 }
         }),
-        'paid-model': model('paid-model', 'Paid Model', 'opencode', { cost: { input: 3, output: 15 } }),
+        'paid-model': model('paid-model', 'Paid Model', 'opencode', {
+          cost: { input: 3, output: 15 }
+        }),
         'unknown-cost-model': model('unknown-cost-model', 'Unknown Cost Model', 'opencode')
         // no `cost` field at all — must NOT be treated as free
       }

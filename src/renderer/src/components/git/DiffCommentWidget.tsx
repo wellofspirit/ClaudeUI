@@ -69,7 +69,10 @@ export function DiffCommentWidget({
   )
 
   return (
-    <div data-testid="DiffCommentWidget" className="diff-comment-widget mx-2 my-1 rounded-md border border-accent/40 shadow-lg overflow-hidden">
+    <div
+      data-testid="DiffCommentWidget"
+      className="diff-comment-widget mx-2 my-1 rounded-md border border-accent/40 shadow-lg overflow-hidden"
+    >
       <textarea
         ref={textareaRef}
         data-testid="DiffCommentWidget.input"

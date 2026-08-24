@@ -570,9 +570,7 @@ describe('PluginManager', () => {
       })
       // The automation tail is NOT session-scoped: one arg, no routingId, so the
       // bridge hands it through unwrapped exactly as it always did.
-      emitEvent('automation:stream-event', [
-        { automationId: 'auto-1', type: 'text', text: 'tok' }
-      ])
+      emitEvent('automation:stream-event', [{ automationId: 'auto-1', type: 'text', text: 'tok' }])
 
       const tails = (global as any).__tails as any[]
       expect(tails).toHaveLength(3)
@@ -598,10 +596,7 @@ describe('PluginManager', () => {
           done: false
         }
       ])
-      expect(tails[2]).toEqual([
-        'auto',
-        { automationId: 'auto-1', type: 'text', text: 'tok' }
-      ])
+      expect(tails[2]).toEqual(['auto', { automationId: 'auto-1', type: 'text', text: 'tok' }])
       delete (global as any).__tails
     })
 

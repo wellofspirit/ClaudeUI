@@ -170,9 +170,9 @@ describe('conformance: opencode plan mode is never more permissive than default 
       ['bash', 'git status'],
       ['webfetch', 'https://example.com/x']
     ] as const) {
-      expect(SEVERITY[evaluate(category, subject, buildRuleset('acceptEdits'))]).toBeGreaterThanOrEqual(
-        SEVERITY[evaluate(category, subject, buildRuleset('default'))]
-      )
+      expect(
+        SEVERITY[evaluate(category, subject, buildRuleset('acceptEdits'))]
+      ).toBeGreaterThanOrEqual(SEVERITY[evaluate(category, subject, buildRuleset('default'))])
     }
   })
 })
@@ -239,7 +239,14 @@ describe('conformance: compiled WebFetch(domain:…) rules match the subject ope
 const NO_SESSION_ALLOWS = new Set<string>()
 
 function piRules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
-  return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined, ...partial }
+  return {
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined,
+    ...partial
+  }
 }
 
 /**
@@ -375,10 +382,18 @@ describe('conformance: pi honors absolute / home / Windows-absolute deny-rule sp
       cwd
     })
     expect(decide('read', { path: '/etc/hosts' }, ctx('Read(//etc/passwd)', '/repo'))).toBe('allow')
-    expect(decide('edit', { path: '/srv/public/x' }, ctx('Edit(//srv/secrets/**)', '/repo'))).toBe('ask')
-    expect(decide('edit', { path: 'D:\\repo\\src\\a.ts' }, ctx('Edit(D:\\secrets\\**)', 'D:\\repo'))).toBe('ask')
+    expect(decide('edit', { path: '/srv/public/x' }, ctx('Edit(//srv/secrets/**)', '/repo'))).toBe(
+      'ask'
+    )
     expect(
-      decide('read', { path: path.join(HOME, 'notes.md') }, ctx('Read(~/.ssh/**)', path.join(HOME, 'proj')))
+      decide('edit', { path: 'D:\\repo\\src\\a.ts' }, ctx('Edit(D:\\secrets\\**)', 'D:\\repo'))
+    ).toBe('ask')
+    expect(
+      decide(
+        'read',
+        { path: path.join(HOME, 'notes.md') },
+        ctx('Read(~/.ssh/**)', path.join(HOME, 'proj'))
+      )
     ).toBe('allow')
   })
 
@@ -422,12 +437,16 @@ describe('conformance: auto mode routes user-ALLOWED actions to the classifier o
     { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
   ]
   const piAuto = (command: string): Action =>
-    decide('bash', { command }, {
-      mode: 'acceptEdits',
-      rules: withoutAllowRules(piRules({ allow: USER.allow, ask: USER.ask, deny: USER.deny })),
-      sessionAllows: NO_SESSION_ALLOWS,
-      cwd: '/repo'
-    }) as Action
+    decide(
+      'bash',
+      { command },
+      {
+        mode: 'acceptEdits',
+        rules: withoutAllowRules(piRules({ allow: USER.allow, ask: USER.ask, deny: USER.deny })),
+        sessionAllows: NO_SESSION_ALLOWS,
+        cwd: '/repo'
+      }
+    ) as Action
 
   /** [label, command, the decision BOTH engines must reach]. */
   const CASES: Array<[string, string, Action]> = [
@@ -453,12 +472,16 @@ describe('conformance: auto mode routes user-ALLOWED actions to the classifier o
     ]
     expect(evaluate('bash', 'git status', fullRuleset)).toBe('allow')
     expect(
-      decide('bash', { command: 'git status' }, {
-        mode: 'default',
-        rules: piRules({ allow: USER.allow, ask: USER.ask, deny: USER.deny }),
-        sessionAllows: NO_SESSION_ALLOWS,
-        cwd: '/repo'
-      })
+      decide(
+        'bash',
+        { command: 'git status' },
+        {
+          mode: 'default',
+          rules: piRules({ allow: USER.allow, ask: USER.ask, deny: USER.deny }),
+          sessionAllows: NO_SESSION_ALLOWS,
+          cwd: '/repo'
+        }
+      )
     ).toBe('allow')
   })
 })

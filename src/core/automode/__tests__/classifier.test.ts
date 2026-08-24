@@ -44,7 +44,9 @@ describe('slimTranscript', () => {
         { type: 'text', text: 'Sure, I will explore.' },
         { type: 'tool_use', toolUseId: 't1', toolName: 'grep', toolInput: { pattern: 'ChatPanel' } }
       ]),
-      msg('user', [{ type: 'tool_result', toolUseId: 't1', toolResult: 'a.tsx\nb.tsx', isError: false }])
+      msg('user', [
+        { type: 'tool_result', toolUseId: 't1', toolResult: 'a.tsx\nb.tsx', isError: false }
+      ])
     ]
     // The assistant prose is pending but never answered by a human turn, so it
     // is dropped; the thinking block and the tool result are always dropped.
@@ -109,7 +111,12 @@ describe('slimTranscript', () => {
     const messages: ChatMessage[] = [
       msg('assistant', [{ type: 'text', text: 'I will force-push to main. OK?' }]),
       msg('assistant', [
-        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'git status' } }
+        {
+          type: 'tool_use',
+          toolUseId: 't1',
+          toolName: 'bash',
+          toolInput: { command: 'git status' }
+        }
       ]),
       msg('user', [{ type: 'tool_result', toolUseId: 't1', toolResult: 'clean', isError: false }]),
       msg('user', [{ type: 'text', text: 'yes' }])
@@ -210,7 +217,12 @@ describe('slimTranscript', () => {
     const messages: ChatMessage[] = [
       msg('assistant', [
         { type: 'text', text: 'I will force-push to main. OK?' },
-        { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'git status' } }
+        {
+          type: 'tool_use',
+          toolUseId: 't1',
+          toolName: 'bash',
+          toolInput: { command: 'git status' }
+        }
       ]),
       msg('user', [{ type: 'text', text: 'yes' }])
     ]
@@ -295,7 +307,12 @@ describe('renderAction + buildUserPrompt', () => {
     const input: ClassifyInput = {
       messages: [
         msg('assistant', [
-          { type: 'tool_use', toolUseId: 't1', toolName: 'bash', toolInput: { command: 'git push' } }
+          {
+            type: 'tool_use',
+            toolUseId: 't1',
+            toolName: 'bash',
+            toolInput: { command: 'git push' }
+          }
         ])
       ],
       action: { toolName: 'bash', input: { command: 'git push' } },
@@ -323,7 +340,9 @@ describe('parseVerdict (fail-closed)', () => {
     expect(parseVerdict('...<block>yes').block).toBe(true) // truncated by stop seq
   })
   it('extracts reason', () => {
-    expect(parseVerdict('<block>yes</block><reason>destructive</reason>').reason).toBe('destructive')
+    expect(parseVerdict('<block>yes</block><reason>destructive</reason>').reason).toBe(
+      'destructive'
+    )
   })
   it('unparseable → block (fail-closed)', () => {
     expect(parseVerdict('I cannot help with that').block).toBe(true)
@@ -334,7 +353,9 @@ describe('parseVerdict (fail-closed)', () => {
     expect(parseVerdictOrNull('<block>yes</block>')).toEqual({ block: true })
   })
   it('ignores a verdict quoted inside <thinking>', () => {
-    expect(parseVerdictOrNull('<thinking>maybe <block>yes</block></thinking><block>no</block>')).toEqual({
+    expect(
+      parseVerdictOrNull('<thinking>maybe <block>yes</block></thinking><block>no</block>')
+    ).toEqual({
       block: false
     })
   })
@@ -581,7 +602,10 @@ describe('classify (orchestrator)', () => {
   it('both mode: stage-2 unparseable → block, fail-closed, WITHOUT unavailable', async () => {
     // `unavailable` means "we got nothing back"; here we got an answer we
     // cannot read, so retrying is not obviously right → a real block.
-    const judge = vi.fn().mockResolvedValueOnce('<block>yes</block>').mockResolvedValueOnce('¯\\_(ツ)_/¯')
+    const judge = vi
+      .fn()
+      .mockResolvedValueOnce('<block>yes</block>')
+      .mockResolvedValueOnce('¯\\_(ツ)_/¯')
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r.block).toBe(true)
     expect(r.stage).toBe('thinking')

@@ -176,7 +176,16 @@ async function openModelDialog(providerId: string): Promise<void> {
 
 function renderManager(): void {
   const section = SECTIONS.find((s) => s.id === 'vendor-opencode')!
-  render(section.items[0].render({} as never, () => {}, {} as never, () => {}, {} as never, () => {}))
+  render(
+    section.items[0].render(
+      {} as never,
+      () => {},
+      {} as never,
+      () => {},
+      {} as never,
+      () => {}
+    )
+  )
 }
 
 describe('opencode provider manager', () => {
@@ -243,7 +252,9 @@ describe('opencode provider manager', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Add' }))
     })
 
-    await waitFor(() => expect(vendorAuthSetKey).toHaveBeenCalledWith('opencode', 'openrouter', 'sk-or-test'))
+    await waitFor(() =>
+      expect(vendorAuthSetKey).toHaveBeenCalledWith('opencode', 'openrouter', 'sk-or-test')
+    )
     await waitFor(() => {
       const last = savedConfigs[savedConfigs.length - 1]
       expect(last.modelAllowlist?.openrouter).toEqual([])
@@ -296,9 +307,7 @@ describe('opencode provider manager', () => {
       )
       // And it must not smuggle in an allowlist seed: enabling is not adding, so
       // the models the provider already shows stay untouched.
-      expect(
-        savedConfigs.some((c) => c.modelAllowlist?.opencode !== undefined)
-      ).toBe(false)
+      expect(savedConfigs.some((c) => c.modelAllowlist?.opencode !== undefined)).toBe(false)
       expect(vendorAuthSetKey).not.toHaveBeenCalled()
     })
   })
@@ -331,13 +340,13 @@ describe('opencode provider manager', () => {
       // Exactly one badge, scoped to the free model's row.
       const badges = screen.getAllByTestId('ModelAllowlistDialog.freeBadge')
       expect(badges).toHaveLength(1)
-      const freeModelRow = screen.getAllByTestId('ModelAllowlistDialog.modelRow').find((r) =>
-        within(r).queryByText('Zen Free Model')
-      )!
+      const freeModelRow = screen
+        .getAllByTestId('ModelAllowlistDialog.modelRow')
+        .find((r) => within(r).queryByText('Zen Free Model'))!
       expect(within(freeModelRow).queryByTestId('ModelAllowlistDialog.freeBadge')).toBeTruthy()
-      const paidModelRow = screen.getAllByTestId('ModelAllowlistDialog.modelRow').find((r) =>
-        within(r).queryByText('Zen Paid Model')
-      )!
+      const paidModelRow = screen
+        .getAllByTestId('ModelAllowlistDialog.modelRow')
+        .find((r) => within(r).queryByText('Zen Paid Model'))!
       expect(within(paidModelRow).queryByTestId('ModelAllowlistDialog.freeBadge')).toBeNull()
 
       const chip = screen.getByTestId('ModelAllowlistDialog.freeFilter')
@@ -530,5 +539,4 @@ describe('opencode provider manager', () => {
       expect(screen.queryByTestId('VendorOpencodeSection.orphanError')).toBeNull()
     })
   })
-
 })

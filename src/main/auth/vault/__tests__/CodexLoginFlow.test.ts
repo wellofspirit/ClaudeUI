@@ -11,7 +11,11 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { createServer } from 'node:http'
-import { CodexLoginFlow, type OAuthDeps, type TokenResponse } from '../../../../core/auth/vault/codex-oauth'
+import {
+  CodexLoginFlow,
+  type OAuthDeps,
+  type TokenResponse
+} from '../../../../core/auth/vault/codex-oauth'
 
 function makeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
@@ -27,7 +31,11 @@ function portFromAuthorizeUrl(authorizeUrl: string): number {
 
 function fakeExchangeDeps(tokens: TokenResponse): OAuthDeps {
   return {
-    fetch: vi.fn(async () => ({ ok: true, status: 200, json: async () => tokens })) as unknown as typeof fetch,
+    fetch: vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => tokens
+    })) as unknown as typeof fetch,
     issuer: 'https://auth.openai.com'
   }
 }
@@ -49,7 +57,12 @@ function canListen(port: number): Promise<boolean> {
 describe('CodexLoginFlow', () => {
   it('resolves waitForCallback with a credential built from the mocked exchange, then frees the port', async () => {
     const idToken = makeJwt({ chatgpt_account_id: 'acct-1', email: 'user@example.com' })
-    const deps = fakeExchangeDeps({ id_token: idToken, access_token: 'acc-tok', refresh_token: 'ref-tok', expires_in: 100 })
+    const deps = fakeExchangeDeps({
+      id_token: idToken,
+      access_token: 'acc-tok',
+      refresh_token: 'ref-tok',
+      expires_in: 100
+    })
     const flow = new CodexLoginFlow({ port: 0, deps, now: () => 1_000_000 })
 
     const { authorizeUrl, state } = await flow.start()
@@ -74,7 +87,10 @@ describe('CodexLoginFlow', () => {
   })
 
   it('wrong state rejects as a CSRF mismatch and responds 400', async () => {
-    const flow = new CodexLoginFlow({ port: 0, deps: fakeExchangeDeps({ access_token: 'a', refresh_token: 'r' }) })
+    const flow = new CodexLoginFlow({
+      port: 0,
+      deps: fakeExchangeDeps({ access_token: 'a', refresh_token: 'r' })
+    })
     const { authorizeUrl } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     // Attach the rejection assertion SYNCHRONOUSLY (before the `get()` round

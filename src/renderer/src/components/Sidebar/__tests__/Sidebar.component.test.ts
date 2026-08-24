@@ -436,7 +436,10 @@ describe('Sidebar FC', () => {
       seed.directories([groupWith([ocA, ocB])])
     })
     expect(
-      useSessionStore.getState().directories.flatMap((g) => g.sessions).map((s) => s.sessionId)
+      useSessionStore
+        .getState()
+        .directories.flatMap((g) => g.sessions)
+        .map((s) => s.sessionId)
     ).toEqual(expect.arrayContaining(['oc-a', 'oc-b']))
 
     act(() => {

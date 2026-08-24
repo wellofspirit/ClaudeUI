@@ -635,10 +635,7 @@ export function saveSessions(config: UISessionConfig): void {
  * no per-surface difference at all: the broadcast reaches every client including
  * the one that saved (see `saveSessions`).
  */
-export function saveUiSettings(
-  manager: SessionManager,
-  incomingSettings: UISettings
-): void {
+export function saveUiSettings(manager: SessionManager, incomingSettings: UISettings): void {
   // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
   // that have moved to engines/claude.json and vendors/anthropic.json
   const raw = incomingSettings as Record<string, unknown>
@@ -673,8 +670,8 @@ export function saveUiSettings(
   {
     const engCfg = loadEngineConfig('claude')
     const venCfg = loadVendorConfig('anthropic')
-    applyProxyEnv(engCfg.proxy).catch(
-      (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
+    applyProxyEnv(engCfg.proxy).catch((err) =>
+      logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
     )
     applyEndpointEnv(venCfg.endpoint)
     applyModelEnv(venCfg.modelOverride)

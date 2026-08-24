@@ -93,7 +93,13 @@ describe('streamId scheme (the single source)', () => {
 })
 
 describe('frame validation (the single source both transports use)', () => {
-  const good: StreamFrame = { type: 'stream', streamId: 'rid/text', turnId: 0, offset: 0, chunk: 'x' }
+  const good: StreamFrame = {
+    type: 'stream',
+    streamId: 'rid/text',
+    turnId: 0,
+    offset: 0,
+    chunk: 'x'
+  }
 
   it('accepts a well-formed frame', () => {
     expect(isStreamFrame(good)).toBe(true)
@@ -175,7 +181,9 @@ describe('accumulation', () => {
     const aux = emptyAux()
     const before = emptyCanonicalState()
     // No frame can even be built without a session to measure the offset against.
-    expect(streamFrameFrom(before, aux, 'session:stream', [RID, { type: 'text', text: 'x' }])).toBeNull()
+    expect(
+      streamFrameFrom(before, aux, 'session:stream', [RID, { type: 'text', text: 'x' }])
+    ).toBeNull()
     // And a frame that arrives anyway (a delete the client already folded) changes
     // nothing — the projection is identity-diffed, so a fresh object would
     // re-write every slice.
@@ -202,7 +210,9 @@ describe('accumulation', () => {
       streamFrameFrom(s, aux, 'session:subagent-stream', [RID, { type: 'text', text: 'x' }])
     ).toBeNull()
     // And a channel that is not on the lane at all.
-    expect(streamFrameFrom(s, aux, 'session:message', [RID, { type: 'text', text: 'x' }])).toBeNull()
+    expect(
+      streamFrameFrom(s, aux, 'session:message', [RID, { type: 'text', text: 'x' }])
+    ).toBeNull()
   })
 })
 
@@ -314,8 +324,14 @@ describe('replay-on-subscribe (the self-heal)', () => {
     // EMPTY buffer seals, so replaying thinking first would wipe what it restored.
     const hostAux = emptyAux()
     let host = stateWith()
-    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [RID, { type: 'text', text: 'answer' }]))
-    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [RID, { type: 'thinking', text: 'second thoughts' }]))
+    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [
+      RID,
+      { type: 'text', text: 'answer' }
+    ]))
+    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [
+      RID,
+      { type: 'thinking', text: 'second thoughts' }
+    ]))
 
     // A replica that missed everything and holds stale content of its own.
     const replicaAux = emptyAux()
@@ -347,9 +363,15 @@ describe('replay-on-subscribe (the self-heal)', () => {
     // happen to be non-empty in it — so it must be able to say "this one is empty".
     const hostAux = emptyAux()
     let host = stateWith()
-    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [RID, { type: 'thinking', text: 'xyz' }]))
+    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [
+      RID,
+      { type: 'thinking', text: 'xyz' }
+    ]))
     // The seal: canonical's thinking is now '' and the span is closed.
-    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [RID, { type: 'text', text: 'abcdef' }]))
+    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [
+      RID,
+      { type: 'text', text: 'abcdef' }
+    ]))
     ;({ state: host } = emitDelta(host, hostAux, 'session:subagent-stream', [
       RID,
       { toolUseId: 'tu-1', type: 'thinking', text: 'sub-thinking' }
@@ -404,7 +426,10 @@ describe('replay-on-subscribe (the self-heal)', () => {
   it('a live delta continues cleanly from a replayed offset', () => {
     const hostAux = emptyAux()
     let host = stateWith()
-    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [RID, { type: 'text', text: 'abc' }]))
+    ;({ state: host } = emitDelta(host, hostAux, 'session:stream', [
+      RID,
+      { type: 'text', text: 'abc' }
+    ]))
     const replicaAux = emptyAux()
     let replica = stateWith()
     for (const frame of streamReplayFrames(host, hostAux, RID)) {
@@ -469,7 +494,15 @@ describe('generations across the event lane', () => {
       s,
       {
         channel: 'session:message',
-        args: [RID, { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'partial' }], timestamp: 0 }],
+        args: [
+          RID,
+          {
+            id: 'm1',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'partial' }],
+            timestamp: 0
+          }
+        ],
         seq: 2
       },
       aux
@@ -593,7 +626,10 @@ describe('generations across the event lane', () => {
       s,
       {
         channel: 'session:subagent-message',
-        args: [RID, { toolUseId: 'tu-1', message: { id: 'm1', role: 'assistant', content: [], timestamp: 0 } }],
+        args: [
+          RID,
+          { toolUseId: 'tu-1', message: { id: 'm1', role: 'assistant', content: [], timestamp: 0 } }
+        ],
         seq: 2
       },
       aux
@@ -617,7 +653,10 @@ describe('generations across the event lane', () => {
       replica,
       {
         channel: 'session:subagent-message',
-        args: [RID, { toolUseId: 'tu-1', message: { id: 'm1', role: 'assistant', content: [], timestamp: 0 } }],
+        args: [
+          RID,
+          { toolUseId: 'tu-1', message: { id: 'm1', role: 'assistant', content: [], timestamp: 0 } }
+        ],
         seq: 2
       },
       replicaAux

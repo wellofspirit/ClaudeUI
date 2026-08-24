@@ -265,7 +265,7 @@ export const EVENT_TYPES = {
   // 1.18.9 bump (they were absent from the 1.17.14 snapshot's list too).
   SESSION_IDLE: 'session.idle',
   SESSION_ERROR: 'session.error',
-  TODO_UPDATED: 'todo.updated',
+  TODO_UPDATED: 'todo.updated'
 } as const
 
 export type KnownEventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]

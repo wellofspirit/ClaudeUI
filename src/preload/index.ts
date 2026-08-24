@@ -107,7 +107,14 @@ const api: ClaudeAPI = {
     engineId: import('../shared/types').EngineId,
     messageIndex: number
   ) =>
-    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
+    ipcRenderer.invoke(
+      'session:resolve-fork-anchor',
+      sessionId,
+      cwd,
+      messageId,
+      engineId,
+      messageIndex
+    ),
   sendPrompt: (
     routingId: string,
     prompt: string,
@@ -309,8 +316,11 @@ const api: ClaudeAPI = {
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
-  deleteSession: (sessionId: string, projectKey: string, engineId?: import('../shared/types').EngineId) =>
-    unwrap<void>('session:delete-session', sessionId, projectKey, engineId),
+  deleteSession: (
+    sessionId: string,
+    projectKey: string,
+    engineId?: import('../shared/types').EngineId
+  ) => unwrap<void>('session:delete-session', sessionId, projectKey, engineId),
   deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
@@ -392,11 +402,8 @@ const api: ClaudeAPI = {
     unwrap('vendor-auth:list-options', engineId),
   vendorAuthListKeys: (engineId: import('../shared/types').EngineId) =>
     unwrap('vendor-auth:list-keys', engineId),
-  vendorAuthSetKey: (
-    engineId: import('../shared/types').EngineId,
-    vendorId: string,
-    key: string
-  ) => unwrap('vendor-auth:set-key', engineId, vendorId, key),
+  vendorAuthSetKey: (engineId: import('../shared/types').EngineId, vendorId: string, key: string) =>
+    unwrap('vendor-auth:set-key', engineId, vendorId, key),
   vendorAuthOauthAuthorize: (
     engineId: import('../shared/types').EngineId,
     vendorId: string,
@@ -414,8 +421,7 @@ const api: ClaudeAPI = {
   vendorAuthOauthCancel: (engineId: import('../shared/types').EngineId) =>
     unwrap('vendor-auth:oauth-cancel', engineId),
 
-  loadEngineConfig: (engineId: string) =>
-    ipcRenderer.invoke('config:load-engine-config', engineId),
+  loadEngineConfig: (engineId: string) => ipcRenderer.invoke('config:load-engine-config', engineId),
   saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
     ipcRenderer.invoke('config:save-engine-config', engineId, config),
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
@@ -425,18 +431,27 @@ const api: ClaudeAPI = {
   patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-opencode-native', patches),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
-  readOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
-    unwrap('opencode-agents:read', name, scope, cwd),
+  readOpencodeAgent: (
+    name: string,
+    scope: import('../shared/types').OpencodeAgentScope,
+    cwd?: string
+  ) => unwrap('opencode-agents:read', name, scope, cwd),
   saveOpencodeAgent: (input: import('../shared/types').OpencodeAgentInput, cwd?: string) =>
     unwrap('opencode-agents:save', input, cwd),
-  deleteOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
-    unwrap('opencode-agents:delete', name, scope, cwd),
-  setOpencodeAgentDisabled: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd: string | undefined, disabled: boolean) =>
-    unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
+  deleteOpencodeAgent: (
+    name: string,
+    scope: import('../shared/types').OpencodeAgentScope,
+    cwd?: string
+  ) => unwrap('opencode-agents:delete', name, scope, cwd),
+  setOpencodeAgentDisabled: (
+    name: string,
+    scope: import('../shared/types').OpencodeAgentScope,
+    cwd: string | undefined,
+    disabled: boolean
+  ) => unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
   generateOpencodeAgent: (description: string, cwd?: string) =>
     unwrap('opencode-agents:generate', description, cwd),
-  loadVendorConfig: (vendorId: string) =>
-    ipcRenderer.invoke('config:load-vendor-config', vendorId),
+  loadVendorConfig: (vendorId: string) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
     ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
   listSharedProviders: () => unwrap('shared-provider:list'),
@@ -446,8 +461,7 @@ const api: ClaudeAPI = {
   removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
-  setSharedProviderApiKey: (id: string, key: string) =>
-    unwrap('shared-provider:set-key', id, key),
+  setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>

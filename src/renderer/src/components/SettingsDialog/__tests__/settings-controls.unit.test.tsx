@@ -117,7 +117,12 @@ describe('InfoTooltip', () => {
   it('tapping the ⓘ inside a SettingsToggle explains it instead of toggling it', () => {
     const onChange = vi.fn()
     render(
-      <SettingsToggle label="Command sandbox" checked={false} onChange={onChange} tooltip="what it does" />
+      <SettingsToggle
+        label="Command sandbox"
+        checked={false}
+        onChange={onChange}
+        tooltip="what it does"
+      />
     )
     fireEvent.click(screen.getByTestId('InfoTooltip.toggle'))
     expect(screen.getByTestId('InfoTooltip.popover')).toHaveTextContent('what it does')

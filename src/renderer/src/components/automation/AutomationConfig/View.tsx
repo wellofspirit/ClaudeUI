@@ -348,10 +348,18 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       {/* Tabs */}
       <div className="px-6 border-b border-border/30 shrink-0">
         <div className="flex gap-1 pt-2.5">
-          <TabButton data-testid="AutomationConfig.tab.configure" active={detailTab === 'configure'} onClick={() => onSetDetailTab('configure')}>
+          <TabButton
+            data-testid="AutomationConfig.tab.configure"
+            active={detailTab === 'configure'}
+            onClick={() => onSetDetailTab('configure')}
+          >
             Configure
           </TabButton>
-          <TabButton data-testid="AutomationConfig.tab.runs" active={detailTab === 'runs'} onClick={() => onSetDetailTab('runs')}>
+          <TabButton
+            data-testid="AutomationConfig.tab.runs"
+            active={detailTab === 'runs'}
+            onClick={() => onSetDetailTab('runs')}
+          >
             Runs
             {runs && runs.length > 0 && (
               <span className="ml-1.5 text-text-muted">{runs.length}</span>
@@ -507,7 +515,10 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
   }
   const changeIntervalUnit = (u: IntervalUnit): void => {
     setIntervalUnit(u)
-    setSchedule({ type: 'interval', intervalMs: clampIntervalMs(intervalValue * unitMultiplier(u)) })
+    setSchedule({
+      type: 'interval',
+      intervalMs: clampIntervalMs(intervalValue * unitMultiplier(u))
+    })
   }
 
   return (

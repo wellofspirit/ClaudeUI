@@ -70,7 +70,9 @@ describe('translateSpecifierPatterns', () => {
     }
   })
   it('webfetch non-domain specifiers pass through unchanged', () => {
-    expect(translateSpecifierPatterns('webfetch', 'https://example.com/*')).toEqual(['https://example.com/*'])
+    expect(translateSpecifierPatterns('webfetch', 'https://example.com/*')).toEqual([
+      'https://example.com/*'
+    ])
   })
   it('websearch keeps the legacy host glob (opencode asks with the QUERY, not a URL)', () => {
     expect(translateSpecifierPatterns('websearch', 'domain:example.com')).toEqual(['example.com*'])
@@ -111,7 +113,9 @@ describe('compileClaudeRulesToOpencode', () => {
   })
 
   it('Write/MultiEdit/NotebookEdit all map to the `edit` category', () => {
-    const out = compileClaudeRulesToOpencode(perms({ allow: ['Write(dist/**)', 'MultiEdit', 'NotebookEdit'] }))
+    const out = compileClaudeRulesToOpencode(
+      perms({ allow: ['Write(dist/**)', 'MultiEdit', 'NotebookEdit'] })
+    )
     expect(out.every((r) => r.permission === 'edit')).toBe(true)
     expect(out).toHaveLength(3)
   })
@@ -130,9 +134,15 @@ describe('compileClaudeRulesToOpencode', () => {
   })
 
   it('deny is emitted last so it wins under last-match-wins', () => {
-    const out = compileClaudeRulesToOpencode(perms({ allow: ['Edit(src/**)'], deny: ['Edit(src/secret.ts)'] }))
+    const out = compileClaudeRulesToOpencode(
+      perms({ allow: ['Edit(src/**)'], deny: ['Edit(src/secret.ts)'] })
+    )
     expect(out[0]).toEqual({ permission: 'edit', pattern: 'src/**', action: 'allow' })
-    expect(out[out.length - 1]).toEqual({ permission: 'edit', pattern: 'src/secret.ts', action: 'deny' })
+    expect(out[out.length - 1]).toEqual({
+      permission: 'edit',
+      pattern: 'src/secret.ts',
+      action: 'deny'
+    })
   })
 
   it('empty permissions → empty ruleset', () => {
@@ -167,7 +177,9 @@ describe('suggestOpencodeAllowRule (reverse: opencode approval → Claude sugges
 
 describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {
   it('rule with content → Tool(content); without → Tool', () => {
-    expect(suggestionRuleToClaudeString({ toolName: 'Bash', ruleContent: 'echo hi' })).toBe('Bash(echo hi)')
+    expect(suggestionRuleToClaudeString({ toolName: 'Bash', ruleContent: 'echo hi' })).toBe(
+      'Bash(echo hi)'
+    )
     expect(suggestionRuleToClaudeString({ toolName: 'Edit' })).toBe('Edit')
   })
   it('round-trips: suggested rule → claude string → compiled opencode rule', () => {

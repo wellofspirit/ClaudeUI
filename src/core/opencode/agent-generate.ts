@@ -127,7 +127,7 @@ export async function generateAgent(
     // unpatched opencode, which ignores it — see SEALED_THROWAWAY_PATCH.
     await client.patchSession(js.id, {
       permission: [{ permission: '*', pattern: '*', action: 'deny' }],
-      permissionHermetic: true,
+      permissionHermetic: true
     })
 
     const resp = await client.prompt(js.id, {
@@ -136,9 +136,9 @@ export async function generateAgent(
       parts: [
         {
           type: 'text',
-          text: `Create an agent configuration based on this request: "${description}". Return ONLY the JSON object, no backticks.`,
-        },
-      ],
+          text: `Create an agent configuration based on this request: "${description}". Return ONLY the JSON object, no backticks.`
+        }
+      ]
     })
 
     // Extract text from response parts
@@ -169,7 +169,11 @@ export async function generateAgent(
     }
 
     const result = parsed as { identifier: string; whenToUse: string; systemPrompt: string }
-    return { identifier: result.identifier, whenToUse: result.whenToUse, systemPrompt: result.systemPrompt }
+    return {
+      identifier: result.identifier,
+      whenToUse: result.whenToUse,
+      systemPrompt: result.systemPrompt
+    }
   } finally {
     client.deleteSession(js.id).catch(() => {})
     opencodeServerManager.release(dir)

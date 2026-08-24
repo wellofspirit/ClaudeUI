@@ -141,8 +141,7 @@ function passwordProvider(): PasswordAuthProvider {
   return {
     params: () => ({ saltHex: SALT_HEX, kdf: { ...KDF } }),
     verify: (proofHex: string) =>
-      crypto.createHash('sha256').update(Buffer.from(proofHex, 'hex')).digest('hex') ===
-      STORED.hash
+      crypto.createHash('sha256').update(Buffer.from(proofHex, 'hex')).digest('hex') === STORED.hash
   }
 }
 

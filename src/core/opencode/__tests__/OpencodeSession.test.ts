@@ -300,7 +300,9 @@ function setupMocks(): void {
   // "No such route" keeps these tests on the session-judge transport they assert.
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => new Response('{"paths":{}}', { headers: { 'Content-Type': 'application/json' } }))
+    vi.fn(
+      async () => new Response('{"paths":{}}', { headers: { 'Content-Type': 'application/json' } })
+    )
   )
   mockCreateSession.mockResolvedValue({ id: 'ses_opencode_1' })
   mockPromptAsync.mockResolvedValue(undefined)
@@ -430,9 +432,7 @@ describe('OpencodeSession — run()', () => {
     // R2: the renderer adds the user message optimistically (addUserMessage),
     // so OpencodeSession must NOT also emit a user session:message (would double it).
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    const userMsgEmitted = calls.some(
-      (c) => c[0] === 'session:message' && c[2]?.role === 'user'
-    )
+    const userMsgEmitted = calls.some((c) => c[0] === 'session:message' && c[2]?.role === 'user')
     expect(userMsgEmitted).toBe(false)
 
     // It is still recorded in local history for getMessages().
@@ -450,7 +450,12 @@ describe('OpencodeSession — run()', () => {
       { name: 'review', description: 'Code review', template: '/review', subtask: true }
     ])
     mockListSkills.mockResolvedValue([
-      { name: 'my-skill', description: 'Does stuff', location: '/home/user/.claude/skills/my-skill/SKILL.md', content: '# My Skill' }
+      {
+        name: 'my-skill',
+        description: 'Does stuff',
+        location: '/home/user/.claude/skills/my-skill/SKILL.md',
+        content: '# My Skill'
+      }
     ])
     const session = new OpencodeSession('r_eager', win, '/tmp')
     session.run(null) // fire-and-forget; eagerConnect runs asynchronously
@@ -622,10 +627,10 @@ describe('OpencodeSession — slash command routing (Phase 8a)', () => {
       [{ name: 'review', template: '/review $ARGUMENTS' }],
       '/review pr 1'
     )
-    expect(mockRunCommand).toHaveBeenCalledWith(
-      'ses_slash_1',
-      { command: 'review', arguments: 'pr 1' }
-    )
+    expect(mockRunCommand).toHaveBeenCalledWith('ses_slash_1', {
+      command: 'review',
+      arguments: 'pr 1'
+    })
     expect(mockPromptAsync).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -633,15 +638,8 @@ describe('OpencodeSession — slash command routing (Phase 8a)', () => {
   it('/known-command with no args passes empty arguments string', async () => {
     mockCreateSession.mockResolvedValue({ id: 'ses_slash_2' })
     const session = makeSession()
-    await runWithCommands(
-      session,
-      [{ name: 'init', template: '/init' }],
-      '/init'
-    )
-    expect(mockRunCommand).toHaveBeenCalledWith(
-      'ses_slash_2',
-      { command: 'init', arguments: '' }
-    )
+    await runWithCommands(session, [{ name: 'init', template: '/init' }], '/init')
+    expect(mockRunCommand).toHaveBeenCalledWith('ses_slash_2', { command: 'init', arguments: '' })
     expect(mockPromptAsync).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -649,11 +647,7 @@ describe('OpencodeSession — slash command routing (Phase 8a)', () => {
   it('/unknown-command → falls through to promptAsync (model sees literal text)', async () => {
     mockCreateSession.mockResolvedValue({ id: 'ses_slash_3' })
     const session = makeSession()
-    await runWithCommands(
-      session,
-      [{ name: 'init', template: '/init' }],
-      '/nonexistent foo bar'
-    )
+    await runWithCommands(session, [{ name: 'init', template: '/init' }], '/nonexistent foo bar')
     // Not a known command → promptAsync with the raw prompt
     expect(mockRunCommand).not.toHaveBeenCalled()
     expect(mockPromptAsync).toHaveBeenCalledWith(
@@ -685,13 +679,11 @@ describe('OpencodeSession — slash command routing (Phase 8a)', () => {
 
   it('runCommand BadRequest falls back to promptAsync (no wedge on name mismatch)', async () => {
     mockCreateSession.mockResolvedValue({ id: 'ses_fallback' })
-    mockRunCommand.mockRejectedValue(new Error('opencode POST /session/ses_fallback/command → 400: Available commands: init'))
-    const session = makeSession()
-    await runWithCommands(
-      session,
-      [{ name: 'review', template: '/review' }],
-      '/review broken'
+    mockRunCommand.mockRejectedValue(
+      new Error('opencode POST /session/ses_fallback/command → 400: Available commands: init')
     )
+    const session = makeSession()
+    await runWithCommands(session, [{ name: 'review', template: '/review' }], '/review broken')
     expect(mockRunCommand).toHaveBeenCalled()
     // Fell back to promptAsync after the 400 error
     expect(mockPromptAsync).toHaveBeenCalledWith(
@@ -914,7 +906,9 @@ const parkingStream = async function* (signal?: AbortSignal): AsyncGenerator<Ope
 /** Build an async-iterable SSE stream from a fixed list of events, then park (as
  *  a real opencode stream does) until aborted — so consumeEvents' H20 recovery
  *  isn't tripped by the mock ending mid-turn. */
-function streamOf(events: OpencodeEvent[]): (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent> {
+function streamOf(
+  events: OpencodeEvent[]
+): (signal?: AbortSignal) => AsyncGenerator<OpencodeEvent> {
   return async function* (signal?: AbortSignal) {
     for (const ev of events) yield ev
     await parkUntilAborted(signal)
@@ -988,7 +982,10 @@ describe('OpencodeSession — usage_event recording', () => {
     expect(row.engineCostUsd).toBeCloseTo(0.002)
     // equiv cost via pricing table: gpt-4o input $2.5/MTok, output $10/MTok, cacheRead $1.25/MTok
     const expectedEquiv =
-      (100 / 1_000_000) * 2.5 + (102 / 1_000_000) * 10 + (4 / 1_000_000) * 2.5 + (10 / 1_000_000) * 1.25
+      (100 / 1_000_000) * 2.5 +
+      (102 / 1_000_000) * 10 +
+      (4 / 1_000_000) * 2.5 +
+      (10 / 1_000_000) * 1.25
     expect(row.equivCostUsd!).toBeCloseTo(expectedEquiv)
     expect(row.source).toBe('live')
     session.dispose()
@@ -1031,7 +1028,12 @@ describe('OpencodeSession — usage_event recording', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_once', role: 'assistant', cost: 0.005, tokens: { input: 10, output: 10 } }
+            info: {
+              id: 'msg_once',
+              role: 'assistant',
+              cost: 0.005,
+              tokens: { input: 10, output: 10 }
+            }
           }
         },
         { id: 'd2', type: 'session.idle', properties: { sessionID: SES } },
@@ -1074,7 +1076,11 @@ const GUARDS: Rule[] = [
 // ADR-033 M2: gates the dispatch_agent tool in EVERY mode, appended LAST
 // (after buildRuleset + the user's compiled rules) so last-match-wins can't
 // accidentally auto-allow it via a blanket user rule.
-const DISPATCH_ASK_RULE: Rule = { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
+const DISPATCH_ASK_RULE: Rule = {
+  permission: 'claudeui_dispatch_agent',
+  pattern: '*',
+  action: 'ask'
+}
 
 describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', () => {
   beforeEach(setupMocks)
@@ -1126,7 +1132,11 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
   it('secret-file reads are guarded in the gated modes', async () => {
     const dflt = await rulesetFor('default')
     expect(dflt).toContainEqual({ permission: 'read', pattern: '*.env', action: 'ask' })
-    expect(await rulesetFor('acceptEdits')).toContainEqual({ permission: 'read', pattern: '*.env', action: 'ask' })
+    expect(await rulesetFor('acceptEdits')).toContainEqual({
+      permission: 'read',
+      pattern: '*.env',
+      action: 'ask'
+    })
   })
 
   it('plan → deny edits + ONLY the general subagent (explore/research task still works); selects plan agent', async () => {
@@ -1169,7 +1179,13 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     // user scope returns one allow + one deny; project/local empty.
     mockLoadClaudePermissions.mockImplementation((scope: string) =>
       scope === 'user'
-        ? { allow: ['Bash(git diff:*)'], deny: ['Edit(secrets/**)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        ? {
+            allow: ['Bash(git diff:*)'],
+            deny: ['Edit(secrets/**)'],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
         : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
     )
     const rs = await rulesetFor('default')
@@ -1225,7 +1241,12 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
   it('allow WITH always-allow suggestions → replyPermission(always) + persists to shared store', async () => {
     const session = await started()
     const suggestions = [
-      { type: 'addRules', behavior: 'allow', destination: 'localSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo hi' }] }
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'localSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo hi' }]
+      }
     ]
     session.resolveApproval('per-2', 'allow', undefined, suggestions as never)
     expect(mockReplyPermission).toHaveBeenCalledWith('per-2', 'always')
@@ -1248,7 +1269,12 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
   it('session-scoped suggestions are NOT written to the store (opencode native always covers it)', async () => {
     const session = await started()
     const suggestions = [
-      { type: 'addRules', behavior: 'allow', destination: 'session', rules: [{ toolName: 'Bash', ruleContent: 'ls' }] }
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'session',
+        rules: [{ toolName: 'Bash', ruleContent: 'ls' }]
+      }
     ]
     session.resolveApproval('per-4', 'allow', undefined, suggestions as never)
     expect(mockReplyPermission).toHaveBeenCalledWith('per-4', 'always')
@@ -1268,7 +1294,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
   const SES = 'ses_auto_1'
 
   function enableAutoMode(extra: Record<string, unknown> = {}): void {
-    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast', ...extra } })
+    mockLoadEngineConfig.mockReturnValue({
+      autoMode: { enabled: true, twoStageMode: 'fast', ...extra }
+    })
     mockCreateSession.mockResolvedValue({ id: SES })
   }
 
@@ -1312,8 +1340,11 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     enableAutoMode()
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: { permission: string; action: string }[] })
-      .permission
+    const rs = (
+      mockPatchSession.mock.calls.at(-1)?.[1] as {
+        permission: { permission: string; action: string }[]
+      }
+    ).permission
     expect(rs.some((r) => r.permission === 'bash' && r.action === 'ask')).toBe(true)
     expect(rs.some((r) => r.permission === 'webfetch' && r.action === 'ask')).toBe(true)
     // edits are auto-allowed (no edit:ask rule) — they never reach the classifier.
@@ -1376,13 +1407,25 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       yield {
         id: 'e1',
         type: 'permission.asked',
-        properties: { sessionID: SES, id: ids[0], permission: 'bash', patterns: ['x'], tool: { callID: 'c1' } }
+        properties: {
+          sessionID: SES,
+          id: ids[0],
+          permission: 'bash',
+          patterns: ['x'],
+          tool: { callID: 'c1' }
+        }
       } as OpencodeEvent
       await gate
       yield {
         id: 'e2',
         type: 'permission.asked',
-        properties: { sessionID: SES, id: ids[1], permission: 'bash', patterns: ['y'], tool: { callID: 'c2' } }
+        properties: {
+          sessionID: SES,
+          id: ids[1],
+          permission: 'bash',
+          patterns: ['y'],
+          tool: { callID: 'c2' }
+        }
       } as OpencodeEvent
       await parkUntilAborted(signal)
     })
@@ -1444,10 +1487,20 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     enableAutoMode()
     mockPrompt
       .mockResolvedValueOnce({
-        parts: [{ type: 'text', text: '<block>yes</block><category>Git Destructive</category><reason>a</reason>' }]
+        parts: [
+          {
+            type: 'text',
+            text: '<block>yes</block><category>Git Destructive</category><reason>a</reason>'
+          }
+        ]
       })
       .mockResolvedValue({
-        parts: [{ type: 'text', text: '<block>yes</block><category>Network Exposure</category><reason>b</reason>' }]
+        parts: [
+          {
+            type: 'text',
+            text: '<block>yes</block><category>Network Exposure</category><reason>b</reason>'
+          }
+        ]
       })
     let release = (): void => {}
     const gate = new Promise<void>((r) => {
@@ -1460,11 +1513,19 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      expect(mockReplyPermission).toHaveBeenCalledWith('per_mix_1', 'reject', expect.stringContaining('Git Destructive'))
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_mix_1',
+        'reject',
+        expect.stringContaining('Git Destructive')
+      )
     )
     release()
     await vi.waitFor(() =>
-      expect(mockReplyPermission).toHaveBeenCalledWith('per_mix_2', 'reject', expect.stringContaining('Network Exposure'))
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_mix_2',
+        'reject',
+        expect.stringContaining('Network Exposure')
+      )
     )
     const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
       (c) => c[0] === 'session:approval-request'
@@ -1559,7 +1620,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     feedPermissionAsked('bash', 'per_live_judge')
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_live_judge', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_live_judge', 'once')
+    )
     session.dispose()
   })
 
@@ -1570,7 +1633,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     feedPermissionAsked('bash', 'per_cold_cache')
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_cold_cache', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_cold_cache', 'once')
+    )
     session.dispose()
   })
 
@@ -1606,7 +1671,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
 
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_gated', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_gated', 'once')
+    )
 
     expect(mockPatchSession).toHaveBeenCalledWith(JUDGE_SES, {
       permission: [{ permission: '*', pattern: '*', action: 'deny' }],
@@ -1634,7 +1701,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     feedPermissionAsked('bash', 'per_judge_patch_fail')
 
     const win = new MockWindow() as unknown as HostWindowHandle
-    const session = new OpencodeSession('r_judge_patch_fail', win, '/tmp', { permissionMode: 'full' })
+    const session = new OpencodeSession('r_judge_patch_fail', win, '/tmp', {
+      permissionMode: 'full'
+    })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1666,7 +1735,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
 
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_sealed', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_judge_sealed', 'once')
+    )
 
     const judgePatch = mockPatchSession.mock.calls.find((c) => c[0] === JUDGE_SES)
     expect(judgePatch).toBeDefined()
@@ -1694,7 +1765,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
 
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_main_unsealed', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_main_unsealed', 'once')
+    )
 
     const mainPatches = mockPatchSession.mock.calls.filter((c) => c[0] === SES)
     expect(mainPatches.length).toBeGreaterThan(0)
@@ -1731,9 +1804,11 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
 
   /** The compiled user-rule tail of the last patched ruleset (base + user + dispatch). */
   function lastPatchedRules(): { permission: string; pattern: string; action: string }[] {
-    return (mockPatchSession.mock.calls.at(-1)?.[1] as {
-      permission: { permission: string; pattern: string; action: string }[]
-    }).permission
+    return (
+      mockPatchSession.mock.calls.at(-1)?.[1] as {
+        permission: { permission: string; pattern: string; action: string }[]
+      }
+    ).permission
   }
 
   it('auto mode: a user ALLOW rule is patched OUT of the session ruleset', async () => {
@@ -1764,7 +1839,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     const win = new MockWindow() as unknown as HostWindowHandle
     const session = new OpencodeSession('r_user_allow', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_user_allow', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_user_allow', 'once')
+    )
     // The judge decided it — the user's allow rule did not make it invisible…
     expect(mockPrompt).toHaveBeenCalled()
     // …and it did NOT degrade into an interruption either: an allow rule still
@@ -1841,7 +1918,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     feedPermissionAsked('bash', 'per_not_user_ask', 'c1', ['ls -la'])
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_not_user_ask', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_not_user_ask', 'once')
+    )
     expect(mockPrompt).toHaveBeenCalled()
     session.dispose()
   })
@@ -1903,7 +1982,9 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     feedPermissionAsked('bash', 'per_mode_same')
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_mode_same', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('per_mode_same', 'once')
+    )
     session.dispose()
   })
 
@@ -2031,7 +2112,11 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     push(toolPartEvent('c_b1', 'kubectl delete ns prod'))
     push(permissionEvent('per_b1', 'c_b1', 'kubectl delete ns prod'))
     await vi.waitFor(() =>
-      expect(mockReplyPermission).toHaveBeenCalledWith('per_b1', 'reject', 'Auto mode blocked: prod')
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_b1',
+        'reject',
+        'Auto mode blocked: prod'
+      )
     )
 
     push(permissionEvent('per_b2', 'c_b2', 'kubectl delete ns prod'))
@@ -2273,7 +2358,9 @@ describe('OpencodeSession — permission patch failure fails CLOSED', () => {
 
   it('setPermissionMode(): a failed patchSession surfaces session:error without rejecting the IPC call', async () => {
     const win = new MockWindow() as unknown as HostWindowHandle
-    const session = new OpencodeSession('r_setmode_fail', win, '/tmp', { permissionMode: 'default' })
+    const session = new OpencodeSession('r_setmode_fail', win, '/tmp', {
+      permissionMode: 'default'
+    })
     await session.run('hi') // establishes openSessionId with a working patch
     ;(win as unknown as MockWindow).webContents.send.mockClear()
 
@@ -2295,7 +2382,9 @@ describe('OpencodeSession — permission patch failure fails CLOSED', () => {
     // steer path, which deliberately does not re-patch — the running turn
     // already owns its ruleset — so this drives a fresh session instead.)
     const win = new MockWindow() as unknown as HostWindowHandle
-    const session = new OpencodeSession('r_reapply_fail', win, '/tmp', { permissionMode: 'default' })
+    const session = new OpencodeSession('r_reapply_fail', win, '/tmp', {
+      permissionMode: 'default'
+    })
     await session.setPermissionMode('plan') // no live session yet → no patch attempted
     expect(mockPatchSession).not.toHaveBeenCalled()
 
@@ -2383,9 +2472,7 @@ describe('OpencodeSession — askSideQuestion', () => {
   it('creates a throwaway session, prompts, returns joined text, deletes the session', async () => {
     const SIDE_SES = { id: 'ses_side_q' }
     // First createSession call = the main session (from run()); second = the side-question session.
-    mockCreateSession
-      .mockResolvedValueOnce({ id: 'ses_main' })
-      .mockResolvedValueOnce(SIDE_SES)
+    mockCreateSession.mockResolvedValueOnce({ id: 'ses_main' }).mockResolvedValueOnce(SIDE_SES)
     mockPrompt.mockResolvedValue({
       parts: [
         { type: 'text', text: 'This is ' },
@@ -2416,9 +2503,7 @@ describe('OpencodeSession — askSideQuestion', () => {
 
   it('patches a deny-all ruleset on the throwaway session BEFORE prompting (hang-proof, tool-less)', async () => {
     const SIDE_SES = { id: 'ses_side_deny' }
-    mockCreateSession
-      .mockResolvedValueOnce({ id: 'ses_main_deny' })
-      .mockResolvedValueOnce(SIDE_SES)
+    mockCreateSession.mockResolvedValueOnce({ id: 'ses_main_deny' }).mockResolvedValueOnce(SIDE_SES)
     mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: 'ok' }] })
 
     const session = makeSession()
@@ -2621,7 +2706,10 @@ describe('OpencodeSession — resolveApproval question branch', () => {
       {
         question: 'Which framework?',
         header: 'Framework',
-        options: [{ label: 'React', description: '' }, { label: 'Vue', description: '' }]
+        options: [
+          { label: 'React', description: '' },
+          { label: 'Vue', description: '' }
+        ]
       }
     ])
 
@@ -2629,10 +2717,7 @@ describe('OpencodeSession — resolveApproval question branch', () => {
       'Which framework?': 'React'
     })
 
-    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
-      'que_test',
-      [['React']]
-    ))
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith('que_test', [['React']]))
     expect(mockReplyPermission).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -2667,10 +2752,12 @@ describe('OpencodeSession — resolveApproval question branch', () => {
       'First Q': 'X'
     })
 
-    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
-      'que_test',
-      [['X'], ['Y']]   // order from the questions array, not the Record iteration order
-    ))
+    await vi.waitFor(() =>
+      expect(mockReplyQuestion).toHaveBeenCalledWith(
+        'que_test',
+        [['X'], ['Y']] // order from the questions array, not the Record iteration order
+      )
+    )
     session.dispose()
   })
 
@@ -2696,10 +2783,7 @@ describe('OpencodeSession — resolveApproval question branch', () => {
       'Pick many': 'A, C'
     })
 
-    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
-      'que_test',
-      [['A', 'C']]
-    ))
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith('que_test', [['A', 'C']]))
     session.dispose()
   })
 
@@ -2721,7 +2805,9 @@ describe('OpencodeSession — resolveApproval question branch', () => {
     const session = makeSession()
     await session.run('hi')
     session.resolveApproval('perm_unchanged', 'allow')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_unchanged', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_unchanged', 'once')
+    )
     expect(mockReplyQuestion).not.toHaveBeenCalled()
     expect(mockRejectQuestion).not.toHaveBeenCalled()
     session.dispose()
@@ -2762,7 +2848,11 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     mockSubscribeEvents.mockImplementation(async function* () {
       await new Promise(() => {}) // hangs forever
     })
-    const session = new OpencodeSession('r_steer', win as unknown as HostWindowHandle, '/tmp/steer-cwd')
+    const session = new OpencodeSession(
+      'r_steer',
+      win as unknown as HostWindowHandle,
+      '/tmp/steer-cwd'
+    )
     // Run without awaiting full completion — promptAsync resolves (the "send" side),
     // but the SSE consumer is still running so isProcessing stays true.
     await session.run('initial prompt')
@@ -2806,7 +2896,9 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     expect(mockPromptAsync).toHaveBeenCalledTimes(1)
     expect(mockPromptAsync).toHaveBeenCalledWith(
       'ses_steer_1',
-      expect.objectContaining({ parts: expect.arrayContaining([{ type: 'text', text: 'mid-turn steer' }]) })
+      expect.objectContaining({
+        parts: expect.arrayContaining([{ type: 'text', text: 'mid-turn steer' }])
+      })
     )
     // Must NOT create a new opencode session
     expect(mockCreateSession).not.toHaveBeenCalled()
@@ -2849,7 +2941,9 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
 
   it('/known-command sent mid-turn still routes via runCommand (sendPrompt reuse) and consumes its item', async () => {
     // Seed knownCommandNames via run(null) before starting the turn
-    mockListCommands.mockResolvedValue([{ name: 'review', description: 'Review', template: '/review' }])
+    mockListCommands.mockResolvedValue([
+      { name: 'review', description: 'Review', template: '/review' }
+    ])
     mockListSkills.mockResolvedValue([])
     const win = new MockWindow() as unknown as HostWindowHandle
     mockCreateSession.mockResolvedValue({ id: 'ses_slash_steer' })
@@ -2857,7 +2951,11 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     mockSubscribeEvents.mockImplementation(async function* () {
       await new Promise(() => {}) // hangs forever so isProcessing stays true
     })
-    const session = new OpencodeSession('r_slash_steer', win as unknown as HostWindowHandle, '/tmp/slash-steer')
+    const session = new OpencodeSession(
+      'r_slash_steer',
+      win as unknown as HostWindowHandle,
+      '/tmp/slash-steer'
+    )
 
     // Populate knownCommandNames via eager connect
     session.run(null)
@@ -2875,10 +2973,10 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
     session.enqueuePrompt('/review this pr')
     await session.run('/review this pr')
 
-    expect(mockRunCommand).toHaveBeenCalledWith(
-      'ses_slash_steer',
-      { command: 'review', arguments: 'this pr' }
-    )
+    expect(mockRunCommand).toHaveBeenCalledWith('ses_slash_steer', {
+      command: 'review',
+      arguments: 'this pr'
+    })
     expect(mockPromptAsync).not.toHaveBeenCalled()
 
     // The ack fires on the runCommand branch too — text correlation matches the
@@ -3035,13 +3133,21 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Own-session task part — registers child
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task', messageID: 'msg_parent',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
-              state: { status: 'running', input: { description: 'subtask' }, metadata: { sessionId: CHILD_SES } }
+              id: 'p_task',
+              messageID: 'msg_parent',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
+              state: {
+                status: 'running',
+                input: { description: 'subtask' },
+                metadata: { sessionId: CHILD_SES }
+              }
             }
           }
         } as OpencodeEvent,
@@ -3088,24 +3194,30 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Register child
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task2', messageID: 'msg_p2',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task2',
+              messageID: 'msg_p2',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Child message.updated (role=assistant)
         {
-          id: 'e2', type: 'message.updated',
+          id: 'e2',
+          type: 'message.updated',
           properties: { sessionID: CHILD_SES, info: { id: 'child_msg_a', role: 'assistant' } }
         } as OpencodeEvent,
         // Child message.part.updated (text)
         {
-          id: 'e3', type: 'message.part.updated',
+          id: 'e3',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
             part: { id: 'cp_a', messageID: 'child_msg_a', type: 'text', text: 'done' }
@@ -3122,7 +3234,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -3141,19 +3255,24 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Register child
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task3', messageID: 'msg_p3',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task3',
+              messageID: 'msg_p3',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Child delta
         {
-          id: 'e2', type: 'message.part.delta',
+          id: 'e2',
+          type: 'message.part.delta',
           properties: {
             sessionID: CHILD_SES,
             messageID: 'child_msg_delta',
@@ -3172,7 +3291,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -3191,24 +3312,32 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Register child
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task4', messageID: 'msg_p4',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task4',
+              messageID: 'msg_p4',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Child tool part (completed) — triggers subagent-tool-result extraction
         {
-          id: 'e2', type: 'message.part.updated',
+          id: 'e2',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
             part: {
-              id: 'cp_tool', messageID: 'child_msg_tool2',
-              type: 'tool', tool: 'bash', callID: 'child_bash_call',
+              id: 'cp_tool',
+              messageID: 'child_msg_tool2',
+              type: 'tool',
+              tool: 'bash',
+              callID: 'child_bash_call',
               state: { status: 'completed', output: 'hello world' }
             }
           }
@@ -3223,7 +3352,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -3243,27 +3374,38 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Register child
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task5', messageID: 'msg_p5',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task5',
+              messageID: 'msg_p5',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Child message.updated (role=user — the task prompt)
         {
-          id: 'e2', type: 'message.updated',
+          id: 'e2',
+          type: 'message.updated',
           properties: { sessionID: CHILD_SES, info: { id: 'child_msg_user', role: 'user' } }
         } as OpencodeEvent,
         // Child user message part
         {
-          id: 'e3', type: 'message.part.updated',
+          id: 'e3',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
-            part: { id: 'cp_user', messageID: 'child_msg_user', type: 'text', text: 'the task prompt' }
+            part: {
+              id: 'cp_user',
+              messageID: 'child_msg_user',
+              type: 'text',
+              text: 'the task prompt'
+            }
           }
         } as OpencodeEvent,
         { id: 'e4', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
@@ -3276,7 +3418,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -3293,7 +3437,8 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // STRANGER session (not a known child) — must be ignored entirely
         {
-          id: 'e1', type: 'message.part.delta',
+          id: 'e1',
+          type: 'message.part.delta',
           properties: {
             sessionID: 'ses_STRANGER_8d',
             messageID: 'stranger_msg',
@@ -3311,7 +3456,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -3328,12 +3475,16 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     mockSubscribeEvents.mockImplementationOnce(
       streamOf([
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_clear', messageID: 'msg_pc',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_clear',
+              messageID: 'msg_pc',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
@@ -3354,7 +3505,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     // Cancel clears childSessions
@@ -3364,7 +3517,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     // Second turn — child session.idle must not produce task-notification since child is cleared
     await session.run('go again')
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls2 = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -3383,19 +3538,24 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Register child via task part
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_8e_ask', messageID: 'msg_par_8e_ask',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_8e_ask',
+              messageID: 'msg_par_8e_ask',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Child permission.asked (e.g. child tries to run bash — ask-gated)
         {
-          id: 'e2', type: 'permission.asked',
+          id: 'e2',
+          type: 'permission.asked',
           properties: {
             sessionID: CHILD_SES,
             id: 'perm_child_ask_8e',
@@ -3421,8 +3581,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       return calls.some((c) => c[0] === 'session:approval-request')
     })
 
-    const approvalCall = (win as unknown as MockWindow).webContents.send.mock.calls
-      .find((c) => c[0] === 'session:approval-request')
+    const approvalCall = (win as unknown as MockWindow).webContents.send.mock.calls.find(
+      (c) => c[0] === 'session:approval-request'
+    )
     expect(approvalCall).toBeDefined()
     // toolName is the permission category ('bash'), NOT 'AskUserQuestion'
     expect(approvalCall![2].toolName).toBe('bash')
@@ -3442,18 +3603,23 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     mockSubscribeEvents.mockImplementation(
       streamOf([
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_8e_allow', messageID: 'msg_par_8e_allow',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_8e_allow',
+              messageID: 'msg_par_8e_allow',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         {
-          id: 'e2', type: 'permission.asked',
+          id: 'e2',
+          type: 'permission.asked',
           properties: {
             sessionID: CHILD_SES,
             id: 'perm_child_allow_8e',
@@ -3469,7 +3635,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
 
     // resolveApproval routes by requestId — call it directly and assert the downstream reply.
     session.resolveApproval('perm_child_allow_8e', 'allow')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_allow_8e', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_allow_8e', 'once')
+    )
 
     session.dispose()
   })
@@ -3479,18 +3647,23 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     mockSubscribeEvents.mockImplementation(
       streamOf([
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_8e_deny', messageID: 'msg_par_8e_deny',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_8e_deny',
+              messageID: 'msg_par_8e_deny',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         {
-          id: 'e2', type: 'permission.asked',
+          id: 'e2',
+          type: 'permission.asked',
           properties: {
             sessionID: CHILD_SES,
             id: 'perm_child_deny_8e',
@@ -3506,7 +3679,11 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
 
     session.resolveApproval('perm_child_deny_8e', 'deny')
     await vi.waitFor(() =>
-      expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_deny_8e', 'reject', 'User denied')
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'perm_child_deny_8e',
+        'reject',
+        'User denied'
+      )
     )
 
     session.dispose()
@@ -3524,18 +3701,23 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     mockSubscribeEvents.mockImplementation(
       streamOf([
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_8e_auto', messageID: 'msg_par_8e_auto',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_8e_auto',
+              messageID: 'msg_par_8e_auto',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         {
-          id: 'e2', type: 'permission.asked',
+          id: 'e2',
+          type: 'permission.asked',
           properties: {
             sessionID: CHILD_SES,
             id: 'perm_child_auto_8e',
@@ -3552,7 +3734,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     // In auto mode the classifier is invoked (mockPrompt), then replyPermission(once)
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_auto_8e', 'once'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_auto_8e', 'once')
+    )
     // The classifier (mockPrompt) must have been called — NOT auto-sent to the human
     expect(mockPrompt).toHaveBeenCalled()
 
@@ -3570,35 +3754,52 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
       streamOf([
         // Own-session task part — registers the child
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_m', messageID: 'msg_parent_m',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_m',
+              messageID: 'msg_parent_m',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Parent assistant message WITH tokens — SHOULD be metered
         {
-          id: 'e2', type: 'message.updated',
+          id: 'e2',
+          type: 'message.updated',
           properties: {
             sessionID: PARENT_SES,
-            info: { id: 'msg_parent_metered', role: 'assistant', cost: 0.01, tokens: { input: 100, output: 50 } }
+            info: {
+              id: 'msg_parent_metered',
+              role: 'assistant',
+              cost: 0.01,
+              tokens: { input: 100, output: 50 }
+            }
           }
         } as OpencodeEvent,
         // Child assistant message WITH tokens — must NOT be metered against parent
         {
-          id: 'e3', type: 'message.updated',
+          id: 'e3',
+          type: 'message.updated',
           properties: {
             sessionID: CHILD_SES,
-            info: { id: 'msg_child_tokens', role: 'assistant', cost: 0.99, tokens: { input: 9999, output: 8888 } }
+            info: {
+              id: 'msg_child_tokens',
+              role: 'assistant',
+              cost: 0.99,
+              tokens: { input: 9999, output: 8888 }
+            }
           }
         } as OpencodeEvent,
         // Child needs a part.updated too (so the child accumulator is fully marked isChild)
         {
-          id: 'e4', type: 'message.part.updated',
+          id: 'e4',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
             part: { id: 'cp_m', messageID: 'msg_child_tokens', type: 'text', text: 'child work' }
@@ -3648,28 +3849,38 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
       streamOf([
         // Register child via task part on own session
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_9a', messageID: 'msg_par_9a',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_9a',
+              messageID: 'msg_par_9a',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Parent assistant message — metered under parent model (anthropic/gpt-4o)
         {
-          id: 'e2', type: 'message.updated',
+          id: 'e2',
+          type: 'message.updated',
           properties: {
             sessionID: PARENT_SES,
-            info: { id: 'msg_par_9a_cost', role: 'assistant', cost: 0.01,
-                    tokens: { input: 100, output: 50 } }
+            info: {
+              id: 'msg_par_9a_cost',
+              role: 'assistant',
+              cost: 0.01,
+              tokens: { input: 100, output: 50 }
+            }
           }
         } as OpencodeEvent,
         // Child assistant message WITH model info — must be metered under child model
         {
-          id: 'e3', type: 'message.updated',
+          id: 'e3',
+          type: 'message.updated',
           properties: {
             sessionID: CHILD_SES,
             info: {
@@ -3684,7 +3895,8 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
         } as OpencodeEvent,
         // Child part.updated (ensures isChild is set)
         {
-          id: 'e4', type: 'message.part.updated',
+          id: 'e4',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
             part: { id: 'cp_9a', messageID: 'msg_child_9a_model', type: 'text', text: 'done' }
@@ -3728,37 +3940,52 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
     mockSubscribeEvents.mockImplementation(
       streamOf([
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_nm', messageID: 'msg_par_nm',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_nm',
+              messageID: 'msg_par_nm',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         // Parent message (so we have a row to wait for)
         {
-          id: 'e2', type: 'message.updated',
+          id: 'e2',
+          type: 'message.updated',
           properties: {
             sessionID: PARENT_SES,
-            info: { id: 'msg_par_nm_anchor', role: 'assistant', cost: 0.001,
-                    tokens: { input: 10, output: 5 } }
+            info: {
+              id: 'msg_par_nm_anchor',
+              role: 'assistant',
+              cost: 0.001,
+              tokens: { input: 10, output: 5 }
+            }
           }
         } as OpencodeEvent,
         // Child message WITHOUT model fields — must be skipped by recordTurnUsage
         {
-          id: 'e3', type: 'message.updated',
+          id: 'e3',
+          type: 'message.updated',
           properties: {
             sessionID: CHILD_SES,
-            info: { id: 'msg_child_no_model', role: 'assistant', cost: 0.5,
-                    tokens: { input: 1000, output: 500 } }
+            info: {
+              id: 'msg_child_no_model',
+              role: 'assistant',
+              cost: 0.5,
+              tokens: { input: 1000, output: 500 }
+            }
             // No providerID / modelID
           }
         } as OpencodeEvent,
         {
-          id: 'e4', type: 'message.part.updated',
+          id: 'e4',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
             part: { id: 'cp_nm', messageID: 'msg_child_no_model', type: 'text', text: 'x' }
@@ -3788,26 +4015,36 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
     mockSubscribeEvents.mockImplementation(
       streamOf([
         {
-          id: 'e1', type: 'message.part.updated',
+          id: 'e1',
+          type: 'message.part.updated',
           properties: {
             sessionID: PARENT_SES,
             part: {
-              id: 'p_task_rz', messageID: 'msg_par_rz',
-              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              id: 'p_task_rz',
+              messageID: 'msg_par_rz',
+              type: 'tool',
+              tool: 'task',
+              callID: TASK_CALL_ID,
               state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
             }
           }
         } as OpencodeEvent,
         {
-          id: 'e2', type: 'message.updated',
+          id: 'e2',
+          type: 'message.updated',
           properties: {
             sessionID: PARENT_SES,
-            info: { id: 'msg_par_reasoning', role: 'assistant', cost: 0.01,
-                    tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } } }
+            info: {
+              id: 'msg_par_reasoning',
+              role: 'assistant',
+              cost: 0.01,
+              tokens: { input: 100, output: 50, reasoning: 25, cache: { read: 0, write: 0 } }
+            }
           }
         } as OpencodeEvent,
         {
-          id: 'e3', type: 'message.updated',
+          id: 'e3',
+          type: 'message.updated',
           properties: {
             sessionID: CHILD_SES,
             info: {
@@ -3821,7 +4058,8 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
           }
         } as OpencodeEvent,
         {
-          id: 'e4', type: 'message.part.updated',
+          id: 'e4',
+          type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
             part: { id: 'cp_rz', messageID: 'msg_child_reasoning', type: 'text', text: 'done' }
@@ -3893,7 +4131,12 @@ describe('OpencodeSession — live bash output streaming (Slice A)', () => {
     try {
       mockCreateSession.mockResolvedValue({ id: SES })
       mockSubscribeEvents.mockImplementation(
-        streamOf([bashPartEvent('e1', 'call_bash1', { status: 'running', metadata: { output: 'line1\nline2' } })])
+        streamOf([
+          bashPartEvent('e1', 'call_bash1', {
+            status: 'running',
+            metadata: { output: 'line1\nline2' }
+          })
+        ])
       )
 
       const win = new MockWindow() as unknown as HostWindowHandle
@@ -3922,8 +4165,14 @@ describe('OpencodeSession — live bash output streaming (Slice A)', () => {
       mockCreateSession.mockResolvedValue({ id: SES })
       mockSubscribeEvents.mockImplementation(
         streamOf([
-          bashPartEvent('e1', 'call_bash2', { status: 'running', metadata: { output: 'same-output' } }),
-          bashPartEvent('e2', 'call_bash2', { status: 'running', metadata: { output: 'same-output' } })
+          bashPartEvent('e1', 'call_bash2', {
+            status: 'running',
+            metadata: { output: 'same-output' }
+          }),
+          bashPartEvent('e2', 'call_bash2', {
+            status: 'running',
+            metadata: { output: 'same-output' }
+          })
         ])
       )
 
@@ -3949,8 +4198,14 @@ describe('OpencodeSession — live bash output streaming (Slice A)', () => {
       mockSubscribeEvents.mockImplementation(
         streamOf([
           bashPartEvent('e1', 'call_bash3', { status: 'running', metadata: { output: 'chunk1' } }),
-          bashPartEvent('e2', 'call_bash3', { status: 'running', metadata: { output: 'chunk1chunk2' } }),
-          bashPartEvent('e3', 'call_bash3', { status: 'running', metadata: { output: 'chunk1chunk2chunk3' } })
+          bashPartEvent('e2', 'call_bash3', {
+            status: 'running',
+            metadata: { output: 'chunk1chunk2' }
+          }),
+          bashPartEvent('e3', 'call_bash3', {
+            status: 'running',
+            metadata: { output: 'chunk1chunk2chunk3' }
+          })
         ])
       )
 
@@ -4074,19 +4329,24 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
     mockSubscribeEvents.mockImplementation(async function* () {
       // Register child via own-session task part
       yield {
-        id: 'eq1', type: 'message.part.updated',
+        id: 'eq1',
+        type: 'message.part.updated',
         properties: {
           sessionID: PARENT_SES,
           part: {
-            id: 'p_task_cq', messageID: 'msg_parent_cq',
-            type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+            id: 'p_task_cq',
+            messageID: 'msg_parent_cq',
+            type: 'tool',
+            tool: 'task',
+            callID: TASK_CALL_ID,
             state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
           }
         }
       } as OpencodeEvent
       // Child question.asked — the hang trigger
       yield {
-        id: 'eq2', type: 'question.asked',
+        id: 'eq2',
+        type: 'question.asked',
         properties: {
           sessionID: CHILD_SES,
           id: QUESTION_ID,
@@ -4094,7 +4354,10 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
             {
               question: 'Which strategy?',
               header: 'Strategy',
-              options: [{ label: 'A', description: 'Fast' }, { label: 'B', description: 'Safe' }],
+              options: [
+                { label: 'A', description: 'Fast' },
+                { label: 'B', description: 'Safe' }
+              ],
               multiple: false
             }
           ],
@@ -4148,10 +4411,7 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
     // Reply with answers keyed by question text (mirrors AskUserQuestionBlock View.tsx keyOf)
     session.resolveApproval(QUESTION_ID, 'allow', { 'Which strategy?': 'A' })
 
-    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
-      QUESTION_ID,
-      [['A']]
-    ))
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(QUESTION_ID, [['A']]))
     expect(mockReplyPermission).not.toHaveBeenCalled()
     expect(mockRejectQuestion).not.toHaveBeenCalled()
 
@@ -4325,8 +4585,8 @@ describe('OpencodeSession — status-line emission', () => {
     expect(finalSl.contextWindowSize).toBe(128000)
     // usedPercentage = round(lastContextLength / 128000 * 100)
     // lastContextLength = input + cacheRead = 1000 + 200 = 1200
-    expect(finalSl.usedPercentage).toBe(Math.round(1200 / 128000 * 100))
-    expect(finalSl.remainingPercentage).toBe(100 - Math.round(1200 / 128000 * 100))
+    expect(finalSl.usedPercentage).toBe(Math.round((1200 / 128000) * 100))
+    expect(finalSl.remainingPercentage).toBe(100 - Math.round((1200 / 128000) * 100))
 
     session.dispose()
   })
@@ -4340,8 +4600,12 @@ describe('OpencodeSession — status-line emission', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_sl_r', role: 'assistant', cost: 0.001,
-              tokens: { input: 500, output: 30 } }
+            info: {
+              id: 'msg_sl_r',
+              role: 'assistant',
+              cost: 0.001,
+              tokens: { input: 500, output: 30 }
+            }
           }
         },
         { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
@@ -4353,14 +4617,18 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     // The status-line emitted AT result must come just before session:result
     const resultIdx = calls.findIndex((c) => c[0] === 'session:result')
     // status-line should appear in the calls before or at result position
-    const hasSlBeforeResult = calls.slice(0, resultIdx + 1).some((c) => c[0] === 'session:status-line')
+    const hasSlBeforeResult = calls
+      .slice(0, resultIdx + 1)
+      .some((c) => c[0] === 'session:status-line')
     expect(hasSlBeforeResult).toBe(true)
 
     session.dispose()
@@ -4393,7 +4661,9 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -4402,7 +4672,7 @@ describe('OpencodeSession — status-line emission', () => {
 
     // lastContextLength = input(5000) + cacheRead(1200) = 6200
     // NOT input+output+cacheWrite+cacheRead = 7050
-    const expectedUsed = Math.round(6200 / 100000 * 100)
+    const expectedUsed = Math.round((6200 / 100000) * 100)
     expect(finalSl.usedPercentage).toBe(expectedUsed)
     // totalInputTokens is the cumulative sum (5000), distinct from lastContextLength
     expect(finalSl.totalInputTokens).toBe(5000)
@@ -4421,8 +4691,12 @@ describe('OpencodeSession — status-line emission', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_unknown_ctx', role: 'assistant', cost: 0.001,
-              tokens: { input: 1000, output: 100 } }
+            info: {
+              id: 'msg_unknown_ctx',
+              role: 'assistant',
+              cost: 0.001,
+              tokens: { input: 1000, output: 100 }
+            }
           }
         },
         { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
@@ -4434,7 +4708,9 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -4474,7 +4750,9 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:metering')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:metering'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -4502,8 +4780,7 @@ describe('OpencodeSession — status-line emission', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_free', role: 'assistant', cost: 0,
-              tokens: { input: 300, output: 40 } }
+            info: { id: 'msg_free', role: 'assistant', cost: 0, tokens: { input: 300, output: 40 } }
           }
         },
         { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
@@ -4515,7 +4792,9 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -4539,8 +4818,12 @@ describe('OpencodeSession — status-line emission', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_cancel', role: 'assistant', cost: 0.001,
-              tokens: { input: 2000, output: 50, cache: { read: 300 } } }
+            info: {
+              id: 'msg_cancel',
+              role: 'assistant',
+              cost: 0.001,
+              tokens: { input: 2000, output: 50, cache: { read: 300 } }
+            }
           }
         },
         { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
@@ -4552,12 +4835,15 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     // After the turn, status-line should show a non-zero usedPercentage
-    const preCancel = (win as unknown as MockWindow).webContents.send.mock.calls
-      .filter((c) => c[0] === 'session:status-line')
+    const preCancel = (win as unknown as MockWindow).webContents.send.mock.calls.filter(
+      (c) => c[0] === 'session:status-line'
+    )
     const lastBefore = preCancel[preCancel.length - 1]![2]
     expect(lastBefore.usedPercentage).not.toBeNull()
 
@@ -4568,8 +4854,9 @@ describe('OpencodeSession — status-line emission', () => {
     // The cancel emits a final sendStatus — we're testing that lastContextLength
     // was reset. Next sendStatusLine call (e.g. on model switch) should show 0.
     await session.setModel('openai/gpt-4o')
-    const postCancel = (win as unknown as MockWindow).webContents.send.mock.calls
-      .filter((c) => c[0] === 'session:status-line')
+    const postCancel = (win as unknown as MockWindow).webContents.send.mock.calls.filter(
+      (c) => c[0] === 'session:status-line'
+    )
     const afterSl = postCancel[postCancel.length - 1]![2]
     // lastContextLength was reset to 0 by cancel(), so usedPercentage is null
     expect(afterSl.usedPercentage).toBeNull()
@@ -4592,8 +4879,12 @@ describe('OpencodeSession — status-line emission', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_freemodel', role: 'assistant', cost: 0,
-              tokens: { input: 1000, output: 20 } }
+            info: {
+              id: 'msg_freemodel',
+              role: 'assistant',
+              cost: 0,
+              tokens: { input: 1000, output: 20 }
+            }
           }
         },
         {
@@ -4601,8 +4892,12 @@ describe('OpencodeSession — status-line emission', () => {
           type: 'message.updated',
           properties: {
             sessionID: SES,
-            info: { id: 'msg_freemodel', role: 'assistant', cost: 0,
-              tokens: { input: 1500, output: 80 } }
+            info: {
+              id: 'msg_freemodel',
+              role: 'assistant',
+              cost: 0,
+              tokens: { input: 1500, output: 80 }
+            }
           }
         },
         { id: 'e3', type: 'session.idle', properties: { sessionID: SES } }
@@ -4614,7 +4909,9 @@ describe('OpencodeSession — status-line emission', () => {
     await session.run('go')
 
     await vi.waitFor(() =>
-      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+      (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:result'
+      )
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
@@ -4624,7 +4921,7 @@ describe('OpencodeSession — status-line emission', () => {
     // lastContextLength = input(1500) + cacheRead(0) = 1500
     // usedPercentage must be non-null (the regression value was null → "–")
     expect(finalSl.usedPercentage).not.toBeNull()
-    expect(finalSl.usedPercentage).toBe(Math.round(1500 / 64000 * 100))
+    expect(finalSl.usedPercentage).toBe(Math.round((1500 / 64000) * 100))
     expect(finalSl.contextWindowSize).toBe(64000)
 
     session.dispose()
@@ -4750,7 +5047,11 @@ describe('OpencodeSession — steer delivery (M-OC9)', () => {
     expect(session.queuedItems.map((i) => i.text)).toEqual(['steer that never lands'])
     // The undelivered message is not retained in local history.
     const userMsgs = session.getMessages().filter((m) => m.role === 'user')
-    expect(userMsgs.some((m) => m.content.some((b) => b.type === 'text' && b.text === 'steer that never lands'))).toBe(false)
+    expect(
+      userMsgs.some((m) =>
+        m.content.some((b) => b.type === 'text' && b.text === 'steer that never lands')
+      )
+    ).toBe(false)
 
     session.dispose()
   })
@@ -4932,7 +5233,13 @@ describe('OpencodeSession — disconnect status', () => {
     // guard skipped everything here, so the renderer got no event at all.
     mockSubscribeEvents.mockImplementation(
       streamUntilGated(
-        [{ id: 'e1', type: 'session.idle', properties: { sessionID: 'ses_opencode_1' } } as OpencodeEvent],
+        [
+          {
+            id: 'e1',
+            type: 'session.idle',
+            properties: { sessionID: 'ses_opencode_1' }
+          } as OpencodeEvent
+        ],
         gate
       )
     )
@@ -4950,7 +5257,10 @@ describe('OpencodeSession — disconnect status', () => {
     expect(calls.some((c) => c[0] === 'session:error')).toBe(false)
     // Released by spawn identity, never by cwd key — another same-cwd session
     // may already hold a replacement server (see releaseIfCurrent).
-    expect(mockReleaseIfCurrent).toHaveBeenCalledWith('/tmp', expect.objectContaining({ baseUrl: 'http://127.0.0.1:9999' }))
+    expect(mockReleaseIfCurrent).toHaveBeenCalledWith(
+      '/tmp',
+      expect.objectContaining({ baseUrl: 'http://127.0.0.1:9999' })
+    )
     // Scoped to THIS session's cwd: the unmocked auth provider's warmCache also
     // acquires/releases the manager, for its own PERSISTED_SESSIONS_DIR.
     expect(mockRelease).not.toHaveBeenCalledWith('/tmp')
