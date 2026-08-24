@@ -8,10 +8,13 @@ When the env var `SKIP_SECURESTORAGE` is truthy, cli.js reads and writes OAuth c
 > | ------------------ | ------------------------------------- | ------------------------------------------------- |
 > | macOS (darwin-\*)  | `name:"keychain"`                     | `return COMPOSER(keychain,file)` (unconditional)  |
 > | Windows (win32-\*) | `name:"windows-credman"`              | `if(<gate>())return COMPOSER(credman,file);return file` |
+> | Linux (linux-\*)   | — none (verified 2.1.231)             | no composer, no facade — plaintext file backend only |
 >
 > The Windows bundle gained a **Windows Credential Manager** backend gated behind a GrowthBook flag (`tengu_windows_credman`) / `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`. The original patch matched only the macOS unconditional body, so it worked on mac and aborted on Windows (`0 store-getter matches`). The fix no longer matches the exact body — it captures the body and **prepends** a `SKIP_SECURESTORAGE` short-circuit, so it works on both. See **Anchor 2 / Before-After** below.
 >
 > Note: on a default Windows install the gate is **off**, so `pf()` already returns the bare file backend — file-based credentials happen without the patch. The patch makes it deterministic (immune to the flag flipping on remotely) and, critically, stops the build pipeline from hard-aborting.
+>
+> **Linux bundles have no secure store at all** (verified on 2.1.231; broke CI on ubuntu runners, which extract the linux-x64 bun-claude binary): the `` `${H.name}-with-${_.name}-fallback` `` template appears **nowhere**, and neither `name:"keychain"` nor `name:"windows-credman"` exists — only `name:"plaintext"`. Credentials are already file-only, i.e. the exact state this patch forces, so `apply.mjs` exits 0 as a **no-op** — but only under a triple **store-less guard** (positive evidence, never fail-open): `process.platform === 'linux'` AND `` src.includes('-fallback`') `` is false AND `name:"plaintext"` present. A renamed composer on mac/win — or a future Linux secure store, whose facade would reintroduce the template — still aborts loudly. `test.mjs` mirrors the guard: on a store-less bundle the *correct* patched state is the pristine one (marker absent).
 
 ## Affected Component
 
@@ -20,6 +23,7 @@ When the env var `SKIP_SECURESTORAGE` is truthy, cli.js reads and writes OAuth c
 | Component              | Version at time of discovery |
 | ---------------------- | ---------------------------- |
 | Bundled CLI (`cli.js`) | 2.1.177                      |
+| Linux store-less no-op | 2.1.231                      |
 
 The SDK bundles its own `cli.js`, independent of the native `claude` binary.
 
@@ -100,9 +104,9 @@ So a bare `lK6` is a complete, working store. No consumer requires the two missi
 
 **Marker**: `/*PATCHED:skip-securestorage*/`
 
-### Anchor 1 — facade composer name (unique, 1 match)
+### Anchor 1 — facade composer name (unique, 1 match; 0 matches on Linux → store-less guard)
 
-Located by its template-literal signature (content-stable across versions):
+Located by its template-literal signature (content-stable across versions). On a Linux bundle this matches **zero** times — that is expected and handled by the store-less guard (see the platform note at the top), not an anchor break:
 
 ```
 let q={name:`${H.name}-with-${_.name}-fallback`
@@ -210,6 +214,7 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 3. `node --check vendor/claude-cli/cli.js` — no syntax errors.
 4. `node patch/apply-all.mjs` — all patches pass + syntax check.
 5. Behavioural: `node patch/skip-securestorage/test.mjs` (see test harness) — asserts file-only read/write under the flag and keychain-primary without it.
+6. On Linux (store-less bundle): step 1 prints "Store-less bundle … skipping" and exits 0; `test.mjs` asserts the marker is **absent**. To reproduce a Linux extraction on another OS, force `detectPlatform()` in a scratch copy of `scripts/extract-cli.mjs` to `linux-x64` and point it at a scratch output dir.
 
 ## Discovery Method
 
@@ -219,6 +224,7 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 4. **Checked consumer method usage**: `p1().` call sites use only `read`/`readAsync`/`mutate`. Verified `readAsyncStrict`/`invalidateCache` are optional-chained inside `VyH`, so the bare file backend `lK6` suffices — avoiding a more invasive facade rewrite.
 5. **Rejected `ev9(lK6,lK6)`**: the facade deletes the "redundant" copy on first successful write, which would erase the just-written file when both backends are the file. Returning the bare `lK6` sidesteps this.
 6. **Patched `p1()`** with an env-gated ternary; verified `node --check` and idempotency.
+7. **Linux store-less no-op (2.1.231)**: ubuntu CI turned red at `ensure-cli` with "could not locate the credential-store facade composer", while the same pinned version applied cleanly on Windows/macOS. Extracting the **linux-x64** binary (the bundles are platform-specific — 25.4MB vs 24.2MB for win32-x64) showed the composer template, `name:"keychain"`, and `name:"windows-credman"` all absent, with `name:"plaintext"` present — the Linux build simply has no secure store. First instinct — "0 matches → skip" — was rejected as fail-open (it would silently swallow a renamed composer on mac/win, the exact silent-breakage class the 2.1.219 p→m rename already demonstrated). The landed fix no-ops only behind the triple store-less guard and keeps every other 0-match a hard abort.
 
 ## Key Functions Reference
 
