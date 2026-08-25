@@ -332,6 +332,116 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
   })
 })
 
+describe('UsageFetcher — weekly per-model buckets (rate_limits.limits[])', () => {
+  // The modern payload carries a generalized `limits[]` array beside the legacy
+  // per-window keys. A weekly per-model bucket (Fable) exists ONLY there —
+  // seven_day_opus / seven_day_sonnet are null on such accounts. cli.js filters
+  // `kind === "weekly_scoped" && scope?.model` and titles the bar from
+  // scope.model.display_name; parseResponse must mirror that contract.
+
+  let fetcher: UsageFetcher
+  const fetchMock = vi.fn()
+
+  const LIMITS = [
+    {
+      kind: 'session',
+      group: 'session',
+      percent: 39,
+      severity: 'normal',
+      resets_at: '2026-08-25T11:39:59.991307+00:00',
+      scope: null,
+      is_active: true
+    },
+    {
+      kind: 'weekly_all',
+      group: 'weekly',
+      percent: 18,
+      severity: 'normal',
+      resets_at: '2026-08-29T04:59:59.991327+00:00',
+      scope: null,
+      is_active: false
+    },
+    {
+      kind: 'weekly_scoped',
+      group: 'weekly',
+      percent: 32,
+      severity: 'normal',
+      resets_at: '2026-08-29T05:00:00.991527+00:00',
+      scope: { model: { id: null, display_name: 'Fable' }, surface: null },
+      is_active: false
+    }
+  ]
+
+  beforeEach(() => {
+    vfs.files.clear()
+    vfs.readErrors.clear()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+    fetcher = new UsageFetcher()
+    seedValidCredentials()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('parses weekly_scoped entries out of the structured relay shape', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        subscription_type: 'max',
+        rate_limits_available: true,
+        rate_limits: {
+          five_hour: { utilization: 39, resets_at: '2026-08-25T11:39:59.991307+00:00' },
+          seven_day: { utilization: 18, resets_at: '2026-08-29T04:59:59.991327+00:00' },
+          seven_day_opus: null,
+          seven_day_sonnet: null,
+          // Opaque codename keys the endpoint also serves — never surfaced.
+          nimbus_quill: { utilization: 0, resets_at: null },
+          limits: LIMITS
+        }
+      })
+    )
+
+    const result = await fetcher.fetch()
+
+    expect(result.error).toBeNull()
+    expect(result.sevenDayModels).toEqual([
+      { label: 'Fable', window: { usedPercent: 32, resetsAt: '2026-08-29T05:00:00.991527+00:00' } }
+    ])
+    // Legacy per-model keys stay null — the bucket lives only in limits[].
+    expect(result.sevenDayOpus).toBeNull()
+    expect(result.sevenDaySonnet).toBeNull()
+  })
+
+  it('parses top-level limits[] from the flat HTTP body', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        five_hour: { utilization: 39, resets_at: '2026-08-25T11:39:59.991307+00:00' },
+        limits: LIMITS
+      })
+    )
+
+    const result = await fetcher.fetch()
+
+    expect(result.sevenDayModels).toEqual([
+      { label: 'Fable', window: { usedPercent: 32, resetsAt: '2026-08-29T05:00:00.991527+00:00' } }
+    ])
+  })
+
+  it('yields null when the payload carries no limits[]', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        five_hour: { utilization: 42, resets_at: '2026-08-25T11:39:59.991307+00:00' },
+        seven_day: { utilization: 20, resets_at: '2026-08-29T04:59:59.991327+00:00' }
+      })
+    )
+
+    const result = await fetcher.fetch()
+
+    expect(result.sevenDayModels).toBeNull()
+  })
+})
+
 describe('UsageFetcher — merge semantics across header + event sources', () => {
   let fetcher: UsageFetcher
 

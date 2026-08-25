@@ -446,7 +446,8 @@ export class UsageFetcher {
       const raw = await readFile(CACHE_PATH, 'utf-8')
       const data = JSON.parse(raw) as AccountUsage
       if (!data.fetchedAt || Date.now() - data.fetchedAt > CACHE_STALE_MS) return null
-      return data
+      // A cache written before sevenDayModels existed has no such key.
+      return { ...data, sevenDayModels: data.sevenDayModels ?? null }
     } catch {
       return null
     }
@@ -472,6 +473,7 @@ export class UsageFetcher {
       sevenDay: null,
       sevenDaySonnet: null,
       sevenDayOpus: null,
+      sevenDayModels: null,
       extraUsage: null,
       planName: null,
       fetchedAt: Date.now(),
@@ -832,6 +834,33 @@ export class UsageFetcher {
       }
     }
 
+    // The generalized `limits[]` array sits alongside the legacy per-window
+    // keys. Weekly per-model buckets live ONLY here (seven_day_opus /
+    // seven_day_sonnet are null on such accounts), so mirror cli.js: keep
+    // `kind === "weekly_scoped"` entries carrying a scope model and take the
+    // label from the server's display_name — never hardcode a model name.
+    // `percent` is already 0-100. Malformed entries are skipped silently, as
+    // parseWindow does.
+    const sevenDayModels: Array<{ label: string; window: RateWindow }> = []
+    const limits = windowSource['limits']
+    if (Array.isArray(limits)) {
+      for (const raw of limits) {
+        const entry = raw as {
+          kind?: unknown
+          percent?: unknown
+          resets_at?: string | null
+          scope?: { model?: { display_name?: unknown } | null } | null
+        } | null
+        if (!entry || typeof entry !== 'object' || entry.kind !== 'weekly_scoped') continue
+        const label = entry.scope?.model?.display_name
+        if (typeof label !== 'string' || typeof entry.percent !== 'number') continue
+        sevenDayModels.push({
+          label,
+          window: { usedPercent: entry.percent, resetsAt: entry.resets_at ?? null }
+        })
+      }
+    }
+
     // subscription_type ('pro' | 'max' | 'team' | 'enterprise') is only present
     // in the structured shape; the HTTP body has no plan name.
     const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
@@ -841,6 +870,7 @@ export class UsageFetcher {
       sevenDay: parseWindow('seven_day'),
       sevenDaySonnet: parseWindow('seven_day_sonnet'),
       sevenDayOpus: parseWindow('seven_day_opus'),
+      sevenDayModels: sevenDayModels.length ? sevenDayModels : null,
       extraUsage,
       planName,
       fetchedAt: Date.now(),
@@ -854,6 +884,7 @@ export class UsageFetcher {
       sevenDay: null,
       sevenDaySonnet: null,
       sevenDayOpus: null,
+      sevenDayModels: null,
       extraUsage: null,
       planName: null,
       fetchedAt: Date.now(),

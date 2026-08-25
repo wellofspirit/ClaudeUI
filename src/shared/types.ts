@@ -2283,6 +2283,9 @@ export interface AccountUsage {
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null
+  /** Server-labeled weekly per-model buckets from rate_limits.limits[]
+   *  (kind "weekly_scoped"), e.g. Fable. Null when the payload has none. */
+  sevenDayModels: Array<{ label: string; window: RateWindow }> | null
   extraUsage: ExtraUsage | null
   planName: string | null // e.g. "claude_max_5x"
   fetchedAt: number // Date.now()

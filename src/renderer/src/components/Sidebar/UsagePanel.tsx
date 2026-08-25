@@ -50,7 +50,7 @@ export function UsageProgressBar({
   const resetStr = formatResetTime(w.resetsAt)
 
   return (
-    <div className="mb-2 last:mb-0">
+    <div data-testid="UsageProgressBar" data-id={label} className="mb-2 last:mb-0">
       <div className="flex items-center justify-between mb-0.5">
         <span className="text-[10px] text-text-secondary font-medium">{label}</span>
         <span className="text-[10px] text-text-muted font-mono">{pct}%</span>
@@ -151,6 +151,14 @@ export function UsagePanel({
           {usage.sevenDaySonnet && (
             <UsageProgressBar label="7-Day Sonnet" window={usage.sevenDaySonnet} />
           )}
+          {/* Server-labeled weekly buckets (limits[] / weekly_scoped). The label
+              comes from the payload — skip one the legacy window already drew. */}
+          {usage.sevenDayModels?.map(({ label, window: w }) => {
+            const lower = label.toLowerCase()
+            if (lower === 'opus' && usage.sevenDayOpus) return null
+            if (lower === 'sonnet' && usage.sevenDaySonnet) return null
+            return <UsageProgressBar key={label} label={`7-Day ${label}`} window={w} />
+          })}
           {usage.extraUsage && <ExtraUsageBar extra={usage.extraUsage} />}
         </>
       ) : (

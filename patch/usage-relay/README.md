@@ -100,9 +100,25 @@ function u_() {
     "utilization": 0.30,
     "resets_at": "2026-03-10T00:00:00Z"
   },
+  "limits": [
+    { "kind": "session", "group": "session", "percent": 39, "resets_at": "...", "scope": null },
+    { "kind": "weekly_all", "group": "weekly", "percent": 18, "resets_at": "...", "scope": null },
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 32,
+      "resets_at": "...",
+      "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }
+    }
+  ],
   "extra_usage": { ... }
 }
 ```
+
+`limits[]` generalizes the per-window keys; `percent` is 0-100 like `utilization`.
+ClaudeUI parses the `weekly_scoped` entries (the only place a weekly per-model
+bucket appears once `seven_day_opus` / `seven_day_sonnet` go null) into one
+sidebar bar each, labelled from the server's `scope.model.display_name`.
 
 For non-subscription accounts (API key auth), `k9q` returns `{}` (empty object).
 For expired tokens, it returns `null`.
