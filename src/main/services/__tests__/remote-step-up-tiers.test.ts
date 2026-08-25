@@ -677,7 +677,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
 
       // READS — attach, detach, pool, resize all still answer.
       await expect(invoke(c, 'terminal:pool', '/tmp/x')).resolves.toEqual([0])
-      await expect(invoke(c, 'terminal:attach', id)).resolves.toBe(true)
+      await expect(invoke(c, 'terminal:attach', id)).resolves.toMatchObject({ ok: true })
       await expect(invoke(c, 'terminal:resize', id, 100, 40)).resolves.toBeUndefined()
       await expect(invoke(c, 'terminal:detach', id)).resolves.toBeUndefined()
 

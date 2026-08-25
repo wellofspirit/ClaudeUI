@@ -126,6 +126,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onAccountsChanged: onEvent('account:changed'),
     onAccountRespawnSessions: onEvent('account:respawn-sessions'),
     onTerminalData: onEvent('terminal:data'),
+    onTerminalResized: onEvent('terminal:resized'),
     onTerminalExit: onEvent('terminal:exit'),
     onBeforeQuit: onEvent('app:before-quit'),
 

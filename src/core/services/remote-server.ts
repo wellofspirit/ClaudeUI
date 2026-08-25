@@ -4213,6 +4213,10 @@ export class RemoteServer {
         const ws = socketFor(connectionId)
         if (ws) this.sendTo(ws, { type: 'term-data', termId, dataB64: textToBase64(data) })
       },
+      resized: (connectionId, termId, cols, rows) => {
+        const ws = socketFor(connectionId)
+        if (ws) this.sendTo(ws, { type: 'term-resized', termId, cols, rows })
+      },
       exit: (connectionId, termId, exitCode) => {
         const ws = socketFor(connectionId)
         if (ws) this.sendTo(ws, { type: 'term-exit', termId, exitCode })

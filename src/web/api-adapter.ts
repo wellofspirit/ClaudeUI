@@ -213,6 +213,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // — PTY bytes must not be replayable from a ring buffer.
     onTerminalData: ((cb: Parameters<ClaudeAPI['onTerminalData']>[0]) =>
       connection.onTerminalData(cb)) as ClaudeAPI['onTerminalData'],
+    // The geometry twin of the host lane's `terminal:resized` (ADR-060): a
+    // `term-resized` frame on the same attached-sockets-only lane.
+    onTerminalResized: ((cb: Parameters<ClaudeAPI['onTerminalResized']>[0]) =>
+      connection.onTerminalResized(cb)) as ClaudeAPI['onTerminalResized'],
     onTerminalExit: ((cb: Parameters<ClaudeAPI['onTerminalExit']>[0]) =>
       connection.onTerminalExit(cb)) as ClaudeAPI['onTerminalExit'],
     onBeforeQuit: on('app:before-quit') as ClaudeAPI['onBeforeQuit'],
@@ -442,7 +446,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         settingsSessionExpiresAt: response.settingsSessionExpiresAt
       }
     },
-    attachTerminal: (id) => connection.invoke('terminal:attach', id) as Promise<boolean>,
+    // The reply shape is `TerminalAttachResult` from this build's host and a
+    // bare boolean from an older one (ADR-060 version skew) — passed through
+    // verbatim either way; the caller narrows.
+    attachTerminal: (id) =>
+      connection.invoke('terminal:attach', id) as ReturnType<ClaudeAPI['attachTerminal']>,
     detachTerminal: (id) => connection.invoke('terminal:detach', id) as Promise<void>,
     onTerminalDetached: ((cb: Parameters<ClaudeAPI['onTerminalDetached']>[0]) =>
       connection.onTerminalDetached(cb)) as ClaudeAPI['onTerminalDetached'],

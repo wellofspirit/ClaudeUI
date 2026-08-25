@@ -124,7 +124,14 @@ describe('terminal.ipc', () => {
     // replay so the client resets instead of appending to what it already drew.
     const same = await harness.call<string>('terminal:create', '/tmp/proj', 0)
     expect(same).toBe(id)
-    await expect(harness.call('terminal:attach', id)).resolves.toBe(true)
+    // The reply carries the pty's grid (ADR-060) — the host lane answers the
+    // same shape the remote one does, so a mirroring surface sizes itself the
+    // same way whichever transport it is on.
+    await expect(harness.call('terminal:attach', id)).resolves.toEqual({
+      ok: true,
+      cols: 100,
+      rows: 30
+    })
 
     expect(events[1]).toEqual({ terminalId: id, data: '$ ls\r\nfile1\r\n', replay: true })
 
@@ -139,7 +146,9 @@ describe('terminal.ipc', () => {
   })
 
   it('terminal:attach reports a stale tab instead of throwing; detach is a no-op', async () => {
-    await expect(harness.call('terminal:attach', 'no-such-terminal')).resolves.toBe(false)
+    await expect(harness.call('terminal:attach', 'no-such-terminal')).resolves.toEqual({
+      ok: false
+    })
     await expect(harness.call('terminal:detach', 'no-such-terminal')).resolves.toBeUndefined()
   })
 

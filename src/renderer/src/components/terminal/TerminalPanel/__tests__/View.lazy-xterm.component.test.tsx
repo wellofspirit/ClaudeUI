@@ -130,4 +130,13 @@ describe('TerminalPanelView — lazy XTermInstance', () => {
     expect(xtermLoaded.current).toBe(true)
     expect(screen.queryByText('Loading terminal…')).toBeNull()
   })
+
+  it('has NO pan wrapper — the desktop still fits both axes (ADR-060)', async () => {
+    // The mirrored-grid regime is the phone's alone. A pan container here would
+    // mean the desktop had stopped fitting its width to the panel, which is the
+    // behavior every other surface's shell is sized from.
+    render(<TerminalPanelView {...viewProps([TAB], TAB.id)} />)
+    await waitFor(() => expect(screen.getByTestId('XTermInstance')).toBeInTheDocument())
+    expect(screen.queryByTestId('XTermInstance.panWrapper')).toBeNull()
+  })
 })

@@ -81,8 +81,15 @@ function ChevronLeft(): React.JSX.Element {
  * keyboard opens — so a full-height takeover would put the accessory keys (and
  * the shell prompt) underneath the keyboard, which is precisely where they are
  * needed. Following the height also drives the resize: the xterm container
- * shrinks, its ResizeObserver fires, and the existing fit → `terminal:resize`
- * path runs. No mobile-specific resize code exists.
+ * shrinks, its ResizeObserver fires, and the resize path runs.
+ *
+ * That path is ROWS-ONLY here (ADR-060). The shell is shared with the desktop,
+ * and a phone that fitted its own ~48 columns onto it would clamp the grid every
+ * other surface is driving — which is what made a PowerShell line garble on the
+ * phone. So this surface mirrors the pty's width and pans it sideways instead,
+ * and it scrolls by touch, because xterm 6 ships no touch handling. All of that
+ * is one `mobile` prop into the shared {@link TerminalSurface}: the fork stays
+ * presentational, the machinery stays single-copy.
  *
  * Only ever mounted on mobile (TerminalPanel forks on `useIsMobile`), which is
  * why the viewport hook is called with a literal `true`.
@@ -221,6 +228,9 @@ export function TerminalMobileView({
             nextSlotRunning={nextSlotRunning}
             readOnly={readOnly}
             onBlockedInput={onBlockedInput}
+            // ADR-060: mirror the shared pty's width, pan it horizontally, and
+            // scroll it by touch. Only this surface asks for that.
+            mobile
           />
           <div
             data-testid="TerminalMobileView.keyRow"

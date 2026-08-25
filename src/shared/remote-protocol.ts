@@ -696,6 +696,21 @@ export interface WsTermData {
   dataB64: string
 }
 
+/**
+ * Server → Client: the PTY's grid changed, sent only to attached sockets.
+ *
+ * NOT to be confused with {@link WsTermResize}, which travels the other way and
+ * ASKS for a size. This one reports the size the shared pty now has, because
+ * some other surface refitted it. Output-class like `term-data`: no gate, no
+ * ring, no audit row (ADR-060).
+ */
+export interface WsTermResized {
+  type: 'term-resized'
+  termId: string
+  cols: number
+  rows: number
+}
+
 /** Server → Client: the PTY exited, sent only to attached sockets. */
 export interface WsTermExit {
   type: 'term-exit'
@@ -799,6 +814,7 @@ export type WsServerMessage =
   | WsStepUpResponse
   | WsStepUpChallenge
   | WsTermData
+  | WsTermResized
   | WsTermExit
   | WsTermDetached
   | StreamFrame

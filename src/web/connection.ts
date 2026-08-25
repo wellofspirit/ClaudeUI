@@ -23,6 +23,7 @@ import type {
   WsStepUpRequest,
   WsStepUpResponse,
   WsTermData,
+  WsTermResized,
   WsTermExit,
   WsTermDetached,
   TermDetachReason,
@@ -203,6 +204,11 @@ export type InvokeGate = (channel: string, attempt: () => Promise<unknown>) => P
 
 export type TerminalDataListener = (payload: { terminalId: string; data: string }) => void
 export type TerminalExitListener = (payload: { terminalId: string; code: number }) => void
+export type TerminalResizedListener = (payload: {
+  terminalId: string
+  cols: number
+  rows: number
+}) => void
 export type TerminalDetachedListener = (payload: {
   terminalId: string
   reason: TermDetachReason
@@ -245,6 +251,7 @@ export class RemoteConnection {
    * screen never showed.
    */
   private termDataListeners = new Set<TerminalDataListener>()
+  private termResizedListeners = new Set<TerminalResizedListener>()
   private termExitListeners = new Set<TerminalExitListener>()
   private termDetachedListeners = new Set<TerminalDetachedListener>()
   private reconnectAttempt = 0
@@ -765,6 +772,11 @@ export class RemoteConnection {
   onTerminalData(cb: TerminalDataListener): () => void {
     this.termDataListeners.add(cb)
     return () => this.termDataListeners.delete(cb)
+  }
+
+  onTerminalResized(cb: TerminalResizedListener): () => void {
+    this.termResizedListeners.add(cb)
+    return () => this.termResizedListeners.delete(cb)
   }
 
   onTerminalExit(cb: TerminalExitListener): () => void {
@@ -1328,6 +1340,14 @@ export class RemoteConnection {
           const frame = msg as WsTermData
           const payload = { terminalId: frame.termId, data: base64ToText(frame.dataB64) }
           for (const cb of this.termDataListeners) cb(payload)
+        }
+        break
+
+      case 'term-resized':
+        {
+          const frame = msg as WsTermResized
+          const payload = { terminalId: frame.termId, cols: frame.cols, rows: frame.rows }
+          for (const cb of this.termResizedListeners) cb(payload)
         }
         break
 

@@ -95,6 +95,15 @@ export interface PtyOpenResult {
 export interface PtyRemoteSink {
   /** Deliver a chunk (or a scrollback replay) to one attached connection. */
   data(connectionId: string, termId: string, data: string): void
+  /**
+   * The pty's grid changed (someone else resized it).
+   *
+   * Server → client output, exactly like {@link PtyRemoteSink.data}: it carries
+   * no authority and needs no gate. It exists because a mirroring client (the
+   * phone, which adopts the pty's COLS instead of pushing its own — ADR-060)
+   * has no other way to learn that another surface refitted the shared shell.
+   */
+  resized(connectionId: string, termId: string, cols: number, rows: number): void
   /** The PTY exited. */
   exit(connectionId: string, termId: string, exitCode: number): void
   /** This connection is no longer attached (policy flip, backpressure, decay). */
@@ -136,6 +145,23 @@ interface PtyEntryInternal extends PtyEntry {
   poolKey: string
   /** This terminal's slot in that pool. */
   index: number
+  /**
+   * The grid the pty currently believes it has — seeded at spawn, updated by
+   * {@link PtyManager.resize}.
+   *
+   * Tracked because the pty is SHARED and its geometry is last-writer-wins: a
+   * client that mirrors the shared width (the phone) has to be able to ask what
+   * that width is on attach, and to be told when it changes. Without this the
+   * only record of the grid lived inside node-pty, which does not expose it.
+   */
+  cols: number
+  rows: number
+}
+
+/** The grid a terminal currently has. */
+export interface PtyGeometry {
+  cols: number
+  rows: number
 }
 
 type DataCallback = (id: string, data: string) => void
@@ -176,6 +202,20 @@ const SCROLLBACK_MAX_BYTES = 200 * 1024
 const REMOTE_BACKPRESSURE_HIGH_WATER_BYTES = 1024 * 1024
 const REMOTE_BACKPRESSURE_RESUME_BYTES = REMOTE_BACKPRESSURE_HIGH_WATER_BYTES / 2
 const REMOTE_DRAIN_POLL_MS = 50
+
+/**
+ * The grid a freshly spawned shell starts with, before any surface refits it.
+ *
+ * 100×30 rather than the classic 80×24 (ADR-060). It is only ever visible for
+ * the window between spawn and the first refit — a DESKTOP surface pushes its
+ * fitted size within a frame or two, so nothing changes there — but the phone
+ * deliberately never pushes cols (it mirrors the pty's width and pans
+ * horizontally instead), so for a pty the phone SPAWNED this default is the
+ * shell width, permanently. 80 columns is unusable for a PowerShell prompt plus
+ * a path; 100 is a real terminal width and still cheap to pan.
+ */
+export const DEFAULT_PTY_COLS = 100
+export const DEFAULT_PTY_ROWS = 30
 
 export class PtyManager {
   private ptys = new Map<string, PtyEntryInternal>()
@@ -251,8 +291,8 @@ export class PtyManager {
     const args: string[] = []
     const pty: IPty = nodePty.spawn(shell, args, {
       name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
+      cols: DEFAULT_PTY_COLS,
+      rows: DEFAULT_PTY_ROWS,
       cwd,
       env: { ...process.env }
     })
@@ -272,7 +312,9 @@ export class PtyManager {
       scrollback: [],
       scrollbackBytes: 0,
       poolKey,
-      index
+      index,
+      cols: DEFAULT_PTY_COLS,
+      rows: DEFAULT_PTY_ROWS
     }
 
     const flush = (): void => {
@@ -344,8 +386,37 @@ export class PtyManager {
     this.ptys.get(id)?.pty.write(data)
   }
 
-  resize(id: string, cols: number, rows: number): void {
-    this.ptys.get(id)?.pty.resize(cols, rows)
+  /**
+   * Apply a new grid to the pty and tell every OTHER viewer about it.
+   *
+   * Returns whether the geometry actually changed — the caller uses that to
+   * decide whether to raise the host-lane `terminal:resized` event, so a refit
+   * that lands on the size the pty already had costs nothing on either lane.
+   * The SIGWINCH itself is still unconditional: `resize` is also how a client
+   * says "this is my viewport" after a reattach, and swallowing that would make
+   * the pty's idea of the grid depend on who asked last rather than on what was
+   * asked.
+   */
+  resize(id: string, cols: number, rows: number): boolean {
+    const entry = this.ptys.get(id)
+    if (!entry) return false
+    entry.pty.resize(cols, rows)
+    if (entry.cols === cols && entry.rows === rows) return false
+    entry.cols = cols
+    entry.rows = rows
+    const sink = this.remoteSink
+    if (sink) {
+      for (const connectionId of entry.attachments) {
+        sink.resized(connectionId, id, cols, rows)
+      }
+    }
+    return true
+  }
+
+  /** The grid a terminal currently has, or undefined when it is gone. */
+  sizeOf(id: string): PtyGeometry | undefined {
+    const entry = this.ptys.get(id)
+    return entry ? { cols: entry.cols, rows: entry.rows } : undefined
   }
 
   kill(id: string): void {

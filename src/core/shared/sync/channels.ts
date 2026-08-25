@@ -530,6 +530,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Desktop PTY bytes, plus the scrollback replay a desktop `terminal:attach` pulls (`replay: true` = reset and take this as the whole history). Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit.'
   },
+  'terminal:resized': {
+    cls: 'host-local',
+    ring: false,
+    canonical: false,
+    why: 'Desktop PTY geometry: another surface refitted the shared shell (ADR-060). Output-class, like the bytes — the remote lane has its own `term-resized` frame. Never rings: it is a fact about a live pty, worthless to replay, and a reconnecting client re-reads the grid from its `terminal:attach` reply.'
+  },
   'terminal:exit': {
     cls: 'host-local',
     ring: false,

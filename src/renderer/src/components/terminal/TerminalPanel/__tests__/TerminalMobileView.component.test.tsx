@@ -35,6 +35,10 @@ class MockTerm {
   dispose = vi.fn()
   loadAddon = vi.fn()
   open = vi.fn()
+  resize = vi.fn((cols: number, rows: number) => {
+    this.cols = cols
+    this.rows = rows
+  })
 
   onData(cb: (data: string) => void): { dispose: () => void } {
     dataCallbacks.push(cb)
@@ -76,6 +80,7 @@ vi.mock('@xterm/xterm', () => ({
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
     fit = vi.fn()
+    proposeDimensions = (): { cols: number; rows: number } => ({ cols: 48, rows: 40 })
   } as never
 }))
 
@@ -144,6 +149,37 @@ describe('TerminalMobileView', () => {
       await Promise.resolve()
     })
   }
+
+  // ── The mirrored grid (ADR-060) ──────────────────────────────────────────
+
+  it('wraps the terminal in a horizontal pan container the browser owns', async () => {
+    await mount()
+
+    const wrapper = screen.getAllByTestId('XTermInstance.panWrapper')[0]
+    expect(wrapper).toBeInTheDocument()
+    // `pan-x` is the axis split: the browser pans the mirrored grid sideways and
+    // terminal-touch-scroll.ts claims the vertical drags. Without it the browser
+    // would also try to scroll vertically and fight the wheel synthesis.
+    expect(wrapper.style.touchAction).toBe('pan-x')
+    expect(wrapper.style.overflowX).toBe('auto')
+    // One axis only: rows always fit the strip exactly, so xterm's own
+    // scrollback is the only vertical axis there is.
+    expect(wrapper.style.overflowY).toBe('hidden')
+    // The xterm host lives INSIDE it, or there is nothing to pan.
+    expect(wrapper.querySelector('[data-testid="XTermInstance"]')).not.toBeNull()
+  })
+
+  it('publishes the mirrored geometry as data attributes (ADR-027)', async () => {
+    // A pty the desktop is driving at 132 columns, seen from a 390px phone.
+    app.bridge.ipcMain.handle('terminal:attach', async () => ({ ok: true, cols: 132, rows: 30 }))
+    await mount()
+
+    await waitFor(() => {
+      const wrapper = screen.getAllByTestId('XTermInstance.panWrapper')[0]
+      expect(wrapper.getAttribute('data-cols')).toBe('132')
+      expect(wrapper.getAttribute('data-rows')).toBe('40')
+    })
+  })
 
   // ── Accessory keys ───────────────────────────────────────────────────────
 
