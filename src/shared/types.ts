@@ -1308,6 +1308,15 @@ interface McpAPI {
   setCleanupPeriodDays(days: number): Promise<void>
 }
 
+/**
+ * What `terminal:attach` answers with (ADR-060).
+ *
+ * `{ ok: false }` is "that terminal is gone" — a stale tab — and is the only
+ * refusal; a gate refusal throws instead. The geometry is the pty's CURRENT
+ * grid, which a mirroring surface adopts as its own cols.
+ */
+export type TerminalAttachResult = { ok: true; cols: number; rows: number } | { ok: false }
+
 interface TerminalAPI {
   /**
    * Open terminal `index` of this cwd's POOL (`cwd#0`, `cwd#1`, …) and get its
@@ -1336,6 +1345,18 @@ interface TerminalAPI {
     cb: (data: { terminalId: string; data: string; replay?: boolean }) => void
   ): () => void
   onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
+  /**
+   * Another surface resized the shared pty (ADR-060).
+   *
+   * Server → client output, like the bytes themselves: it carries no authority
+   * and is gated by nothing beyond already being attached. A surface that
+   * MIRRORS the pty's width (the mobile fork) adopts `cols` from this; a
+   * fit-driven surface (the desktop panel) ignores the event entirely, which is
+   * what keeps the two from resizing each other in a loop.
+   */
+  onTerminalResized(
+    cb: (data: { terminalId: string; cols: number; rows: number }) => void
+  ): () => void
   /**
    * May this client open a terminal, and does it need a step-up first?
    * (SyncCore phase 2.) Desktop answers a constant; the web client gates its
@@ -1403,9 +1424,18 @@ interface TerminalAPI {
    * Subscribe this client to a live PTY (server-side scrollback replays first).
    * Real on BOTH surfaces since the terminal pool landed: a desktop tab can
    * resolve to a pty it did not spawn, and the replay is how it renders that
-   * terminal's history. False means the terminal is gone (a stale tab).
+   * terminal's history.
+   *
+   * Resolves with the pty's GEOMETRY (ADR-060) so a mirroring surface can adopt
+   * the shared shell's width in the same step it attaches. `{ ok: false }` means
+   * the terminal is gone (a stale tab).
+   *
+   * The bare `boolean` in the union is VERSION SKEW, not a second shape this
+   * build produces: an older host answers `true`/`false`, and a client that
+   * cannot read a geometry off the reply must fall back to fitting both axes
+   * (which is exactly what it did before this existed).
    */
-  attachTerminal(id: string): Promise<boolean>
+  attachTerminal(id: string): Promise<TerminalAttachResult | boolean>
   detachTerminal(id: string): Promise<void>
   /**
    * The server dropped this client's attachment (toggle turned off, grant

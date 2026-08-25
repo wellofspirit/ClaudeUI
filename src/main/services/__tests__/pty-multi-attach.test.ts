@@ -45,6 +45,7 @@ const flushPtyBatch = (): Promise<void> => new Promise((r) => setTimeout(r, 25))
 
 interface RecordingSink extends PtyRemoteSink {
   received: Array<{ connectionId: string; termId: string; data: string }>
+  resizes: Array<{ connectionId: string; termId: string; cols: number; rows: number }>
   exits: Array<{ connectionId: string; termId: string; exitCode: number }>
   detaches: Array<{ connectionId: string; termId: string; reason: string }>
   buffered: Map<string, number>
@@ -54,12 +55,16 @@ interface RecordingSink extends PtyRemoteSink {
 function makeSink(): RecordingSink {
   const sink: RecordingSink = {
     received: [],
+    resizes: [],
     exits: [],
     detaches: [],
     buffered: new Map(),
     gone: new Set(),
     data: (connectionId, termId, data) => {
       sink.received.push({ connectionId, termId, data })
+    },
+    resized: (connectionId, termId, cols, rows) => {
+      sink.resizes.push({ connectionId, termId, cols, rows })
     },
     exit: (connectionId, termId, exitCode) => {
       sink.exits.push({ connectionId, termId, exitCode })
@@ -276,6 +281,77 @@ describe('PtyManager multi-attach', () => {
     await flushPtyBatch()
 
     expect(manager.isAttached(id, 'ghost')).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // Geometry on the wire (ADR-060)
+  // -------------------------------------------------------------------------
+  //
+  // The pty is SHARED and its grid is last-writer-wins, so a surface that
+  // mirrors the width instead of pushing its own (the phone) needs two things
+  // that did not exist: the ability to ASK what the grid is, and to be TOLD when
+  // someone else changes it.
+
+  describe('geometry', () => {
+    it('spawns at the 100x30 default and reports it', () => {
+      const id = manager.create('/x', vi.fn(), vi.fn())
+      // The default is load-bearing rather than cosmetic: the phone never pushes
+      // cols, so for a pty the PHONE spawned this is the shell width forever.
+      expect(ptyStub.spawned[0].spawnOptions.cols).toBe(100)
+      expect(ptyStub.spawned[0].spawnOptions.rows).toBe(30)
+      expect(manager.sizeOf(id)).toEqual({ cols: 100, rows: 30 })
+      expect(manager.sizeOf('no-such-terminal')).toBeUndefined()
+    })
+
+    it('tracks the grid across resizes and answers sizeOf with it', () => {
+      const id = manager.create('/x', vi.fn(), vi.fn())
+      expect(manager.resize(id, 120, 40)).toBe(true)
+      expect(manager.sizeOf(id)).toEqual({ cols: 120, rows: 40 })
+      expect(ptyStub.spawned[0].resizes).toEqual([{ cols: 120, rows: 40 }])
+    })
+
+    it('reports a change ONCE — a repeat of the same grid is not a change', () => {
+      const id = manager.create('/x', vi.fn(), vi.fn())
+      expect(manager.resize(id, 120, 40)).toBe(true)
+      expect(manager.resize(id, 120, 40)).toBe(false)
+      // The SIGWINCH is still delivered (a reattaching client re-states its
+      // viewport, and swallowing that would make the pty's grid depend on who
+      // asked last) — it is the NOTICE that is deduped.
+      expect(ptyStub.spawned[0].resizes).toHaveLength(2)
+      expect(manager.resize('bogus-id', 80, 24)).toBe(false)
+    })
+
+    it('fans a resized notice out to attached connections only, and only on a change', () => {
+      const id = manager.create('/x', vi.fn(), vi.fn())
+      const other = manager.create('/y', vi.fn(), vi.fn())
+      manager.attach(id, 'conn-a')
+      manager.attach(id, 'conn-b')
+      manager.attach(other, 'conn-c')
+
+      manager.resize(id, 120, 40)
+      expect(sink.resizes).toEqual([
+        { connectionId: 'conn-a', termId: id, cols: 120, rows: 40 },
+        { connectionId: 'conn-b', termId: id, cols: 120, rows: 40 }
+      ])
+
+      // No change → no second notice.
+      manager.resize(id, 120, 40)
+      expect(sink.resizes).toHaveLength(2)
+
+      // A detached connection stops hearing about it.
+      manager.detach(id, 'conn-a')
+      manager.resize(id, 100, 30)
+      expect(sink.resizes.slice(2)).toEqual([
+        { connectionId: 'conn-b', termId: id, cols: 100, rows: 30 }
+      ])
+    })
+
+    it('says nothing when no sink is installed (desktop-only is unchanged)', () => {
+      manager.setRemoteSink(null)
+      const id = manager.create('/x', vi.fn(), vi.fn())
+      expect(manager.resize(id, 120, 40)).toBe(true)
+      expect(sink.resizes).toEqual([])
+    })
   })
 
   it('leaves desktop-only flow control exactly as it was', async () => {

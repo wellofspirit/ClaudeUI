@@ -103,8 +103,8 @@ describe('PtyManager', () => {
       expect(typeof fake.spawnArgs.file).toBe('string')
       expect(fake.spawnArgs.file.length).toBeGreaterThan(0)
       expect(fake.spawnOptions.cwd).toBe('C:/repo')
-      expect(fake.spawnOptions.cols).toBe(80)
-      expect(fake.spawnOptions.rows).toBe(24)
+      expect(fake.spawnOptions.cols).toBe(100)
+      expect(fake.spawnOptions.rows).toBe(30)
       expect(fake.spawnOptions.name).toBe('xterm-256color')
     })
 
@@ -135,14 +135,18 @@ describe('PtyManager', () => {
       expect(ptyStub.spawned[0].spawnOptions.cwd).toBe('/my/custom/cwd')
     })
 
-    it('uses default cols=80, rows=24', () => {
+    // ADR-060 raised this from 80x24. It is the width a shell the PHONE spawned
+    // keeps for its whole life (that surface mirrors cols and never pushes its
+    // own), and a desktop refits within a frame, so the default is now sized for
+    // the surface that cannot change it.
+    it('uses default cols=100, rows=30', () => {
       mockPlatform = 'linux'
       process.env.SHELL = '/bin/bash'
 
       manager.create('/x', vi.fn(), vi.fn())
 
-      expect(ptyStub.spawned[0].cols).toBe(80)
-      expect(ptyStub.spawned[0].rows).toBe(24)
+      expect(ptyStub.spawned[0].cols).toBe(100)
+      expect(ptyStub.spawned[0].rows).toBe(30)
     })
 
     it('returns a uuid string; multiple calls produce distinct ids', () => {

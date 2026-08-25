@@ -173,6 +173,11 @@ const api: ClaudeAPI = {
   onAccountsChanged: onEvent('account:changed'),
   onAccountRespawnSessions: onEvent('account:respawn-sessions'),
   onTerminalData: onEvent('terminal:data'),
+  // Host-local like the bytes: the pty's geometry changed because some surface
+  // refitted it (ADR-060). A narrow Electron window runs the MOBILE fork, which
+  // mirrors the shared width rather than pushing its own, so the desktop
+  // renderer needs this event too — it is not a remote-only concern.
+  onTerminalResized: onEvent('terminal:resized'),
   onTerminalExit: onEvent('terminal:exit'),
   onBeforeQuit: onEvent('app:before-quit'),
 

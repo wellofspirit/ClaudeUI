@@ -434,7 +434,11 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     const id = await client.invoke<string>('terminal:create', '/tmp/x')
     expect(typeof id).toBe('string')
     expect(ptyStub.spawned).toHaveLength(1)
-    await expect(client.invoke('terminal:attach', id)).resolves.toBe(true)
+    await expect(client.invoke('terminal:attach', id)).resolves.toEqual({
+      ok: true,
+      cols: 100,
+      rows: 30
+    })
   })
 
   /**
@@ -627,7 +631,11 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     // broadcast, so it already saw the live chunk; the replay is flagged so the
     // client resets rather than appending.
     expect(terminalService.create(hostConnection(), '/repo', 0)).toBe(remoteId)
-    expect(terminalService.attach(hostConnection(), remoteId)).toBe(true)
+    expect(terminalService.attach(hostConnection(), remoteId)).toEqual({
+      ok: true,
+      cols: 100,
+      rows: 30
+    })
 
     ptyStub.spawned[0].emitData('after\r\n')
     await flushPtyBatch()
@@ -675,6 +683,96 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
     // …and the socket is still perfectly usable for a legitimate open.
     await expect(client.invoke('terminal:create', '/repo', 0)).resolves.toBeTruthy()
     expect(ptyStub.spawned).toHaveLength(1)
+  })
+
+  // -------------------------------------------------------------------------
+  // Test 1c — geometry on the wire (ADR-060)
+  // -------------------------------------------------------------------------
+  //
+  // The phone mirrors the shared pty's WIDTH instead of fitting to it, so the
+  // transport has to answer two questions it never used to: what is the grid
+  // right now (the attach reply), and who changed it (`term-resized`).
+
+  it('answers attach with the pty geometry and pushes term-resized to attached sockets', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const client = await connect()
+    await stepUp(client)
+    const collector = frameCollector(client)
+
+    const id = await client.invoke<string>('terminal:create', '/repo', 0)
+    // The spawn default — what a PHONE-created shell keeps, since that surface
+    // never pushes cols of its own.
+    await expect(client.invoke('terminal:attach', id)).resolves.toEqual({
+      ok: true,
+      cols: 100,
+      rows: 30
+    })
+
+    // The desktop refits the shared shell wider; the attached phone is told.
+    terminalService.resize(hostConnection(), id, 132, 43)
+    const frame = await collector.waitFor('term-resized')
+    expect(frame).toEqual({ type: 'term-resized', termId: id, cols: 132, rows: 43 })
+
+    // A LATER attach reads the new grid straight off the reply — the push only
+    // ever covers changes after you were already watching.
+    await client.invoke('terminal:detach', id)
+    await expect(client.invoke('terminal:attach', id)).resolves.toEqual({
+      ok: true,
+      cols: 132,
+      rows: 43
+    })
+  })
+
+  it('sends term-resized to ATTACHED sockets only, and only on an actual change', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const attached = await connect()
+    const watcher = await connect()
+    await stepUp(attached)
+    await stepUp(watcher)
+
+    const id = await attached.invoke<string>('terminal:create', '/repo', 0)
+    await attached.invoke('terminal:attach', id)
+    const attachedFrames = frameCollector(attached)
+    const watcherFrames = frameCollector(watcher)
+
+    terminalService.resize(hostConnection(), id, 132, 43)
+    await attachedFrames.waitFor('term-resized')
+    // Same grid again: no second frame. (An echo storm here is what the client's
+    // adopt-on-cols-change rule is protecting against — do not feed it noise.)
+    terminalService.resize(hostConnection(), id, 132, 43)
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(attachedFrames.frames.filter((f) => f.type === 'term-resized')).toHaveLength(1)
+    // The second socket holds a shell grant and is NOT attached: geometry is
+    // output about a terminal you are watching, so it learns nothing.
+    expect(watcherFrames.frames.filter((f) => f.type === 'term-resized')).toEqual([])
+  })
+
+  it('broadcasts terminal:resized on the HOST lane too (a narrow window runs the mobile fork)', async () => {
+    remoteConfigRef.current = makeConfigRow({ allowTerminal: true })
+    const client = await connect()
+    await stepUp(client)
+    const id = await client.invoke<string>('terminal:create', '/repo', 0)
+    // `term-resize` is attachment-gated like every other client→server terminal
+    // frame, so the attach is part of the setup, not part of what is asserted.
+    await client.invoke('terminal:attach', id)
+
+    // A REMOTE resize must reach the desktop renderer, not just the other
+    // sockets: the Electron window can be narrow enough to run the mobile fork,
+    // and that fork mirrors the width rather than pushing its own.
+    await client.send({ type: 'term-resize', termId: id, cols: 60, rows: 20 })
+    await flushPtyBatch()
+    const resizedPushes = desktopSink.mock.calls.filter(
+      ([channel]) => channel === 'terminal:resized'
+    )
+    expect(resizedPushes).toEqual([['terminal:resized', { terminalId: id, cols: 60, rows: 20 }]])
+
+    // …and a no-op resize adds nothing.
+    await client.send({ type: 'term-resize', termId: id, cols: 60, rows: 20 })
+    await flushPtyBatch()
+    expect(
+      desktopSink.mock.calls.filter(([channel]) => channel === 'terminal:resized')
+    ).toHaveLength(1)
   })
 
   // -------------------------------------------------------------------------

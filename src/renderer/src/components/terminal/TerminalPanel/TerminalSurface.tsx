@@ -20,6 +20,16 @@ export interface TerminalSurfaceProps {
   nextSlotRunning: boolean
   readOnly?: boolean
   onBlockedInput?: () => void
+  /**
+   * Render the phone's terminal regime (ADR-060): mirror the pty's width rather
+   * than fitting to it, pan horizontally, and scroll by touch. Passed by
+   * `TerminalMobileView` and by nothing else — the desktop panel omits it and
+   * gets the fit-both-axes terminal unchanged.
+   *
+   * The ADR-048 shape: the presentation forks, the machinery does not. Both
+   * surfaces still mount ONE `XTermInstance` per tab through this file.
+   */
+  mobile?: boolean
 }
 
 /**
@@ -39,7 +49,8 @@ export function TerminalSurface({
   activeId,
   nextSlotRunning,
   readOnly,
-  onBlockedInput
+  onBlockedInput,
+  mobile
 }: TerminalSurfaceProps): React.JSX.Element {
   return (
     <div className="flex-1 min-h-0 relative overflow-hidden">
@@ -61,6 +72,7 @@ export function TerminalSurface({
               isActive={tab.id === activeId}
               readOnly={readOnly}
               onBlockedInput={onBlockedInput}
+              mirrorGrid={mobile}
             />
           </Suspense>
         </div>

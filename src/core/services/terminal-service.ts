@@ -34,7 +34,7 @@ import {
   TERMINAL_DISABLED_ERROR,
   type TermDetachReason
 } from '../../shared/remote-protocol'
-import type { TerminalAvailability } from '../../shared/types'
+import type { TerminalAttachResult, TerminalAvailability } from '../../shared/types'
 
 /** The desktop-side posture, read fresh so a Settings flip applies immediately. */
 export interface TerminalPolicy {
@@ -243,6 +243,21 @@ export class TerminalService {
     this.win!.webContents.send('terminal:data', { terminalId, data, replay })
   }
 
+  /**
+   * Host-local geometry notice — the desktop twin of the remote `term-resized`
+   * frame. Same literal-channel rule as {@link sendData}.
+   *
+   * The host lane needs it because the Electron window can host the MOBILE fork
+   * (a narrow window runs the same takeover the phone does), and that fork
+   * mirrors the pty's cols instead of pushing its own. Without this event a
+   * narrow desktop window would keep rendering the width it happened to attach
+   * at while another surface widened the shell.
+   */
+  private sendResized(terminalId: string, cols: number, rows: number): void {
+    if (!this.hasLocalSink()) return
+    this.win!.webContents.send('terminal:resized', { terminalId, cols, rows })
+  }
+
   write(connection: CommandConnection, id: string, data: string): void {
     this.assertAllowed(connection, 'act')
     this.manager.write(id, data)
@@ -253,7 +268,11 @@ export class TerminalService {
   // after the act window decays.
   resize(connection: CommandConnection, id: string, cols: number, rows: number): void {
     this.assertAllowed(connection, 'read')
-    this.manager.resize(id, cols, rows)
+    // Remote attachments are fanned out inside the manager (it owns the
+    // attachment set); the host lane has no attachment set, so its broadcast is
+    // raised here. Both are gated on the geometry ACTUALLY changing, so a refit
+    // to the size the pty already had is silent.
+    if (this.manager.resize(id, cols, rows)) this.sendResized(id, cols, rows)
   }
 
   kill(connection: CommandConnection, id: string): void {
@@ -313,15 +332,25 @@ export class TerminalService {
    * idempotent no matter how much of it the client already saw. Live bytes that
    * arrive afterwards are sent on a later turn of the loop, so ordering is
    * replay-then-live with no interleave.
+   *
+   * The reply carries the pty's GEOMETRY (ADR-060) rather than a bare boolean.
+   * A mirroring client needs the shared shell's width at the moment it attaches
+   * — the `terminal:resized` / `term-resized` push only tells it about LATER
+   * changes, and asking after the fact would race the first bytes. Both lanes
+   * answer the same shape, and `{ ok: false }` is the one refusal (the terminal
+   * is gone — a stale tab).
    */
-  attach(connection: CommandConnection, id: string): boolean {
+  attach(connection: CommandConnection, id: string): TerminalAttachResult {
     this.assertAllowed(connection, 'read')
     if (connection.identity.method !== 'host') {
-      return this.manager.attach(id, connection.connectionId)
+      if (!this.manager.attach(id, connection.connectionId)) return { ok: false }
+      const size = this.manager.sizeOf(id)
+      return size ? { ok: true, ...size } : { ok: false }
     }
-    if (!this.manager.has(id)) return false
+    const size = this.manager.sizeOf(id)
+    if (!size) return { ok: false }
     this.sendData(id, this.manager.scrollbackOf(id), true)
-    return true
+    return { ok: true, ...size }
   }
 
   detach(connection: CommandConnection, id: string): void {
