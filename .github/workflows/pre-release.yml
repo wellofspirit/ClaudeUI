@@ -21,9 +21,6 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   version:
     runs-on: ubuntu-latest
@@ -32,7 +29,7 @@ jobs:
       tag: ${{ steps.bump.outputs.tag }}
       changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -105,7 +102,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Exclude workspace from Windows Defender
         if: runner.os == 'Windows'
@@ -118,7 +115,7 @@ jobs:
           Add-MpPreference -ExclusionProcess "bun.exe"
           Add-MpPreference -ExclusionProcess "node.exe"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # Pinned to 24.15.0: Node 24.16.0 ships a libuv that aborts on Windows
           # (Assertion failed: !_wcsnicmp(filename, dir, dirlen), src/win/fs-event.c:72)
@@ -130,7 +127,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - name: Cache bun install
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -143,13 +140,13 @@ jobs:
         run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
 
       - name: Cache claude CLI source binary
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/claude-cli
           key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
 
       - name: Cache Electron binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/electron
@@ -249,7 +246,7 @@ jobs:
           Compress-Archive -Path "${{ matrix.build_dir }}/*" -DestinationPath "${{ matrix.zip_name }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.zip_name }}
           path: ${{ matrix.zip_name }}
@@ -276,9 +273,9 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # Pinned to match the other jobs — see the build matrix note.
           node-version: 24.15.0
@@ -286,7 +283,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - name: Cache bun install
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('bun.lock') }}
@@ -300,7 +297,7 @@ jobs:
         run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
 
       - name: Cache claude CLI source binary
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/claude-cli
           # runner.arch matters: one fixed path per version, and an x64 ELF
@@ -311,7 +308,7 @@ jobs:
       # runs it; the os-only restore key hits ci.yml's ubuntu gates cache (the
       # store's files are arch-named, so cross-arch restore is additive).
       - name: Cache Electron binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/electron
@@ -348,7 +345,7 @@ jobs:
           tar -czf "$STAGE.tar.gz" "$STAGE"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
           path: claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
@@ -357,16 +354,16 @@ jobs:
     needs: [version, build, server]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Create pre-release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ClaudeUI ${{ needs.version.outputs.tag }} (Pre-release)
