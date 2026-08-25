@@ -243,8 +243,9 @@ jobs:
           name: ${{ matrix.zip_name }}
           path: ${{ matrix.zip_name }}
 
-  # Headless `claudeui-server` for linux-x64, compiled host-natively on ubuntu
-  # (bun cross-targets exist but are unnecessary here). The tarball is runnable
+  # Headless `claudeui-server` for linux x64 + arm64, each compiled host-natively
+  # (arm64 hosted runners are free for public repos; bun cross-targets exist but
+  # are unnecessary here). The tarball is runnable
   # as shipped: the compiled executable resolves its app path to the directory
   # holding `out/web`, and every engine looks up `vendor/<engine>-cli` under
   # that same root — so the linux opencode + pi binaries that `bun install`'s
@@ -253,9 +254,16 @@ jobs:
   # is unimplemented), so there is no patched linux bun-claude and the Claude
   # engine is desktop-only for now — fail-closed rather than silently unpatched.
   server:
-    name: Linux server build
+    name: Linux server build (${{ matrix.arch }})
     needs: version
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -270,8 +278,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-bun-
             ${{ runner.os }}-bun-
 
       - name: Read claude CLI version
@@ -283,18 +292,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/claude-cli
-          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
+          # runner.arch matters: one fixed path per version, and an x64 ELF
+          # restored onto the arm runner would be extracted as if native.
+          key: ${{ runner.os }}-${{ runner.arch }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
 
       # postinstall downloads the Electron binary even though this job never
-      # runs it; same key as ci.yml's ubuntu gates job, so this is usually a hit.
+      # runs it; the os-only restore key hits ci.yml's ubuntu gates cache (the
+      # store's files are arch-named, so cross-arch restore is additive).
       - name: Cache Electron binaries
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/electron
             ~/.cache/electron-builder
-          key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-electron-${{ hashFiles('bun.lock') }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-electron-
             ${{ runner.os }}-electron-
 
       - name: Install dependencies
@@ -315,7 +328,7 @@ jobs:
       # released as a single opaque file.
       - name: Assemble tarball
         run: |
-          STAGE="claudeui-server-${{ needs.version.outputs.version }}-linux-x64"
+          STAGE="claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}"
           mkdir "$STAGE"
           cp -r dist/server-bin/. "$STAGE/"
           mkdir "$STAGE/vendor"
@@ -326,8 +339,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: claudeui-server-${{ needs.version.outputs.version }}-linux-x64.tar.gz
-          path: claudeui-server-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+          name: claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          path: claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
 
   release:
     needs: [version, build, server]
@@ -347,8 +360,8 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ClaudeUI ${{ needs.version.outputs.tag }}
           body: |
-            The `claudeui-server-*-linux-x64.tar.gz` artifact is the headless server.
-            It ships with the opencode and pi engines; the Claude Code engine is
+            The `claudeui-server-*-linux-{x64,arm64}.tar.gz` artifacts are the headless
+            server. Each ships with the opencode and pi engines; the Claude Code engine is
             desktop-only for now (no patched linux binary exists yet).
 
             ## Changes
