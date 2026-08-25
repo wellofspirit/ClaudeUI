@@ -3,7 +3,8 @@
  *
  * Tested flows:
  *   1. onNewTab calls createTerminal IPC + addTerminalTab store action
- *   2. onCloseTab removes tab from store
+ *   2. onCloseTab KILLS the pty then removes the tab; `detach: true` only removes
+ *      the tab; a refused kill removes nothing (ADR-062)
  *   3. onSelectTab updates active terminal
  *   4. onClosePanel sets terminalPanelOpen=false
  *   5. onTerminalExit event removes tab
@@ -133,11 +134,11 @@ describe('TerminalPanel FC', () => {
     expect(createCalls.map((c) => c.index)).toEqual([0, 1])
     expect(spawnCount).toBe(2)
 
-    // Close the FIRST tab: this surface detaches from slot 0 — the pty lives on
-    // (it may still be open elsewhere), so pressing + asks for slot 0 again and
-    // gets the very same terminal back.
+    // DETACH the first tab (Shift-click / the menu item): this surface lets go
+    // of slot 0 — the pty lives on (it may still be open elsewhere), so pressing
+    // + asks for slot 0 again and gets the very same terminal back.
     act(() => {
-      viewProps.onCloseTab('term-1')
+      viewProps.onCloseTab('term-1', true)
     })
     await settle()
     await act(async () => {
@@ -170,30 +171,15 @@ describe('TerminalPanel FC', () => {
     expect(useSessionStore.getState().terminalGroups[CWD].activeTabId).toBe('term-9')
   })
 
-  it('onCloseTab closes the terminal tab', async () => {
-    useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
-    await renderFC()
-
-    act(() => {
-      viewProps.onCloseTab('term-x')
-    })
-
-    // A plain close DETACHES: the pty may still be open on another surface, so
-    // the tab goes and the shell stays.
-    expect(killCalls).toEqual([])
-    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
-    expect(tabs.find((t) => t.id === 'term-x')).toBeUndefined()
-  })
-
-  // Shift-click is the ONLY UI path that stops a runaway process: a plain close
-  // detaches, and the cold sweep never reaps the cwd you are actively working
-  // in. The tab must go either way — the kill is best-effort on top.
-  it('onCloseTab with the kill flag kills the pty and still closes the tab', async () => {
+  // ADR-062: closing a terminal MEANS stopping it. The unmodified close is the
+  // kill — the cold sweep never reaps the cwd you are actively working in, and
+  // the phone's chip has no modifier to hide a kill behind.
+  it('onCloseTab kills the pty and then closes the tab', async () => {
     useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
     await renderFC()
 
     await act(async () => {
-      viewProps.onCloseTab('term-x', true)
+      viewProps.onCloseTab('term-x')
       await new Promise((r) => setTimeout(r, 0))
     })
     await settle()
@@ -203,10 +189,7 @@ describe('TerminalPanel FC', () => {
     expect(tabs.find((t) => t.id === 'term-x')).toBeUndefined()
   })
 
-  it('closes the tab even when the kill is refused', async () => {
-    app.bridge.ipcMain.handle('terminal:kill', async () => {
-      throw new Error('needs-step-up')
-    })
+  it('onCloseTab with the detach flag closes the tab and leaves the shell running', async () => {
     useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
     await renderFC()
 
@@ -216,8 +199,34 @@ describe('TerminalPanel FC', () => {
     })
     await settle()
 
+    // The pty may still be open on another surface: a detach must never reach
+    // `terminal:kill`.
+    expect(killCalls).toEqual([])
     const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
     expect(tabs.find((t) => t.id === 'term-x')).toBeUndefined()
+  })
+
+  // No silent fallback: a close that could not do what it says stays undone, so
+  // the operator can see the shell is still there rather than believing a
+  // runaway process was stopped.
+  it('KEEPS the tab when the kill is refused', async () => {
+    app.bridge.ipcMain.handle('terminal:kill', async () => {
+      throw new Error('boom')
+    })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
+    await renderFC()
+
+    await act(async () => {
+      viewProps.onCloseTab('term-x')
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await settle()
+
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs.find((t) => t.id === 'term-x')).toBeDefined()
+    expect(logged).toHaveBeenCalled()
+    logged.mockRestore()
   })
 
   it('onSelectTab updates the active terminal', async () => {
@@ -278,7 +287,7 @@ describe('TerminalPanel FC', () => {
     expect(viewProps.nextSlotRunning).toBe(false)
   })
 
-  it('lights up when a tab is closed — the detach leaves the shell running', async () => {
+  it('lights up after a DETACH — the shell keeps running with no tab on it', async () => {
     await renderFC()
     await act(async () => {
       await viewProps.onNewTab()
@@ -288,7 +297,7 @@ describe('TerminalPanel FC', () => {
     await waitFor(() => expect(viewProps.nextSlot).toBe(1))
 
     act(() => {
-      viewProps.onCloseTab('term-1')
+      viewProps.onCloseTab('term-1', true)
     })
     await settle()
 
@@ -301,7 +310,7 @@ describe('TerminalPanel FC', () => {
   // which adds the tab straight to the store. A pool answer taken before that
   // shell existed made it invisible the moment its tab was closed, which is
   // precisely the state the indicator exists for.
-  it('picks up a pty this panel did not open, once its tab is closed', async () => {
+  it('picks up a pty this panel did not open, once its tab is detached', async () => {
     await renderFC()
 
     act(() => {
@@ -313,7 +322,7 @@ describe('TerminalPanel FC', () => {
     await settle()
 
     act(() => {
-      viewProps.onCloseTab('term-auto')
+      viewProps.onCloseTab('term-auto', true)
     })
     await settle()
 
@@ -363,7 +372,7 @@ describe('TerminalPanel FC', () => {
     await settle()
 
     await act(async () => {
-      viewProps.onCloseTab('term-1', true)
+      viewProps.onCloseTab('term-1')
       await new Promise((r) => setTimeout(r, 0))
     })
     await settle()

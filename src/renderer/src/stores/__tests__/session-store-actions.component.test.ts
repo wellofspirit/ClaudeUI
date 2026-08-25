@@ -1573,10 +1573,12 @@ describe('addTerminalTab', () => {
 })
 
 describe('closeTerminalTab', () => {
-  // Terminals are a shared per-cwd POOL: the shell behind a tab may also be open
-  // on another surface, so closing a viewer must NOT kill it. The detach rides
-  // the XTermInstance unmount; this action is pure tab state.
-  it('removes the tab WITHOUT killing the pty (pool semantics)', () => {
+  // The action is pure TAB STATE and stays that way under ADR-062. Closing a tab
+  // in the UI now kills the shell by default, but that kill is sequenced by the
+  // panel (`terminal:kill` first, drop the tab only if it succeeded) — a store
+  // action that killed on its own would fire on the detach path too, and on
+  // every non-user caller of this reducer.
+  it('removes the tab WITHOUT killing the pty (the panel owns the kill)', () => {
     store().addTerminalTab({ id: 'term-1', title: 'bash', cwd: '/project' })
     store().closeTerminalTab('term-1')
     expect(store().terminalGroups['/project'].tabs).toHaveLength(0)

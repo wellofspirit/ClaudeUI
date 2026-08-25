@@ -91,6 +91,26 @@ export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
     })
   }, [refreshAvailability])
 
+  /**
+   * An ACT was refused for staleness: the grant decayed between the availability
+   * check and the click (ADR-054).
+   *
+   * Keeps whatever step-up params the last query returned — only the grant died
+   * — and, deliberately, whatever it said about WATCHING. Acting was refused; a
+   * refusal to act says nothing about reading, so flattening `readsAllowed` here
+   * would wall off a terminal the connection may still see, which is the exact
+   * regression the read/act split exists to prevent.
+   */
+  const markActRefused = useCallback((): void => {
+    setAvailability((prev) => ({
+      allowed: true,
+      granted: false,
+      needsStepUp: true,
+      readsAllowed: prev?.readsAllowed,
+      stepUp: prev?.stepUp ?? null
+    }))
+  }, [])
+
   useEffect(() => {
     void refreshAvailability()
   }, [refreshAvailability])
@@ -107,8 +127,8 @@ export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
 
   // Terminals are an ordered per-cwd POOL shared by every surface: "+" asks for
   // the lowest slot this surface is not already showing. If a live pty sits
-  // there — this surface closed its tab (a close DETACHES), or another surface
-  // owns it — the open re-attaches instead of spawning, and the strip says so.
+  // there — this surface DETACHED from it, or another surface owns it — the open
+  // re-attaches instead of spawning, and the strip says so.
   const nextSlot = nextFreeSlot(visibleTabs)
   // Web asks only once the server has said "granted": every `shell` channel is
   // refused before that, and a query we know will fail is noise on the wire.
@@ -116,7 +136,7 @@ export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
   // The tab SET is the re-ask trigger, not this panel's own actions: a pty can
   // appear without "+" being pressed (opening the panel auto-opens slot 0), and
   // an answer taken before that shell existed is exactly the stale one that
-  // makes a running shell invisible after its tab is closed.
+  // makes a running shell invisible after its tab is detached.
   const tabKey = visibleTabs.map((t) => `${t.poolIndex ?? ''}:${t.id}`).join(',')
   // `terminal:pool` is a shell READ (ADR-054), so the gate is `readsAllowed`, not
   // `granted`: a connection whose act window decayed can still be told which
@@ -144,20 +164,8 @@ export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
       }
       addTerminalTab({ id: terminalId, title: 'Terminal', cwd: target, poolIndex: index })
     } catch (err) {
-      // The grant decayed between the availability check and the click. Keep
-      // whatever step-up params the last query returned — only the grant died.
       if (isWeb && isNeedsStepUpError(err)) {
-        setAvailability((prev) => ({
-          allowed: true,
-          granted: false,
-          needsStepUp: true,
-          // Acting was refused; WATCHING is a separate question this refusal
-          // says nothing about, so the previous answer stands. Flattening it to
-          // false here would wall off a terminal the connection may still read
-          // — the exact regression the read/act split exists to prevent.
-          readsAllowed: prev?.readsAllowed,
-          stepUp: prev?.stepUp ?? null
-        }))
+        markActRefused()
         return
       }
       throw err
@@ -165,33 +173,50 @@ export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
   }
 
   /**
-   * Close a tab, and KILL the pty behind it when asked (Shift-click on the ×,
-   * or the tab menu's confirmed "Kill shell").
+   * Close a tab. The default KILLS the pty behind it; `detach` only drops the
+   * tab (ADR-062).
    *
-   * Closing became detach-only when terminals became a shared per-cwd pool, which
-   * left no way at all to stop a runaway process (a dev server, a `tail -f`) from
-   * the UI: the cold sweep only reaps cwds with no live session, i.e. never the
-   * one you are working in. The kill is always the EXPLICIT half — an unmodified
-   * click, and the plain menu item, must not take a shell away from another
-   * viewer by accident.
+   * Closing was detach-only from the moment terminals became a shared per-cwd
+   * pool, on the reasoning that a close must never take a shell away from
+   * another viewer. In practice closing a terminal means "stop it": the kill sat
+   * behind Shift or a confirmed menu item nobody found, the cold sweep only
+   * reaps cwds with no live session (i.e. never the one you are working in), and
+   * the phone's chip — no modifier, no right-click — had no kill at all. So the
+   * modifier moved to the SAFE half instead.
    *
-   * The tab goes either way. A refused kill (decayed grant, pty already gone) is
-   * swallowed: closing the tab is the part the operator can always have, and the
-   * pool query is what re-tells them whether the shell survived.
+   * The kill is sequenced, not best-effort: the tab is dropped only once
+   * `terminal:kill` resolves. A close that could not do what it says must stay
+   * undone — dropping the tab anyway would read as "stopped" while the process
+   * kept running, which is the one thing the inversion must not introduce. Main
+   * resolves a kill of an already-gone id without error, so "the pty died on its
+   * own" still closes the tab cleanly.
    */
   const handleCloseTab = useCallback(
-    (id: string, kill?: boolean): void => {
-      if (kill) {
-        // Best-effort: a pty that is already gone (or a decayed grant) must
-        // still close the tab, which is the part the user asked for.
-        void window.api
-          .killTerminal(id)
-          .catch(() => {})
-          .finally(() => refreshPool())
+    (id: string, detach?: boolean): void => {
+      if (detach) {
+        // The pty may be open on another surface: let go, kill nothing. The
+        // attachment itself rides the XTermInstance unmount.
+        closeTerminalTab(id)
+        return
       }
-      closeTerminalTab(id)
+      void window.api
+        .killTerminal(id)
+        .then(() => {
+          closeTerminalTab(id)
+          refreshPool()
+        })
+        .catch((err: unknown) => {
+          // The grant decayed between the availability check and the click: the
+          // tab stays, and the panel recovers into the ceremony exactly as "+"
+          // does. No silent fallback to a detach — see the doc comment.
+          if (isWeb && isNeedsStepUpError(err)) {
+            markActRefused()
+            return
+          }
+          console.error('[TerminalPanel] kill failed; keeping the tab:', err)
+        })
     },
-    [closeTerminalTab, refreshPool]
+    [closeTerminalTab, refreshPool, isWeb, markActRefused]
   )
 
   // Listen for PTY exit events. The exit is also how a kill this surface did

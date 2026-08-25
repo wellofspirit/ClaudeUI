@@ -15,14 +15,18 @@ import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { ClaudeAPI, TerminalAvailability } from '../../../../../../shared/types'
 
-let viewRendered = 0
-let viewProps: {
+/** The slice of the view's contract this suite drives. */
+interface CapturedViewProps {
   onNewTab: () => Promise<void>
+  onCloseTab: (id: string, detach?: boolean) => void
   readOnly?: boolean
   onBlockedInput?: () => void
-} | null = null
+}
+
+let viewRendered = 0
+let viewProps: CapturedViewProps | null = null
 vi.mock('../View', () => ({
-  TerminalPanelView: (props: { onNewTab: () => Promise<void> }) => {
+  TerminalPanelView: (props: CapturedViewProps) => {
     viewRendered++
     viewProps = props
     return React.createElement('div', { 'data-testid': 'TerminalPanelView' })
@@ -37,6 +41,7 @@ interface WebApiOverrides {
   terminalAvailability: ReturnType<typeof vi.fn>
   terminalStepUp: ReturnType<typeof vi.fn>
   createTerminal: ReturnType<typeof vi.fn>
+  killTerminal: ReturnType<typeof vi.fn>
   onTerminalDetached: ReturnType<typeof vi.fn>
 }
 
@@ -62,6 +67,7 @@ describe('TerminalPanel — web availability gate', () => {
     }))
     real.terminalStepUp = vi.fn(async () => ({ ok: true }))
     real.createTerminal = vi.fn(async () => 'term-1')
+    real.killTerminal = vi.fn(async () => {})
     real.onTerminalDetached = vi.fn((cb: (p: { terminalId: string; reason: string }) => void) => {
       detachedListeners.push(cb)
       return () => {}
@@ -189,6 +195,30 @@ describe('TerminalPanel — web availability gate', () => {
       await viewProps!.onNewTab()
     })
 
+    await waitFor(() => expect(screen.getByTestId('TerminalStepUpPrompt')).toBeTruthy())
+  })
+
+  /**
+   * ADR-062: the close that could not kill stays undone.
+   *
+   * A plain close is an ACT, so the same decayed grant that stops "+" stops it —
+   * and the panel must not fall back to a detach, which would drop the tab and
+   * read to the operator as "stopped" while the shell kept running. The tab
+   * stays put and the ceremony opens, exactly as it does for a refused create.
+   */
+  it('keeps the tab and opens the ceremony when the KILL is refused for staleness', async () => {
+    useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
+    await renderPanel()
+    await waitFor(() => expect(screen.getByTestId('TerminalPanelView')).toBeTruthy())
+
+    api.killTerminal.mockRejectedValue(new Error('needs-step-up'))
+    await act(async () => {
+      viewProps!.onCloseTab('term-x')
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    const tabs = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    expect(tabs.find((t) => t.id === 'term-x')).toBeDefined()
     await waitFor(() => expect(screen.getByTestId('TerminalStepUpPrompt')).toBeTruthy())
   })
 

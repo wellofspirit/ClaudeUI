@@ -2934,15 +2934,19 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   /**
-   * Closing a tab DETACHES this surface; it no longer kills the pty.
+   * Drops a tab from its cwd group. Pure tab state — it kills nothing.
    *
-   * Terminals are a shared per-cwd pool — the shell behind this tab may also be
-   * open on a phone, and closing a viewer must never take it away from another
-   * viewer. The detach itself rides the XTermInstance unmount (which is the
-   * thing that actually holds the attachment), so this action is now pure tab
-   * state, identical to {@link removeTerminalTab}. A pty still dies on its own
-   * `exit`, on an explicit `terminal:kill`, on the cold-session sweep
-   * (`killTerminalsByCwd`), and with the window.
+   * Closing a terminal in the UI does kill the shell (ADR-062), but the panel
+   * owns that: it awaits `terminal:kill` and calls this only once the kill
+   * landed, so a refused kill leaves the tab where it is. Killing from here
+   * instead would fire on the DETACH path too (Shift-click, the tab menu), where
+   * the shell may still be open on a phone and must survive — and on every
+   * non-user caller of this reducer. The detach itself rides the XTermInstance
+   * unmount, which is the thing that actually holds the attachment.
+   *
+   * Identical to {@link removeTerminalTab}, which is the pty-exit path. A pty
+   * dies on its own `exit`, on an explicit `terminal:kill`, on the cold-session
+   * sweep (`killTerminalsByCwd`), and with the window.
    */
   closeTerminalTab: (id) => set((state) => dropTerminalTab(state.terminalGroups, id)),
 

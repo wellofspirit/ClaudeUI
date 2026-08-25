@@ -9,9 +9,10 @@ const NO_SLOTS: ReadonlySet<number> = new Set()
 /**
  * Which slots of `cwd`'s terminal pool are running a shell right now.
  *
- * Terminals are an ordered per-cwd POOL shared by every surface, and closing a
- * tab only DETACHES this one — so pressing "+" can land on a shell that has
- * been running since before the tab was closed (or on a phone's shell). The
+ * Terminals are an ordered per-cwd POOL shared by every surface, and a DETACH
+ * (Shift-click, or the tab menu — a plain close kills since ADR-062) lets go of
+ * a slot without stopping it — so pressing "+" can land on a shell that has
+ * been running since before the tab was detached (or on a phone's shell). The
  * client cannot infer that: `terminal:create` answers with a bare id whether it
  * spawned or attached, so the fact has to be asked for.
  *
@@ -26,7 +27,7 @@ const NO_SLOTS: ReadonlySet<number> = new Set()
  * than from the panel's own actions is deliberate: a pty can appear without the
  * panel doing anything (opening the panel auto-opens slot 0 through
  * `toggle-terminal.ts`), and a live walk caught exactly that — the shell was
- * running, the tab closed, and the strip said nothing because the last answer
+ * running, its tab detached, and the strip said nothing because the last answer
  * predated the shell.
  *
  * A refusal (no grant, decayed grant, host that predates the channel) resolves

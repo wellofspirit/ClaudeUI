@@ -1,10 +1,12 @@
 /**
  * Layer 2: the "a shell is still running here" indicator.
  *
- * Closing a tab DETACHES (the pool is shared), so the panel can be empty while
- * a dev server keeps running in slot 0 — and before this, nothing on screen
- * distinguished that from a machine with no shells at all. The strip's "+" and
- * the empty state both have to say which of the two the next open will be.
+ * The pool is shared and a DETACH (Shift-click, or the tab menu) lets go of a
+ * slot without stopping it, so the panel can be empty while a dev server keeps
+ * running in slot 0 — as it can when another surface owns that slot outright.
+ * Before this, nothing on screen distinguished either case from a machine with
+ * no shells at all. The strip's "+" and the empty state both have to say which
+ * of the two the next open will be.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'

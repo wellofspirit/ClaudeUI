@@ -1,12 +1,11 @@
 /**
- * Layer 2: the terminal tab's right-click menu — the DISCOVERABLE kill path.
+ * Layer 2: the terminal tab's close semantics and its right-click menu.
  *
- * Killing a shell existed before this menu, but only as Shift-click on the ×:
- * invisible unless you already knew, which is how the owner ended up with
- * "there is no way to kill a terminal completely" while a kill verb sat behind
- * a modifier. The menu spells out the distinction the pool created — close
- * detaches THIS surface, kill ends the shell for every attached one — and asks
- * before the destructive half.
+ * Closing a terminal MEANS "stop it" (ADR-062): the × kills the shell, and the
+ * modifier now guards the SAFE half — Shift-click detaches and leaves the pty
+ * running for whoever else is attached. The menu spells both out, in that order,
+ * and the kill no longer asks: it is the same action a plain click performs, so
+ * an in-menu confirm in front of it would be ceremony the × does not charge.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
@@ -38,67 +37,46 @@ describe('TerminalTab — context menu', () => {
 
     openMenu()
     expect(screen.getByTestId('TerminalTab.menu')).toBeTruthy()
-    expect(screen.getByTestId('TerminalTab.menuClose')).toBeTruthy()
     expect(screen.getByTestId('TerminalTab.menuKill')).toBeTruthy()
+    expect(screen.getByTestId('TerminalTab.menuDetach')).toBeTruthy()
   })
 
-  it('the plain menu item closes WITHOUT killing', () => {
+  it('the kill item kills immediately — no confirmation step', () => {
     const { onClose } = renderTab()
     openMenu()
 
-    fireEvent.click(screen.getByTestId('TerminalTab.menuClose'))
+    fireEvent.click(screen.getByTestId('TerminalTab.menuKill'))
 
+    // `detach: false` IS the kill. A confirm here would be stricter than the ×,
+    // which performs the identical action on one unmodified click.
+    expect(onClose).toHaveBeenCalledTimes(1)
     expect(onClose).toHaveBeenCalledWith(false)
     expect(screen.queryByTestId('TerminalTab.menu')).toBeNull()
+    // The whole arm-then-confirm machinery is gone with it.
+    expect(screen.queryByTestId('TerminalTab.killWarning')).toBeNull()
+    expect(screen.queryByTestId('TerminalTab.confirmKill')).toBeNull()
+    expect(screen.queryByTestId('TerminalTab.cancelKill')).toBeNull()
   })
 
-  it('kill asks first — the menu item alone kills nothing', () => {
+  it('the detach item keeps the shell running and closes the menu', () => {
     const { onClose } = renderTab()
     openMenu()
 
-    fireEvent.click(screen.getByTestId('TerminalTab.menuKill'))
-
-    expect(onClose).not.toHaveBeenCalled()
-    expect(screen.getByTestId('TerminalTab.killWarning')).toBeTruthy()
-    // The safe item is out of the way while the destructive one is armed, so a
-    // second click on the same spot cannot mean two different things.
-    expect(screen.queryByTestId('TerminalTab.menuClose')).toBeNull()
-  })
-
-  it('the confirmation kills and closes the menu', () => {
-    const { onClose } = renderTab()
-    openMenu()
-    fireEvent.click(screen.getByTestId('TerminalTab.menuKill'))
-    fireEvent.click(screen.getByTestId('TerminalTab.confirmKill'))
+    fireEvent.click(screen.getByTestId('TerminalTab.menuDetach'))
 
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(onClose).toHaveBeenCalledWith(true)
     expect(screen.queryByTestId('TerminalTab.menu')).toBeNull()
   })
 
-  it('cancel returns to the safe menu and kills nothing', () => {
-    const { onClose } = renderTab()
-    openMenu()
-    fireEvent.click(screen.getByTestId('TerminalTab.menuKill'))
-    fireEvent.click(screen.getByTestId('TerminalTab.cancelKill'))
-
-    expect(onClose).not.toHaveBeenCalled()
-    expect(screen.getByTestId('TerminalTab.menuClose')).toBeTruthy()
-    expect(screen.queryByTestId('TerminalTab.killWarning')).toBeNull()
-  })
-
-  it('re-opening the menu disarms a confirmation left behind', () => {
+  it('names both actions for what they do to the SHELL, not to the tab', () => {
     renderTab()
     openMenu()
-    fireEvent.click(screen.getByTestId('TerminalTab.menuKill'))
-    expect(screen.getByTestId('TerminalTab.confirmKill')).toBeTruthy()
 
-    // Outside click dismisses (useContextMenu listens on mousedown).
-    fireEvent.mouseDown(document.body)
-    openMenu()
-
-    expect(screen.queryByTestId('TerminalTab.confirmKill')).toBeNull()
-    expect(screen.getByTestId('TerminalTab.menuClose')).toBeTruthy()
+    expect(screen.getByTestId('TerminalTab.menuKill').textContent).toBe('Kill shell')
+    expect(screen.getByTestId('TerminalTab.menuDetach').textContent).toBe(
+      'Detach (keep shell running)'
+    )
   })
 
   // Pins the OUTCOME, not a guard: the menu is the tab's fragment sibling, so
@@ -110,12 +88,11 @@ describe('TerminalTab — context menu', () => {
     openMenu()
 
     fireEvent.click(screen.getByTestId('TerminalTab.menuKill'))
-    fireEvent.click(screen.getByTestId('TerminalTab.confirmKill'))
 
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('keeps the × as close-with-Shift-to-kill, and advertises the menu', () => {
+  it('makes the × a kill, Shift-click a detach, and advertises both', () => {
     const { onClose } = renderTab()
 
     fireEvent.click(screen.getByTestId('TerminalTab.close'))
@@ -126,7 +103,7 @@ describe('TerminalTab — context menu', () => {
 
     expect(screen.getByTestId('TerminalTab.close')).toHaveAttribute(
       'title',
-      'Close (detach) — Shift-click to kill, right-click for more'
+      'Close (kill) — Shift-click to detach, right-click for more'
     )
   })
 })

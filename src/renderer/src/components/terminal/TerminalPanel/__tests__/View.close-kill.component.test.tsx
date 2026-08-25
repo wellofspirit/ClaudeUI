@@ -1,12 +1,12 @@
 /**
  * Layer 2: the tab close button's two paths, THROUGH the strip.
  *
- * Closing a terminal tab is DETACH-ONLY since terminals became a shared per-cwd
- * pool — which left no UI path at all to stop a runaway process, because the
- * cold sweep only reaps cwds with no live session (never the one you are working
- * in). Shift-click is that path. The modifier belongs on the DESTRUCTIVE action:
- * the unmodified click must stay the safe one, since another surface may be
- * attached to the same pty.
+ * Closing a terminal means "stop it" (ADR-062), so the × KILLS and the modifier
+ * guards the safe half: Shift-click detaches this surface and leaves the pty
+ * running for anyone else attached to the shared per-cwd pool. That inverts the
+ * older "the safe action stays the unmodified one" stance — deliberately, because
+ * detach-only closing left a runaway process with no reachable stop, and the
+ * phone's chip has no modifier to offer at all.
  *
  * The tab itself is now its own component (it owns a context menu — see
  * TerminalTab.component.test.tsx); these cases stay here because what they pin
@@ -42,20 +42,21 @@ function viewProps(onCloseTab: TerminalPanelViewProps['onCloseTab']): TerminalPa
   }
 }
 
-describe('TerminalPanelView — close vs kill', () => {
+describe('TerminalPanelView — close vs detach', () => {
   afterEach(() => cleanup())
 
-  it('a plain click closes without asking for a kill', () => {
+  it('a plain click asks for the KILL', () => {
     const onCloseTab = vi.fn()
     render(<TerminalPanelView {...viewProps(onCloseTab)} />)
 
     fireEvent.click(screen.getByTestId('TerminalTab.close'))
 
+    // `detach: false` — the container kills the pty and only then drops the tab.
     expect(onCloseTab).toHaveBeenCalledTimes(1)
     expect(onCloseTab).toHaveBeenCalledWith(TAB.id, false)
   })
 
-  it('a SHIFT-click asks for the kill', () => {
+  it('a SHIFT-click detaches instead, leaving the shell running', () => {
     const onCloseTab = vi.fn()
     render(<TerminalPanelView {...viewProps(onCloseTab)} />)
 
@@ -78,7 +79,7 @@ describe('TerminalPanelView — close vs kill', () => {
     render(<TerminalPanelView {...viewProps(vi.fn())} />)
     expect(screen.getByTestId('TerminalTab.close')).toHaveAttribute(
       'title',
-      'Close (detach) — Shift-click to kill, right-click for more'
+      'Close (kill) — Shift-click to detach, right-click for more'
     )
   })
 })

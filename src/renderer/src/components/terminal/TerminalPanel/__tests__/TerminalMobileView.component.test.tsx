@@ -277,14 +277,29 @@ describe('TerminalMobileView', () => {
 
     // Closing must not also select — the × stops the bubble.
     onSelectTab.mockClear()
-    fireEvent.click(
-      screen
-        .getAllByTestId('TerminalMobileView.tabClose')
-        .find((el) => el.getAttribute('data-id') === TAB2.id)!
-    )
-    // Detach only: no `kill` argument may reach the container from a thumb.
-    expect(onCloseTab).toHaveBeenCalledWith(TAB2.id)
+    const closeChip = screen
+      .getAllByTestId('TerminalMobileView.tabClose')
+      .find((el) => el.getAttribute('data-id') === TAB2.id)!
+    fireEvent.click(closeChip)
+    // ADR-062: the chip KILLS where the surface can act. It is the phone's only
+    // close affordance — there is no modifier and no right-click here — so a
+    // detach-only chip would leave the mobile operator with no stop at all.
+    expect(onCloseTab).toHaveBeenCalledWith(TAB2.id, false)
+    expect(closeChip).toHaveAttribute('title', 'Close (kill)')
     expect(onSelectTab).not.toHaveBeenCalled()
+  })
+
+  it('falls back to a DETACH on a read-only surface', async () => {
+    const onCloseTab = vi.fn()
+    await mount({ readOnly: true, onCloseTab })
+
+    const closeChip = screen.getAllByTestId('TerminalMobileView.tabClose')[0]
+    fireEvent.click(closeChip)
+
+    // The act gate would refuse the kill (ADR-054), so the chip does the thing it
+    // is still entitled to do rather than firing a request it knows will fail.
+    expect(onCloseTab).toHaveBeenCalledWith(TAB.id, true)
+    expect(closeChip).toHaveAttribute('title', 'Close (the shell keeps running)')
   })
 
   it('back closes the panel through the same flag the desktop close uses', async () => {

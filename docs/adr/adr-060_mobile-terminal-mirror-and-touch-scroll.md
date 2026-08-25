@@ -124,6 +124,13 @@ a diagonal from fighting the pan.
 
 The takeover chrome (tab strip, accessory keys, read-only badge) is untouched.
 
+> **Amendment (2026-08-25, ADR-062).** One piece of that chrome has since moved: the tab
+> chip's × is now a **kill**, not a detach — this surface has no modifier and no
+> right-click, so the chip is the phone's entire close vocabulary and a detach-only chip
+> left it with no way to stop a runaway shell. On a **read-only** surface it still
+> detaches, because the act gate would refuse the kill. Nothing about the mirrored grid,
+> the pan container or the touch-scroll synthesis changes.
+
 ## Probe evidence
 
 Chromium via Playwright, real `@xterm/xterm@6.0.0`, 390×844 viewport, a 120×40 grid in a

@@ -79,10 +79,12 @@ export function TerminalSurface({
       ))}
       {visibleTabs.length === 0 &&
         (nextSlotRunning ? (
-          // The case the pool made invisible: the tab is gone but the shell
-          // (a dev server, a `tail -f`) is still running, and nothing on
-          // screen said so — the operator reads an empty panel as an empty
-          // machine. Reopening re-attaches and replays its scrollback.
+          // The case the pool made invisible: no tab here, but the shell (a dev
+          // server, a `tail -f`) is still running — this surface detached from
+          // it, or another surface owns the slot — and nothing on screen said
+          // so, so the operator reads an empty panel as an empty machine.
+          // Reopening re-attaches and replays its scrollback; closing the tab
+          // that comes back is what stops it (ADR-062).
           <div
             data-testid="TerminalPanel.emptyRunning"
             className="h-full flex flex-col items-center justify-center gap-1 text-text-muted text-xs"
@@ -96,7 +98,7 @@ export function TerminalSurface({
               <span className="font-mono mx-0.5 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
                 +
               </span>{' '}
-              to re-attach, then right-click the tab to kill it
+              to re-attach, then close its tab to stop it
             </div>
           </div>
         ) : (

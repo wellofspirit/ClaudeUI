@@ -9,18 +9,18 @@ export interface TerminalPanelViewProps {
   activeId: string | null
   onSelectTab: (id: string, cwd: string) => void
   /**
-   * Close this tab. `kill: true` (Shift-click, or the tab menu's confirmed
-   * "Kill shell") also terminates the pty behind it — the only UI path that
-   * kills a shell now that a plain close merely detaches this surface from the
-   * shared per-cwd pool.
+   * Close this tab. The default KILLS the pty behind it (ADR-062) — closing a
+   * terminal is taken to mean stopping it. `detach: true` (Shift-click, or the
+   * tab menu's "Detach") only lets this surface go, leaving the shell running
+   * for anyone else attached to the shared per-cwd pool.
    */
-  onCloseTab: (id: string, kill?: boolean) => void
+  onCloseTab: (id: string, detach?: boolean) => void
   onNewTab: () => void
   onClosePanel: () => void
   /**
    * The pool slot "+" will ask for, and whether a shell is ALREADY running in
-   * it. True means the next open re-attaches to a live pty (this surface closed
-   * its tab, or another surface owns it) instead of spawning — which is
+   * it. True means the next open re-attaches to a live pty (this surface
+   * detached from it, or another surface owns it) instead of spawning — which is
    * invisible otherwise, because a detached shell leaves nothing on screen.
    */
   nextSlot: number
@@ -66,7 +66,7 @@ export function TerminalPanelView({
             tab={tab}
             active={tab.id === activeId}
             onSelect={() => onSelectTab(tab.id, tab.cwd)}
-            onClose={(kill) => onCloseTab(tab.id, kill)}
+            onClose={(detach) => onCloseTab(tab.id, detach)}
           />
         ))}
         <button

@@ -159,17 +159,22 @@ export function TerminalMobileView({
               >
                 <span className="truncate max-w-[92px]">{tab.title}</span>
                 {/* Always visible — the desktop chip reveals this on hover,
-                    which on touch means "never". Detach only: killing a shell
-                    every device shares is not a thing a stray thumb may do. */}
+                    which on touch means "never". It KILLS (ADR-062): there is
+                    no modifier and no right-click here, so this one chip is the
+                    phone's entire close vocabulary, and a detach-only chip left
+                    the mobile operator with no way to stop a runaway process.
+                    A read-only surface falls back to the detach — the act gate
+                    would refuse the kill (ADR-054), and firing a request we know
+                    is refused teaches the user nothing. */}
                 <button
                   data-testid="TerminalMobileView.tabClose"
                   data-id={tab.id}
                   onClick={(e) => {
                     e.stopPropagation()
-                    onCloseTab(tab.id)
+                    onCloseTab(tab.id, !!readOnly)
                   }}
                   className="w-5 h-5 shrink-0 flex items-center justify-center rounded-full text-[11px] text-text-muted"
-                  title="Close (the shell keeps running)"
+                  title={readOnly ? 'Close (the shell keeps running)' : 'Close (kill)'}
                 >
                   &times;
                 </button>
