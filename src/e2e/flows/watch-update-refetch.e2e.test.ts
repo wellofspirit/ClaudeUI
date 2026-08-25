@@ -42,7 +42,13 @@ const { testHome } = vi.hoisted(() => {
   const nodeFs = require('node:fs') as typeof import('node:fs')
   const nodeOs = require('node:os') as typeof import('node:os')
   const nodePath = require('node:path') as typeof import('node:path')
-  const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'watch-refetch-home-'))
+  // realpath: on macOS `os.tmpdir()` is a symlink (`/var/folders` →
+  // `/private/var/folders`), and the FSEvents backend behind `fs.watch` reports
+  // real paths — watching through the symlinked prefix can deliver no events at
+  // all, which made this file fail deterministically on mac CI only.
+  const dir = nodeFs.realpathSync(
+    nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'watch-refetch-home-'))
+  )
   process.env.HOME = dir
   process.env.USERPROFILE = dir
   return { testHome: dir }
@@ -168,6 +174,27 @@ function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
 }
 
 /**
+ * Append a transcript line and wait until `settled` observes the watcher's
+ * reaction. macOS's FSEvents-backed `fs.watch` starts its event stream
+ * asynchronously, so a change made right after `fs.watch()` returns can be
+ * dropped on the floor — each retry therefore bumps the file's mtime to hand
+ * the watcher a fresh edge. Extra fires are harmless: the watcher re-reads the
+ * whole file and the seed is idempotent.
+ */
+function appendAndWait(line: string, settled: () => boolean): Promise<void> {
+  fs.appendFileSync(transcriptPath, line)
+  return vi.waitFor(
+    () => {
+      if (settled()) return
+      const now = new Date()
+      fs.utimesSync(transcriptPath, now, now)
+      throw new Error('watcher notify not observed yet')
+    },
+    { timeout: 10_000, interval: 250 }
+  )
+}
+
+/**
  * What a client does with a notify: fold it (bootstrap + cwd), then answer it with
  * ONE refetch through the cold-history path and apply the result with the same
  * `applyWatchedContent` canonical used. This is `useClaudeEvents`'s observer plus
@@ -211,9 +238,9 @@ describe('E2E: a watched session converges by notify + refetch (phase 5 S4)', ()
     expect(replica.sessions[ROUTING_ID]).toBeUndefined()
 
     watchSession(ROUTING_ID, SESSION_ID, PROJECT_KEY, CWD)
-    fs.appendFileSync(transcriptPath, assistantLine('a-2', 'second'))
-
-    await waitFor(() => frames.some((f) => f.type === 'event'))
+    await appendAndWait(assistantLine('a-2', 'second'), () =>
+      frames.some((f) => f.type === 'event')
+    )
     const notify = frames.find((f): f is WsEvent => f.type === 'event')!
     expect(notify.channel).toBe('session:watch-update')
     // THE point of S4: the wire (and therefore the ring) holds an address, not a
@@ -253,13 +280,13 @@ describe('E2E: a watched session converges by notify + refetch (phase 5 S4)', ()
 
     // The file grows twice while it is away. The watcher debounces, so this is one
     // or two notifies; either way the ring cost is a handful of bytes per entry.
-    fs.appendFileSync(transcriptPath, assistantLine('a-3', 'third'))
-    await waitFor(
-      () => syncCore.getCanonicalState().sessions[ROUTING_ID].messages.length === before + 1
+    await appendAndWait(
+      assistantLine('a-3', 'third'),
+      () => syncCore.getCanonicalState().sessions[ROUTING_ID]?.messages.length === before + 1
     )
-    fs.appendFileSync(transcriptPath, assistantLine('a-4', 'fourth'))
-    await waitFor(
-      () => syncCore.getCanonicalState().sessions[ROUTING_ID].messages.length === before + 2
+    await appendAndWait(
+      assistantLine('a-4', 'fourth'),
+      () => syncCore.getCanonicalState().sessions[ROUTING_ID]?.messages.length === before + 2
     )
 
     const second = await connect()

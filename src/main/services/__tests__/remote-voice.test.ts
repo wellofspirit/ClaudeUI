@@ -180,13 +180,21 @@ describe('remote voice capture', () => {
     await voiceServer.close()
   })
 
-  /** Start a capture and wait until the fake server has seen `voice_start`. */
+  /**
+   * Start a capture and wait until the fake server has seen THIS capture's
+   * `voice_start` — counted, not `some()`: a second capture's `some()` is
+   * already satisfied by the first one's line, so it returned before the new
+   * socket was even accepted and `connections` raced the assertion.
+   */
   async function startCapture(
     connectionId = CONNECTION_ID,
     manager = makeManager(voiceServer.port)
   ): Promise<void> {
+    const seen = voiceServer.received.filter((m) => m.type === 'voice_start').length
     await remoteVoice.start(manager, makeConnection(connectionId), ROUTING_ID, 'en')
-    await waitFor(() => voiceServer.received.some((m) => m.type === 'voice_start'))
+    await waitFor(
+      () => voiceServer.received.filter((m) => m.type === 'voice_start').length === seen + 1
+    )
   }
 
   it('binds the connection to the session voice server and announces `connecting`', async () => {
