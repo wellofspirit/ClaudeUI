@@ -132,6 +132,9 @@ write/read split was found and deleted. BLOB typing is deliberately NOT normalis
 
 ### 5. Two artifacts, both native-dependency-free for storage — with the limits stated
 
+> Distribution is ADR-061's: CI gates both artifacts on every PR, and releases ship the
+> compiled executable as a runnable linux-x64 tarball (engines vendored beside it).
+
 `bun run build:server` produces a pure-asset bundle (`dist/server/`); `bun run
 build:server:compile` produces a single-file executable (`dist/server-bin/`). Neither
 needs `better-sqlite3` rebuilt per platform or per ABI. Three limitations are documented
