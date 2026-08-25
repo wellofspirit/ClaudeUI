@@ -13,6 +13,12 @@ name: CI
 # (windows-2022 + macos) still runs in release.yml / pre-release.yml before any
 # tag is published, so a Windows-only regression is caught at push-to-pre-release
 # time. Add an os matrix here if PR-time Windows coverage becomes worth the cost.
+#
+# The build steps at the end are gates, not artifacts: electron-vite + the web
+# bundle catch vite-config regressions that tests cannot see, and the server
+# steps are the ONLY workflow anywhere that runs `build:server*` and its
+# bun:sqlite conformance arm (`verify:sqlite`) — the release workflows ship the
+# same linux-x64 executable this job proves buildable and bootable.
 
 on:
   pull_request:
@@ -103,6 +109,23 @@ jobs:
 
       - name: Tests (unit + component + e2e + git)
         run: bun run test:ci
+
+      # Typecheck already ran above, so this is the raw bundler pass the release
+      # workflows' "Build app" step runs — not `bun run build`, which would
+      # typecheck a second time.
+      - name: Build (electron + web)
+        run: |
+          bunx electron-vite build
+          bunx vite build --config vite.web.config.ts
+
+      # `build:server` runs verify:sqlite before bundling; the compile step
+      # produces the same host-native linux-x64 executable the release
+      # workflows ship, and --help proves it boots outside a repo checkout.
+      - name: Build server artifacts (bundle + linux executable)
+        run: |
+          bun run build:server
+          bun run build:server:compile
+          ./dist/server-bin/claudeui-server --help > /dev/null
 
   patch-tests:
     name: Patch behavioural tests (live Claude — manual)

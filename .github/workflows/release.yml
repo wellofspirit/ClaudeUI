@@ -243,8 +243,94 @@ jobs:
           name: ${{ matrix.zip_name }}
           path: ${{ matrix.zip_name }}
 
+  # Headless `claudeui-server` for linux-x64, compiled host-natively on ubuntu
+  # (bun cross-targets exist but are unnecessary here). The tarball is runnable
+  # as shipped: the compiled executable resolves its app path to the directory
+  # holding `out/web`, and every engine looks up `vendor/<engine>-cli` under
+  # that same root — so the linux opencode + pi binaries that `bun install`'s
+  # postinstall vendors on this runner ride along. `vendor/claude-cli` does NOT:
+  # rebundle-cli is a documented clean skip for ELF (bun's ELF standalone layout
+  # is unimplemented), so there is no patched linux bun-claude and the Claude
+  # engine is desktop-only for now — fail-closed rather than silently unpatched.
+  server:
+    name: Linux server build
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned to match the other jobs — see the build matrix note.
+          node-version: 24.15.0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Read claude CLI version
+        id: cli-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache claude CLI source binary
+        uses: actions/cache@v4
+        with:
+          path: .cache/claude-cli
+          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
+
+      # postinstall downloads the Electron binary even though this job never
+      # runs it; same key as ci.yml's ubuntu gates job, so this is usually a hit.
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Stamp version into package.json
+        run: |
+          node -e "const p=require('./package.json'); p.version='${{ needs.version.outputs.version }}'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n')"
+
+      - name: Build server executable
+        run: |
+          bun run build:web
+          bun run build:server:compile
+          ./dist/server-bin/claudeui-server --help > /dev/null
+
+      # tar (not a bare upload): actions/upload-artifact strips the executable
+      # bit, so modes survive only INSIDE the tarball, which is uploaded and
+      # released as a single opaque file.
+      - name: Assemble tarball
+        run: |
+          STAGE="claudeui-server-${{ needs.version.outputs.version }}-linux-x64"
+          mkdir "$STAGE"
+          cp -r dist/server-bin/. "$STAGE/"
+          mkdir "$STAGE/vendor"
+          cp -r vendor/opencode-cli "$STAGE/vendor/opencode-cli"
+          cp -r vendor/pi-cli "$STAGE/vendor/pi-cli"
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claudeui-server-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+          path: claudeui-server-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+
   release:
-    needs: [version, build]
+    needs: [version, build, server]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -261,6 +347,10 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ClaudeUI ${{ needs.version.outputs.tag }}
           body: |
+            The `claudeui-server-*-linux-x64.tar.gz` artifact is the headless server.
+            It ships with the opencode and pi engines; the Claude Code engine is
+            desktop-only for now (no patched linux binary exists yet).
+
             ## Changes
 
             ${{ needs.version.outputs.changelog }}

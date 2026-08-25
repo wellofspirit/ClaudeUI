@@ -156,19 +156,33 @@ function buildBundle() {
   log('run it with:  bun dist/server/claudeui-server.js --help')
 }
 
-function buildCompile() {
+/**
+ * `target` is a bun compile target (`bun-linux-x64`, `bun-darwin-arm64`, …) or
+ * null for the host platform. Cross-targets make bun download that platform's
+ * runtime on first use — this works from linux and mac hosts (it is how the
+ * ubuntu release job could cross-build, though it compiles natively instead),
+ * but on Windows hosts bun 1.3.14 fails to extract ANY foreign runtime
+ * ("Failed to extract executable … The download may be incomplete"), so
+ * cross-building from Windows is not currently possible.
+ */
+function buildCompile(target) {
   ensureWebBundle()
   verifySqlite()
 
   const out = path.join(ROOT, 'dist', 'server-bin')
   clearDir(out)
 
-  const exeName = process.platform === 'win32' ? 'claudeui-server.exe' : 'claudeui-server'
-  log(`compiling a single-file executable → dist/server-bin/${exeName}`)
+  const forWindows = target ? target.includes('windows') : process.platform === 'win32'
+  const exeName = forWindows ? 'claudeui-server.exe' : 'claudeui-server'
+  log(
+    `compiling a single-file executable → dist/server-bin/${exeName}` +
+      (target ? ` (target: ${target})` : '')
+  )
   run('bun', [
     'build',
     ENTRY,
     '--compile',
+    ...(target ? [`--target=${target}`] : []),
     '--outfile',
     path.join(out, exeName),
     ...EXTERNAL.flatMap((dep) => ['--external', dep])
@@ -234,15 +248,15 @@ Layout — \`out/web\` must stay beside the executable, or set
 
 ## Building for other platforms
 
-Bun cross-compiles. From the repo, replace the \`--compile\` invocation with a
-target flag:
+Bun cross-compiles. From the repo:
 
-    bun build src/server/main.ts --compile --target=bun-linux-x64   --outfile claudeui-server
-    bun build src/server/main.ts --compile --target=bun-darwin-arm64 --outfile claudeui-server
-    bun build src/server/main.ts --compile --target=bun-windows-x64 --outfile claudeui-server.exe
+    bun run build:server:compile --target=bun-linux-x64
+    bun run build:server:compile --target=bun-darwin-arm64
+    bun run build:server:compile --target=bun-windows-x64
 
-…each with \`--external node-pty --external ws --external better-sqlite3\`, then
-copy \`out/web\` beside the result.
+Cross-targets download that platform's bun runtime on first use. This works
+from linux and mac hosts; bun 1.3.x on Windows fails to extract foreign
+runtimes, so cross-build from linux/mac or let CI produce the artifact.
 
 ## Storage
 
@@ -258,9 +272,16 @@ beside the executable to enable terminals.
 }
 
 const command = process.argv[2]
+const targetArg = process.argv.slice(3).find((a) => a.startsWith('--target='))
+const target = targetArg ? targetArg.slice('--target='.length) : null
+if (target && !/^bun-[a-z0-9]+-[a-z0-9-]+$/.test(target)) {
+  fail(`invalid --target "${target}" — expected a bun compile target like bun-linux-x64`)
+}
 if (command === 'bundle') buildBundle()
-else if (command === 'compile') buildCompile()
+else if (command === 'compile') buildCompile(target)
 else {
-  process.stderr.write('usage: node scripts/build-server.mjs <bundle|compile>\n')
+  process.stderr.write(
+    'usage: node scripts/build-server.mjs <bundle|compile> [--target=bun-<os>-<arch>]\n'
+  )
   process.exit(2)
 }
