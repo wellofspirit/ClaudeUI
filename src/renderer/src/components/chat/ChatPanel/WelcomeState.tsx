@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { DirectoryBrowserInput } from '../../shared/DirectoryBrowserInput'
@@ -51,6 +51,15 @@ const NOUNS = [
   'haven'
 ]
 
+/**
+ * Highest `welcomeBrowseToken` any instance has acted on. MODULE scope, not a
+ * component ref: the usual order is "sidebar requests, then this component
+ * mounts", so the marker has to outlive the mount it was made for — while a
+ * later remount (every return to the welcome screen is one) must not re-open
+ * the browser off the same stale token.
+ */
+let lastBrowseTokenConsumed = 0
+
 function generateRandomName(): string {
   const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
   const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)]
@@ -70,6 +79,7 @@ export function WelcomeState(): React.JSX.Element {
   const createNewSession = useSessionStore((s) => s.createNewSession)
   const setWorktreeInfo = useSessionStore((s) => s.setWorktreeInfo)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const welcomeBrowseToken = useSessionStore((s) => s.welcomeBrowseToken)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [browseMode, setBrowseMode] = useState(false)
   const [worktreeEnabled, setWorktreeEnabled] = useState(false)
@@ -103,6 +113,15 @@ export function WelcomeState(): React.JSX.Element {
     },
     [worktreeEnabled, worktreeName, createNewSession, setWorktreeInfo]
   )
+
+  // A surface with no native dialog (the sidebar's web double-click) asked for
+  // the browser — open the dropdown straight into browse mode.
+  useEffect(() => {
+    if (welcomeBrowseToken <= lastBrowseTokenConsumed) return
+    lastBrowseTokenConsumed = welcomeBrowseToken
+    setDropdownOpen(true)
+    setBrowseMode(true)
+  }, [welcomeBrowseToken])
 
   const closeDropdown = (): void => {
     setDropdownOpen(false)

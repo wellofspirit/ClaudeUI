@@ -10,6 +10,7 @@
  * phone that typed it.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { StrictMode } from 'react'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import { DirectoryBrowserInput } from '../DirectoryBrowserInput'
 import type { DirEntry } from '../../../../../shared/types'
@@ -102,7 +103,78 @@ describe('DirectoryBrowserInput', () => {
     })
 
     await waitFor(() => expect(entryNames()).toEqual([]))
-    expect(listDir).not.toHaveBeenCalled()
+    // The mount-time home seed is the only call the host ever sees.
+    expect(listDir.mock.calls.map(([p]) => p)).toEqual([''])
+  })
+
+  it('opens on the host home directory instead of an empty box', async () => {
+    // `listDirEntries('')` answers with the host's homedir. Without the seed the
+    // widget rendered an input that listed nothing at all until the user typed
+    // an absolute path — the "picker doesn't work" report.
+    const listDir = vi.fn<ListDir>(async (dirPath: string) => {
+      const key = dirPath === '' ? 'D:/work' : dirPath.replace(/\\/g, '/').replace(/(.)\/$/, '$1')
+      const entries = FS[key]
+      if (!entries) return { entries: [], isRoot: false, resolvedPath: '' }
+      return { entries, isRoot: false, resolvedPath: key }
+    })
+    const { input } = renderBrowser(listDir)
+
+    await waitFor(() => expect(input.value).toBe('D:/work/'))
+    await waitFor(() => expect(entryNames()).toEqual(['..', 'ClaudeUI', 'claude-memory']))
+    expect(listDir).toHaveBeenCalledWith('')
+  })
+
+  it('still seeds under StrictMode, whose double-invoked effect discards the first pass', async () => {
+    const listDir = vi.fn<ListDir>(async (dirPath: string) => {
+      const key = dirPath === '' ? 'D:/work' : dirPath.replace(/\\/g, '/')
+      const entries = FS[key]
+      if (!entries) return { entries: [], isRoot: false, resolvedPath: '' }
+      return { entries, isRoot: false, resolvedPath: key }
+    })
+    render(
+      <StrictMode>
+        <DirectoryBrowserInput listDir={listDir} onConfirm={vi.fn()} onCancel={vi.fn()} />
+      </StrictMode>
+    )
+
+    await waitFor(() =>
+      expect((screen.getByTestId('DirectoryBrowserInput.path') as HTMLInputElement).value).toBe(
+        'D:/work/'
+      )
+    )
+  })
+
+  it('stays empty and silent when the host cannot seed a home directory', async () => {
+    const { input, listDir } = renderBrowser()
+
+    await waitFor(() => expect(listDir).toHaveBeenCalledWith(''))
+    expect(input.value).toBe('')
+    expect(entryNames()).toEqual([])
+    expect(screen.queryByTestId('DirectoryBrowserInput.error')).toBeNull()
+  })
+
+  it('does not overwrite a path typed before the seed resolves', async () => {
+    let releaseSeed: (() => void) | undefined
+    const listDir = vi.fn<ListDir>(async (dirPath: string) => {
+      if (dirPath === '') {
+        await new Promise<void>((resolve) => {
+          releaseSeed = resolve
+        })
+        return { entries: FS['D:/work'], isRoot: false, resolvedPath: 'D:/work' }
+      }
+      const key = dirPath.replace(/\\/g, '/')
+      const entries = FS[key]
+      if (!entries) return { entries: [], isRoot: false, resolvedPath: '' }
+      return { entries, isRoot: false, resolvedPath: key }
+    })
+    const { input } = renderBrowser(listDir)
+
+    fireEvent.change(input, { target: { value: 'D:/work/ClaudeUI/' } })
+    await waitFor(() => expect(releaseSeed).toBeDefined())
+    releaseSeed!()
+
+    await waitFor(() => expect(entryNames()).toEqual(['..', 'src']))
+    expect(input.value).toBe('D:/work/ClaudeUI/')
   })
 
   it('descends into a clicked directory, then Enter confirms the host-resolved path', async () => {

@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
@@ -693,8 +694,14 @@ export async function listDirEntries(dirPath: string): Promise<{
   isRoot: boolean
   resolvedPath: string
 }> {
+  // Nothing typed yet (the remote picker's opening state): seed the host's home
+  // directory. Must branch BEFORE readdir — `readdir('')` throws into the empty
+  // shape below, and `path.resolve('')` would answer the process cwd, which for
+  // a packaged host is meaningless to the client. No capability change: fs-read
+  // already lists any path by name.
+  const target = dirPath || os.homedir()
   try {
-    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+    const entries = await fs.promises.readdir(target, { withFileTypes: true })
     const HIDDEN_NAMES = new Set([
       'node_modules',
       '.git',
@@ -718,7 +725,7 @@ export async function listDirEntries(dirPath: string): Promise<{
     })
     // Check if this directory is a filesystem root (parent resolves to itself)
     // Return resolved path in POSIX format so renderer can rewrite relative dirs
-    const resolved = path.resolve(dirPath)
+    const resolved = path.resolve(target)
     const isRoot = path.dirname(resolved) === resolved
     const resolvedPosix = resolved.replace(/\\/g, '/').replace(/\/$/, '')
     return { entries: result, isRoot, resolvedPath: resolvedPosix }

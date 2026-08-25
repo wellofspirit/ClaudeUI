@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { AutomationConfigView, type AutomationConfigViewProps, type ModelOption } from '../View'
 import type { Automation } from '../../../../../../shared/types'
 
@@ -149,6 +149,42 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
       effort: 'high',
       thinkingMode: 'disabled'
     })
+  })
+
+  it('keeps the native folder dialog when no host listing is injected (desktop)', async () => {
+    const onPickFolder = vi.fn(async () => 'D:/picked/by/dialog')
+    render(<AutomationConfigView {...makeProps({ onPickFolder })} />)
+
+    fireEvent.click(screen.getByTestId('AutomationConfig.browseFolder'))
+
+    expect(onPickFolder).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+    await waitFor(() =>
+      expect(screen.getByTestId('AutomationConfig.cwd')).toHaveValue('D:/picked/by/dialog')
+    )
+  })
+
+  it('browses the host inline when a listing is injected (web — ADR-046 decision 3)', async () => {
+    const onPickFolder = vi.fn(async () => null)
+    const listDir = vi.fn(async () => ({
+      entries: [],
+      isRoot: false,
+      resolvedPath: 'D:/work/ClaudeUI'
+    }))
+    render(<AutomationConfigView {...makeProps({ onPickFolder, listDir })} />)
+
+    fireEvent.click(screen.getByTestId('AutomationConfig.browseFolder'))
+    // pickFolder() resolves to null on web — the row must never reach it.
+    expect(onPickFolder).not.toHaveBeenCalled()
+
+    const input = screen.getByTestId('DirectoryBrowserInput.path')
+    fireEvent.change(input, { target: { value: 'D:/work/ClaudeUI' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('AutomationConfig.cwd')).toHaveValue('D:/work/ClaudeUI')
+    )
+    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
   })
 
   it('switching to a model without adaptive support coerces thinkingMode down', () => {

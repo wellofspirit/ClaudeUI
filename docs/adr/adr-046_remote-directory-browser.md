@@ -51,6 +51,15 @@ autocomplete — which works over remote today — and the `@`-mention browser).
 - Known residuals: AutomationConfig / first-run WelcomeScreen / sidebar double-click still
   have no web browse; `listDirEntries` hides dot-directories, so a dot-named project root
   must be typed rather than picked from the listing.
+  _(2026-08-25 — three of those are closed. The sidebar's "New session" double-click no
+  longer calls the null-resolving `pickFolder()` on web: it shows the welcome screen and
+  bumps an ephemeral `welcomeBrowseToken`, which `WelcomeState` consumes by opening this
+  browser. `listDirEntries('')` now answers with the host's home directory instead of
+  throwing `readdir('')` into the empty shape, and `DirectoryBrowserInput` seeds itself
+  from it once on mount — the widget used to open on an empty box that listed nothing
+  until an absolute path was typed. AutomationConfig's cwd row adopts the component on
+  web, which is decision 3 above. Still open: the first-run `WelcomeScreen` is native-only
+  (it appears unrouted), and dot-directories remain hidden.)_
 
 ## Alternatives considered
 

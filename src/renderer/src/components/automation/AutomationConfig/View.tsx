@@ -27,6 +27,10 @@ import {
 } from '../../shared/InlinePickers'
 import { SelectMenu } from '../../shared/SelectMenu'
 import {
+  DirectoryBrowserInput,
+  type DirectoryBrowserInputProps
+} from '../../shared/DirectoryBrowserInput'
+import {
   modelSupportsAdaptiveThinking,
   modelSupportsEffort,
   modelSupportedEffortLevels,
@@ -59,6 +63,9 @@ export interface AutomationConfigViewProps {
   onRunNow: () => void
   onStopRun: () => void
   onPickFolder: () => Promise<string | null>
+  /** Present only where there is no native folder dialog (the web client): the
+   *  Directory row browses the host through this instead of `onPickFolder`. */
+  listDir?: DirectoryBrowserInputProps['listDir']
   onSelectRun: (runId: string) => void
   onSetDetailTab: (tab: DetailTab) => void
 }
@@ -78,6 +85,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     onRunNow,
     onStopRun,
     onPickFolder,
+    listDir,
     onSelectRun,
     onSetDetailTab
   } = props
@@ -390,6 +398,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
             cwd={cwd}
             setCwd={setCwd}
             onBrowseFolder={handlePickFolder}
+            listDir={listDir}
             models={models}
             selectedModel={selectedModel}
             onSelectModel={handleSelectModel}
@@ -451,6 +460,7 @@ interface ConfigurePanelProps {
   cwd: string
   setCwd: (v: string) => void
   onBrowseFolder: () => void
+  listDir?: DirectoryBrowserInputProps['listDir']
   models: ModelOption[]
   selectedModel: ModelDisplay
   onSelectModel: (v: string) => void
@@ -478,6 +488,7 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
     cwd,
     setCwd,
     onBrowseFolder,
+    listDir,
     models,
     selectedModel,
     onSelectModel,
@@ -496,6 +507,9 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
   } = p
 
   const nextRuns = useMemo(() => computeNextRuns(schedule, lastRunAt, 4), [schedule, lastRunAt])
+
+  /** Inline host browser, open only where `listDir` stands in for the dialog. */
+  const [browsing, setBrowsing] = useState(false)
 
   // Sticky unit for the interval editor — if we derived it every render, typing
   // "60" (minutes) would snap to "1 hour" and you couldn't edit freely.
@@ -604,30 +618,47 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
         <SectionHeader icon="folder">Environment</SectionHeader>
 
         <InspectorRow label="Directory">
-          <div className="flex items-center gap-2 bg-bg-tertiary border border-border/40 rounded-md px-2.5 py-1 focus-within:border-text-accent/60 transition-colors">
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="text-text-muted shrink-0"
-            >
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
-            <input
-              value={cwd}
-              onChange={(e) => setCwd(e.target.value)}
-              className="flex-1 bg-transparent text-[13px] font-mono text-text-primary outline-none min-w-0"
-              placeholder="/path/to/project"
-            />
-            <button
-              onClick={onBrowseFolder}
-              className="text-[11px] text-text-muted hover:text-text-secondary px-2 py-0.5 rounded border border-border/40 hover:bg-bg-hover transition-colors shrink-0"
-            >
-              Browse
-            </button>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2 bg-bg-tertiary border border-border/40 rounded-md px-2.5 py-1 focus-within:border-text-accent/60 transition-colors">
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                className="text-text-muted shrink-0"
+              >
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              <input
+                data-testid="AutomationConfig.cwd"
+                value={cwd}
+                onChange={(e) => setCwd(e.target.value)}
+                className="flex-1 bg-transparent text-[13px] font-mono text-text-primary outline-none min-w-0"
+                placeholder="/path/to/project"
+              />
+              <button
+                data-testid="AutomationConfig.browseFolder"
+                onClick={listDir ? () => setBrowsing(true) : onBrowseFolder}
+                className="text-[11px] text-text-muted hover:text-text-secondary px-2 py-0.5 rounded border border-border/40 hover:bg-bg-hover transition-colors shrink-0"
+              >
+                Browse
+              </button>
+            </div>
+            {browsing && listDir && (
+              <div className="rounded-md border border-border/40 bg-bg-tertiary">
+                <DirectoryBrowserInput
+                  listDir={listDir}
+                  onConfirm={(picked) => {
+                    setCwd(picked)
+                    setBrowsing(false)
+                  }}
+                  onCancel={() => setBrowsing(false)}
+                  autoFocus
+                />
+              </div>
+            )}
           </div>
         </InspectorRow>
       </section>

@@ -97,6 +97,31 @@ export function DirectoryBrowserInput({
     if (autoFocus) inputRef.current?.focus()
   }, [autoFocus])
 
+  /**
+   * Open on somewhere real. The listing effect below only fires for an absolute
+   * path, so an untouched input showed an empty box until the user typed a drive
+   * or a slash. `listDir('')` is the host's home directory; an empty
+   * `resolvedPath` means it could not answer, and the input just stays blank.
+   *
+   * The write is conditional on the input still being empty rather than gated by
+   * a ran-once ref: that keeps a seed typed over mid-flight, and keeps this
+   * correct under StrictMode's mount/unmount/remount, where a ref-gated second
+   * pass would bail while the first pass's result was already discarded.
+   */
+  useEffect(() => {
+    let stale = false
+    listDir('')
+      .then(({ resolvedPath }) => {
+        if (stale || !resolvedPath) return
+        const home = normalizeResolved(resolvedPath)
+        setValue((current) => current || (home.endsWith('/') ? home : home + '/'))
+      })
+      .catch(() => {})
+    return () => {
+      stale = true
+    }
+  }, [listDir])
+
   useEffect(() => {
     if (!isAbsolutePath || !dirPortion) {
       setDirEntries([])

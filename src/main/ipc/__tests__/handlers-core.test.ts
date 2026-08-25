@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import * as os from 'os'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { CommandRegistry, makeRemoteConnection } from '../../../core/ipc/command-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
@@ -190,6 +191,20 @@ describe('handlers-core', () => {
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {
     const res = await listDirEntries('/does/not/exist/zzzzz-unique')
     expect(res).toEqual({ entries: [], isRoot: false, resolvedPath: '' })
+  })
+
+  it('listDirEntries seeds the home directory for the empty path', async () => {
+    // The remote picker opens with nothing typed. '' used to hit
+    // `fs.readdir('')`, which throws into the empty shape — an empty box that
+    // listed nothing until the user typed an absolute path. It must NOT fall
+    // through to `path.resolve('')` either: that is the process cwd, which for a
+    // packaged host is meaningless to the client.
+    const home = os.homedir().replace(/\\/g, '/').replace(/\/$/, '')
+    const seeded = await listDirEntries('')
+    const explicit = await listDirEntries(os.homedir())
+
+    expect(seeded.resolvedPath).toBe(home)
+    expect(seeded).toEqual(explicit)
   })
 
   describe('setPermissionMode', () => {

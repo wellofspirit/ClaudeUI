@@ -9,6 +9,7 @@
  * dialog untouched.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { StrictMode } from 'react'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import type { DirEntry, DirectoryGroup } from '../../../../../../shared/types'
 
@@ -19,7 +20,8 @@ const { store } = vi.hoisted(() => ({
     directories: [] as DirectoryGroup[],
     createNewSession: vi.fn(),
     setWorktreeInfo: vi.fn(),
-    activeSessionId: 'route-1'
+    activeSessionId: 'route-1',
+    welcomeBrowseToken: 0
   }
 }))
 
@@ -74,7 +76,17 @@ function openDropdown(): void {
 beforeEach(() => {
   vi.clearAllMocks()
   store.directories = [KNOWN_DIR]
+  // 0 is below every token the sidebar can hand out, so nothing auto-browses.
+  store.welcomeBrowseToken = 0
 })
+
+/**
+ * `welcomeBrowseToken` is monotonic for the lifetime of the page, and the
+ * consumer remembers the last one it acted on across mounts — so a test must
+ * never reuse a token value an earlier test already consumed.
+ */
+let tokenSeq = 100
+const nextBrowseToken = (): number => ++tokenSeq
 
 afterEach(() => {
   cleanup()
@@ -148,6 +160,59 @@ describe('WelcomeState — web client', () => {
 
     expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
     expect(screen.getByTestId('WelcomeState.browse')).toBeTruthy()
+  })
+})
+
+/**
+ * The sidebar's "New session" double-click has no native dialog to open on web,
+ * so it shows the welcome screen and bumps `welcomeBrowseToken`. Whichever
+ * WelcomeState is mounted when that lands — or mounts right after it, which is
+ * the usual order — opens the host browser.
+ */
+describe('WelcomeState — sidebar browse request', () => {
+  beforeEach(() => stubApi('web'))
+
+  it('opens the browser when the request landed before it mounted', () => {
+    store.welcomeBrowseToken = nextBrowseToken()
+    render(<WelcomeState />)
+
+    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+  })
+
+  it('opens the browser when the request arrives while it is already mounted', () => {
+    const token = nextBrowseToken()
+    const { rerender } = render(<WelcomeState />)
+    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+
+    store.welcomeBrowseToken = token
+    rerender(<WelcomeState />)
+
+    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+  })
+
+  it('survives StrictMode, whose second effect pass sees the token already consumed', () => {
+    store.welcomeBrowseToken = nextBrowseToken()
+    render(
+      <StrictMode>
+        <WelcomeState />
+      </StrictMode>
+    )
+
+    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+  })
+
+  it('does not re-open the browser on a later remount without a new request', () => {
+    store.welcomeBrowseToken = nextBrowseToken()
+    render(<WelcomeState />)
+    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+
+    // Every visit to the welcome screen remounts this component; only a NEW
+    // request may re-open the browser.
+    cleanup()
+    render(<WelcomeState />)
+
+    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+    expect(screen.getByTestId('WelcomeState.selectDirectory')).toBeTruthy()
   })
 })
 

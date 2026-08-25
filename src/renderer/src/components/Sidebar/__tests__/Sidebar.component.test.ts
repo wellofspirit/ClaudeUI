@@ -56,6 +56,11 @@ function makeSessionInfo(id: string, title = 'Session title'): SessionInfo {
   }
 }
 
+/** `window.api.platform` is what the FC branches on for the web-vs-desktop picker. */
+function setPlatform(platform: string): void {
+  ;(window as unknown as { api: { platform: string } }).api.platform = platform
+}
+
 function makeDirectoryGroup(sessions: SessionInfo[]): DirectoryGroup {
   return {
     cwd: CWD,
@@ -118,7 +123,8 @@ describe('Sidebar FC', () => {
       hiddenProjectKeys: [],
       customTitles: {},
       worktreeInfoMap: {},
-      pluginViews: []
+      pluginViews: [],
+      welcomeBrowseToken: 0
     })
     mirrorStoreIntoReplica()
   })
@@ -171,6 +177,7 @@ describe('Sidebar FC', () => {
   // -------------------------------------------------------------------------
 
   it('picks a folder and creates a new session on double-click', async () => {
+    setPlatform('win32')
     app.bridge.ipcMain.handle('session:pick-folder', async () => '/new/folder')
 
     await act(async () => {
@@ -185,6 +192,38 @@ describe('Sidebar FC', () => {
     const sessions = Object.values(useSessionStore.getState().sessions)
     expect(sessions).toHaveLength(1)
     expect(sessions[0].cwd).toBe('/new/folder')
+    // Desktop never asks the welcome screen to browse — the dialog IS the browse.
+    expect(useSessionStore.getState().welcomeBrowseToken).toBe(0)
+  })
+
+  /**
+   * ADR-046 residual: `pickFolder()` is stubbed to null on web (and
+   * `session:pick-folder` declares `host`, so it is never registered on the
+   * remote dispatcher), so the double-click was a guaranteed silent no-op
+   * there. It now shows the welcome screen and asks it to open the host-backed
+   * browser instead.
+   */
+  it('web double-click opens the welcome browser instead of the dead native dialog', async () => {
+    setPlatform('web')
+    let pickCalls = 0
+    app.bridge.ipcMain.handle('session:pick-folder', async () => {
+      pickCalls++
+      return '/new/folder'
+    })
+    useSessionStore.getState().createNewSession('sess-live', CWD)
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    await act(async () => {
+      viewProps.onNewSessionDblClick()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(pickCalls).toBe(0)
+    expect(useSessionStore.getState().welcomeBrowseToken).toBe(1)
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
   })
 
   // -------------------------------------------------------------------------

@@ -99,6 +99,7 @@ export function Sidebar({
   const deleteSessionAction = useSessionStore((s) => s.deleteSession)
   const deleteProjectAction = useSessionStore((s) => s.deleteProject)
   const showWelcome = useSessionStore((s) => s.showWelcome)
+  const requestWelcomeBrowse = useSessionStore((s) => s.requestWelcomeBrowse)
   const activeView = useSessionStore((s) => s.activeView)
   const setActiveView = useSessionStore((s) => s.setActiveView)
   const pluginViews = useSessionStore((s) => s.pluginViews)
@@ -256,6 +257,16 @@ export function Sidebar({
   }
 
   const handleNewSessionDblClick = async (): Promise<void> => {
+    // The web client has no native dialog — `pickFolder()` resolves to null and
+    // `session:pick-folder` declares `host`, so it is never registered on the
+    // remote dispatcher — route to the welcome screen's host-backed browser
+    // instead of no-oping (ADR-046).
+    if (window.api.platform === 'web') {
+      showWelcome()
+      requestWelcomeBrowse()
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
     const folder = await window.api.pickFolder()
     if (folder) {
       const routingId = uuid()

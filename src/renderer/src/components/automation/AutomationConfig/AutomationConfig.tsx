@@ -124,6 +124,11 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     return window.api.pickFolder()
   }, [])
 
+  // ADR-046 decision 3: on the web client `pickFolder()` resolves to null, so the
+  // View browses the host's filesystem through `file:list-dir` instead. Desktop
+  // passes nothing and keeps the native dialog.
+  const listDir = window.api.platform === 'web' ? window.api.listDir : undefined
+
   const handleSelectRun = useCallback(
     (runId: string) => {
       selectRun(automation.id, runId)
@@ -146,6 +151,7 @@ function AutomationConfigController({ automation }: { automation: Automation }):
       onRunNow={handleRunNow}
       onStopRun={handleStopRun}
       onPickFolder={handlePickFolder}
+      listDir={listDir}
       onSelectRun={handleSelectRun}
       onSetDetailTab={setDetailTab}
     />

@@ -1081,6 +1081,10 @@ export interface SessionState {
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
   vendorOAuth: VendorOAuthState | null
   activeView: ActiveView
+  /** Bumped when a surface with no native folder dialog (the web client's
+   *  sidebar double-click) asks the welcome screen to open its host-backed
+   *  directory browser. Local UI signal — never replicated, never persisted. */
+  welcomeBrowseToken: number
   pluginViews: PluginViewWithOwner[]
 
   // Worktree (global)
@@ -1297,6 +1301,9 @@ export interface SessionState {
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
   setActiveView: (view: ActiveView) => void
+  /** Ask the welcome screen to open its directory browser (see
+   *  {@link SessionState.welcomeBrowseToken}). */
+  requestWelcomeBrowse: () => void
   setPluginViews: (views: PluginViewWithOwner[]) => void
   // Git sync operations
   setGitSyncOperation: (routingId: string, op: 'idle' | 'fetching' | 'pulling' | 'pushing') => void
@@ -1373,6 +1380,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   vendorOAuth: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
+  welcomeBrowseToken: 0,
   pluginViews: [],
   worktreeInfoMap: {},
   quitWorktrees: null,
@@ -2643,6 +2651,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
   setBlockUsage: (data) => set({ blockUsage: data }),
   setActiveView: (view) => set({ activeView: view }),
+  requestWelcomeBrowse: () => set((s) => ({ welcomeBrowseToken: s.welcomeBrowseToken + 1 })),
   setPluginViews: (views) => set({ pluginViews: views }),
 
   clearConversation: async (routingId) => {
