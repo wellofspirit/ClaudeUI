@@ -88,8 +88,9 @@ jobs:
       # mirroring the release workflows. postinstall's ensure-cli also proves the
       # cli.js patches still APPLY against the pinned claudeCliVersion — a patch
       # that no longer applies fails the install and turns CI red. (Behavioural
-      # correctness of the applied patches is a separate, live-only concern — see
-      # the patch-tests job below.)
+      # correctness of the applied patches is a separate, live-only concern:
+      # `bun run test:patch` locally, with real Claude credentials — deliberately
+      # not a CI job.)
       - name: Install dependencies
         run: bun install
 
@@ -126,55 +127,3 @@ jobs:
           bun run build:server
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
-
-  patch-tests:
-    name: Patch behavioural tests (live Claude — manual)
-    # These drive a REAL authenticated Claude Code session: they spawn the
-    # rebundled bun-claude binary, prompt the model, and assert on the observed
-    # stream-json wire behaviour (patch/test-all.mjs → 11 per-patch harnesses).
-    # They therefore need live Claude credentials + network, cost tokens, and are
-    # inherently model-behaviour-flaky — so they CANNOT be a required headless PR
-    # gate and are NOT wired into test:ci (the release pipeline depends on that).
-    # Run them on demand via "Run workflow"; set an ANTHROPIC_API_KEY repo secret
-    # for auth. This is the only automated check that catches the applies-but-
-    # misbinds patch failure class (e.g. the documented 2.1.219 p→m rename).
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.15.0
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Cache bun install
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
-      - name: Read claude CLI version
-        id: cli-version
-        shell: bash
-        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
-
-      - name: Cache claude CLI source binary
-        uses: actions/cache@v4
-        with:
-          path: .cache/claude-cli
-          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
-
-      # postinstall builds the patched bun-claude binary the harnesses spawn.
-      - name: Install dependencies (builds patched bun-claude)
-        run: bun install
-
-      - name: Run patch behavioural tests
-        run: bun run test:patch
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Surface harness probe stderr on failure (see reference memory).
-          DEBUG_HARNESS: '1'
