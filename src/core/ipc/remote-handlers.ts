@@ -162,7 +162,6 @@ let remoteHandlersRegistered = false
  */
 export function registerRemoteVersionInfo(versionInfo: {
   appVersion: string
-  sdkVersion: string
   cliVersion: string
 }): void {
   if (!remoteHandlersRegistered) return

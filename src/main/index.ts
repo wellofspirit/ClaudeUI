@@ -55,7 +55,7 @@ import { opencodeServerManager } from '../core/opencode/OpencodeServerManager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from '../core/services/logger'
-import { getSdkVersion } from '../core/services/claude-session'
+import { getCliVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
 import { loadPersistedPrices } from '../core/services/opencode-pricing'
 import { QuitCoordinator } from './quit-coordinator'
@@ -611,19 +611,18 @@ app.whenReady().then(() => {
   // ── About panel ────────────────────────────────────────────────────
   const rawVersion = app.getVersion() // from package.json "version"
   const appVersion = is.dev || rawVersion === '1.0.0' ? 'Local Build' : rawVersion
-  const sdkVersion = getSdkVersion()
-  const cliVersion = sdkVersion !== 'unknown' ? sdkVersion.replace(/^0\./, '2.') : 'unknown'
+  const cliVersion = getCliVersion()
 
   app.setAboutPanelOptions({
     applicationName: 'ClaudeUI',
     applicationVersion: appVersion,
-    version: `SDK ${sdkVersion} · CLI ${cliVersion}`,
+    version: `CLI ${cliVersion}`,
     copyright: '© 2025 Daniel Liu',
     website: 'https://github.com/wellofspirit/ClaudeUI'
   })
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
-  const versionInfo = { appVersion, sdkVersion, cliVersion }
+  const versionInfo = { appVersion, cliVersion }
   ipcMain.handle('app:version-info', () => versionInfo)
   // Mirror to the remote dispatcher so the web client's Settings dialog can
   // read the server's build versions.

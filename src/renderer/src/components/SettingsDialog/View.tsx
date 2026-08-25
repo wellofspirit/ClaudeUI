@@ -11,7 +11,6 @@ import {
 
 export interface VersionInfo {
   appVersion: string
-  sdkVersion: string
   cliVersion: string
 }
 
@@ -266,7 +265,7 @@ export function SettingsDialogView({
                 {/^\d/.test(versionInfo.appVersion)
                   ? `v${versionInfo.appVersion}`
                   : versionInfo.appVersion}{' '}
-                · SDK {versionInfo.sdkVersion} · CLI {versionInfo.cliVersion}
+                · CLI {versionInfo.cliVersion}
               </div>
             )}
           </div>

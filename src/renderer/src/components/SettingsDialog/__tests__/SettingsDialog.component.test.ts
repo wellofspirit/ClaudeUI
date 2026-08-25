@@ -40,7 +40,6 @@ describe('SettingsDialog FC', () => {
 
     app.bridge.ipcMain.handle('app:version-info', async () => ({
       appVersion: '1.0.0',
-      sdkVersion: '0.2.112',
       cliVersion: '2.5.0'
     }))
   })
@@ -64,7 +63,6 @@ describe('SettingsDialog FC', () => {
 
     expect(viewProps.versionInfo).toEqual({
       appVersion: '1.0.0',
-      sdkVersion: '0.2.112',
       cliVersion: '2.5.0'
     })
   })

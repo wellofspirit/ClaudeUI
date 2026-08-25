@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { getSdkVersion } from './claude-session'
+import { getCliVersion } from './claude-session'
 import { emitEvent } from './sync-host'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
@@ -82,14 +82,11 @@ const UNKNOWN_WINDOW_FETCH_THROTTLE_MS = 30_000
 /**
  * Construct the User-Agent header matching the CLI's jO() function.
  * The CLI uses "claude-code/<VERSION>" where VERSION comes from its
- * embedded build config. We read it from the SDK's package.json.
+ * embedded build config. We read it from the vendored CLI's version.json.
  */
 function getCliUserAgent(): string {
   try {
-    // SDK version 0.2.X corresponds to CLI version 2.1.X
-    const sdkVersion = getSdkVersion()
-    const cliVersion = sdkVersion.replace(/^0\./, '2.')
-    return `claude-code/${cliVersion}`
+    return `claude-code/${getCliVersion()}`
   } catch {
     return 'claude-code/2.1.0'
   }

@@ -54,7 +54,6 @@ describe('SettingsDialog mobile fork', () => {
     onClose = vi.fn<() => void>()
     app.bridge.ipcMain.handle('app:version-info', async () => ({
       appVersion: '1.0.0',
-      sdkVersion: '0.2.112',
       cliVersion: '2.5.0'
     }))
     // Panes read these straight out of the props; the default stub answers null,

@@ -48,7 +48,9 @@ import {
 } from '../../shared/model-capabilities'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
-import { locateBunClaude, getCliVersion } from '../sdk'
+import { locateBunClaude } from '../sdk'
+
+export { getCliVersion } from '../sdk'
 
 /**
  * Path to the rebundled Bun standalone binary (has cli.js embedded).
@@ -57,11 +59,6 @@ import { locateBunClaude, getCliVersion } from '../sdk'
  */
 export function getCliJsPath(): string {
   return locateBunClaude()
-}
-
-/** Vendored CLI version, read from vendor/claude-cli/version.json. */
-export function getSdkVersion(): string {
-  return getCliVersion()
 }
 
 /**

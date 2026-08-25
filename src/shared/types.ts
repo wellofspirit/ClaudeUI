@@ -2251,7 +2251,7 @@ export interface ClaudeAPI
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
-  getVersionInfo(): Promise<{ appVersion: string; sdkVersion: string; cliVersion: string }>
+  getVersionInfo(): Promise<{ appVersion: string; cliVersion: string }>
   /** Open the standalone log viewer window */
   openLogViewer(): Promise<void>
   /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not

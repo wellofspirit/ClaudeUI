@@ -762,9 +762,9 @@ describe('registerRemoteHandlers', () => {
 
   it('registerRemoteVersionInfo exposes app:version-info on the dispatcher', async () => {
     expect(dispatcher.has('app:version-info')).toBe(false)
-    registerRemoteVersionInfo({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
+    registerRemoteVersionInfo({ appVersion: '1.2.3', cliVersion: '2.9' })
     const res = await dispatcher.handle(makeRequest('app:version-info'), remoteConn)
-    expect(res).toEqual({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
+    expect(res).toEqual({ appVersion: '1.2.3', cliVersion: '2.9' })
   })
 
   // Regression: mockup channels must be reachable over remote — the web client
@@ -1602,7 +1602,7 @@ describe('remote surface parity (phase 1 port)', () => {
     dispatcher = new RemoteDispatcher()
     registerRemoteHandlers(dispatcher, sessionManagerStub)
     // Registered later in the real bootstrap, once build versions are known.
-    registerRemoteVersionInfo({ appVersion: '1', sdkVersion: '2', cliVersion: '3' })
+    registerRemoteVersionInfo({ appVersion: '1', cliVersion: '3' })
   })
 
   afterEach(() => {

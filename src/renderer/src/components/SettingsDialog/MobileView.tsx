@@ -436,7 +436,7 @@ export function SettingsMobileView({
           {/^\d/.test(versionInfo.appVersion)
             ? `v${versionInfo.appVersion}`
             : versionInfo.appVersion}{' '}
-          · SDK {versionInfo.sdkVersion} · CLI {versionInfo.cliVersion}
+          · CLI {versionInfo.cliVersion}
         </div>
       )}
     </div>
